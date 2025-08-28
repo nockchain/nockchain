@@ -33,7 +33,7 @@ pub mod driver_init {
     use nockapp::wire::{SystemWire, Wire};
     use nockapp::NockAppError;
     use tokio::sync::oneshot;
-    use tracing::{debug, error, info, warn};
+    use tracing::{debug, error, info};
 
     /// A collection of initialization signals for drivers
     #[derive(Default)]
@@ -119,8 +119,9 @@ pub mod driver_init {
                     }
                     if let Some(tx) = init_complete_tx {
                         tx.send(()).map_err(|_| {
-                            warn!("Could not send driver initialization for mining driver.");
-                            NockAppError::OtherError
+                            NockAppError::OtherError(String::from(
+                                "Could not send driver initialization for mining driver.",
+                            ))
                         })?;
                     }
 
@@ -502,30 +503,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     // Add the born driver to the nockapp
     nockapp.add_io_driver(born_driver).await;
 
-    // set up socket
-    let socket_path = Path::new(
-        &cli.as_ref()
-            .unwrap_or_else(|| {
-                panic!(
-                    "Panicked at {}:{} (git sha: {:?})",
-                    file!(),
-                    line!(),
-                    option_env!("GIT_SHA")
-                )
-            })
-            .npc_socket,
-    );
-    nockapp.npc_socket_path = Some(socket_path.to_path_buf());
-
-    if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let listener = UnixListener::bind(socket_path)?;
-
-    nockapp
-        .add_io_driver(nockapp::npc_listener_driver(listener))
-        .await;
-
+    let driver = nockapp_grpc::grpc_server_driver();
+    nockapp.add_io_driver(driver).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
 
     Ok(nockapp)

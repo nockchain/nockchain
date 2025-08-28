@@ -1260,25 +1260,46 @@ pub const KEYGEN_JETS: &[HotEntry] = &[(
     argon2_jet,
 )];
 
-pub const CURVE_JETS: &[HotEntry] = &[(
-    &[
-        K_138,
-        Left(b"one"),
-        Left(b"two"),
-        Left(b"tri"),
-        Left(b"qua"),
-        Left(b"pen"),
-        Left(b"zeke"),
-        Left(b"ext-field"),
-        Left(b"misc-lib"),
-        Left(b"cheetah"),
-        Left(b"curve"),
-        Left(b"affine"),
-        Left(b"ch-scal"),
-    ],
-    1,
-    ch_scal_jet,
-)];
+pub const CURVE_JETS: &[HotEntry] = &[
+    (
+        &[
+            K_138,
+            Left(b"one"),
+            Left(b"two"),
+            Left(b"tri"),
+            Left(b"qua"),
+            Left(b"pen"),
+            Left(b"zeke"),
+            Left(b"ext-field"),
+            Left(b"misc-lib"),
+            Left(b"cheetah"),
+            Left(b"curve"),
+            Left(b"affine"),
+            Left(b"ch-scal"),
+        ],
+        1,
+        ch_scal_jet,
+    ),
+    //(
+    //    &[
+    //        K_138,
+    //        Left(b"one"),
+    //        Left(b"two"),
+    //        Left(b"tri"),
+    //        Left(b"qua"),
+    //        Left(b"pen"),
+    //        Left(b"zeke"),
+    //        Left(b"ext-field"),
+    //        Left(b"misc-lib"),
+    //        Left(b"cheetah"),
+    //        Left(b"schnorr"),
+    //        Left(b"affine"),
+    //        Left(b"verify"),
+    //    ],
+    //    1,
+    //    verify_affine_jet,
+    //),
+];
 
 pub const CUSTOM_LIST_JETS: &[HotEntry] = &[
     (

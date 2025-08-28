@@ -394,6 +394,21 @@ pub enum Error {
     NonDeterministic(Mote, Noun), // mote, trace
 }
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::ScryBlocked(ref path) => write!(f, "ScryBlocked({:?})", path),
+            Error::ScryCrashed(ref trace) => write!(f, "ScryCrashed({:?})", trace),
+            Error::Deterministic(ref mote, ref trace) => {
+                write!(f, "Deterministic({:?}, {:?})", mote, trace)
+            }
+            Error::NonDeterministic(ref mote, ref trace) => {
+                write!(f, "NonDeterministic({:?}, {:?})", mote, trace)
+            }
+        }
+    }
+}
+
 impl Preserve for Error {
     unsafe fn preserve(&mut self, stack: &mut NockStack) {
         match self {

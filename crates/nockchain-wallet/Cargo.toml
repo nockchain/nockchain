@@ -6,10 +6,12 @@ edition.workspace = true
 [dependencies]
 kernels = { workspace = true, features = ["wallet"] }
 nockapp = { workspace = true }
+nockapp-grpc = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 
 bardecoder = { workspace = true }
+bs58 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 crossterm.workspace = true
 either.workspace = true

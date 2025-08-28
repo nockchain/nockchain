@@ -2,10 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 #[allow(unused)]
 use nockapp::utils::make_tas;
-use nockapp::AtomExt;
-use nockvm::mem::NockStack;
-use nockvm::noun::{FullDebugCell, Noun, NounAllocator, Slots, D, T};
-use noun_serde::{NounDecode, NounDecodeError, NounEncode};
+use nockvm::noun::FullDebugCell;
+use noun_serde::{NounDecode, NounEncode};
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
 pub enum Key {
@@ -49,16 +47,9 @@ pub enum FileEffect {
 }
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
-pub enum NpcEffect {
-    Poke { fact: u64 },
-    Peek { path: u64 },
-}
-
-#[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
 pub enum Effect {
     File(FileEffect),
     Markdown(String),
-    Npc { pid: u64, effect: NpcEffect },
     Exit { code: u64 },
 }
 
@@ -268,12 +259,12 @@ mod tests {
 
         let hash = Source::Hash(0x1234);
         let encoded = hash.to_noun(&mut stack);
-        let decoded = Source::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Source::from_noun(&encoded).unwrap();
         assert_eq!(hash, decoded);
 
         let coinbase = Source::Coinbase;
         let encoded = coinbase.to_noun(&mut stack);
-        let decoded = Source::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Source::from_noun(&encoded).unwrap();
         assert_eq!(coinbase, decoded);
     }
 
@@ -287,7 +278,7 @@ mod tests {
 
         let lock = Lock { m: 2, pubkeys };
         let encoded = lock.to_noun(&mut stack);
-        let decoded = Lock::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Lock::from_noun(&encoded).unwrap();
         assert_eq!(lock, decoded);
     }
 
@@ -304,7 +295,7 @@ mod tests {
             "Encoded timelock: {:?}",
             FullDebugCell(&encoded.as_cell().unwrap())
         );
-        let decoded = Timelock::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Timelock::from_noun(&encoded).unwrap();
         assert_eq!(timelock, decoded);
     }
 
@@ -323,7 +314,7 @@ mod tests {
             parent_hash: 0x9abc,
         };
         let encoded = seed.to_noun(&mut stack);
-        let decoded = Seed::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Seed::from_noun(&encoded).unwrap();
         assert_eq!(seed, decoded);
     }
 
@@ -343,7 +334,7 @@ mod tests {
             },
         };
         let encoded = preseed.to_noun(&mut stack);
-        let decoded = PreSeed::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = PreSeed::from_noun(&encoded).unwrap();
         assert_eq!(preseed, decoded);
     }
 
@@ -373,7 +364,7 @@ mod tests {
             fee: 10,
         };
         let encoded = spend.to_noun(&mut stack);
-        let decoded = Spend::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Spend::from_noun(&encoded).unwrap();
         assert_eq!(spend, decoded);
     }
 
@@ -394,7 +385,7 @@ mod tests {
             },
         };
         let encoded = preinput.to_noun(&mut stack);
-        let decoded = PreInput::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = PreInput::from_noun(&encoded).unwrap();
         assert_eq!(preinput, decoded);
     }
 
@@ -407,7 +398,7 @@ mod tests {
             inputs: 0x1234,
         };
         let encoded = draft.to_noun(&mut stack);
-        let decoded = Draft::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Draft::from_noun(&encoded).unwrap();
         assert_eq!(draft, decoded);
     }
 
@@ -418,13 +409,13 @@ mod tests {
         // Test with Some value
         let seed_tuple = SeedTuple(42, Some("seed-phrase".to_string()));
         let encoded = seed_tuple.to_noun(&mut stack);
-        let decoded = SeedTuple::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = SeedTuple::from_noun(&encoded).unwrap();
         assert_eq!(seed_tuple, decoded);
 
         // Test with None value
         let seed_tuple = SeedTuple(42, None);
         let encoded = seed_tuple.to_noun(&mut stack);
-        let decoded = SeedTuple::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = SeedTuple::from_noun(&encoded).unwrap();
         assert_eq!(seed_tuple, decoded);
     }
 
@@ -503,7 +494,7 @@ mod tests {
         println!("Encoding wallet state...");
         let encoded = wallet_state.to_noun(&mut stack);
         println!("Encoded noun: {:?}", encoded);
-        let decoded = WalletState::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = WalletState::from_noun(&encoded).unwrap();
         assert_eq!(wallet_state, decoded);
     }
 
@@ -538,7 +529,7 @@ mod tests {
                 println!("Tail tail tail: {:?}", tail_tail_cell.tail());
             }
         }
-        let decoded = DraftEntityKind::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(draft_kind, decoded);
 
         // Test Input variant
@@ -553,7 +544,7 @@ mod tests {
         println!("Encoding input kind...");
         let encoded = input_kind.to_noun(&mut stack);
         println!("Encoded input kind: {:?}", encoded);
-        let decoded = DraftEntityKind::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(input_kind, decoded);
 
         // Test Seed variant
@@ -568,7 +559,7 @@ mod tests {
         println!("Encoding seed kind...");
         let encoded = seed_kind.to_noun(&mut stack);
         println!("Encoded seed kind: {:?}", encoded);
-        let decoded = DraftEntityKind::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(seed_kind, decoded);
     }
 }

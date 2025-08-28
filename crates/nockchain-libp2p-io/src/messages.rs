@@ -52,7 +52,9 @@ impl NockchainFact {
                 oldest, elder_id_strings?, poke_slab,
             ))
         } else {
-            Err(NockAppError::OtherError)
+            Err(NockAppError::OtherError(String::from(
+                "Invalid fact head tag",
+            )))
         }
     }
     pub fn fact_poke(&self) -> &NounSlab {
@@ -79,7 +81,9 @@ impl NockchainDataRequest {
         let res = (|| {
             let request_cell = noun.as_cell()?;
             if !request_cell.head().eq_bytes(b"request") {
-                return Err(NockAppError::OtherError);
+                return Err(NockAppError::OtherError(String::from(
+                    "Missing %request tag",
+                )));
             }
             // kind cell type $%([%block request-block] [%raw-tx request-tx])
             let kind_cell = request_cell.tail().as_cell()?;
@@ -103,7 +107,9 @@ impl NockchainDataRequest {
                     };
                     Ok(Self::EldersById(block_id, peer_id, slab))
                 } else {
-                    Err(NockAppError::OtherError)
+                    Err(NockAppError::OtherError(String::from(
+                        "Failed to parse EldersById message",
+                    )))
                 }
             } else if kind_cell.head().eq_bytes(b"raw-tx") {
                 // has type [%by-id p=tx-id:dt]
@@ -116,7 +122,9 @@ impl NockchainDataRequest {
                 };
                 Ok(Self::RawTransactionById(raw_tx_id, slab))
             } else {
-                Err(NockAppError::OtherError)
+                Err(NockAppError::OtherError(String::from(
+                    "Failed to parse RawTransaction message",
+                )))
             }
         })();
         res.map_err(|_| {

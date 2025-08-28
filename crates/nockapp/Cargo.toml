@@ -11,36 +11,47 @@ bazel_build = []
 tracing-tracy = ["dep:tracing-tracy"]
 
 [dependencies]
-anyhow = { workspace = true }
-async-trait = { workspace = true }
-axum = { workspace = true }
-bitvec = { workspace = true, default-features = false, features = ["alloc"] }
-blake3 = { workspace = true }
-clap = { workspace = true, features = ["derive", "cargo", "color", "env"] }
-dirs = { workspace = true }
-ibig = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true }
+axum-server = { workspace = true }
 bincode = { workspace = true, features = ["serde"] }
+bitvec = { workspace = true, default-features = false, features = ["alloc"] }
+blake3 = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
+clap = { workspace = true, features = ["derive", "cargo", "color", "env"] }
 config = { workspace = true }
+dirs = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
 getrandom = { workspace = true }
 gnort = { workspace = true }
+ibig = { workspace = true }
+instant-acme = { workspace = true }
 intmap = { workspace = true }
+opentelemetry.workspace = true
+opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
+opentelemetry_sdk.workspace = true
 rand = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 signal-hook = { workspace = true }
 signal-hook-tokio = { workspace = true, features = ["futures-v0_3"] }
 tempfile = { workspace = true }
 termimad = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "signal"] }
+tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
+tonic.workspace = true
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry.workspace = true
@@ -51,23 +62,9 @@ tracing-tracy = { workspace = true, optional = true, features = [
     "manual-lifetime",
     "ondemand",
 ] }
-yaque = { workspace = true }
-
-# Let's Encrypt and HTTPS support
-axum-server = { workspace = true }
-instant-acme = { workspace = true }
-rcgen = { workspace = true }
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-serde_json = { workspace = true }
-tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
 x509-parser = { workspace = true }
-
-opentelemetry.workspace = true
-opentelemetry-otlp.workspace = true
-opentelemetry_sdk.workspace = true
-tonic.workspace = true
+yaque = { workspace = true }
 
 [dev-dependencies]
 

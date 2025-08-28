@@ -241,7 +241,7 @@ pub fn mpeval_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
     // |=  $:  field=?(%ext %base)
     //         mp=mp-mega
     //         args=bpoly  :: can be bpoly or fpoly
-    //         chal-map=(map @ belt)
+    //         chals=bpoly
     //         dyns=bpoly
     //         com-map=(map @ elt)
     //     ==
@@ -267,7 +267,7 @@ fn mpeval<F: Fops>(
     stack: &mut NockStack,
     mp: Noun,
     args: Noun,
-    chal_map: Noun,
+    chals: Noun,
     dyns: BPolySlice,
     com_map: Noun,
 ) -> Result<F, JetErr>
@@ -278,7 +278,10 @@ where
         return jet_err();
     };
 
-    let chal_map = HoonMap::try_from(chal_map).ok();
+    let Ok(chals) = BPolySlice::try_from(chals) else {
+        return jet_err();
+    };
+
     let com_map = HoonMap::try_from(com_map).ok();
 
     // ?:  =(~ mp)
@@ -337,12 +340,8 @@ where
                         //   %+  pow-op
                         //     (lift-op (~(got by chal-map) idx))
                         //   exp
-                        let v = chal_map
-                            .as_ref()
-                            .unwrap()
-                            .get(stack, D(idx as _))
-                            .expect("Index not in chal-map");
-                        F::lift(Belt(v.as_atom().unwrap().as_u64().unwrap())).pow(exp)
+                        let v = chals.0[idx];
+                        F::lift(v).pow(exp)
                     }
                     // ::
                     //     %dyn

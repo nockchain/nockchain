@@ -42,18 +42,17 @@ impl<J> Debug for NounSlab<J> {
 }
 
 impl<J> NounSlab<J> {
-    pub fn coerce_jammer<I>(self) -> NounSlab<I> {
-        let res = NounSlab {
+    pub fn coerce_jammer<I>(mut self) -> NounSlab<I> {
+        let slabs = std::mem::take(&mut self.slabs);
+        NounSlab {
             root: self.root,
-            slabs: self.slabs.clone(),
+            slabs,
             allocation_start: self.allocation_start,
             allocation_stop: self.allocation_stop,
             _phantom: std::marker::PhantomData,
-        };
-        // We are keeping the allocation and just reconstructing the slab struct to change type: running drop() results in use-after-free + double-free
-        std::mem::forget(self);
-        res
+        }
     }
+
     unsafe fn raw_alloc(new_layout: Layout) -> *mut u8 {
         if new_layout.size() == 0 {
             std::alloc::handle_alloc_error(new_layout);
@@ -832,6 +831,7 @@ impl Jammer for NockJammer {
             noun_counter += 1;
         }
         tracing::trace!("cue_into: noun_counter {}", noun_counter);
+        slab.set_root(res);
         Ok(res)
     }
 }

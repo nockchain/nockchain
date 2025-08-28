@@ -1,0 +1,40 @@
+[package]
+name = "nockapp-grpc"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["server"]
+server = []
+client = []
+
+[dependencies]
+nockapp = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
+
+anyhow = { workspace = true }
+bytes = { workspace = true }
+prost = { workspace = true }
+prost-build = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tonic-build = { workspace = true }
+tonic-prost = { workspace = true }
+tonic-prost-build = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+
+[build-dependencies]
+prost-build = { workspace = true }
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = { workspace = true }

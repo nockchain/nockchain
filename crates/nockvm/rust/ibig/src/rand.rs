@@ -1,6 +1,6 @@
 //! Random distributions.
 
-use rand::distributions::uniform::{SampleBorrow, SampleUniform, UniformSampler};
+use rand::distr::uniform::{SampleBorrow, SampleUniform, UniformSampler};
 use rand::Rng;
 
 use crate::arch::word::Word;
@@ -28,7 +28,7 @@ impl UBig {
         debug_assert!(*range != UBig::from_word(0));
 
         match range.repr() {
-            Small(word) => UBig::from_word(rng.gen_range(0..*word)),
+            Small(word) => UBig::from_word(rng.random_range(0..*word)),
             Large(buffer) => UBig::uniform_large(buffer, rng),
         }
     }
@@ -58,7 +58,7 @@ where
     let n = words.len();
     debug_assert!(n > 0 && result.len() == n);
     let mut i = n - 1;
-    result[i] = rng.gen_range(0..=words[i]);
+    result[i] = rng.random_range(0..=words[i]);
     // With at least 50% probability this loop executes 0 times (and thus doesn't fail).
     while result[i] == words[i] {
         if i == 0 {
@@ -66,7 +66,7 @@ where
             return false;
         }
         i -= 1;
-        result[i] = rng.gen();
+        result[i] = rng.random();
         if result[i] > words[i] {
             return false;
         }
@@ -96,7 +96,7 @@ impl UniformSampler for UniformUBig {
     type X = UBig;
 
     #[inline]
-    fn new<B1, B2>(low: B1, high: B2) -> UniformUBig
+    fn new<B1, B2>(low: B1, high: B2) -> Result<UniformUBig, rand::distr::uniform::Error>
     where
         B1: SampleBorrow<UBig>,
         B2: SampleBorrow<UBig>,
@@ -105,23 +105,23 @@ impl UniformSampler for UniformUBig {
         if range == UBig::from_word(0) {
             panic!("Empty range");
         }
-        UniformUBig {
+        Ok(UniformUBig {
             range,
             offset: low.borrow().clone(),
-        }
+        })
     }
 
     #[inline]
-    fn new_inclusive<B1, B2>(low: B1, high: B2) -> UniformUBig
+    fn new_inclusive<B1, B2>(low: B1, high: B2) -> Result<UniformUBig, rand::distr::uniform::Error>
     where
         B1: SampleBorrow<UBig>,
         B2: SampleBorrow<UBig>,
     {
         let range = high.borrow() - low.borrow() + UBig::from_word(1);
-        UniformUBig {
+        Ok(UniformUBig {
             range,
             offset: low.borrow().clone(),
-        }
+        })
     }
 
     #[inline]
@@ -154,7 +154,7 @@ impl UniformSampler for UniformIBig {
     type X = IBig;
 
     #[inline]
-    fn new<B1, B2>(low: B1, high: B2) -> UniformIBig
+    fn new<B1, B2>(low: B1, high: B2) -> Result<UniformIBig, rand::distr::uniform::Error>
     where
         B1: SampleBorrow<IBig>,
         B2: SampleBorrow<IBig>,
@@ -163,14 +163,14 @@ impl UniformSampler for UniformIBig {
         if range <= IBig::from(0u8) {
             panic!("Empty range");
         }
-        UniformIBig {
+        Ok(UniformIBig {
             range: range.unsigned_abs(),
             offset: low.borrow().clone(),
-        }
+        })
     }
 
     #[inline]
-    fn new_inclusive<B1, B2>(low: B1, high: B2) -> UniformIBig
+    fn new_inclusive<B1, B2>(low: B1, high: B2) -> Result<UniformIBig, rand::distr::uniform::Error>
     where
         B1: SampleBorrow<IBig>,
         B2: SampleBorrow<IBig>,
@@ -179,10 +179,10 @@ impl UniformSampler for UniformIBig {
         if range <= IBig::from(0u8) {
             panic!("Empty range");
         }
-        UniformIBig {
+        Ok(UniformIBig {
             range: range.unsigned_abs(),
             offset: low.borrow().clone(),
-        }
+        })
     }
 
     #[inline]

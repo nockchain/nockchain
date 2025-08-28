@@ -14,6 +14,7 @@ tracing-heap = ["tikv-jemallocator", "tracy-client"]
 hoonc.workspace = true
 kernels = { workspace = true, features = ["dumb", "miner"] }
 nockapp.workspace = true
+nockapp-grpc.workspace = true
 nockvm.workspace = true
 nockvm_macros.workspace = true
 

@@ -209,7 +209,7 @@ impl<J: Jammer> Saver<J> {
         let path = self.next_path();
         jammed.save_to_file(&path).await?;
         self.save_to_next = self.save_to_next.next();
-
+        std::mem::drop(jammed);
         debug!(
             "Saved checkpoint to file: {}",
             &path.as_os_str().to_str().unwrap()

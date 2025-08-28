@@ -56,6 +56,15 @@ pub enum JetErr {
     Punt,        // Retry with the raw nock
     Fail(Error), // Error; do not retry
 }
+impl std::fmt::Display for JetErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            JetErr::Punt => write!(f, "Punt"),
+            JetErr::Fail(err) => write!(f, "Fail({})", err),
+        }
+    }
+}
+impl std::error::Error for JetErr {}
 
 impl Preserve for JetErr {
     unsafe fn preserve(&mut self, stack: &mut NockStack) {

@@ -844,8 +844,9 @@
         ==
     ::  TODO maybe add a should-fail flag that silences failed constraints or modifies printf
     ::       or change signature to surface error unit?
-    =/  challenge-map=(map term belt)
-      (make-challenge-map:chal challenges s f)
+    ::  augment challenges with derived challenges
+    =/  augmented-chals=bpoly
+      (augment-challenges:chal challenges s f)
     |^  ^-  ?
     =/  bound-fail  (run-bounds boundary-constraints:funcs dynamics)
     ?.  ?=(~ bound-fail)
@@ -870,7 +871,7 @@
       %+  mevy  ~(tap by boundary-constraints-labeled)
       |=  [name=@tas constraint=mp-ultra]
       =/  point  (~(snag-as-bpoly ave p.table) 0)
-      =/  eval  (mpeval-ultra %base constraint point challenge-map dynamics)
+      =/  eval  (mpeval-ultra %base constraint point augmented-chals dynamics)
       ?:  (levy eval |=(b=belt =(b 0)))  ~
       %-  some
       :*  %constraint-failed-bounds
@@ -886,7 +887,7 @@
       |=  [name=@tas constraint=mp-ultra]
       =/  last  (dec len.array.p.table)
       =/  point  (~(snag-as-bpoly ave p.table) last)
-      =/  eval  (mpeval-ultra %base constraint point challenge-map dynamics)
+      =/  eval  (mpeval-ultra %base constraint point augmented-chals dynamics)
       ?:  (levy eval |=(b=belt =(b 0)))  ~
       %-  some
       :*  %constraint-failed-terms
@@ -907,7 +908,7 @@
       %+  mevy  (range len.array.p.table)
       |=  i=@
       =/  point       (~(snag-as-bpoly ave p.table) i)
-      =/  eval  (mpeval-ultra %base constraint point challenge-map dynamics)
+      =/  eval  (mpeval-ultra %base constraint point augmented-chals dynamics)
       ?:  (levy eval |=(b=belt =(b 0)))  ~
       %-  some
       :*  %constraint-failed-row
@@ -931,7 +932,7 @@
       =/  point       (~(snag-as-bpoly ave p.table) i)
       =/  next-point   (~(snag-as-bpoly ave p.table) +(i))
       =/  combo-point  (~(weld bop point) next-point)
-      =/  eval  (mpeval-ultra %base constraint combo-point challenge-map dynamics)
+      =/  eval  (mpeval-ultra %base constraint combo-point augmented-chals dynamics)
       ?:  (levy eval |=(b=belt =(b 0)))  ~
       %-  some
       :*  %constraint-failed-trans

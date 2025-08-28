@@ -746,17 +746,40 @@
       range
     (fix-absolute:timelock timelock.note.ip origin-page.note.ip)
   ::
-  ::  +validate: calls validate:input on each input, and checks key/value
+  ::  +validate: validates each input and checks key/value
   ++  validate
     ~/  %validate
     |=  ips=form
     ^-  ?
     ?:  =(ips *form)  %.n  :: tx with no inputs are not allowed.
+    ::
+    ::  we validate all signatures, even if there are more than m, since
+    ::  saying a transaction is valid with invalid signatures just seems wrong.
+    ?.  (verify-signatures ips)
+      ~>  %slog.[0 "Invalid inputs. There is an input with an invalid signature"]
+      !!
     %+  levy  ~(tap z-by ips)
     |=  [name=nname inp=input]
-    ?&  (validate:input inp)
+    ?&  (validate-without-signatures:input inp)
         =(name name.note.inp)
     ==
+  ::
+  ::  +verify-signatures: verify all signatures in the inputs of a tx
+  ++  verify-signatures
+    |=  ips=form
+    %-  batch-verify:affine:belt-schnorr:cheetah
+    (signatures ips)
+  ::
+  ::  +signatures: pull all the necessary data out of inputs to verify the signature
+  ++  signatures
+    |=  ips=form
+    ^-  (list [schnorr-pubkey ^hash schnorr-signature])
+    %+  roll
+      ~(val z-by ips)
+    |=  [inp=input sigs=(list [schnorr-pubkey ^hash schnorr-signature])]
+    %+  weld
+      sigs
+    (signatures:spend spend.inp)
   ::
   ++  based
     ~/  %based
@@ -787,6 +810,7 @@
   |%
   +$  form  (z-map lock output)   :: lock is the recipient
   ::
+  ::  +new:  create outputs given valid inputs. assumes that the inputs passed in are valid.
   ++  new
     ~/  %new
     |=  [ips=inputs new-page-number=page-number]
@@ -797,19 +821,6 @@
     |-
     ?~  inputs
       (birth-children children new-page-number)
-    ?.  (validate:input i.inputs)
-      =/  log-message
-        %+  rap  3
-        :~   'spend: outputs: Failed validation for note name '
-              %-  crip
-              ^-  tape
-              ~[first ' ' last]:(to-b58:nname name.note.i.inputs)
-              ' with signature '
-              %-  crip
-              <signature.spend.i.inputs>
-        ==
-      ~>  %slog.[1 log-message]
-      !!
     =/  seed-list=(list seed)  ~(tap z-in seeds.spend.i.inputs)
     |-
     ?~  seed-list
@@ -1021,6 +1032,7 @@
         =outputs
     ==
   ::
+  ::  +new: create a new tx. we assume that raw-tx has already been validated at this point.
   ++  new
     ~/  %new
     |=  [raw=raw-tx new-page-number=page-number]
@@ -1280,20 +1292,28 @@
     ::
     ::  +m-of-n: m signers required of n=#keys.
     ++  m-of-n
-      |=  [m=@ud keys=(z-set schnorr-pubkey)]
-      %-  check
-      =/  n=@  ~(wyt z-in keys)
-      ?>  ?&  (lte m 255)
-              (lte n 255)
-              !=(m 0)                                  :: 0-sigs not allowed
-              !=(n 0)                                  :: need at least 1 signer
-          ==
-      ~?  >>>  (lth n m)
-          """
-          warning: lock requires more signatures {(scow %ud m)} than there
-          are in .pubkeys: {(scow %ud n)}
-          """
-      [m=m pubkeys=keys]
+      =<  default
+      |%
+      ++  default
+        |=  [m=@ud keys=(z-set schnorr-pubkey)]
+        %-  check
+        =/  n=@  ~(wyt z-in keys)
+        ?>  ?&  (lte m 255)
+                (lte n 255)
+                !=(m 0)                                  :: 0-sigs not allowed
+                !=(n 0)                                  :: need at least 1 signer
+            ==
+        ~?  >>>  (lth n m)
+            """
+            warning: lock requires more signatures {(scow %ud m)} than there
+            are in .pubkeys: {(scow %ud n)}
+            """
+        [m=m pubkeys=keys]
+      ::
+      ++  from-list
+        |=  [m=@ud keys=(list schnorr-pubkey)]
+        (default m (z-silt keys))
+      --
     --
   ::
   ::  +join: union of several $locks
@@ -1922,7 +1942,7 @@
     =/  sig=schnorr-signature
       %+  sign:affine:belt-schnorr:cheetah
         sk
-      (leaf-sequence:shape (sig-hash sen))
+      (sig-hash sen)
     ?:  =(~ signature.sen)
       %_  sen
         signature  `(~(put z-by *signature) pk sig)
@@ -1931,9 +1951,41 @@
       signature  `(~(put z-by (need signature.sen)) pk sig)
     ==
   ::
+  ++  signatures
+    ~/  %signatures
+    |=  sen=form
+    ^-  (list [schnorr-pubkey ^hash schnorr-signature])
+    ?~  signature.sen
+      ~>  %slog.[0 "Invalid inputs. There is an input with a spend with no signature"]
+      !!
+    ^-  (list [schnorr-pubkey ^hash schnorr-signature])
+    %+  turn
+      ~(tap z-by u.signature.sen)
+    |=  [pk=schnorr-pubkey sig=schnorr-signature]
+    :*  pk
+        (sig-hash:spend sen)
+        sig
+    ==
+  ::
   ::  +verify: verify the .signature and each seed has correct parent-hash
   ++  verify
     ~/  %verify
+    |=  [sen=form parent-note=nnote]
+    ^-  ?
+    ?&  (verify-without-signatures sen parent-note)
+      (verify-signatures sen)
+    ==
+  ::
+  ::  +verify-signatures: verifies whether an $input's .spend is valid by checking the signatures
+  ++  verify-signatures
+    ~/  %verify-signatures
+    |=  sen=form
+    ^-  ?
+    (batch-verify:affine:belt-schnorr:cheetah (signatures sen))
+  ::
+  ::  +verify-without-signatures: verifies whether an $input's .spend is valid without checking the signatures
+  ++  verify-without-signatures
+    ~/  %verify-without-signatures
     |=  [sen=form parent-note=nnote]
     ^-  ?
     ?~  signature.sen  %.n
@@ -1948,30 +2000,19 @@
       %.n
     ::  check that the keys in .signature are a subset of the keys in the lock
     ?.  =((~(int z-in pubkeys.lock.parent-note) have-pks) have-pks)
-    ::   =/  base58-have-pks=(list @t)
-    ::     %+  turn  ~(tap z-by have-pks)
-    ::     to-b58:schnorr-pubkey
-    ::   =/  base58-pubkeys=(list @t)
-    ::     %+  turn  ~(tap z-by pubkeys.lock.parent-note)
-    ::     to-b58:schnorr-pubkey
-      ::  intersection of pubkeys in .lock and pubkeys in .signature does not equal
-      ::  the pubkeys in .signature
+      :: =/  base58-have-pks=(list @t)
+      ::   %+  turn  ~(tap z-by have-pks)
+      ::   to-b58:schnorr-pubkey
+      :: =/  base58-pubkeys=(list @t)
+      ::   %+  turn  ~(tap z-by pubkeys.lock.parent-note)
+      ::   to-b58:schnorr-pubkey
+      :: intersection of pubkeys in .lock and pubkeys in .signature does not equal
+      :: the pubkeys in .signature
       :: ~&  >>  "invalid signatures"
       :: ~&  >>  "have-pks: {<base58-have-pks>}"
       :: ~&  >>  "pubkeys.lock.parent-note: {<base58-pubkeys>}"
       %.n
-    ::  we have enough signatures, they're all from the set of pubkeys required
-    ::  by the lock, so now we can actually verify them.
-    ::
-    ::  we validate all signatures, even if there are more than m, since
-    ::  saying a transaction is valid with invalid signatures just seems wrong.
-    %-  ~(all z-in have-pks)
-    |=  pk=schnorr-pubkey
-    %:  verify:affine:belt-schnorr:cheetah
-        pk
-        (leaf-sequence:shape (sig-hash sen))
-        (~(got z-by u.signature.sen) pk)
-    ==
+    %.y
   ::
   ++  based
     |=  sen=form
@@ -2080,8 +2121,16 @@
   ++  validate
     ~/  %validate
     |=  inp=form
+    ?&  (validate-without-signatures inp)
+    (verify-signatures:spend spend.inp)
+    ==
+  ::
+  ::  +validate-without-signatures: verifies whether an $input's .spend is valid without checking the sigs
+  ++  validate-without-signatures
+    ~/  %validate-without-signatures
+    |=  inp=form
     ^-  ?
-    =/  check-spend=?  (verify:spend spend.inp note.inp)
+    =/  check-spend=?  (verify-without-signatures:spend spend.inp note.inp)
     =/  check-gifts-and-fee=?
       =/  gifts-and-fee=coins
         %+  add  fee.spend.inp
@@ -2091,7 +2140,7 @@
       =(gifts-and-fee assets.note.inp)
       ::  total gifts and fee is = assets in the note (coin scarcity)
     :: ~&  >>
-    ::  :*  %validate-input
+    ::  :*  %validate-input-without-signatures
     ::      spend+check-spend
     ::      gifts-and-fees+check-gifts-and-fee
     ::  ==

@@ -2,9 +2,37 @@
 
 use std::slice::Iter;
 
+use noun_serde::{NounDecode, NounEncode};
+
+use crate::form::based_check;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]
 pub struct Belt(pub u64);
+
+// Manual implementation for Belt to encode/decode as atom
+impl NounEncode for Belt {
+    fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
+        nockvm::noun::Atom::new(allocator, self.0).as_noun()
+    }
+}
+
+impl NounDecode for Belt {
+    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+        let atom = noun
+            .as_atom()
+            .map_err(|_| noun_serde::NounDecodeError::ExpectedAtom)?;
+        let value = atom
+            .as_u64()
+            .map_err(|_| noun_serde::NounDecodeError::Custom("Belt value too large".to_string()))?;
+        if !based_check(value) {
+            return Err(noun_serde::NounDecodeError::Custom(
+                "Belt value not based".to_string(),
+            ));
+        }
+        Ok(Belt(value))
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Default)]
 #[repr(transparent)]

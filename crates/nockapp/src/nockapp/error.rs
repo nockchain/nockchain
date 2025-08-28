@@ -39,8 +39,8 @@ pub enum NockAppError {
     CrownError(#[from] CrownError),
     #[error("Channel closed error")]
     ChannelClosedError,
-    #[error("Other error")]
-    OtherError,
+    #[error("Other error: {0}")]
+    OtherError(String),
     #[error("Peek failed")]
     PeekFailed,
     #[error("Poke failed")]
@@ -57,8 +57,13 @@ pub enum NockAppError {
     SendError(#[from] tokio::sync::watch::error::SendError<u64>),
     #[error("Config error: {0}")]
     ConfigError(#[from] config::ConfigError),
-    #[error("Checkpoing error: {0}")]
+    #[error("Checkpoint error: {0}")]
     CheckpointError(#[from] CheckpointError),
+    // Serialization/deserialization errors
+    #[error("Noun deserialization error: {0}")]
+    NounDecodeError(Box<dyn std::error::Error + Send>),
+    #[error("Noun serialization error: {0}")]
+    NounEncodeError(Box<dyn std::error::Error + Send>),
 }
 
 impl From<TrySendError<IOAction>> for NockAppError {

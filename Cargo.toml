@@ -1,33 +1,163 @@
-[workspace]
-members = [
-  "crates/equix-latency",
-  "crates/kernels",
-  "crates/hoonc",
-  "crates/hoon",
-  "crates/nockapp",
-  "crates/nockchain-libp2p-io",
-  "crates/nockchain",
-  "crates/nockvm/rust/ibig",
-  "crates/nockvm/rust/murmur3",
-  "crates/nockvm/rust/nockvm_macros",
-  "crates/nockvm/rust/nockvm",
-  "crates/nockchain-wallet",
-  "crates/zkvm-jetpack",
-  "crates/noun-serde",
-  "crates/noun-serde-derive",
-]
-
 resolver = "2"
+
+[workspace]
+members = ["crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-wallet", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 
+[workspace.dependencies]
+aes = { version = "0.8.3", default-features = false }
+aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
+anyhow = "1.0"
+argon2 = "0.5.3"
+arrayref = "0.3.7"
+async-trait = "0.1"
+axum = "0.8.1"
+axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+bardecoder = "0.5.0"
+bincode = "2.0.0-rc.3"
+bitcoincore-rpc = "0.19.0"
+bitvec = "1.0.1"
+blake3 = { version = "1.5.1", features = ["serde"] }
+bs58 = "0.5.1"
+byteorder = "1.5.0"
+bytes = "1.5.0"
+cbor4ii = "1.0.0"
+cfg-if = "1.0.0"
+chrono = "0.4.40"
+clap = "4.4.4"
+config = "0.15"
+console-subscriber = "0.4.1"
+criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485aece85a3546126b06cc25d33e14aba829b3", features = [
+    "html_reports",
+] }
+crossterm = "0.29"
+curve25519-dalek = { version = "4.1.1", default-features = false }
+dashmap = "6.1.0"
+dirs = "6.0.0"
+divan = "0.1.21"
+ed25519-dalek = { version = "2.1.0", default-features = false }
+either = "1.9.0"
+equix = "0.2.2"
+futures = "0.3.31"
+gdt-cpus = "25.5.0"
+getrandom = { version = "0.3.3", features = ["std"] }
+gnort = "0.1.1"
+hex-literal = "1.0.0"
+hickory-proto = "0.25.0-alpha.4"
+hickory-resolver = { version = "0.25.0-alpha.4", features = ["system-config"] }
+image = "0.24.7"
+instant-acme = "0.7.2"
+intmap = "3.1.0"
+json = "0.12.4"
+lazy_static = "1.4.0"
+libc = "0.2.171"
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
+memmap2 = "^0.9.5"
+num-derive = "0.4.2"
+num-traits = "0.2"
+num_cpus = "1.16.0"
+once_cell = "1.21.3"
+opentelemetry = { version = "0.30.0", features = [
+    "trace",
+    "logs",
+    "metrics",
+    "internal-logs",
+] }
+opentelemetry-otlp = { version = "0.30.0", features = [
+    "tonic",
+    "http-proto",
+    "reqwest-client",
+] }
+opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
+parking_lot = "0.12.4"
+pin-project-lite = "0.2.16"
+proc-macro2 = "1.0.91"
+prost = "0.14.1"
+prost-build = "0.14.1"
+prost-types = "0.14.1"
+qrcode = "0.14.1"
+quickcheck = "1.0.3"
+quickcheck_macros = "1.0"
+quote = "1.0.37"
+rand = { version = "0.9.2", features = ["std"] }
+ratatui = "0.29.0"
+rayon = "1.8.0"
+rcgen = "0.14.3"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "http2",
+    "charset",
+] }
+rkyv = "0.8.10"
+rustls = "0.23.0"
+rustls-pemfile = "2.0.0"
+serde = "1.0.217"
+serde_bytes = { version = "0.11.15", features = ["alloc"] }
+serde_cbor = "0.11"
+serde_json = "1.0.104"
+sha1 = { version = "0.10.6", default-features = false }
+sha2 = { version = "0.10.8", default-features = false }
+sha3 = "0.10.8"
+signal-hook = "0.3"
+signal-hook-tokio = "0.3.1"
+slotmap = "1.0.7"
+smallvec = "1.15.1"
+static_assertions = "1.1.0"
+strum = { version = "0.27.2", features = ["derive"] }
+syn = { version = "2.0.39", features = ["full"] }
+tempfile = "3.3"
+termcolor = "1.4"
+termimad = "0.33.0"
+testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "54851fd9faf9b9cded9d681b46f87c056880d870" }
+thiserror = "2.0.11"
+tikv-jemallocator = { version = "0.6" }
+tokio = { version = "1.32", features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "rt",
+    "signal",
+    "tracing",
+] }
+tokio-rustls = "0.26.0"
+tokio-stream = "0.1"
+tokio-util = "0.7.11"
+tonic = "0.14.0"
+tonic-build = "0.14"
+tonic-prost = "0.14.0"
+tonic-prost-build = "0.14.0"
+tower-http = { version = "0.6", features = ["fs"] }
+tracing = "0.1.41"
+tracing-core = "0.1"
+tracing-opentelemetry = { version = "0.31.0", features = ["metrics"] }
+tracing-subscriber = { version = "0.3.18", features = [
+    "ansi",
+    "env-filter",
+    "registry",
+] }
+tracing-test = "0.2.5"
+tracing-tracy = { version = "0.11.4" }
+tracy-client = { version = "0.18.2" }
+unroll = "0.1.5"
+vergen = "8.3.2"
+void = "1.0.2"
+webpki-roots = "1.0.2"
+x25519-dalek = { version = "2.0.0", features = [
+    "static_secrets",
+], default-features = false }
+x509-parser = "0.17.0"
+yaque = "0.6.6"
+
+[workspace.dependencies.hoon]
+path = "crates/hoon"
+
 [workspace.dependencies.hoonc]
 path = "crates/hoonc"
-
-[workspace.dependencies.nockapp]
-path = "crates/nockapp"
 
 [workspace.dependencies.ibig]
 path = "crates/nockvm/rust/ibig"
@@ -38,11 +168,20 @@ path = "crates/kernels"
 [workspace.dependencies.murmur3]
 path = "crates/nockvm/rust/murmur3"
 
+[workspace.dependencies.nockapp]
+path = "crates/nockapp"
+
+[workspace.dependencies.nockapp-grpc]
+path = "crates/nockapp-grpc"
+
 [workspace.dependencies.nockchain]
 path = "crates/nockchain"
 
 [workspace.dependencies.nockchain-libp2p-io]
 path = "crates/nockchain-libp2p-io"
+
+[workspace.dependencies.nockchain-wallet]
+path = "crates/nockchain-wallet"
 
 [workspace.dependencies.nockvm]
 path = "crates/nockvm/rust/nockvm"
@@ -53,171 +192,29 @@ path = "crates/nockvm/rust/nockvm_crypto"
 [workspace.dependencies.nockvm_macros]
 path = "crates/nockvm/rust/nockvm_macros"
 
-[workspace.dependencies.zkvm-jetpack]
-path = "crates/zkvm-jetpack"
-
 [workspace.dependencies.noun-serde]
 path = "crates/noun-serde"
 
 [workspace.dependencies.noun-serde-derive]
 path = "crates/noun-serde-derive"
 
-[workspace.dependencies]
-json = "0.12.4"
-lazy_static = "1.4.0"
-libc = "0.2.171"
-memmap2 = "^0.9.5"
-num-derive = "0.4.2"
-signal-hook = "0.3"
-signal-hook-tokio = "0.3.1"
-static_assertions = "1.1.0"
+[workspace.dependencies.zkvm-jetpack]
+path = "crates/zkvm-jetpack"
 
-## Sword crypto dependencies
-# ed25519
-curve25519-dalek = { version = "4.1.1", default-features = false }
-ed25519-dalek = { version = "2.1.0", default-features = false }
-x25519-dalek = { version = "2.0.0", features = [
-  "static_secrets",
-], default-features = false }
-
-# aes_siv
-aes = { version = "0.8.3", default-features = false }
-aes-siv = { version = "0.7.0", default-features = false }
-
-# sha
-sha1 = { version = "0.10.6", default-features = false }
-sha2 = { version = "0.10.8", default-features = false }
-
-# nockapp-specific workspace dependencies
-anyhow = "1.0"
-async-trait = "0.1"
-axum = "0.8.1"
-bincode = "2.0.0-rc.3"
-blake3 = { version = "1.5.1", features = ["serde"] }
-bs58 = "0.5.1"
-byteorder = "1.5.0"
-crossterm = "0.28.1"
-chrono = "0.4.40"
-intmap = "3.1.0"
-opentelemetry = { version = "0.27.1", features = [
-  "trace",
-  "logs",
-  "metrics",
-  "internal-logs",
-] }
-opentelemetry-otlp = { version = "0.27.0", features = [
-  "tonic",
-  "http-proto",
-  "reqwest-client",
-] }
-opentelemetry_sdk = { version = "0.27.1", features = ["rt-tokio"] }
-serde_bytes = { version = "0.11.15", features = ["alloc"] }
-tempfile = "3.3"
-termimad = "0.31.0"
-tonic = "0.12.3"
-tracing-opentelemetry = { version = "0.28.0", features = ["metrics"] }
-tracing-test = "0.2.5"
-yaque = "0.6.6"
-
-
-# External dependencies
-arrayref = "0.3.7"
-argon2 = "0.5.3"
-bardecoder = "0.5.0"
-bitcoincore-rpc = "0.19.0"
-bitvec = "1.0.1"
-bytes = "1.5.0"
-cfg-if = "1.0.0"
-clap = "4.4.4"
-config = "0.15"
-dashmap = "6.1.0"
-num-traits = "0.2"
-pin-project-lite = "0.2.16"
-criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485aece85a3546126b06cc25d33e14aba829b3", features = [
-  "html_reports",
-] }
-dirs = "6.0.0"
-either = "1.9.0"
-equix = "0.2.2"
-futures = "0.3.31"
-getrandom = { version = "0.2.15", features = ["std"] }
-gnort = "0.1.1"
-hex-literal = "1.0.0"
-hickory-resolver = { version = "0.25.0-alpha.4", features = ["system-config"] }
-hickory-proto = "0.25.0-alpha.4"
-image = "0.24.7"
-# libp2p = "0.55.0"
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
-proc-macro2 = "1.0.91"
-qrcode = "0.13"
-quickcheck = "1.0.3"
-quickcheck_macros = "1.0"
-quote = "1.0.37"
-rand = "0.8.5"
-ratatui = "0.29.0"
-rayon = "1.8.0"
-reqwest = { version = "0.12", default-features = false, features = [
-  "rustls-tls",
-  "http2",
-  "charset",
-] }
-serde = "1.0.217"
-serde_json = "1.0.104"
-serde_cbor = "0.11"
-cbor4ii = "0.3"
-sha3 = "0.10.8"
-slotmap = "1.0.7"
-smallvec = "1.13.2"
-strum = { version = "0.26", features = ["derive"] }
-syn = { version = "2.0.39", features = ["full"] }
-termcolor = "1.4"
-testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "54851fd9faf9b9cded9d681b46f87c056880d870" }
-thiserror = "2.0.11"
-tikv-jemallocator = { version = "0.6" }
-tokio = { version = "1.32", features = [
-  "fs",
-  "io-util",
-  "macros",
-  "net",
-  "rt-multi-thread",
-  "rt",
-  "signal",
-] }
-tokio-util = "0.7.11"
-tower-http = { version = "0.6", features = ["fs"] }
-tracing = "0.1.41"
-tracing-core = "0.1"
-tracing-subscriber = { version = "0.3.18", features = [
-  "ansi",
-  "env-filter",
-  "registry",
-] }
-tracing-tracy = { version = "0.11.4" }
-tracy-client = { version = "0.18.2" }
-vergen = "8.3.2"
-void = "1.0.2"
-num_cpus = "1.16.0"
-# Let's Encrypt and HTTPS support
-instant-acme = "0.7.2"
-axum-server = { version = "0.7.2", features = ["tls-rustls"] }
-rustls = "0.23.0"
-rustls-pemfile = "2.0.0"
-tokio-rustls = "0.26.0"
-x509-parser = "0.16.0"
-rcgen = "0.13.0"
-webpki-roots = "0.26.0"
-
-
+# Comment out this block if gdb is lacking info
 [profile.dev]
+# default settings, no opt-level, full build: 22 seconds, incremental: 1 second
 opt-level = 0
+# Full build: 1m 40s, incremental: 0.95 seconds
 debug = 2
 
 [profile.test]
 inherits = "release"
 
+# TODO: Enable debug info for release or dev builds
 [profile.release]
-opt-level = 3
 lto = "thin"
+opt-level = 3
 codegen-units = 1
 debug = 1
 

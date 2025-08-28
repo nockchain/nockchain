@@ -77,7 +77,8 @@ impl Buffer {
     fn reallocate_stack<S: Stack>(&mut self, stack: &mut S, num_words: usize) {
         assert!(num_words >= self.len());
         let mut new_buffer = Buffer::allocate_stack(stack, num_words);
-        new_buffer.clone_from(self);
+        new_buffer.0.extend_from_slice(self);
+
         *self = new_buffer;
     }
 
@@ -89,7 +90,7 @@ impl Buffer {
     fn reallocate(&mut self, num_words: usize) {
         assert!(num_words >= self.len());
         let mut new_buffer = Buffer::allocate(num_words);
-        new_buffer.clone_from(self);
+        new_buffer.0.extend_from_slice(self);
         *self = new_buffer
     }
 
@@ -275,187 +276,229 @@ impl<'a> Extend<&'a Word> for Buffer {
 }
 
 // FIXME: ibig makes invalid assumptions about how Vec works, we need to audit this.
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
+#[cfg(test)]
+mod tests {
+    use alloc::alloc;
+    use core::alloc::Layout;
 
-//     #[test]
-//     fn test_default_capacity() {
-//         assert_eq!(Buffer::default_capacity(2), 4);
-//         assert_eq!(Buffer::default_capacity(1000), 1127);
-//     }
+    use super::*;
+    use crate::memory::Stack;
 
-//     #[test]
-//     fn test_max_compact_capacity() {
-//         assert_eq!(Buffer::max_compact_capacity(2), 6);
-//         assert_eq!(Buffer::max_compact_capacity(1000), 1254);
-//     }
+    // Simple stack implementation for testing
+    struct TestStack;
 
-//     #[test]
-//     fn test_allocate() {
-//         let buffer = Buffer::allocate(1000);
-//         assert_eq!(buffer.len(), 0);
-//         assert_eq!(buffer.capacity(), Buffer::default_capacity(1000));
-//     }
+    impl TestStack {
+        fn new() -> Self {
+            TestStack
+        }
+    }
 
-//     #[test]
-//     #[should_panic]
-//     fn test_allocate_too_large() {
-//         let _ = Buffer::allocate(Buffer::MAX_CAPACITY + 1);
-//     }
+    impl Stack for TestStack {
+        unsafe fn alloc_layout(&mut self, layout: Layout) -> *mut u64 {
+            if layout.size() == 0 {
+                layout.dangling().as_ptr()
+            } else {
+                let ptr = alloc::alloc(layout);
+                ptr as *mut u64
+            }
+        }
+    }
 
-//     #[test]
-//     fn test_ensure_capacity() {
-//         let mut buffer = Buffer::allocate(2);
-//         buffer.push(7);
-//         assert_eq!(buffer.capacity(), 4);
-//         buffer.ensure_capacity(4);
-//         assert_eq!(buffer.capacity(), 4);
-//         buffer.ensure_capacity(5);
-//         assert_eq!(buffer.capacity(), 7);
-//         assert_eq!(&buffer[..], [7]);
-//     }
+    //     #[test]
+    //     fn test_default_capacity() {
+    //         assert_eq!(Buffer::default_capacity(2), 4);
+    //         assert_eq!(Buffer::default_capacity(1000), 1127);
+    //     }
 
-//     #[test]
-//     fn test_shrink() {
-//         let mut buffer = Buffer::allocate(100);
-//         buffer.push(7);
-//         buffer.push(8);
-//         buffer.shrink();
-//         assert_eq!(buffer.capacity(), Buffer::default_capacity(2));
-//         assert_eq!(&buffer[..], [7, 8]);
-//     }
+    //     #[test]
+    //     fn test_max_compact_capacity() {
+    //         assert_eq!(Buffer::max_compact_capacity(2), 6);
+    //         assert_eq!(Buffer::max_compact_capacity(1000), 1254);
+    //     }
 
-//     #[test]
-//     fn test_push_pop() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push(2);
-//         assert_eq!(&buffer[..], [1, 2]);
-//         assert_eq!(buffer.pop(), Some(2));
-//         assert_eq!(buffer.pop(), Some(1));
-//         assert_eq!(buffer.pop(), None);
-//     }
+    //     #[test]
+    //     fn test_allocate() {
+    //         let buffer = Buffer::allocate(1000);
+    //         assert_eq!(buffer.len(), 0);
+    //         assert_eq!(buffer.capacity(), Buffer::default_capacity(1000));
+    //     }
 
-//     #[test]
-//     fn test_pop_leading_zeros() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push(2);
-//         buffer.push(0);
-//         buffer.push(0);
-//         buffer.pop_leading_zeros();
-//         assert_eq!(&buffer[..], [1, 2]);
-//     }
+    //     #[test]
+    //     #[should_panic]
+    //     fn test_allocate_too_large() {
+    //         let _ = Buffer::allocate(Buffer::MAX_CAPACITY + 1);
+    //     }
 
-//     #[test]
-//     fn test_extend() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         let list: [Word; 2] = [2, 3];
-//         buffer.extend(&list);
-//         assert_eq!(&buffer[..], [1, 2, 3]);
-//     }
+    //     #[test]
+    //     fn test_ensure_capacity() {
+    //         let mut buffer = Buffer::allocate(2);
+    //         buffer.push(7);
+    //         assert_eq!(buffer.capacity(), 4);
+    //         buffer.ensure_capacity(4);
+    //         assert_eq!(buffer.capacity(), 4);
+    //         buffer.ensure_capacity(5);
+    //         assert_eq!(buffer.capacity(), 7);
+    //         assert_eq!(&buffer[..], [7]);
+    //     }
 
-//     #[test]
-//     fn test_push_zeros() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push_zeros(2);
-//         assert_eq!(&buffer[..], [1, 0, 0]);
-//     }
+    //     #[test]
+    //     fn test_shrink() {
+    //         let mut buffer = Buffer::allocate(100);
+    //         buffer.push(7);
+    //         buffer.push(8);
+    //         buffer.shrink();
+    //         assert_eq!(buffer.capacity(), Buffer::default_capacity(2));
+    //         assert_eq!(&buffer[..], [7, 8]);
+    //     }
 
-//     #[test]
-//     fn test_push_zeros_front() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push_zeros_front(2);
-//         assert_eq!(&buffer[..], [0, 0, 1]);
-//     }
+    //     #[test]
+    //     fn test_push_pop() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push(2);
+    //         assert_eq!(&buffer[..], [1, 2]);
+    //         assert_eq!(buffer.pop(), Some(2));
+    //         assert_eq!(buffer.pop(), Some(1));
+    //         assert_eq!(buffer.pop(), None);
+    //     }
 
-//     #[test]
-//     fn test_truncate() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push(2);
-//         buffer.push(3);
-//         buffer.truncate(1);
-//         assert_eq!(&buffer[..], [1]);
-//     }
+    //     #[test]
+    //     fn test_pop_leading_zeros() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push(2);
+    //         buffer.push(0);
+    //         buffer.push(0);
+    //         buffer.pop_leading_zeros();
+    //         assert_eq!(&buffer[..], [1, 2]);
+    //     }
 
-//     #[test]
-//     fn test_erase_front() {
-//         let mut buffer = Buffer::allocate(5);
-//         buffer.push(1);
-//         buffer.push(2);
-//         buffer.push(3);
-//         buffer.erase_front(2);
-//         assert_eq!(&buffer[..], [3]);
-//     }
+    //     #[test]
+    //     fn test_extend() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         let list: [Word; 2] = [2, 3];
+    //         buffer.extend(&list);
+    //         assert_eq!(&buffer[..], [1, 2, 3]);
+    //     }
 
-//     #[test]
-//     #[should_panic]
-//     fn test_push_failed() {
-//         let mut buffer = Buffer::allocate(2);
-//         for _ in 0..10 {
-//             buffer.push(7);
-//         }
-//     }
+    //     #[test]
+    //     fn test_push_zeros() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push_zeros(2);
+    //         assert_eq!(&buffer[..], [1, 0, 0]);
+    //     }
 
-//     #[test]
-//     fn test_push_may_reallocate() {
-//         let mut buffer = Buffer::allocate(2);
-//         for _ in 0..10 {
-//             buffer.push_may_reallocate(7);
-//         }
-//         assert_eq!(buffer.len(), 10);
-//     }
+    //     #[test]
+    //     fn test_push_zeros_front() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push_zeros_front(2);
+    //         assert_eq!(&buffer[..], [0, 0, 1]);
+    //     }
 
-//     #[test]
-//     fn test_clone() {
-//         let mut buffer = Buffer::allocate(100);
-//         buffer.push(7);
-//         buffer.push(8);
-//         let buffer2 = buffer.clone();
-//         assert_eq!(buffer, buffer2);
-//         assert_eq!(buffer2.capacity(), Buffer::default_capacity(2));
-//     }
+    //     #[test]
+    //     fn test_truncate() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push(2);
+    //         buffer.push(3);
+    //         buffer.truncate(1);
+    //         assert_eq!(&buffer[..], [1]);
+    //     }
 
-//     #[test]
-//     fn test_clone_from() {
-//         let mut buffer = Buffer::allocate(100);
-//         buffer.push(7);
-//         buffer.push(8);
-//         let mut buffer2 = Buffer::allocate(50);
-//         buffer2.clone_from(&buffer);
-//         assert_eq!(buffer, buffer2);
-//         assert_eq!(buffer2.capacity(), Buffer::default_capacity(50));
-//     }
+    //     #[test]
+    //     fn test_erase_front() {
+    //         let mut buffer = Buffer::allocate(5);
+    //         buffer.push(1);
+    //         buffer.push(2);
+    //         buffer.push(3);
+    //         buffer.erase_front(2);
+    //         assert_eq!(&buffer[..], [3]);
+    //     }
 
-//     #[test]
-//     fn test_resizing_clone_from() {
-//         let mut buf = Buffer::allocate(5);
-//         assert_eq!(buf.capacity(), 7);
+    //     #[test]
+    //     #[should_panic]
+    //     fn test_push_failed() {
+    //         let mut buffer = Buffer::allocate(2);
+    //         for _ in 0..10 {
+    //             buffer.push(7);
+    //         }
+    //     }
 
-//         let mut buf2 = Buffer::allocate(4);
-//         assert_eq!(buf2.capacity(), 6);
-//         for i in 0..4 {
-//             buf2.push(i);
-//         }
-//         buf.resizing_clone_from(&buf2);
-//         assert_eq!(buf.capacity(), 7);
-//         assert_eq!(&buf[..], [0, 1, 2, 3]);
+    // This is a regression test for a bug where push_may_reallocate did not
+    // increase the capacity of the buffer
+    #[test]
+    fn test_push_may_reallocate() {
+        let mut buffer = Buffer::allocate(2);
+        for _ in 0..10 {
+            buffer.push_may_reallocate(7);
+        }
+        assert_eq!(buffer.len(), 10);
+    }
 
-//         let mut buf3 = Buffer::allocate(100);
-//         for i in 0..100 {
-//             buf3.push(i);
-//         }
-//         buf.resizing_clone_from(&buf3);
-//         assert_eq!(buf.capacity(), Buffer::default_capacity(100));
-//         assert_eq!(buf.len(), 100);
+    // This is a regression test for a bug where push_may_reallocate_stack did not
+    // increase the capacity of the buffer
+    #[test]
+    fn test_push_may_reallocate_stack() {
+        // Create a test stack for testing
+        let mut stack = TestStack::new();
 
-//         buf.resizing_clone_from(&buf2);
-//         assert_eq!(buf.capacity(), 6);
-//         assert_eq!(&buf[..], [0, 1, 2, 3]);
-//     }
-// }
+        // Create a buffer with small initial capacity
+        let mut buffer = Buffer::allocate_stack(&mut stack, 2);
+
+        // Push more elements than the initial capacity
+        for i in 0..10 {
+            buffer.push_may_reallocate_stack(&mut stack, i as Word);
+        }
+    }
+
+    //     #[test]
+    //     fn test_clone() {
+    //         let mut buffer = Buffer::allocate(100);
+    //         buffer.push(7);
+    //         buffer.push(8);
+    //         let buffer2 = buffer.clone();
+    //         assert_eq!(buffer, buffer2);
+    //         assert_eq!(buffer2.capacity(), Buffer::default_capacity(2));
+    //     }
+
+    //     #[test]
+    //     fn test_clone_from() {
+    //         let mut buffer = Buffer::allocate(100);
+    //         buffer.push(7);
+    //         buffer.push(8);
+    //         let mut buffer2 = Buffer::allocate(50);
+    //         buffer2.clone_from(&buffer);
+    //         assert_eq!(buffer, buffer2);
+    //         assert_eq!(buffer2.capacity(), Buffer::default_capacity(50));
+    //     }
+
+    //     #[test]
+    //     fn test_resizing_clone_from() {
+    //         let mut buf = Buffer::allocate(5);
+    //         assert_eq!(buf.capacity(), 7);
+
+    //         let mut buf2 = Buffer::allocate(4);
+    //         assert_eq!(buf2.capacity(), 6);
+    //         for i in 0..4 {
+    //             buf2.push(i);
+    //         }
+    //         buf.resizing_clone_from(&buf2);
+    //         assert_eq!(buf.capacity(), 7);
+    //         assert_eq!(&buf[..], [0, 1, 2, 3]);
+
+    //         let mut buf3 = Buffer::allocate(100);
+    //         for i in 0..100 {
+    //             buf3.push(i);
+    //         }
+    //         buf.resizing_clone_from(&buf3);
+    //         assert_eq!(buf.capacity(), Buffer::default_capacity(100));
+    //         assert_eq!(buf.len(), 100);
+
+    //         buf.resizing_clone_from(&buf2);
+    //         assert_eq!(buf.capacity(), 6);
+    //         assert_eq!(&buf[..], [0, 1, 2, 3]);
+    //     }
+}

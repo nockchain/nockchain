@@ -8,3 +8,4 @@ nockapp.workspace = true
 nockvm.workspace = true
 noun-serde-derive.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

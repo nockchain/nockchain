@@ -307,6 +307,16 @@
       ?~  heaviest-block  ~
       ``(to-page:local-page:t u.heaviest-block)
     ::
+        [%current-balance ~]
+      ^-  (unit (unit (z-map nname:t nnote:t)))
+      ?~  heaviest-block.c.k
+        [~ ~]
+      ?.  (~(has z-by blocks.c.k) u.heaviest-block.c.k)
+        [~ ~]
+      :-  ~
+      %-  ~(get z-by balance.c.k)
+      u.heaviest-block.c.k
+    ::
         [%heavy-summary ~]
       ^-  (unit (unit [(z-set lock:t) (unit page-summary:t)]))
       ?~  heaviest-block.c.k
@@ -348,7 +358,7 @@
     ::~&  "inner dumbnet cause: {<[-.cause -.+.cause]>}"
     =^  effs  k
       ?+    wir  ~|("Unsupported wire: {<wir>}" !!)
-          [%poke src=?(%nc %timer %sys %miner %npc) ver=@ *]
+          [%poke src=?(%nc %timer %sys %miner %grpc) ver=@ *]
         ?-  -.cause
           %command  (handle-command now eny p.cause)
           %fact     (handle-fact wir eny our now p.cause)
@@ -451,7 +461,7 @@
       ::  peer id. so it gets cross-referenced with the blocks being
       ::  tracked to know who to ban.
       ::
-      ::  the crash case is when we get a bad block from the npc driver or
+      ::  the crash case is when we get a bad block from the grpc driver or
       ::  from the kernel itself.
       ::
       =/  check-page-without-txs=(reason:dk ~)
@@ -951,7 +961,7 @@
     ::  +liar-effect: produce the appropriate liar effect
     ::
     ::    this only produces the `%liar-peer` effect. the other possibilities
-    ::    are receiving a bad block or tx via the npc driver or from within
+    ::    are receiving a bad block or tx via the grpc driver or from within
     ::    the miner module or +do-genesis. in this case we just emit a
     ::    warning and crash, since that means there's a bug.
     ++  liar-effect
@@ -961,8 +971,8 @@
           [%poke %libp2p ver=@ typ=?(%gossip %response) %peer-id id=@ *]
         [%liar-peer (need (get-peer-id wir)) r]
       ::
-          [%poke %npc ver=@ *]
-        ~|  'liar-effect: ATTN: received a bad block or tx via npc driver'
+          [%poke %grpc ver=@ *]
+        ~|  'liar-effect: ATTN: received a bad block or tx via grpc driver'
         !!
       ::
           [%poke %miner *]

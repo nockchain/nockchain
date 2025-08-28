@@ -1,0 +1,325 @@
+// nockapp.proto
+
+syntax = "proto3";
+
+package nockapp.v1;
+
+// ===================================================================
+// Core Types
+// ===================================================================
+
+// Wire identifier for routing operations to correct drivers
+message Wire {
+  string source = 1;    // e.g., "http", "file", "wallet", "grpc"
+  uint64 version = 2;   // wire format version
+  repeated WireTag tags = 3;  // operation-specific tags
+}
+
+// Wire tag can be either a string or a number
+message WireTag {
+  oneof value {
+    string text = 1;
+    uint64 number = 2;
+  }
+}
+
+// ===================================================================
+// NockApp Operations (Generic Peek/Poke)
+// ===================================================================
+
+// Peek operation - reads application state without side effects
+message PeekRequest {
+  int32 pid = 1;        // process ID for tracking
+  repeated string path = 2;  // path components, e.g. ["mining", "header"] or ["balance", "my-address"]
+}
+
+message PeekResponse {
+  oneof result {
+    bytes data = 1;     // JAM-encoded nock data (success case)
+    ErrorStatus error = 2;
+  }
+}
+
+// Poke operation - modifies application state
+message PokeRequest {
+  int32 pid = 1;        // process ID for tracking
+  Wire wire = 2;        // wire routing information
+  bytes payload = 3;    // JAM-encoded nock data
+}
+
+message PokeResponse {
+  oneof result {
+    bool acknowledged = 1;  // true if successful
+    ErrorStatus error = 2;
+  }
+}
+
+// ===================================================================
+// Error Handling / Liveness check
+// ===================================================================
+
+message ErrorStatus {
+  ErrorCode code = 1;
+  string message = 2;
+  optional string details = 3;  // additional error context
+}
+
+enum ErrorCode {
+  UNKNOWN = 0;
+  INVALID_REQUEST = 1;
+  PEEK_FAILED = 2;
+  POKE_FAILED = 3;
+  NACKAPP_ERROR = 4;
+  TIMEOUT = 5;
+  INTERNAL_ERROR = 6;
+  NOT_FOUND = 7;
+  PERMISSION_DENIED = 8;
+  INVALID_WIRE = 9;
+  KERNEL_ERROR = 10;
+}
+
+message PingRequest {
+  int32 zero = 1;
+}
+
+message PingResponse {
+  oneof result {
+    int32 succ = 1;
+    ErrorStatus error = 2;
+  }
+}
+
+// ===================================================================
+// Service Definition
+// ===================================================================
+service NockAppService {
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Peek(PeekRequest) returns (PeekResponse);
+  // rpc PeekVase(PeekVaseRequest) returns (PeekVaseResponse);
+  rpc Poke(PokeRequest) returns (PokeResponse);
+
+  //rpc SendTx(SendTxRequest) returns (SendTxResponse);
+
+  // Not finished, WILL CHANGE WHEN IT IS
+  // // ===== Wallet Operations =====
+  // rpc WalletGetBalance(WalletGetBalanceRequest) returns (WalletGetBalanceResponse);
+  // rpc WalletSendTransaction(WalletSendTransactionRequest) returns (WalletSendTransactionResponse);
+  // rpc WalletGetTransactionStatus(WalletGetTransactionStatusRequest) returns (WalletGetTransactionStatusResponse);
+
+  // // ===== Mining Operations =====
+  // // rpc MiningGetHeader(MiningGetHeaderRequest) returns (MiningGetHeaderResponse);
+  // // rpc MiningSubmitSolution(MiningSubmitSolutionRequest) returns (MiningSubmitSolutionResponse);
+
+  // // ===== Block Operations =====
+  // rpc BlockGetById(BlockGetByIdRequest) returns (BlockGetByIdResponse);
+  // rpc BlockGetHeaviest(BlockGetHeaviestRequest) returns (BlockGetHeaviestResponse);
+
+  // // ===== System Operations =====
+  // rpc SystemHealthCheck(SystemHealthCheckRequest) returns (SystemHealthCheckResponse);
+}
+
+//////// Not finished, WILL CHANGE WHEN IT IS ////////
+
+// // PeekVase operation - reads application state as a vase (type-value pair)
+// message PeekVaseRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   repeated string path = 2;  // path components, e.g. ["block", "block-id"]
+// }
+
+// message PeekVaseResponse {
+//   oneof result {
+//     bytes vase = 1;     // JAM-encoded vase (type-value pair)
+//     ErrorStatus error = 2;
+//   }
+// }
+
+
+// // ===================================================================
+// // Wallet Operations (Type-Safe Domain-Specific)
+// // ===================================================================
+
+// // Get wallet balance - type-safe wallet operation
+// message WalletGetBalanceRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   optional string address = 2;  // specific address, or current wallet if omitted
+//   optional string block_id = 3; // balance at specific block, or latest if omitted
+// }
+
+// message WalletGetBalanceResponse {
+//   oneof result {
+//     WalletBalanceData balance = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// message WalletBalanceData {
+//   map<string, uint64> notes = 1;  // note name -> amount
+//   repeated uint64 locked_balances = 2;  // amounts currently locked
+//   optional string block_id = 3;   // block where balance was computed
+//   optional uint64 total_balance = 4;  // sum of all notes
+// }
+
+// // Send transaction - type-safe wallet operation
+// message WalletSendTransactionRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   repeated string input_names = 2;   // names of notes to spend
+//   repeated WalletTransactionOutput outputs = 3;
+//   uint64 fee = 4;
+//   optional bytes signature = 5;      // for pre-signed transactions
+// }
+//
+ // Send transaction - type-safe wallet operation
+// message WalletSendTransactionRequest {
+//   string tx_id = 1;        // base58 encoded transaction ID for tracking
+//   bytes raw_tx = 2;        // jammed encoded raw_tx
+// }
+
+// message WalletTransactionOutput {
+//   string recipient = 1;   // recipient address/lock
+//   uint64 amount = 2;
+//   optional uint64 timelock = 3;  // optional timelock height
+// }
+
+//message WalletSendTransactionResponse {
+//string tx_id = 1;  // base58 encoded transaction ID
+//bool acknowledged = 2;  // true if transaction accepted by node
+//ErrorStatus error = 3;
+//}
+
+ //message TransactionConfirmationsRequest {
+ //    string tx_id = 1; // base58 encoded transaction ID
+ //}
+
+ //message TransactionConfirmationsResponse {
+ //    string tx_id = 1; // base58 encded transaction ID
+ //    int32 confirmations = 2;  // number of confirmations, negative confirmations indicates that the transaction is part of a re-org
+ //    ErrorStatus error = 3;
+ //}
+
+// message WalletTransactionResult {
+//   bytes transaction_hash = 1;
+//   string status = 2;      // "pending", "confirmed", "failed"
+//   optional uint64 block_height = 3;
+//   optional uint64 confirmations = 4;
+// }
+
+// // Get transaction status - type-safe wallet operation
+// message WalletGetTransactionStatusRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   bytes transaction_hash = 2;
+// }
+
+// message WalletGetTransactionStatusResponse {
+//   oneof result {
+//     WalletTransactionStatus status = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// message WalletTransactionStatus {
+//   bytes transaction_hash = 1;
+//   string status = 2; // "pending", "confirmed", "failed"
+//   optional uint64 block_height = 3;
+//   optional uint64 confirmations = 4;
+//   optional uint64 fee_paid = 5;
+// }
+
+// ===================================================================
+// Mining Operations (Type-Safe Domain-Specific)
+// ===================================================================
+
+// Get mining header for miners
+// message MiningGetHeaderRequest {
+//   int32 pid = 1;        // process ID for tracking
+// }
+
+// message MiningGetHeaderResponse {
+//   oneof result {
+//     MiningHeaderData header = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// message MiningHeaderData {
+//   bytes commitment = 1;   // mining commitment
+//   uint64 target = 2;      // difficulty target
+//   optional uint64 height = 3;  // block height
+//   optional bytes parent_hash = 4;  // parent block hash
+// }
+
+// // Submit mining solution
+// message MiningSubmitSolutionRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   bytes header_hash = 2;  // hash of header being mined
+//   uint64 nonce = 3;       // found nonce
+//   bytes proof = 4;        // mining proof
+// }
+
+// message MiningSubmitSolutionResponse {
+//   oneof result {
+//     bool accepted = 1;    // true if solution was accepted
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// // ===================================================================
+// // Block Operations (Type-Safe Domain-Specific)
+// // ===================================================================
+
+// // Get block by ID
+// message BlockGetByIdRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   string block_id = 2;  // block ID in base58 format
+// }
+
+// message BlockGetByIdResponse {
+//   oneof result {
+//     BlockData block = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// message BlockData {
+//   string block_id = 1;    // block ID in base58
+//   uint64 height = 2;      // block height
+//   bytes header = 3;       // block header data
+//   repeated bytes transactions = 4;  // transaction data
+//   optional bytes parent_hash = 5;   // parent block hash
+//   optional uint64 timestamp = 6;    // block timestamp
+// }
+
+// // Get heaviest block
+// message BlockGetHeaviestRequest {
+//   int32 pid = 1;        // process ID for tracking
+// }
+
+// message BlockGetHeaviestResponse {
+//   oneof result {
+//     BlockData block = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// ===================================================================
+// System Operations
+// ===================================================================
+
+// message SystemHealthCheckRequest {
+//   int32 pid = 1;        // process ID for tracking
+//   optional bool detailed = 2;  // include subsystem details
+// }
+
+// message SystemHealthCheckResponse {
+//   oneof result {
+//     SystemHealthData health = 1;
+//     ErrorStatus error = 2;
+//   }
+// }
+
+// message SystemHealthData {
+//   bool healthy = 1;
+//   string message = 2;
+//   map<string, string> subsystems = 3;  // subsystem -> status
+//   optional uint64 uptime_seconds = 4;
+//   optional uint64 event_count = 5;
+// }

@@ -55,7 +55,7 @@ const REQUEST_HIGH_RESET: Duration = Duration::from_secs(60);
 const ELDERS_DEBOUNCE_RESET: Duration = Duration::from_secs(60);
 
 // Cache clear interval of seen_tx cache handled in libp2p driver
-const SEEN_TX_CLEAR_INTERVAL: u64 = 1;
+const SEEN_TX_CLEAR_INTERVAL: u64 = 30;
 
 // ALL PROTOCOLS MUST HAVE UNIQUE VERSIONS
 const REQ_RES_PROTOCOL_VERSION: &str = "/nockchain-1-req-res";

@@ -40,12 +40,6 @@ pub const GENESIS_HEIGHT: u64 = 897767;
 pub struct NockchainCli {
     #[command(flatten)]
     pub nockapp_cli: nockapp::kernel::boot::Cli,
-    #[arg(
-        long,
-        help = "npc socket path",
-        default_value = ".socket/nockchain_npc.sock"
-    )]
-    pub npc_socket: String,
     #[arg(long, help = "Mine in-kernel", default_value = "false")]
     pub mine: bool,
     #[arg(

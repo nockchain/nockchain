@@ -73,8 +73,6 @@ pub struct NockApp<J = NockJammer> {
     save_interval: Interval,
     /// Mutex to ensure only one save at a time
     pub(crate) save_mutex: Arc<Mutex<Saver<J>>>,
-    /// Shutdown oneshot sender
-    pub npc_socket_path: Option<PathBuf>,
     metrics: Arc<NockAppMetrics>,
     /// Signals handled by the work loop
     signals: Signals,
@@ -199,7 +197,6 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
             save_interval,
             save_mutex,
             // cancel_token,
-            npc_socket_path: None,
             metrics,
             signals,
         })
@@ -421,25 +418,6 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                 }
             };
         }
-    }
-
-    #[instrument(skip(socket))]
-    fn cleanup_socket_(socket: &Option<PathBuf>) {
-        // Clean up npc socket file if it exists
-        if let Some(socket) = socket {
-            if socket.exists() {
-                if let Err(e) = std::fs::remove_file(socket) {
-                    error!("Failed to remove npc socket file before exit: {}", e);
-                }
-            }
-        }
-    }
-
-    #[instrument(skip(self))]
-    #[allow(dead_code)]
-    fn cleanup_socket(&self) {
-        // Clean up npc socket file if it exists
-        Self::cleanup_socket_(&self.npc_socket_path);
     }
 
     async fn work(&mut self) -> Result<NockAppRun, NockAppError> {
@@ -705,7 +683,6 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         // self.tasks.wait().await;
         // recv from the watch channel until we reach the exit event_num, wrapped up in a future
         // that will send the shutdown result when we're done.
-        let socket_path = self.npc_socket_path.clone();
         // TODO: Break this out as a separate select! handler with no spawn
         self.tasks.spawn(async move {
             debug!("Waiting for save event_num {}", exit_event_num);
@@ -714,7 +691,6 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                 error!("Error waiting for snapshot: {e}");
                 panic!("Error waiting for snapshot: {e}");
             };
-            Self::cleanup_socket_(&socket_path);
             debug!("Save event_num reached, finishing with code {}", code);
             let shutdown_result = if code == EXIT_OK {
                 Ok(())

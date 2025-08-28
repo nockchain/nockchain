@@ -396,6 +396,8 @@
     ::
     =/  alpha  (~(snag bop weights) (mul 2 idx))
     =/  beta   (~(snag bop weights) (add 1 (mul 2 idx)))
+    ::~&  alpha+alpha
+    ::~&  beta+beta
     ::
     ::  adjust degree up to fri-deg-bound.
     ::  if fri-deg-bound is D-1 then we construct:

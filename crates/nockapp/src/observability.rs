@@ -1,4 +1,4 @@
-pub fn init_tracing() -> Result<impl tracing::Subscriber, opentelemetry::trace::TraceError> {
+pub fn init_tracing() -> Result<impl tracing::Subscriber, opentelemetry_sdk::trace::TraceError> {
     use opentelemetry::trace::TracerProvider;
     use opentelemetry_otlp::WithExportConfig;
     use opentelemetry_sdk::trace::Sampler;
@@ -17,17 +17,25 @@ pub fn init_tracing() -> Result<impl tracing::Subscriber, opentelemetry::trace::
     let environment = std::env::var("DD_ENV").unwrap_or("development".to_owned());
 
     // Resource attributes that Datadog requires
-    let resource = opentelemetry_sdk::Resource::new(vec![
-        opentelemetry::KeyValue::new("service.name", service_name.clone()),
-        opentelemetry::KeyValue::new("service.version", service_version),
-        opentelemetry::KeyValue::new("deployment.environment", environment),
-    ]);
+    let resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_attribute(opentelemetry::KeyValue::new(
+            "service.name",
+            service_name.clone(),
+        ))
+        .with_attribute(opentelemetry::KeyValue::new(
+            "service.version", service_version,
+        ))
+        .with_attribute(opentelemetry::KeyValue::new(
+            "deployment.environment", environment,
+        ))
+        .build();
 
     // Create OTLP exporter configured for Datadog
     let otlp_exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic() // use gRPC
+        .with_tonic()
         .with_endpoint(endpoint)
         .with_timeout(std::time::Duration::from_secs(30))
+        .with_protocol(opentelemetry_otlp::Protocol::Grpc)
         .build()
         .unwrap_or_else(|_| {
             panic!(
@@ -44,8 +52,8 @@ pub fn init_tracing() -> Result<impl tracing::Subscriber, opentelemetry::trace::
         .and_then(|v| v.parse::<f64>().ok())
         .unwrap_or(1.0);
 
-    let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-        .with_batch_exporter(otlp_exporter, opentelemetry_sdk::runtime::Tokio)
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(otlp_exporter)
         .with_resource(resource)
         // Add the probability sampler here
         .with_sampler(Sampler::TraceIdRatioBased(sampling_ratio))

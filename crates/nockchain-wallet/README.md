@@ -42,14 +42,14 @@ Can be used for:
 
 ### Connecting to Nockchain
 
-The wallet needs to connect to a running nockchain instance to perform operations like checking balances, broadcasting transactions, etc.
+The wallet connects to the NockApp gRPC server exposed by a running nockchain instance to perform operations like checking balances, broadcasting transactions, etc.
 
 ```bash
-# Connect to nockchain using a Unix domain socket
-nockchain-wallet --nockchain-socket ./nockchain.sock <command>
+# Connect to nockchain using gRPC
+nockchain-wallet --grpc-address http://localhost:5555 <command>
 ```
 
-Note: Make sure nockchain is running and the socket path matches your nockchain configuration.
+Note: Make sure nockchain is running and the grpc address matches your nockchain configuration.
 
 
 

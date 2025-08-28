@@ -32,20 +32,20 @@ workspace = true
 workspace = true
 
 [dependencies.num-traits]
+default-features = false
 optional = true
 workspace = true
-default-features = false
 
 [dependencies.rand]
+default-features = false
 optional = true
 workspace = true
-default-features = false
 
 [dependencies.serde]
-optional = true
-workspace = true
 default-features = false
 features = ["derive"]
+optional = true
+workspace = true
 
 [dev-dependencies.criterion]
 workspace = true
@@ -61,14 +61,6 @@ version = "1.0.130"
 bench = false
 test = false
 doctest = false
-
-# [[test]]
-# name = "random"
-# required-features = ["rand"]
-
-# [[test]]
-# name = "serde"
-# required-features = ["serde"]
 
 [[bench]]
 name = "benchmarks"

@@ -9,13 +9,11 @@ missing_safety_doc = "allow"
 
 # Please keep these alphabetized
 [dependencies]
-# Internal dependencies
 ibig.workspace = true
 murmur3.workspace = true
 nockvm_crypto = { workspace = true }
 nockvm_macros.workspace = true
 
-# Crates.io dependencies
 bitvec = { workspace = true }
 either = { workspace = true }
 intmap = { workspace = true }
@@ -30,8 +28,8 @@ signal-hook = { workspace = true }
 slotmap = { workspace = true }
 static_assertions = { workspace = true }
 thiserror = { workspace = true }
-tracing-core.workspace = true
 tracing.workspace = true
+tracing-core.workspace = true
 
 [dev-dependencies]
 criterion = { workspace = true }

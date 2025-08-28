@@ -49,8 +49,10 @@ impl From<WalletError> for NockAppError {
         match err {
             WalletError::NockApp(e) => e,
             WalletError::Io(e) => NockAppError::IoError(e),
-            WalletError::Parse(_) => NockAppError::OtherError,
-            WalletError::Command(_) => NockAppError::OtherError,
+            WalletError::Parse(_) => NockAppError::OtherError(String::from("Wallet Parse error")),
+            WalletError::Command(_) => {
+                NockAppError::OtherError(String::from("Wallet Command error"))
+            }
         }
     }
 }

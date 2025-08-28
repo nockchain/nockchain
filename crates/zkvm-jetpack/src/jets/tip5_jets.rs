@@ -128,7 +128,7 @@ pub fn hash_varlen_jet(context: &mut Context, subject: Noun) -> Result<Noun, Jet
     Ok(vec_to_hoon_list(stack, &digest))
 }
 
-fn hash_varlen(input_vec: &mut Vec<Belt>) -> [u64; 5] {
+pub fn hash_varlen(input_vec: &mut Vec<Belt>) -> [u64; 5] {
     let mut sponge = create_init_sponge_variable();
 
     // assert that input is made of base field elements
