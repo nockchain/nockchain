@@ -387,12 +387,6 @@
     (validate:page-msg:t msg.pag)
   ?.  check-msg-valid
     [%.n %msg-not-valid]
-  =/  check-soft-page=?
-    ?~  softed-pag=((soft page:t) pag)
-      %.n
-    %.y
-  ?.  check-soft-page
-    [%.n %page-not-soft]
   ::
   [%.y ~]
 ::

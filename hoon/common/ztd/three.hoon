@@ -1818,7 +1818,6 @@
         ==
       ::
       ++  batch-verify
-        ~/  %batch-verify
         |=  batch=(list [pk=a-pt:curve m=noun-digest:tip5 =chal =sig])
         ^-  ?
         (levy batch verify)

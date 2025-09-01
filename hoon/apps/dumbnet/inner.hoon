@@ -726,12 +726,6 @@
         ~>  %slog.[1 log-message]
         :_  k
         [(liar-effect wir %tx-id-invalid)]~
-      ?~  softed-tx=((soft raw-tx:t) raw)
-        ::  note that we should never actually see this case, since we're
-        ::  already softing the cause:dk at the poke entrypoint.
-        ~>  %slog.[1 'heard-tx: Transaction structure is invalid!']
-        :_  k
-        [(liar-effect wir %tx-not-soft)]~
       ::
       ::  check if raw-tx is part of a pending block
       ::

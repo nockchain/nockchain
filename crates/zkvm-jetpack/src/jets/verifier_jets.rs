@@ -2,7 +2,7 @@ use nockvm::interpreter::Context;
 use nockvm::jets::util::slot;
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D};
+use nockvm::noun::{Atom, Cell, IndirectAtom, Noun};
 use nockvm_macros::tas;
 use tracing::debug;
 
@@ -10,9 +10,70 @@ use crate::form::math::fext::*;
 use crate::form::poly::Poly;
 use crate::form::{bpow, brek, BPolySlice, Belt, Element, FPolySlice, Felt, MegaTyp, PolySlice};
 use crate::hand::handle::new_handle_mut_felt;
-use crate::hand::structs::{HoonList, HoonMap, HoonMapIter};
+use crate::hand::structs::{HoonList, HoonMapIter};
+use crate::jets::proof_gen_jets::{MPUltra, ProofMap};
 use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::NounExt;
+use crate::noun::noun_ext::{AtomExt, NounExt};
+pub struct IndexFeltMap(pub ProofMap<usize, Felt>);
+pub struct IndexBeltMap(pub ProofMap<usize, Belt>);
+
+impl TryFrom<Noun> for IndexFeltMap {
+    type Error = JetErr;
+
+    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
+        let hoon_map = HoonMapIter::from(hoon_map);
+        let mut map = ProofMap::<usize, Felt>::new();
+
+        for term_noun in hoon_map.into_iter() {
+            let (k, v): (usize, Felt) = {
+                let term_cell = term_noun.as_cell().unwrap_or_else(|err| {
+                    panic!(
+                        "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                        file!(),
+                        line!(),
+                        option_env!("GIT_SHA")
+                    )
+                });
+                (
+                    term_cell.head().as_atom()?.as_u64()? as usize,
+                    *term_cell.tail().as_atom()?.as_felt()?,
+                )
+            };
+
+            map.insert(k, v);
+        }
+        Ok(IndexFeltMap(map))
+    }
+}
+
+impl TryFrom<Noun> for IndexBeltMap {
+    type Error = JetErr;
+
+    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
+        let hoon_map = HoonMapIter::from(hoon_map);
+        let mut map = ProofMap::<usize, Belt>::new();
+
+        for term_noun in hoon_map.into_iter() {
+            let (k, v): (usize, Belt) = {
+                let term_cell = term_noun.as_cell().unwrap_or_else(|err| {
+                    panic!(
+                        "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                        file!(),
+                        line!(),
+                        option_env!("GIT_SHA")
+                    )
+                });
+                (
+                    term_cell.head().as_atom()?.as_u64()? as usize,
+                    term_cell.tail().as_atom()?.as_belt()?,
+                )
+            };
+
+            map.insert(k, v);
+        }
+        Ok(IndexBeltMap(map))
+    }
+}
 
 pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
@@ -249,14 +310,27 @@ pub fn mpeval_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
     let sam = slot(subject, 6)?;
     let stack = &mut context.stack;
     let [field, mp, args, chal_map, dyns, com_map] = sam.uncell()?;
+    let chals = BPolySlice::try_from(chal_map)?.0;
 
     let Ok(dyns) = BPolySlice::try_from(dyns) else {
         return jet_err();
     };
 
     let ret = match field.as_direct()?.data() {
-        tas!(b"ext") => mpeval::<Felt>(stack, mp, args, chal_map, dyns, com_map)?.to_noun(stack),
-        tas!(b"base") => mpeval::<Belt>(stack, mp, args, chal_map, dyns, com_map)?.to_noun(stack),
+        tas!(b"ext") => {
+            let Ok(com_map) = IndexFeltMap::try_from(com_map) else {
+                return jet_err();
+            };
+            let args = FPolySlice::try_from(args)?.0;
+            mpeval::<Felt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
+        }
+        tas!(b"base") => {
+            let Ok(com_map) = IndexBeltMap::try_from(com_map) else {
+                return jet_err();
+            };
+            let args = BPolySlice::try_from(args)?.0;
+            mpeval::<Belt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
+        }
         _ => return jet_err(),
     };
 
@@ -264,16 +338,17 @@ pub fn mpeval_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
 }
 
 fn mpeval<F: Fops>(
-    stack: &mut NockStack,
     mp: Noun,
-    args: Noun,
-    chals: Noun,
-    dyns: BPolySlice,
-    com_map: Noun,
+    args: &[F],
+    chals: &[Belt],
+    dyns: &[Belt],
+    com_map: Option<&ProofMap<usize, F>>,
+    //com_map: Noun,
 ) -> Result<F, JetErr>
 where
     for<'a> PolySlice<'a, F>: TryFrom<Noun>,
 {
+    /*
     let Ok(args) = PolySlice::try_from(args) else {
         return jet_err();
     };
@@ -281,8 +356,9 @@ where
     let Ok(chals) = BPolySlice::try_from(chals) else {
         return jet_err();
     };
+    */
 
-    let com_map = HoonMap::try_from(com_map).ok();
+    //let com_map = HoonMap::try_from(com_map).ok();
 
     // ?:  =(~ mp)
     if mp.is_atom() {
@@ -332,7 +408,7 @@ where
                         //   %+  pow-op
                         //     (~(snag aop-door args) idx)
                         //   exp
-                        args.0[idx].pow(exp)
+                        args[idx].pow(exp)
                     }
                     // ::
                     //     %rnd
@@ -340,7 +416,7 @@ where
                         //   %+  pow-op
                         //     (lift-op (~(got by chal-map) idx))
                         //   exp
-                        let v = chals.0[idx];
+                        let v = chals[idx];
                         F::lift(v).pow(exp)
                     }
                     // ::
@@ -349,7 +425,7 @@ where
                         //   %+  pow-op
                         //     (lift-op (~(snag bop dyns) idx))
                         //   exp
-                        F::lift(dyns.0[idx]).pow(exp)
+                        F::lift(dyns[idx]).pow(exp)
                     }
                     // ::
                     //     %con
@@ -364,11 +440,17 @@ where
                         //     (~(got by com-map) idx)
                         //   exp
                         let v = com_map
-                            .as_ref()
-                            .unwrap()
-                            .get(stack, D(idx as _))
-                            .expect("Index not in com-map");
-                        F::from_noun(v).unwrap().pow(exp)
+                            .expect("Composition dependencies are empty")
+                            .get(&{ idx })
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "Panicked at {}:{} (git sha: {:?})",
+                                    file!(),
+                                    line!(),
+                                    option_env!("GIT_SHA")
+                                )
+                            });
+                        v.pow(exp)
                     }
                 }
                 // ==
@@ -378,4 +460,33 @@ where
 
         Ok(acc + (coeff * res))
     })
+}
+
+pub fn mpeval_ultra_felt(
+    mp: &MPUltra,
+    args: &[Felt],
+    chals: &[Belt],
+    dyns: &[Belt],
+) -> Result<Vec<Felt>, JetErr> {
+    match mp {
+        MPUltra::Mega(mp_mega) => {
+            let mut vec: Vec<Felt> = Vec::new();
+            let eval = mpeval::<Felt>(*mp_mega, args, chals, dyns, None)?;
+            vec.push(eval);
+            Ok(vec)
+        }
+        MPUltra::Comp(mp_comp) => {
+            let mut deps = ProofMap::new();
+            for (i, dep) in mp_comp.dep.iter().enumerate() {
+                let eval = mpeval::<Felt>(*dep, args, chals, dyns, None)?;
+                deps.insert(i, eval);
+            }
+
+            mp_comp
+                .com
+                .iter()
+                .map(|com| mpeval::<Felt>(*com, args, chals, dyns, Some(&deps)))
+                .collect()
+        }
+    }
 }
