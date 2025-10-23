@@ -43,6 +43,9 @@ pub const A_GEN: CheetahPoint = CheetahPoint {
 pub enum CheetahError {
     #[error("base58 decode error: {0}")]
     Base58(#[from] bs58::decode::Error),
+    
+    #[error("used zpub import key instead of address")]
+    ZPubUsed,
 
     #[error("invalid base58 string length, got {0}")]
     InvalidLength(usize),
@@ -79,6 +82,9 @@ impl CheetahPoint {
     pub fn from_base58(b58: &str) -> Result<Self, CheetahError> {
         let v = bs58::decode(b58).into_vec()?;
         if v.len() != Self::BYTES {
+            if b58.starts_with("zpub") {
+                return Err(CheetahError::ZPubUsed);
+            }
             return Err(CheetahError::InvalidLength(v.len()));
         }
 
