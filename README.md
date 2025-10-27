@@ -120,6 +120,20 @@ bash ./scripts/run_nockchain_miner.sh
 
 For launch, make sure you run in a fresh working directory that does not include a .data.nockchain file from testing.
 
+### For Linux
+
+Linux users **must** manually set their memory overcommit status:
+
+```
+# Enable always-overcommit:
+echo 'vm.overcommit_memory=1' | sudo tee /etc/sysctl.d/99-overcommit.conf
+
+# Reload kernel parameters:
+sudo sysctl --system
+# or:
+sudo sysctl -p /etc/sysctl.d/99-overcommit.conf
+```
+
 ## FAQ
 
 ### Can I use same pubkey if running multiple miners?
