@@ -13,10 +13,10 @@
         get-note=$-(nname:transact nnote:transact)
     ==
 |^
-^-  spends:v1:transact
+^-  [spends:v1:transact hash:transact]
 =/  notes=(list nnote:transact)  (turn names get-note)
 ::  TODO: unify functions across versions. There's too much repetition
-=/  =spends:v1:transact
+=/  [=spends:v1:transact =hash:transact]
   ?:  =(orders ~)
     ~|("Cannot create a transaction with empty order" !!)
   ?:  (lien orders |=([recipient=hash:transact gift=coins:transact] (lte gift 0)))
@@ -34,7 +34,7 @@
       %+  sort  notes
       |=  [a=nnote:v0:transact b=nnote:v0:transact]
       (gth assets.a assets.b)
-    (create-spends-0 notes)
+    [(create-spends-0 notes) u.refund-pkh]
   ::  If all notes are v1
   ?:  (levy notes |=(=nnote:transact ?=(@ -.nnote)))
     =/  notes=(list nnote-1:v1:transact)
@@ -46,7 +46,8 @@
       %+  sort  notes
       |=  [a=nnote-1:v1:transact b=nnote-1:v1:transact]
       (gth assets.a assets.b)
-    (create-spends-1 notes)
+    =/  pkh=hash:transact  (hash:schnorr-pubkey:transact pubkey)
+    [(create-spends-1 notes) pkh]
   ::
   ::  I don't want to do this, but the fact that we're constrained to a single master seckey
   ::  means no mixing versions in single spends.
@@ -55,7 +56,7 @@
 =+  min-fee=(calculate-min-fee:spends:transact spends)
 ?:  (lth fee min-fee)
   ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
-spends
+[spends hash]
 ::
 ++  create-spends-0
   |=  notes=(list nnote:v0:transact)
@@ -114,25 +115,23 @@ spends
   =/  coinbase-lock=spend-condition:transact  ~[simple-pkh tim-lp:coinbase:transact]
   =/  input-lock=(reason:transact lock:transact)
     ::  if there is no lock noun, default to coinbase lock
-    ?~  lok-noun=(~(get z-by:zo u.nd) %lock)
+    ?~  parent-lock=(pull-lock:locks:utils [u.nd name.note (some pkh)])
       [%.y coinbase-lock]
-    ?~  parent-lock=((soft lock-data:wt) u.lok-noun)
-      ~>  %slog.[0 'error: lock-data malformed in note!']  !!
     ::  more than one spend condition
-    ?@  -.lock.u.parent-lock
+    ?@  -.u.parent-lock
       [%.n 'lock has multiple spend conditions, we are not supporting this at the moment']
-    ?:  (gth (lent lock.u.parent-lock) 1)
+    ?:  (gth (lent u.parent-lock) 1)
       [%.n 'lock is a single spend-condition with more than one predicate']
     ::
     ::  Grab a single condition off of the lock,
     ::  check that it is a pkh condition that it is spendable
-    =/  lp=lock-primitive:v1:transact  (snag 0 `spend-condition:transact`lock.u.parent-lock)
+    =/  lp=lock-primitive:v1:transact  (snag 0 `spend-condition:transact`u.parent-lock)
     ?.  ?=(%pkh -.lp)  [%.n 'lock is not a pkh lock']
     ?.  ?&  =(1 m.lp)
             (~(has z-in:zo h.lp) pkh)
         ==
       [%.n 'lock has a spend-condition for more than on predicate']
-    [%.y lock.u.parent-lock]
+    [%.y u.parent-lock]
   ?:  ?=(%.n -.input-lock)
     ~>  %slog.[0 "Error processing note {(trip (name:v1:display:utils name.note))}"]  !!
   :: fan-out gifts + fee for this v1 note (reuse shared gates)
@@ -223,14 +222,11 @@ spends
       ==
   =/  output-lock=lock:transact
     [%pkh [m=1 (z-silt:zo ~[recipient.spec])]]~
-  =/  =note-data:v1:transact
-    %-  ~(put z-by:zo *note-data:v1:transact)
-    [%lock ^-(lock-data:wt [%0 output-lock])]
   :_  (add gifts.acc gift.spec)
   :_  seeds.acc
   :*  output-source=~
       lock-root=(hash:lock:transact output-lock)
-      note-data
+      note-data=~
       gift=gift.spec
       parent-hash=(hash:nnote:transact note)
   ==

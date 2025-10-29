@@ -31,6 +31,34 @@
 ++  make-markdown-effect
   |=  nodes=markdown:m
   [%markdown (crip (en:md nodes))]
+++  locks
+  |%
+  ++  pull-lock-inner
+    |=  [nd=note-data:v1:transact nn=nname:transact pkh=(unit hash:transact)]
+    ^-  (unit lock:transact)
+    ?~  lock-noun=(~(get z-by:zo nd) %lock)
+      ?~  pkh
+        ~
+      :: There's no stored lock. Attempt rebuilding from name
+      =/  simple-lock  [(simple-pkh-lp:v1:first-name:transact u.pkh)]~
+      ?:  =((first:nname:transact (hash:lock:transact simple-lock)) -.nn)
+        (some simple-lock)
+      =/  coinbase-lock  (coinbase-pkh-sc:v1:first-name:transact u.pkh)
+      ?:  =((first:nname:transact (hash:lock:transact coinbase-lock)) -.nn)
+        (some coinbase-lock)
+      ~
+    ?~  soft-lock=((soft lock-data:wt) u.lock-noun)
+      ~>  %slog.[2 'lock data in note is malformed']  ~
+    (some lock.u.soft-lock)
+  ++  pull-lock
+    |=  [nd=note-data:v1:transact nn=nname:transact pkh=(unit hash:transact)]
+    ^-  (unit lock:transact)
+    ?~  lok=(pull-lock-inner [nd nn pkh])
+      ~
+    ?:  =((first:nname:transact (hash:lock:transact u.lok)) -.nn)
+      lok
+    ~>  %slog.[2 'first-name does not match the pulled lock']  ~
+  --
 ::
 ::  +timelock-helpers: helper functions for creating timelock-intents
 ::
@@ -456,15 +484,13 @@
         :((cury cat 3) '[' first ' ' last ']')
       ::
       ++  lock-data
-        |=  data=note-data:v1:transact
+        |=  [data=note-data:v1:transact =nname:transact pkh=(unit hash:transact)]
         ^-  @t
-        ?~  lock-data=(~(get z-by:zo data) %lock)
+        ?~  lock-data=(pull-lock:locks data nname pkh)
           ~>  %slog.[2 'lock data in note is missing']  'N/A'
-        ?~  soft-lock=((soft lock-data:wt) u.lock-data)
-          ~>  %slog.[2 'lock data in note is malformed']  'N/A'
-        ?:  ?=(@ -.lock.u.soft-lock)
+        ?:  ?=(@ -.u.lock-data)
           ~>  %slog.[2 'expected m-of-n pkh lock']  'N/A'
-        =+  lp=`lock-primitive:transact`(head lock.u.soft-lock)
+        =+  lp=`lock-primitive:transact`(head u.lock-data)
         ?.  ?=(%pkh -.lp)
           ~>  %slog.[2 'expected m-of-n pkh lock']  'N/A'
         =/  signers=tape
@@ -484,7 +510,7 @@
         """
       ::
       ++  note
-        |=  [note=nnote:transact output=?]
+        |=  [note=nnote:transact pkh=(unit hash:transact) output=?]
         ^-  @t
         ?>  ?=(@ -.note)
         ;:  (cury cat 3)
@@ -504,11 +530,12 @@
              'N/A (output note has not been submitted yet)'
            (format-ui:common origin-page.note)
            '\0a- Lock Information: '
-           (lock-data note-data.note)
+           (lock-data note-data.note name.note pkh)
 
          ==
       ++  transaction
-        |=  [name=@t outs=outputs:v1:transact fees=@]
+        :: TODO: pass a (z-map:zo output:v1:transact hash:transact) to lookup PKHs of all outputs
+        |=  [name=@t outs=outputs:v1:transact primary-pkh=(unit hash:transact) fees=@]
         ^-  @t
         ::=/  input-notes=tape
         ::  =/  notes=(list nnote:transact)
@@ -532,7 +559,7 @@
             ~(tap z-in:zo outs)
           |=  out=output:v1:transact
           =/  out-note=nnote:v1:transact  note.out
-          "\0a{(trip (note out-note %.y))}"
+          "\0a{(trip (note out-note primary-pkh %.y))}"
         %-  crip
         """
         ## Transaction Information

@@ -641,7 +641,7 @@
     =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
     =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
     =/  markdown-text=@t
-      (transaction:v1:display:utils transaction-name outputs.tx fees)
+      (transaction:v1:display:utils transaction-name outputs.tx ~ fees)
     :_  state
     :~
       [%markdown markdown-text]
@@ -793,7 +793,7 @@
       |=  note=nnote:transact
       ?^  -.note
         (trip (note:v0:display:utils note))
-      (trip (note:v1:display:utils note %.n))
+      (trip (note:v1:display:utils note ~ %.n))
       ::
       [%exit 0]
     ==
@@ -801,11 +801,12 @@
   ++  do-list-notes-by-address
     |=  =cause:wt
     ?>  ?=(%list-notes-by-address -.cause)
-    =/  matching-notes=(list [name=nname:transact note=nnote:transact])
+    =/  [matching-notes=(list [name=nname:transact note=nnote:transact]) pkh=(unit hash:transact)]
       ::  v0 address case
       ?:  (gte (met 3 address.cause) 132)
         =/  target-pubkey=schnorr-pubkey:transact
           (from-b58:schnorr-pubkey:transact address.cause)
+        =/  notes
         %+  skim  ~(tap z-by:zo notes.balance.state)
         |=  [name=nname:transact note=nnote:transact]
         ::  skip v1 notes
@@ -813,9 +814,11 @@
         ::  this should cover all cases because we only
         ::  sync coinbase notes or non-coinbase notes with m=1 locks.
         (~(has z-in:zo pubkeys.sig.note) target-pubkey)
+        [notes ~]
       ::  v1 address case
       =/  target-pkh=hash:transact
         (from-b58:hash:transact address.cause)
+      =/  notes
       %+  skim  ~(tap z-by:zo notes.balance.state)
       |=  [name=nname:transact note=nnote:transact]
       ::  skip v0 notes
@@ -827,6 +830,7 @@
       ?|  =(simple-fn -.name.note)
           =(coinbase-fn -.name.note)
       ==
+      [notes (some target-pkh)]
     :_  state
     :~  :-  %markdown
         %-  crip
@@ -842,7 +846,7 @@
         %-  trip
         ?^  -.nnote
           (note:v0:display:utils nnote)
-        (note:v1:display:utils nnote output=%.n)
+        (note:v1:display:utils nnote pkh output=%.n)
         ::
         [%exit 0]
     ==
@@ -936,9 +940,9 @@
     =/  pubkey=schnorr-pubkey:transact
       %-  from-sk:schnorr-pubkey:transact
       (to-atom:schnorr-seckey:transact sign-key)
-    =/  =spends:transact
+    =/  [=spends:transact primary-pkh=hash:transact]
       (tx-builder names orders.cause fee.cause sign-key pubkey refund-pkh.cause get-note:v)
-    (save-transaction spends)
+    (save-transaction spends primary-pkh)
     ::
     ++  parse-names
       |=  raw-names=(list [first=@t last=@t])
@@ -948,7 +952,7 @@
       (from-b58:nname:transact [first last])
     ::
     ++  save-transaction
-      |=  =spends:transact
+      |=  [=spends:transact primary-pkh=hash:transact]
       ^-  [(list effect:wt) state:wt]
       ~&  "Validating transaction before saving"
       ::  we fallback to the hash of the spends as the transaction name
@@ -965,7 +969,7 @@
       =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
       =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
       =/  fees=@  (roll-fees:spends:v1:transact spends)
-      =/  markdown-text=@t  (transaction:v1:display:utils transaction-name outputs.tx fees)
+      =/  markdown-text=@t  (transaction:v1:display:utils transaction-name outputs.tx (some primary-pkh) fees)
       ?-    -.valid
           %.y
         ::  jam inputs and save as transaction

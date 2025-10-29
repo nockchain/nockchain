@@ -187,13 +187,18 @@
       =/  lock-hash  (hash:lock pkh-lock)
       (first:nname (hash:lock pkh-lock))
     ::
+    ++  coinbase-pkh-sc
+      |=  key-hash=hash
+      ^-  spend-condition
+      :~  ^-(lock-primitive (simple-pkh-lp key-hash))
+          ^-(lock-primitive tim-lp:^coinbase)
+      ==
+    ::
     ++  coinbase
       |=  key-hash=hash
       ^-  form
       =/  coinbase-lock=spend-condition
-        :~  ^-(lock-primitive (simple-pkh-lp key-hash))
-            ^-(lock-primitive tim-lp:^coinbase)
-        ==
+        (coinbase-pkh-sc key-hash)
       (first:nname (hash:lock coinbase-lock))
     --::+v1
   --::+first-name
