@@ -379,7 +379,7 @@
         [%list-notes-by-address-csv address=@t]             ::  base58-encoded address, CSV format
         $:  %create-tx
             names=(list [first=@t last=@t])               ::  base58-encoded name hashes
-            =order
+            orders=(list order)
             fee=coins:transact                            ::  fee
             sign-key=(unit [child-index=@ud hardened=?])  ::  child key information to sign from
             refund-pkh=(unit hash:transact)               ::  refund pkh for spends over v0 notes

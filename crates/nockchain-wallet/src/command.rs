@@ -342,8 +342,8 @@ pub enum Commands {
         #[arg(long)]
         names: String,
         /// Transaction output, formatted as "<recipient>:<amount>"
-        #[arg(long)]
-        recipient: String,
+        #[arg(long = "recipient")]
+        recipients: Vec<String>,
         /// Transaction fee
         #[arg(long)]
         fee: u64,

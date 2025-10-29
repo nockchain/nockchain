@@ -247,14 +247,14 @@ async fn main() -> Result<(), NockAppError> {
         Commands::ListNotesByAddressCsv { address } => Wallet::list_notes_by_address_csv(address),
         Commands::CreateTx {
             names,
-            recipient,
+            recipients,
             fee,
             refund_pkh,
             index,
             hardened,
         } => Wallet::create_tx(
             names.clone(),
-            recipient.clone(),
+            recipients.clone(),
             *fee,
             refund_pkh.clone(),
             *index,
@@ -804,7 +804,7 @@ impl Wallet {
     /// defaults back to the note owner, so `--refund-pkh` can be omitted.
     fn create_tx(
         names: String,
-        recipients: String,
+        recipients: Vec<String>,
         fee: u64,
         refund_pkh: Option<String>,
         index: Option<u64>,
@@ -813,7 +813,11 @@ impl Wallet {
         let mut slab = NounSlab::new();
 
         let names_vec = Self::parse_note_names(&names)?;
-        let (pkh, amount) = Self::parse_single_output(&recipients)?;
+        let recipients = recipients
+            .iter()
+            .map(|v| &**v)
+            .map(Self::parse_single_output)
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Convert names to list of pairs
         let names_noun = names_vec
@@ -839,15 +843,21 @@ impl Wallet {
             None => D(0),
         };
 
-        let recipient_pkh = Hash::from_base58(&pkh)
-            .map_err(|err| {
-                NockAppError::from(CrownError::Unknown(format!(
-                    "Invalid output pubkey hash '{}': {}",
-                    pkh, err
-                )))
-            })?
-            .to_noun(&mut slab);
-        let order_noun = T(&mut slab, &[recipient_pkh, D(amount)]);
+        let mut order_nouns = vec![];
+        for (pkh, amount) in recipients {
+            let recipient_pkh = Hash::from_base58(&pkh)
+                .map_err(|err| {
+                    NockAppError::from(CrownError::Unknown(format!(
+                        "Invalid output pubkey hash '{}': {}",
+                        pkh, err
+                    )))
+                })?
+                .to_noun(&mut slab);
+            let order_noun = T(&mut slab, &[recipient_pkh, D(amount)]);
+            order_nouns.push(order_noun);
+        }
+        order_nouns.push(D(0));
+        let order_noun = T(&mut slab, &order_nouns);
 
         let refund_noun = if let Some(refund) = refund_pkh {
             let refund_hash = Hash::from_base58(&refund).map_err(|err| {

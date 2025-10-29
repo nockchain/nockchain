@@ -937,7 +937,7 @@
       %-  from-sk:schnorr-pubkey:transact
       (to-atom:schnorr-seckey:transact sign-key)
     =/  =spends:transact
-      (tx-builder names order.cause fee.cause sign-key pubkey refund-pkh.cause get-note:v)
+      (tx-builder names orders.cause fee.cause sign-key pubkey refund-pkh.cause get-note:v)
     (save-transaction spends)
     ::
     ++  parse-names
