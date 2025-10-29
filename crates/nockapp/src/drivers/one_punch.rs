@@ -1,6 +1,4 @@
 use either::Either::{self, Left, Right};
-use nockvm::noun::D;
-use nockvm_macros::tas;
 use tracing::{debug, error};
 
 use crate::nockapp::driver::*;
@@ -119,46 +117,6 @@ async fn handle_effect(
     if root.is_atom() {
         error!("No effects were returned from one-shot poke.");
         return Err(NockAppError::PokeFailed);
-    }
-
-    let effect_cell = root.as_cell().unwrap_or_else(|err| {
-        panic!(
-            "Panicked with {err:?} at {}:{} (git sha: {:?})",
-            file!(),
-            line!(),
-            option_env!("GIT_SHA")
-        )
-    });
-    if unsafe { effect_cell.head().raw_equals(&D(tas!(b"npc"))) } {
-        let npc_effect = effect_cell.tail();
-        if let Ok(npc_effect_cell) = npc_effect.as_cell() {
-            match npc_effect_cell
-                .head()
-                .as_atom()
-                .unwrap_or_else(|err| {
-                    panic!(
-                        "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                        file!(),
-                        line!(),
-                        option_env!("GIT_SHA")
-                    )
-                })
-                .as_u64()
-                .expect("Failed to convert to u64")
-            {
-                tas!(b"gossip") => {
-                    // Ignore gossip data
-                    debug!("Ignoring gossip data");
-                }
-                tas!(b"request") => {
-                    debug!("Processing request effect");
-                    let request_data = npc_effect_cell.tail();
-                    debug!("Request data: {:?}", request_data);
-                    // handle.poke(create_response(request_data)).await?;
-                }
-                _ => debug!("Received unknown npc effect"),
-            }
-        }
     }
     Ok(())
 }

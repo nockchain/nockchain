@@ -17,9 +17,9 @@ use nockvm_macros::tas;
 use rand::Rng;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
-use zkvm_jetpack::form::PRIME;
-use zkvm_jetpack::hand::structs::HoonList;
-use zkvm_jetpack::noun::noun_ext::NounExt as OtherNounExt;
+use zkvm_jetpack::form::belt::PRIME;
+use zkvm_jetpack::form::noun_ext::NounMathExt;
+use zkvm_jetpack::form::structs::HoonList;
 
 pub enum MiningWire {
     Mined,
@@ -79,6 +79,29 @@ impl FromStr for MiningKeyConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MiningPkhConfig {
+    pub share: u64,
+    pub pkh: String,
+}
+
+impl FromStr for MiningPkhConfig {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Expected format: "share,pkh"
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() != 2 {
+            return Err("Invalid share,pkh format".to_string());
+        }
+
+        let share = parts[0].parse::<u64>().map_err(|e| e.to_string())?;
+        let pkh = parts[1].parse::<String>().map_err(|e| e.to_string())?;
+
+        Ok(MiningPkhConfig { share, pkh })
+    }
+}
+
 struct MiningData {
     pub block_header: NounSlab,
     pub version: NounSlab,
@@ -88,39 +111,37 @@ struct MiningData {
 
 pub fn create_mining_driver(
     mining_config: Option<Vec<MiningKeyConfig>>,
+    mining_pkh_config: Option<Vec<MiningPkhConfig>>,
     mine: bool,
     num_threads: u64,
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> IODriverFn {
     Box::new(move |handle| {
         Box::pin(async move {
-            let Some(configs) = mining_config else {
+            // set up empty config for v0 keys (TODO remove when taking out pubkey infra)
+            let configs = Vec::<MiningKeyConfig>::new();
+
+            let Some(pkh_configs) = mining_pkh_config else {
                 enable_mining(&handle, false).await?;
 
                 if let Some(tx) = init_complete_tx {
                     tx.send(()).map_err(|_| {
-                        warn!("Could not send driver initialization for mining driver.");
-                        NockAppError::OtherError
+                        NockAppError::OtherError(String::from(
+                            "Could not send driver initialization for mining driver.",
+                        ))
                     })?;
                 }
 
                 return Ok(());
             };
-            if configs.len() == 1
-                && configs[0].share == 1
-                && configs[0].m == 1
-                && configs[0].keys.len() == 1
-            {
-                set_mining_key(&handle, configs[0].keys[0].clone()).await?;
-            } else {
-                set_mining_key_advanced(&handle, configs).await?;
-            }
+            set_mining_key_advanced(&handle, configs, pkh_configs).await?;
             enable_mining(&handle, mine).await?;
 
             if let Some(tx) = init_complete_tx {
                 tx.send(()).map_err(|_| {
-                    warn!("Could not send driver initialization for mining driver.");
-                    NockAppError::OtherError
+                    NockAppError::OtherError(String::from(
+                        "Could not send driver initialization for mining driver.",
+                    ))
                 })?;
             }
 
@@ -178,8 +199,7 @@ pub fn create_mining_driver(
                                         },
                                         Some(mine_result) => {
                                             let Ok([res, tail]) = mine_result.uncell() else {
-                                                error!("Expected two elements in mining result");
-                                                return Err(NockAppError::OtherError);
+                                                return Err(NockAppError::OtherError(String::from("Expected two elements in mining result")));
                                             };
                                             if unsafe { res.raw_equals(&D(0)) } {
                                                 // success
@@ -187,7 +207,7 @@ pub fn create_mining_driver(
                                                 info!("Found block! thread={id}");
                                                 let Ok([hash, poke]) = tail.uncell() else {
                                                     error!("Expected two elements in tail");
-                                                    return Err(NockAppError::OtherError);
+                                                    return Err(NockAppError::OtherError(String::from("Expected two elements in tail")));
                                                 };
                                                 let mut poke_slab = NounSlab::new();
                                                 poke_slab.copy_into(poke);
@@ -303,36 +323,16 @@ fn create_poke(mining_data: &MiningData, nonce: &NounSlab) -> NounSlab {
     slab
 }
 
-#[instrument(skip(handle, pubkey))]
-async fn set_mining_key(
-    handle: &NockAppHandle,
-    pubkey: String,
-) -> Result<PokeResult, NockAppError> {
-    let mut set_mining_key_slab = NounSlab::new();
-    let set_mining_key = Atom::from_value(&mut set_mining_key_slab, "set-mining-key")
-        .expect("Failed to create set-mining-key atom");
-    let pubkey_cord =
-        Atom::from_value(&mut set_mining_key_slab, pubkey).expect("Failed to create pubkey atom");
-    let set_mining_key_poke = T(
-        &mut set_mining_key_slab,
-        &[D(tas!(b"command")), set_mining_key.as_noun(), pubkey_cord.as_noun()],
-    );
-    set_mining_key_slab.set_root(set_mining_key_poke);
-
-    handle
-        .poke(MiningWire::SetPubKey.to_wire(), set_mining_key_slab)
-        .await
-}
-
 async fn set_mining_key_advanced(
     handle: &NockAppHandle,
     configs: Vec<MiningKeyConfig>,
+    pkh_configs: Vec<MiningPkhConfig>,
 ) -> Result<PokeResult, NockAppError> {
     let mut set_mining_key_slab = NounSlab::new();
     let set_mining_key_adv = Atom::from_value(&mut set_mining_key_slab, "set-mining-key-advanced")
         .expect("Failed to create set-mining-key-advanced atom");
 
-    // Create the list of configs
+    // Create the list of v0 (pubkey) configs (TODO remove when taking out pubkey infra)
     let mut configs_list = D(0);
     for config in configs {
         // Create the list of keys
@@ -352,9 +352,27 @@ async fn set_mining_key_advanced(
         configs_list = T(&mut set_mining_key_slab, &[config_tuple, configs_list]);
     }
 
+    // Create the list of v1 (pubkey hash) configs
+    let mut pkh_configs_list = D(0);
+    for config in pkh_configs {
+        let pkh_noun = Atom::from_value(&mut set_mining_key_slab, config.pkh)
+            .expect("Failed to create key atom")
+            .as_noun();
+
+        // Create the config tuple [share pkh]
+        let config_tuple = T(&mut set_mining_key_slab, &[D(config.share), pkh_noun]);
+
+        pkh_configs_list = T(&mut set_mining_key_slab, &[config_tuple, pkh_configs_list]);
+    }
+
     let set_mining_key_poke = T(
         &mut set_mining_key_slab,
-        &[D(tas!(b"command")), set_mining_key_adv.as_noun(), configs_list],
+        &[
+            D(tas!(b"command")),
+            set_mining_key_adv.as_noun(),
+            configs_list,
+            pkh_configs_list,
+        ],
     );
     set_mining_key_slab.set_root(set_mining_key_poke);
 

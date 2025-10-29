@@ -22,7 +22,7 @@
       %1  nock-common-v0-v1
       %2  nock-common-v2
     ==
-  =/  pre=preprocess-data 
+  =/  pre=preprocess-data
     ?-  version.proof
       %0  p.pre-0-1.prep.stark-config
       %1  p.pre-0-1.prep.stark-config
@@ -120,9 +120,14 @@
     ::  challenges: beta, z
     =^  chals-rd2=(list belt)  rng  (belts:rng num-chals-rd2:chal)
     =/  challenges  (weld chals-rd1 chals-rd2)
+    ::  augment challenges with derived challenges
+    =/  augmented-chals=bpoly
+      (augment-challenges:chal challenges s f)
     =/  chal-map=(map term belt)
       (bp-zip-chals-list:chal chal-names-basic:chal challenges)
     ::
+    :: TODO: read these out of the augmented-chals bpoly and dont waste
+    :: time building the map
     =/  [alf=pelt j=pelt k=pelt l=pelt m=pelt z=pelt]
       :*  (got-pelt chal-map %alf)
           (got-pelt chal-map %j)
@@ -161,18 +166,17 @@
       !!
     ::
     ::
-    =/  [terminal-map=(map term belt) dyn-map=(map @ bpoly)]
-      =-  [term-map dyn-map]
+    =/  [terminal-map=(map term belt) dyn-list=(list bpoly)]
+      =-  [term-map (flop dyn-list)]
       %+  roll  all-terminal-names:nock-common
-      |=  [terms=(list term) table-num=@ idx=@ term-map=(map term belt) dyn-map=(map @ bpoly)]
+      |=  [terms=(list term) table-num=@ idx=@ term-map=(map term belt) dyn-list=(list bpoly)]
       :^    +(table-num)
           (add idx (lent terms))
         %-  ~(gas by term-map)
         %+  iturn  terms
         |=  [i=@ t=term]
         [t (~(snag bop terminals) (add idx i))]
-      %-  ~(put by dyn-map)
-      [table-num (~(swag bop terminals) idx (lent terms))]
+      [(~(swag bop terminals) idx (lent terms)) dyn-list]
     ::
     ::
     ?.  (linking-checks subj-data form-data prod-data j k l m z terminal-map)
@@ -195,7 +199,7 @@
     =^  extra-comp-weights=bpoly  rng
       =^  belts  rng  (belts:rng (mul 2 total-extra-constraints))
       [(init-bpoly belts) rng]
-    =/  extra-composition-chals=(map @ bpoly)
+    =/  extra-composition-weights=(map @ bpoly)
       %-  ~(gas by *(map @ bpoly))
       =-  -<
       %+  roll  (range num-tables)
@@ -237,14 +241,11 @@
           heights
           constraint-map.pre
           count-map.pre
-          dyn-map
-          extra-composition-chals
-          challenges
-          max-degree:clc
+          dyn-list
+          extra-composition-weights
+          augmented-chals
           extra-comp-eval-point
           table-full-widths
-          s
-          f
           %.y
       ==
     ::
@@ -279,7 +280,7 @@
     =^  comp-weights=bpoly  rng
       =^  belts  rng  (belts:rng (mul 2 total-constraints))
       [(init-bpoly belts) rng]
-    =/  composition-chals=(map @ bpoly)
+    =/  composition-weights=(map @ bpoly)
       %-  ~(gas by *(map @ bpoly))
       =-  -<
       %+  roll  (range num-tables)
@@ -346,14 +347,11 @@
           heights
           constraint-map.pre
           count-map.pre
-          dyn-map
-          composition-chals
-          challenges
-          max-degree:clc
+          dyn-list
+          composition-weights
+          augmented-chals
           deep-challenge
           table-full-widths
-          s
-          f
           %.n
       ==
     ::
@@ -606,30 +604,40 @@
     ==
   ::
   ++  eval-composition-poly
+    ~/  %eval-composition-poly-wrapper
+    |=  $:  trace-evaluations=fpoly
+            heights=(list @)
+            constraint-map=(map @ constraints)
+            constraint-counts=(map @ constraint-counts)
+            dyn-list=(list bpoly)
+            weight-map=(map @ bpoly)
+            challenges=bpoly
+            deep-challenge=felt
+            table-full-widths=(list @)
+            is-extra=?
+        ==
+    ^-  felt
+    (do-eval-composition-poly +<)
+  ::
+  :: Jets dont show up in the trace so we wrap it in a hoon function that will
+  :: show up
+  ++  do-eval-composition-poly
     ~/  %eval-composition-poly
     |=  $:  trace-evaluations=fpoly
             heights=(list @)
             constraint-map=(map @ constraints)
             constraint-counts=(map @ constraint-counts)
-            dyn-map=(map @ bpoly)
-            composition-chals=(map @ bpoly)
-            challenges=(list belt)
-            max-degree=@
+            dyn-list=(list bpoly)
+            weight-map=(map @ bpoly)
+            challenges=bpoly
             deep-challenge=felt
             table-full-widths=(list @)
-            s=*
-            f=*
             is-extra=?
         ==
     ^-  felt
-    =/  max-height=@
-      %-  bex  %-  xeb  %-  dec
-      (roll heights max)
     =/  dp  (degree-processing heights constraint-map is-extra)
     =/  boundary-zerofier=felt
       (finv (fsub deep-challenge (lift 1)))
-    =/  chal-map=(map @ belt)
-      (make-challenge-map:chal challenges s f)
     |^
     =-  -<
     %^  zip-roll  (range (lent heights))  heights
@@ -638,11 +646,10 @@
     =/  omicron  (lift (ordered-root height))
     =/  last-row  (fsub deep-challenge (finv omicron))
     =/  terminal-zerofier  (finv last-row)                                   ::  f(X)=1/(X-g^{-1})
-    =/  chals=bpoly  (~(got by composition-chals) i)
-    =/  height=@  (snag i heights)
+    =/  weights=bpoly  (~(got by weight-map) i)
     =/  constraints  (~(got by constraint-w-deg-map.dp) i)
     =/  counts  (~(got by constraint-counts) i)
-    =/  dyns  (~(got by dyn-map) i)
+    =/  dyns  (snag i dyn-list)
     =/  row-zerofier  (finv (fsub (fpow deep-challenge height) (lift 1)))    ::  f(X)=1/(X^N-1)
     =/  transition-zerofier                                                  ::  f(X)=(X-g^{-1})/(X^N-1)
       (fmul last-row row-zerofier)
@@ -656,19 +663,17 @@
       %-  evaluate-constraints
       :*  boundary.constraints
           dyns
-          chal-map
           current-evals
-          (~(scag bop chals) (mul 2 boundary.counts))
+          (~(scag bop weights) (mul 2 boundary.counts))
       ==
     ::
       %+  fmul  row-zerofier
       %-  evaluate-constraints
       :*  row.constraints
           dyns
-          chal-map
           current-evals
         ::
-          %+  ~(swag bop chals)
+          %+  ~(swag bop weights)
             (mul 2 boundary.counts)
           (mul 2 row.counts)
         ::
@@ -678,10 +683,9 @@
       %-  evaluate-constraints
       :*  transition.constraints
           dyns
-          chal-map
           current-evals
         ::
-          %+  ~(swag bop chals)
+          %+  ~(swag bop weights)
             (mul 2 (add boundary.counts row.counts))
           (mul 2 transition.counts)
         ::
@@ -691,10 +695,9 @@
       %-  evaluate-constraints
       :*  terminal.constraints
           dyns
-          chal-map
           current-evals
         ::
-          %+  ~(swag bop chals)
+          %+  ~(swag bop weights)
             (mul 2 :(add boundary.counts row.counts transition.counts))
           (mul 2 terminal.counts)
         ::
@@ -705,10 +708,9 @@
       %-  evaluate-constraints
       :*  extra.constraints
           dyns
-          chal-map
           current-evals
         ::
-          %-  ~(slag bop chals)
+          %-  ~(slag bop weights)
           %+  mul  2
           ;:  add
             boundary.counts
@@ -723,9 +725,8 @@
     ++  evaluate-constraints
       |=  $:  constraints=(list [(list @) mp-ultra])
               dyns=bpoly
-              chal-map=(map @ belt)
               evals=fpoly
-              chals=bpoly
+              weights=bpoly
           ==
       ^-  felt
       =-  acc
@@ -734,7 +735,7 @@
       ::
       ::  evaled is a list because the %comp constraint type
       ::  can contain multiple mp-mega constraints.
-      =/  evaled=(list felt)  (mpeval-ultra %ext c evals chal-map dyns)
+      =/  evaled=(list felt)  (mpeval-ultra %ext c evals challenges dyns)
       %+  roll
         (zip-up degs evaled)
       |=  [[deg=@ eval=felt] [idx=_idx acc=_acc]]
@@ -745,11 +746,9 @@
       ::  and beta weights for a given constraint are situated next to each other
       ::  in the array.
       ::
-      =/  alpha  (~(snag bop chals) (mul 2 idx))
-      =/  beta   (~(snag bop chals) (add 1 (mul 2 idx)))
+      =/  alpha  (~(snag bop weights) (mul 2 idx))
+      =/  beta   (~(snag bop weights) (add 1 (mul 2 idx)))
       ::
-      ::  TODO: I've removed the degree adjustments but left it commented out. Once we figrue
-      ::  out exactly how to do it we can put it back in.
       %+  fadd  acc
       %+  fmul  eval
       %+  fadd  (lift beta)
@@ -758,6 +757,24 @@
     --  ::+eval-composition-poly
   ::
   ++  evaluate-deep
+    ~/  %evaluate-deep-wrapper
+    |=  $:  trace-evaluations=fpoly
+            comp-evaluations=fpoly
+            trace-elems=(list belt)
+            comp-elems=(list belt)
+            num-comp-pieces=@
+            weights=fpoly
+            heights=(list @)
+            full-widths=(list @)
+            omega=felt
+            index=@
+            deep-challenge=felt
+            new-comp-eval=felt
+        ==
+    ^-  felt
+    (do-evaluate-deep +<)
+  ::
+  ++  do-evaluate-deep
     ~/  %evaluate-deep
     |=  $:  trace-evaluations=fpoly
             comp-evaluations=fpoly

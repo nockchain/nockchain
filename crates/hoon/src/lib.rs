@@ -2,7 +2,7 @@
 use std::fs::File;
 
 use clap::{arg, command, Parser};
-use hoonc::save_generator;
+use hoonc::kick_and_save_generator;
 use nockapp::utils::NOCK_STACK_SIZE;
 use nockvm::interpreter::Context;
 use nockvm::jets::cold::Cold;
@@ -72,7 +72,7 @@ pub async fn run(cli: HoonCli, hot_state: &[HotEntry]) -> Result<(), Box<dyn std
     };
     let mut context: Context = init_context(Some(hot_state), trace_info);
 
-    save_generator(&mut context, &cli.nock_script, cli.dep_dir, cli.out_dir).await
+    kick_and_save_generator(&mut context, &cli.nock_script, cli.dep_dir, cli.out_dir).await
 }
 
 /// Initializes a nockvm interpreter Context with default settings

@@ -1,0 +1,22 @@
+// nockchain/monitoring/v1/primitives.proto
+
+syntax = "proto3";
+
+package nockchain.monitoring.v1;
+
+import "nockchain/common/v1/primitives.proto";
+
+service MonitoringService {
+  rpc Ping(PingRequest) returns (PingResponse);
+}
+
+message PingRequest {
+  int32 zero = 1;
+}
+
+message PingResponse {
+  oneof result {
+    int32 succ = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}

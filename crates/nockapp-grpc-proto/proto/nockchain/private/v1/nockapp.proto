@@ -1,0 +1,37 @@
+// nockchain/private/v1/nockapp.proto
+
+syntax = "proto3";
+
+package nockchain.private.v1;
+
+import "nockchain/common/v1/primitives.proto";
+
+service NockAppService {
+  rpc Peek(PeekRequest) returns (PeekResponse);
+  rpc Poke(PokeRequest) returns (PokeResponse);
+}
+
+message PeekRequest {
+  int32 pid = 1; // process ID for tracking
+  bytes path = 2; // JAM-encoded nock peek path
+}
+
+message PeekResponse {
+  oneof result {
+    bytes data = 1; // JAM-encoded nock data (success case)
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message PokeRequest {
+  int32 pid = 1; // process ID for tracking
+  common.v1.Wire wire = 2; // wire routing information
+  bytes payload = 3; // JAM-encoded nock data
+}
+
+message PokeResponse {
+  oneof result {
+    bool acknowledged = 1; // true if successful
+    common.v1.ErrorStatus error = 2;
+  }
+}

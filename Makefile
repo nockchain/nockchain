@@ -8,7 +8,7 @@ include .env
 export RUST_BACKTRACE ?= full
 export RUST_LOG ?= info,nockchain=info,nockchain_libp2p_io=info,libp2p=info,libp2p_quic=info
 export MINIMAL_LOG_FORMAT ?= true
-export MINING_PUBKEY ?= 2qwq9dQRZfpFx8BDicghpMRnYGKZsZGxxhh9m362pzpM9aeo276pR1yHZPS41y3CW3vPKxeYM8p8fzZS8GXmDGzmNNCnVNekjrSYogqfEFMqwhHh5iCjaKPaDTwhupWqiXj6
+export MINING_PKH ?= 9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV
 export
 
 .PHONY: build
@@ -33,6 +33,16 @@ test:
 fmt:
 	cargo fmt
 
+.PHONY: build-hoonc
+build-hoonc: nuke-hoonc-data ## Build hoonc from this repo
+	$(call show_env_vars)
+	cargo build --release --locked --bin hoonc
+
+.PHONY: build-hoonc-tracing
+build-hoonc-tracing: nuke-hoonc-data ## Build hoonc with tracing
+	$(call show_env_vars)
+	cargo build --release --bin hoonc --features tracing-tracy
+
 .PHONY: install-hoonc
 install-hoonc: nuke-hoonc-data ## Install hoonc from this repo
 	$(call show_env_vars)
@@ -42,6 +52,11 @@ install-hoonc: nuke-hoonc-data ## Install hoonc from this repo
 update-hoonc:
 	$(call show_env_vars)
 	cargo install --locked --path crates/hoonc --bin hoonc
+
+.PHONY: build-nockchain
+build-nockchain: assets/dumb.jam assets/miner.jam
+	$(call show_env_vars)
+	cargo build --release --bin nockchain --features tracing-tracy
 
 .PHONY: install-nockchain
 install-nockchain: assets/dumb.jam assets/miner.jam

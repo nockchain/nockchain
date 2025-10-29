@@ -47,6 +47,7 @@ impl num_traits::Pow<usize> for &UBig {
     type Output = UBig;
 
     #[inline]
+    // FIXME: This use of ibig's pow will leak memory.
     fn pow(self, rhs: usize) -> UBig {
         self.pow(rhs)
     }
@@ -56,6 +57,7 @@ impl num_traits::Pow<usize> for &IBig {
     type Output = IBig;
 
     #[inline]
+    // FIXME: This use of ibig's pow will leak memory.
     fn pow(self, rhs: usize) -> IBig {
         self.pow(rhs)
     }

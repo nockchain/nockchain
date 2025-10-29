@@ -1,14 +1,42 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use ibig::UBig;
 pub mod wallet;
 
 #[allow(unused_imports)]
 use nockapp::utils::make_tas;
-use nockapp::AtomExt;
+use nockapp::{AtomExt, NockAppError};
+use nockvm::jets::util::BAIL_FAIL;
+use nockvm::jets::JetErr;
 #[allow(unused_imports)]
 use nockvm::noun::{Atom, FullDebugCell, Noun, NounAllocator, Slots, D, T};
 use nockvm::noun::{NO, YES};
 pub use noun_serde_derive::{NounDecode, NounEncode};
+use tracing::trace;
+
+pub mod prelude {
+    pub use super::{NounDecode, NounEncode, NounSerdeDecodeExt, NounSerdeEncodeExt};
+}
+
+// Trait extensions for Noun
+pub trait NounSerdeDecodeExt {
+    fn decode<T: NounDecode>(&self) -> Result<T, NounDecodeError>;
+}
+
+impl NounSerdeDecodeExt for nockvm::noun::Noun {
+    fn decode<T: NounDecode>(&self) -> Result<T, NounDecodeError> {
+        T::from_noun(self)
+    }
+}
+
+pub trait NounSerdeEncodeExt: NounEncode {
+    fn encode<A: NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
+        self.to_noun(allocator)
+    }
+}
+
+impl<T: NounEncode + ?Sized> NounSerdeEncodeExt for T {}
+
 /// Trait for types that can be encoded as a Noun
 pub trait NounEncode {
     /// Encode this value as a Noun
@@ -18,8 +46,7 @@ pub trait NounEncode {
 /// Trait for types that can be decoded from a Noun
 pub trait NounDecode: Sized {
     /// Try to decode this value from a Noun
-    fn from_noun<A: NounAllocator>(allocator: &mut A, noun: &Noun)
-        -> Result<Self, NounDecodeError>;
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError>;
 }
 
 /// Error that can occur during Noun decoding
@@ -56,6 +83,18 @@ pub enum NounDecodeError {
     ConstraintsDecodeError,
 }
 
+impl From<NounDecodeError> for JetErr {
+    fn from(_err: NounDecodeError) -> Self {
+        BAIL_FAIL
+    }
+}
+
+impl From<NounDecodeError> for NockAppError {
+    fn from(err: NounDecodeError) -> Self {
+        NockAppError::NounDecodeError(Box::new(err))
+    }
+}
+
 impl From<nockvm::noun::Error> for NounDecodeError {
     fn from(err: nockvm::noun::Error) -> Self {
         NounDecodeError::Custom(err.to_string())
@@ -70,7 +109,7 @@ impl NounEncode for Noun {
 }
 
 impl NounDecode for Noun {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         Ok(*noun)
     }
 }
@@ -84,7 +123,7 @@ impl NounEncode for u64 {
 }
 
 impl NounDecode for u64 {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         match noun.as_atom() {
             Ok(atom) => atom
                 .as_u64()
@@ -101,8 +140,14 @@ impl NounEncode for u32 {
     }
 }
 
+impl NounEncode for UBig {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        Atom::from_ubig(allocator, self).as_noun()
+    }
+}
+
 impl NounDecode for u32 {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         match noun.as_atom() {
             Ok(atom) => atom
                 .as_u64()
@@ -121,7 +166,7 @@ impl NounEncode for String {
 }
 
 impl NounDecode for String {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         match noun.as_atom() {
             Ok(atom) => atom
                 .into_string()
@@ -132,13 +177,10 @@ impl NounDecode for String {
 }
 
 impl<X: NounDecode, Y: NounDecode> NounDecode for (X, Y) {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let a = X::from_noun(allocator, &cell.slot(2)?)?;
-        let b = Y::from_noun(allocator, &cell.slot(3)?)?;
+        let a = X::from_noun(&cell.slot(2)?)?;
+        let b = Y::from_noun(&cell.slot(3)?)?;
         Ok((a, b))
     }
 }
@@ -153,14 +195,11 @@ impl<X: NounEncode, Y: NounEncode> NounEncode for (X, Y) {
 }
 
 impl<X: NounDecode, Y: NounDecode, Z: NounDecode> NounDecode for (X, Y, Z) {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let a = X::from_noun(allocator, &cell.slot(2)?)?;
-        let b = Y::from_noun(allocator, &cell.slot(6)?)?;
-        let c = Z::from_noun(allocator, &cell.slot(7)?)?;
+        let a = X::from_noun(&cell.slot(2)?)?;
+        let b = Y::from_noun(&cell.slot(6)?)?;
+        let c = Z::from_noun(&cell.slot(7)?)?;
         Ok((a, b, c))
     }
 }
@@ -177,15 +216,12 @@ impl<X: NounEncode, Y: NounEncode, Z: NounEncode> NounEncode for (X, Y, Z) {
 }
 
 impl<W: NounDecode, X: NounDecode, Y: NounDecode, Z: NounDecode> NounDecode for (W, X, Y, Z) {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let a = W::from_noun(allocator, &cell.slot(2)?)?;
-        let b = X::from_noun(allocator, &cell.slot(6)?)?;
-        let c = Y::from_noun(allocator, &cell.slot(14)?)?;
-        let d = Z::from_noun(allocator, &cell.slot(15)?)?;
+        let a = W::from_noun(&cell.slot(2)?)?;
+        let b = X::from_noun(&cell.slot(6)?)?;
+        let c = Y::from_noun(&cell.slot(14)?)?;
+        let d = Z::from_noun(&cell.slot(15)?)?;
         Ok((a, b, c, d))
     }
 }
@@ -206,16 +242,13 @@ impl<W: NounEncode, X: NounEncode, Y: NounEncode, Z: NounEncode> NounEncode for 
 impl<V: NounDecode, W: NounDecode, X: NounDecode, Y: NounDecode, Z: NounDecode> NounDecode
     for (V, W, X, Y, Z)
 {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let a = V::from_noun(allocator, &cell.slot(2)?)?;
-        let b = W::from_noun(allocator, &cell.slot(6)?)?;
-        let c = X::from_noun(allocator, &cell.slot(14)?)?;
-        let d = Y::from_noun(allocator, &cell.slot(30)?)?;
-        let e = Z::from_noun(allocator, &cell.slot(31)?)?;
+        let a = V::from_noun(&cell.slot(2)?)?;
+        let b = W::from_noun(&cell.slot(6)?)?;
+        let c = X::from_noun(&cell.slot(14)?)?;
+        let d = Y::from_noun(&cell.slot(30)?)?;
+        let e = Z::from_noun(&cell.slot(31)?)?;
         Ok((a, b, c, d, e))
     }
 }
@@ -240,17 +273,14 @@ impl<V: NounEncode, W: NounEncode, X: NounEncode, Y: NounEncode, Z: NounEncode> 
 impl<U: NounDecode, V: NounDecode, W: NounDecode, X: NounDecode, Y: NounDecode, Z: NounDecode>
     NounDecode for (U, V, W, X, Y, Z)
 {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let a = U::from_noun(allocator, &cell.slot(2)?)?;
-        let b = V::from_noun(allocator, &cell.slot(6)?)?;
-        let c = W::from_noun(allocator, &cell.slot(14)?)?;
-        let d = X::from_noun(allocator, &cell.slot(30)?)?;
-        let e = Y::from_noun(allocator, &cell.slot(62)?)?;
-        let f = Z::from_noun(allocator, &cell.slot(63)?)?;
+        let a = U::from_noun(&cell.slot(2)?)?;
+        let b = V::from_noun(&cell.slot(6)?)?;
+        let c = W::from_noun(&cell.slot(14)?)?;
+        let d = X::from_noun(&cell.slot(30)?)?;
+        let e = Y::from_noun(&cell.slot(62)?)?;
+        let f = Z::from_noun(&cell.slot(63)?)?;
         Ok((a, b, c, d, e, f))
     }
 }
@@ -285,28 +315,28 @@ impl NounEncode for bool {
 }
 
 impl NounDecode for bool {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
-        println!("Decoding bool from noun: {:?}", noun);
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        trace!("Decoding bool from noun: {:?}", noun);
         match noun.as_atom() {
             Ok(atom) => {
-                println!("Successfully decoded as atom: {:?}", atom);
+                trace!("Successfully decoded as atom: {:?}", atom);
                 match atom.as_u64() {
                     Ok(0) => {
-                        println!("Decoded as 0 -> true (%.y)");
+                        trace!("Decoded as 0 -> true (%.y)");
                         Ok(true)
                     }
                     Ok(1) => {
-                        println!("Decoded as 1 -> false (%.n)");
+                        trace!("Decoded as 1 -> false (%.n)");
                         Ok(false)
                     }
                     other => {
-                        println!("Invalid boolean value: {:?}", other);
+                        trace!("Invalid boolean value: {:?}", other);
                         Err(NounDecodeError::Custom("Invalid boolean value".into()))
                     }
                 }
             }
             Err(e) => {
-                println!("Failed to decode as atom: {:?}", e);
+                trace!("Failed to decode as atom: {:?}", e);
                 Err(NounDecodeError::ExpectedAtom)
             }
         }
@@ -325,17 +355,12 @@ impl<T: NounEncode> NounEncode for Option<T> {
 }
 
 impl<T: NounDecode> NounDecode for Option<T> {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
-        println!("Decoding Option with noun: {:?}", noun);
-
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         // First check if it's an atom 0 (None)
         if let Ok(atom) = noun.as_atom() {
             match atom.as_u64() {
                 Ok(0) => {
-                    println!("Found ~ (0), returning None");
+                    trace!("Found ~ (0), returning None");
                     return Ok(None);
                 }
                 _ => return Err(NounDecodeError::Custom("Invalid Option encoding".into())),
@@ -355,7 +380,7 @@ impl<T: NounDecode> NounDecode for Option<T> {
             ));
         }
 
-        let value = T::from_noun(allocator, &cell.tail())?;
+        let value = T::from_noun(&cell.tail())?;
         Ok(Some(value))
     }
 }
@@ -370,17 +395,14 @@ impl<T: NounEncode> NounEncode for Vec<T> {
 }
 
 impl<T: NounDecode> NounDecode for Vec<T> {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let mut result = Vec::new();
         let mut current = noun;
         #[allow(unused_assignments)]
         let mut current_tail = None;
 
         while let Ok(cell) = current.as_cell() {
-            let item = T::from_noun(allocator, &cell.head())?;
+            let item = T::from_noun(&cell.head())?;
             result.push(item);
             current_tail = Some(cell.tail());
             current = current_tail.as_ref().unwrap();
@@ -410,44 +432,9 @@ impl NounEncode for Vec<u8> {
 }
 
 impl NounDecode for Vec<u8> {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
-        let nums = Vec::<u64>::from_noun(allocator, noun)?;
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        let nums = Vec::<u64>::from_noun(noun)?;
         Ok(nums.into_iter().map(|x| x as u8).collect())
-    }
-}
-
-impl NounDecode for [u64; 5] {
-    fn from_noun<A: NounAllocator>(_: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
-        let mut ret: [u64; 5] = [0; 5];
-        let mut cur = *noun;
-        for i in 0..4 {
-            let cur_cell = cur.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-            ret[i] = cur_cell
-                .head()
-                .as_atom()
-                .map_err(|_| NounDecodeError::ExpectedAtom)?
-                .as_u64()?;
-            cur = cur_cell.tail();
-        }
-        ret[4] = cur
-            .as_atom()
-            .map_err(|_| NounDecodeError::ExpectedAtom)?
-            .as_u64()?;
-        Ok(ret)
-    }
-}
-
-impl NounEncode for [u64; 5] {
-    fn to_noun<A: NounAllocator>(&self, alloc: &mut A) -> Noun {
-        let mut res_cell = Atom::new(alloc, self[4]).as_noun();
-        for i in (0..=3).rev() {
-            let b = Atom::new(alloc, self[i]).as_noun();
-            res_cell = T(alloc, &[b, res_cell]);
-        }
-        res_cell
     }
 }
 
@@ -485,7 +472,7 @@ impl NounEncode for [u64; 5] {
 ///
 /// let mut stack = NockStack::new(8 << 10 << 10, 0);
 /// let encoded = map.to_noun(&mut stack);
-/// let decoded = HashMap::<String, u64>::from_noun(&mut stack, &encoded).unwrap();
+/// let decoded = HashMap::<String, u64>::from_noun(&encoded).unwrap();
 /// assert_eq!(map, decoded);
 /// ```
 impl<K: NounEncode, V: NounEncode> NounEncode for HashMap<K, V>
@@ -568,14 +555,11 @@ where
     K: std::hash::Hash + Eq + std::fmt::Debug,
     V: std::fmt::Debug,
 {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
-        println!("\nDecoding HashMap from noun: {:?}", noun);
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        trace!("\nDecoding HashMap from noun: {:?}", noun);
         // Handle empty tree case
         if let Ok(atom) = noun.as_atom() {
-            println!("Got atom: {:?}", atom);
+            trace!("Got atom: {:?}", atom);
             if atom.as_u64()? == 0 {
                 return Ok(HashMap::new());
             }
@@ -586,11 +570,9 @@ where
 
         // Helper function to recursively traverse the tree
         fn traverse_tree<
-            A: NounAllocator,
             K: NounDecode + std::hash::Hash + Eq + std::fmt::Debug,
             V: NounDecode + std::fmt::Debug,
         >(
-            allocator: &mut A,
             node: &Noun,
             map: &mut HashMap<K, V>,
         ) -> Result<(), NounDecodeError> {
@@ -606,21 +588,21 @@ where
 
             // Get the key-value pair from the node
             let pair = cell.head().as_cell().map_err(|e| {
-                println!("Failed to get node cell: {:?}", e);
+                trace!("Failed to get node cell: {:?}", e);
                 NounDecodeError::ExpectedCell
             })?;
 
-            println!(
+            trace!(
                 "Got node - key: {:?}, value: {:?}",
                 pair.head(),
                 pair.tail()
             );
-            println!("Key type: {:?}", std::any::type_name::<K>());
-            println!("Value type: {:?}", std::any::type_name::<V>());
+            trace!("Key type: {:?}", std::any::type_name::<K>());
+            trace!("Value type: {:?}", std::any::type_name::<V>());
 
-            let key = K::from_noun(allocator, &pair.head())?;
-            let value = V::from_noun(allocator, &pair.tail())?;
-            println!("Key: {:?}, Value: {:?}", key, value);
+            let key = K::from_noun(&pair.head())?;
+            let value = V::from_noun(&pair.tail())?;
+            trace!("Key: {:?}, Value: {:?}", key, value);
             map.insert(key, value);
 
             // Get left and right branches
@@ -629,13 +611,13 @@ where
             let right = &rest.tail();
 
             // Recursively process left and right branches
-            traverse_tree(allocator, left, map)?;
-            traverse_tree(allocator, right, map)?;
+            traverse_tree(left, map)?;
+            traverse_tree(right, map)?;
 
             Ok(())
         }
 
-        traverse_tree(allocator, noun, &mut map)?;
+        traverse_tree(noun, &mut map)?;
         Ok(map)
     }
 }
@@ -665,7 +647,7 @@ where
 ///
 /// let mut stack = NockStack::new(8 << 10 << 10, 0);
 /// let encoded = result.to_noun(&mut stack);
-/// let decoded = Result::<u64, String>::from_noun(&mut stack, &encoded).unwrap();
+/// let decoded = Result::<u64, String>::from_noun(&encoded).unwrap();
 /// assert_eq!(result, decoded);
 /// ```
 impl<T: NounEncode, E: NounEncode> NounEncode for Result<T, E> {
@@ -713,14 +695,11 @@ impl<T: NounEncode, E: NounEncode> NounEncode for Result<T, E> {
 /// 3. Decodes the tail into the appropriate type
 /// 4. Wraps in Ok/Err accordingly
 impl<T: NounDecode, E: NounDecode> NounDecode for Result<T, E> {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
-        println!("\nDecoding Result from noun: {:?}", noun);
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        trace!("\nDecoding Result from noun: {:?}", noun);
         let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        println!("Result cell head: {:?}", cell.head());
-        println!("Result cell tail: {:?}", cell.tail());
+        trace!("Result cell head: {:?}", cell.head());
+        trace!("Result cell tail: {:?}", cell.tail());
 
         let tag = cell
             .head()
@@ -729,18 +708,18 @@ impl<T: NounDecode, E: NounDecode> NounDecode for Result<T, E> {
             .into_string()
             .map_err(|_| NounDecodeError::InvalidTag)?;
 
-        println!("Result tag: {}", tag);
+        trace!("Result tag: {}", tag);
         match tag.as_str() {
             "ok" => {
-                println!("Decoding Ok variant");
-                Ok(Ok(T::from_noun(allocator, &cell.tail())?))
+                trace!("Decoding Ok variant");
+                Ok(Ok(T::from_noun(&cell.tail())?))
             }
             "err" => {
-                println!("Decoding Err variant");
-                Ok(Err(E::from_noun(allocator, &cell.tail())?))
+                trace!("Decoding Err variant");
+                Ok(Err(E::from_noun(&cell.tail())?))
             }
             _ => {
-                println!("Invalid Result tag: {}", tag);
+                trace!("Invalid Result tag: {}", tag);
                 Err(NounDecodeError::InvalidEnumVariant)
             }
         }
@@ -748,7 +727,7 @@ impl<T: NounDecode, E: NounDecode> NounDecode for Result<T, E> {
 }
 
 // Helper function for encoding/decoding bool
-pub fn encode_bool<A: NounAllocator>(_: &mut A, value: bool) -> Noun {
+pub fn encode_bool(value: bool) -> Noun {
     if value {
         YES
     } else {
@@ -756,28 +735,28 @@ pub fn encode_bool<A: NounAllocator>(_: &mut A, value: bool) -> Noun {
     }
 }
 
-pub fn decode_bool(_: &mut impl NounAllocator, noun: &Noun) -> Result<bool, NounDecodeError> {
-    println!("Decoding bool from noun: {:?}", noun);
+pub fn decode_bool(noun: &Noun) -> Result<bool, NounDecodeError> {
+    trace!("Decoding bool from noun: {:?}", noun);
     match noun.as_atom() {
         Ok(atom) => {
-            println!("Successfully decoded as atom: {:?}", atom);
+            trace!("Successfully decoded as atom: {:?}", atom);
             match atom.as_u64() {
                 Ok(0) => {
-                    println!("Decoded as 0 -> true (%.y)");
+                    trace!("Decoded as 0 -> true (%.y)");
                     Ok(true)
                 }
                 Ok(1) => {
-                    println!("Decoded as 1 -> false (%.n)");
+                    trace!("Decoded as 1 -> false (%.n)");
                     Ok(false)
                 }
                 other => {
-                    println!("Invalid boolean value: {:?}", other);
+                    trace!("Invalid boolean value: {:?}", other);
                     Err(NounDecodeError::Custom("Invalid boolean value".into()))
                 }
             }
         }
         Err(e) => {
-            println!("Failed to decode as atom: {:?}", e);
+            trace!("Failed to decode as atom: {:?}", e);
             Err(NounDecodeError::ExpectedAtom)
         }
     }
@@ -818,7 +797,7 @@ impl From<nockapp::CrownError> for NounDecodeError {
 ///
 /// let mut stack = NockStack::new(8 << 10 << 10, 0);
 /// let encoded = set.to_noun(&mut stack);
-/// let decoded = HashSet::<String>::from_noun(&mut stack, &encoded).unwrap();
+/// let decoded = HashSet::<String>::from_noun(&encoded).unwrap();
 /// assert_eq!(set, decoded);
 /// ```
 impl<T: NounEncode + Clone> NounEncode for HashSet<T>
@@ -877,10 +856,7 @@ impl<T: NounDecode> NounDecode for HashSet<T>
 where
     T: std::hash::Hash + Eq,
 {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         // Handle empty tree case
         if let Ok(atom) = noun.as_atom() {
             if atom.as_u64()? == 0 {
@@ -892,8 +868,7 @@ where
         let mut set = HashSet::new();
 
         // Helper function to recursively traverse the tree
-        fn traverse_tree<A: NounAllocator, T: NounDecode + std::hash::Hash + Eq>(
-            allocator: &mut A,
+        fn traverse_tree<T: NounDecode + std::hash::Hash + Eq>(
             node: &Noun,
             set: &mut HashSet<T>,
         ) -> Result<(), NounDecodeError> {
@@ -908,7 +883,7 @@ where
             let cell = node.as_cell()?;
 
             // Insert the node value
-            let value = T::from_noun(allocator, &cell.head())?;
+            let value = T::from_noun(&cell.head())?;
             set.insert(value);
 
             // Get left and right branches
@@ -917,13 +892,13 @@ where
             let right = &rest.tail();
 
             // Recursively process left and right branches
-            traverse_tree(allocator, left, set)?;
-            traverse_tree(allocator, right, set)?;
+            traverse_tree(left, set)?;
+            traverse_tree(right, set)?;
 
             Ok(())
         }
 
-        traverse_tree(allocator, noun, &mut set)?;
+        traverse_tree(noun, &mut set)?;
         Ok(set)
     }
 }
@@ -931,7 +906,7 @@ where
 /// Implements noun encoding for BTreeMap types to match Hoon's map structure.
 ///
 /// BTreeMap is encoded as a Hoon `$map`, which is a binary tree structure:
-/// ```
+/// ```text
 /// $@(~ [n=[key value] l=(tree [key value]) r=(tree [key value])])
 /// ```
 ///
@@ -955,7 +930,7 @@ where
 ///
 /// let mut stack = NockStack::new(8 << 10 << 10, 0);
 /// let encoded = map.to_noun(&mut stack);
-/// let decoded = BTreeMap::<u64, String>::from_noun(&mut stack, &encoded).unwrap();
+/// let decoded = BTreeMap::<u64, String>::from_noun(&encoded).unwrap();
 /// assert_eq!(map, decoded);
 /// ```
 impl<K: NounEncode + Ord, V: NounEncode> NounEncode for BTreeMap<K, V> {
@@ -1024,14 +999,10 @@ impl<K: NounEncode + Ord, V: NounEncode> NounEncode for BTreeMap<K, V> {
 /// 3. Recursively processes all subtrees
 /// 4. Atom 0 represents empty subtrees
 impl<K: NounDecode + Ord, V: NounDecode> NounDecode for BTreeMap<K, V> {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let mut map = BTreeMap::new();
 
-        fn traverse_tree<A: NounAllocator, K: NounDecode + Ord, V: NounDecode>(
-            allocator: &mut A,
+        fn traverse_tree<K: NounDecode + Ord, V: NounDecode>(
             node: &Noun,
             map: &mut BTreeMap<K, V>,
         ) -> Result<(), NounDecodeError> {
@@ -1047,8 +1018,8 @@ impl<K: NounDecode + Ord, V: NounDecode> NounDecode for BTreeMap<K, V> {
 
             // Get the [key value] pair from the node
             let pair = cell.head().as_cell()?;
-            let key = K::from_noun(allocator, &pair.head())?;
-            let value = V::from_noun(allocator, &pair.tail())?;
+            let key = K::from_noun(&pair.head())?;
+            let value = V::from_noun(&pair.tail())?;
             map.insert(key, value);
 
             // Get left and right subtrees
@@ -1057,13 +1028,13 @@ impl<K: NounDecode + Ord, V: NounDecode> NounDecode for BTreeMap<K, V> {
             let right = &rest.tail();
 
             // Recursively process left and right subtrees
-            traverse_tree(allocator, left, map)?;
-            traverse_tree(allocator, right, map)?;
+            traverse_tree(left, map)?;
+            traverse_tree(right, map)?;
 
             Ok(())
         }
 
-        traverse_tree(allocator, noun, &mut map)?;
+        traverse_tree(noun, &mut map)?;
         Ok(map)
     }
 }
@@ -1083,11 +1054,8 @@ impl NounEncode for usize {
 /// usize values are decoded from u64 atoms. On 32-bit systems, values larger
 /// than u32::MAX will cause a decode error.
 impl NounDecode for usize {
-    fn from_noun<A: NounAllocator>(
-        allocator: &mut A,
-        noun: &Noun,
-    ) -> Result<Self, NounDecodeError> {
-        let value = u64::from_noun(allocator, noun)?;
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        let value = u64::from_noun(noun)?;
 
         // Check if the value fits in usize for the current architecture
         if value > usize::MAX as u64 {
@@ -1098,6 +1066,218 @@ impl NounDecode for usize {
         }
 
         Ok(value as usize)
+    }
+}
+
+impl<T: NounDecode, const N: usize> NounDecode for [T; N] {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        let mut result = Vec::with_capacity(N);
+
+        if N > 0 {
+            let mut current = *noun;
+
+            // Process all elements except the last one
+            for _ in 0..N - 1 {
+                let cell = current
+                    .as_cell()
+                    .map_err(|_| NounDecodeError::ExpectedCell)?;
+                let head = cell.head();
+                let item = T::from_noun(&head)?;
+                result.push(item);
+                current = cell.tail();
+            }
+
+            // Process the last element
+            let last_item = T::from_noun(&current)?;
+            result.push(last_item);
+        }
+
+        // Convert Vec to array
+        result
+            .try_into()
+            .map_err(|_| NounDecodeError::Custom("Failed to convert Vec to array".into()))
+    }
+}
+
+impl<T: NounEncode, const N: usize> NounEncode for [T; N] {
+    fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
+        if N == 0 {
+            // Empty array is encoded as 0
+            return D(0);
+        }
+
+        // Start with the last element
+        let mut result = self[N - 1].to_noun(stack);
+
+        // Add remaining elements in reverse order
+        for i in (0..N - 1).rev() {
+            let e = self[i].to_noun(stack);
+            result = T(stack, &[e, result]);
+        }
+
+        result
+    }
+}
+
+#[cfg(test)]
+mod array_tests {
+    use nockvm::jets::util::test::init_context;
+
+    use super::*;
+
+    #[test]
+    fn test_empty_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let empty_array: [u64; 0] = [];
+
+        // Test encoding
+        let noun = empty_array.to_noun(stack);
+        assert!(noun.is_atom());
+        assert_eq!(noun.as_atom().unwrap().as_u64().unwrap(), 0);
+
+        // Test decoding
+        let decoded: [u64; 0] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded.len(), 0);
+    }
+
+    #[test]
+    fn test_single_element_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let array = [42u64];
+
+        // Test encoding
+        let noun = array.to_noun(stack);
+
+        // Encoding should produce just the single element as an atom
+        assert!(noun.is_atom());
+        assert_eq!(noun.as_atom().unwrap().as_u64().unwrap(), 42);
+
+        // Test decoding
+        let decoded: [u64; 1] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded, [42]);
+    }
+
+    #[test]
+    fn test_multi_element_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let array = [1u64, 2, 3, 4, 5];
+
+        // Test encoding
+        let noun = array.to_noun(stack);
+
+        // It should create a right-associative chain of cells
+        assert!(noun.is_cell());
+        let cell = noun.as_cell().unwrap();
+        assert_eq!(cell.head().as_atom().unwrap().as_u64().unwrap(), 1);
+
+        // Recursively check the structure
+        let tail1 = cell.tail();
+        assert!(tail1.is_cell());
+        let cell1 = tail1.as_cell().unwrap();
+        assert_eq!(cell1.head().as_atom().unwrap().as_u64().unwrap(), 2);
+
+        let tail2 = cell1.tail();
+        assert!(tail2.is_cell());
+        let cell2 = tail2.as_cell().unwrap();
+        assert_eq!(cell2.head().as_atom().unwrap().as_u64().unwrap(), 3);
+
+        let tail3 = cell2.tail();
+        assert!(tail3.is_cell());
+        let cell3 = tail3.as_cell().unwrap();
+        assert_eq!(cell3.head().as_atom().unwrap().as_u64().unwrap(), 4);
+
+        // Last element should be an atom, not a cell
+        let tail4 = cell3.tail();
+        assert!(tail4.is_atom());
+        assert_eq!(tail4.as_atom().unwrap().as_u64().unwrap(), 5);
+
+        // Test decoding
+        let decoded: [u64; 5] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded, [1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_string_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let array = ["hello".to_string(), "world".to_string()];
+
+        // Test encoding
+        let noun = array.to_noun(stack);
+
+        // Test decoding
+        let decoded: [String; 2] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded, ["hello".to_string(), "world".to_string()]);
+    }
+    #[test]
+    fn test_bool_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let array = [true, false, true];
+
+        // Test encoding
+        let noun = array.to_noun(stack);
+
+        // Test decoding
+        let decoded: [bool; 3] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded, [true, false, true]);
+    }
+    #[test]
+    fn test_nested_array() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+        let array = [[1u64, 2u64], [3u64, 4u64]];
+
+        // Test encoding
+        let noun = array.to_noun(stack);
+
+        // Test decoding
+        let decoded: [[u64; 2]; 2] = NounDecode::from_noun(&noun).unwrap();
+        assert_eq!(decoded, [[1, 2], [3, 4]]);
+    }
+
+    #[test]
+    fn test_decode_error() {
+        let mut context = init_context();
+        let stack = &mut context.stack;
+
+        // Create an atom (not a proper cell chain for array)
+        let noun = D(42);
+
+        // Try to decode as a multi-element array (should fail)
+        let result = <[u64; 3]>::from_noun(&noun);
+        assert!(result.is_err());
+
+        // Create a cell with wrong structure
+        let bad_noun = T(stack, &[D(1), D(2)]);
+
+        // Last element should be a cell for a 3-element array
+        let result = <[u64; 3]>::from_noun(&bad_noun);
+        assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod tip5_tests {
+    use super::*;
+
+    #[test]
+    fn test_tip5_encode_decode_array() {
+        let mut stack = nockvm::mem::NockStack::new(1024 * 1024, 0);
+        let noun = T(&mut stack, &[D(1), D(2), D(3), D(4), D(5)]);
+        let decoded = noun.decode::<[u64; 5]>().unwrap();
+        assert_eq!([1, 2, 3, 4, 5], decoded);
+    }
+
+    #[test]
+    fn test_tip5_encode_decode_tuple() {
+        let mut stack = nockvm::mem::NockStack::new(1024 * 1024, 0);
+        let noun = T(&mut stack, &[D(1), D(2), D(3), D(4), D(5)]);
+        let decoded = noun.decode::<(u64, u64, u64, u64, u64)>().unwrap();
+        assert_eq!((1, 2, 3, 4, 5), decoded);
     }
 }
 
@@ -1121,7 +1301,7 @@ mod btreemap_tests {
         assert_eq!(noun.as_atom().unwrap().as_u64().unwrap(), 0);
 
         // Round-trip test
-        let decoded = BTreeMap::<u64, String>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, String>::from_noun(&noun).unwrap();
         assert_eq!(map, decoded);
     }
 
@@ -1137,7 +1317,7 @@ mod btreemap_tests {
         assert!(noun.as_cell().is_ok());
 
         // Round-trip test
-        let decoded = BTreeMap::<u64, String>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, String>::from_noun(&noun).unwrap();
         assert_eq!(map, decoded);
         assert_eq!(decoded.get(&42), Some(&"hello".to_string()));
     }
@@ -1155,7 +1335,7 @@ mod btreemap_tests {
         let noun = map.to_noun(&mut stack);
 
         // Round-trip test
-        let decoded = BTreeMap::<u64, String>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, String>::from_noun(&noun).unwrap();
         assert_eq!(map, decoded);
 
         // Check all values are preserved
@@ -1178,7 +1358,7 @@ mod btreemap_tests {
         let noun = map.to_noun(&mut stack);
 
         // Round-trip test
-        let decoded = BTreeMap::<u64, u64>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, u64>::from_noun(&noun).unwrap();
         assert_eq!(map, decoded);
 
         // Check specific values
@@ -1207,7 +1387,7 @@ mod btreemap_tests {
         let noun = outer.to_noun(&mut stack);
 
         // Round-trip test
-        let decoded = BTreeMap::<u64, BTreeMap<String, u64>>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, BTreeMap<String, u64>>::from_noun(&noun).unwrap();
         assert_eq!(outer, decoded);
 
         // Check nested values
@@ -1223,7 +1403,7 @@ mod btreemap_tests {
 
         // Test with invalid atom (not 0)
         let invalid_atom = nockvm::noun::Atom::new(&mut stack, 42).as_noun();
-        let result = BTreeMap::<u64, String>::from_noun(&mut stack, &invalid_atom);
+        let result = BTreeMap::<u64, String>::from_noun(&invalid_atom);
         assert!(result.is_err());
 
         // Test with malformed cell (missing key-value structure)
@@ -1235,7 +1415,7 @@ mod btreemap_tests {
                 nockvm::noun::D(0),
             ],
         );
-        let result = BTreeMap::<u64, String>::from_noun(&mut stack, &malformed);
+        let result = BTreeMap::<u64, String>::from_noun(&malformed);
         assert!(result.is_err());
     }
 
@@ -1251,7 +1431,7 @@ mod btreemap_tests {
         }
 
         let noun = map.to_noun(&mut stack);
-        let decoded = BTreeMap::<u64, String>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<u64, String>::from_noun(&noun).unwrap();
 
         // BTreeMap should maintain sorted order
         let original_keys: Vec<_> = map.keys().collect();
@@ -1274,7 +1454,7 @@ mod btreemap_tests {
 
         for &value in &values {
             let noun = value.to_noun(&mut stack);
-            let decoded = usize::from_noun(&mut stack, &noun).unwrap();
+            let decoded = usize::from_noun(&noun).unwrap();
             assert_eq!(value, decoded);
         }
     }
@@ -1290,7 +1470,7 @@ mod btreemap_tests {
         let noun = map.to_noun(&mut stack);
 
         // Round-trip test
-        let decoded = BTreeMap::<usize, u64>::from_noun(&mut stack, &noun).unwrap();
+        let decoded = BTreeMap::<usize, u64>::from_noun(&noun).unwrap();
         assert_eq!(map, decoded);
 
         // Check specific values

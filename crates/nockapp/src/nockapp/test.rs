@@ -27,9 +27,13 @@ pub async fn setup_nockapp(jam: &str) -> (TempDir, NockApp) {
         async |checkpoint| Kernel::load(&jam_bytes, checkpoint, vec![], Default::default()).await;
     (
         temp_dir,
-        NockApp::new(kernel_f, &temp_dir_path, std::time::Duration::from_secs(1))
-            .await
-            .expect("Could not create NockApp"),
+        NockApp::new(
+            kernel_f,
+            &temp_dir_path,
+            Some(std::time::Duration::from_secs(1)),
+        )
+        .await
+        .expect("Could not create NockApp"),
     )
 }
 
@@ -155,7 +159,8 @@ pub mod tests {
 
         info!("Asserting checkpoint and arvo equality");
         // Checkpoint kernel should be equal to the saved kernel
-        assert!(slab_equality(&checkpoint.noun, &first_checkpoint.noun));
+        assert!(slab_equality(&checkpoint.state, &first_checkpoint.state));
+        assert!(slab_equality(&checkpoint.cold, &first_checkpoint.cold));
     }
 
     // Test nockapp poke
@@ -205,8 +210,9 @@ pub mod tests {
             .await
             .expect("Failed to get checkpoint after poke");
 
-        assert!(slab_equality(&checkpoint.noun, &state_after_poke.noun));
-        assert!(!slab_equality(&checkpoint.noun, &state_before_poke.noun));
+        assert!(slab_equality(&checkpoint.state, &state_after_poke.state));
+        assert!(slab_equality(&checkpoint.cold, &state_after_poke.cold));
+        assert!(!slab_equality(&checkpoint.state, &state_before_poke.state));
     }
 
     #[tokio::test]

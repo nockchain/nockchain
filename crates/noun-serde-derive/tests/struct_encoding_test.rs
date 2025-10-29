@@ -56,7 +56,7 @@ fn test_struct_encoding_no_terminator() {
     let single = SingleField { x: 42 };
     let encoded = single.to_noun(&mut stack);
     // Test that it decodes correctly - this is the actual test
-    let decoded = SingleField::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = SingleField::from_noun(&encoded).unwrap();
     assert_eq!(single, decoded);
     // Also verify it's a single atom (not wrapped in a cell)
     assert!(
@@ -67,7 +67,7 @@ fn test_struct_encoding_no_terminator() {
     // Test two fields - should encode as [x y]
     let two = TwoFields { x: 42, y: 43 };
     let encoded = two.to_noun(&mut stack);
-    let decoded = TwoFields::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = TwoFields::from_noun(&encoded).unwrap();
     assert_eq!(two, decoded);
     // Verify it's a cell with two atoms
     let cell = encoded
@@ -83,7 +83,7 @@ fn test_struct_encoding_no_terminator() {
         z: 44,
     };
     let encoded = three.to_noun(&mut stack);
-    let decoded = ThreeFields::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = ThreeFields::from_noun(&encoded).unwrap();
     assert_eq!(three, decoded);
     // Verify structure: [42 [43 44]]
     let cell = encoded
@@ -97,7 +97,7 @@ fn test_struct_encoding_no_terminator() {
     // Test empty struct - should encode as 0
     let empty = EmptyStruct;
     let encoded = empty.to_noun(&mut stack);
-    let decoded = EmptyStruct::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = EmptyStruct::from_noun(&encoded).unwrap();
     assert_eq!(empty, decoded);
     // Verify it's atom 0
     assert_eq!(encoded.as_atom().unwrap().as_u64().unwrap(), 0);
@@ -110,7 +110,7 @@ fn test_struct_encoding_no_terminator() {
         d: 103,
     };
     let encoded = four.to_noun(&mut stack);
-    let decoded = FourFields::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = FourFields::from_noun(&encoded).unwrap();
     assert_eq!(four, decoded);
     // Verify structure: [100 [101 [102 103]]]
     let cell = encoded
@@ -132,7 +132,7 @@ fn test_struct_encoding_no_terminator() {
         z: 204,
     };
     let encoded = five.to_noun(&mut stack);
-    let decoded = FiveFields::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = FiveFields::from_noun(&encoded).unwrap();
     assert_eq!(five, decoded);
     // Verify structure: [200 [201 [202 [203 204]]]]
     let cell = encoded
@@ -155,7 +155,7 @@ fn test_tuple_struct_encoding_no_terminator() {
     // Test single tuple field - should encode as just the field value
     let single = TupleSingle(42);
     let encoded = single.to_noun(&mut stack);
-    let decoded = TupleSingle::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = TupleSingle::from_noun(&encoded).unwrap();
     assert_eq!(single, decoded);
     // Verify it's a single atom (not wrapped in a cell)
     assert!(
@@ -167,7 +167,7 @@ fn test_tuple_struct_encoding_no_terminator() {
     // Test two tuple fields - should encode as [first second]
     let double = TupleDouble(42, 43);
     let encoded = double.to_noun(&mut stack);
-    let decoded = TupleDouble::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = TupleDouble::from_noun(&encoded).unwrap();
     assert_eq!(double, decoded);
     // Verify it's a cell with two atoms
     let cell = encoded
@@ -179,7 +179,7 @@ fn test_tuple_struct_encoding_no_terminator() {
     // Test three tuple fields - should encode as [first [second third]]
     let triple = TupleTriple(42, 43, 44);
     let encoded = triple.to_noun(&mut stack);
-    let decoded = TupleTriple::from_noun(&mut stack, &encoded).unwrap();
+    let decoded = TupleTriple::from_noun(&encoded).unwrap();
     assert_eq!(triple, decoded);
     // Verify structure: [42 [43 44]]
     let cell = encoded

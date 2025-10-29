@@ -1627,9 +1627,9 @@
       |%
       ++  sign
         ~/  %sign
-        |=  [sk-as-32-bit-belts=(list belt) m=(list belt)]
+        |=  [sk-as-32-bit-belts=(list belt) m=noun-digest:tip5]
         ^-  [c=@ux s=@ux]
-        ?>  =((lent m) 5)
+        =/  m-list  (leaf-sequence:shape m)
         =/  b-32  (bex 32)
         ?>  (levy sk-as-32-bit-belts |=(n=@ (lth n b-32)))
         =/  sk      (rep 5 sk-as-32-bit-belts)
@@ -1637,14 +1637,21 @@
         ?>  (lth sk g-order:curve)
         =/  pubkey  (ch-scal:affine:curve sk a-gen:curve)
         =/  transcript=(list (list belt))
-          [(f6lt-to-list x.pubkey) (f6lt-to-list y.pubkey) m ~]
+          [(f6lt-to-list x.pubkey) (f6lt-to-list y.pubkey) m-list sk-as-32-bit-belts ~]
         =/  nonce
           (trunc-g-order (hash-varlen:tip5 (zing transcript)))
         ?<  =(nonce 0)
         =/  scalar  (ch-scal:affine:curve nonce a-gen:curve)
-        =.  transcript  [(f6lt-to-list x.scalar) (f6lt-to-list y.scalar) transcript]
+        =/  pre-image
+          %-  zing
+          :~  (f6lt-to-list x.scalar)
+              (f6lt-to-list y.scalar)
+              (f6lt-to-list x.pubkey)
+              (f6lt-to-list y.pubkey)
+              m-list
+          ==
         =/  chal
-          (trunc-g-order (hash-varlen:tip5 (zing transcript)))
+          (trunc-g-order (hash-varlen:tip5 pre-image))
         ?<  =(chal 0)
         =/  sig
           %+  mod
@@ -1655,10 +1662,10 @@
       ::
       ++  verify
         ~/  %verify
-        |=  [pubkey=a-pt:curve m=(list belt) chal=@ux sig=@ux]
+        |=  [pubkey=a-pt:curve m=noun-digest:tip5 chal=@ux sig=@ux]
         ^-  ?
+        =/  m-list  (leaf-sequence:shape m)
         ?&
-          =((lent m) 5)  ::  m must be a tip5 hash
           (gth chal 0)  (lth chal g-order:curve)
         ::
           (gth sig 0)   (lth sig g-order:curve)
@@ -1674,9 +1681,14 @@
           %-  zing
           :~  (f6lt-to-list x.scalar)  (f6lt-to-list y.scalar)
               (f6lt-to-list x.pubkey)  (f6lt-to-list y.pubkey)
-              m
+              m-list
           ==
         ==
+      ::
+      ++  batch-verify
+        ~/  %batch-verify
+        |=  batch=(list [pubkey=a-pt:curve m=noun-digest:tip5 chal=@ux sig=@ux])
+        (levy batch verify)
       --
     --
   ::
@@ -1777,12 +1789,12 @@
       |=  a=@ux
       ^-  t8
       =/  ripped=(list @)  (rip-correct 5 a)
-      ::  most of the time, .rippped will be 8 @, but if it has enough leading
+      ::  most of the time, .ripped will be 8 @, but if it has enough leading
       ::  zeroes then it won't. +rip reverses the endianness, so we put the
       ::  leading zeroes at the end.
       =/  length-dif=@  (sub 8 (lent ripped))
       =.  ripped  (weld ripped (reap length-dif 0))
-      ;;(t8 (list-to-tuple:tip5 (rip-correct 5 a)))
+      ;;(t8 (list-to-tuple:tip5 ripped))
     ::
     ++  t8-to-atom
       |=  t=t8
@@ -1797,20 +1809,26 @@
     ++  affine
       |%
       ++  sign
-        |=  [=sk m=(list belt)]
+        |=  [=sk m=noun-digest:tip5]
         ^-  [c=chal s=sig]
         =/  [c=@ux s=@ux]
           (sign:affine:schnorr (t8-to-list sk) m)
         [(atom-to-t8 c) (atom-to-t8 s)]
       ::
       ++  verify
-        |=  [pk=a-pt:curve m=(list belt) =chal =sig]
+        |=  [pk=a-pt:curve m=noun-digest:tip5 =chal =sig]
         ^-  ?
         %-  verify:affine:schnorr
         :*  pk  m
             (t8-to-atom chal)
             (t8-to-atom sig)
         ==
+      ::
+      ++  batch-verify
+        |=  batch=(list [pk=a-pt:curve m=noun-digest:tip5 =chal =sig])
+        ^-  ?
+        (levy batch verify)
+      ::
       --  ::+affine
     --  ::+belt-schnorr
   --  ::+cheetah
@@ -1979,6 +1997,40 @@
         $(lis (~(slag ave lis) (div len 2)))
       $(lis (~(slag ave lis) +((div len 2))))
     [%tree l r]
+  ::
+  ::  +prove-hashable-by-index: build proof directly over a hashable
+  ++  prove-hashable-by-index
+    |=  [h=hashable:tip5 idx=@]
+    ^-  [axis=@ proof=merk-proof]
+    ?<  =(idx 0)
+    =/  res
+      =+  |%
+          ++  node-digest  hash-hashable:tip5
+          ++  leaf-count
+            |=  n=hashable:tip5
+            ^-  @
+            ?.  ?=(^ -.n)  1
+            (add (leaf-count p.n) (leaf-count q.n))
+          ++  go
+            |=  [n=hashable:tip5 i=@]
+            ^-  [root=noun-digest:tip5 path=(list noun-digest:tip5) axis=@]
+            ?.  ?=(^ -.n)
+              [(node-digest n) ~ 1]
+            =/  lc=@  (leaf-count p.n)
+            ?:  (lte i lc)
+              =/  rec  (go [p.n i])
+              =/  sib  (node-digest q.n)
+              :+  (hash-ten-cell:tip5 root.rec sib)
+                (weld path.rec ~[sib])
+              (peg 2 axis.rec)
+            =/  rec  (go [q.n (sub i lc)])
+            =/  sib  (node-digest p.n)
+            :+  (hash-ten-cell:tip5 sib root.rec)
+              (weld path.rec ~[sib])
+            (peg 3 axis.rec)
+          --
+      (go [h idx])
+    [axis.res [root.res path.res]]
   ::
   ++  build-merk-proof
     ~/  %build-merk-proof

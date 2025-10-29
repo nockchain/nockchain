@@ -23,7 +23,8 @@ impl PeerIdExt for PeerId {
     fn from_noun(noun: Noun) -> Result<PeerId, NockAppError> {
         let peer_id_bytes = noun.as_atom()?.to_bytes_until_nul()?;
         let peer_id_str = String::from_utf8(peer_id_bytes)?;
-        PeerId::from_str(&peer_id_str).map_err(|_| NockAppError::OtherError)
+        PeerId::from_str(&peer_id_str)
+            .map_err(|_| NockAppError::OtherError(String::from("Failed to parse PeerId from noun")))
     }
 }
 

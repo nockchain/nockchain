@@ -1,16 +1,15 @@
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_EXIT, BAIL_FAIL};
 use nockvm::jets::Result;
 use nockvm::noun::{IndirectAtom, Noun, D};
 
-use crate::form::math::base::bpow;
-use crate::form::math::bpoly::*;
+use crate::form::belt::*;
+use crate::form::bpoly::*;
+use crate::form::handle::*;
 use crate::form::mega::{brek, MegaTyp};
+use crate::form::noun_ext::NounMathExt;
 use crate::form::poly::*;
-use crate::hand::handle::*;
-use crate::hand::structs::{HoonMap, HoonMapIter};
-use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::NounExt;
+use crate::form::structs::{HoonMap, HoonMapIter};
 
 fn zero_bpoly() -> BPolyVec {
     BPolyVec::from(vec![0u64])
@@ -28,22 +27,22 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
         sam.uncell()?;
 
     let Ok(trace_evals) = BPolySlice::try_from(trace_evals_noun) else {
-        return jet_err::<Noun>();
+        return Err(BAIL_FAIL);
     };
     let Ok(height_atom) = height_noun.as_atom() else {
-        return jet_err::<Noun>();
+        return Err(BAIL_FAIL);
     };
     let Ok(height) = height_atom.as_u64() else {
-        return jet_err::<Noun>();
+        return Err(BAIL_FAIL);
     };
     let height_usize = height as usize;
 
     let Ok(dyns) = BPolySlice::try_from(dyns_noun) else {
-        return jet_err::<Noun>();
+        return Err(BAIL_FAIL);
     };
 
     let Ok(challenges) = BPolySlice::try_from(chals_noun) else {
-        return jet_err::<Noun>();
+        return Err(BAIL_FAIL);
     };
 
     let com_map_opt: Option<HoonMap> = unsafe {
@@ -60,10 +59,10 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
     p_iter.try_fold((), |_, n| {
         let [k_noun, v_noun] = n.uncell()?;
         let Ok(k) = BPolySlice::try_from(k_noun) else {
-            return jet_err::<()>();
+            return Err(BAIL_FAIL);
         };
         let Ok(v) = v_noun.as_belt() else {
-            return jet_err::<()>();
+            return Err(BAIL_FAIL);
         };
 
         if v.0 == 0 {
@@ -84,7 +83,7 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
                     let var_end_idx = var_start_idx + poly_len_for_var_com;
 
                     if var_end_idx > trace_evals.len() {
-                        return jet_err::<()>();
+                        return Err(BAIL_FAIL);
                     }
                     let var_slice = &trace_evals.0[var_start_idx..var_end_idx];
                     let hadamard_res_len = inner_acc_vec.len().min(var_slice.len());
@@ -102,7 +101,7 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
                 }
                 MegaTyp::Rnd => {
                     let Some(rnd) = challenges.0.get(idx) else {
-                        return jet_err::<()>();
+                        return Err(BAIL_FAIL);
                     };
 
                     let pow_rnd = bpow(rnd.0, exp);
@@ -120,7 +119,7 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
                 }
                 MegaTyp::Dyn => {
                     if idx >= dyns.len() {
-                        return jet_err::<()>();
+                        return Err(BAIL_FAIL);
                     }
                     let dyn_val = dyns.0[idx];
 
@@ -142,9 +141,9 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
                     let com_noun = com_map_opt
                         .as_ref()
                         .and_then(|m| m.get(stack, D(idx as u64)))
-                        .ok_or_else(|| jet_err::<()>().unwrap_err())?;
+                        .ok_or_else(|| BAIL_EXIT)?;
                     let Ok(com_slice) = BPolySlice::try_from(com_noun) else {
-                        return jet_err::<()>();
+                        return Err(BAIL_FAIL);
                     };
 
                     let hadamard_res_len = inner_acc_vec.len().min(com_slice.len());

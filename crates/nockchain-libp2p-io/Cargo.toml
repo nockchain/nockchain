@@ -7,6 +7,8 @@ edition.workspace = true
 nockapp = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
+zkvm-jetpack = { workspace = true }
 
 bs58 = { workspace = true }
 bytes = { workspace = true }
@@ -43,4 +45,4 @@ void = { workspace = true }
 [dev-dependencies]
 quickcheck = { workspace = true }
 serde_cbor = { workspace = true }
-cbor4ii = { workspace = true }
+cbor4ii = { workspace = true, features = ["serde1", "use_std"] }

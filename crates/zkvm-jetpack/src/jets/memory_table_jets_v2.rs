@@ -3,21 +3,19 @@ use std::collections::VecDeque;
 use nockapp::Noun;
 use nockvm::hamt::MutHamt;
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, IndirectAtom, D, T};
 use nockvm_macros::tas;
 use tracing::debug;
 
-use crate::form::base::*;
-use crate::form::fext::*;
+use crate::form::belt::*;
+use crate::form::felt::*;
 use crate::form::gen_trace::{build_tree_data, TreeData};
-use crate::form::mary::{MarySlice, *};
-use crate::form::{Belt, Felt};
-use crate::hand::handle::{finalize_mary, new_handle_mut_mary};
+use crate::form::handle::{finalize_mary, new_handle_mut_mary};
+use crate::form::mary::*;
 use crate::jets::table_utils::*;
-use crate::jets::utils::jet_err;
 
 pub fn memory_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
@@ -33,7 +31,7 @@ pub fn memory_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun
     let table_noun = slot(table_mary, 3)?;
     let Ok(table) = MarySlice::try_from(table_noun) else {
         debug!("cannot convert mary arg to mary");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let (res, mut res_mary): (IndirectAtom, MarySliceMut) = new_handle_mut_mary(
@@ -266,7 +264,7 @@ pub fn memory_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Result
     let table_noun = slot(table_mary, 3)?;
     let Ok(table) = MarySlice::try_from(table_noun) else {
         debug!("cannot convert mary arg to mary");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let (res, mut res_mary): (IndirectAtom, MarySliceMut) = new_handle_mut_mary(

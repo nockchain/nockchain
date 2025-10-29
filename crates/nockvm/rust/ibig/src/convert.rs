@@ -593,7 +593,7 @@ impl TryFrom<&IBig> for UBig {
 
 impl UBig {
     #[inline]
-    pub(crate) fn from_unsigned_stack<S: Stack, T>(stack: &mut S, x: T) -> UBig
+    pub fn from_unsigned_stack<S: Stack, T>(stack: &mut S, x: T) -> UBig
     where
         T: PrimitiveUnsigned,
     {

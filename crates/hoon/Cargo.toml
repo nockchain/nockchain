@@ -8,7 +8,7 @@ hoonc.workspace = true
 nockapp.workspace = true
 nockvm.workspace = true
 zkvm-jetpack.workspace = true
-# Outside dependencies
+
 clap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

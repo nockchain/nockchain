@@ -1,5 +1,6 @@
 ::  /lib/zoon: vendored types from hoon.hoon
 /=  z  /common/zeke
+~%  %zoon  ..stark-engine-jet-hook:z  ~
 |%
 ::
 +|  %no-by-in
@@ -16,9 +17,11 @@
   |=(a=(tree (pair)) ?:(=(~ a) & ~(apt z-by a)))
 ::
 ++  z-by                                                  ::  z-map engine
+  ~/  %z-by
   =|  a=(tree (pair))  ::  (z-map)
   |@
   ++  all                                               ::  logical AND
+    ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
     ?~  a
@@ -26,6 +29,7 @@
     ?&((b q.n.a) $(a l.a) $(a r.a))
   ::
   ++  any                                               ::  logical OR
+    ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
     ?~  a
@@ -33,6 +37,7 @@
     ?|((b q.n.a) $(a l.a) $(a r.a))
   ::
   ++  bif                                               ::  splits a z-by b
+    ~/  %bif
     |*  b=*
     |-  ^+  [l=a r=a]
     ?~  a
@@ -48,6 +53,7 @@
     [a(r l.d) r.d]
   ::
   ++  del                                               ::  delete at key b
+    ~/  %del
     |*  b=*
     |-  ^+  a
     ?~  a
@@ -64,6 +70,7 @@
     r.a(l $(r.a l.r.a))
   ::
   ++  dif                                               ::  difference
+    ~/  %dif
     |*  b=_a
     |-  ^+  a
     ?~  b
@@ -80,6 +87,7 @@
     e(l $(e l.e))
   ::
   ++  dig                                               ::  axis of b key
+    ~/  %dig
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
@@ -103,6 +111,7 @@
     ==
   ::
   ++  gas                                               ::  concatenate
+    ~/  %gas
     |*  b=(list [p=* q=*])
     =>  .(b `(list _?>(?=(^ a) n.a))`b)
     |-  ^+  a
@@ -111,6 +120,7 @@
     $(b t.b, a (put p.i.b q.i.b))
   ::
   ++  get                                               ::  grab value z-by key
+    ~/  %get
     |*  b=*
     =>  .(b `_?>(?=(^ a) p.n.a)`b)
     |-  ^-  (unit _?>(?=(^ a) q.n.a))
@@ -123,18 +133,22 @@
     $(a r.a)
   ::
   ++  got                                               ::  need value z-by key
+    ~/  %got
     |*  b=*
     (need (get b))
   ::
   ++  gut                                               ::  fall value z-by key
+    ~/  %gut
     |*  [b=* c=*]
     (fall (get b) c)
   ::
   ++  has                                               ::  key existence check
+    ~/  %has
     |*  b=*
     !=(~ (get b))
   ::
   ++  int                                               ::  intersection
+    ~/  %int
     |*  b=_a
     |-  ^+  a
     ?~  b
@@ -154,6 +168,7 @@
     %-  uni(a $(b r.b, l.a ~))  $(a l.a)
   ::
   ++  jab
+    ~/  %jab
     |*  [key=_?>(?=(^ a) p.n.a) fun=$-(_?>(?=(^ a) q.n.a) _?>(?=(^ a) q.n.a))]
     ^+  a
     ::
@@ -168,12 +183,14 @@
     a(r $(a r.a))
   ::
   ++  mar                                               ::  add with validation
+    ~/  %mar
     |*  [b=* c=(unit *)]
     ?~  c
       (del b)
     (put b u.c)
   ::
   ++  put                                               ::  adds key-value pair
+    ~/  %put
     |*  [b=* c=*]
     |-  ^+  a
     ?~  a
@@ -195,12 +212,14 @@
     d(l a(r l.d))
   ::
   ++  rep                                               ::  reduce to product
+    ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
     ?~  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  rib                                               ::  transform + product
+    ~/  %rib
     |*  [b=* c=gate]
     |-  ^+  [b a]
     ?~  a  [b ~]
@@ -211,6 +230,7 @@
     [-.f a(l +.e, r +.f)]
   ::
   ++  run                                               ::  apply gate to values
+    ~/  %run
     |*  b=gate
     |-
     ?~  a  a
@@ -225,6 +245,7 @@
     $(a r.a, b [n.a $(a l.a)])
   ::
   ++  uni                                               ::  union, merge
+    ~/  %uni
     |*  b=_a
     |-  ^+  a
     ?~  b
@@ -242,6 +263,7 @@
     $(r.b $(b r.b, l.a ~), a l.a)
   ::
   ++  uno                                               ::  general union
+    ~/  %uno
     |*  b=_a
     |*  meg=$-([* * *] *)
     |-  ^+  a
@@ -262,6 +284,7 @@
     $(r.b $(b r.b, l.a ~), a l.a)
   ::
   ++  urn                                               ::  apply gate to nodes
+    ~/  %urn
     |*  b=$-([* *] *)
     |-
     ?~  a  ~
@@ -290,9 +313,11 @@
   |=(a=(tree) ?:(=(~ a) & ~(apt z-in a)))
 ::
 ++  z-in                                                  ::  z-set engine
+  ~/  %z-in
   =|  a=(tree)  :: (z-set)
   |@
   ++  all                                               ::  logical AND
+    ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
     ?~  a
@@ -300,6 +325,7 @@
     ?&((b n.a) $(a l.a) $(a r.a))
   ::
   ++  any                                               ::  logical OR
+    ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
     ?~  a
@@ -318,6 +344,7 @@
     ==
   ::
   ++  bif                                               ::  splits a by b
+    ~/  %bif
     |*  b=*
     ^+  [l=a r=a]
     =<  +
@@ -335,6 +362,7 @@
     c(l a(r l.c))
   ::
   ++  del                                               ::  b without any a
+    ~/  %del
     |*  b=*
     |-  ^+  a
     ?~  a
@@ -350,7 +378,8 @@
       l.a(r $(l.a r.l.a))
     r.a(l $(r.a l.r.a))
   ::
-  ++  dif                                               ::  difference
+  ++  dif                                              ::  difference
+    ~/  %dif
     |*  b=_a
     |-  ^+  a
     ?~  b
@@ -367,6 +396,7 @@
     e(l $(e l.e))
   ::
   ++  dig                                               ::  axis of a z-in b
+    ~/  %dig
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
@@ -377,6 +407,7 @@
     $(a r.a, c (peg c 7))
   ::
   ++  gas                                               ::  concatenate
+    ~/  %gas
     |=  b=(list _?>(?=(^ a) n.a))
     |-  ^+  a
     ?~  b
@@ -385,6 +416,7 @@
   ::  +has: does :b exist z-in :a?
   ::
   ++  has
+    ~/  %has
     |*  b=*
     ^-  ?
     ::    wrap extracted item type z-in a unit because bunting fails
@@ -411,6 +443,7 @@
     $(a r.a)
   ::
   ++  int                                               ::  intersection
+    ~/  %int
     |*  b=_a
     |-  ^+  a
     ?~  b
@@ -426,6 +459,7 @@
     %-  uni(a $(a r.a, l.b ~))  $(b l.b)
   ::
   ++  put                                               ::  puts b z-in a, sorted
+    ~/  %put
     |*  b=*
     |-  ^+  a
     ?~  a
@@ -445,12 +479,14 @@
     c(l a(r l.c))
   ::
   ++  rep                                               ::  reduce to product
+    ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
     ?~  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  run                                               ::  apply gate to values
+    ~/  %run
     |*  b=gate
     =+  c=`(z-set _?>(?=(^ a) (b n.a)))`~
     |-  ?~  a  c
@@ -467,6 +503,7 @@
     $(a r.a, b [n.a $(a l.a)])
   ::
   ++  uni                                               ::  union
+    ~/  %uni
     |*  b=_a
     ?:  =(a b)  a
     |-  ^+  a
@@ -594,6 +631,7 @@
 ::    Orders z-in ascending tree depth.
 ::
 ++  dor-tip
+  ~/  %dor-tip
   |=  [a=* b=*]
   ^-  ?
   ?:  =(a b)  &
@@ -609,6 +647,7 @@
 ::    Orders z-in ascending +tip hash order, collisions fall back to +dor.
 ::
 ++  gor-tip
+  ~/  %gor-tip
   |=  [a=* b=*]
   ^-  ?
   =+  [c=(tip a) d=(tip b)]
@@ -620,6 +659,7 @@
 ::    Orders z-in ascending double +tip hash order, collisions fall back to +dor.
 ::
 ++  mor-tip
+  ~/  %mor-tip
   |=  [a=* b=*]
   ^-  ?
   =+  [c=(double-tip a) d=(double-tip b)]

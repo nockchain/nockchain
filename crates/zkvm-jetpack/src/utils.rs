@@ -6,7 +6,7 @@ use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, IndirectAtom, Noun, D, DIRECT_MAX, NONE, T};
 pub use tracing::{debug, trace};
 
-use crate::form::Belt;
+use crate::form::belt::*;
 
 // tests whether a felt atom has the leading 1. we cannot actually test
 // Felt, because it doesn't include the leading 1.

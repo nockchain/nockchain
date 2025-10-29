@@ -1,0 +1,59 @@
+// nockchain/public/v2/nockchain.proto
+
+syntax = "proto3";
+
+package nockchain.public.v2;
+
+import "nockchain/common/v1/blockchain.proto";
+import "nockchain/common/v1/pagination.proto";
+import "nockchain/common/v1/primitives.proto";
+import "nockchain/common/v2/blockchain.proto";
+
+service NockchainService {
+  rpc WalletGetBalance(WalletGetBalanceRequest)
+      returns (WalletGetBalanceResponse);
+  rpc WalletSendTransaction(WalletSendTransactionRequest)
+      returns (WalletSendTransactionResponse);
+  rpc TransactionAccepted(TransactionAcceptedRequest)
+      returns (TransactionAcceptedResponse);
+  //rpc TransactionConfirmation(TransactionConfirmationRequest)
+  //    returns (TransactionConfirmationResponse);
+}
+
+message WalletGetBalanceRequest {
+  oneof selector {
+    common.v1.Base58Pubkey address = 1; // wallet address, a base58-encoded cheetah pubkey
+    common.v1.Base58Hash first_name = 2; // tip5 hash identifying the note first-name
+  }
+  common.v1.PageRequest page = 3;
+}
+
+message WalletGetBalanceResponse {
+  oneof result {
+    common.v2.Balance balance = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message WalletSendTransactionRequest {
+  common.v1.Hash tx_id = 1;
+  common.v2.RawTransaction raw_tx = 2;
+}
+
+message WalletSendTransactionResponse {
+  oneof result {
+    common.v1.Acknowledged ack = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message TransactionAcceptedRequest {
+  common.v1.Base58Hash tx_id = 1;
+}
+
+message TransactionAcceptedResponse {
+  oneof result {
+    bool accepted = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}

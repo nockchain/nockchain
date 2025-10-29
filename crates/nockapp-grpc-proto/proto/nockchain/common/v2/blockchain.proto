@@ -1,0 +1,146 @@
+// nockchain/common/v2/blockchain.proto
+
+syntax = "proto3";
+
+package nockchain.common.v2;
+
+import "nockchain/common/v1/blockchain.proto";
+import "nockchain/common/v1/pagination.proto";
+import "nockchain/common/v1/primitives.proto";
+
+message Balance {
+  repeated BalanceEntry notes = 1;
+  common.v1.BlockHeight height = 2;
+  optional common.v1.Hash block_id = 3;
+  common.v1.PageResponse page = 4;
+}
+
+message BalanceEntry {
+  common.v1.Name name = 1;
+  Note note = 2;
+}
+
+message Note {
+  oneof note_version {
+    common.v1.Note legacy = 1;
+    NoteV1 v1 = 2;
+  }
+}
+
+message NoteV1 {
+  common.v1.NoteVersion version = 1;
+  common.v1.BlockHeight origin_page = 2;
+  common.v1.Name name = 3;
+  NoteData note_data = 4;
+  common.v1.Nicks assets = 5;
+}
+
+message NoteData {
+  repeated NoteDataEntry entries = 1;
+}
+
+message NoteDataEntry {
+  string key = 1;
+  bytes blob = 2; // jammed noun bytes
+}
+
+message RawTransaction {
+  common.v1.NoteVersion version = 1;
+  common.v1.Hash id = 2;
+  repeated SpendEntry spends = 3;
+}
+
+message SpendEntry {
+  common.v1.Name name = 1;
+  Spend spend = 2;
+}
+
+message Spend {
+  oneof spend_kind {
+    LegacySpend legacy = 1;
+    WitnessSpend witness = 2;
+  }
+}
+
+message LegacySpend {
+  common.v1.Signature signature = 1;
+  repeated Seed seeds = 2;
+  common.v1.Nicks fee = 3;
+}
+
+message WitnessSpend {
+  Witness witness = 1;
+  repeated Seed seeds = 2;
+  common.v1.Nicks fee = 3;
+}
+
+message Seed {
+  // Absent when the seed originates from a coinbase output.
+  common.v1.Source output_source = 1;
+  common.v1.Hash lock_root = 2;
+  NoteData note_data = 3;
+  common.v1.Nicks gift = 4;
+  common.v1.Hash parent_hash = 5;
+}
+
+message Witness {
+  LockMerkleProof lock_merkle_proof = 1;
+  PkhSignature pkh_signature = 2;
+  repeated HaxPreimage hax = 3;
+  //uint64 tim = 4; // reserved field, currently 0
+}
+
+message HaxPreimage {
+  common.v1.Hash hash = 1;
+  bytes value = 2; // jammed noun bytes
+}
+
+message PkhSignature {
+  repeated PkhSignatureEntry entries = 1;
+}
+
+message PkhSignatureEntry {
+  common.v1.Hash hash = 1;
+  common.v1.SchnorrPubkey pubkey = 2;
+  common.v1.SchnorrSignature signature = 3;
+}
+
+message LockMerkleProof {
+  SpendCondition spend_condition = 1;
+  uint64 axis = 2;
+  MerkleProof proof = 3;
+}
+
+message SpendCondition {
+  repeated LockPrimitive primitives = 1;
+}
+
+message LockPrimitive {
+  oneof primitive {
+    PkhLock pkh = 1;
+    LockTim tim = 2;
+    HaxLock hax = 3;
+    BurnLock burn = 4;
+  }
+}
+
+message PkhLock {
+  uint64 m = 1;
+  repeated common.v1.Hash hashes = 2;
+}
+
+message LockTim {
+  common.v1.TimeLockRangeRelative rel = 1;
+  common.v1.TimeLockRangeAbsolute abs = 2;
+}
+
+message HaxLock {
+  repeated common.v1.Hash hashes = 1;
+}
+
+message BurnLock {}
+
+message MerkleProof {
+  common.v1.Hash root = 1;
+  repeated common.v1.Hash path = 2;
+}

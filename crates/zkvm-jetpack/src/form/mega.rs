@@ -1,6 +1,6 @@
 use nockvm_macros::tas;
 
-use super::Belt;
+use crate::form::belt::Belt;
 
 // +$  mega-typ  ?(%var %rnd %dyn %con %com)
 #[repr(u64)]

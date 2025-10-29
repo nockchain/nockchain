@@ -1421,7 +1421,7 @@
     |=  $:  field=?(%ext %base)
             mp=mp-mega
             args=bpoly  :: can be bpoly or fpoly
-            chal-map=(map @ belt)
+            chals=bpoly
             dyns=bpoly
             com-map=(map @ elt)
         ==
@@ -1457,7 +1457,7 @@
     ::
         %rnd
       %+  pow-op
-        (lift-op (~(got by chal-map) idx))
+        (lift-op (~(snag bop chals) idx))
       exp
     ::
         %dyn
@@ -1572,7 +1572,7 @@
   |=  $:  field=?(%ext %base)
           p=mp-mega
           args=bpoly  :: can be bpoly or fpoly
-          chal-map=(map @ belt)
+          chals=bpoly
           dyns=bpoly
           com-map=(map @ elt)
       ==
@@ -1584,13 +1584,13 @@
   |=  $:  field=?(%ext %base)
           p=mp-ultra
           args=bpoly  :: can be bpoly or fpoly
-          chal-map=(map @ belt)
+          chals=bpoly
           dyns=bpoly
       ==
   ^-  (list elt)
   ?-    -.p
       %mega
-    :~  (mpeval-mega field +.p args chal-map dyns ~)
+    :~  (mpeval-mega field +.p args chals dyns ~)
     ==
   ::
       %comp
@@ -1598,14 +1598,14 @@
       %+  turn
         com.p
       |=  mp=mp-mega
-      (mpeval-mega field mp args chal-map dyns com-map)
+      (mpeval-mega field mp args chals dyns com-map)
     %+  roll
       (range (lent dep.p))
     |=  [i=@ acc=(map @ elt)]
     =/  mp  (snag i dep.p)
     %-  ~(put by acc)
     :-  i
-    (mpeval-mega field mp args chal-map dyns ~)
+    (mpeval-mega field mp args chals dyns ~)
   ==
 ::
 ::

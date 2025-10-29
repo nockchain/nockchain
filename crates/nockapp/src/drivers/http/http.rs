@@ -67,7 +67,7 @@ impl From<HttpError> for NockAppError {
             HttpError::BindError(io_err) => NockAppError::IoError(io_err),
             HttpError::EffectError(nock_err) => nock_err,
             HttpError::Utf8Error(utf8_err) => NockAppError::FromUtf8Error(utf8_err),
-            _ => NockAppError::OtherError,
+            _ => NockAppError::OtherError(String::from("HttpError: Unknown error")),
         }
     }
 }
@@ -401,7 +401,7 @@ pub fn http() -> IODriverFn {
                             continue;
                         }
                     };
-                    info!("Processing request {} {} with id: {}", msg.method, msg.uri, msg.id);
+                    debug!("Processing request {} {} with id: {}", msg.method, msg.uri, msg.id);
                     debug!("headers: {:?}", msg.headers);
                     if let Some(ref body) = msg.body {
                         match String::from_utf8(body.to_vec()) {
@@ -428,7 +428,7 @@ pub fn http() -> IODriverFn {
 
                                 if should_serve {
                                     let cache_type = if is_htmx { "HTMX" } else { "regular" };
-                                    info!("serving cached {} response for {}", cache_type, msg.uri);
+                                    debug!("serving cached {} response for {}", cache_type, msg.uri);
                                     let cached_response = cached.to_response()?;
                                     let _ = msg.resp.send(Ok(cached_response));
                                     return Ok(());
@@ -502,7 +502,7 @@ pub fn http() -> IODriverFn {
                     let effect_result = async {
                         let slab = match effect {
                             Ok(slab) => {
-                                info!("received effect from kernel");
+                                debug!("received effect from kernel");
                                 slab
                             }
                             Err(e) => {
@@ -516,11 +516,11 @@ pub fn http() -> IODriverFn {
                         let head_tag = res_list.head().as_atom()?;
                         let tag_val = head_tag.as_u64().map_err(|e| HttpError::AtomCreationError(e.to_string()))?;
                         if tag_val != tas!(b"res") && tag_val != tas!(b"cache") && tag_val != tas!(b"htmx") && tag_val != tas!(b"h-cache") {
-                            info!("http: not an HTTP response effect, skipping. Got tag: {:?}", head_tag);
+                            debug!("http: not an HTTP response effect, skipping. Got tag: {:?}", head_tag);
                             return Ok(());
                         }
 
-                        info!("processing HTTP response effect");
+                        debug!("processing HTTP response effect");
                         let mut res = res_list.tail().as_cell()?;
                         let id = res.head().as_atom()?.as_u64()
                             .map_err(|e| HttpError::AtomCreationError(e.to_string()))?;
@@ -629,10 +629,10 @@ pub fn http() -> IODriverFn {
                             if status == StatusCode::OK {
                                 let cached_response = CachedResponse::new(status, header_vec.clone(), body.clone());
                                 if tag_val == tas!(b"htmx") || tag_val == tas!(b"h-cache") {
-                                    info!("caching HTMX response (htmx or h-cache effect)");
+                                    debug!("caching HTMX response (htmx or h-cache effect)");
                                     *htmx_cache.write().await = Some(cached_response);
                                 } else {
-                                    info!("caching regular response (res or cache effect)");
+                                    debug!("caching regular response (res or cache effect)");
                                     *regular_cache.write().await = Some(cached_response);
                                 }
                             }

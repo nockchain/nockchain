@@ -27,7 +27,7 @@ mod tests {
         let mut stack = nockvm::mem::NockStack::new(8 << 10 << 10, 0);
         let original = 42u64;
         let encoded = original.to_noun(&mut stack);
-        let decoded = u64::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = u64::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -36,7 +36,7 @@ mod tests {
         let mut stack = nockvm::mem::NockStack::new(8 << 10 << 10, 0);
         let original = String::from("test");
         let encoded = original.to_noun(&mut stack);
-        let decoded = String::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = String::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -47,13 +47,13 @@ mod tests {
         // Test Some
         let original = Some(42u64);
         let encoded = original.to_noun(&mut stack);
-        let decoded = Option::<u64>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Option::<u64>::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
 
         // Test None
         let original: Option<u64> = None;
         let encoded = original.to_noun(&mut stack);
-        let decoded = Option::<u64>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Option::<u64>::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -62,22 +62,20 @@ mod tests {
         let mut stack = nockvm::mem::NockStack::new(8 << 10 << 10, 0);
         let original = vec![1u64, 2, 3, 4, 5];
         let encoded = original.to_noun(&mut stack);
-        let decoded = Vec::<u64>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Vec::<u64>::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
     #[test]
     fn test_bool_encoding() {
-        let mut stack = nockvm::mem::NockStack::new(8 << 10 << 10, 0);
-
         // Test true
-        let encoded = encode_bool(&mut stack, true);
-        let decoded = decode_bool(&mut stack, &encoded).unwrap();
+        let encoded = encode_bool(true);
+        let decoded = decode_bool(&encoded).unwrap();
         assert!(decoded);
 
         // Test false
-        let encoded = encode_bool(&mut stack, false);
-        let decoded = decode_bool(&mut stack, &encoded).unwrap();
+        let encoded = encode_bool(false);
+        let decoded = decode_bool(&encoded).unwrap();
         assert!(!decoded);
     }
 
@@ -91,7 +89,7 @@ mod tests {
         };
         let encoded = original.to_noun(&mut stack);
         println!("encoded TestStruct: {:?}", encoded);
-        let decoded = TestStruct::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TestStruct::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -109,7 +107,7 @@ mod tests {
             println!("head: {:?}", cell.head());
             println!("tail: {:?}", cell.tail());
         }
-        let decoded = TestEnum::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TestEnum::from_noun(&encoded).unwrap();
         println!("decoded: {:?}", decoded);
         assert_eq!(original, decoded);
 
@@ -130,7 +128,7 @@ mod tests {
                 println!("tail.tail: {:?}", tail_cell.tail());
             }
         }
-        let decoded = TestEnum::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TestEnum::from_noun(&encoded).unwrap();
         println!("decoded: {:?}", decoded);
         assert_eq!(original, decoded);
 
@@ -144,7 +142,7 @@ mod tests {
             println!("head: {:?}", cell.head());
             println!("tail: {:?}", cell.tail());
         }
-        let decoded = TestEnum::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TestEnum::from_noun(&encoded).unwrap();
         assert_eq!(original, decoded);
     }
 
@@ -160,13 +158,13 @@ mod tests {
 
         // Test encoding and decoding
         let encoded = set.to_noun(&mut stack);
-        let decoded = HashSet::<u64>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = HashSet::<u64>::from_noun(&encoded).unwrap();
         assert_eq!(set, decoded);
 
         // Test empty set
         let empty_set: HashSet<u64> = HashSet::new();
         let encoded_empty = empty_set.to_noun(&mut stack);
-        let decoded_empty = HashSet::<u64>::from_noun(&mut stack, &encoded_empty).unwrap();
+        let decoded_empty = HashSet::<u64>::from_noun(&encoded_empty).unwrap();
         assert_eq!(empty_set, decoded_empty);
     }
 }
@@ -227,20 +225,17 @@ mod complex_tests {
     where
         T: NounEncode + NounDecode + Debug + PartialEq + Clone,
     {
-        fn from_noun<A: NounAllocator>(
-            allocator: &mut A,
-            noun: &Noun,
-        ) -> Result<Self, NounDecodeError> {
+        fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
             let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
             let tag = cell.head().as_atom()?.into_string()?;
 
             match tag.as_str() {
                 "branch" => {
                     let data = cell.tail().as_cell()?;
-                    let left = Box::new(Tree::from_noun(allocator, &data.head())?);
+                    let left = Box::new(Tree::from_noun(&data.head())?);
                     let rest = data.tail().as_cell()?;
-                    let right = Box::new(Tree::from_noun(allocator, &rest.head())?);
-                    let metadata = HashMap::from_noun(allocator, &rest.tail())?;
+                    let right = Box::new(Tree::from_noun(&rest.head())?);
+                    let metadata = HashMap::from_noun(&rest.tail())?;
                     Ok(Tree::Branch {
                         left,
                         right,
@@ -248,7 +243,7 @@ mod complex_tests {
                     })
                 }
                 "leaf" => {
-                    let value = T::from_noun(allocator, &cell.tail())?;
+                    let value = T::from_noun(&cell.tail())?;
                     Ok(Tree::Leaf(value))
                 }
                 _ => Err(NounDecodeError::InvalidEnumVariant),
@@ -310,7 +305,7 @@ mod complex_tests {
             FullDebugCell(&encoded.as_cell().unwrap())
         );
 
-        let decoded = Tree::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Tree::from_noun(&encoded).unwrap();
         assert_eq!(tree, decoded);
     }
 
@@ -344,7 +339,7 @@ mod complex_tests {
         }
 
         println!("\nDecoding status...");
-        let decoded = TransactionStatus::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TransactionStatus::from_noun(&encoded).unwrap();
         println!("Decoded status: {:?}", decoded);
         assert_eq!(status, decoded);
     }
@@ -377,7 +372,7 @@ mod complex_tests {
         }
 
         println!("\nDecoding TransactionData...");
-        let decoded = TransactionData::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = TransactionData::from_noun(&encoded).unwrap();
         println!("Decoded result: {:?}", decoded);
 
         assert_eq!(original, decoded);
@@ -416,7 +411,7 @@ mod complex_tests {
         }
 
         println!("\nDecoding transaction...");
-        let decoded = Transaction::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Transaction::from_noun(&encoded).unwrap();
         println!("Successfully decoded transaction: {:?}", decoded);
         assert_eq!(transaction, decoded);
 
@@ -426,7 +421,7 @@ mod complex_tests {
             result: Ok(vec![1, 2, 3]),
         };
         let encoded2 = transaction2.to_noun(&mut stack);
-        let decoded2 = Transaction::from_noun(&mut stack, &encoded2).unwrap();
+        let decoded2 = Transaction::from_noun(&encoded2).unwrap();
         assert_eq!(transaction2, decoded2);
 
         let mut transaction3 = transaction;
@@ -435,7 +430,7 @@ mod complex_tests {
             trace: vec![404, 500],
         };
         let encoded3 = transaction3.to_noun(&mut stack);
-        let decoded3 = Transaction::from_noun(&mut stack, &encoded3).unwrap();
+        let decoded3 = Transaction::from_noun(&encoded3).unwrap();
         assert_eq!(transaction3, decoded3);
     }
 
@@ -452,16 +447,14 @@ mod complex_tests {
             FullDebugCell(&encoded.as_cell().unwrap())
         );
 
-        let decoded =
-            Option::<Result<Option<Vec<u64>>, String>>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Option::<Result<Option<Vec<u64>>, String>>::from_noun(&encoded).unwrap();
         assert_eq!(nested_data, decoded);
 
         // Test None case
         let none_data: Option<Result<Option<Vec<u64>>, String>> = None;
         let encoded_none = none_data.to_noun(&mut stack);
         let decoded_none =
-            Option::<Result<Option<Vec<u64>>, String>>::from_noun(&mut stack, &encoded_none)
-                .unwrap();
+            Option::<Result<Option<Vec<u64>>, String>>::from_noun(&encoded_none).unwrap();
         assert_eq!(none_data, decoded_none);
 
         // Test Error case
@@ -469,8 +462,7 @@ mod complex_tests {
             Some(Err("test error".to_string()));
         let encoded_err = err_data.to_noun(&mut stack);
         let decoded_err =
-            Option::<Result<Option<Vec<u64>>, String>>::from_noun(&mut stack, &encoded_err)
-                .unwrap();
+            Option::<Result<Option<Vec<u64>>, String>>::from_noun(&encoded_err).unwrap();
         assert_eq!(err_data, decoded_err);
     }
 
@@ -494,8 +486,7 @@ mod complex_tests {
             FullDebugCell(&encoded.as_cell().unwrap())
         );
 
-        let decoded =
-            Vec::<HashMap<String, Vec<Option<u64>>>>::from_noun(&mut stack, &encoded).unwrap();
+        let decoded = Vec::<HashMap<String, Vec<Option<u64>>>>::from_noun(&encoded).unwrap();
         assert_eq!(complex_collection, decoded);
     }
 }

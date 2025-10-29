@@ -1,4 +1,5 @@
 #![feature(cold_path)]
+#![feature(cfg_boolean_literals)]
 #![allow(dead_code)]
 
 extern crate lazy_static;

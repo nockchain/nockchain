@@ -1,0 +1,27 @@
+[package]
+name = "nockchain-math"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+argon2.workspace = true
+arrayref.workspace = true
+bs58.workspace = true
+bytes.workspace = true
+either.workspace = true
+hex-literal.workspace = true
+ibig.workspace = true
+nockapp.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+noun-serde.workspace = true
+num-traits.workspace = true
+once_cell.workspace = true
+quickcheck.workspace = true
+rkyv.workspace = true
+serde = { workspace = true, features = ["derive"], default-features = false }
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quickcheck.workspace = true

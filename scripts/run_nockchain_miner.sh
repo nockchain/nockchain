@@ -2,7 +2,7 @@
 source .env
 export RUST_LOG
 export MINIMAL_LOG_FORMAT
-export MINING_PUBKEY
+export MINING_PKH
 
 get_cpu_count() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -25,5 +25,4 @@ num_threads=$((threads > 1 ? threads : 1))
 
 echo "Starting nockchain miner with $num_threads mining threads:"
 
-nockchain --mining-pubkey ${MINING_PUBKEY} --mine --num-threads $num_threads
-
+nockchain --mining-pkh ${MINING_PKH} --mine --num-threads $num_threads

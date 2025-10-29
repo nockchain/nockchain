@@ -1,0 +1,29 @@
+[package]
+name = "nockapp-grpc-proto"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["server"]
+server = []
+client = []
+
+[dependencies]
+anyhow = { workspace = true }
+nockchain-math = { workspace = true }
+nockchain-types = { workspace = true }
+
+prost = { workspace = true }
+prost-build = { workspace = true }
+prost-types = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true }
+tonic-build = { workspace = true }
+tonic-health = { workspace = true }
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+glob = { workspace = true }
+prost-build = { workspace = true }
+tonic-build = { workspace = true }
+tonic-prost-build = { workspace = true }

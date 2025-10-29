@@ -1,15 +1,15 @@
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::Result;
 use nockvm::noun::{Cell, IndirectAtom, Noun, D};
 use tracing::debug;
 
+use crate::form::felt::Felt;
 use crate::form::fpoly::{fp_coseword, fpeval, lift_to_fpoly};
-use crate::form::{FPolySlice, Felt};
-use crate::hand::handle::{finalize_poly, new_handle_mut_felt, new_handle_mut_slice};
-use crate::hand::structs::HoonList;
-use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::{AtomExt, NounExt};
+use crate::form::handle::{finalize_poly, new_handle_mut_felt, new_handle_mut_slice};
+use crate::form::noun_ext::{AtomMathExt, NounMathExt};
+use crate::form::poly::FPolySlice;
+use crate::form::structs::HoonList;
 
 pub fn fp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
     let sam = slot(subject, 6)?;
@@ -21,7 +21,7 @@ pub fn fp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
         (FPolySlice::try_from(p), offset.as_felt(), order.as_atom())
     else {
         debug!("p not an fpoly, offset not a felt, or order not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let order_32: u32 = order_atom.as_u32()?;
     let root = Felt::ordered_root(order_32 as u64)?;
@@ -46,7 +46,7 @@ pub fn init_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
     for (i, felt_noun) in list_felt.enumerate() {
         let Ok(felt) = felt_noun.as_felt() else {
             debug!("list element not a felt");
-            return jet_err();
+            return Err(BAIL_FAIL);
         };
         res_poly[i] = *felt;
     }
@@ -61,7 +61,7 @@ pub fn fpeval_jet(context: &mut Context, subject: Noun) -> Result {
     let felt = slot(sam, 3)?;
     let (Ok(fp_poly), Ok(felt)) = (FPolySlice::try_from(fp), felt.as_felt()) else {
         debug!("fp or fq not an fpoly");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res, res_poly): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     let result = fpeval(fp_poly.0, *felt);
@@ -75,7 +75,7 @@ pub fn lift_to_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
 
     let Ok(belts) = HoonList::try_from(belt) else {
         debug!("belts not a list");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let belts_iter = belts.into_iter();
     let count = belts_iter.count();

@@ -9,7 +9,7 @@ use nockapp::noun::slab::NounSlab;
 use nockapp::NockAppError;
 use nockvm::noun::Noun;
 use rand::prelude::SliceRandom;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use crate::messages::NockchainDataRequest;
 use crate::metrics::NockchainP2PMetrics;
@@ -153,7 +153,7 @@ impl P2PState {
             .keys()
             .cloned()
             .collect::<Vec<ConnectionId>>();
-        inbound_connections_vec.shuffle(&mut rand::thread_rng());
+        inbound_connections_vec.shuffle(&mut rand::rng());
         let prune_actual = std::cmp::min(prune_n, inbound_connections_vec.len());
         for connection_id in &inbound_connections_vec[0..prune_actual] {
             metrics.incoming_connections_pruned.increment();
@@ -170,7 +170,7 @@ impl P2PState {
                 None
             }
         } else {
-            warn!("Not tracking {ip} but it is connected. Please inform the developers.");
+            trace!("Not tracking {ip} but it is connected. Please inform the developers.");
             None
         }
     }
@@ -184,7 +184,7 @@ impl P2PState {
     pub(crate) fn ping_succeeded(&mut self, connection: ConnectionId) {
         let addr = self.connection_address(connection);
         let Some(addr) = addr else {
-            warn!("No address for connection {connection}. Please inform the developers.");
+            trace!("No address for connection {connection}. Please inform the developers.");
             return;
         };
         let Some(ip) = addr.ip_addr() else {
@@ -199,7 +199,7 @@ impl P2PState {
     pub(crate) fn ping_failed(&mut self, connection: ConnectionId) -> u64 {
         let addr = self.connection_address(connection);
         let Some(addr) = addr else {
-            warn!("No address for connection {connection}. Please inform the developers.");
+            trace!("No address for connection {connection}. Please inform the developers.");
             return 0;
         };
         let Some(ip) = addr.ip_addr() else {

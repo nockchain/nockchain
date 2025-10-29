@@ -1,11 +1,13 @@
 use core::str;
 use std::iter::Iterator;
+use std::ptr::copy_nonoverlapping;
 
 use bincode::{Decode, Encode};
 use bytes::Bytes;
+use either::Either;
 use nockvm::interpreter::Error;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, IndirectAtom, NounAllocator, D};
+use nockvm::noun::{Atom, Cell, IndirectAtom, NounAllocator, D};
 use nockvm::serialization::{cue, jam};
 
 use crate::noun::slab::NounSlab;
@@ -277,5 +279,39 @@ impl IntoSlab for &str {
         let noun = self.into_noun();
         slab.set_root(noun);
         slab
+    }
+}
+
+pub trait NounAllocatorExt {
+    fn copy_into(&mut self, noun: Noun) -> Noun;
+}
+
+impl<A: NounAllocator> NounAllocatorExt for A {
+    fn copy_into(&mut self, noun: Noun) -> Noun {
+        let mut stack = Vec::with_capacity(32);
+        let mut res = D(0);
+        stack.push((noun, &mut res as *mut Noun));
+        while let Some((noun, dest)) = stack.pop() {
+            match noun.as_either_direct_allocated() {
+                Either::Left(d) => unsafe {
+                    *dest = d.as_noun();
+                },
+                Either::Right(a) => match a.as_either() {
+                    Either::Left(i) => unsafe {
+                        let word_size = i.size();
+                        let ia = self.alloc_indirect(word_size);
+                        copy_nonoverlapping(i.to_raw_pointer(), ia, word_size + 2);
+                        *dest = IndirectAtom::from_raw_pointer(ia).as_noun();
+                    },
+                    Either::Right(c) => unsafe {
+                        let cm = self.alloc_cell();
+                        *dest = Cell::from_raw_pointer(cm).as_noun();
+                        stack.push((c.tail(), &mut (*cm).tail));
+                        stack.push((c.head(), &mut (*cm).head));
+                    },
+                },
+            }
+        }
+        res
     }
 }

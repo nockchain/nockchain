@@ -1,11 +1,11 @@
 use std::time::Instant;
 
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 
 fn main() {
     let mut msg = [0u8; 65536];
-    OsRng.fill_bytes(&mut msg);
+    OsRng.try_fill_bytes(&mut msg).unwrap();
     let mut builder = equix::EquiXBuilder::new();
     builder.runtime(equix::RuntimeOption::CompileOnly);
 

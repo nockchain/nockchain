@@ -15,7 +15,7 @@ Install `rustup` by following their instructions at: [https://rustup.rs/](https:
 Ensure you have these dependencies installed if running on Debian/Ubuntu:
 ```
 sudo apt update
-sudo apt install clang llvm-dev libclang-dev make
+sudo apt install clang llvm-dev libclang-dev make protobuf-compiler
 ```
 Clone the repo and cd into it:
 ```
@@ -27,12 +27,30 @@ Copy the example environment file and rename it to `.env`:
 cp .env_example .env
 ```
 
+### For Linux
+
+Linux users **must** manually set their memory overcommit status:
+
+```
+# Enable always-overcommit:
+echo 'vm.overcommit_memory=1' | sudo tee /etc/sysctl.d/99-overcommit.conf
+
+# Reload kernel parameters:
+sudo sysctl --system
+# or:
+sudo sysctl -p /etc/sysctl.d/99-overcommit.conf
+```
+
+## Install Hoon Compiler
+
 Install `hoonc`, the Hoon compiler:
 
 ```
 make install-hoonc
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
+
+(If you build manually with `cargo build`, be sure to use `--release` for `hoonc`.)
 
 ## Install Wallet
 
@@ -65,11 +83,15 @@ nockchain-wallet keygen
 
 This will print a new public/private key pair + chain code to the console, as well as the seed phrase for the private key.
 
-Now, copy the public key to the `.env` file:
+Use `.env_example` as a template and copy your pkh to the `.env` file.
+
+Then, in your `.env` file, set the `MINING_PKH` variable to the address of the v1 key you generated.
 
 ```
-MINING_PUBKEY=<public-key>
+MINING_PKH=<address>
 ```
+
+The miner will generate v1 coinbases spendable by the `MINING_PKH`.
 
 ## Backup Keys
 
@@ -84,7 +106,7 @@ This will save your keys to a file called `keys.export` in the current directory
 They can be imported later with:
 
 ```
-nockchain-wallet import-keys --input keys.export
+nockchain-wallet import-keys --file keys.export
 ```
 
 ## Running Nodes
@@ -97,7 +119,7 @@ To run a Nockchain node without mining.
 bash ./scripts/run_nockchain_node.sh
 ```
 
-To run a Nockchain node and mine to a pubkey:
+To run a Nockchain node and mine to a pkh:
 
 ```
 bash ./scripts/run_nockchain_miner.sh
@@ -107,19 +129,23 @@ For launch, make sure you run in a fresh working directory that does not include
 
 ## FAQ
 
-### Can I use same pubkey if running multiple miners?
+### What is a pkh?
 
-Yes, you can use the same pubkey if running multiple miners.
+A pkh is a "pubkey hash", which is a shorter representation of a public key.  v1 pkhs are base58-encoded.
 
-### How do I change the mining pubkey?
+### Can I use same pkh if running multiple miners?
+
+Yes, you can use the same pkh if running multiple miners.
+
+### How do I change the mining pkh?
 
 Run `nockchain-wallet keygen` to generate a new key pair.
 
-If you are using the Makefile workflow, copy the public key to the `.env` file.
+If you are using the Makefile workflow, copy the pkh to the `.env` file.
 
 ### How do I run a testnet?
-To run a testnet on your machine, follow the same instructions as above, except use the fakenet
-scripts provided in the `scripts` directory.
+
+To run a testnet on your machine, follow the same instructions as above, except use the fakenet scripts provided in the `scripts` directory.
 
 Here's how to set it up:
 
@@ -226,8 +252,8 @@ Common errors and their solutions:
 To check your wallet balance:
 
 ```bash
-# List all notes by pubkey
-nockchain-wallet --nockchain-socket ./nockchain.sock list-notes-by-pubkey -p <your-pubkey>
+# List all notes by pkh
+nockchain-wallet list-notes-by-address <your-base58-address>
 ```
 
 ### How do I configure logging levels?
@@ -334,7 +360,7 @@ ssh -L 8087:backbone-us-south-mig:8086 backbone-us-south-mig
    - Check firewall settings
 
 3. **Mining Not Working**:
-   - Verify mining pubkey
+   - Verify mining pkh
    - Check --mine flag
    - Ensure peers are connected
    - Check system resources

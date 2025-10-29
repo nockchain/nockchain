@@ -3,8 +3,8 @@ use nockvm::interpreter::Context;
 use nockvm::jets::JetErr;
 use nockvm::noun::{Noun, D};
 
-use crate::form::fext::*;
-use crate::form::{Belt, Felt};
+use crate::form::belt::Belt;
+use crate::form::felt::{fmul_, Felt};
 use crate::utils::vec_to_hoon_list;
 
 #[derive(Copy, Clone)]

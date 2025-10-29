@@ -41,7 +41,23 @@
   ++  of-wall                                           ::  line list to tape
     |=  a=wall  ^-  tape
     ?~(a ~ "{i.a}\0a{$(a t.a)}")
+  ::                                                    ::  ++of-wain:format
+  ++  of-wain                                           ::  line list to cord
+    |=  tez=wain  ^-  cord
+    (rap 3 (join '\0a' tez))
   ::
+  ++  to-wall
+    |=  =tang
+    ^-  wall
+    (zing (turn (flop tang) (cury wash [0 80])))
+  ::
+  ++  to-wain
+    |=  =tang
+    ^-  wain
+    %+  turn
+      ^-  (list tape)
+      (zing (turn (flop tang) (cury wash [0 80])))
+    crip
   --
 ::
 ++  number  ^?
