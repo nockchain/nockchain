@@ -1394,7 +1394,7 @@
     ^-  hashable:tip5
     |^
     :+  hash+(hash:spend-condition spend-condition.form)
-      leaf+axis
+      leaf+axis.form
     (hashable-merk-proof merk-proof.form)
     ::
     ++  hashable-merk-proof
