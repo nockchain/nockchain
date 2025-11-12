@@ -167,46 +167,46 @@ jobs:
 
           # Create manifest generation script
           cat << 'EOF' > scripts/generate-manifest.sh
-#!/bin/bash
-set -euo pipefail
+          #!/bin/bash
+          set -euo pipefail
 
-BINARY=$1
-TARGET=$2
-CHANNEL=$3
-VERSION=$4
-COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
-DATE=$(date +%Y-%m-%d)
+          BINARY=$1
+          TARGET=$2
+          CHANNEL=$3
+          VERSION=$4
+          COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
+          DATE=$(date +%Y-%m-%d)
 
-# Calculate hashes from the packaged archive
-ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
+          # Calculate hashes from the packaged archive
+          ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
 
-if [ ! -f "$ARCHIVE_PATH" ]; then
-    echo "Error: Archive not found at $ARCHIVE_PATH" >&2
-    exit 1
-fi
+          if [ ! -f "$ARCHIVE_PATH" ]; then
+              echo "Error: Archive not found at $ARCHIVE_PATH" >&2
+              exit 1
+          fi
 
-BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
-SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
+          BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
+          SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
 
-# Generate URL
-URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
+          # Generate URL
+          URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
 
-# Generate manifest
-cat << MANIFEST_EOF
-manifest-version = "1"
-date = "$DATE"
+          # Generate manifest
+          cat << MANIFEST_EOF
+          manifest-version = "1"
+          date = "$DATE"
 
-[pkg.$BINARY]
-version = "$VERSION"
-components = ["core"]
+          [pkg.$BINARY]
+          version = "$VERSION"
+          components = ["core"]
 
-[pkg.$BINARY.target.$TARGET]
-available = true
-url = "$URL"
-hash_blake3 = "$BLAKE3_HASH"
-hash_sha1 = "$SHA1_HASH"
-MANIFEST_EOF
-EOF
+          [pkg.$BINARY.target.$TARGET]
+          available = true
+          url = "$URL"
+          hash_blake3 = "$BLAKE3_HASH"
+          hash_sha1 = "$SHA1_HASH"
+          MANIFEST_EOF
+          EOF
 
           chmod +x scripts/generate-manifest.sh
 
@@ -270,54 +270,54 @@ EOF
         run: |
           mkdir -p scripts
           cat << 'EOF' > scripts/collate-manifests.sh
-#!/bin/bash
-set -euo pipefail
+          #!/bin/bash
+          set -euo pipefail
 
-CHANNEL=$1
-MANIFEST_DIR=$2
+          CHANNEL=$1
+          MANIFEST_DIR=$2
 
-# Start with global metadata
-cat << HEADER_EOF
-manifest-version = "1"
-date = "$(date +%Y-%m-%d)"
+          # Start with global metadata
+          cat << HEADER_EOF
+          manifest-version = "1"
+          date = "$(date +%Y-%m-%d)"
 
-# Profiles
-[profiles.default]
-components = ["core"]
-[profiles.minimal]
-components = ["core"]
+          # Profiles
+          [profiles.default]
+          components = ["core"]
+          [profiles.minimal]
+          components = ["core"]
 
-HEADER_EOF
+          HEADER_EOF
 
-# Process manifests by package, then by target
-for package in hoonc hoon; do
-    echo "# $package binaries"
+          # Process manifests by package, then by target
+          for package in hoonc hoon; do
+              echo "# $package binaries"
 
-    # Find all manifests for this package
-    find "$MANIFEST_DIR" -name "${package}-*-manifest.toml" -type f | sort | while read manifest; do
-        if [ -f "$manifest" ]; then
-            echo "# From $(basename "$manifest")"
-            # Extract only the target-specific sections
-            awk -v pkg="$package" '
-                /^\[pkg\./ {
-                    if ($0 ~ "\\[pkg\\." pkg "\\.target\\.") {
-                        printing = 1
-                    } else {
-                        printing = 0
-                    }
-                }
-                /^available|^url|^hash_/ {
-                    if (printing) print
-                }
-                /^\[pkg\..*\.target\./ {
-                    if (printing) print
-                }
-            ' "$manifest"
-            echo ""
-        fi
-    done
-done
-EOF
+              # Find all manifests for this package
+              find "$MANIFEST_DIR" -name "${package}-*-manifest.toml" -type f | sort | while read manifest; do
+                  if [ -f "$manifest" ]; then
+                      echo "# From $(basename "$manifest")"
+                      # Extract only the target-specific sections
+                      awk -v pkg="$package" '
+                          /^\[pkg\./ {
+                              if ($0 ~ "\\[pkg\\." pkg "\\.target\\.") {
+                                  printing = 1
+                              } else {
+                                  printing = 0
+                              }
+                          }
+                          /^available|^url|^hash_/ {
+                              if (printing) print
+                          }
+                          /^\[pkg\..*\.target\./ {
+                              if (printing) print
+                          }
+                      ' "$manifest"
+                      echo ""
+                  fi
+              done
+          done
+          EOF
 
           chmod +x scripts/collate-manifests.sh
           
