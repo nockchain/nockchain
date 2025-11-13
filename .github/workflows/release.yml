@@ -71,12 +71,12 @@ jobs:
 
       - name: Build hoon
         run: |
-          cargo build --release --bin hoon --manifest-path crates/hoon/Cargo.toml --locked
+          cargo build --release --bin hoon --manifest-path crates/hoon/Cargo.toml
           file target/release/hoon
 
       - name: Build hoonc
         run: |
-          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
+          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml
           file target/release/hoonc
 
       - name: Set up GPG
