@@ -69,7 +69,7 @@ install-nockchain-wallet: assets/wal.jam
 	cargo install --locked --force --path crates/nockchain-wallet --bin nockchain-wallet
 
 .PHONY: install-nockchain-peek
-install-nockchain-peek: assets/nockchain-peek.jam
+install-nockchain-peek: assets/peek.jam
 	$(call show_env_vars)
 	cargo install --locked --force --path crates/nockchain-peek --bin nockchain-peek
 
@@ -84,7 +84,7 @@ build-trivial: ensure-dirs
 	echo '%trivial' > hoon/trivial.hoon
 	hoonc --arbitrary hoon/trivial.hoon
 
-HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/nockchain-peek.jam
+HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam
 
 .PHONY: nuke-hoonc-data
 nuke-hoonc-data:
@@ -131,8 +131,8 @@ assets/miner.jam: ensure-dirs hoon/apps/dumbnet/miner.hoon $(HOON_SRCS)
 	mv out.jam assets/miner.jam
 
 ## Build peek.jam with hoonc
-assets/nockchain-peek.jam: ensure-dirs hoon/apps/peek/peek.hoon $(HOON_SRCS)
+assets/peek.jam: ensure-dirs hoon/apps/peek/peek.hoon $(HOON_SRCS)
 	$(call show_env_vars)
-	rm -f assets/nockchain-peek.jam
+	rm -f assets/peek.jam
 	hoonc hoon/apps/peek/peek.hoon hoon
-	mv out.jam assets/nockchain-peek.jam
+	mv out.jam assets/peek.jam

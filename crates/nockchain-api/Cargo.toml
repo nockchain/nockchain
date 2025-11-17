@@ -1,0 +1,23 @@
+[package]
+name = "nockchain-api"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+tracing-heap = ["tracy-client"]
+malloc = []
+
+[dependencies]
+kernels = { workspace = true, features = ["dumb"] }
+nockapp.workspace = true
+nockchain.workspace = true
+nockvm.workspace = true
+zkvm-jetpack.workspace = true
+
+clap.workspace = true
+tikv-jemallocator = { workspace = true, features = [
+    "unprefixed_malloc_on_supported_platforms",
+] }
+tokio.workspace = true
+tracy-client = { workspace = true, optional = true }

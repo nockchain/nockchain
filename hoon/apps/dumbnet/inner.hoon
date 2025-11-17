@@ -366,6 +366,44 @@
       %-  some
       [u.highest u.block-id]
     ::
+        [%heaviest-chain-map ~]
+      ^-  (unit (unit (z-map page-number:t block-id:t)))
+      ``heaviest-chain.d.k
+    ::
+        [%heaviest-chain-blocks-range start=@ end=@ ~]
+      ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])))
+      =/  start-height  ((soft page-number:t) start.pole)
+      =/  end-height  ((soft page-number:t) end.pole)
+      ?~  start-height  ~
+      ?~  end-height  ~
+      ::  ensure start <= end
+      ?:  (gth u.start-height u.end-height)
+        ``~
+      ::  build list of blocks in range from heaviest chain
+      =/  result=(list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
+        =/  height  u.start-height
+        |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
+        ?:  (gth height u.end-height)
+          ~
+        ::  get block-id from heaviest chain
+        =/  block-id=(unit block-id:t)
+          (~(get z-by heaviest-chain.d.k) height)
+        ?~  block-id
+          $(height +(height))
+        ::  get block data
+        =/  local-block=(unit local-page:t)
+          (~(get z-by blocks.c.k) u.block-id)
+        ?~  local-block
+          $(height +(height))
+        ::  get transactions for this block
+        =/  block-txs=(unit (z-map tx-id:t tx:t))
+          (~(get z-by txs.c.k) u.block-id)
+        =/  txs-map  ?~(block-txs ~ u.block-txs)
+        ::  add to result list
+        :-  [height u.block-id (to-page:local-page:t u.local-block) txs-map]
+        $(height +(height))
+      ``result
+    ::
         [%desk-hash ~]
       ^-  (unit (unit (unit @uvI)))
       ``desk-hash.a.k
