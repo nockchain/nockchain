@@ -11,8 +11,8 @@
         pubkey=schnorr-pubkey:transact
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
+        memo-data=(unit @t)
         include-data=?
-        override-data=(unit @t)
     ==
 |^
 ^-  [spends:v1:transact hash:transact]
@@ -208,28 +208,28 @@
       ==
   ^-  seeds:v1:transact
   =/  [seeds=(list seed:v1:transact) gifts=@]
-  %+  roll  specs
-  |=  $:  spec=order:wt
-          _acc=[seeds=`(list seed:v1:transact)`~ gifts=0]
-      ==
-  =/  output-lock=lock:transact
-    [%pkh [m=1 (z-silt:zo ~[recipient.spec])]]~
-  =/  nd-map=note-data:v1:transact
-    ?:  include-data
-      ?~  override-data
-        %-  ~(put z-by:zo *note-data:v1:transact)
-        [%lock ^-(lock-data:wt [%0 output-lock])]
-      %-  ~(put z-by:zo *note-data:v1:transact)
-      [%memo ^-(memo-data:wt u.override-data)]
-    *note-data:v1:transact
-  :_  (add gifts.acc gift.spec)
-  :_  seeds.acc
-  :*  output-source=~
-      lock-root=(hash:lock:transact output-lock)
-      note-data=nd-map
-      gift=gift.spec
-      parent-hash=(hash:nnote:transact note)
-  ==
+    %+  roll  specs
+    |=  $:  spec=order:wt
+            acc=[seeds=(list seed:v1:transact) gifts=@]
+        ==
+    =/  output-lock=lock:transact
+      [%pkh [m=1 (z-silt:zo ~[recipient.spec])]]~
+    =/  =note-data:v1:transact
+      ?:  include-data
+        ?~  memo-data
+          =/  base-map  *note-data:v1:transact
+          (~(put by base-map) [%lock] ^-(lock-data:wt [%0 output-lock]))
+        =/  base-map  *note-data:v1:transact
+        (~(put by base-map) [%memo u.memo-data])
+      *note-data:v1:transact
+    :_  (add gifts.acc gift.spec)
+    :_  seeds.acc
+    :*  output-source=~
+        lock-root=(hash:lock:transact output-lock)
+        note-data
+        gift=gift.spec
+        parent-hash=(hash:nnote:transact note)
+    ==
   ~|  "assets in note must equal gift + fee + refund"
   ?>  =(assets.note (add gifts fee-portion))
   %-  z-silt:zo

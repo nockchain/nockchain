@@ -257,7 +257,7 @@ async fn main() -> Result<(), NockAppError> {
             index,
             hardened,
             include_data,
-            override_data,
+            memo_data,
             save_raw_tx,
         } => Wallet::create_tx(
             names.clone(),
@@ -267,7 +267,7 @@ async fn main() -> Result<(), NockAppError> {
             *index,
             *hardened,
             *include_data,
-            override_data.clone(),
+            memo_data.clone(),
             *save_raw_tx,
         ),
         Commands::SendTx { transaction } => Wallet::send_tx(transaction),
@@ -833,7 +833,7 @@ impl Wallet {
         index: Option<u64>,
         hardened: bool,
         include_data: bool,
-        override_data: Option<String>,
+        memo_data: Option<String>,
         save_raw_tx: bool,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
@@ -895,9 +895,9 @@ impl Wallet {
         };
         let include_data_noun = include_data.to_noun(&mut slab);
 
-        let override_data_noun = if let Some(override_data) = override_data {
-            let override_data_noun = override_data.to_noun(&mut slab);
-            T(&mut slab, &[SIG, override_data_noun])
+        let memo_data_noun = if let Some(memo_data) = memo_data {
+            let memo_data_noun = memo_data.to_noun(&mut slab);
+            T(&mut slab, &[SIG, memo_data_noun])
         } else {
             SIG
         };
@@ -906,8 +906,8 @@ impl Wallet {
         Self::wallet(
             "create-tx",
             &[
-                names_noun, order_noun, fee_noun, sign_key_noun, 
-                refund_noun, include_data_noun, override_data_noun, save_raw_tx_noun,
+                names_noun, order_noun, fee_noun, sign_key_noun, refund_noun, include_data_noun,
+                memo_data_noun, save_raw_tx_noun,
             ],
             Operation::Poke,
             &mut slab,
@@ -1743,7 +1743,7 @@ mod tests {
             index: None,
             hardened: false,
             include_data: true,
-            override_data: None,
+            memo_data: None,
             save_raw_tx: false,
         })
         .to_wire();
@@ -1802,7 +1802,7 @@ mod tests {
             index: None,
             hardened: false,
             include_data: true,
-            override_data: None,
+            memo_data: None,
             save_raw_tx: false,
         })
         .to_wire();

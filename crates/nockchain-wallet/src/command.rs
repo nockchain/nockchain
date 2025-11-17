@@ -369,8 +369,8 @@ pub enum Commands {
         )]
         include_data: bool,
         /// Override note data with custom string instead of lock data
-        #[arg(long = "override-data", value_name = "STRING")]
-        override_data: Option<String>,
+        #[arg(long = "memo-data", value_name = "MEMO")]
+        memo_data: Option<String>,
         /// For debugging purposes. If true, the raw-tx jam will be saved in the
         /// txs-debug folder in the current working directory.
         #[arg(long, default_value = "false")]
