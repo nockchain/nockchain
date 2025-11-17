@@ -12,6 +12,7 @@
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
+        override-data=(unit @t)
     ==
 |^
 ^-  [spends:v1:transact hash:transact]
@@ -213,20 +214,23 @@
       ==
   =/  output-lock=lock:transact
     [%pkh [m=1 (z-silt:zo ~[recipient.spec])]]~
-  =/  nd=note-data:v1:transact
-    ?.  include-data
-      ~
-    %-  ~(put z-by:zo *note-data:v1:transact)
-    [%lock ^-(lock-data:wt [%0 output-lock])]
+  =/  nd-map=note-data:v1:transact
+    ?:  include-data
+      ?~  override-data
+        %-  ~(put z-by:zo *note-data:v1:transact)
+        [%lock ^-(lock-data:wt [%0 output-lock])]
+      %-  ~(put z-by:zo *note-data:v1:transact)
+      [%memo ^-(memo-data:wt u.override-data)]
+    *note-data:v1:transact
   :_  (add gifts.acc gift.spec)
   :_  seeds.acc
   :*  output-source=~
       lock-root=(hash:lock:transact output-lock)
-      note-data=nd
+      note-data=nd-map
       gift=gift.spec
       parent-hash=(hash:nnote:transact note)
   ==
-  ~|  "assets in must equal gift + fee + refund"
+  ~|  "assets in note must equal gift + fee + refund"
   ?>  =(assets.note (add gifts fee-portion))
   %-  z-silt:zo
   seeds

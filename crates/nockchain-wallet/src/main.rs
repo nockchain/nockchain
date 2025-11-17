@@ -257,6 +257,7 @@ async fn main() -> Result<(), NockAppError> {
             index,
             hardened,
             include_data,
+            override_data,
             save_raw_tx,
         } => Wallet::create_tx(
             names.clone(),
@@ -266,6 +267,7 @@ async fn main() -> Result<(), NockAppError> {
             *index,
             *hardened,
             *include_data,
+            override_data.clone(),
             *save_raw_tx,
         ),
         Commands::SendTx { transaction } => Wallet::send_tx(transaction),
@@ -831,6 +833,7 @@ impl Wallet {
         index: Option<u64>,
         hardened: bool,
         include_data: bool,
+        override_data: Option<String>,
         save_raw_tx: bool,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
@@ -891,13 +894,20 @@ impl Wallet {
             SIG
         };
         let include_data_noun = include_data.to_noun(&mut slab);
+
+        let override_data_noun = if let Some(override_data) = override_data {
+            let override_data_noun = override_data.to_noun(&mut slab);
+            T(&mut slab, &[SIG, override_data_noun])
+        } else {
+            SIG
+        };
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
 
         Self::wallet(
             "create-tx",
             &[
-                names_noun, order_noun, fee_noun, sign_key_noun, refund_noun, include_data_noun,
-                save_raw_tx_noun,
+                names_noun, order_noun, fee_noun, sign_key_noun, 
+                refund_noun, include_data_noun, override_data_noun, save_raw_tx_noun,
             ],
             Operation::Poke,
             &mut slab,
@@ -1722,6 +1732,7 @@ mod tests {
             None,
             false,
             true,
+            None::<String>,
             false,
         )?;
         let wire = WalletWire::Command(Commands::CreateTx {
@@ -1732,6 +1743,7 @@ mod tests {
             index: None,
             hardened: false,
             include_data: true,
+            override_data: None,
             save_raw_tx: false,
         })
         .to_wire();
@@ -1768,6 +1780,7 @@ mod tests {
             None,
             false,
             true,
+            None,
             false,
         )?;
 
@@ -1789,6 +1802,7 @@ mod tests {
             index: None,
             hardened: false,
             include_data: true,
+            override_data: None,
             save_raw_tx: false,
         })
         .to_wire();

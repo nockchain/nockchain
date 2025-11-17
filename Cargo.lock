@@ -3790,6 +3790,7 @@ dependencies = [
  "intmap",
  "nockvm",
  "nockvm_macros",
+ "noun-serde",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -3954,7 +3955,6 @@ dependencies = [
  "either",
  "hex-literal",
  "ibig",
- "nockapp",
  "nockvm",
  "nockvm_macros",
  "noun-serde",
@@ -4041,7 +4041,9 @@ name = "nockvm"
 version = "0.1.0"
 dependencies = [
  "autotools",
+ "bincode",
  "bitvec",
+ "bytes",
  "cc",
  "criterion",
  "either",
@@ -4057,6 +4059,7 @@ dependencies = [
  "num-derive",
  "num-traits",
  "rand 0.9.2",
+ "serde",
  "signal-hook",
  "slotmap",
  "static_assertions",
@@ -4125,8 +4128,8 @@ dependencies = [
 name = "noun-serde"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ibig",
- "nockapp",
  "nockvm",
  "noun-serde-derive",
  "thiserror 2.0.16",
@@ -7751,7 +7754,6 @@ dependencies = [
  "either",
  "hex-literal",
  "ibig",
- "nockapp",
  "nockchain-math",
  "nockvm",
  "nockvm_macros",

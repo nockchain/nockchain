@@ -227,6 +227,7 @@
 +$  lock-data
   $%  [%0 =lock:transact]
   ==
++$  memo-data  @t
 ::
 +$  transaction-tree
   $+  wallet-transaction-tree
@@ -388,6 +389,7 @@
                                                           ::  if the lock is not a standard 1-of-1 pkh or coinbase, the wallet won't
                                                           ::  be able to guess it, so the funds could be lost forever if the user.
                                                           ::  doesn't keep track of the lock.
+            override-data=(unit @t)                       ::  optional custom string to override note data instead of lock data
             save-raw-tx=?                                 ::  if %.y, saves jams of the raw-tx and its hashable into a txs-debug folder
                                                           ::  in the current working directory
         ==
