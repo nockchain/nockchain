@@ -896,7 +896,11 @@ impl Wallet {
         };
         let include_data_noun = include_data.to_noun(&mut slab);
 
-        // Memo: Create proper Hoon (list @ux) from string bytes
+        // Validate memo data
+        if let Some(err) = validate_memo(&memo_data) {
+            return err;
+        }
+        // Memo: Option<String> to (list @ux)
         let memo_data_noun = if let Some(memo_str) = memo_data.as_ref() {
             let bytes = memo_str.as_bytes();
             let mut list = D(0);
@@ -1182,6 +1186,25 @@ impl Wallet {
         let mut slab = NounSlab::new();
         Self::wallet("show-master-zprv", &[], Operation::Poke, &mut slab)
     }
+}
+
+fn validate_memo(memo_data: &Option<String>) -> Option<Result<(NounSlab, Operation), NockAppError>> {
+    if let Some(memo) = memo_data {
+        let memo_bytes = memo.as_bytes().len();
+        let estimated_leaves = memo_bytes + 128;
+        if estimated_leaves > 2048 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(format!(
+                "Memo too large: {} bytes would use ~{} leaves (max 2,048 leaves)",
+                memo_bytes, estimated_leaves
+            )))));
+        }
+        if memo_bytes == 0 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(
+                "Memo cannot be empty. Omit --memo-data flag instead.".to_string(),
+            ))));
+        }
+    }
+    None
 }
 
 pub async fn wallet_data_dir() -> Result<PathBuf, NockAppError> {
