@@ -1,3 +1,4 @@
+pub mod block_explorer;
 mod cache;
 pub mod client;
 pub mod driver;

@@ -57,3 +57,100 @@ message TransactionAcceptedResponse {
     common.v1.ErrorStatus error = 2;
   }
 }
+
+service NockchainBlockService {
+  rpc GetBlocks(GetBlocksRequest)
+    returns (GetBlocksResponse);
+  rpc GetTransactionBlock(GetTransactionBlockRequest)
+    returns (GetTransactionBlockResponse);
+  rpc GetTransactionDetails(GetTransactionDetailsRequest)
+    returns (GetTransactionDetailsResponse);
+}
+
+message GetBlocksRequest {
+  common.v1.PageRequest page = 1;
+}
+
+message GetBlocksResponse {
+  oneof result {
+    BlocksData blocks = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message BlocksData {
+  repeated BlockEntry blocks = 1;
+  uint64 current_height = 2;
+  common.v1.PageResponse page = 3;
+}
+
+message BlockEntry {
+  common.v1.Hash block_id = 1;
+  uint64 height = 2;
+  common.v1.Hash parent = 3;
+  uint64 timestamp = 4;
+  repeated common.v1.Base58Hash tx_ids = 5;
+}
+
+message GetTransactionBlockRequest {
+  common.v1.Base58Hash tx_id = 1;
+}
+
+message GetTransactionBlockResponse {
+  oneof result {
+    TransactionBlockData block = 1;
+    TransactionPending pending = 2;
+    common.v1.ErrorStatus error = 3;
+  }
+}
+
+message TransactionBlockData {
+  common.v1.Hash block_id = 1;
+  uint64 height = 2;
+  common.v1.Hash parent = 3;
+  uint64 timestamp = 4;
+}
+
+message TransactionPending {
+  // Transaction exists in mempool but not yet in a block
+}
+
+message GetTransactionDetailsRequest {
+  common.v1.Base58Hash tx_id = 1;
+}
+
+message GetTransactionDetailsResponse {
+  oneof result {
+    TransactionDetails details = 1;
+    TransactionPending pending = 2;
+    common.v1.ErrorStatus error = 3;
+  }
+}
+
+message TransactionDetails {
+  string tx_id = 1;
+  common.v1.Hash block_id = 2;
+  uint64 height = 3;
+  uint64 timestamp = 4;
+  uint64 version = 5;
+  uint64 size_bytes = 6;
+  common.v1.Nicks total_input = 7;
+  common.v1.Nicks total_output = 8;
+  common.v1.Nicks fee = 9;
+  repeated TransactionInput inputs = 10;
+  repeated TransactionOutput outputs = 11;
+  common.v1.Hash parent = 12;
+}
+
+message TransactionInput {
+  string note_name_b58 = 1;
+  common.v1.Nicks amount = 2;
+  string source_tx_id = 3;
+  bool coinbase = 4;
+}
+
+message TransactionOutput {
+  string note_name_b58 = 1;
+  common.v1.Nicks amount = 2;
+  string lock_summary = 3;
+}

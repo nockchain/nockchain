@@ -39,6 +39,18 @@ pub enum NockAppGrpcError {
 
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Transaction pending")]
+    TxPending,
+
+    #[error("Transaction not found")]
+    NotFound,
+
+    #[error("Transaction prefix matched multiple transactions: {0}")]
+    TxPrefixAmbiguous(String),
+
+    #[error("Transaction prefix too short (minimum {0} characters)")]
+    TxPrefixTooShort(usize),
 }
 
 impl From<NockAppGrpcError> for tonic::Status {
@@ -109,6 +121,26 @@ impl From<NockAppGrpcError> for tonic::Status {
                 tonic::Code::Internal,
                 format!("Serialization error: {}", msg),
                 ErrorCode::InternalError,
+            ),
+            TxPending => (
+                tonic::Code::FailedPrecondition,
+                "Transaction pending".to_string(),
+                ErrorCode::PeekReturnedNoData,
+            ),
+            NotFound => (
+                tonic::Code::NotFound,
+                "Transaction not found".to_string(),
+                ErrorCode::NotFound,
+            ),
+            TxPrefixAmbiguous(matches) => (
+                tonic::Code::InvalidArgument,
+                format!("Transaction prefix is ambiguous; matches: {}", matches),
+                ErrorCode::InvalidRequest,
+            ),
+            TxPrefixTooShort(min) => (
+                tonic::Code::InvalidArgument,
+                format!("Transaction prefix too short (minimum {} characters)", min),
+                ErrorCode::InvalidRequest,
             ),
         };
 

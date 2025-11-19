@@ -52,7 +52,7 @@ async fn prepare_file_write(path: &str, contents: &[u8]) -> std::io::Result<File
 
 async fn write_then_flush(path: &str, contents: &[u8]) -> std::io::Result<()> {
     debug!("file driver: writing {} bytes to: {}", contents.len(), path);
-    let mut file = prepare_file_write(path, contents).await?;
+    let file = prepare_file_write(path, contents).await?;
     file.sync_all().await
 }
 

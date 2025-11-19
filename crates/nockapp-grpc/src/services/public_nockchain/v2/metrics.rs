@@ -108,7 +108,83 @@ metrics_struct![
     (balance_cache_address_hit, "nockchain_public_grpc.balance_cache_address_hit", Count),
     (balance_cache_address_miss, "nockchain_public_grpc.balance_cache_address_miss", Count),
     (balance_cache_first_name_hit, "nockchain_public_grpc.balance_cache_first_name_hit", Count),
-    (balance_cache_first_name_miss, "nockchain_public_grpc.balance_cache_first_name_miss", Count)
+    (balance_cache_first_name_miss, "nockchain_public_grpc.balance_cache_first_name_miss", Count),
+    (
+        block_explorer_cache_initialize_time,
+        "nockchain_public_grpc.block_explorer.cache_initialize_time", TimingCount
+    ),
+    (
+        block_explorer_cache_initialize_error,
+        "nockchain_public_grpc.block_explorer.cache_initialize_error", Count
+    ),
+    (
+        block_explorer_cache_refresh_time,
+        "nockchain_public_grpc.block_explorer.cache_refresh_time", TimingCount
+    ),
+    (
+        block_explorer_cache_refresh_error,
+        "nockchain_public_grpc.block_explorer.cache_refresh_error", Count
+    ),
+    (
+        block_explorer_cache_backfill_error,
+        "nockchain_public_grpc.block_explorer.cache_backfill_error", Count
+    ),
+    (
+        block_explorer_get_blocks_success,
+        "nockchain_public_grpc.block_explorer.get_blocks.success", TimingCount
+    ),
+    (
+        block_explorer_get_blocks_error, "nockchain_public_grpc.block_explorer.get_blocks.error",
+        TimingCount
+    ),
+    (
+        block_explorer_get_blocks_error_invalid_request,
+        "nockchain_public_grpc.block_explorer.get_blocks.error.invalid_request", Count
+    ),
+    (
+        block_explorer_get_blocks_error_internal,
+        "nockchain_public_grpc.block_explorer.get_blocks.error.internal", Count
+    ),
+    (
+        block_explorer_get_transaction_block_success,
+        "nockchain_public_grpc.block_explorer.get_transaction_block.success", TimingCount
+    ),
+    (
+        block_explorer_get_transaction_block_error,
+        "nockchain_public_grpc.block_explorer.get_transaction_block.error", TimingCount
+    ),
+    (
+        block_explorer_get_transaction_block_not_found,
+        "nockchain_public_grpc.block_explorer.get_transaction_block.not_found", Count
+    ),
+    (
+        block_explorer_get_transaction_block_pending,
+        "nockchain_public_grpc.block_explorer.get_transaction_block.pending", Count
+    ),
+    (
+        block_explorer_get_transaction_block_invalid_request,
+        "nockchain_public_grpc.block_explorer.get_transaction_block.invalid_request", Count
+    ),
+    (
+        block_explorer_get_transaction_details_success,
+        "nockchain_public_grpc.block_explorer.get_transaction_details.success", TimingCount
+    ),
+    (
+        block_explorer_get_transaction_details_error,
+        "nockchain_public_grpc.block_explorer.get_transaction_details.error", TimingCount
+    ),
+    (
+        block_explorer_get_transaction_details_not_found,
+        "nockchain_public_grpc.block_explorer.get_transaction_details.not_found", Count
+    ),
+    (
+        block_explorer_get_transaction_details_pending,
+        "nockchain_public_grpc.block_explorer.get_transaction_details.pending", Count
+    ),
+    (
+        block_explorer_get_transaction_details_invalid_request,
+        "nockchain_public_grpc.block_explorer.get_transaction_details.invalid_request", Count
+    )
 ];
 
 static METRICS: OnceCell<Arc<NockchainGrpcApiMetrics>> = OnceCell::new();
