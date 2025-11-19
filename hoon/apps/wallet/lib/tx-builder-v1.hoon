@@ -2,6 +2,7 @@
 /=  utils  /apps/wallet/lib/utils
 /=  wt  /apps/wallet/lib/types
 /=  zo  /common/zoon
+/=  *  /common/zose 
 ::
 ::  Builds a simple fan-in transaction
 |=  $:  names=(list nname:transact)
@@ -11,7 +12,7 @@
         pubkey=schnorr-pubkey:transact
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
-        memo-data=(unit @t)
+        memo-data=(list @ux)
         include-data=?
     ==
 |^
@@ -172,6 +173,12 @@
       gift=refund
       parent-hash=(hash:nnote:transact note)
   ==
+++  bytes-to-text
+  |=  bytes=(list @ux)
+  ^-  @t
+  =/  chars  (turn bytes |=(b=@ux `@tD`b))
+  (crip chars) :: Simple concatenation of @ux bytes back to @t
+
 ++  allocate-from-note
   |=  [orders=(list order:wt) note=nnote:transact assets=@ fee=@]
   ^-  [orders=(list order:wt) seeds=(list order:wt) fee=@]
@@ -207,29 +214,36 @@
           fee-portion=@
       ==
   ^-  seeds:v1:transact
+  ~&  "Processing specs for note with assets: {(trip (format-ui:common:display:utils assets.note))}"
   =/  [seeds=(list seed:v1:transact) gifts=@]
     %+  roll  specs
     |=  $:  spec=order:wt
             acc=[seeds=(list seed:v1:transact) gifts=@]
         ==
+    ~&  "Processing spec with gift: {(trip (format-ui:common:display:utils gift.spec))}"
     =/  output-lock=lock:transact
       [%pkh [m=1 (z-silt:zo ~[recipient.spec])]]~
+    ~&  "Generated output-lock for recipient"
     =/  =note-data:v1:transact
       ?:  include-data
         ?~  memo-data
-          =/  base-map  *note-data:v1:transact
-          (~(put by base-map) [%lock] ^-(lock-data:wt [%0 output-lock]))
-        =/  base-map  *note-data:v1:transact
-        (~(put by base-map) [%memo u.memo-data])
-      *note-data:v1:transact
+          ~&  "Adding lock data to note-data for spec"
+          (~(put z-by:zo *note-data:v1:transact) %lock ^-(lock-data:wt [%0 output-lock]))
+        ~&  "Encoding memo --{(trip (bytes-to-text memo-data))}-- as bytes"
+        (~(put z-by:zo *note-data:v1:transact) %memo ^-(memo-data:wt memo-data))
+      ~
+    =/  =seed:v1:transact
+      :*  output-source=~
+          lock-root=(hash:lock:transact output-lock)
+          note-data
+          gift=gift.spec
+          parent-hash=(hash:nnote:transact note)
+      ==
+    ~&  "Created seed with gift: {(trip (format-ui:common:display:utils gift.spec))}"
     :_  (add gifts.acc gift.spec)
-    :_  seeds.acc
-    :*  output-source=~
-        lock-root=(hash:lock:transact output-lock)
-        note-data
-        gift=gift.spec
-        parent-hash=(hash:nnote:transact note)
-    ==
+    [seed seeds.acc]
+  ~&  "Total gifts: {(trip (format-ui:common:display:utils gifts))}, fee-portion: {(trip (format-ui:common:display:utils fee-portion))}"
+  ~&  "Total note assets: {(trip (format-ui:common:display:utils assets.note))}"
   ~|  "assets in note must equal gift + fee + refund"
   ?>  =(assets.note (add gifts fee-portion))
   %-  z-silt:zo

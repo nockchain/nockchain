@@ -1,6 +1,7 @@
 /=  transact  /common/tx-engine
 /=  zo  /common/zoon
 /=  *  /common/zose
+/=  *  /common/zeke
 /=  dumb  /apps/dumbnet/lib/types
 /=  s10  /apps/wallet/lib/s10
 |%
@@ -227,7 +228,16 @@
 +$  lock-data
   $%  [%0 =lock:transact]
   ==
-+$  memo-data  @t
+::  Memos: Optional memo data stored in note-data
+::  this data is stored under the %memo key in $note-data.
++$  memo-data  (list @ux)
+::
+++  memo
+  =<  form
+  |%
+  +$  form  [%memo memo-data]
+  ++  hash  |=(=form (hash-hashable:tip5 leaf+form))
+  --
 ::
 +$  transaction-tree
   $+  wallet-transaction-tree
@@ -389,7 +399,7 @@
                                                           ::  if the lock is not a standard 1-of-1 pkh or coinbase, the wallet won't
                                                           ::  be able to guess it, so the funds could be lost forever if the user.
                                                           ::  doesn't keep track of the lock.
-            memo-data=(unit @t)                           ::  optional custom string to override note data instead of lock data
+            memo-data=(list @ux)                   ::  optional custom string to override note data instead of lock data
             save-raw-tx=?                                 ::  if %.y, saves jams of the raw-tx and its hashable into a txs-debug folder
                                                           ::  in the current working directory
         ==

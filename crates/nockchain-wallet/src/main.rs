@@ -31,7 +31,8 @@ use nockapp_grpc::{private_nockapp, public_nockchain};
 use nockchain_types::common::{Hash, SchnorrPubkey, TimelockRangeAbsolute, TimelockRangeRelative};
 use nockchain_types::{v0, v1};
 use nockvm::jets::cold::Nounable;
-use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, SIG, T, YES};
+use nockvm::mem;
+use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, NONE, SIG, T, YES};
 use noun_serde::prelude::*;
 use noun_serde::NounDecodeError;
 use termimad::MadSkin;
@@ -895,12 +896,19 @@ impl Wallet {
         };
         let include_data_noun = include_data.to_noun(&mut slab);
 
-        let memo_data_noun = if let Some(memo_data) = memo_data {
-            let memo_data_noun = memo_data.to_noun(&mut slab);
-            T(&mut slab, &[SIG, memo_data_noun])
+        // Memo: Create proper Hoon (list @ux) from string bytes
+        let memo_data_noun = if let Some(memo_str) = memo_data.as_ref() {
+            let bytes = memo_str.as_bytes();
+            let mut list = D(0);
+            for &byte in bytes.iter().rev() {
+                let byte_noun = D(u64::from(byte));
+                list = Cell::new(&mut slab, byte_noun, list).as_noun();
+            }
+            list
         } else {
             SIG
         };
+
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
 
         Self::wallet(
