@@ -1,11 +1,11 @@
 use bytes::Bytes;
-use nockapp::utils::bytes::Byts;
-use nockapp::{AtomExt, Noun};
+use nockchain_math::crypto::argon2::Byts;
+use nockvm::ext::AtomExt;
 use nockvm::interpreter::Context;
 use nockvm::jets::cold::Nounable;
 use nockvm::jets::util::{slot, BAIL_EXIT};
 use nockvm::jets::JetErr;
-use nockvm::noun::Atom;
+use nockvm::noun::{Atom, Noun};
 
 use crate::form::crypto::argon2::{argon2_hook, Argon2Args};
 
@@ -34,7 +34,7 @@ pub fn argon2_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
 pub mod test {
     use hex_literal::hex;
     use ibig::UBig;
-    use nockapp::utils::make_tas;
+    use nockvm::ext::make_tas;
     use nockvm::jets::util::test::{assert_jet_door, init_context};
     use nockvm::noun::{D, T};
 

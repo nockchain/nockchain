@@ -1,14 +1,11 @@
+use nockchain_math::belt::*;
 use nockvm::interpreter::Context;
 use nockvm::jets::bits::util::rip;
-use nockvm::jets::util::{bite, slot};
+use nockvm::jets::util::{bite, slot, BAIL_FAIL};
 use nockvm::jets::Result;
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Noun, D, NO, T, YES};
 use tracing::debug;
-
-use crate::form::math::base::*;
-use crate::form::poly::*;
-use crate::jets::utils::*;
 
 // base field jets
 //
@@ -30,7 +27,7 @@ pub fn badd_jet(context: &mut Context, subject: Noun) -> Result {
 
     let (Ok(a_atom), Ok(b_atom)) = (a.as_atom(), b.as_atom()) else {
         debug!("a or b was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (a_belt, b_belt): (Belt, Belt) = (a_atom.as_u64()?.into(), b_atom.as_u64()?.into());
     Ok(Atom::new(&mut context.stack, (a_belt + b_belt).into()).as_noun())
@@ -43,7 +40,7 @@ pub fn bsub_jet(context: &mut Context, subject: Noun) -> Result {
 
     let (Ok(a_atom), Ok(b_atom)) = (a.as_atom(), b.as_atom()) else {
         debug!("a or b was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (a_belt, b_belt): (Belt, Belt) = (a_atom.as_u64()?.into(), b_atom.as_u64()?.into());
 
@@ -54,7 +51,7 @@ pub fn bneg_jet(context: &mut Context, subject: Noun) -> Result {
     let a = slot(subject, 6)?;
     let Ok(a_atom) = a.as_atom() else {
         debug!("a was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let a_belt: Belt = a_atom.as_u64()?.into();
 
@@ -68,7 +65,7 @@ pub fn bmul_jet(context: &mut Context, subject: Noun) -> Result {
 
     let (Ok(a_atom), Ok(b_atom)) = (a.as_atom(), b.as_atom()) else {
         debug!("a or b was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (a_belt, b_belt): (Belt, Belt) = (a_atom.as_u64()?.into(), b_atom.as_u64()?.into());
 
@@ -80,7 +77,7 @@ pub fn ordered_root_jet(context: &mut Context, subject: Noun) -> Result {
 
     let Ok(n_atom) = n.as_atom() else {
         debug!("n was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let n_u64 = Belt(n_atom.as_u64()?);
     // TODO: clean this up
@@ -95,7 +92,7 @@ pub fn bpow_jet(context: &mut Context, subject: Noun) -> Result {
 
     let (Ok(x_atom), Ok(n_atom)) = (x.as_atom(), n.as_atom()) else {
         debug!("x or n was not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (x_belt, n_belt) = (x_atom.as_u64()?, n_atom.as_u64()?);
 

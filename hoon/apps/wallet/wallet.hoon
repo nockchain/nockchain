@@ -1,6 +1,5 @@
 ::  /ker/wallet/wallet: nockchain wallet
 /=  bip39  /common/bip39
-/=  slip10  /common/slip10
 /=  m  /common/markdown/types
 /=  md  /common/markdown/markdown
 /=  transact  /common/tx-engine
@@ -11,16 +10,16 @@
 /=  *  /common/wrapper
 /=  wt  /apps/wallet/lib/types
 /=  wutils  /apps/wallet/lib/utils
-/=  tx-builder  /apps/wallet/lib/tx-builder
+/=  tx-builder  /apps/wallet/lib/tx-builder-v1
+/=  s10  /apps/wallet/lib/s10
 =>
 =|  bug=_&
 |%
-++  utils  ~(. wutils bug)
 ::
 ::  re-exporting names from wallet types while passing the bug flag
+++  utils  ~(. wutils bug)
 ++  debug  debug:utils
 ++  warn  warn:utils
-++  s10  s10:utils
 ++  moat  (keep state:wt)
 --
 ::
@@ -29,24 +28,30 @@
 |_  =state:wt
 +*  v  ~(. vault:utils state)
     d  ~(. draw:utils state)
-    e  ~(. edit:utils state)
     p  ~(. plan:utils transaction-tree.state)
 ::
 ++  load
   |=  old=versioned-state:wt
   ^-  state:wt
   |^
+  |-
+  ?:  ?=(%4 -.old)
+    old
+  ~>  %slog.[0 'load: State upgrade required']
   ?-  -.old
-    %0  state-0-1
-    %1  old
+    %0  $(old state-0-1)
+    %1  $(old state-1-2)
+    %2  $(old state-2-3)
+    %3  $(old state-3-4)
   ==
   ::
   ++  state-0-1
-    ^-  state:wt
+    ^-  state-1:wt
     ?>  ?=(%0 -.old)
+    ~>  %slog.[0 'upgrade version 0 to 1']
     :*  %1
         balance.old
-        master.old
+        active-master.old
         keys.old
         last-block.old
         peek-requests.old
@@ -56,19 +61,125 @@
         transaction-tree.old
         pending-commands.old
     ==
+  ::
+  ++  state-1-2
+    ^-  state-2:wt
+    ?>  ?=(%1 -.old)
+    ~>  %slog.[0 'upgrade version 1 to 2']
+    :*  %2
+        balance=*balance-v2:wt
+        active-master.old
+        keys.old
+        last-block.old
+        peek-requests.old
+        active-transaction.old
+        active-input.old
+        active-seed.old
+        transaction-tree.old
+        pending-commands.old
+    ==
+  ::
+  ++  state-2-3
+    ^-  state-3:wt
+    ?>  ?=(%2 -.old)
+    ~>  %slog.[0 'upgrade version 2 to 3']
+    =/  new-keys=keys:wt
+      %+  roll  ~(tap of keys.old)
+      |=  [[=trek m=meta-v2:wt] new=keys:wt]
+      %-  ~(put of new)
+      :-  trek
+      ^-  meta:wt
+      ?.  ?=(%coil -.m)
+        m
+      [%coil [%0 +.m]]
+    =/  new-master=active:wt
+      ?~  active-master.old  ~
+      `[%0 +.u.active-master.old]
+    :*  %3
+        balance.old
+        new-master
+        new-keys
+        last-block.old
+        peek-requests.old
+        active-transaction.old
+        active-input.old
+        active-seed.old
+        transaction-tree.old
+        pending-commands.old
+    ==
+  ::
+  ++  state-3-4
+    ^-  state:wt
+    ?>  ?=(%3 -.old)
+    ~>  %slog.[0 'upgrade version 3 to 4']
+    :*  %4
+        balance.old
+        :: delete active master
+        active-master.old
+        keys.old
+    ==
   --
 ::
 ++  peek
-  |=  =path
+  |=  arg=path
   ^-  (unit (unit *))
-  %-  (debug "peek: {<state>}")
-  ?+    path  ~
+  %-  (debug "peek: {<arg>}")
+  =/  =(pole)  arg
+  ?+  pole  ~
     ::
       [%balance ~]
     ``balance.state
     ::
       [%state ~]
     ``state
+    ::
+    ::  returns a list of tracked first names
+      [%tracked-names include-watch-only=? ~]
+    :+  ~
+      ~
+    =/  signing-names=(list @t)
+      %+  roll
+        ~(coils get:v %pub)
+      |=  [=coil:wt names=(list @t)]
+      ::  exclude names for v0 keys because those are handled through tracked pubkeys
+      ?:  ?=(%0 -.coil)
+        names
+      :+  (to-b58:hash:transact (simple-first-name:coil:wt coil))
+        (to-b58:hash:transact (coinbase-first-name:coil:wt coil))
+      names
+    ?.  include-watch-only.pole
+      signing-names
+    %+  weld  signing-names
+    %+  roll  watch-addrs:get:v
+    |=  [addr=@t first-names=(list @t)]
+    ::  v0 keys have at least 132 bytes
+    ?:  (gte (met 3 addr) 132)
+      ::  exclude names for v0 keys because those are handled through tracked pubkeys
+      first-names
+    =+  pubkey-hash=(from-b58:hash:transact addr)
+    :+  (to-b58:hash:transact (simple:v1:first-name:transact pubkey-hash))
+      (to-b58:hash:transact (coinbase:v1:first-name:transact pubkey-hash))
+    first-names
+    ::
+    ::  returns a list of pubkeys
+      [%tracked-pubkeys include-watch-only=? ~]
+    :+  ~
+      ~
+    =;  signing-keys=(list @t)
+      ?.  include-watch-only.pole
+        signing-keys
+      %+  weld  signing-keys
+      %+  murn  watch-addrs:get:v
+      |=  addr=@t
+      ?:  (lth (met 3 addr) 132)
+        ~
+      `addr
+    %+  murn
+      ~(coils get:v %pub)
+    |=  =coil:wt
+    ?:  ?=(%1 -.coil)
+      ~
+    `~(address to-b58:coil:wt coil)
   ==
 ::
 ++  poke
@@ -94,16 +205,14 @@
       (do-grpc-bind cause tag.wir)
     [effs state]
   ::
-      [%poke ?(%one-punch %sys %wallet) ver=@ *]
+      [%poke ?(%one-punch %sys %wallet %file) ver=@ *]
     ?+    -.cause  ~|("unsupported cause: {<-.cause>}" !!)
         %show                  (show:utils state path.cause)
         %keygen                (do-keygen cause)
         %derive-child          (do-derive-child cause)
-        %sign-tx               (do-sign-tx cause)
-        %scan                  (do-scan cause)
         %list-notes            (do-list-notes cause)
-        %list-notes-by-pubkey  (do-list-notes-by-pubkey cause)
-        %list-notes-by-pubkey-csv  (do-list-notes-by-pubkey-csv cause)
+        %list-notes-by-address  (do-list-notes-by-address cause)
+        %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
         %create-tx             (do-create-tx cause)
         %update-balance-grpc   (do-update-balance-grpc cause)
         %sign-message          (do-sign-message cause)
@@ -112,28 +221,27 @@
         %verify-hash           (do-verify-hash cause)
         %import-keys           (do-import-keys cause)
         %import-extended       (do-import-extended cause)
+        %watch-address  (do-watch-address cause)
         %export-keys           (do-export-keys cause)
         %export-master-pubkey  (do-export-master-pubkey cause)
         %import-master-pubkey  (do-import-master-pubkey cause)
-        %gen-master-privkey    (do-gen-master-privkey cause)
-        %gen-master-pubkey     (do-gen-master-pubkey cause)
+        %import-seed-phrase    (do-import-seed-phrase cause)
         %send-tx               (do-send-tx cause)
         %show-tx               (do-show-tx cause)
-        %list-pubkeys          (do-list-pubkeys cause)
-        %show-seedphrase       (do-show-seedphrase cause)
-        %show-master-pubkey    (do-show-master-pubkey cause)
-        %show-master-privkey   (do-show-master-privkey cause)
-    ::
-        %advanced-spend
-      ?-  +<.cause
-        %seed   (do-advanced-spend-seed +>.cause)
-        %input  (do-advanced-spend-input +>.cause)
-        %transaction  (do-advanced-spend-transaction +>.cause)
-      ==
+        %list-active-addresses  (do-list-active-addresses cause)
+        %show-seed-phrase       (do-show-seed-phrase cause)
+        %show-master-zpub    (do-show-master-zpub cause)
+        %show-master-zprv  (do-show-master-zprv cause)
+        %list-master-addresses  (do-list-master-addresses cause)
+        %set-active-master-address  (do-set-active-master-address cause)
     ::
         %file
-      ?>  ?=(%write +<.cause)
-      [[%exit 0]~ state]
+      ::?>  ?=(%write +<.cause)
+      ::[[%exit 0]~ state]
+      ?-  +<.cause
+        %write  [[%exit 0]~ state]
+        %batch-write  [[%exit 0]~ state]
+      ==
     ==
   ==
   ::
@@ -150,9 +258,9 @@
     |=  =cause:wt
     ?>  ?=(%update-balance-grpc -.cause)
     %-  (debug "update-balance-grpc")
-    %-  (debug "last balance size: {<(lent ~(tap z-by:zo balance.state))>}")
-    =/  softed=(unit (unit (unit (z-map:zo nname:transact nnote:transact))))
-      %-  (soft (unit (unit (z-map:zo nname:transact nnote:transact))))
+    %-  (debug "last balance size: {<(lent ~(tap z-by:zo notes.balance.state))>}")
+    =/  softed=(unit (unit (unit balance:wt)))
+      %-  (soft (unit (unit balance:wt)))
       balance.cause
     ?~  softed
       %-  (debug "do-update-balance-grpc: %balance: could not soft result")
@@ -164,10 +272,16 @@
     ?~  u.balance-result
       %-  (warn "%update-balance did not return a result: nothing")
       [~ state]
-    ?~  u.u.balance-result
-      %-  (warn "%update-balance did not return a result: empty result")
-      [~ state]
-    =.  balance.state  u.u.balance-result
+    =/  update=balance:wt  u.u.balance-result
+    =?  balance.state  (gte height.update height.balance.state)
+      ?:  ?&  =(height.update height.balance.state)
+              =(block-id.balance.state block-id.update)
+          ==
+          ~>  %slog.[0 'Received balance update from same block, adding update to current balance']
+          ::  If it is duplicate balance update for the same address, union should have no impact
+          update(notes (~(uni z-by:zo notes.balance.state) notes.update))
+      ~>  %slog.[0 'Received balance update for new heaviest block, overwriting balance with update']
+      update
     %-  (debug "balance state updated!")
     [~ state]
   ::
@@ -176,8 +290,28 @@
     ?>  ?=(%import-keys -.cause)
     =/  new-keys=_keys.state
       %+  roll  keys.cause
-      |=  [[=trek =meta:wt] acc=_keys.state]
-      (~(put of acc) trek meta)
+      |=  [[=trek raw-meta=*] acc=_keys.state]
+      =/  converted-meta=meta:wt
+        ;;  meta:wt
+        ?.  ?=(%coil -.raw-meta)
+          ::  non-coil meta (label, seed, watch-key) - unchanged
+          raw-meta
+        ::  it's a coil, check if it's already versioned
+        ::  meta-v3 coil: [%coil [%0|%1 coil-data]]
+        ::  meta-{v0,v1,v2} coil: [%coil coil-data]
+        ::  we can check if +.raw-meta is itself a cell with %0 or %1 head
+        =/  inner  +.raw-meta
+        ?:  ?&  ?=(^ inner)
+                ?|  ?=(%0 -.inner)
+                    ?=(%1 -.inner)
+                ==
+            ==
+          ::  already meta-v3 format
+          raw-meta
+        ::  old meta-v0 format, convert to meta-v3
+        ::  inner is coil-data [=key =cc], wrap as [%0 coil-data]
+        [%coil [%0 inner]]
+      (~(put of acc) trek converted-meta)
     =/  master-key=coil:wt
       %-  head
       %+  murn  ~(tap of new-keys)
@@ -187,31 +321,73 @@
             ?=(%coil -.m)
             =((slag 2 t) /pub/m)
           ==
-        `m
+        `p.m
       ~
     =/  key-list=(list tape)
       %+  murn  ~(tap of new-keys)
       |=  [t=trek m=meta:wt]
       ^-  (unit tape)
-      ?.  ?=(%coil -.m)  ~
-      =/  key-type=tape  ?:(?=(%pub -.key.m) "Public Key" "Private Key")
-      =/  key=@t  (slav %t (snag 1 (pout t)))
-      =+  (to-b58:coil:wt m)
+      ?.  ?&  ?=(%coil -.m)
+              (gte (lent t) 4)
+          ==
+        ~
+      =/  =coil:wt  p.m
+      =/  version=@  -.coil
+      =/  parent=@t  (slav %t (snag 1 (pout t)))
+      =/  key-or-address-b58=tape
+        ?:  ?=(%prv -.key.coil)
+          """
+          - Type: Private
+          - Private Key: {(trip ~(key to-b58:coil:wt coil))}
+          """
+        """
+        - Type: Public
+        - Address: {(trip ~(address to-b58:coil:wt coil))}
+        """
+      =/  info=tape
+        =+  index-display=(snag 3 (pout t))
+        ?:  =('m' index-display)
+          "- Derivation Info: Master Key"
+        =/  index=@  (slav %ud index-display)
+        =?  index-display  (gte index (bex 31))
+          =+  hardened-index=(mod index (bex 31))
+          (cat 3 (scot %ud hardened-index) ' (hardened)')
+        """
+        - Derivation Info: Child Key
+          - Index: {(trip index-display)}
+          - Parent Address: {(trip parent)}
+        """
       %-  some
       """
-      - {key-type}: {(trip key-b58)}
-      - Parent Key: {(trip key)}
+      {key-or-address-b58}
+      {info}
+      - Version: {<version>}
       ---
 
       """
-    =.  master.state  `master-key
-    :_  state(keys new-keys)
+    =.  active-master.state  `master-key
+    =.  keys.state  new-keys
+    :_  state
     :~  :-  %markdown
         %-  crip
         """
         ## Imported Keys
 
         {(zing key-list)}
+        """
+        [%exit 0]
+    ==
+  ::
+  ++  do-watch-address
+    |=  =cause:wt
+    ?>  ?=(%watch-address -.cause)
+    :_  state(keys (watch-addrs:put:v address.cause))
+    :~  :-  %markdown
+        %-  crip
+        """
+        ## Imported watch-only pubkey
+
+        - Imported key: {<address.cause>}
         """
         [%exit 0]
     ==
@@ -227,16 +403,24 @@
       ?:  is-private
         [%prv private-key:core]
       [%pub public-key:core]
-    =/  imported-coil=coil:wt  [%coil coil-key chain-code:core]
-    =/  public-coil=coil:wt  [%coil [%pub public-key] chain-code]:core
+    =/  protocol-version=@  protocol-version:core
+    =/  [imported-coil=coil:wt public-coil=coil:wt]
+      ?+    protocol-version  ~|('unsupported protocol version' !!)
+           %0
+        :-  [%0 coil-key chain-code:core]
+        [%0 [%pub public-key] chain-code]:core
+      ::
+           %1
+         :-  [%1 coil-key chain-code:core]
+         [%1 [%pub public-key] chain-code]:core
+      ==
     =/  key-label=@t
       ?:  is-private
         (crip "imported-private-{<(end [3 4] public-key:core)>}")
       (crip "imported-public-{<(end [3 4] public-key:core)>}")
     ::  if this is a master key (no parent), set as master
     ?:  =(0 dep:core)
-      =.  master.state  (some public-coil)
-
+      =.  active-master.state  (some public-coil)
       =.  keys.state  (key:put:v imported-coil ~ `key-label)
       =.  keys.state  (key:put:v public-coil ~ `key-label)
       =/  extended-type=tape  ?:(is-private "private" "public")
@@ -244,28 +428,28 @@
       :~  :-  %markdown
           %-  crip
           """
-          ## imported import {extended-type} key
+          ## Imported {extended-type} key
 
-          - import key: {(trip extended-key.cause)}
-          - label: {(trip key-label)}
-          - set as master key
+          - Imported Extended Key: {(trip extended-key.cause)}
+          - Assigned Label: {(trip key-label)}
+          - Set as active master key
           """
           [%exit 0]
       ==
     ::  otherwise, import as derived key
     ::  first validate that this key is actually a child of the current master
-    ?~  master.state
+    ?~  active-master.state
       :_  state
       :~  :-  %markdown
           %-  crip
           """
-          ## import failed
+          ## Import failed
 
-          cannot import derived key: no master key set
+          Cannot import derived key: no active master key set
           """
           [%exit 1]
       ==
-    =/  master-pubkey-coil=coil:wt  (public:master:wt master.state)
+    =/  master-pubkey-coil=coil:wt  (public:active:wt active-master.state)
     =/  expected-children=(set coil:wt)
       (derive-child:v ind:core)
     =/  imported-pubkey=@  public-key:core
@@ -303,10 +487,10 @@
         """
         ## Imported {extended-type} Key
 
-        - Import Key: {(trip extended-key.cause)}
-        - Label: {(trip key-label)}
+        - Imported Extended Key: {(trip extended-key.cause)}
+        - Assigned Label: {(trip key-label)}
         - Index: {<ind:core>}
-        - Verified as child of master key
+        - Verified as child of active master key
         """
         [%exit 0]
     ==
@@ -335,29 +519,29 @@
     |=  =cause:wt
     ?>  ?=(%export-master-pubkey -.cause)
     %-  (debug "export-master-pubkey")
-    ?~  master.state
-      %-  (warn "wallet: no master keys available for export")
+    ?~  active-master.state
+      %-  (warn "wallet: no active keys available for export")
       [[%exit 0]~ state]
     =/  master-coil=coil:wt  ~(master get:v %pub)
     ?.  ?=(%pub -.key.master-coil)
       %-  (warn "wallet: fatal: master pubkey malformed")
       [[%exit 0]~ state]
     =/  dat-jam=@  (jam master-coil)
-    =/  key-b58=tape  (en:base58:wrap p.key.master-coil)
-    =/  cc-b58=tape  (en:base58:wrap cc.master-coil)
+    =/  addr-b58=@t  ~(address to-b58:coil:wt master-coil)
     =/  extended-key=@t
-      =/  core  (from-public:s10 [p.key cc]:master-coil)
+      =/  core  (from-public:s10 ~(keyc get:coil:wt master-coil))
       extended-public-key:core
     =/  file-path=@t  'master-pubkey.export'
+    =/  version=@  -.master-coil
     :_  state
     :~  :-  %markdown
         %-  crip
         """
         ## Exported Master Public Key
 
-        - Import Key: {(trip extended-key)}
-        - Public Key: {key-b58}
-        - Chain Code: {cc-b58}
+        - Extended Key: {(trip extended-key)}
+        - Address: {(trip addr-b58)}
+        - Version: {<version>}
         - File: {(trip file-path)}
         """
         [%exit 0]
@@ -368,84 +552,71 @@
     |=  =cause:wt
     ?>  ?=(%import-master-pubkey -.cause)
     %-  (debug "import-master-pubkey: {<coil.cause>}")
-    =/  master-pubkey-coil=coil:wt  coil.cause
-    =.  master.state  (some master-pubkey-coil)
+    =/  raw-coil=*  coil.cause
+    =/  master-pubkey-coil=coil:wt
+      ;;  coil:wt
+      ?:  ?&  ?=(^ raw-coil)
+              ?|  ?=(%0 -.raw-coil)
+                  ?=(%1 -.raw-coil)
+              ==
+          ==
+        ::  already coil-v3 format
+        raw-coil
+      ::  old coil-v0 format, convert to coil-v3
+      ::  raw-coil is coil-data [=key =cc], wrap as [%0 coil-data]
+      [%0 +.raw-coil]
+    =.  active-master.state  (some master-pubkey-coil)
     =/  label  `(crip "master-public-{<(end [3 4] p.key.master-pubkey-coil)>}")
     =.  keys.state  (key:put:v master-pubkey-coil ~ label)
-    =/  key-b58=tape  (en:base58:wrap p.key.master-pubkey-coil)
-    =/  cc-b58=tape  (en:base58:wrap cc.master-pubkey-coil)
+    =/  addr-b58=@t  ~(address to-b58:coil:wt master-pubkey-coil)
+    =/  version=@  -.master-pubkey-coil
     :_  state
     :~  :-  %markdown
         %-  crip
         """
         ## Imported Master Public Key
 
-        - Public Key: {key-b58}
-        - Chain Code: {cc-b58}
+        - Address: {(trip addr-b58)}
+        - Version: {<version>}
         """
         [%exit 0]
     ==
   ::
-  ++  do-gen-master-privkey
+  ++  do-import-seed-phrase
     |=  =cause:wt
-    ?>  ?=(%gen-master-privkey -.cause)
-    ::  We do not need to reverse the endian-ness of the seedphrase
+    ?>  ?=(%import-seed-phrase -.cause)
+    ::  We do not need to reverse the endian-ness of the seed phrase
     ::  because the bip39 code expects a tape.
-    =/  seed=byts  [64 (to-seed:bip39 (trip seedphrase.cause) "")]
-    =/  cor  (from-seed:s10 seed)
-    =/  master-pubkey-coil=coil:wt  [%coil [%pub public-key] chain-code]:cor
-    =/  master-privkey-coil=coil:wt  [%coil [%prv private-key] chain-code]:cor
-    =.  master.state  (some master-pubkey-coil)
+    ::  TODO: move this conversion into s10
+    =/  seed=byts  [64 (to-seed:bip39 (trip seed-phrase.cause) "")]
+    =/  cor  (from-seed:s10 seed version.cause)
+    =/  [master-pubkey-coil=coil:wt master-privkey-coil=coil:wt]
+      ?-    version.cause
+          %0
+        :-  [%0 [%pub public-key] chain-code]:cor
+        [%0 [%prv private-key] chain-code]:cor
+      ::
+          %1
+        :-  [%1 [%pub public-key] chain-code]:cor
+        [%1 [%prv private-key] chain-code]:cor
+      ==
+    =.  active-master.state  (some master-pubkey-coil)
     =/  public-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
     =/  private-label  `(crip "master-private-{<(end [3 4] public-key:cor)>}")
     =.  keys.state  (key:put:v master-privkey-coil ~ private-label)
     =.  keys.state  (key:put:v master-pubkey-coil ~ public-label)
-    =.  keys.state  (seed:put:v seedphrase.cause)
-    %-  (debug "master.state: {<master.state>}")
+    =.  keys.state  (seed:put:v seed-phrase.cause)
+    %-  (debug "active-master.state: {<active-master.state>}")
+    =/  version=@  version.cause
+    =/  address=@t  ~(address to-b58:coil:wt master-pubkey-coil)
     :_  state
     :~  :-  %markdown
         %-  crip
         """
         ## Master Key (Imported)
 
-        - Seed Phrase: {<seedphrase.cause>}
-        - Master Public Key: {(en:base58:wrap p.key.master-pubkey-coil)}
-        - Master Private Key: {(en:base58:wrap p.key.master-privkey-coil)}
-        - Chain Code: {(en:base58:wrap cc.master-privkey-coil)}
-        """
-        [%exit 0]
-    ==
-  ::
-  ++  do-gen-master-pubkey
-    |=  =cause:wt
-    ?>  ?=(%gen-master-pubkey -.cause)
-    =/  privkey-atom=@
-      (de:base58:wrap (trip privkey-b58.cause))
-    =/  chain-code-atom=@
-      (de:base58:wrap (trip cc-b58.cause))
-    =/  =keyc:slip10  [privkey-atom chain-code-atom]
-    =/  cor  (from-private:s10 keyc)
-    =/  master-pubkey-coil=coil:wt  [%coil [%pub public-key] chain-code]:cor
-    =/  master-privkey-coil=coil:wt  [%coil [%prv private-key] chain-code]:cor
-    %-  (debug "Generated master public key: {<public-key:cor>}")
-    =/  public-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
-    =/  private-label  `(crip "master-private-{<(end [3 4] public-key:cor)>}")
-    =.  master.state  (some master-pubkey-coil)
-
-    =.  keys.state  (key:put:v master-privkey-coil ~ private-label)
-    =.  keys.state  (key:put:v master-pubkey-coil ~ public-label)
-    %-  (debug "master.state: {<master.state>}")
-    =/  extended-key=@t  extended-public-key:cor
-    :_  state
-    :~  :-  %markdown
-        %-  crip
-        """
-        ## Master Public Key (Imported)
-
-        - Import Key: {(trip extended-key)}
-        - Public Key: {(en:base58:wrap p.key.master-pubkey-coil)}
-        - Private Key: {(en:base58:wrap p.key.master-privkey-coil)}
-        - Chain Code: {(en:base58:wrap cc.master-pubkey-coil)}
+        - Address: {(trip address)}
+        - Version: {<version>}
         """
         [%exit 0]
     ==
@@ -454,16 +625,26 @@
     |=  =cause:wt
     ?>  ?=(%send-tx -.cause)
     %-  (debug "send-tx: creating raw-tx")
-    ::  note that new:raw-tx calls +validate already
-    =/  raw=raw-tx:transact  (new:raw-tx:transact p.dat.cause)
-    =/  tx-id  id.raw
+    ::
+    =/  raw=raw-tx:v1:transact  (new:raw-tx:v1:transact p.dat.cause)
+    ?.  (validate:raw-tx:v1:transact raw)
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot send transaction: invalid raw-tx
+          """
+          [%exit 1]
+      ==
     =/  nock-cause=$>(%fact cause:dumb)
       [%fact %0 %heard-tx raw]
     %-  (debug "send-tx: made raw-tx, sending poke request over grpc")
-    =/  pid  generate-pid:v
+    ::  we currently do not need to assign pids. shim is here in case
+    =/  pid  *@
     :_  state
     :~
       [%grpc %poke pid nock-cause]
+      [%nockchain-grpc %send-tx raw]
       [%exit 0]
     ==
   ::
@@ -473,25 +654,37 @@
     %-  (debug "show-tx: displaying transaction")
     =/  =transaction:wt  dat.cause
     =/  transaction-name=@t  name.transaction
-    =/  ins-transaction=inputs:transact  p.transaction
-    =/  markdown-text=@t  (display-transaction-cord:utils transaction-name ins-transaction)
+    =/  =spends:transact  p.transaction
+    =/  fees=@  (roll-fees:spends:v1:transact spends)
+    =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
+    =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
+    =/  markdown-text=@t
+      (transaction:v1:display:utils transaction-name outputs.tx fees)
     :_  state
     :~
       [%markdown markdown-text]
       [%exit 0]
     ==
   ::
-  ++  do-list-pubkeys
+  ++  do-list-active-addresses
     |=  =cause:wt
-    ?>  ?=(%list-pubkeys -.cause)
-    =/  pubkeys  ~(coils get:v %pub)
-    =/  base58-keys=(list tape)
-      %+  turn  pubkeys
+    ?>  ?=(%list-active-addresses -.cause)
+    =/  base58-sign-keys=(list tape)
+      %+  turn  ~(coils get:v %pub)
       |=  =coil:wt
-      =/  [key-b58=@t cc-b58=@t]  (to-b58:coil:wt coil)
+      =/  version=@  -.coil
+      =/  address=@t  ~(address to-b58:coil:wt coil)
       """
-      - Public Key: {<key-b58>}
-      - Chain Code: {<cc-b58>}
+      - Address: {(trip address)}
+      - Version: {<version>}
+      ---
+
+      """
+    =/  base58-watch-addrs=(list tape)
+      %+  turn  watch-addrs:get:v
+      |=  key-b58=@t
+      """
+      - {<key-b58>}
       ---
 
       """
@@ -499,163 +692,106 @@
     :~  :-  %markdown
         %-  crip
         """
-        ## Public Keys
+        ## Addresses -- Signing
 
-        {?~(base58-keys "No pubkeys found" (zing base58-keys))}
+        {?~(base58-sign-keys "No pubkeys found" (zing base58-sign-keys))}
+
+        ## Addresses -- Watch only
+
+        {?~(base58-watch-addrs "No pubkeys found" (zing base58-watch-addrs))}
         """
         [%exit 0]
     ==
   ::
-  ++  do-show-seedphrase
+  ++  do-show-seed-phrase
     |=  =cause:wt
-    ?>  ?=(%show-seedphrase -.cause)
-    %-  (debug "show-seedphrase")
+    ?>  ?=(%show-seed-phrase -.cause)
+    %-  (debug "show-seed-phrase")
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot show seed phrase without active master address set. Please import a master key / seed phrase or generate a new one.
+          """
+          [%exit 0]
+      ==
     =/  =meta:wt  seed:get:v
-    =/  seedphrase=@t
+    =/  version=@  -.u.active-master.state
+    =/  seed-phrase=@t
       ?:  ?=(%seed -.meta)
         +.meta
       %-  crip
-      "no seedphrase found"
+      "no seed-phrase found"
     :_  state
     :~  :-  %markdown
         %-  crip
         """
-        ## Seed Phrase
-
-        {<seedphrase>}
+        ## Show Seed Phrase
+        Store this seedphrase in a safe place. Keep note of the version
+        - Seed Phrase: {<seed-phrase>}
+        - Version: {<version>}
         """
         [%exit 0]
     ==
   ::
-  ++  do-show-master-pubkey
+  ++  do-show-master-zpub
     |=  =cause:wt
-    ?>  ?=(%show-master-pubkey -.cause)
-    %-  (debug "show-master-pubkey")
-    =/  =meta:wt  ~(master get:v %pub)
-    ?>  ?=(%coil -.meta)
-    =/  extended-key=@t
-      =/  core  (from-public:s10 [p.key cc]:meta)
-      extended-public-key:core
-    :_  state
-    :~  :-  %markdown
-        %-  crip
-        """
-        ## Master Public Key
-
-        - Import Key: {<extended-key>}
-        - Public Key: {(en:base58:wrap p.key.meta)}
-        - Chain Code: {(en:base58:wrap cc.meta)}
-        """
-        [%exit 0]
-    ==
-  ::
-  ++  do-show-master-privkey
-    |=  =cause:wt
-    ?>  ?=(%show-master-privkey -.cause)
-    %-  (debug "show-master-privkey")
-    =/  =meta:wt  ~(master get:v %prv)
-    ?>  ?=(%coil -.meta)
-    =/  extended-key=@t
-      =/  core  (from-private:s10 [p.key cc]:meta)
-      extended-private-key:core
-    =/  key-b58=tape  (en:base58:wrap p.key.meta)
-    =/  cc-b58=tape  (en:base58:wrap cc.meta)
-    :_  state
-    :~  :-  %markdown
-        %-  crip
-        """
-        ## Master Private Key
-
-        - Import Key: {<extended-key>}
-        - Private Key: {(en:base58:wrap p.key.meta)}
-        - Chain Code: {(en:base58:wrap cc.meta)}
-        """
-        [%exit 0]
-    ==
-  ::
-  ++  do-scan
-    |=  =cause:wt
-    ?>  ?=(%scan -.cause)
-    %-  (debug "scan: scanning {<search-depth.cause>} addresses")
-    ?>  ?=(^ master.state)
-    ::  get all public keys up to search depth
-    =/  index=@ud  search-depth.cause
-    =/  coils=(list coil:wt)
-      =/  keys=(list coil:wt)  [~(master get:v %pub)]~
-      =|  done=_|
-      |-  ^-  (list coil:wt)
-      ?:  done  keys
-      =?  done  =(0 index)  &
-      =/  base=trek  /keys/pub/[ux/p.key:(public:master:wt master.state)]/[ud/index]
-      =/  key=(unit coil:wt)
-        ;;  (unit coil:wt)
-        (~(get of keys.state) base)
-      %=  $
-        index  ?:(=(0 index) 0 (dec index))
-        keys  ?^(key (snoc keys u.key) keys)
+    ?>  ?=(%show-master-zpub -.cause)
+    %-  (debug "show-master-zpub")
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot show master pubkey without active master address set. Please import a master key / seed phrase or generate a new one.
+          """
+          [%exit 0]
       ==
-    ::  fail when no coils
-    ?:  ?=(~ coils)
-      ~|("no coils for master key" !!)
-    ::  generate first names of notes owned by each pubkey
-    =/  first-names=(list [hash:transact schnorr-pubkey:transact])
-      %+  turn  coils
-      |=  =coil:wt
-      ::  create lock from public key
-      =/  pubkey=schnorr-pubkey:transact  pub:(from-public:s10 [p.key cc]:coil)
-      =/  =lock:transact  (new:lock:transact pubkey)
-      ::  generate name and take first name
-      =/  match-name=nname:transact
-        %-  new:nname:transact
-        :*  lock
-            [*hash:transact %.n]  ::  empty source, not a coinbase
-            *timelock:transact    ::  no timelock
-        ==
-      [-.match-name pubkey]
-    ::  find notes with matching first names in balance
-    =/  notes=(list nnote:transact)
-      %+  murn
-        ~(tap z-by:zo balance.state)
-      |=  [name=nname:transact note=nnote:transact]
-      ^-  (unit nnote:transact)
-      ::  check if first name matches any in our list
-      =/  matches
-        %+  lien  first-names
-        |=  [first-name=hash:transact pubkey=schnorr-pubkey:transact]
-        =/  =lock:transact  (new:lock:transact pubkey)
-        ::  update lock if include-multisig is true and pubkey is in
-        ::  the multisig set in the note's lock
-        =?  lock
-          ?&  include-multisig.cause
-              (~(has z-in:zo pubkeys.lock.note) pubkey)
-          ==
-        lock.note
-        ::  update match-name if include-timelocks is set
-        =?  first-name  include-timelocks.cause
-          =<  -
-          %-  new:nname:transact
-          :*  lock
-              [*hash:transact %.n]  ::  empty source, not a coinbase
-              timelock.note         ::  include timelock
-          ==
-        =(-.name first-name)
-      ?:(matches `note ~)
-    %-  (debug "found matches: {<notes>}")
-    =/  nodes=markdown:m
-      :~  :-  %leaf
-          :-  %heading
-          :*  %atx  1
-              :~  [%text 'Scan Result']
-              ==
-          ==
-          :-  %container
-          :-  %ul
-          :*  0  '*'
-             (turn notes display-note:utils)
-          ==
-      ==
+    =/  =coil:wt  ~(master get:v %pub)
+    =/  extended-key=@t  (extended-key:coil:wt coil)
+    =/  version=@  -.coil
+    =/  address=@t  ~(address to-b58:coil:wt coil)
     :_  state
-    ~[(make-markdown-effect:utils nodes) [%exit 0]]
+    :~  :-  %markdown
+        %-  crip
+        """
+        ## Show Master Extended Public Key
+
+        - Extended Public Key: {(trip extended-key)} (save for import)
+        - Corresponding Address: {(trip address)}
+        - Version: {<version>}
+        """
+        [%exit 0]
+    ==
+  ::
+  ++  do-show-master-zprv
+    |=  =cause:wt
+    ?>  ?=(%show-master-zprv -.cause)
+    %-  (debug "show-master-zprv")
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot show master privkey without active master address set. Please import a master key / seed phrase or generate a new one.
+          """
+          [%exit 0]
+      ==
+    =/  [version=@ extended-key=@t]
+      =/  =coil:wt  ~(master get:v %prv)
+      [`@`-.coil (extended-key:coil:wt coil)]
+    :_  state
+    :~  :-  %markdown
+        %-  crip
+        """
+        ## Master Extended Private Key (zprv)
+
+        - Extended Private Key: {(trip extended-key)} (save for import)
+        - Version: {<version>}
+        """
+        [%exit 0]
+    ==
   ::
   ++  do-list-notes
     |=  =cause:wt
@@ -671,29 +807,54 @@
       """
       =-  ?:  =("" -)  "No notes found"  -
       %-  zing
-      %+  turn  ~(val z-by:zo balance.state)
-      |=  =nnote:transact
-      %-  trip
-      (display-note-cord:utils nnote)
+      %+  turn  ~(val z-by:zo notes.balance.state)
+      |=  note=nnote:transact
+      ?^  -.note
+        (trip (note:v0:display:utils note))
+      (trip (note:v1:display:utils note %.n))
       ::
       [%exit 0]
     ==
   ::
-  ++  do-list-notes-by-pubkey
+  ++  do-list-notes-by-address
     |=  =cause:wt
-    ?>  ?=(%list-notes-by-pubkey -.cause)
-    =/  target-pubkey=schnorr-pubkey:transact
-      (from-b58:schnorr-pubkey:transact pubkey.cause)
-    =/  matching-notes=(list [name=nname:transact note=nnote:transact])
-      %+  skim  ~(tap z-by:zo balance.state)
+    ?>  ?=(%list-notes-by-address -.cause)
+    =/  [matching-notes=(list [name=nname:transact note=nnote:transact]) pkh=(unit hash:transact)]
+      ::  v0 address case
+      ?:  (gte (met 3 address.cause) 132)
+        =/  target-pubkey=schnorr-pubkey:transact
+          (from-b58:schnorr-pubkey:transact address.cause)
+        =/  notes
+        %+  skim  ~(tap z-by:zo notes.balance.state)
+        |=  [name=nname:transact note=nnote:transact]
+        ::  skip v1 notes
+        ?@  -.note  %.n
+        ::  this should cover all cases because we only
+        ::  sync coinbase notes or non-coinbase notes with m=1 locks.
+        (~(has z-in:zo pubkeys.sig.note) target-pubkey)
+        [notes ~]
+      ::  v1 address case
+      =/  target-pkh=hash:transact
+        (from-b58:hash:transact address.cause)
+      =/  notes
+      %+  skim  ~(tap z-by:zo notes.balance.state)
       |=  [name=nname:transact note=nnote:transact]
-      (~(has z-in:zo pubkeys.lock.note) target-pubkey)
+      ::  skip v0 notes
+      ?^  -.note  %.n
+      ::  look for coinbase notes with target-pkh
+      ::  or notes with simple 1-of-1 lock containing
+      =+  simple-fn=(simple:v1:first-name:transact target-pkh)
+      =+  coinbase-fn=(coinbase:v1:first-name:transact target-pkh)
+      ?|  =(simple-fn -.name.note)
+          =(coinbase-fn -.name.note)
+      ==
+      [notes (some target-pkh)]
     :_  state
     :~  :-  %markdown
         %-  crip
         %+  welp
           """
-          ## Wallet Notes for Public Key {<(to-b58:schnorr-pubkey:transact target-pubkey)>}
+          ## Wallet Notes for Address {(trip address.cause)}
 
           """
         =-  ?:  =("" -)  "No notes found"  -
@@ -701,29 +862,61 @@
         %+  turn  matching-notes
         |=  [* =nnote:transact]
         %-  trip
-        (display-note-cord:utils nnote)
+        ?^  -.nnote
+          (note:v0:display:utils nnote)
+        (note:v1:display:utils nnote output=%.n)
         ::
         [%exit 0]
     ==
   ::
-  ++  do-list-notes-by-pubkey-csv
+  ++  do-list-notes-by-address-csv
     |=  =cause:wt
-    ?>  ?=(%list-notes-by-pubkey-csv -.cause)
-    =/  target-pubkey=schnorr-pubkey:transact
-      (from-b58:schnorr-pubkey:transact pubkey.cause)
+    ?>  ?=(%list-notes-by-address-csv -.cause)
     =/  matching-notes=(list [name=nname:transact note=nnote:transact])
-      %+  skim  ~(tap z-by:zo balance.state)
+      ::  v0 address case
+      ?:  (gte (met 3 address.cause) 132)
+        =/  target-pubkey=schnorr-pubkey:transact
+          (from-b58:schnorr-pubkey:transact address.cause)
+        %+  skim  ~(tap z-by:zo notes.balance.state)
+        |=  [name=nname:transact note=nnote:transact]
+        ::  skip v1 notes
+        ?@  -.note  %.n
+        ::  this should cover all cases because we only
+        ::  sync coinbase notes or non-coinbase notes with m=1 locks.
+        (~(has z-in:zo pubkeys.sig.note) target-pubkey)
+      ::  v1 address case
+      =/  target-pkh=hash:transact
+        (from-b58:hash:transact address.cause)
+      %+  skim  ~(tap z-by:zo notes.balance.state)
       |=  [name=nname:transact note=nnote:transact]
-      (~(has z-in:zo pubkeys.lock.note) target-pubkey)
+      ::  skip v0 notes
+      ?^  -.note  %.n
+      ::  look for coinbase notes with target-pkh
+      ::  or notes with simple 1-of-1 lock containing
+      =+  simple-fn=(simple:v1:first-name:transact target-pkh)
+      =+  coinbase-fn=(coinbase:v1:first-name:transact target-pkh)
+      ?|  =(simple-fn -.name.note)
+          =(coinbase-fn -.name.note)
+      ==
     =/  csv-header=tape
-      "name_first,name_last,assets,block_height,source_hash"
+      "version,name_first,name_last,assets,block_height,source_hash"
     =/  csv-rows=(list tape)
       %+  turn  matching-notes
       |=  [name=nname:transact note=nnote:transact]
+      ?^  -.note
+        ::  v0 note
+        =+  version=0
+        =/  name-b58=[first=@t last=@t]  (to-b58:nname:transact name)
+        =/  source-hash-b58=@t  (to-b58:hash:transact p.source.note)
+        """
+        {(ui-to-tape:utils version)},{(trip first.name-b58)},{(trip last.name-b58)},{(ui-to-tape:utils assets.note)},{(ui-to-tape:utils origin-page.note)},{(trip source-hash-b58)}
+        """
+      ::  v1 note
+      =+  version=1
       =/  name-b58=[first=@t last=@t]  (to-b58:nname:transact name)
-      =/  source-hash-b58=@t  (to-b58:hash:transact p.source.note)
+      =/  source-hash-b58=@t  'N/A'
       """
-      {(trip first.name-b58)},{(trip last.name-b58)},{(ui-to-tape:utils assets.note)},{(ui-to-tape:utils origin-page.note)},{(trip source-hash-b58)}
+      {(ui-to-tape:utils version)},{(trip first.name-b58)},{(trip last.name-b58)},{(ui-to-tape:utils assets.note)},{(ui-to-tape:utils origin-page.note)},{(trip source-hash-b58)}
       """
     =/  csv-content=tape
       %+  welp  csv-header
@@ -734,13 +927,15 @@
       "{row}\0a"
     =/  filename=@t
       %-  crip
-      "notes-{(trip (to-b58:schnorr-pubkey:transact target-pubkey))}.csv"
+      "notes-{(trip address.cause)}.csv"
+    =/  markdown=tape
+      """
+      ## Result
+      Output csv written to {(trip filename)} in current working directory
+      """
     :_  state
-    :~  :-  %file
-        :-  %write
-        :-  filename
-        %-  crip
-        csv-content
+    :~  [%file %write filename (crip csv-content)]
+        [%markdown (crip markdown)]
         [%exit 0]
     ==
   ::
@@ -750,9 +945,22 @@
     |^
     %-  (debug "create-tx: {<names.cause>}")
     =/  names=(list nname:transact)  (parse-names names.cause)
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot create a transaction without active master address set. Please import a master key / seed phrase or generate a new one.
+          """
+          [%exit 0]
+      ==
     =/  sign-key  (sign-key:get:v sign-key.cause)
-    =/  ins=inputs:transact  (tx-builder names order.cause fee.cause sign-key timelock-intent.cause get-note:v)
-    (save-transaction ins)
+    =/  pubkey=schnorr-pubkey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact sign-key)
+    =/  [=spends:transact primary-pkh=hash:transact]
+      (tx-builder names orders.cause fee.cause sign-key pubkey refund-pkh.cause get-note:v include-data.cause)
+    (save-transaction spends primary-pkh)
     ::
     ++  parse-names
       |=  raw-names=(list [first=@t last=@t])
@@ -761,81 +969,83 @@
       |=  [first=@t last=@t]
       (from-b58:nname:transact [first last])
     ::
-    ++  validate-inputs
-      |=  =inputs:transact
-      ^-  ?
-      ?&  (validate:inputs:transact inputs)
-          %+  levy  ~(tap z-by:zo inputs)
-          |=  [name=nname:transact inp=input:transact]
-          (spendable:lock:transact lock.note.inp)
-      ==
-    ::
     ++  save-transaction
-      |=  ins=inputs:transact
+      |=  [=spends:transact primary-pkh=hash:transact]
       ^-  [(list effect:wt) state:wt]
       ~&  "Validating transaction before saving"
-      ::  we fallback to the hash of the inputs as the transaction name
+      ::  we fallback to the hash of the spends as the transaction name
       ::  if the tx is invalid. this is just for display
       ::  in the error message, as an invalid tx is not saved.
       =/  transaction-name=@t
         %-  to-b58:hash:transact
-        =-  %+  fall  -
-            (hash:inputs:transact ins)
-        %-  mole
-        |.
-        ::  TODO: this also calls validate:inputs, but we need it to
-        ::  get the id of the transaction. we should deduplicate this.
-        id:(new:raw-tx:transact ins)
-      ::  jam inputs and save as transaction
-      =/  =transaction:wt
-        %*  .  *transaction:wt
-          p  ins
-          name  transaction-name
-        ==
-      ?.  (validate-inputs ins)
+        id:(new:raw-tx:v1:transact spends)
+      ::  TODO: modulate blockchain constants from wallet with poke
+      =+  data=data:*blockchain-constants:transact
+      =/  valid=(reason:dumb ~)
+        %-  validate-with-context:spends:transact
+        [notes.balance.state spends height.balance.state max-size.data]
+      =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
+      =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
+      =/  fees=@  (roll-fees:spends:v1:transact spends)
+      =/  markdown-text=@t  (transaction:v1:display:utils transaction-name outputs.tx fees)
+      ?-    -.valid
+          %.y
+        ::  jam inputs and save as transaction
+        =/  =transaction:wt  [transaction-name spends]
+        =/  transaction-jam  (jam transaction)
+        =/  tx-path=@t
+          %-  crip
+          "./txs/{(trip name.transaction)}.tx"
+        %-  (debug "saving transaction to {<path>}")
+        =/  write-effect=effect:wt
+          ?.  save-raw-tx.cause
+            [%file %write tx-path transaction-jam]
+          =/  hashable-path=@t
+            %-  crip
+            "./txs-debug/{(trip name.transaction)}-hashable.jam"
+          =/  raw-tx-path=@t
+            %-  crip
+            "./txs-debug/{(trip name.transaction)}.jam"
+          :*  %file
+              %batch-write
+              :~  [hashable-path (jam [leaf+%1 (hashable:spends:transact spends)])]
+                  [tx-path transaction-jam]
+                  [raw-tx-path (jam raw-tx)]
+              ==
+          ==
+        :_  state
+        ~[write-effect [%markdown markdown-text]]
+      ::
+          %.n
         =/  msg=@t
-          %^  cat  3
             %-  crip
             """
             # TX Validation Failed
 
             Failed to validate the correctness of transaction {(trip transaction-name)}.
+            Reason: {(trip p.valid)}
 
-            Check that the note(s) you are spending from:
-
-            1. Can be spent by the public key you are signing with.
-            2. Have enough assets to cover the gift and fee.
-            3. Have the correct timelock intent.
-
+            {(trip markdown-text)}
             ---
 
-
             """
-          (display-transaction-cord:utils transaction-name ins)
         %-  (debug "{(trip msg)}")
         :_  state
         :~  [%markdown msg]
             [%exit 1]
         ==
-      =/  transaction-jam  (jam transaction)
-      =/  markdown-text=@t  (display-transaction-cord:utils transaction-name ins)
-      =/  path=@t
-        %-  crip
-        "./txs/{(trip name.transaction)}.tx"
-      %-  (debug "saving transaction to {<path>}")
-      =/  =effect:wt  [%file %write path transaction-jam]
-      :-  ~[effect [%markdown markdown-text] [%exit 0]]
-      state
+      ==
     --
   ::
   ++  do-keygen
     |=  =cause:wt
     ?>  ?=(%keygen -.cause)
     =+  [seed-phrase=@t cor]=(gen-master-key:s10 entropy.cause salt.cause)
-    =/  master-public-coil  [%coil [%pub public-key] chain-code]:cor
-    =/  master-private-coil  [%coil [%prv private-key] chain-code]:cor
-    =.  master.state  (some master-public-coil)
-
+    =/  [master-public-coil=coil:wt master-private-coil=coil:wt]
+      :-  [%1 [%pub public-key] chain-code]:cor
+      [%1 [%prv private-key] chain-code]:cor
+    =/  old-active  active-master.state
+    =.  active-master.state  (some master-public-coil)
     %-  (debug "keygen: public key: {<(en:base58:wrap public-key:cor)>}")
     %-  (debug "keygen: private key: {<(en:base58:wrap private-key:cor)>}")
     =/  pub-label  `(crip "master-public-{<(end [3 4] public-key:cor)>}")
@@ -845,29 +1055,39 @@
     =.  keys.state  (seed:put:v seed-phrase)
     =/  extended-private=@t  extended-private-key:cor
     =/  extended-public=@t  extended-public-key:cor
+    =/  addr-b58=@t  ~(address to-b58:coil:wt master-public-coil)
+    ::  If there was already an active master address, set it back to the old master address
+    ::  The new keys generated are stored in the keys state and the user can manually
+    ::  switch to them by running `set-active-master-address`
+    =?  active-master.state  ?=(^ old-active)
+      old-active
+    =/  active-addr=@t  (to-b58:active:wt active-master.state)
     :_  state
     :~  :-  %markdown
         %-  crip
         """
-        ## Keygen
+        ## Generated New Master Key (version 1)
+        - Added keys to wallet.
+        - Active master key is set to {(trip active-addr)}.
+          - To switch the active address, run `nockchain-wallet set-active-master-address <master-address>`.
+          - To see the available master addresses, run `nockchain-wallet list-master-addresses`.
+          - To see the current active address and its child keys, run `nockchain-wallet list-active-addresses`.
 
-        ### New Public Key
-        {<(en:base58:wrap public-key:cor)>}
+        ### Address
+        {(trip addr-b58)}
 
-        ### New Private Key
-        {<(en:base58:wrap private-key:cor)>}
-
-        ### Chain Code
-        {<(en:base58:wrap chain-code:cor)>}
-
-        ### Import Private Key
+        ### Extended Private Key (save this for import)
         {(trip extended-private)}
 
-        ### Import Public Key
+        ### Extended Public Key (save this for import)
         {(trip extended-public)}
 
-        ### Seed Phrase
+        ### Seed Phrase (save this for import)
         {<seed-phrase>}
+
+        ### Version (keep this for import with seed phrase)
+        1
+
         """
         [%exit 0]
     ==
@@ -888,19 +1108,26 @@
       |=  [=coil:wt keys=_keys.state]
       =.  keys.state  keys
       (key:put:v coil `index label.cause)
-    ::
     =/  key-text=tape
       %-  zing
       %+  turn  ~(tap in derived-keys)
       |=  =coil:wt
-      =/  [key-b58=@t cc-b58=@t]  (to-b58:coil:wt coil)
+      =/  version=@  -.coil
+      =/  ext-key=@t  (extended-key:coil:wt coil)
+      =/  address=@t
+        ?:  ?=(%prv -.key.coil)
+          'N/A (private key)'
+        ~(address to-b58:coil:wt coil)
       =/  key-type=tape
         ?:  ?=(%pub -.key.coil)
-          "Public Key"
-        "Private Key"
+          "Extended Public Key"
+        "Extended Private Key"
       """
-      - {key-type}: {<key-b58>}
-      - Chain Code: {<cc-b58>}
+      - {key-type}: {(trip ext-key)}
+      - Address: {(trip address)}
+      - Version: {<version>}
+      ---
+
       """
     :_  state
     :~
@@ -915,39 +1142,18 @@
       [%exit 0]
     ==
   ::
-  ++  do-sign-tx
-    |=  =cause:wt
-    ?>  ?=(%sign-tx -.cause)
-    %-  (debug "sign-tx: {<dat.cause>}")
-    ::  get private key at child index, or master key if no index
-    ::  add 2^31 to child index if hardened
-    =/  sender-key=schnorr-seckey:transact
-      (sign-key:get:v sign-key.cause)
-    =/  signed-inputs=inputs:transact
-      %-  ~(run z-by:zo p.dat.cause)
-      |=  =input:transact
-      %-  (debug "signing input: {<input>}")
-      =.  spend.input
-        %+  sign:spend:transact
-          spend.input
-        sender-key
-      input
-    =/  signed-transaction=transaction:wt
-      %=  dat.cause
-        p  signed-inputs
-      ==
-    =/  transaction-jam  (jam signed-transaction)
-    =/  path=@t
-      %-  crip
-      "./txs/{(trip name.signed-transaction)}.tx"
-    %-  (debug "saving input transaction to {<path>}")
-    =/  =effect:wt  [%file %write path transaction-jam]
-    :-  ~[effect [%exit 0]]
-    state
-  ::
   ++  do-sign-message
     |=  =cause:wt
     ?>  ?=(%sign-message -.cause)
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot sign a message without active master address set. Please import a master key / seed phrase or generate a new one.
+          """
+          [%exit 0]
+      ==
     =/  sk=schnorr-seckey:transact  (sign-key:get:v sign-key.cause)
     =/  msg-belts=page-msg:transact  (new:page-msg:transact `cord`msg.cause)
     ?.  (validate:page-msg:transact msg-belts)
@@ -1063,626 +1269,51 @@
         ?:  ok  '# Valid signature, hash verified'  '# Invalid signature, hash not verified'
         [%exit ?:(ok 0 1)]
     ==
-  ::
-  ++  do-advanced-spend-seed
-    |=  cause=advanced-spend-seed:wt
-    ^-  [(list effect:wt) state:wt]
-    |^
-    =?  active-transaction.state  ?=(~ active-transaction.state)  `*transaction-name:wt
-    =?  active-seed.state  ?=(~ active-seed.state)  `*seed-name:wt
-    ?-  -.cause
-      %new  do-new
-      %set-name  do-set-name
-      %set-source  do-set-source
-      %set-recipient  do-set-recipient
-      %set-timelock  do-set-timelock
-      %set-gift  do-set-gift
-      %set-parent-hash  do-set-parent-hash
-      %set-parent-hash-from-name  do-set-parent-hash-from-name
-      %print-status  do-print-status
+    ::
+  ++  do-list-master-addresses
+    |=  =cause:wt
+    ?>  ?=(%list-master-addresses -.cause)
+    %-  (debug "list-master-addresses")
+    =/  master-addrs=(list tape)
+      %+  turn
+        master-addresses:get:v
+      |=  [version=@ addr=@t]
+      =?  addr  =(addr (to-b58:active:wt active-master.state))
+        (cat 3 addr ' **(active)**')
+      """
+      - Address: {(trip addr)}
+      - Version: {<version>}
+      ---
+
+      """
+    :_  state
+    :~  :-  %markdown
+        %-  crip
+        """
+        ## Master Address Information
+        Note: Addresses are the same as pubkeys for v0 keys. For v1 keys, the address is the hash of the public key.
+
+        {(zing master-addrs)}
+        """
+        [%exit 0]
     ==
-    ::
-    ++  do-new
-      ?>  ?=([%new *] cause)
-      =/  sed=preseed:wt
-        %*  .  *preseed:wt
-          name  name.cause
-        ==
-      (write-seed sed)
-    ::
-    ++  do-set-name
-      ?>  ?=([%set-name *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =.  name.u.pre  new-name.cause
-      (write-seed u.pre)
-    ::
-    ++  do-set-source
-      ?>  ?=([%set-source *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  sed=preseed:wt
-        ?~  source.cause
-          %=  u.pre
-            output-source.p  ~
-            output-source.q  %.y
-          ==
-        %=  u.pre
-          output-source.p  (some (from-b58:source:transact u.source.cause))
-          output-source.q  %.y
-        ==
-      (write-seed sed)
-    ::
-    ++  do-set-recipient
-      ?>  ?=([%set-recipient *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  recipient=lock:transact
-        %+  m-of-n:new:lock:transact  m.recipient.cause
-        %-  ~(gas z-in:zo *(z-set:zo schnorr-pubkey:transact))
-        (turn pks.recipient.cause from-b58:schnorr-pubkey:transact)
-      =/  sed=preseed:wt
-        %=  u.pre
-          recipient.p  recipient
-          recipient.q  %.y
-        ==
-      (write-seed sed)
-    ::
-    ++  do-set-timelock
-      ?>  ?=([%set-timelock *] cause)
-      ::TODO
-      !!
-    ::
-    ++  do-set-gift
-      ?>  ?=([%set-gift *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  sed=preseed:wt
-        %=  u.pre
-          gift.p  gift.cause
-          gift.q  %.y
-        ==
-      (write-seed sed)
-    ::
-    ++  do-set-parent-hash
-      ?>  ?=([%set-parent-hash *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  sed=preseed:wt
-        %=  u.pre
-          parent-hash.q  %.y
-          parent-hash.p  (from-b58:hash:transact parent-hash.cause)
-        ==
-      (write-seed sed)
-    ::
-    ++  do-set-parent-hash-from-name
-      ?>  ?=([%set-parent-hash-from-name *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  name=nname:transact  (from-b58:nname:transact name.cause)
-      =/  not=nnote:transact  (get-note:v name)
-      =/  sed=preseed:wt
-        %=  u.pre
-          parent-hash.p  (hash:nnote:transact not)
-          parent-hash.q  %.y
-        ==
-      (write-seed sed)
-    ::
-    ++  do-print-status
-      ?>  ?=([%print-status *] cause)
-      =/  pre=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ pre)
-      =/  output-source-text=tape
-        ?:  !output-source.q.u.pre
-          "Unset (any output source is OK)"
-        <output-source.p.u.pre>
-      =/  recipient-text=tape
-        ?:  !recipient.q.u.pre
-          "Unset"
-        <recipient.p.u.pre>
-      =/  timelock-text=tape
-        ?:  !timelock-intent.q.u.pre
-          "Unset (no intent)"
-        <timelock-intent.p.u.pre>
-      =/  gift-text=tape
-        ?:  !gift.q.u.pre
-          "Gift: unset (gift must be nonzero)"
-        ?:  =(0 gift.p.u.pre)
-          """
-          Gift: 0 (must be nonzero)
-          """
-        """
-        Gift: {<gift.p.u.pre>}
-        """
-      =/  status-text=tape
-        """
-        ## Seed Status
-
-        ### Output Source
-        {output-source-text}
-
-        ### Recipient
-        {recipient-text}
-
-        ### Timelock Intent
-        {timelock-text}
-
-        ### Gift
-        {gift-text}
-        """
-      :_  state
-      (print:utils (need (de:md (crip status-text))))
-    ::
-    ++  write-seed
-      |=  sed=preseed:wt
-      ^-  [(list effect:wt) state:wt]
-      =.  active-seed.state  (some name.sed)
-      =.  transaction-tree.state  (add-seed:p name.sed sed)
-      =^  writes  state  write-transaction:d
-      [writes state]
-    --  ::+do-advanced-spend-seed
   ::
-  ++  do-advanced-spend-input
-    |=  cause=advanced-spend-input:wt
-    ^-  [(list effect:wt) state:wt]
-    |^
-    ?-  -.cause
-      %new  do-new
-      %set-name  do-set-name
-      %add-seed  do-add-seed
-      %set-fee   do-set-fee
-      %set-note-from-name  do-set-note-from-name
-      %set-note-from-hash  do-set-note-from-hash
-      %derive-note-from-seeds  do-derive-note-from-seeds
-      %remove-seed  do-remove-seed
-      %remove-seed-by-hash  do-remove-seed-by-hash
-      %print-status  do-print-status
+  ++  do-set-active-master-address
+    |=  =cause:wt
+    ?>  ?=(%set-active-master-address -.cause)
+    %-  (debug "set-active-master-address")
+    =/  addr-b58=@t  address-b58.cause
+    =/  =coil:wt  (master-by-addr:get:v addr-b58)
+    :_  state(active-master `coil)
+    :~  :-  %markdown
+        %-  crip
+        """
+        ## Set Active Master Address To:
+
+        - {(trip addr-b58)}
+        """
+        [%exit 0]
     ==
-    ::
-    ++  do-new
-      ?>  ?=([%new *] cause)
-      =/  inp=preinput:wt
-        %*  .  *preinput:wt
-          name  name.cause
-        ==
-      =.  active-input.state  (some name.cause)
-      (write-input inp)
-    ::
-    ++  do-set-name
-      ?>  ?=([%set-name *] cause)
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =.  name.u.pre  new-name.cause
-      =.  active-input.state  (some new-name.cause)
-      (write-input u.pre)
-    ::
-    ++  do-add-seed
-      ?>  ?=([%add-seed *] cause)
-      ::
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =/  sed=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ sed)
-      ?:  (~(has z-in:zo seeds.spend.p.u.pre) p.u.sed)
-        :_  state
-        =/  nodes=markdown:m
-          :~  :-  %leaf
-              :-  %paragraph
-              :~  [%text (crip "seed already exists in .spend, doing nothing.")]
-              ==
-          ==
-        (print:utils nodes)
-      =/  inp=preinput:wt
-        %=  u.pre
-          seeds.spend.p  (~(put z-in:zo seeds.spend.p.u.pre) p.u.sed)
-          seeds.spend.q  %.y
-        ==
-      (write-input inp)
-    ::
-    ++  do-set-fee
-      ?>  ?=([%set-fee *] cause)
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =.  fee.spend.p.u.pre  fee.cause
-      =.  fee.spend.q.u.pre  %.y
-      (write-input u.pre)
-    ::
-    ++  do-set-note-from-name
-      ?>  ?=([%set-note-from-name *] cause)
-      ::
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =/  name=nname:transact  (from-b58:nname:transact name.cause)
-      =/  not=nnote:transact  (get-note:v name)
-      =/  inp=preinput:wt
-        %=  u.pre
-          note.p  not
-          note.q  %.y
-        ==
-      (write-input inp)
-    ::
-    ++  do-set-note-from-hash
-      ?>  ?=([%set-note-from-hash *] cause)
-      ::
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =/  =hash:transact  (from-b58:hash:transact hash.cause)
-      =/  note=nnote:transact  (get-note-from-hash:v hash)
-      =/  inp=preinput:wt
-        %=  u.pre
-          note.p  note
-          note.q  %.y
-        ==
-      (write-input inp)
-    ::
-    ++  do-derive-note-from-seeds
-      ?>  ?=([%derive-note-from-seeds *] cause)
-      ::
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =/  seeds-list=(list seed:transact)
-        ~(tap z-in:zo seeds.spend.p.u.pre)
-      ?~  seeds-list
-        :_  state
-        =/  nodes=markdown:m
-          :~  :-  %leaf
-              :-  %paragraph
-              :~  [%text (crip "no seeds exist in .spend, so note cannot be set.")]
-              ==
-          ==
-        (print:utils nodes)
-      =/  =hash:transact  parent-hash.i.seeds-list
-      =/  note=nnote:transact  (get-note-from-hash:v hash)
-      =/  inp=preinput:wt
-        %=  u.pre
-          note.p  note
-          note.q  %.y
-        ==
-      (write-input inp)
-    ::
-    ++  do-remove-seed
-      ?>  ?=([%remove-seed *] cause)
-      ::
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =.  active-input.state  (some input-name.cause)
-      =/  sed=(unit preseed:wt)
-        (get-seed:p seed-name.cause)
-      ?>  ?=(^ sed)
-      ?:  !(~(has z-in:zo seeds.spend.p.u.pre) p.u.sed)
-        :_  state
-        =/  nodes=markdown:m
-          :~  :-  %leaf
-              :-  %paragraph
-              :~  [%text (crip "seed does not exist in .spend, doing nothing")]
-              ==
-          ==
-        (print:utils nodes)
-      =/  inp=preinput:wt
-        %=  u.pre
-          seeds.spend.p  (~(del z-in:zo seeds.spend.p.u.pre) p.u.sed)
-          seeds.spend.q  !=(*seeds:transact seeds.spend.p.u.pre)
-        ==
-      (write-input inp)
-    ::
-    ++  do-remove-seed-by-hash
-      ?>  ?=([%remove-seed-by-hash *] cause)
-      :: find seed with hash
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =.  active-input.state  (some input-name.cause)
-      =/  seed-hashes=(z-map:zo hash:transact seed:transact)
-        %-  ~(gas z-by:zo *(z-map:zo hash:transact seed:transact))
-        %+  turn  ~(tap z-in:zo seeds.spend.p.u.pre)
-        |=  sed=seed:transact
-        [(hash:seed:transact sed) sed]
-      =/  has=hash:transact  (from-b58:hash:transact hash.cause)
-      ?.  (~(has z-by:zo seed-hashes) has)
-        :_  state
-        =/  nodes=markdown:m
-          :~  :-  %leaf
-              :-  %paragraph
-              :~  [%text (crip "seed does not exist in .spend, doing nothing")]
-              ==
-          ==
-        (print:utils nodes)
-      =/  remove-seed=seed:transact
-        (~(got z-by:zo seed-hashes) has)
-      ::
-      =/  inp=preinput:wt
-        %=  u.pre
-          seeds.spend.p  (~(del z-in:zo seeds.spend.p.u.pre) remove-seed)
-          seeds.spend.q  !=(*seeds:transact seeds.spend.p.u.pre)
-        ==
-      (write-input inp)
-    ::
-    ++  do-print-status
-      ?>  ?=([%print-status *] cause)
-      =/  pre=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ pre)
-      =|  status-nodes=markdown:m
-      =.  status-nodes
-        %+  snoc  status-nodes
-        :-  %leaf
-        :-  %paragraph
-        ?:  !signature.spend.q.u.pre
-          ::  TODO we removed the ability to sign in this control flow
-          [%text (crip ".signature: unset")]~
-        ::  check the signature
-        ::
-        ::  get a .parent-hash of a seed. they have to all be the same, so which
-        ::  one doesn't matter; if they're not all the same validation will fail.
-        =/  seeds-list=(list seed:transact)
-          ~(tap z-in:zo seeds.spend.p.u.pre)
-        ?~  seeds-list
-          [%text (crip "no seeds exist, so signature cannot be checked")]~
-        =/  parent-note-hash=hash:transact  parent-hash.i.seeds-list
-        =/  parent-note-hash-b58=tape
-          (trip (to-b58:hash:transact parent-note-hash))
-        =/  parent-note-name=(unit nname:transact)
-          (find-name-by-hash:v parent-note-hash)
-        ?~  parent-note-name
-          :~
-            :-  %text
-            %-  crip
-            """
-            note with hash {parent-note-hash-b58} present in .spend but
-            has no matching .name in wallet
-            """
-            :-  %text
-            ::  TODO better, more succint error message.
-            '''
-            this implies that it is not in the balance unless there is a hash collision.
-            please report this as a bug if you are sure you have the $note, as this
-            situation is very unlkely. the spend ought to still be valid in that case
-            and you can broadcast it anyway.
-            '''
-          ==
-        =/  parent-note-name-b58=tape
-          =;  [first=@t last=@t]
-            "<(trip first)> <(trip last)>"
-          (to-b58:nname:transact u.parent-note-name)
-        =/  parent-note=(unit nnote:transact)
-          (~(get z-by:zo balance.state) u.parent-note-name)
-        ?~  parent-note
-          :~
-            :-  %text
-            %-  crip
-            """
-            note with name {parent-note-name-b58} and hash {parent-note-hash-b58}
-            present in .spend but not in balance
-            """
-          ==
-        ?:  (verify:spend:transact spend.p.u.pre u.parent-note)
-          [%text (crip "signature(s) on spend are valid.")]~
-        ::  missing or invalid sigs
-        =/  have-sigs
-          %+  turn
-            %~  tap  z-in:zo
-            ^-  (z-set:zo schnorr-pubkey:transact)
-            %~  key  z-by:zo  (need signature.spend.p.u.pre)
-          |=  pk=schnorr-pubkey:transact
-          [%text (to-b58:schnorr-pubkey:transact pk)]
-        ?~  have-sigs
-          [%text 'no signatures found!']~
-        =/  lock-b58=[m=@ pks=(list @t)]
-          (to-b58:lock:transact recipient.i.seeds-list)
-        =/  need-sigs
-          (turn pks.lock-b58 (lead %text))
-        ?~  need-sigs
-          [%text 'no recipients found!']~
-        ;:  welp
-          :~  [%text (crip "signature on spend did not validate.")]
-              [%text (crip "signatures on spend:")]
-          ==
-          ::TODO check if any particular signature did not validate
-          have-sigs
-          :~  [%text (crip ".lock on parent note:")]
-              [%text (crip "number of sigs required: {(scow %ud m.lock-b58)}")]
-              [%text (crip "pubkeys of possible signers:")]
-          ==
-          need-sigs
-        ==
-      ::TODO  check individual seeds? this would require some refactoring and
-      ::the happy path does not involve adding unfinished seeds to an input.
-      :_  state
-      (print:utils status-nodes)
-    ::
-    ++  write-input
-      |=  inp=preinput:wt
-      ^-  [(list effect:wt) state:wt]
-      =.  active-input.state  (some name.inp)
-      =.  transaction-tree.state  (add-input:p name.inp inp)
-      =^  writes  state  write-transaction:d
-      [writes state]
-    --  ::+do-advanced-spend-input
   ::
-  ++  do-advanced-spend-transaction
-    |=  cause=advanced-spend-transaction:wt
-    ^-  [(list effect:wt) state:wt]
-    |^
-    =?  active-transaction.state  ?=(~ active-transaction.state)  `*transaction-name:wt
-    ?-  -.cause
-      %new  do-new
-      %set-name  do-set-name
-      %add-input  do-add-input
-      %remove-input  do-remove-input
-      %remove-input-by-name  do-remove-input-by-name
-      %print-status  do-print-status
-    ==
-    ::
-    ++  do-new
-      ?>  ?=([%new *] cause)
-      =.  active-transaction.state  (some name.cause)
-      =/  dat=transaction:wt
-        %*  .  *transaction:wt
-          name  name.cause
-        ==
-      (write-transaction dat)
-    ::
-    ++  do-set-name
-      ?>  ?=([%set-name *] cause)
-      =/  pre=(unit transaction:wt)
-        (get-transaction:p transaction-name.cause)
-      ?>  ?=(^ pre)
-      =.  active-transaction.state  (some new-name.cause)
-      =.  name.u.pre  new-name.cause
-      (write-transaction u.pre)
-    ::
-    ++  do-add-input
-      ?>  ?=([%add-input *] cause)
-      =/  pre=(unit transaction:wt)
-        (get-transaction:p transaction-name.cause)
-      ?>  ?=(^ pre)
-      =.  active-transaction.state  (some transaction-name.cause)
-      =/  inp=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ inp)
-      ?:  (~(has z-by:zo p.u.pre) name.note.p.u.inp)
-        :_  state
-        %-  print:utils
-        ^-  markdown:m
-        :_  ~  :-  %leaf
-        :-  %paragraph
-        :_  ~  :-  %text
-        %-  crip
-        """
-        transaction already has input with note name
-        {<(to-b58:nname:transact name.note.p.u.inp)>}, doing nothing.
-        """
-      =.  p.u.pre
-        (~(put z-by:zo p.u.pre) [name.note.p.u.inp p.u.inp])
-      (write-transaction u.pre)
-    ::
-    ++  do-remove-input
-      ?>  ?=([%remove-input *] cause)
-      =/  pre=(unit transaction:wt)
-        (get-transaction:p transaction-name.cause)
-      ?>  ?=(^ pre)
-      =.  active-transaction.state  (some transaction-name.cause)
-      =/  inp=(unit preinput:wt)
-        (get-input:p input-name.cause)
-      ?>  ?=(^ inp)
-      ?.  (~(has z-by:zo p.u.pre) name.note.p.u.inp)
-        :_  state
-        %-  print:utils
-        :_  ~  :-  %leaf
-        :-  %paragraph
-        :_  ~  :-  %text
-        %-  crip
-        """
-        transaction does not have input with note name
-        {<(to-b58:nname:transact name.note.p.u.inp)>}, doing nothing.
-        """
-      ?.  =(u.inp (~(got z-by:zo p.u.pre) name.note.p.u.inp))
-        :_  state
-        %-  print:utils
-        :_  ~  :-  %leaf
-        :-  %paragraph
-        :_  ~  :-  %text
-        %-  crip
-        """
-        transaction has input with note name
-        {<(to-b58:nname:transact name.note.p.u.inp)>}, but it is
-        a different input. to remove this input, use %remove-input-by-name
-        instead.
-        """
-      =.  p.u.pre
-        (~(del z-by:zo p.u.pre) name.note.p.u.inp)
-      (write-transaction u.pre)
-    ::
-    ++  do-remove-input-by-name
-      ?>  ?=([%remove-input-by-name *] cause)
-      =/  pre=(unit transaction:wt)
-        (get-transaction:p transaction-name.cause)
-      =.  active-transaction.state  (some transaction-name.cause)
-      ?>  ?=(^ pre)
-      =/  name=nname:transact  (from-b58:nname:transact name.cause)
-      ?.  (~(has z-by:zo p.u.pre) name)
-        :_  state
-        %-  print:utils
-        :_  ~  :-  %leaf
-        :-  %paragraph
-        :_  ~  :-  %text
-        %-  crip
-        """
-        transaction does not have input with note name {(trip first.name.cause)}
-        {(trip last.name.cause)}, doing nothing.
-        """
-      =.  p.u.pre  (~(del z-by:zo p.u.pre) name)
-      (write-transaction u.pre)
-    ::
-    ++  do-print-status
-      ?>  ?=([%print-status *] cause)
-      =/  pre=(unit transaction:wt)
-        (get-transaction:p transaction-name.cause)
-      =.  active-transaction.state  (some transaction-name.cause)
-      ?>  ?=(^ pre)
-      =/  inputs=(list [name=nname:transact =input:transact])
-        ~(tap z-by:zo p.u.pre)
-      =/  input-texts=(list tape)
-        %+  turn  inputs
-        |=  [name=nname:transact =input:transact]
-        =/  signature-text=tape  ?~(signature.spend.input "unset" "set")
-        =/  name-text=tape  <(to-b58:nname:transact name)>
-        =/  note-text=tape  <(to-b58:hash:transact (hash:nnote:transact note.input))>
-        =/  seeds-text=tape
-          %-  zing
-          %+  turn  ~(tap z-in:zo seeds.spend.input)
-          |=  =seed:transact
-          """
-          - recipient: {<(to-b58:lock:transact recipient.seed)>}
-          - gift: {<gift.seed>}
-          - parent hash: {<(to-b58:hash:transact parent-hash.seed)>}
-          """
-        """
-        #### Input {name-text}:
-
-        - Note hash: {note-text}
-        - Fee: {<fee.spend.input>}
-        - Signature: {signature-text}
-
-        ##### Seeds
-
-        {seeds-text}
-
-        """
-      =/  status-text=tape
-        """
-        ## Transaction Status
-
-        Name: {(trip name.u.pre)}
-        Number of inputs: {<(lent inputs)>}
-
-        ### Inputs
-
-        {(zing input-texts)}
-        """
-      :_  state
-      (print:utils (need (de:md (crip status-text))))
-    ::
-    ++  write-transaction
-      |=  dat=transaction:wt
-      ^-  [(list effect:wt) state:wt]
-      =.  active-transaction.state  (some name.dat)
-      write-transaction:d
-    --  ::+do-advanced-spend-transaction
   --  ::+poke
 --

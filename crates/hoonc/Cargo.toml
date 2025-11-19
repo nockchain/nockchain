@@ -9,7 +9,7 @@ tracing-tracy = ["dep:tracing-tracy"]
 
 [dependencies]
 nockapp = { workspace = true }
-nockvm = { workspace = true }
+nockvm = { workspace = true, features = ["no_check_oom"] }
 nockvm_macros = { workspace = true }
 
 bincode = { workspace = true }

@@ -1,384 +1,15 @@
-use bs58;
 use ibig::UBig;
+use nockvm::ext::NounExt;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
-use nockvm::noun::{Atom, Noun, NounAllocator, Slots, NO, T, YES};
-use noun_serde::{NounDecode, NounDecodeError, NounEncode};
-use once_cell::sync::Lazy;
+use nockvm::noun::{Noun, Slots};
+use noun_serde::{NounDecode, NounEncode};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::form::base::bneg;
-use crate::form::bpoly::{bpegcd, bpscal};
-use crate::form::{Belt, PRIME};
-use crate::jets::tip5_jets::hash_varlen;
-use crate::noun::noun_ext::AtomExt;
-
-// TODO: move this into a nockchain-types crate
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CheetahPoint {
-    pub x: F6lt,
-    pub y: F6lt,
-    pub inf: bool,
-}
-
-static G_ORDER: Lazy<UBig> = Lazy::new(|| {
-    UBig::from_str_radix(
-        "7af2599b3b3f22d0563fbf0f990a37b5327aa72330157722d443623eaed4accf", 16,
-    )
-    .unwrap()
-});
-
-static P_BIG: Lazy<UBig> = Lazy::new(|| UBig::from(PRIME));
-static P_BIG_2: Lazy<UBig> = Lazy::new(|| &*P_BIG * &*P_BIG);
-static P_BIG_3: Lazy<UBig> = Lazy::new(|| &*P_BIG_2 * &*P_BIG);
-
-pub const A_GEN: CheetahPoint = CheetahPoint {
-    x: F6lt([
-        Belt(2754611494552410273),
-        Belt(8599518745794843693),
-        Belt(10526511002404673680),
-        Belt(4830863958577994148),
-        Belt(375185138577093320),
-        Belt(12938930721685970739),
-    ]),
-    y: F6lt([
-        Belt(15384029202802550068),
-        Belt(2774812795997841935),
-        Belt(14375303400746062753),
-        Belt(10708493419890101954),
-        Belt(13187678623570541764),
-        Belt(9990732138772505951),
-    ]),
-    inf: false,
-};
-
-impl CheetahPoint {
-    pub fn into_base58(&self) -> Result<String, Box<dyn std::error::Error>> {
-        if self.inf {
-            return Err("CheetahPoint: point is at infinity, we will not encode it".into());
-        }
-        // Convert the Belt values to u64 bytes
-        let mut bytes = Vec::new();
-        bytes.push(0x1);
-        for belt in self.y.0.iter().rev().chain(self.x.0.iter().rev()) {
-            bytes.extend_from_slice(&belt.0.to_be_bytes());
-        }
-        Ok(bs58::encode(bytes).into_string())
-    }
-
-    pub fn from_base58(b58: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let v = bs58::decode(b58).into_vec()?;
-        // (6 + 6) * 8 + 1 leading byte
-        if v.len() != 97 {
-            return Err("CheetahPoint: invalid base58 string length".into());
-        }
-
-        let mut v64 = v[1..]
-            .chunks_exact(8)
-            .map(|a| {
-                let arr = <[u8; 8]>::try_from(a)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-                Ok(Belt(u64::from_be_bytes(arr)))
-            })
-            .collect::<Result<Vec<Belt>, Box<dyn std::error::Error>>>()?;
-
-        v64.reverse();
-
-        let c_pt = CheetahPoint {
-            x: F6lt {
-                0: <[Belt; 6]>::try_from(&v64[..6])?,
-            },
-            y: F6lt {
-                0: <[Belt; 6]>::try_from(&v64[6..])?,
-            },
-            inf: false,
-        };
-
-        if c_pt.in_curve() {
-            Ok(c_pt)
-        } else {
-            Err("CheetahPoint: point is not on the curve".into())
-        }
-    }
-
-    pub fn in_curve(&self) -> bool {
-        if *self == A_ID {
-            return true;
-        }
-        let scaled = ch_scal_big(&G_ORDER, self).unwrap();
-        scaled == A_ID
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct F6lt(pub [Belt; 6]);
-
-#[inline(always)]
-pub(crate) fn make_n_belt<A: NounAllocator>(stack: &mut A, arr: &[Belt]) -> Noun {
-    assert!(!arr.is_empty());
-    let n = arr.len();
-    let mut res_cell = Atom::new(stack, arr[n - 1].0).as_noun();
-    for i in (0..n - 1).rev() {
-        let b = Atom::new(stack, arr[i].0).as_noun();
-        res_cell = T(stack, &[b, res_cell]);
-    }
-    res_cell
-}
-
-impl NounEncode for F6lt {
-    fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
-        make_n_belt(stack, &self.0)
-    }
-}
-
-impl NounDecode for F6lt {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let mut x = *noun;
-        // convert f6lts to vecs
-        let mut f6lt = [Belt(0); 6];
-        for i in 0..5 {
-            let cell = x.as_cell()?;
-            f6lt[i] = cell.head().as_atom()?.as_belt()?;
-            x = cell.tail();
-        }
-        f6lt[5] = x.as_atom()?.as_belt()?;
-
-        Ok(F6lt(f6lt))
-    }
-}
-
-impl NounDecode for CheetahPoint {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let x = noun.slot(2)?;
-        let y = noun.slot(6)?;
-        let inf = noun.slot(7)?;
-
-        // convert f6lts to vecs
-        let y_f6lt = F6lt::from_noun(&x)?;
-        let x_f6lt = F6lt::from_noun(&y)?;
-
-        Ok(CheetahPoint {
-            x: y_f6lt,
-            y: x_f6lt,
-            inf: inf.as_atom()?.as_bool()?,
-        })
-    }
-}
-
-impl NounEncode for CheetahPoint {
-    fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
-        let x_noun = make_n_belt(stack, &self.x.0);
-        let y_noun = make_n_belt(stack, &self.y.0);
-        let inf_noun = if self.inf { YES } else { NO };
-        T(stack, &[x_noun, y_noun, inf_noun])
-    }
-}
-
-#[inline(always)]
-pub(crate) fn f6_div(f1: &F6lt, f2: &F6lt) -> Result<F6lt, JetErr> {
-    let f2_inv = f6_inv(f2)?;
-    Ok(f6_mul(f1, &f2_inv))
-}
-
-#[inline(always)]
-fn karat3(a: &[Belt; 3], b: &[Belt; 3]) -> [Belt; 5] {
-    let m = [a[0] * b[0], a[1] * b[1], a[2] * b[2]];
-    [
-        m[0],
-        (a[0] + a[1]) * (b[0] + b[1]) - (m[0] + m[1]),
-        (a[0] + a[2]) * (b[0] + b[2]) - (m[0] + m[2]) + m[1],
-        (a[1] + a[2]) * (b[1] + b[2]) - (m[1] + m[2]),
-        m[2],
-    ]
-}
-
-#[inline(always)]
-fn f6_mul(f: &F6lt, g: &F6lt) -> F6lt {
-    let f0g0 = karat3(&[f.0[0], f.0[1], f.0[2]], &[g.0[0], g.0[1], g.0[2]]);
-    let f1g1 = karat3(&[f.0[3], f.0[4], f.0[5]], &[g.0[3], g.0[4], g.0[5]]);
-
-    let foil = karat3(
-        &[f.0[0] + f.0[3], f.0[1] + f.0[4], f.0[2] + f.0[5]],
-        &[g.0[0] + g.0[3], g.0[1] + g.0[4], g.0[2] + g.0[5]],
-    );
-
-    let cross = [
-        foil[0] - (f0g0[0] + f1g1[0]),
-        foil[1] - (f0g0[1] + f1g1[1]),
-        foil[2] - (f0g0[2] + f1g1[2]),
-        foil[3] - (f0g0[3] + f1g1[3]),
-        foil[4] - (f0g0[4] + f1g1[4]),
-    ];
-    F6lt([
-        f0g0[0] + Belt(7) * (cross[3] + f1g1[0]),
-        f0g0[1] + Belt(7) * (cross[4] + f1g1[1]),
-        f0g0[2] + Belt(7) * f1g1[2],
-        f0g0[3] + cross[0] + Belt(7) * f1g1[3],
-        f0g0[4] + cross[1] + Belt(7) * f1g1[4],
-        cross[2],
-    ])
-}
-
-#[inline(always)]
-fn f6_inv(f: &F6lt) -> Result<F6lt, JetErr> {
-    if f == &F6_ZERO {
-        return Err(BAIL_FAIL);
-    }
-    let mut res = [Belt(0); 6];
-    // length of d is at most min(6, 7) + 1
-    let mut d = [Belt(0); 7];
-    // length of u is at most deg(b) = 7
-    let mut u = [Belt(0); 7];
-    // length of u is at most deg(a) = 6
-    let mut v = [Belt(0); 6];
-    bpegcd(
-        &f.0,
-        &[Belt(bneg(7)), Belt(0), Belt(0), Belt(0), Belt(0), Belt(0), Belt(1)],
-        &mut d,
-        &mut u,
-        &mut v,
-    );
-    let inv = d[0].inv();
-    bpscal(inv, &u, &mut res);
-    Ok(F6lt(res))
-}
-
-#[inline(always)]
-fn f6_add(f1: &F6lt, f2: &F6lt) -> F6lt {
-    F6lt([
-        f1.0[0] + f2.0[0],
-        f1.0[1] + f2.0[1],
-        f1.0[2] + f2.0[2],
-        f1.0[3] + f2.0[3],
-        f1.0[4] + f2.0[4],
-        f1.0[5] + f2.0[5],
-    ])
-}
-
-fn f6_scal(s: Belt, f: &F6lt) -> F6lt {
-    F6lt([f.0[0] * s, f.0[1] * s, f.0[2] * s, f.0[3] * s, f.0[4] * s, f.0[5] * s])
-}
-
-// TODO: Try karat3-square if performance is an issue
-#[inline(always)]
-fn f6_square(f: &F6lt) -> F6lt {
-    f6_mul(f, f)
-}
-
-#[inline(always)]
-fn f6_neg(f: &F6lt) -> F6lt {
-    F6lt([-f.0[0], -f.0[1], -f.0[2], -f.0[3], -f.0[4], -f.0[5]])
-}
-
-#[inline(always)]
-fn f6_sub(f1: &F6lt, f2: &F6lt) -> F6lt {
-    f6_add(f1, &f6_neg(f2))
-}
-
-#[inline(always)]
-fn ch_double_unsafe(x: &F6lt, y: &F6lt) -> Result<CheetahPoint, JetErr> {
-    let slope = f6_div(
-        &f6_add(&f6_scal(Belt(3), &f6_square(x)), &F6_ONE),
-        &f6_scal(Belt(2), y),
-    )?;
-    let x_out = f6_sub(&f6_square(&slope), &f6_scal(Belt(2), x));
-    let y_out = f6_sub(&f6_mul(&slope, &f6_sub(x, &x_out)), y);
-    Ok(CheetahPoint {
-        x: x_out,
-        y: y_out,
-        inf: false,
-    })
-}
-
-pub(crate) const A_ID: CheetahPoint = CheetahPoint {
-    x: F6_ZERO,
-    y: F6_ONE,
-    inf: true,
-};
-pub(crate) const F6_ZERO: F6lt = F6lt([Belt(0); 6]);
-pub(crate) const F6_ONE: F6lt = F6lt([Belt(1), Belt(0), Belt(0), Belt(0), Belt(0), Belt(0)]);
-
-#[inline(always)]
-fn ch_double(p: CheetahPoint) -> Result<CheetahPoint, JetErr> {
-    if p.inf {
-        return Ok(A_ID);
-    }
-    if p.y == F6_ZERO {
-        return Ok(A_ID);
-    }
-    ch_double_unsafe(&p.x, &p.y)
-}
-
-#[inline(always)]
-fn ch_add_unsafe(p: CheetahPoint, q: CheetahPoint) -> Result<CheetahPoint, JetErr> {
-    let slope = f6_div(&f6_sub(&p.y, &q.y), &f6_sub(&p.x, &q.x))?;
-    let x_out = f6_sub(&f6_square(&slope), &f6_add(&p.x, &q.x));
-    let y_out = f6_sub(&f6_mul(&slope, &f6_sub(&p.x, &x_out)), &p.y);
-    Ok(CheetahPoint {
-        x: x_out,
-        y: y_out,
-        inf: false,
-    })
-}
-
-#[inline(always)]
-fn ch_neg(p: &CheetahPoint) -> CheetahPoint {
-    CheetahPoint {
-        x: p.x,
-        y: f6_neg(&p.y),
-        inf: p.inf,
-    }
-}
-
-#[inline(always)]
-fn ch_add(p: &CheetahPoint, q: &CheetahPoint) -> Result<CheetahPoint, JetErr> {
-    if p.inf {
-        return Ok(*q);
-    }
-    if q.inf {
-        return Ok(*p);
-    }
-    if *p == ch_neg(q) {
-        return Ok(A_ID);
-    }
-    if p == q {
-        return ch_double(*p);
-    }
-    ch_add_unsafe(*p, *q)
-}
-
-#[inline(always)]
-pub(crate) fn ch_scal(n: u64, p: &CheetahPoint) -> Result<CheetahPoint, JetErr> {
-    let mut n = n;
-    let mut p_copy = *p;
-    let mut acc = A_ID;
-    while n > 0 {
-        if n & 1 == 1 {
-            acc = ch_add(&acc, &p_copy)?;
-        }
-        p_copy = ch_double(p_copy)?;
-        n >>= 1;
-    }
-    Ok(acc)
-}
-
-#[inline(always)]
-pub(crate) fn ch_scal_big(n: &UBig, p: &CheetahPoint) -> Result<CheetahPoint, JetErr> {
-    let mut n_copy = n.clone();
-    let zero = UBig::from(0u64);
-    let mut p_copy = *p;
-    let mut acc = A_ID;
-
-    while n_copy > zero {
-        // Check if least significant bit is set
-        if n_copy.bit(0) {
-            acc = ch_add(&acc, &p_copy)?;
-        }
-        p_copy = ch_double(p_copy)?;
-        n_copy >>= 1; // Right shift by 1 bit
-    }
-    Ok(acc)
-}
+use crate::form::belt::*;
+use crate::form::crypto::cheetah::*;
+use crate::form::tip5;
 
 #[inline(always)]
 pub fn ch_scal_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
@@ -410,16 +41,75 @@ pub fn verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let pubkey: CheetahPoint = CheetahPoint::from_noun(&pubkey).map_err(|_| BAIL_FAIL)?;
     let m = <[Belt; 5]>::from_noun(&m).map_err(|_| BAIL_FAIL)?;
 
-    let res = verify_affine(pubkey, &m, chal, sig)?;
+    let res = verify_affine(pubkey, &m, &chal, &sig)?;
     Ok(res.to_noun(&mut context.stack))
+}
+
+pub(crate) struct ValidateArgs {
+    pub pubkey: CheetahPoint,
+    pub m: [Belt; 5],
+    pub chal: UBig,
+    pub sig: UBig,
+}
+
+//  TODO: Implement NounDecode for UBig, requires NounAllocator in NounDecode from_noun
+//impl NounDecode for ValidateArgs {
+//    fn from_noun<A: NounAllocator>(stack: &mut A, noun: &Noun) -> Result<Self, NounDecodeError> {
+//        let pubkey = CheetahPoint::from_noun(&noun.slot(2)?)?;
+//        let m = Vec::<Belt>::from_noun(&noun.slot(6)?)?;
+//        let chal = noun.slot(14)?.as_atom()?.as_ubig(stack);
+//        let sig = noun.slot(15)?.as_atom()?.as_ubig(stack);
+//
+//        Ok(ValidateArgs {
+//            pubkey,
+//            m,
+//            chal,
+//            sig,
+//        })
+//    }
+//}
+
+pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let list = subject.slot(6)?;
+    let args = list
+        .list_iter()
+        .map(|arg| {
+            let pubkey = CheetahPoint::from_noun(&arg.slot(2)?).map_err(|_| BAIL_FAIL)?;
+            let m = <[Belt; 5]>::from_noun(&arg.slot(6)?).map_err(|_| BAIL_FAIL)?;
+            let chal = arg.slot(14)?.as_atom()?.as_ubig(&mut context.stack);
+            let sig = arg.slot(15)?.as_atom()?.as_ubig(&mut context.stack);
+            Ok(ValidateArgs {
+                pubkey,
+                m,
+                chal,
+                sig,
+            })
+        })
+        .collect::<Result<Vec<ValidateArgs>, JetErr>>()?;
+
+    let all_signatures_valid = !args
+        .par_iter()
+        .map(|arg| {
+            let ValidateArgs {
+                pubkey,
+                m,
+                chal,
+                sig,
+            } = arg;
+            verify_affine(*pubkey, m, chal, sig).unwrap()
+        })
+        //  check if any result is invalid and try to short-circuit as soon as an
+        //  invalid result is found
+        .any(|result| !result);
+    Ok(all_signatures_valid.to_noun(&mut context.stack))
 }
 
 #[inline(always)]
 pub fn verify_affine(
     pubkey: CheetahPoint,
-    m: &[Belt; 5],
-    chal: UBig,
-    sig: UBig,
+    m: &[Belt],
+    chal: &UBig,
+    sig: &UBig,
 ) -> Result<bool, JetErr> {
     let left = ch_scal_big(&sig, &A_GEN)?;
     let right = ch_neg(&ch_scal_big(&chal, &pubkey)?);
@@ -435,30 +125,20 @@ pub fn verify_affine(
     hashable[18..24].copy_from_slice(&pubkey.y.0);
     hashable[24..].copy_from_slice(m);
 
-    let hash = hash_varlen(&mut hashable);
+    let hash = tip5::hash::hash_varlen(&mut hashable);
     let truncated_hash = trunc_g_order(&hash);
 
-    Ok(truncated_hash == chal)
-}
-
-fn trunc_g_order(a: &[u64]) -> UBig {
-    let mut result = UBig::from(a[0]);
-    result += &*P_BIG * UBig::from(a[1]);
-    result += &*P_BIG_2 * UBig::from(a[2]);
-    result += &*P_BIG_3 * UBig::from(a[3]);
-
-    result % &*G_ORDER
+    Ok(truncated_hash == *chal)
 }
 
 #[cfg(test)]
 mod tests {
     use ibig::UBig;
     use nockvm::jets::util::test::{assert_jet, init_context, A};
-    use nockvm::noun::{D, T};
+    use nockvm::noun::{Atom, D, T, YES};
     use noun_serde::NounEncode;
 
     use super::*;
-    use crate::form::Belt;
 
     const F6_TEST: F6lt = F6lt([
         Belt(13724052584687643294),
@@ -471,10 +151,12 @@ mod tests {
 
     #[test]
     fn test_b58_roundtrip() {
-        let x = "32KVTmv3ofSyACq9nC1Hgnk4Jt8rs2hj1cvDZWC1EQuiYFMDg8MaLtF3ntafJbEUH5XPV1pK3K4xkxfjRPAWprBb7LYCVv4HF7817Bwh9M9xAdmgrPt77j4xejihNFd9h5Eo";
-        let point = CheetahPoint::from_base58(&x).unwrap();
-        let x_round = point.into_base58().unwrap();
-        assert_eq!(x, x_round)
+        for x in ["32KVTmv3ofSyACq9nC1Hgnk4Jt8rs2hj1cvDZWC1EQuiYFMDg8MaLtF3ntafJbEUH5XPV1pK3K4xkxfjRPAWprBb7LYCVv4HF7817Bwh9M9xAdmgrPt77j4xejihNFd9h5Eo",
+            "2Xu6FtvopCS69Ko2YnC99B9SVVZ7PLoVn7WvEdDpJKRxW1pmj51uBQdYfADEbRUFYwG55Wi2Qwa3f6Y6WTev5jLcvfJFDEr2Wwt8rViQeLsz1XwEPah5pxtwHTm2nmecjJNW"] {
+                let point = CheetahPoint::from_base58(&x).unwrap();
+                let x_round = point.into_base58().unwrap();
+                assert_eq!(x, x_round)
+            }
     }
 
     #[test]
@@ -667,7 +349,6 @@ mod tests {
     }
     #[test]
     fn test_verify_affine_sparse_seckey() -> Result<(), Box<dyn std::error::Error>> {
-        let mut context = init_context();
         // chal and sig are values taken from an example signature
         // secret_key: 0x8
         // message (hash): [0 1 2 3 4]
@@ -699,21 +380,48 @@ mod tests {
         };
 
         let m = [Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)];
-        let pubkey = pubkey.to_noun(&mut context.stack);
-        let chal = Atom::from_ubig(&mut context.stack, &chal).as_noun();
-        let sig = Atom::from_ubig(&mut context.stack, &sig).as_noun();
-        let m = m.to_noun(&mut context.stack);
-        let sample = T(&mut context.stack, &[pubkey, m, chal, sig]);
-        assert_jet(&mut context, verify_affine_jet, sample, YES);
+        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
         Ok(())
     }
 
     #[test]
     fn test_verify_affine_dense_seckey() -> Result<(), Box<dyn std::error::Error>> {
-        let mut context = init_context();
         // chal and sig are values taken from an example signature
         // secret_key: g-order - 1
         // message (hash): [8 9 10 11 12]
+        let chal = UBig::from_str_radix(
+            "6f3cd43cd8709f4368aed04cd84292ab1c380cb645aaa7d010669d70375cbe88", 16,
+        )?;
+        let sig = UBig::from_str_radix(
+            "5197ab182e307a350b5cf3606d6e99a6f35b0d382c8330dde6e51fb6ef8ebb8c", 16,
+        )?;
+        let pubkey = CheetahPoint {
+            x: F6lt([
+                Belt(2754611494552410273),
+                Belt(8599518745794843693),
+                Belt(10526511002404673680),
+                Belt(4830863958577994148),
+                Belt(375185138577093320),
+                Belt(12938930721685970739),
+            ]),
+            y: F6lt([
+                Belt(3062714866612034253),
+                Belt(15671931273416742386),
+                Belt(4071440668668521568),
+                Belt(7738250649524482367),
+                Belt(5259065445844042557),
+                Belt(8456011930642078370),
+            ]),
+            inf: false,
+        };
+        let m = [Belt(8), Belt(9), Belt(10), Belt(11), Belt(12)];
+        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_verify_affine() -> Result<(), Box<dyn std::error::Error>> {
+        let mut context = init_context();
         let chal = UBig::from_str_radix(
             "6f3cd43cd8709f4368aed04cd84292ab1c380cb645aaa7d010669d70375cbe88", 16,
         )?;
@@ -745,8 +453,9 @@ mod tests {
         let chal = Atom::from_ubig(&mut context.stack, &chal).as_noun();
         let sig = Atom::from_ubig(&mut context.stack, &sig).as_noun();
         let m = m.to_noun(&mut context.stack);
-        let sample = T(&mut context.stack, &[pubkey, m, chal, sig]);
-        assert_jet(&mut context, verify_affine_jet, sample, YES);
+        let arg = T(&mut context.stack, &[pubkey, m, chal, sig]);
+        let sample = T(&mut context.stack, &[arg, arg, arg, arg, arg, arg, D(0)]);
+        assert_jet(&mut context, batch_verify_affine_jet, sample, YES);
         Ok(())
     }
 }

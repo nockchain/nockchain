@@ -1,10 +1,10 @@
-use nockapp::Noun;
 use nockvm::jets::JetErr;
+use nockvm::noun::Noun;
 
-use crate::form::fext::*;
+use crate::form::belt::Belt;
+use crate::form::felt::*;
 use crate::form::mary::*;
-use crate::form::{Belt, Felt};
-use crate::hand::structs::HoonList;
+use crate::form::structs::HoonList;
 
 pub struct ExtChals {
     pub a: Felt,

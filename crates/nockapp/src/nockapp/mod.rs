@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use driver::{IOAction, IODriverFn, NockAppHandle, PokeResult};
 pub use error::NockAppError;
+use futures::future::{pending, Either};
 use futures::stream::StreamExt;
-use futures::FutureExt;
 use metrics::*;
 use nockvm::noun::SIG;
 use signal_hook::consts::signal::*;
@@ -23,9 +23,9 @@ use signal_hook::consts::TERM_SIGNALS;
 use signal_hook_tokio::Signals;
 use tokio::select;
 use tokio::sync::{broadcast, mpsc, Mutex, OwnedMutexGuard};
-use tokio::time::{interval, Duration, Interval};
+use tokio::time::{interval_at, Duration, Instant, Interval};
 use tokio_util::task::TaskTracker;
-use tracing::{debug, error, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 use wire::WireRepr;
 
 use crate::kernel::form::Kernel;
@@ -70,7 +70,7 @@ pub struct NockApp<J = NockJammer> {
     /// Effect broadcast channel
     effect_broadcast: Arc<broadcast::Sender<NounSlab>>,
     /// Save interval
-    save_interval: Interval,
+    save_interval: Option<Interval>,
     /// Mutex to ensure only one save at a time
     pub(crate) save_mutex: Arc<Mutex<Saver<J>>>,
     metrics: Arc<NockAppMetrics>,
@@ -142,7 +142,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
     pub async fn new<F, U, E>(
         kernel_from_checkpoint: F,
         snapshot_path: &PathBuf,
-        save_interval_duration: Duration,
+        save_interval_duration: Option<Duration>,
     ) -> Result<Self, NockAppError>
     where
         F: FnOnce(Option<SaveableCheckpoint>) -> U,
@@ -170,8 +170,16 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         // let tasks = TaskJoinSet::new();
         // let tasks = Arc::new(TaskJoinSet::new());
         let tasks = TaskTracker::new();
-        let mut save_interval = interval(save_interval_duration);
-        save_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // important so we don't stack ticks when lagging
+        let save_interval = save_interval_duration.map(|duration| {
+            info!("Nockapp save interval duration: {:?}", duration);
+            let first_tick_at = Instant::now() + duration;
+            let mut interval = interval_at(first_tick_at, duration);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // important so we don't stack ticks when lagging
+            interval
+        });
+        if save_interval.is_none() {
+            info!("Nockapp save interval disabled; periodic saves off");
+        }
         let exit_status = AtomicBool::new(false);
         let abort_immediately = AtomicBool::new(false);
 
@@ -349,7 +357,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         } else {
             let res_noun = tail.as_cell()?.tail();
             let mut slab = NounSlab::new();
-            slab.modify_noun(|_| res_noun);
+            slab.copy_into(res_noun);
             Ok(Some(slab))
         }
     }
@@ -423,12 +431,18 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
     async fn work(&mut self) -> Result<NockAppRun, NockAppError> {
         // Track SIGINT (C-c) presses for immediate termination
         // Fires when there is a save interval tick *and* an available permit in the save semaphore
-        let save_ready = self.save_interval.tick().then(|_| async {
-            trace!("save_interval tick: locking save_mutex");
-            let guard = self.save_mutex.clone().lock_owned().await;
-            trace!("save_interval tick: save_mutex locked");
-            guard
-        });
+        let save_ready = if let Some(interval) = self.save_interval.as_mut() {
+            let save_mutex = self.save_mutex.clone();
+            Either::Left(async move {
+                interval.tick().await;
+                trace!("save_interval tick: locking save_mutex");
+                let guard = save_mutex.lock_owned().await;
+                trace!("save_interval tick: save_mutex locked");
+                guard
+            })
+        } else {
+            Either::Right(pending::<OwnedMutexGuard<Saver<J>>>())
+        };
         select!(
             exit_status_res = self.exit_recv.recv() => {
                 let Some(exit_status) = exit_status_res else {

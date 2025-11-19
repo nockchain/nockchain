@@ -8,6 +8,7 @@ use bitvec::view::BitView;
 use bitvec::{bits, bitvec};
 use bytes::Bytes;
 use either::Either;
+use ibig::Stack;
 use intmap::IntMap;
 use nockvm::mem::NockStack;
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
@@ -203,6 +204,12 @@ impl<J> NounAllocator for NounSlab<J> {
         let new_struct_ptr = self.allocation_start as *mut T;
         self.allocation_start = self.allocation_start.add(word_size);
         new_struct_ptr
+    }
+
+    unsafe fn equals(&mut self, a: *mut Noun, b: *mut Noun) -> bool {
+        let a = unsafe { &mut *a };
+        let b = unsafe { &mut *b };
+        slab_noun_equality(a, b)
     }
 }
 
@@ -416,6 +423,39 @@ impl<J: Jammer> NounSlab<J> {
 
     pub fn cue_into(&mut self, jammed: Bytes) -> Result<Noun, CueError> {
         J::cue(self, jammed)
+    }
+}
+
+impl<J> Stack for NounSlab<J> {
+    unsafe fn alloc_layout(&mut self, layout: Layout) -> *mut u64 {
+        let word_size = (layout.size() + 7) >> 3;
+
+        // Ensure we have enough space
+        if self.allocation_start.is_null()
+            || self.allocation_start.add(word_size) > self.allocation_stop
+        {
+            let next_idx = std::cmp::max(self.slabs.len(), min_idx_for_size(word_size));
+            self.slabs
+                .resize(next_idx + 1, (std::ptr::null_mut(), Layout::new::<u8>()));
+            let new_size = idx_to_size(next_idx);
+            let new_layout = Layout::array::<u64>(new_size).unwrap_or_else(|err| {
+                panic!(
+                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            });
+            let new_slab = Self::raw_alloc(new_layout);
+            let new_slab_u64 = new_slab as *mut u64;
+            self.slabs[next_idx] = (new_slab, new_layout);
+            self.allocation_start = new_slab_u64;
+            self.allocation_stop = new_slab_u64.add(new_size);
+        }
+
+        let ptr = self.allocation_start;
+        self.allocation_start = self.allocation_start.add(word_size);
+        ptr
     }
 }
 
@@ -666,7 +706,6 @@ impl Jammer for NockJammer {
             );
             buffer.extend_from_bitslice(&atom.as_bitslice()[0..atom_sz]);
         }
-
         let mut backref_map = NounMap::<usize>::new();
         let mut stack = vec![noun];
         let mut buffer = bitvec![u8, Lsb0; 0; 0];
@@ -839,11 +878,20 @@ impl Jammer for NockJammer {
 #[cfg(test)]
 mod tests {
     use bitvec::prelude::*;
+    use ibig::ubig;
     use nockvm::noun::{D, T};
     use nockvm_macros::tas;
 
     use super::*;
     use crate::AtomExt;
+    #[test]
+    fn test_ubig_alloc() {
+        let mut slab: NounSlab = NounSlab::new();
+        let big_exp = ubig!(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF);
+        let atom = Atom::from_ubig(&mut slab, &big_exp);
+        let big = atom.as_ubig(&mut slab);
+        assert_eq!(big, big_exp);
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

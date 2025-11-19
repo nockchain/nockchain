@@ -1,15 +1,13 @@
 use nockvm::interpreter::Context;
-use nockvm::jets::util::{slot, BAIL_FAIL};
+use nockvm::jets::util::{slot, BAIL_EXIT, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::noun::{IndirectAtom, Noun, D, T};
 use nockvm::site::{site_slam, Site};
 use tracing::debug;
 
-use crate::form::fext::*;
-use crate::form::poly::*;
-use crate::hand::handle::new_handle_mut_felt;
-use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::NounExt;
+use crate::form::felt::*;
+use crate::form::handle::new_handle_mut_felt;
+use crate::form::noun_ext::NounMathExt;
 use crate::utils::*;
 
 pub fn zip_roll_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
@@ -33,14 +31,14 @@ pub fn zip_roll_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr
                 prod = site_slam(context, &site, sam)?;
             } else {
                 debug!("list_a and list_b sizes unequal");
-                return jet_err();
+                return Err(BAIL_EXIT);
             }
         } else {
             if unsafe { !list_a.raw_equals(&D(0)) } {
-                return Err(BAIL_FAIL);
+                return Err(BAIL_EXIT);
             }
             if unsafe { !list_b.raw_equals(&D(0)) } {
-                return Err(BAIL_FAIL);
+                return Err(BAIL_EXIT);
             }
             return Ok(prod);
         }
@@ -54,7 +52,7 @@ pub fn fadd_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let (Ok(a_felt), Ok(b_felt)) = (a.as_felt(), b.as_felt()) else {
         debug!("a or b not a felt");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     fadd(a_felt, b_felt, res_felt);
@@ -70,7 +68,7 @@ pub fn fsub_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let (Ok(a_felt), Ok(b_felt)) = (a.as_felt(), b.as_felt()) else {
         debug!("a or b not a felt");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     fsub(a_felt, b_felt, res_felt);
@@ -84,7 +82,7 @@ pub fn fneg_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let Ok(a_felt) = a.as_felt() else {
         debug!("a not a felt");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     fneg(a_felt, res_felt);
@@ -100,7 +98,7 @@ pub fn fmul_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let (Ok(a_felt), Ok(b_felt)) = (a.as_felt(), b.as_felt()) else {
         debug!("a or b not a felt");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     fmul(a_felt, b_felt, res_felt);
@@ -114,7 +112,7 @@ pub fn finv_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let Ok(a_felt) = a.as_felt() else {
         debug!("a is not a felt");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     finv(a_felt, res_felt);
@@ -130,7 +128,7 @@ pub fn fdiv_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let (Ok(a_felt), Ok(b_felt)) = (a.as_felt(), b.as_felt()) else {
         debug!("a or b not felts");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     fdiv(a_felt, b_felt, res_felt);
@@ -146,7 +144,7 @@ pub fn fpow_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
 
     let (Ok(x_felt), Ok(n_atom)) = (x.as_felt(), n.as_atom()) else {
         debug!("x not a felt or n not an atom");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let n_64 = n_atom.as_u64()?;
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);

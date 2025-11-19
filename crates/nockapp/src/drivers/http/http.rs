@@ -344,8 +344,9 @@ pub fn http() -> IODriverFn {
         }
 
         let channel_map = RwLock::new(HashMap::<u64, Responder>::new());
-        let regular_cache = Arc::new(RwLock::new(Option::<CachedResponse>::None));
-        let htmx_cache = Arc::new(RwLock::new(Option::<CachedResponse>::None));
+        let uri_map = RwLock::new(HashMap::<u64, String>::new());
+        let regular_cache = Arc::new(RwLock::new(HashMap::<String, CachedResponse>::new()));
+        let htmx_cache = Arc::new(RwLock::new(HashMap::<String, CachedResponse>::new()));
 
         // Parse cache expiration from environment variable, default to never expire
         let cache_duration = env::var("EXPIRE_CACHE")
@@ -366,7 +367,7 @@ pub fn http() -> IODriverFn {
                     loop {
                         interval.tick().await;
                         debug!("invalidating regular response cache");
-                        *regular_cache.write().await = None;
+                        regular_cache.write().await.clear();
                     }
                 })
             };
@@ -378,7 +379,7 @@ pub fn http() -> IODriverFn {
                     loop {
                         interval.tick().await;
                         debug!("invalidating htmx response cache");
-                        *htmx_cache.write().await = None;
+                        htmx_cache.write().await.clear();
                     }
                 })
             };
@@ -418,7 +419,7 @@ pub fn http() -> IODriverFn {
                             let cache_to_use = if is_htmx { &htmx_cache } else { &regular_cache };
 
                             let cache_read = cache_to_use.read().await;
-                            if let Some(cached) = &*cache_read {
+                            if let Some(cached) = cache_read.get(&msg.uri.to_string()) {
                                 // Check expiration only if cache_duration is set
                                 let should_serve = if let Some(cache_duration) = cache_duration {
                                     !cached.is_expired(cache_duration)
@@ -438,6 +439,7 @@ pub fn http() -> IODriverFn {
                         }
 
                         channel_map.write().await.insert(msg.id, msg.resp);
+                        uri_map.write().await.insert(msg.id, msg.uri.to_string());
                         let mut slab = NounSlab::new();
 
                         let id = Atom::from_value(&mut slab, msg.id)
@@ -484,6 +486,7 @@ pub fn http() -> IODriverFn {
                             error!("Kernel nacked the request for {}", msg.uri);
                             let resp_tx = channel_map.write().await.remove(&msg.id)
                                 .ok_or(HttpError::ResponseChannelNotFound(msg.id))?;
+                            uri_map.write().await.remove(&msg.id);
                             let _ = resp_tx.send(Err(StatusCode::BAD_REQUEST));
                         }
 
@@ -494,6 +497,7 @@ pub fn http() -> IODriverFn {
                         error!("Error processing HTTP request: {}", e);
                         // Try to send error response if we still have the channel
                         if let Some(resp_tx) = channel_map.write().await.remove(&msg.id) {
+                            uri_map.write().await.remove(&msg.id);
                             let _ = resp_tx.send(Err(StatusCode::INTERNAL_SERVER_ERROR));
                         }
                     }
@@ -627,13 +631,15 @@ pub fn http() -> IODriverFn {
 
                             // Cache logic - determine which cache to use based on effect type
                             if status == StatusCode::OK {
-                                let cached_response = CachedResponse::new(status, header_vec.clone(), body.clone());
-                                if tag_val == tas!(b"htmx") || tag_val == tas!(b"h-cache") {
-                                    debug!("caching HTMX response (htmx or h-cache effect)");
-                                    *htmx_cache.write().await = Some(cached_response);
-                                } else {
-                                    debug!("caching regular response (res or cache effect)");
-                                    *regular_cache.write().await = Some(cached_response);
+                                if let Some(request_uri) = uri_map.read().await.get(&id).cloned() {
+                                    let cached_response = CachedResponse::new(status, header_vec.clone(), body.clone());
+                                    if tag_val == tas!(b"htmx") || tag_val == tas!(b"h-cache") {
+                                        debug!("caching HTMX response for {} (htmx or h-cache effect)", request_uri);
+                                        htmx_cache.write().await.insert(request_uri, cached_response);
+                                    } else {
+                                        debug!("caching regular response for {} (res or cache effect)", request_uri);
+                                        regular_cache.write().await.insert(request_uri, cached_response);
+                                    }
                                 }
                             }
 
@@ -647,6 +653,7 @@ pub fn http() -> IODriverFn {
                         if tag_val == tas!(b"res") || tag_val == tas!(b"htmx") {
                             let resp_tx = channel_map.write().await.remove(&id)
                                 .ok_or(HttpError::ResponseChannelNotFound(id))?;
+                            uri_map.write().await.remove(&id);
                             debug!("Sending response back to client for request id: {}", id);
                             let _ = resp_tx.send(resp);
                         }

@@ -18,6 +18,103 @@ metrics_struct![
     (requests_erred_elders_by_id, "nockchain-libp2p-io.requests_erred_elders_by_id", Count),
     (requests_erred_raw_tx_by_id, "nockchain-libp2p-io.requests_erred_raw_tx_by_id", Count),
     (requests_dropped, "nockchain-libp2p-io.requests_dropped", Count),
+    (requests_crown_error_external, "nockchain-libp2p-io.requests_crown_error_external", Count),
+    (requests_crown_error_mutex, "nockchain-libp2p-io.requests_crown_error_mutex", Count),
+    (
+        requests_crown_error_invalid_kernel_input,
+        "nockchain-libp2p-io.requests_crown_error_invalid_kernel_input", Count
+    ),
+    (
+        requests_crown_error_unknown_effect,
+        "nockchain-libp2p-io.requests_crown_error_unknown_effect", Count
+    ),
+    (requests_crown_error_io_error, "nockchain-libp2p-io.requests_crown_error_io_error", Count),
+    (
+        requests_crown_error_noun_error, "nockchain-libp2p-io.requests_crown_error_noun_error",
+        Count
+    ),
+    (
+        requests_crown_error_interpreter_error,
+        "nockchain-libp2p-io.requests_crown_error_interpreter_error", Count
+    ),
+    (
+        requests_crown_error_kernel_error, "nockchain-libp2p-io.requests_crown_error_kernel_error",
+        Count
+    ),
+    (
+        requests_crown_error_utf8_from_error,
+        "nockchain-libp2p-io.requests_crown_error_utf8_from_error", Count
+    ),
+    (
+        requests_crown_error_utf8_error, "nockchain-libp2p-io.requests_crown_error_utf8_error",
+        Count
+    ),
+    (
+        requests_crown_error_newt_error, "nockchain-libp2p-io.requests_crown_error_newt_error",
+        Count
+    ),
+    (
+        requests_crown_error_boot_error, "nockchain-libp2p-io.requests_crown_error_boot_error",
+        Count
+    ),
+    (
+        requests_crown_error_serf_load_error,
+        "nockchain-libp2p-io.requests_crown_error_serf_load_error", Count
+    ),
+    (requests_crown_error_work_bail, "nockchain-libp2p-io.requests_crown_error_work_bail", Count),
+    (requests_crown_error_peek_bail, "nockchain-libp2p-io.requests_crown_error_peek_bail", Count),
+    (requests_crown_error_work_swap, "nockchain-libp2p-io.requests_crown_error_work_swap", Count),
+    (
+        requests_crown_error_tank_error, "nockchain-libp2p-io.requests_crown_error_tank_error",
+        Count
+    ),
+    (requests_crown_error_play_bail, "nockchain-libp2p-io.requests_crown_error_play_bail", Count),
+    (
+        requests_crown_error_queue_recv, "nockchain-libp2p-io.requests_crown_error_queue_recv",
+        Count
+    ),
+    (
+        requests_crown_error_save_error, "nockchain-libp2p-io.requests_crown_error_save_error",
+        Count
+    ),
+    (requests_crown_error_int_error, "nockchain-libp2p-io.requests_crown_error_int_error", Count),
+    (
+        requests_crown_error_join_error, "nockchain-libp2p-io.requests_crown_error_join_error",
+        Count
+    ),
+    (
+        requests_crown_error_decode_error, "nockchain-libp2p-io.requests_crown_error_decode_error",
+        Count
+    ),
+    (
+        requests_crown_error_encode_error, "nockchain-libp2p-io.requests_crown_error_encode_error",
+        Count
+    ),
+    (
+        requests_crown_error_state_jam_format_error,
+        "nockchain-libp2p-io.requests_crown_error_state_jam_format_error", Count
+    ),
+    (requests_crown_error_unknown, "nockchain-libp2p-io.requests_crown_error_unknown", Count),
+    (
+        requests_crown_error_conversion_error,
+        "nockchain-libp2p-io.requests_crown_error_conversion_error", Count
+    ),
+    (
+        requests_crown_error_unknown_error,
+        "nockchain-libp2p-io.requests_crown_error_unknown_error", Count
+    ),
+    (
+        requests_crown_error_queue_error, "nockchain-libp2p-io.requests_crown_error_queue_error",
+        Count
+    ),
+    (
+        requests_crown_error_serf_mpsc_error,
+        "nockchain-libp2p-io.requests_crown_error_serf_mpsc_error", Count
+    ),
+    (
+        requests_crown_error_oneshot_channel_error,
+        "nockchain-libp2p-io.requests_crown_error_oneshot_channel_error", Count
+    ),
     (responses_acked_heard_block, "nockchain-libp2p-io.responses_acked_heard_block", Count),
     (responses_acked_heard_tx, "nockchain-libp2p-io.responses_acked_heard_tx", Count),
     (responses_acked_heard_elders, "nockchain-libp2p-io.responses_acked_heard_elders", Count),

@@ -19,7 +19,7 @@ use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{Hot, HotEntry};
 use nockvm::jets::warm::Warm;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, IndirectAtom, Noun, NounAllocator, D};
+use nockvm::noun::{Noun, D};
 use nockvm::serialization::jam;
 use nockvm::trace::TraceInfo;
 use slogger::CrownSlogger;
@@ -93,14 +93,7 @@ pub fn current_epoch_ms() -> u128 {
         .as_millis()
 }
 
-pub fn make_tas<A: NounAllocator>(allocator: &mut A, tas: &str) -> Atom {
-    let tas_bytes: &[u8] = tas.as_bytes();
-    unsafe {
-        let mut tas_atom =
-            IndirectAtom::new_raw_bytes(allocator, tas_bytes.len(), tas_bytes.as_ptr());
-        tas_atom.normalize_as_atom()
-    }
-}
+pub use nockvm::ext::make_tas;
 
 // serialize a noun for writing over a socket or a file descriptor
 pub fn serialize_noun(stack: &mut NockStack, noun: Noun) -> Result<Vec<u8>> {

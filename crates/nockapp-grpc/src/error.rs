@@ -1,3 +1,4 @@
+use noun_serde::NounDecodeError;
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, NockAppGrpcError>;
@@ -19,6 +20,11 @@ pub enum NockAppGrpcError {
     #[error("Peek operation failed")]
     PeekFailed,
 
+    #[error(
+        "Peek operation either returned ~ or [~ ~]. Path was either malformed or there was no data"
+    )]
+    PeekReturnedNoData,
+
     #[error("Poke operation failed")]
     PokeFailed,
 
@@ -28,15 +34,30 @@ pub enum NockAppGrpcError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[error("NounDecode error: {0}")]
+    NounDecode(#[from] NounDecodeError),
+
     #[error("Serialization error: {0}")]
     Serialization(String),
+
+    #[error("Transaction pending")]
+    TxPending,
+
+    #[error("Transaction not found")]
+    NotFound,
+
+    #[error("Transaction prefix matched multiple transactions: {0}")]
+    TxPrefixAmbiguous(String),
+
+    #[error("Transaction prefix too short (minimum {0} characters)")]
+    TxPrefixTooShort(usize),
 }
 
 impl From<NockAppGrpcError> for tonic::Status {
     fn from(err: NockAppGrpcError) -> Self {
         use NockAppGrpcError::*;
 
-        use crate::pb::ErrorCode;
+        use crate::pb::common::v1::ErrorCode;
 
         let (code, message, error_code) = match &err {
             NockApp(nockapp::NockAppError::PeekFailed) => (
@@ -75,6 +96,11 @@ impl From<NockAppGrpcError> for tonic::Status {
                 "Peek operation failed".to_string(),
                 ErrorCode::PeekFailed,
             ),
+            PeekReturnedNoData => (
+                tonic::Code::NotFound,
+                "Peek operation returned no data".to_string(),
+                ErrorCode::PeekReturnedNoData,
+            ),
             PokeFailed => (
                 tonic::Code::InvalidArgument,
                 "Poke operation failed".to_string(),
@@ -86,17 +112,42 @@ impl From<NockAppGrpcError> for tonic::Status {
                 ErrorCode::Timeout,
             ),
             Internal(msg) => (tonic::Code::Internal, msg.clone(), ErrorCode::InternalError),
+            NounDecode(msg) => (
+                tonic::Code::Internal,
+                format!("NounDecode error: {}", msg),
+                ErrorCode::InternalError,
+            ),
             Serialization(msg) => (
                 tonic::Code::Internal,
                 format!("Serialization error: {}", msg),
                 ErrorCode::InternalError,
+            ),
+            TxPending => (
+                tonic::Code::FailedPrecondition,
+                "Transaction pending".to_string(),
+                ErrorCode::PeekReturnedNoData,
+            ),
+            NotFound => (
+                tonic::Code::NotFound,
+                "Transaction not found".to_string(),
+                ErrorCode::NotFound,
+            ),
+            TxPrefixAmbiguous(matches) => (
+                tonic::Code::InvalidArgument,
+                format!("Transaction prefix is ambiguous; matches: {}", matches),
+                ErrorCode::InvalidRequest,
+            ),
+            TxPrefixTooShort(min) => (
+                tonic::Code::InvalidArgument,
+                format!("Transaction prefix too short (minimum {} characters)", min),
+                ErrorCode::InvalidRequest,
             ),
         };
 
         let status = tonic::Status::new(code, message);
 
         // Add structured error details
-        let error_details = crate::pb::ErrorStatus {
+        let error_details = crate::pb::common::v1::ErrorStatus {
             code: error_code as i32,
             message: status.message().to_string(),
             details: None,

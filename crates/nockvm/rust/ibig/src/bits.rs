@@ -6,6 +6,7 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, 
 use crate::arch::word::Word;
 use crate::buffer::Buffer;
 use crate::ibig::IBig;
+use crate::memory::Stack;
 use crate::ops::{AndNot, NextPowerOfTwo, UnsignedAbs};
 use crate::primitive::{double_word, PrimitiveSigned, PrimitiveUnsigned, WORD_BITS_USIZE};
 use crate::sign::Sign::*;
@@ -492,6 +493,7 @@ impl UBig {
 impl BitOr<UBig> for UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use bitor_stack or bitor_ref_stack instead to prevent memory leaks.
     #[inline]
     fn bitor(self, rhs: UBig) -> UBig {
         match (self.into_repr(), rhs.into_repr()) {
@@ -512,6 +514,7 @@ impl BitOr<UBig> for UBig {
 impl BitOr<&UBig> for UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use bitor_stack or bitor_ref_stack instead to prevent memory leaks.
     #[inline]
     fn bitor(self, rhs: &UBig) -> UBig {
         match (self.into_repr(), rhs.repr()) {
@@ -526,6 +529,7 @@ impl BitOr<&UBig> for UBig {
 impl BitOr<UBig> for &UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use bitor_stack or bitor_ref_stack instead to prevent memory leaks.
     #[inline]
     fn bitor(self, rhs: UBig) -> UBig {
         rhs.bitor(self)
@@ -535,6 +539,7 @@ impl BitOr<UBig> for &UBig {
 impl BitOr<&UBig> for &UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use bitor_stack or bitor_ref_stack instead to prevent memory leaks.
     #[inline]
     fn bitor(self, rhs: &UBig) -> UBig {
         match (self.repr(), rhs.repr()) {
@@ -567,6 +572,75 @@ impl BitOrAssign<&UBig> for UBig {
 }
 
 impl UBig {
+    /// Bitwise OR with stack allocator.
+    pub fn bitor_stack<S: Stack>(stack: &mut S, lhs: UBig, rhs: UBig) -> UBig {
+        match (lhs.into_repr(), rhs.into_repr()) {
+            (Small(word0), Small(word1)) => UBig::from_word(word0 | word1),
+            (Small(word0), Large(buffer1)) => UBig::bitor_large_word_stack(stack, buffer1, word0),
+            (Large(buffer0), Small(word1)) => UBig::bitor_large_word_stack(stack, buffer0, word1),
+            (Large(buffer0), Large(buffer1)) => {
+                if buffer0.len() >= buffer1.len() {
+                    UBig::bitor_large_stack(stack, buffer0, &buffer1)
+                } else {
+                    UBig::bitor_large_stack(stack, buffer1, &buffer0)
+                }
+            }
+        }
+    }
+
+    /// Bitwise OR reference with stack allocator.
+    pub fn bitor_ref_stack<S: Stack>(stack: &mut S, lhs: &UBig, rhs: &UBig) -> UBig {
+        match (lhs.repr(), rhs.repr()) {
+            (Small(word0), Small(word1)) => UBig::from_word(word0 | word1),
+            (Small(word0), Large(buffer1)) => {
+                let mut new_buffer = Buffer::allocate_stack(stack, buffer1.len());
+                new_buffer.clone_from(buffer1);
+                UBig::bitor_large_word_stack(stack, new_buffer, *word0)
+            }
+            (Large(buffer0), Small(word1)) => {
+                let mut new_buffer = Buffer::allocate_stack(stack, buffer0.len());
+                new_buffer.clone_from(buffer0);
+                UBig::bitor_large_word_stack(stack, new_buffer, *word1)
+            }
+            (Large(buffer0), Large(buffer1)) => {
+                if buffer0.len() >= buffer1.len() {
+                    let mut new_buffer = Buffer::allocate_stack(stack, buffer0.len());
+                    new_buffer.clone_from(buffer0);
+                    UBig::bitor_large_stack(stack, new_buffer, buffer1)
+                } else {
+                    let mut new_buffer = Buffer::allocate_stack(stack, buffer1.len());
+                    new_buffer.clone_from(buffer1);
+                    UBig::bitor_large_stack(stack, new_buffer, buffer0)
+                }
+            }
+        }
+    }
+
+    fn bitor_large_word_stack<S: Stack>(_stack: &mut S, mut buffer: Buffer, rhs: Word) -> UBig {
+        debug_assert!(buffer.len() >= 2);
+
+        *buffer.first_mut().unwrap_or_else(|| {
+            panic!(
+                "Panicked at {}:{} (git sha: {})",
+                file!(),
+                line!(),
+                option_env!("GIT_SHA").unwrap_or("unknown")
+            )
+        }) |= rhs;
+        buffer.into()
+    }
+
+    fn bitor_large_stack<S: Stack>(stack: &mut S, mut buffer: Buffer, rhs: &[Word]) -> UBig {
+        for (x, y) in buffer.iter_mut().zip(rhs.iter()) {
+            *x |= *y;
+        }
+        if rhs.len() > buffer.len() {
+            buffer.ensure_capacity_stack(stack, rhs.len());
+            buffer.extend(&rhs[buffer.len()..]);
+        }
+        buffer.into()
+    }
+
     fn bitor_large_word(mut buffer: Buffer, rhs: Word) -> UBig {
         debug_assert!(buffer.len() >= 2);
 

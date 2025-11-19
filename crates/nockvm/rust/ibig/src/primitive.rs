@@ -26,7 +26,7 @@ pub(crate) const fn split_double_word(dw: DoubleWord) -> (Word, Word) {
     (dw as Word, (dw >> WORD_BITS) as Word)
 }
 
-pub(crate) trait PrimitiveUnsigned
+pub trait PrimitiveUnsigned
 where
     Self: Copy,
     Self: Debug,

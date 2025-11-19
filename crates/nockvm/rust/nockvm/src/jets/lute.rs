@@ -189,6 +189,34 @@ pub fn jet_ut_nest_dext(context: &mut Context, subject: Noun) -> Result {
     }
 }
 
+pub fn jet_ut_redo(context: &mut Context, subject: Noun) -> Result {
+    let rff = slot(subject, 6)?;
+    let van = slot(subject, 7)?;
+    let bat = slot(van, 2)?;
+    let sut = slot(van, 6)?;
+
+    let flag = if let Ok(noun) = slot(van, 59) {
+        if unsafe { noun.raw_equals(&D(0)) } {
+            0u64
+        } else {
+            1u64
+        }
+    } else {
+        1
+    };
+    let fun = 141 + tas!(b"redo") + (flag << 8);
+    let mut key = T(&mut context.stack, &[D(fun), sut, rff, bat]);
+
+    match context.cache.lookup(&mut context.stack, &mut key) {
+        Some(pro) => Ok(pro),
+        None => {
+            let pro = interpret(context, subject, slot(subject, 2)?)?;
+            context.cache = context.cache.insert(&mut context.stack, &mut key, pro);
+            Ok(pro)
+        }
+    }
+}
+
 pub fn jet_ut_rest(context: &mut Context, subject: Noun) -> Result {
     let leg = slot(subject, 6)?;
     let van = slot(subject, 7)?;

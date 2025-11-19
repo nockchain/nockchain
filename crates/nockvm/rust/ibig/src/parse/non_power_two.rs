@@ -73,6 +73,7 @@ fn parse_large(bytes: &[u8], radix: Digit) -> Result<UBig, ParseError> {
     assert!(bytes.len() > chunk_bytes);
 
     // Calculate radix^(CHUNK_LEN<<i).
+    // FIXME: This use of ibig's pow will leak memory.
     let mut radix_powers = vec![UBig::from_word(radix_info.range_per_word).pow(CHUNK_LEN)];
 
     // while (chunk_bytes << radix_powers.len()) < bytes.len()

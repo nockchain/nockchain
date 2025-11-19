@@ -1,10 +1,4 @@
-pub mod base;
-pub mod bpoly;
-pub mod fext;
-pub mod fpoly;
 pub mod gen_trace;
-pub mod mary;
 pub mod prover;
-pub mod tip5;
 
-pub use base::*;
+pub use nockchain_math::{belt, bpoly, felt, fpoly, mary, poly, shape, tip5};

@@ -65,7 +65,7 @@ const IDENTIFY_PROTOCOL_VERSION: &str = "/nockchain-1-identify";
 const PEER_STORE_RECORD_CAPACITY: usize = 1024;
 
 // Default timeout for network-originating pokes
-const POKE_TIMEOUT_SECS: u64 = 60;
+const POKE_TIMEOUT_SECS: u64 = 180;
 
 // Default max failed pings before closing connection
 const FAILED_PINGS_BEFORE_CLOSE: u64 = 4;

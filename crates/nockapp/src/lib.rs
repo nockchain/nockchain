@@ -25,7 +25,7 @@ pub use bytes::*;
 pub use drivers::*;
 pub use nockapp::*;
 pub use nockvm::noun::Noun;
-pub use noun::{AtomExt, JammedNoun, NounExt};
+pub use noun::{AtomExt, IndirectAtomExt, JammedNoun, NounExt};
 pub use utils::bytes::{ToBytes, ToBytesExt};
 pub use utils::error::{CrownError, Result};
 
@@ -49,6 +49,19 @@ pub fn default_data_dir(dir_name: &str) -> PathBuf {
 }
 
 pub fn system_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("NOCKAPP_HOME") {
+        if !dir.trim().is_empty() {
+            let path = PathBuf::from(&dir);
+            if path.is_absolute() {
+                return path;
+            }
+            if let Ok(current) = std::env::current_dir() {
+                return current.join(path);
+            }
+            return PathBuf::from(dir);
+        }
+    }
+
     let home_dir = dirs::home_dir().expect("Failed to get home directory");
     home_dir.join(".nockapp")
 }

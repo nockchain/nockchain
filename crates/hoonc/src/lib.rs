@@ -1,20 +1,23 @@
 use std::env::current_dir;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::PathBuf;
 
 use clap::{arg, command, ColorChoice, Parser};
 use nockapp::driver::Operation;
 use nockapp::kernel::boot::{self, default_boot_cli, Cli as BootCli};
-use nockapp::noun::slab::NounSlab;
+use nockapp::noun::slab::{Jammer, NockJammer, NounSlab};
 use nockapp::one_punch::OnePunchWire;
 use nockapp::wire::Wire;
-use nockapp::{system_data_dir, AtomExt, Noun, NounExt};
+use nockapp::{system_data_dir, AtomExt, Noun};
+use nockvm::ext::NounExt;
 use nockvm::interpreter::{self, Context};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
+use tempfile::NamedTempFile;
 use tokio::fs::{self, File};
 use tokio::io::AsyncReadExt;
-use tracing::{debug, info, instrument, trace};
+use tracing::{debug, info, instrument};
 use walkdir::{DirEntry, WalkDir};
 
 pub const OUT_JAM_NAME: &str = "out.jam";
@@ -24,12 +27,13 @@ const DEFAULT_SAVE_INTERVAL: u64 = 600000;
 
 pub type Error = Box<dyn std::error::Error>;
 
-static KERNEL_JAM: &[u8] = include_bytes!("../bootstrap/hoonc.jam");
-static HOON_TXT: &[u8] = include_bytes!("../hoon/hoon-138.hoon");
+pub static KERNEL_JAM: &[u8] = include_bytes!("../bootstrap/hoonc.jam");
+pub static PREWARM_STATE_JAM: &[u8] = include_bytes!("../bootstrap/hoonc-prewarm.jam");
+pub static HOON_TXT: &[u8] = include_bytes!("../hoon/hoon-138.hoon");
 
-#[derive(Parser, Debug)]
+#[derive(Clone, Parser, Debug)]
 #[command(about = "Tests various poke types for the kernel", author = "zorp", version, color = ColorChoice::Auto)]
-pub struct ChooCli {
+pub struct HoonCli {
     #[command(flatten)]
     pub boot: BootCli,
 
@@ -112,7 +116,7 @@ pub async fn build_and_kick_jam(
     })
 }
 
-pub async fn save_generator(
+pub async fn kick_and_save_generator(
     context: &mut Context,
     path: &PathBuf,
     deps_dir: PathBuf,
@@ -141,7 +145,7 @@ pub async fn save_generator(
 
         fs::write(&output_file, jammed).await?;
 
-        println!("Generator saved to: {}", output_file.display());
+        info!("Generator saved to: {}", output_file.display());
     }
     Ok(())
 }
@@ -177,8 +181,21 @@ pub async fn build_jam(
     run_build(nockapp, Some(out_path.clone())).await
 }
 
-pub async fn initialize_hoonc(cli: ChooCli) -> Result<(nockapp::NockApp, PathBuf), Error> {
+pub async fn initialize_hoonc(cli: HoonCli) -> Result<(nockapp::NockApp, PathBuf), Error> {
     initialize_hoonc_(
+        cli.entry,
+        cli.directory,
+        cli.arbitrary,
+        cli.output,
+        cli.boot.clone(),
+    )
+    .await
+}
+
+pub async fn initialize_hoonc_with_cli<J: Jammer + Send + 'static>(
+    cli: HoonCli,
+) -> Result<(nockapp::NockApp<J>, PathBuf), Error> {
+    initialize_hoonc_inner(
         cli.entry,
         cli.directory,
         cli.arbitrary,
@@ -199,29 +216,48 @@ pub async fn initialize_with_default_cli(
     initialize_hoonc_(entry, deps_dir, arbitrary, out, cli).await
 }
 
-pub async fn initialize_hoonc_(
+async fn initialize_hoonc_inner<J: Jammer + Send + 'static>(
     entry: std::path::PathBuf,
     deps_dir: std::path::PathBuf,
     arbitrary: bool,
     out: Option<std::path::PathBuf>,
     boot_cli: BootCli,
-) -> Result<(nockapp::NockApp, PathBuf), Error> {
+) -> Result<(nockapp::NockApp<J>, PathBuf), Error> {
     debug!("Dependencies directory: {:?}", deps_dir);
     debug!("Entry file: {:?}", entry);
     let data_dir = system_data_dir();
-    let mut nockapp = boot::setup(
-        KERNEL_JAM,
-        Some(boot_cli.clone()),
-        &[],
-        "hoonc",
-        Some(data_dir),
-    )
-    .await?;
+    let mut boot_cli = boot_cli;
+    let disable_prewarm = std::env::var("HOONC_DISABLE_PREWARM").is_ok();
+    let hoonc_data_dir = data_dir.join("hoonc");
+    let checkpoints_dir = hoonc_data_dir.join("checkpoints");
+    let has_existing_checkpoint = checkpoints_dir.exists()
+        && std::fs::read_dir(&checkpoints_dir)
+            .map(|entries| {
+                entries.filter_map(Result::ok).any(|entry| {
+                    let is_file = entry.file_type().map(|ft| ft.is_file()).unwrap_or(false);
+                    is_file && entry.file_name().to_string_lossy().ends_with(".chkjam")
+                })
+            })
+            .unwrap_or(false);
+
+    let should_use_prewarm = !disable_prewarm
+        && boot_cli.state_jam.is_none()
+        && (boot_cli.new || !has_existing_checkpoint);
+
+    let mut prewarm_state_file: Option<NamedTempFile> = None;
+    if should_use_prewarm {
+        let mut tmp = NamedTempFile::new()?;
+        tmp.write_all(PREWARM_STATE_JAM)?;
+        boot_cli.state_jam = Some(tmp.path().to_string_lossy().into_owned());
+        prewarm_state_file = Some(tmp);
+    }
+    let mut nockapp =
+        boot::setup::<J>(KERNEL_JAM, boot_cli.clone(), &[], "hoonc", Some(data_dir)).await?;
     nockapp.add_io_driver(nockapp::file_driver()).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
 
-    let mut slab = NounSlab::new();
-    let hoon_cord = Atom::from_value(&mut slab, HOON_TXT)
+    let mut boot_slab = NounSlab::new();
+    let hoon_cord = Atom::from_value(&mut boot_slab, HOON_TXT)
         .unwrap_or_else(|_| {
             panic!(
                 "Panicked at {}:{} (git sha: {:?})",
@@ -231,19 +267,15 @@ pub async fn initialize_hoonc_(
             )
         })
         .as_noun();
-    let bootstrap_poke = T(&mut slab, &[D(tas!(b"boot")), hoon_cord]);
-    slab.set_root(bootstrap_poke);
+    let bootstrap_poke = T(&mut boot_slab, &[D(tas!(b"boot")), hoon_cord]);
+    boot_slab.set_root(bootstrap_poke);
 
     // It's OK to do a raw poke for boot because it doesn't yield any effects that need to be processed.
     // We do a raw poke here to ensure boot is done before we start the build poke.
-    let _boot_result = nockapp.poke(OnePunchWire::Poke.to_wire(), slab).await?;
-    let mut slab = NounSlab::new();
-    let entry_contents = {
-        let mut contents_vec: Vec<u8> = vec![];
-        let mut file = File::open(&entry).await?;
-        file.read_to_end(&mut contents_vec).await?;
-        Atom::from_value(&mut slab, contents_vec)?.as_noun()
-    };
+    let _boot_result = nockapp
+        .poke(OnePunchWire::Poke.to_wire(), boot_slab)
+        .await?;
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
 
     let entry_string = canonicalize_and_string(&entry);
     let entry_path = Atom::from_value(&mut slab, entry_string)?.as_noun();
@@ -277,18 +309,24 @@ pub async fn initialize_hoonc_(
         }
     }
 
+    let entry_contents = {
+        let mut contents_vec: Vec<u8> = vec![];
+        let mut file = File::open(&entry).await?;
+        file.read_to_end(&mut contents_vec).await?;
+        Atom::from_value(&mut slab, contents_vec)?.as_noun()
+    };
+
     let out_path_string = if let Some(path) = &out {
         let parent = if path.is_dir() {
             path
         } else {
-            path.parent().unwrap_or_else(|| Path::new("."))
+            &current_dir().expect("Failed to get current directory")
         };
         let filename = if path.is_dir() {
             OsStr::new(OUT_JAM_NAME)
         } else {
             path.file_name().unwrap_or_else(|| OsStr::new(OUT_JAM_NAME))
         };
-        info!("Filename: {:?}", filename);
         let parent_canonical = canonicalize_and_string(parent);
         format!("{}/{}", parent_canonical, filename.to_string_lossy())
     } else {
@@ -298,7 +336,7 @@ pub async fn initialize_hoonc_(
     debug!("Output path: {:?}", out_path_string);
     let out_path = Atom::from_value(&mut slab, out_path_string.clone())?.as_noun();
 
-    let arbitrary_noun = if arbitrary { D(0) } else { D(1) };
+    let arbitrary_flag = if arbitrary { D(0) } else { D(1) };
 
     let poke = T(
         &mut slab,
@@ -307,7 +345,7 @@ pub async fn initialize_hoonc_(
             entry_path,
             entry_contents,
             directory_noun,
-            arbitrary_noun,
+            arbitrary_flag,
             out_path,
         ],
     );
@@ -318,6 +356,26 @@ pub async fn initialize_hoonc_(
         .add_io_driver(nockapp::one_punch_driver(slab, Operation::Poke))
         .await;
     Ok((nockapp, out_path_string.into()))
+}
+
+pub async fn initialize_hoonc_with_jammer<J: Jammer + Send + 'static>(
+    entry: std::path::PathBuf,
+    deps_dir: std::path::PathBuf,
+    arbitrary: bool,
+    out: Option<std::path::PathBuf>,
+    boot_cli: BootCli,
+) -> Result<(nockapp::NockApp<J>, PathBuf), Error> {
+    initialize_hoonc_inner(entry, deps_dir, arbitrary, out, boot_cli).await
+}
+
+pub async fn initialize_hoonc_(
+    entry: std::path::PathBuf,
+    deps_dir: std::path::PathBuf,
+    arbitrary: bool,
+    out: Option<std::path::PathBuf>,
+    boot_cli: BootCli,
+) -> Result<(nockapp::NockApp, PathBuf), Error> {
+    initialize_hoonc_with_jammer::<NockJammer>(entry, deps_dir, arbitrary, out, boot_cli).await
 }
 
 pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
@@ -341,6 +399,13 @@ pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
                 || s.ends_with(".hoon")
                 || s.ends_with(".txt")
                 || s.ends_with(".jam")
+                // Include common web asset types
+                || s.ends_with(".html")
+                || s.ends_with(".css")
+                || s.ends_with(".js")
+                || s.ends_with(".jpg")
+                || s.ends_with(".png")
+                || s.ends_with(".gif")
         })
         .unwrap_or(false);
 
@@ -349,11 +414,8 @@ pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
 
 #[instrument]
 pub fn canonicalize_and_string(path: &std::path::Path) -> String {
-    trace!("Canonicalizing path: {:?}", path);
     let path = path.canonicalize().expect("Failed to canonicalize path");
-    debug!("Canonicalized path: {:?}", path);
     let path = path.to_str().expect("Failed to convert path to string");
-
     path.to_string()
 }
 

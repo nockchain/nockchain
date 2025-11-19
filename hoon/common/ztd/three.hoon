@@ -1637,14 +1637,21 @@
         ?>  (lth sk g-order:curve)
         =/  pubkey  (ch-scal:affine:curve sk a-gen:curve)
         =/  transcript=(list (list belt))
-          [(f6lt-to-list x.pubkey) (f6lt-to-list y.pubkey) m-list ~]
+          [(f6lt-to-list x.pubkey) (f6lt-to-list y.pubkey) m-list sk-as-32-bit-belts ~]
         =/  nonce
           (trunc-g-order (hash-varlen:tip5 (zing transcript)))
         ?<  =(nonce 0)
         =/  scalar  (ch-scal:affine:curve nonce a-gen:curve)
-        =.  transcript  [(f6lt-to-list x.scalar) (f6lt-to-list y.scalar) transcript]
+        =/  pre-image
+          %-  zing
+          :~  (f6lt-to-list x.scalar)
+              (f6lt-to-list y.scalar)
+              (f6lt-to-list x.pubkey)
+              (f6lt-to-list y.pubkey)
+              m-list
+          ==
         =/  chal
-          (trunc-g-order (hash-varlen:tip5 (zing transcript)))
+          (trunc-g-order (hash-varlen:tip5 pre-image))
         ?<  =(chal 0)
         =/  sig
           %+  mod
@@ -1990,6 +1997,40 @@
         $(lis (~(slag ave lis) (div len 2)))
       $(lis (~(slag ave lis) +((div len 2))))
     [%tree l r]
+  ::
+  ::  +prove-hashable-by-index: build proof directly over a hashable
+  ++  prove-hashable-by-index
+    |=  [h=hashable:tip5 idx=@]
+    ^-  [axis=@ proof=merk-proof]
+    ?<  =(idx 0)
+    =/  res
+      =+  |%
+          ++  node-digest  hash-hashable:tip5
+          ++  leaf-count
+            |=  n=hashable:tip5
+            ^-  @
+            ?.  ?=(^ -.n)  1
+            (add (leaf-count p.n) (leaf-count q.n))
+          ++  go
+            |=  [n=hashable:tip5 i=@]
+            ^-  [root=noun-digest:tip5 path=(list noun-digest:tip5) axis=@]
+            ?.  ?=(^ -.n)
+              [(node-digest n) ~ 1]
+            =/  lc=@  (leaf-count p.n)
+            ?:  (lte i lc)
+              =/  rec  (go [p.n i])
+              =/  sib  (node-digest q.n)
+              :+  (hash-ten-cell:tip5 root.rec sib)
+                (weld path.rec ~[sib])
+              (peg 2 axis.rec)
+            =/  rec  (go [q.n (sub i lc)])
+            =/  sib  (node-digest p.n)
+            :+  (hash-ten-cell:tip5 sib root.rec)
+              (weld path.rec ~[sib])
+            (peg 3 axis.rec)
+          --
+      (go [h idx])
+    [axis.res [root.res path.res]]
   ::
   ++  build-merk-proof
     ~/  %build-merk-proof

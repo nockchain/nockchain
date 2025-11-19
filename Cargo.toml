@@ -1,7 +1,7 @@
 resolver = "2"
 
 [workspace]
-members = ["crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-wallet", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack"]
+members = ["crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-peek", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-types", "crates/nockchain-wallet", "crates/raw-tx-checker", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack"]
 
 [workspace.package]
 version = "0.1.0"
@@ -44,7 +44,9 @@ equix = "0.2.2"
 futures = "0.3.31"
 gdt-cpus = "25.5.0"
 getrandom = { version = "0.3.3", features = ["std"] }
+glob = "0.3"
 gnort = "0.1.1"
+hex = "0.4"
 hex-literal = "1.0.0"
 hickory-proto = "0.25.0-alpha.4"
 hickory-resolver = { version = "0.25.0-alpha.4", features = ["system-config"] }
@@ -114,6 +116,7 @@ termimad = "0.33.0"
 testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "54851fd9faf9b9cded9d681b46f87c056880d870" }
 thiserror = "2.0.11"
 tikv-jemallocator = { version = "0.6" }
+tiny-keccak = { version = "2", features = ["keccak"] }
 tokio = { version = "1.32", features = [
     "fs",
     "io-util",
@@ -127,10 +130,12 @@ tokio = { version = "1.32", features = [
 tokio-rustls = "0.26.0"
 tokio-stream = "0.1"
 tokio-util = "0.7.11"
-tonic = "0.14.0"
+tonic = { version = "0.14.0", features = ["tls-webpki-roots"] }
 tonic-build = "0.14"
+tonic-health = "0.14.2"
 tonic-prost = "0.14.0"
 tonic-prost-build = "0.14.0"
+tonic-reflection = "0.14.0"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.41"
 tracing-core = "0.1"
@@ -171,6 +176,9 @@ path = "crates/nockvm/rust/murmur3"
 [workspace.dependencies.nockapp]
 path = "crates/nockapp"
 
+[workspace.dependencies.nockapp-grpc-proto]
+path = "crates/nockapp-grpc-proto"
+
 [workspace.dependencies.nockapp-grpc]
 path = "crates/nockapp-grpc"
 
@@ -180,11 +188,18 @@ path = "crates/nockchain"
 [workspace.dependencies.nockchain-libp2p-io]
 path = "crates/nockchain-libp2p-io"
 
+[workspace.dependencies.nockchain-math]
+path = "crates/nockchain-math"
+
+[workspace.dependencies.nockchain-types]
+path = "crates/nockchain-types"
+
 [workspace.dependencies.nockchain-wallet]
 path = "crates/nockchain-wallet"
 
 [workspace.dependencies.nockvm]
 path = "crates/nockvm/rust/nockvm"
+
 
 [workspace.dependencies.nockvm_crypto]
 path = "crates/nockvm/rust/nockvm_crypto"

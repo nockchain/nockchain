@@ -24,7 +24,8 @@ use crate::save::SaveableCheckpoint;
 use crate::utils::error::{CrownError, ExternalError};
 use crate::{default_data_dir, AtomExt, NockApp};
 
-const DEFAULT_SAVE_INTERVAL: u64 = 120000;
+pub const DEFAULT_SAVE_INTERVAL: u64 = 120000;
+const DEFAULT_SAVE_INTERVAL_STR: &str = "120000";
 const DEFAULT_LOG_FILTER: &str = "info";
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -51,10 +52,10 @@ pub struct TraceOpts {
     #[arg(long = "trace", help = "Make a Sword trace in json or tracing mode")]
     pub mode: Option<TraceMode>,
 
-    #[arg(long, requires = "trace")]
+    #[arg(long, requires = "mode")]
     pub keyword_filter: Option<String>,
 
-    #[arg(long, requires = "trace")]
+    #[arg(long, requires = "mode")]
     pub interval_filter: Option<usize>,
 }
 
@@ -111,10 +112,11 @@ pub struct Cli {
 
     #[arg(
         long,
-        default_value_t = DEFAULT_SAVE_INTERVAL,
-        help = "Set the save interval for checkpoints (in ms)"
+        help = "Set the save interval for checkpoints (in ms). Use 'none' or '0' to disable periodic saves.",
+        default_value = DEFAULT_SAVE_INTERVAL_STR,
+        value_parser = parse_save_interval
     )]
-    pub save_interval: u64,
+    pub save_interval: Option<u64>,
 
     #[arg(long, help = "Control colored output", value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
@@ -140,6 +142,60 @@ pub struct Cli {
     pub stack_size: NockStackSize,
 }
 
+impl Cli {
+    fn normalized_save_interval(&self) -> Option<u64> {
+        self.save_interval
+            .and_then(|value| if value == 0 { None } else { Some(value) })
+    }
+}
+
+fn parse_save_interval(input: &str) -> Result<u64, String> {
+    let trimmed = input.trim();
+
+    if trimmed.eq_ignore_ascii_case("none") {
+        Ok(0)
+    } else {
+        let value = trimmed
+            .parse::<u64>()
+            .map_err(|e| format!("Invalid save interval '{trimmed}': {e}"))?;
+        Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_save_interval;
+
+    #[test]
+    fn parse_save_interval_none_variants() {
+        assert_eq!(parse_save_interval("none").unwrap(), 0);
+        assert_eq!(parse_save_interval("NoNe").unwrap(), 0);
+        assert_eq!(parse_save_interval("0").unwrap(), 0);
+        assert_eq!(parse_save_interval(" 0 ").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_save_interval_positive_values() {
+        assert_eq!(parse_save_interval("1").unwrap(), 1);
+        assert_eq!(parse_save_interval(" 120000 ").unwrap(), 120000);
+    }
+
+    #[test]
+    fn parse_save_interval_rejects_invalid() {
+        assert!(parse_save_interval("abc").is_err());
+    }
+
+    #[test]
+    fn normalized_save_interval_filters_zero() {
+        let mut cli = super::default_boot_cli(false);
+        cli.save_interval = Some(0);
+        assert_eq!(cli.normalized_save_interval(), None);
+
+        cli.save_interval = Some(5000);
+        assert_eq!(cli.normalized_save_interval(), Some(5000));
+    }
+}
+
 /// Result of setting up a NockApp
 pub enum SetupResult<J> {
     /// A fully initialized NockApp
@@ -150,7 +206,7 @@ pub enum SetupResult<J> {
 
 pub fn default_boot_cli(new: bool) -> Cli {
     Cli {
-        save_interval: DEFAULT_SAVE_INTERVAL,
+        save_interval: Some(DEFAULT_SAVE_INTERVAL),
         new,
         trace_opts: Default::default(),
         color: ColorChoice::Auto,
@@ -274,10 +330,10 @@ fn init_with_default_filter<T: Subscriber + Send + Sync + for<'a> LookupSpan<'a>
         } else {
             reg.with(tracy).init();
         }
-        info!("Tracy tracing is enabled");
+        debug!("Tracy tracing is enabled");
         return;
     } else {
-        info!("Tracy tracing is disabled");
+        debug!("Tracy tracing is disabled");
     }
     reg.init();
 }
@@ -309,19 +365,12 @@ pub fn init_default_tracing(cli: &Cli) {
 
 pub async fn setup<J: Jammer + Send + 'static>(
     jam: &[u8],
-    cli: Option<Cli>,
+    cli: Cli,
     hot_state: &[HotEntry],
     name: &str,
     data_dir: Option<PathBuf>,
 ) -> Result<NockApp<J>, Box<dyn std::error::Error>> {
-    let result = setup_(
-        jam,
-        cli.unwrap_or_else(|| default_boot_cli(false)),
-        hot_state,
-        name,
-        data_dir,
-    )
-    .await?;
+    let result = setup_(jam, cli, hot_state, name, data_dir).await?;
     match result {
         SetupResult::App(app) => Ok(app),
         SetupResult::ExportedState => {
@@ -366,6 +415,10 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     info!("kernel: starting");
     debug!("kernel: pma directory: {:?}", pma_dir);
     debug!("kernel: snapshots directory: {:?}", jams_dir);
+    info!("NockApp boot cli: {:?}", cli);
+    let save_interval = cli
+        .normalized_save_interval()
+        .map(std::time::Duration::from_millis);
 
     let kernel_f = async |checkpoint| {
         let kernel: Kernel<SaveableCheckpoint> = match cli.stack_size {
@@ -407,8 +460,6 @@ pub async fn setup_<J: Jammer + Send + 'static>(
         let res: Result<Kernel<SaveableCheckpoint>, CrownError<ExternalError>> = Ok(kernel);
         res
     };
-
-    let save_interval = std::time::Duration::from_millis(cli.save_interval);
 
     let app: NockApp<J> = NockApp::new(kernel_f, &jams_dir, save_interval).await?;
 

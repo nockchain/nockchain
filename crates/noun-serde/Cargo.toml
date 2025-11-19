@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nockapp.workspace = true
 nockvm.workspace = true
 noun-serde-derive.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+ibig.workspace = true
+bytes.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "raw-tx-checker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+nockvm = { workspace = true }
+zkvm-jetpack = { workspace = true }
+noun-serde = { workspace = true }
+nockchain-math = { workspace = true }
+nockchain-types = { workspace = true }

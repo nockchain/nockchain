@@ -31,7 +31,7 @@ use crate::utils::{
     create_context, current_da, NOCK_STACK_SIZE, NOCK_STACK_SIZE_HUGE, NOCK_STACK_SIZE_LARGE,
     NOCK_STACK_SIZE_MEDIUM, NOCK_STACK_SIZE_SMALL, NOCK_STACK_SIZE_TINY,
 };
-use crate::{AtomExt, CrownError, NounExt, Result, ToBytesExt};
+use crate::{AtomExt, CrownError, IndirectAtomExt, NounExt, Result, ToBytesExt};
 
 pub(crate) const STATE_AXIS: u64 = 6;
 const LOAD_AXIS: u64 = 4;
@@ -39,7 +39,7 @@ const PEEK_AXIS: u64 = 22;
 const POKE_AXIS: u64 = 23;
 
 const SERF_FINISHED_INTERVAL: Duration = Duration::from_millis(100);
-const SERF_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+const SERF_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024; // 8MB
 
 pub struct LoadState {
     pub ker_hash: Hash,
@@ -263,14 +263,16 @@ impl<C> SerfThread<C> {
 
     pub(crate) fn poke_sync(&self, wire: WireRepr, cause: NounSlab) -> Result<NounSlab> {
         let (result, result_fut) = oneshot::channel();
-        let (_result_ack_sender, result_ack) = oneshot::channel();
+        let (result_ack_sender, result_ack) = oneshot::channel();
         self.action_sender.blocking_send(SerfAction::Poke {
             wire,
             cause,
             result,
             result_ack,
         })?;
-        result_fut.blocking_recv()?
+        let res = result_fut.blocking_recv()?;
+        let _ = result_ack_sender.send(());
+        res
     }
 
     pub(crate) fn peek_sync(&self, ovo: NounSlab) -> Result<NounSlab> {
@@ -459,7 +461,7 @@ fn serf_loop<C: SerfCheckpoint>(
                 wire,
                 cause,
                 result,
-                result_ack: _,
+                result_ack,
             } => {
                 if inhibit.load(Ordering::SeqCst) {
                     let _ = result
@@ -479,6 +481,9 @@ fn serf_loop<C: SerfCheckpoint>(
                         debug!("Failed to send poke result from serf thread");
                     });
                 };
+                let _ = result_ack.blocking_recv().inspect_err(|_e| {
+                    debug!("Failed to receive result ack in serf thread");
+                });
                 let action_elapsed = action_start.elapsed();
                 if let Some(nockapp_metrics) = &serf.metrics {
                     nockapp_metrics.serf_loop_poke.add_timing(&action_elapsed);
@@ -764,12 +769,8 @@ impl Serf {
         let (maybe_state, cold, event_num_raw) = if let Some(c) = checkpoint {
             let saveable = c.load();
 
-            let checkpoint_noun = saveable.noun.copy_to_stack(&mut stack);
-            let checkpoint_cell = checkpoint_noun
-                .as_cell()
-                .expect("snapshot noun should be a cell");
-            let ker_state = checkpoint_cell.head();
-            let cold_noun = checkpoint_cell.tail();
+            let ker_state = saveable.state.copy_to_stack(&mut stack);
+            let cold_noun = saveable.cold.copy_to_stack(&mut stack);
             let cold_vecs = Cold::from_noun(&mut stack, &cold_noun)
                 .expect("Could not load cold state from snapshot");
             let cold = Cold::from_vecs(&mut stack, cold_vecs.0, cold_vecs.1, cold_vecs.2);
@@ -1151,12 +1152,12 @@ impl Serf {
         let bytes = random_bytes.as_bytes()?;
         let eny: Atom = Atom::from_bytes(&mut self.context.stack, &bytes);
         let our = <nockvm::noun::Atom as AtomExt>::from_value(&mut self.context.stack, 0)?; // Using 0 as default value
-        let now: Atom = unsafe {
-            let mut t_vec: Vec<u8> = vec![];
-            t_vec.write_u128::<LittleEndian>(current_da().0)?;
-            IndirectAtom::new_raw_bytes(&mut self.context.stack, 16, t_vec.as_slice().as_ptr())
-                .normalize_as_atom()
-        };
+        let mut t_vec: Vec<u8> = vec![];
+        t_vec.write_u128::<LittleEndian>(current_da().0)?;
+        let now: Atom = <IndirectAtom as IndirectAtomExt>::from_bytes(
+            &mut self.context.stack,
+            t_vec.as_slice(),
+        );
 
         let event_num = D(self.event_num.load(Ordering::SeqCst) + 1);
         let base_wire_noun = wire_to_noun(&mut self.context.stack, &wire);
@@ -1310,21 +1311,20 @@ impl SerfCheckpoint for SaveableCheckpoint {
         cold_state: Cold,
         metrics: &Option<Arc<NockAppMetrics>>,
     ) -> Self {
-        let mut slab = NounSlab::new();
-
         let cold_noun_start = Instant::now();
         // Cold state has nouns in it which are *not* copied in into_noun
         // TODO: FIX THIS FOOTGUN
         let cold_stack_noun = cold_state.into_noun(stack);
-        let cold_noun = slab.copy_into(cold_stack_noun);
+        let mut cold_slab: NounSlab = NounSlab::new();
+        let cold_copy = cold_slab.copy_into(cold_stack_noun);
+        cold_slab.set_root(cold_copy);
         let cold_noun_elapsed = cold_noun_start.elapsed();
 
         let state_copy_start = Instant::now();
-        let kernel_state_slab = slab.copy_into(kernel_state);
+        let mut state_slab: NounSlab = NounSlab::new();
+        let state_copy = state_slab.copy_into(kernel_state);
+        state_slab.set_root(state_copy);
         let state_copy_elapsed = state_copy_start.elapsed();
-
-        let cell = T(&mut slab, &[kernel_state_slab, cold_noun]);
-        slab.set_root(cell);
 
         if let Some(metrics) = metrics {
             metrics
@@ -1337,7 +1337,8 @@ impl SerfCheckpoint for SaveableCheckpoint {
         Self {
             ker_hash,
             event_num,
-            noun: slab,
+            state: state_slab,
+            cold: cold_slab,
         }
     }
 

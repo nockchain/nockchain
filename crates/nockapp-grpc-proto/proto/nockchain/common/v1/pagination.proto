@@ -1,0 +1,38 @@
+// nockchain/common/v1/pagination.proto
+
+syntax = "proto3";
+
+package nockchain.common.v1;
+
+// Generic pagination parameters for list-style RPCs.
+// These types are intended to be reused across public APIs.
+//
+// Contract:
+// - The server may return fewer items than requested (client_page_items_limit is a hint).
+// - page_token is an opaque cursor produced by the server; clients must treat
+//   it as a black box. Servers may encode snapshot identity and last-key.
+// - For consistent pagination, clients should include the returned page_token
+//   in the next request without modification.
+// - Servers may enforce a maximum client_page_items_limit and/or byte budget regardless of
+//   client hints.
+message PageRequest {
+  // Maximum number of items to return. The server may return fewer items
+  // than requested. Clients should not rely on receiving exactly this count.
+  uint32 client_page_items_limit = 1;
+
+  // Opaque cursor returned by a previous call. When set, the server resumes
+  // the listing from the position described by the token.
+  // An empty token indicates the first page.
+  string page_token = 2;
+
+  // Optional soft limit on the uncompressed bytes to return in a single page.
+  // The server may ignore or cap this value according to policy. This refers
+  // to the gRPC payload size after protobuf encoding and decompression.
+  uint64 max_bytes = 3;
+}
+
+message PageResponse {
+  // Opaque cursor for fetching the next page. Empty when there are no more
+  // results.
+  string next_page_token = 1;
+}

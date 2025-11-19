@@ -1,11 +1,10 @@
-use crate::form::bpoly::*;
-use crate::form::fext::*;
+use crate::form::belt::*;
+use crate::form::bpoly::{bp_fft, bpoly_zero_extend};
+use crate::form::felt::{fpow, Felt};
 use crate::form::fpoly::*;
-use crate::form::mary::MarySlice;
-use crate::form::math::mary::snag_as_bpoly;
-use crate::form::math::*;
-use crate::form::{Belt, FPolySlice, Felt};
-use crate::hand::structs::HoonList;
+use crate::form::mary::{snag_as_bpoly, MarySlice};
+use crate::form::poly::*;
+use crate::form::structs::HoonList;
 
 pub fn precompute_ntts(
     polys: MarySlice,

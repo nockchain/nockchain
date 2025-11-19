@@ -157,7 +157,7 @@ pub mod util {
         Ok(tsil)
     }
 
-    pub fn weld(stack: &mut NockStack, a: Noun, b: Noun) -> Result {
+    pub fn weld<A: NounAllocator>(alloc: &mut A, a: Noun, b: Noun) -> Result {
         let mut res = D(0);
         let mut cur = a;
         loop {
@@ -165,7 +165,7 @@ pub mod util {
                 break;
             }
             let cell = cur.as_cell()?;
-            res = T(stack, &[cell.head(), res]);
+            res = T(alloc, &[cell.head(), res]);
             cur = cell.tail();
         }
         cur = b;
@@ -174,10 +174,10 @@ pub mod util {
                 break;
             }
             let cell = cur.as_cell()?;
-            res = T(stack, &[cell.head(), res]);
+            res = T(alloc, &[cell.head(), res]);
             cur = cell.tail();
         }
-        flop(stack, res)
+        flop(alloc, res)
     }
 
     pub fn lent(tape: Noun) -> result::Result<usize, JetErr> {

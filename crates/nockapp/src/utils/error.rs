@@ -1,3 +1,4 @@
+use noun_serde::NounDecodeError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -82,6 +83,12 @@ impl<C> From<tokio::sync::mpsc::error::SendError<crate::kernel::form::SerfAction
 {
     fn from(_: tokio::sync::mpsc::error::SendError<crate::kernel::form::SerfAction<C>>) -> Self {
         CrownError::SerfMPSCError()
+    }
+}
+
+impl From<CrownError> for NounDecodeError {
+    fn from(e: CrownError) -> Self {
+        NounDecodeError::Custom(e.to_string())
     }
 }
 

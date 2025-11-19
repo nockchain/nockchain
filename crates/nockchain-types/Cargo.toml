@@ -1,0 +1,23 @@
+[package]
+name = "nockchain-types"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+bs58 = { workspace = true }
+nockapp = { workspace = true }
+nockvm = { workspace = true }
+ibig = { workspace = true }
+nockchain-math = { workspace = true }
+nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"], default-features = false }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+quickcheck = { workspace = true }

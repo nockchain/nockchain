@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use nockapp::utils::make_tas;
-use nockapp::AtomExt;
+use nockvm::ext::{make_tas, AtomExt};
 use nockvm::noun::{Noun, NounAllocator, D, T};
 
 use crate::{NounDecode, NounDecodeError, NounEncode};

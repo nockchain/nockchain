@@ -10,12 +10,17 @@ client = []
 
 [dependencies]
 nockapp = { workspace = true }
+nockapp-grpc-proto = { workspace = true }
+nockchain-types = {workspace = true}
+nockchain-math = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 noun-serde = { workspace = true }
 
 anyhow = { workspace = true }
 bytes = { workspace = true }
+dashmap = { workspace = true }
+gnort = { workspace = true }
 prost = { workspace = true }
 prost-build = { workspace = true }
 prost-types = { workspace = true }
@@ -24,11 +29,18 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
+tonic-health = { workspace = true }
 tonic-build = { workspace = true }
 tonic-prost = { workspace = true }
 tonic-prost-build = { workspace = true }
+tonic-reflection = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+bincode = { workspace = true }
+hex = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+once_cell = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }

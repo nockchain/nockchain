@@ -1,20 +1,20 @@
 use nockvm::interpreter::Context;
 use nockvm::jets::list::util::flop;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::{JetErr, Result};
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, T, YES};
 use tracing::debug;
 
-use crate::form::fext::{fadd, fmul};
-use crate::form::math::bpoly::*;
+use crate::form::belt::*;
+use crate::form::bpoly::*;
+use crate::form::felt::{fadd, fmul, Felt};
+use crate::form::handle::*;
+use crate::form::noun_ext::{AtomMathExt, NounMathExt};
 use crate::form::poly::*;
-use crate::hand::handle::*;
-use crate::hand::structs::HoonList;
+use crate::form::structs::HoonList;
 use crate::jets::fpntt_jets::{felt_as_noun, felt_from_u64s};
 use crate::jets::mary_jets::{mary_to_list_fields, snag_one_fields};
-use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::{AtomExt, NounExt};
 use crate::utils::is_hoon_list_end;
 
 pub fn bpoly_to_list_jet(context: &mut Context, subject: Noun) -> Result {
@@ -25,7 +25,7 @@ pub fn bpoly_to_list_jet(context: &mut Context, subject: Noun) -> Result {
 
 pub fn bpoly_to_list(stack: &mut NockStack, sam: Noun) -> Result {
     let Ok(sam_bpoly) = BPolySlice::try_from(sam) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     //  empty list is a null atom
@@ -51,7 +51,7 @@ pub fn bpadd_jet(context: &mut Context, subject: Noun) -> Result {
     let bq = slot(sam, 3)?;
 
     let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let res_len = std::cmp::max(bp_poly.len(), bq_poly.len());
@@ -68,7 +68,7 @@ pub fn bpneg_jet(context: &mut Context, subject: Noun) -> Result {
     let bp = slot(subject, 6)?;
 
     let Ok(bp_poly) = BPolySlice::try_from(bp) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
@@ -86,7 +86,7 @@ pub fn bpsub_jet(context: &mut Context, subject: Noun) -> Result {
     let q = slot(sam, 3)?;
 
     let (Ok(p_poly), Ok(q_poly)) = (BPolySlice::try_from(p), BPolySlice::try_from(q)) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let res_len = std::cmp::max(p_poly.len(), q_poly.len());
@@ -104,7 +104,7 @@ pub fn bpscal_jet(context: &mut Context, subject: Noun) -> Result {
     let c = slot(sam, 2)?;
     let bp = slot(sam, 3)?;
     let (Ok(c_atom), Ok(bp_poly)) = (c.as_atom(), BPolySlice::try_from(bp)) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let c_64 = c_atom.as_u64()?;
 
@@ -123,7 +123,7 @@ pub fn bpmul_jet(context: &mut Context, subject: Noun) -> Result {
     let bq = slot(sam, 3)?;
 
     let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let res_len = if bp_poly.is_zero() | bq_poly.is_zero() {
@@ -147,7 +147,7 @@ pub fn bp_hadamard_jet(context: &mut Context, subject: Noun) -> Result {
     let bq = slot(sam, 3)?;
 
     let (Ok(bp_poly), Ok(bq_poly)) = (BPolySlice::try_from(bp), BPolySlice::try_from(bq)) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     assert_eq!(bp_poly.len(), bq_poly.len());
     let res_len = bp_poly.len();
@@ -166,7 +166,7 @@ pub fn bp_ntt_jet(context: &mut Context, subject: Noun) -> Result {
     let root = slot(sam, 3)?;
 
     let (Ok(bp_poly), Ok(root_atom)) = (BPolySlice::try_from(bp), root.as_atom()) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let root_64 = root_atom.as_u64()?;
     let returned_bpoly = bp_ntt(bp_poly.0, &Belt(root_64));
@@ -184,7 +184,7 @@ pub fn bp_fft_jet(context: &mut Context, subject: Noun) -> Result {
     let p = slot(subject, 6)?;
 
     let Ok(p_poly) = BPolySlice::try_from(p) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let returned_bpoly = bp_fft(p_poly.0)?;
     let (res_atom, res_poly): (IndirectAtom, &mut [Belt]) =
@@ -203,7 +203,7 @@ pub fn bp_shift_jet(context: &mut Context, subject: Noun) -> Result {
     let c = slot(sam, 3)?;
 
     let (Ok(bp_poly), Ok(c_belt)) = (BPolySlice::try_from(bp), c.as_belt()) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let (res_atom, res_poly): (IndirectAtom, &mut [Belt]) =
         new_handle_mut_slice(&mut context.stack, Some(bp_poly.len()));
@@ -223,7 +223,7 @@ pub fn bp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
     let (Ok(p_poly), Ok(offset_belt), Ok(order_atom)) =
         (BPolySlice::try_from(p), offset.as_belt(), order.as_atom())
     else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let order_32: u32 = order_atom.as_u32()?;
     let root = Belt(order_32 as u64).ordered_root()?;
@@ -308,7 +308,7 @@ pub fn bpeval_lift_jet(context: &mut Context, subject: Noun) -> Result {
     let mut res = lift0;
     loop {
         if is_hoon_list_end(&p) {
-            return jet_err();
+            return Err(BAIL_FAIL);
         }
 
         let p_cell = p.as_cell()?;
@@ -334,12 +334,12 @@ pub fn bpdvr_jet(context: &mut Context, subject: Noun) -> Result {
 
     let (Ok(ba_poly), Ok(bb_poly)) = (BPolySlice::try_from(ba), BPolySlice::try_from(bb)) else {
         debug!("ba or bb was not a bpoly");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     if bb_poly.is_zero() {
         debug!("divide by zero");
-        return jet_err();
+        return Err(BAIL_FAIL);
     }
 
     let ba_deg = ba_poly.degree();

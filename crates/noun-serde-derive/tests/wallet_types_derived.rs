@@ -6,12 +6,12 @@ use nockvm::noun::FullDebugCell;
 use noun_serde::{NounDecode, NounEncode};
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
-pub enum Key {
+enum Key {
     Pub(u64),
     Prv(u64),
 }
 
-pub type Knot = u64;
+type Knot = u64;
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
 pub struct Coil {
@@ -204,32 +204,32 @@ impl std::hash::Hash for Lock {
 }
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
-pub struct Timelock {
-    pub block: u64,
-    pub intent: TimelockIntent,
+struct Timelock {
+    block: u64,
+    intent: TimelockIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NounEncode, NounDecode)]
-pub enum TimelockIntent {
+enum TimelockIntent {
     None,
     Before,
     After,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NounEncode, NounDecode)]
-pub struct Seed {
-    pub output_source: Option<Source>,
-    pub recipient: Lock,
-    pub timelock_intent: TimelockIntent,
-    pub gift: u64,
-    pub parent_hash: u64,
+struct Seed {
+    output_source: Option<Source>,
+    recipient: Lock,
+    timelock_intent: TimelockIntent,
+    gift: u64,
+    parent_hash: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
-pub struct Spend {
-    pub signature: Option<HashMap<u64, u64>>,
-    pub seeds: HashSet<Seed>,
-    pub fee: u64,
+struct Spend {
+    signature: Option<HashMap<u64, u64>>,
+    seeds: HashSet<Seed>,
+    fee: u64,
 }
 
 #[cfg(test)]

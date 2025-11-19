@@ -6,20 +6,21 @@ use nockapp::nockapp::driver::{IODriverFn, NockAppHandle, PokeResult};
 use nockapp::nockapp::wire::Wire;
 use nockapp::nockapp::NockAppError;
 use nockapp::noun::slab::NounSlab;
-use nockapp::noun::{AtomExt, NounExt};
+use nockapp::noun::AtomExt;
 use nockapp::save::SaveableCheckpoint;
 use nockapp::utils::NOCK_STACK_SIZE_TINY;
 use nockapp::CrownError;
 use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58;
+use nockvm::ext::NounExt;
 use nockvm::interpreter::NockCancelToken;
 use nockvm::noun::{Atom, D, NO, T, YES};
 use nockvm_macros::tas;
 use rand::Rng;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
-use zkvm_jetpack::form::PRIME;
-use zkvm_jetpack::hand::structs::HoonList;
-use zkvm_jetpack::noun::noun_ext::NounExt as OtherNounExt;
+use zkvm_jetpack::form::belt::PRIME;
+use zkvm_jetpack::form::noun_ext::NounMathExt;
+use zkvm_jetpack::form::structs::HoonList;
 
 pub enum MiningWire {
     Mined,
@@ -79,6 +80,29 @@ impl FromStr for MiningKeyConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MiningPkhConfig {
+    pub share: u64,
+    pub pkh: String,
+}
+
+impl FromStr for MiningPkhConfig {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Expected format: "share,pkh"
+        let parts: Vec<&str> = s.split(',').collect();
+        if parts.len() != 2 {
+            return Err("Invalid share,pkh format".to_string());
+        }
+
+        let share = parts[0].parse::<u64>().map_err(|e| e.to_string())?;
+        let pkh = parts[1].parse::<String>().map_err(|e| e.to_string())?;
+
+        Ok(MiningPkhConfig { share, pkh })
+    }
+}
+
 struct MiningData {
     pub block_header: NounSlab,
     pub version: NounSlab,
@@ -88,13 +112,23 @@ struct MiningData {
 
 pub fn create_mining_driver(
     mining_config: Option<Vec<MiningKeyConfig>>,
+    mining_pkh_config: Option<Vec<MiningPkhConfig>>,
     mine: bool,
     num_threads: u64,
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> IODriverFn {
     Box::new(move |handle| {
         Box::pin(async move {
-            let Some(configs) = mining_config else {
+            // set up empty config for v0 keys (TODO remove when taking out pubkey infra from kernel)
+            let mut configs = Vec::<MiningKeyConfig>::new();
+            configs.push(MiningKeyConfig {
+                share: 1,
+                m: 1,
+                // hardcoded key to satisfy pass-through for v0 pubkey mining infra
+                keys: vec!["2qwq9dQRZfpFx8BDicghpMRnYGKZsZGxxhh9m362pzpM9aeo276pR1yHZPS41y3CW3vPKxeYM8p8fzZS8GXmDGzmNNCnVNekjrSYogqfEFMqwhHh5iCjaKPaDTwhupWqiXj6".to_string()],
+            });
+
+            let Some(pkh_configs) = mining_pkh_config else {
                 enable_mining(&handle, false).await?;
 
                 if let Some(tx) = init_complete_tx {
@@ -107,15 +141,7 @@ pub fn create_mining_driver(
 
                 return Ok(());
             };
-            if configs.len() == 1
-                && configs[0].share == 1
-                && configs[0].m == 1
-                && configs[0].keys.len() == 1
-            {
-                set_mining_key(&handle, configs[0].keys[0].clone()).await?;
-            } else {
-                set_mining_key_advanced(&handle, configs).await?;
-            }
+            set_mining_key_advanced(&handle, configs, pkh_configs).await?;
             enable_mining(&handle, mine).await?;
 
             if let Some(tx) = init_complete_tx {
@@ -304,36 +330,16 @@ fn create_poke(mining_data: &MiningData, nonce: &NounSlab) -> NounSlab {
     slab
 }
 
-#[instrument(skip(handle, pubkey))]
-async fn set_mining_key(
-    handle: &NockAppHandle,
-    pubkey: String,
-) -> Result<PokeResult, NockAppError> {
-    let mut set_mining_key_slab = NounSlab::new();
-    let set_mining_key = Atom::from_value(&mut set_mining_key_slab, "set-mining-key")
-        .expect("Failed to create set-mining-key atom");
-    let pubkey_cord =
-        Atom::from_value(&mut set_mining_key_slab, pubkey).expect("Failed to create pubkey atom");
-    let set_mining_key_poke = T(
-        &mut set_mining_key_slab,
-        &[D(tas!(b"command")), set_mining_key.as_noun(), pubkey_cord.as_noun()],
-    );
-    set_mining_key_slab.set_root(set_mining_key_poke);
-
-    handle
-        .poke(MiningWire::SetPubKey.to_wire(), set_mining_key_slab)
-        .await
-}
-
 async fn set_mining_key_advanced(
     handle: &NockAppHandle,
     configs: Vec<MiningKeyConfig>,
+    pkh_configs: Vec<MiningPkhConfig>,
 ) -> Result<PokeResult, NockAppError> {
     let mut set_mining_key_slab = NounSlab::new();
     let set_mining_key_adv = Atom::from_value(&mut set_mining_key_slab, "set-mining-key-advanced")
         .expect("Failed to create set-mining-key-advanced atom");
 
-    // Create the list of configs
+    // Create the list of v0 (pubkey) configs (TODO remove when taking out pubkey infra)
     let mut configs_list = D(0);
     for config in configs {
         // Create the list of keys
@@ -353,9 +359,27 @@ async fn set_mining_key_advanced(
         configs_list = T(&mut set_mining_key_slab, &[config_tuple, configs_list]);
     }
 
+    // Create the list of v1 (pubkey hash) configs
+    let mut pkh_configs_list = D(0);
+    for config in pkh_configs {
+        let pkh_noun = Atom::from_value(&mut set_mining_key_slab, config.pkh)
+            .expect("Failed to create key atom")
+            .as_noun();
+
+        // Create the config tuple [share pkh]
+        let config_tuple = T(&mut set_mining_key_slab, &[D(config.share), pkh_noun]);
+
+        pkh_configs_list = T(&mut set_mining_key_slab, &[config_tuple, pkh_configs_list]);
+    }
+
     let set_mining_key_poke = T(
         &mut set_mining_key_slab,
-        &[D(tas!(b"command")), set_mining_key_adv.as_noun(), configs_list],
+        &[
+            D(tas!(b"command")),
+            set_mining_key_adv.as_noun(),
+            configs_list,
+            pkh_configs_list,
+        ],
     );
     set_mining_key_slab.set_root(set_mining_key_poke);
 

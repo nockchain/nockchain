@@ -13,34 +13,34 @@
   |=  mine=?
   ^-  mining-state:dk
   m(mining mine)
-::
-::  +set-pubkey: set .pubkey
-++  set-pubkeys
-  |=  pks=(list lock:t)
-  ^-  mining-state:dk
-  =.  pubkeys.m
-    (~(gas z-in *(z-set lock:t)) pks)
-  m
-::
-::  +set-shares validate and set .shares
+::  +set-v0-shares: validate and set .v0-shares
+++  set-v0-shares
+  |=  shr=(list [sig:v0:t @])
+  =/  s=shares:v0:t  (~(gas z-by *(z-map sig:v0:t @)) shr)
+  ?.  (validate:shares:v0:t s)
+    ~|('invalid shares' !!)
+  m(v0-shares s)
+:: set-shares: validate and set .shares
 ++  set-shares
-  |=  shr=(list [lock:t @])
-  =/  s=shares:t  (~(gas z-by *(z-map lock:t @)) shr)
+  |=  shr=(list [hash:t @])
+  =/  s=shares:t  (~(gas z-by *(z-map hash:t @)) shr)
   ?.  (validate:shares:t s)
     ~|('invalid shares' !!)
   m(shares s)
 ::
-++  mining-pubkeys-set
-  !=(*(z-set lock:t) pubkeys.m)
+::  true if no keys are set for v0 or no key hashes are set for v1
+++  no-keys-set  ?|(=(*shares:v0:t v0-shares.m) =(*shares:t shares.m))
 ::
 +|  %candidate-block
 ++  set-pow
   |=  prf=proof:sp
   ^-  mining-state:dk
+  ?^  -.candidate-block.m  m(pow.candidate-block (some prf))
   m(pow.candidate-block (some prf))
 ::
 ++  set-digest
   ^-  mining-state:dk
+  ?^  -.candidate-block.m  m(digest.candidate-block (compute-digest:page:t candidate-block.m))
   m(digest.candidate-block (compute-digest:page:t candidate-block.m))
 ::
 ++  candidate-block-below-max-size
@@ -52,8 +52,7 @@
 ::  grab all raw-txs that could possibly be included in block.
 ::  note that this set could include txs that are not spendable
 ::  from the current heaviest balance. we rely on the logic inside
-::  of process:tx-acc
-::  to catch these txs and reject them.
+::  of process:tx-acc to catch these txs and reject them.
 ++  candidate-txs
   |=  c=consensus-state:dk
   ^-  (z-set raw-tx:t)
@@ -68,7 +67,7 @@
   ++  candidate-tx-ids
     %-  %~  dif  z-in
         (~(uni z-in excluded-txs.c) pending-block-tx-ids)
-    tx-ids.candidate-block.m
+    ~(tx-ids get:page:t candidate-block.m)
   ::
   ::  set of available raw-txs from pending blocks
   ++  pending-block-tx-ids
@@ -76,7 +75,7 @@
     %-  ~(rep z-by pending-blocks.c)
     |=  [[block-id:t pag=page:t *] all=(z-set tx-id:t)]
     ^-  (z-set tx-id:t)
-    %-  ~(rep z-in tx-ids.pag)
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t all=_all]
     ?:  (~(has z-by raw-txs.c) tx-id)
       (~(put z-in all) tx-id)
@@ -92,19 +91,22 @@
   |=  [c=consensus-state:dk now=@da]
   ^-  [? mining-state:dk]
   ?:  ?|  =(*page:t candidate-block.m)
-          !mining-pubkeys-set
+          no-keys-set
       ==
     ::  not mining or no candidate block is set so no need to update
     [%.n m]
-  ?:  %+  gte  timestamp.candidate-block.m
+  ?:  %+  gte  ~(timestamp get:page:t candidate-block.m)
       (time-in-secs:page:t (sub now update-candidate-interval:t))
     ::  has not reached interval (default ~m2), so leave timestamp alone
     [%.n m]
-  =.  timestamp.candidate-block.m  (time-in-secs:page:t now)
+  =.  candidate-block.m
+    ?^  -.candidate-block.m
+      candidate-block.m(timestamp (time-in-secs:page:t now))
+    candidate-block.m(timestamp (time-in-secs:page:t now))
   =/  log-message
     %^  cat  3
       'update-candidate-block: Candidate block timestamp updated: '
-    (scot %$ timestamp.candidate-block.m)
+    (scot %$ ~(timestamp get:page:t candidate-block.m))
   ~>  %slog.[0 log-message]
   :-  %.y
   (add-txs-to-candidate c)
@@ -113,7 +115,7 @@
   |=  c=consensus-state:dk
   ^-  mining-state:dk
   ::  if the mining pubkey is not set, do nothing
-  ?:  =(*(z-set lock:t) pubkeys.m)  m
+  ?:  no-keys-set  m
   %-  ~(rep z-in (candidate-txs c))
   |=  [raw=raw-tx:t min=_m]
   =.  m  min
@@ -124,58 +126,63 @@
 ++  heard-new-tx
   |=  raw=raw-tx:t
   ^-  mining-state:dk
+  =/  =tx-id:t  ~(id get:raw-tx:t raw)
   =/  log-message
     %+  rap  3
     :~  'heard-new-tx: '
         'Miner received new transaction: '
-        (to-b58:hash:t id.raw)
+        (to-b58:hash:t tx-id)
     ==
   ~>  %slog.[0 log-message]
   ::  if the mining pubkey is not set, do nothing
-  ?:  =(*(z-set lock:t) pubkeys.m)  m
+  ?:  no-keys-set  m
   ::
   ::  if the transaction is already in the candidate block, do nothing
-  ?:  (~(has z-in tx-ids.candidate-block.m) id.raw)
+  ?:  (~(has z-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
     m
-  ::  check to see if block is valid with tx - this checks whether the inputs
-  ::  exist, whether the new size will exceed block size, and whether timelocks
-  ::  are valid
-  =/  tx=(unit tx:t)  (mole |.((new:tx:t raw height.candidate-block.m)))
-  ?~  tx
-    ::  invalid tx. we don't emit a %liar effect from this because it might
-    ::  just not be valid for this particular block
-    m
-  =/  new-acc=(unit tx-acc:t)
-    (process:tx-acc:t candidate-acc.m u.tx height.candidate-block.m)
-  ?~  new-acc
+  :: ::  check to see if block is valid with tx - this checks whether the inputs
+  :: ::  exist, whether the new size will exceed block size, and whether timelocks
+  :: ::  are valid
+  :: =/  tx=(unit tx:t)  (mole |.((new:tx:t raw ~(height get:page:t candidate-block.m))))
+  :: ?~  tx
+  ::   ::  invalid tx. we don't emit a %liar effect from this because it might
+  ::   ::  just not be valid for this particular block
+  ::   m
+  =.  height.candidate-acc.m  ~(height get:page:t candidate-block.m)
+  =/  new-acc=(reason:dk tx-acc:t)
+    (process:tx-acc:t candidate-acc.m raw)
+  ?.  ?=(%.y -.new-acc)
     =/  log-message
         %+  rap  3
         :~  'heard-new-tx: '
             'Transaction '
-            (to-b58:hash:t id.raw)
+            (to-b58:hash:t tx-id)
             ' cannot be added to candidate block.'
         ==
     ~>  %slog.[3 log-message]
     m
   =/  old-mining-state  m
   ::  we can add tx to candidate-block
-  =.  tx-ids.candidate-block.m
-    (~(put z-in tx-ids.candidate-block.m) id.raw)
+  =/  new-tx-ids  (~(put z-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
+  =.  candidate-block.m
+    ?^  -.candidate-block.m
+      candidate-block.m(tx-ids new-tx-ids)
+    candidate-block.m(tx-ids new-tx-ids)
   =/  old-fees=coins:t  fees.candidate-acc.m
-  =.  candidate-acc.m  u.new-acc
+  =.  candidate-acc.m  +.new-acc
   =/  new-fees=coins:t  fees.candidate-acc.m
   =/  log-message-added-tx
       %+  rap  3
       :~  'heard-new-tx: '
           'Added transaction '
-          (to-b58:hash:t id.raw)
+          (to-b58:hash:t tx-id)
           ' to the candidate block.'
       ==
   =/  log-message-exceeds-max-size
     %+  rap  3
     :~  'heard-new-tx: '
         'Exceeds max block size, not adding tx: '
-        (to-b58:hash:t id.raw)
+        (to-b58:hash:t tx-id)
     ==
   ::  check if new-fees != old-fees to determine if split should be recalculated.
   ::  since we don't have replace-by-fee
@@ -191,13 +198,21 @@
   ?>  (gth new-fees old-fees)
   =/  fee-diff=coins:t  (sub new-fees old-fees)
   ::  compute old emission+fees
+  =/  cb=coinbase-split:t  ~(coinbase get:page:t candidate-block.m)
   =/  old-assets=coins:t
-    %+  roll  ~(val z-by coinbase.candidate-block.m)
-    |=  [c=coins:t sum=coins:t]
-    (add c sum)
+    ?-  -.cb
+      %0  %+  roll  ~(val z-by +.cb)
+          |=  [c=coins:t sum=coins:t]
+          (add c sum)
+      %1  %+  roll  ~(val z-by +.cb)
+          |=  [c=coins:t sum=coins:t]
+          (add c sum)
+    ==
   =/  new-assets=coins:t  (add old-assets fee-diff)
-  =.  coinbase.candidate-block.m
-    (new:coinbase-split:t new-assets shares.m)
+  =.  candidate-block.m
+    ?^  -.candidate-block.m
+      candidate-block.m(coinbase (new:v0:coinbase-split:t new-assets v0-shares.m))
+    candidate-block.m(coinbase (new:v1:coinbase-split:t new-assets shares.m))
   ::  check size of candidate block
   ?.  candidate-block-below-max-size
     ~>  %slog.[3 log-message-exceeds-max-size]
@@ -224,10 +239,10 @@
       %+  rap  3
       :~  'heard-new-block: '
           'Attempted to generate new candidate block when we have no genesis block'
-      ==
-    ~>  %slog.[0 log-message]
-    m
-  ?:  =(u.heaviest-block.c parent.candidate-block.m)
+    ==
+  ~>  %slog.[0 log-message]
+  m
+?:  =(u.heaviest-block.c ~(parent get:page:t candidate-block.m))
     =/  log-message
       %+  rap  3
       :~  'heard-new-block: '
@@ -235,7 +250,7 @@
       ==
     ~>  %slog.[0 log-message]
     m
-  ?.  mining-pubkeys-set
+  ?:  no-keys-set
     =/  log-message
       %+  rap  3
       :~  'heard-new-block: '
@@ -251,15 +266,22 @@
         (to-b58:hash:t u.heaviest-block.c)
     ==
   ~>  %slog.[0 log-message]
+  =/  parent-local=local-page:t  (~(got z-by blocks.c) u.heaviest-block.c)
+  =/  parent=page:t  (to-page:local-page:t parent-local)
   =.  candidate-block.m
-    %-  new-candidate:page:t
-    :*  (to-page:local-page:t (~(got z-by blocks.c) u.heaviest-block.c))
-        now
-        (~(got z-by targets.c) u.heaviest-block.c)
-        shares.m
-    ==
+    ?^  -.parent
+      ::  v0 parent -
+      ::    if candidate height is less than cutoff, use v0 new-candidate with v0 shares
+      ::    otherwise use v1 new-candidate with v1 shares
+      ?:  (lth +(height.parent) v1-phase.blockchain-constants)
+        (new-candidate:v0:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) v0-shares.m)
+      (new-candidate:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) shares.m)
+    ::  v1 parent - use v1 new-candidate with v1 shares
+    (new-candidate:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) shares.m)
   =.  candidate-acc.m
-    (new:tx-acc:t (~(get z-by balance.c) u.heaviest-block.c))
+    %+  new:tx-acc:t
+      (~(get z-by balance.c) u.heaviest-block.c)
+    ~(height get:page:t candidate-block.m)
   ::
   ::  roll over the candidate txs and try to include them in the new candidate block
   (add-txs-to-candidate c)

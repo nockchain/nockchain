@@ -1,10 +1,12 @@
 #![feature(cold_path)]
+#![feature(cfg_boolean_literals)]
 #![allow(dead_code)]
 
 extern crate lazy_static;
 extern crate num_derive;
 #[macro_use]
 extern crate static_assertions;
+pub mod ext;
 mod flog;
 pub mod hamt;
 pub mod interpreter;

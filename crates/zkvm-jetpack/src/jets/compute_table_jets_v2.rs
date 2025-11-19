@@ -1,20 +1,17 @@
-use nockapp::Noun;
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_EXIT, BAIL_FAIL};
 use nockvm::jets::JetErr;
-use nockvm::noun::{Atom, IndirectAtom, D, T};
+use nockvm::noun::{Atom, IndirectAtom, Noun, D, T};
 use nockvm_macros::tas;
 use tracing::debug;
 
-use crate::form::base::*;
-use crate::form::fext::*;
+use crate::form::belt::*;
+use crate::form::felt::*;
 use crate::form::gen_trace::{build_tree_data, TreeData};
-use crate::form::mary::{MarySlice, *};
-use crate::form::{Belt, Felt};
-use crate::hand::handle::{finalize_mary, new_handle_mut_mary};
-use crate::hand::structs::HoonList;
+use crate::form::handle::{finalize_mary, new_handle_mut_mary};
+use crate::form::mary::*;
+use crate::form::structs::HoonList;
 use crate::jets::table_utils::*;
-use crate::jets::utils::jet_err;
 
 pub fn compute_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let sam = slot(subject, 6)?;
@@ -30,7 +27,7 @@ pub fn compute_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Resul
     let table_noun = slot(table_mary, 3)?;
     let Ok(table) = MarySlice::try_from(table_noun) else {
         debug!("cannot convert mary arg to mary");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let (res, mut res_mary): (IndirectAtom, MarySliceMut) = new_handle_mut_mary(
@@ -221,7 +218,7 @@ pub fn compute_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Resul
             }
             _ => {
                 debug!("invalid opcode");
-                return jet_err();
+                return Err(BAIL_EXIT);
             }
         };
         state.sfcons_inv = compute_sfcons_inv(&state, row, &chals)?;
@@ -448,7 +445,7 @@ fn get_opcode(row: &[u64]) -> Result<u64, JetErr> {
     } else if grab_belt(row, OP9_IDX).0 == 1 {
         Ok(9)
     } else {
-        jet_err()
+        return Err(BAIL_EXIT);
     }
 }
 
@@ -511,7 +508,7 @@ pub fn compute_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Nou
     let table_noun = slot(table_mary, 3)?;
     let Ok(table) = MarySlice::try_from(table_noun) else {
         debug!("cannot convert mary arg to mary");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let (res, mut res_mary): (IndirectAtom, MarySliceMut) = new_handle_mut_mary(
@@ -649,7 +646,7 @@ pub fn compute_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Nou
             }
             _ => {
                 debug!("invalid opcode");
-                return jet_err();
+                return Err(BAIL_EXIT);
             }
         }
 

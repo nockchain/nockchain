@@ -2,22 +2,22 @@ use std::cmp;
 use std::collections::BTreeMap;
 
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::noun::{IndirectAtom, Noun, D};
 use nockvm_macros::tas;
 use noun_serde::NounDecode;
 use tracing::debug;
 
-use crate::form::fext::*;
-use crate::form::mary::MarySlice;
+use crate::form::belt::Belt;
+use crate::form::felt::*;
+use crate::form::handle::{finalize_poly, new_handle_mut_felt, new_handle_mut_slice};
+use crate::form::mary::*;
 use crate::form::math::prover::*;
-use crate::form::{BPolySlice, Belt, FPolySlice, Felt};
-use crate::hand::handle::{finalize_poly, new_handle_mut_felt, new_handle_mut_slice};
-use crate::hand::structs::{HoonList, HoonMapIter};
-use crate::jets::utils::jet_err;
+use crate::form::noun_ext::NounMathExt;
+use crate::form::poly::*;
+use crate::form::structs::{HoonList, HoonMapIter};
 use crate::jets::verifier_jets::mpeval_ultra_felt;
-use crate::noun::noun_ext::NounExt;
 
 pub enum MPUltra {
     Mega(Noun),
@@ -296,11 +296,11 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
 
     let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations) else {
         debug!("trace_evaluations is not a valid FPolySlice");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let Ok(heights) = Vec::<u64>::from_noun(&heights) else {
         debug!("heights decode failed");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let constraint_map = Constraints::try_from(constraint_map)?;
     let counts_map = CountMap::try_from(counts_map)?;
@@ -625,7 +625,7 @@ pub fn compute_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, Je
         FPolySlice::try_from(omicrons),
     ) else {
         debug!("one of trace_openings, composition_piece_openings, weights, or omicrons is not a valid FPolySlice");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let trace_polys = HoonList::try_from(trace_polys)?;

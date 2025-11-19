@@ -1,0 +1,138 @@
+// nockchain/common/v1/blockchain.proto
+
+syntax = "proto3";
+
+package nockchain.common.v1;
+
+import "nockchain/common/v1/primitives.proto";
+import "nockchain/common/v1/pagination.proto";
+
+message WalletBalanceData {
+  // Page of full UTXO entries for the requested wallet. Entries are ordered
+  // by (Name.first, Name.last) to support consistent pagination.
+  repeated BalanceEntry notes = 1; // note name -> amount
+
+  // Snapshot metadata where this page was computed. Clients should include
+  // the returned page token to continue paging against the same snapshot.
+  BlockHeight height = 2;     // block height where balance was computed
+  optional Hash block_id = 3; // block where balance was computed
+
+  // Pagination cursor for fetching the next page in a paginated view.
+  // When empty, there are no further results for this snapshot.
+  PageResponse page = 4;
+}
+
+message BalanceEntry {
+  Name name = 1;
+  Note note = 2;
+}
+
+// the string key is the name of the input
+// message RawTransaction { map<Name, Input> inputs = 1; }
+message RawTransaction {
+  repeated NamedInput named_inputs = 1;
+  TimeLockRangeAbsolute timelock_range = 2;
+  Nicks total_fees = 3;
+  Hash id = 4;
+}
+
+message NamedInput {
+  Name name = 1;
+  Input input = 2;
+}
+
+message Input {
+  Note note = 1;
+  Spend spend = 2;
+}
+
+message Spend {
+  Signature signature = 1;
+  repeated Seed seeds = 2;
+  Nicks miner_fee_nicks = 3;
+}
+
+message Seed {
+  optional OutputSource output_source = 1;
+  Lock recipient = 2;
+  optional TimeLockIntent timelock_intent = 3;
+  Nicks gift = 4;
+  Hash parent_hash = 5;
+}
+
+message OutputSource { optional Source source = 1; }
+
+message Source {
+  Hash hash = 1;
+  bool coinbase = 2;
+}
+
+message TimeLockIntent {
+  oneof value {
+    TimeLockRangeAbsolute absolute = 1;
+    TimeLockRangeRelative relative = 2;
+    TimeLockRangeAbsoluteAndRelative absolute_and_relative = 3;
+    TimeLockRangeNeither neither = 4;
+  }
+}
+
+// Use this when you want to force the output to not have a timelock
+message TimeLockRangeNeither {}
+
+message TimeLockRangeAbsoluteAndRelative {
+  optional TimeLockRangeAbsolute absolute = 1;
+  optional TimeLockRangeRelative relative = 2;
+}
+
+// min and max are absolute origin page numbers
+message TimeLockRangeAbsolute {
+  optional BlockHeight min = 1;
+  optional BlockHeight max = 2;
+}
+
+// min and max are relative to the note's creation page
+message TimeLockRangeRelative {
+  optional BlockHeightDelta min = 1;
+  optional BlockHeightDelta max = 2;
+}
+
+// ===================================================================
+// Wallet Domain Types: UTXO (nnote), Lock, and Signature (multisig)
+// ===================================================================
+
+message Lock {
+  uint32 keys_required = 1; // threshold of keys required to spend the note
+  // DEPRECATED: repeated string schnorr_pubkeys_b58 = 2;
+  repeated SchnorrPubkey schnorr_pubkeys =
+      2; // schnorr pubkeys (curve: cheetah)
+}
+
+message Name {
+  // First is the hash of whether the note has a timelock and the lock
+  Hash first = 1;
+  // Last is the hash of the actual timelock and the source
+  Hash last = 2;
+}
+
+message Note {
+  BlockHeight origin_page = 1;          // page-number when added to balance
+  optional TimeLockIntent timelock = 2; // enforced timelock
+  Name name = 3;                        // nname (human/name label)
+  Lock lock = 4;                        // spending condition
+  Source source = 5;                    // provenance commitment
+  Nicks assets = 6;                     // coin amount (nicks)
+  NoteVersion version = 7;              // note version (currently 0)
+}
+
+message Signature { repeated SignatureEntry entries = 1; }
+
+message SignatureEntry {
+  SchnorrPubkey schnorr_pubkey =
+      1; // serialized pubkey corresponding to the signer
+  SchnorrSignature signature = 2;
+}
+
+message SchnorrSignature {
+  EightBelt chal = 1;
+  EightBelt sig = 2;
+}

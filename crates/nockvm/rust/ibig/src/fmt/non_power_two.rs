@@ -164,6 +164,7 @@ impl PreparedLarge {
 
         let mut radix_powers = Vec::new();
         let mut big_chunks = Vec::new();
+        // FIXME: This use of ibig's pow will leak memory.
         let chunk_power = UBig::from_word(radix_info.range_per_word).pow(CHUNK_LEN);
         if chunk_power > *number {
             return PreparedLarge {

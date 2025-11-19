@@ -1,5 +1,5 @@
 use bs58;
-use ibig::{ubig, UBig};
+use ibig::{ubig, Stack, UBig};
 use nockapp::NockAppError;
 use nockvm::noun::Noun;
 use noun_serde::prelude::*;
@@ -28,8 +28,33 @@ pub fn tip5_hash_to_base58(noun: Noun) -> Result<String, NockAppError> {
     Ok(base58_string)
 }
 
+/// Stack-aware version of tip5_hash_to_base58
+pub fn tip5_hash_to_base58_stack<S: Stack>(
+    stack: &mut S,
+    noun: Noun,
+) -> Result<String, NockAppError> {
+    let tuple: [u64; 5] = noun.decode()?;
+    let decimal_value = base_p_to_decimal_stack(stack, tuple)?;
+    let base58_string = ubig_to_base58(decimal_value);
+
+    Ok(base58_string)
+}
+
+// FIXME: This use of ibig's pow will leak memory.
 fn accum_prime_ubig(prime: &UBig, acc: &mut UBig, value: u64, i: usize) {
     *acc += UBig::from(value) * prime.pow(i);
+}
+
+fn accum_prime_ubig_stack<S: Stack>(
+    stack: &mut S,
+    prime: &UBig,
+    acc: &mut UBig,
+    value: u64,
+    i: usize,
+) {
+    let pow_result = prime.pow_stack(stack, i);
+    let mul_result = UBig::mul_stack(stack, UBig::from(value), pow_result);
+    *acc += mul_result;
 }
 
 pub fn base_p_to_decimal(hash: [u64; 5]) -> Result<UBig, NockAppError> {
@@ -39,6 +64,20 @@ pub fn base_p_to_decimal(hash: [u64; 5]) -> Result<UBig, NockAppError> {
     for (i, value) in hash.iter().enumerate() {
         // Add the value * P^i to the result
         accum_prime_ubig(&prime_ubig, &mut result, *value, i);
+    }
+    Ok(result)
+}
+
+pub fn base_p_to_decimal_stack<S: Stack>(
+    stack: &mut S,
+    hash: [u64; 5],
+) -> Result<UBig, NockAppError> {
+    let prime_ubig = UBig::from(P);
+    let mut result = ubig!(0);
+
+    for (i, value) in hash.iter().enumerate() {
+        // Add the value * P^i to the result
+        accum_prime_ubig_stack(stack, &prime_ubig, &mut result, *value, i);
     }
     Ok(result)
 }
@@ -91,6 +130,36 @@ mod tests {
     fn test_tip5_ubig_isomorphism() {
         let tip5 = [1, 2, 3, 4, 5];
         iso(tip5);
+    }
+
+    #[test]
+    fn test_tip5_hash_to_base58_stack() {
+        use nockapp::noun::slab::NounSlab;
+        use nockvm::noun::Atom;
+
+        // Create a NounSlab to use as both allocator and Stack
+        let mut slab: NounSlab = NounSlab::new();
+
+        // Test case 1: Simple tuple [1 2 3 4 5]
+        let tuple1 = T(&mut slab, &[D(1), D(2), D(3), D(4), D(5)]);
+        let expected1 = "2V9arU36gvtaofWmNowewoj9u7gbNA2qsJZEQ3WPky5mQ";
+        let result1 = tip5_hash_to_base58_stack(&mut slab, tuple1).unwrap();
+        assert_eq!(result1, expected1);
+
+        // Test case 2: Complex values
+        let a1 = Atom::new(&mut slab, 0x6ef99e5f3447ffda);
+        let a2 = Atom::new(&mut slab, 0xdf94122d1a98ec99);
+        let a3 = Atom::new(&mut slab, 0xcbf1918337a0e197);
+        let a4 = Atom::new(&mut slab, 0x6cda1112891244ce);
+        let a5 = Atom::new(&mut slab, 0x6e420b8a615508d4);
+
+        let tuple2 = T(
+            &mut slab,
+            &[a1.as_noun(), a2.as_noun(), a3.as_noun(), a4.as_noun(), a5.as_noun()],
+        );
+        let expected2 = "6UkUko9WTwwR6VVRXwPQpUy5pswdvNtoyHspY5n9nLVnBxzAgEyMwPR";
+        let result2 = tip5_hash_to_base58_stack(&mut slab, tuple2).unwrap();
+        assert_eq!(result2, expected2);
     }
 
     #[test]

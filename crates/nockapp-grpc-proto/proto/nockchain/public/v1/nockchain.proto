@@ -1,0 +1,91 @@
+// nockchain/public/v1/nockchain.proto
+
+syntax = "proto3";
+
+package nockchain.public.v1;
+
+import "nockchain/common/v1/blockchain.proto";
+import "nockchain/common/v1/primitives.proto";
+import "nockchain/common/v1/pagination.proto";
+
+service NockchainService {
+  rpc WalletGetBalance(WalletGetBalanceRequest)
+      returns (WalletGetBalanceResponse);
+  rpc WalletSendTransaction(WalletSendTransactionRequest)
+      returns (WalletSendTransactionResponse);
+  rpc TransactionAccepted(TransactionAcceptedRequest)
+      returns (TransactionAcceptedResponse);
+  //rpc TransactionConfirmation(TransactionConfirmationRequest)
+  //    returns (TransactionConfirmationResponse);
+}
+
+message WalletGetBalanceRequest {
+  // pubkey cheetah point; specific address, or current wallet
+  string address = 1;
+  // Pagination parameters. The server enforces limits and may return fewer
+  // entries than requested to respect message size and policy. For consistent
+  // paging across a stable snapshot, pass along the returned page_token from
+  // the previous response without modification.
+  common.v1.PageRequest page = 2;
+}
+
+message WalletGetBalanceResponse {
+  oneof result {
+    // Paginated wallet balance data with full entries and snapshot metadata.
+    // Continue paging using `balance.page.next_page_token` until empty. Clients
+    // should treat the page token as opaque; it may encode snapshot identity
+    // and the last returned key.
+    common.v1.WalletBalanceData balance = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message WalletSendTransactionRequest {
+  common.v1.Hash tx_id = 1; // base58 encoded transaction ID for tracking
+  common.v1.RawTransaction raw_tx = 2;
+}
+
+message WalletSendTransactionResponse {
+    oneof result {
+      // true is request was acknowledge by node,
+      // this does not mean that the transaction was
+      // confirmed and/or accepted.
+      common.v1.Acknowledged ack = 1;
+      common.v1.ErrorStatus error = 2;
+    }
+}
+
+message TransactionAcceptedRequest {
+  common.v1.Base58Hash tx_id = 1; // base58 encoded transaction ID for tracking
+}
+
+message TransactionAcceptedResponse {
+  // true if transaction was accepted by node. this not does mean that the
+  // transaction was confirmed. Just that it was validated by the node and
+  // added to its raw-tx set.
+  oneof result {
+    bool accepted = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+
+//message TransactionConfirmationRequest {
+//  // base58 encoded transaction ID
+//  common.v1.Base58Hash tx_id = 1;
+//}
+//
+//// TODO: Handle re-orgs / orphaned transactions
+//message TransactionConfirmationResponse {
+//  oneof result {
+//    // Number of blocks between the transaction's origin page and the current
+//    // chain tip. 0 = mempool, no block contains the transaction yet.
+//    // 1 = first block containing the transaction, current heaviest block.
+//    // > 1 = number of blocks between the transaction's origin page and the
+//    // current chain tip.
+//    common.v1.BlockHeightDelta confirmations = 1;
+//    // Transaction not found in mempool or chain
+//    bool transaction_not_found = 2;
+//    common.v1.ErrorStatus error = 3;
+//  }
+//}

@@ -15,5 +15,4 @@ pub mod table_utils;
 pub mod tip5_jets;
 pub mod tip5_sponge;
 pub mod trace_gen_jets;
-pub mod utils;
 pub mod verifier_jets;

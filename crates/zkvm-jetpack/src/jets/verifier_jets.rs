@@ -1,19 +1,18 @@
 use nockvm::interpreter::Context;
-use nockvm::jets::util::slot;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
 use nockvm::noun::{Atom, Cell, IndirectAtom, Noun};
 use nockvm_macros::tas;
 use tracing::debug;
 
-use crate::form::math::fext::*;
-use crate::form::poly::Poly;
-use crate::form::{bpow, brek, BPolySlice, Belt, Element, FPolySlice, Felt, MegaTyp, PolySlice};
-use crate::hand::handle::new_handle_mut_felt;
-use crate::hand::structs::{HoonList, HoonMapIter};
+use crate::form::belt::{bpow, Belt};
+use crate::form::felt::*;
+use crate::form::handle::new_handle_mut_felt;
+use crate::form::noun_ext::{AtomMathExt, NounMathExt};
+use crate::form::poly::{BPolySlice, Element, FPolySlice, Poly, PolySlice};
+use crate::form::structs::{HoonList, HoonMapIter};
 use crate::jets::proof_gen_jets::{MPUltra, ProofMap};
-use crate::jets::utils::jet_err;
-use crate::noun::noun_ext::{AtomExt, NounExt};
 pub struct IndexFeltMap(pub ProofMap<usize, Felt>);
 pub struct IndexBeltMap(pub ProofMap<usize, Belt>);
 
@@ -106,11 +105,11 @@ pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     // Convert nouns to appropriate types
     let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations) else {
         debug!("trace_evaluations is not a valid FPolySlice");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let Ok(comp_evaluations) = FPolySlice::try_from(comp_evaluations) else {
         debug!("comp_evaluations is not a valid FPolySlice");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let trace_elems: Vec<Belt> = HoonList::try_from(trace_elems)?
         .into_iter()
@@ -125,7 +124,7 @@ pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let num_comp_pieces = num_comp_pieces.as_atom()?.as_u64()?;
     let Ok(weights) = FPolySlice::try_from(weights) else {
         debug!("weights is not a valid FPolySlice");
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
     let heights: Vec<u64> = HoonList::try_from(heights)?
         .into_iter()
@@ -285,7 +284,7 @@ impl Fops for Felt {
         if let Ok(r) = noun.as_felt() {
             Ok(*r)
         } else {
-            jet_err()
+            return Err(BAIL_FAIL);
         }
     }
 
@@ -313,25 +312,25 @@ pub fn mpeval_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
     let chals = BPolySlice::try_from(chal_map)?.0;
 
     let Ok(dyns) = BPolySlice::try_from(dyns) else {
-        return jet_err();
+        return Err(BAIL_FAIL);
     };
 
     let ret = match field.as_direct()?.data() {
         tas!(b"ext") => {
             let Ok(com_map) = IndexFeltMap::try_from(com_map) else {
-                return jet_err();
+                return Err(BAIL_FAIL);
             };
             let args = FPolySlice::try_from(args)?.0;
             mpeval::<Felt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
         }
         tas!(b"base") => {
             let Ok(com_map) = IndexBeltMap::try_from(com_map) else {
-                return jet_err();
+                return Err(BAIL_FAIL);
             };
             let args = BPolySlice::try_from(args)?.0;
             mpeval::<Belt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
         }
-        _ => return jet_err(),
+        _ => return Err(BAIL_FAIL),
     };
 
     Ok(ret)
@@ -365,7 +364,7 @@ where
         if mp.is_direct() && mp.as_direct()?.data() == 0 {
             return Ok(F::zero());
         } else {
-            return jet_err();
+            return Err(BAIL_FAIL);
         }
     }
 
@@ -377,7 +376,7 @@ where
         let [k, v] = n.uncell()?;
 
         let Ok(k) = BPolySlice::try_from(k) else {
-            return jet_err();
+            return Err(BAIL_FAIL);
         };
         let v = Belt::from_noun(v)?;
         // =/  coeff=@ux  (lift-op v)
@@ -399,12 +398,12 @@ where
             .iter()
             .copied()
             // =/  [typ=mega-typ idx=@ exp=@ud]  (brek ter)
-            .map(brek)
+            .map(crate::form::brek)
             .map(|(typ, idx, exp)| {
                 // ?-  typ
                 match typ {
                     //     %var
-                    MegaTyp::Var => {
+                    crate::form::MegaTyp::Var => {
                         //   %+  pow-op
                         //     (~(snag aop-door args) idx)
                         //   exp
@@ -412,7 +411,7 @@ where
                     }
                     // ::
                     //     %rnd
-                    MegaTyp::Rnd => {
+                    crate::form::MegaTyp::Rnd => {
                         //   %+  pow-op
                         //     (lift-op (~(got by chal-map) idx))
                         //   exp
@@ -421,7 +420,7 @@ where
                     }
                     // ::
                     //     %dyn
-                    MegaTyp::Dyn => {
+                    crate::form::MegaTyp::Dyn => {
                         //   %+  pow-op
                         //     (lift-op (~(snag bop dyns) idx))
                         //   exp
@@ -429,13 +428,13 @@ where
                     }
                     // ::
                     //     %con
-                    MegaTyp::Con => {
+                    crate::form::MegaTyp::Con => {
                         //   init-one
                         F::one()
                     }
                     // ::
                     //     %com
-                    MegaTyp::Com => {
+                    crate::form::MegaTyp::Com => {
                         //   %+  pow-op
                         //     (~(got by com-map) idx)
                         //   exp

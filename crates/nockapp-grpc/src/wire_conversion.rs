@@ -1,7 +1,7 @@
 use nockapp::wire::{WireRepr, WireTag as NockAppWireTag};
 
 use crate::error::{NockAppGrpcError, Result};
-use crate::pb::{Wire, WireTag};
+use crate::pb::common::v1::{wire_tag, Wire, WireTag};
 
 /// Convert gRPC Wire to NockApp WireRepr
 pub fn grpc_wire_to_nockapp(wire: &Wire) -> Result<WireRepr> {
@@ -22,8 +22,8 @@ pub fn grpc_wire_to_nockapp(wire: &Wire) -> Result<WireRepr> {
     let mut tags = Vec::new();
     for tag in &wire.tags {
         let nockapp_tag = match &tag.value {
-            Some(crate::pb::wire_tag::Value::Text(s)) => NockAppWireTag::String(s.clone()),
-            Some(crate::pb::wire_tag::Value::Number(n)) => NockAppWireTag::Direct(*n),
+            Some(wire_tag::Value::Text(s)) => NockAppWireTag::String(s.clone()),
+            Some(wire_tag::Value::Number(n)) => NockAppWireTag::Direct(*n),
             None => {
                 return Err(NockAppGrpcError::InvalidRequest(
                     "WireTag value is required".to_string(),
@@ -43,8 +43,8 @@ pub fn nockapp_wire_to_grpc(wire: &WireRepr) -> Wire {
         .iter()
         .map(|tag| {
             let value = match tag {
-                NockAppWireTag::String(s) => crate::pb::wire_tag::Value::Text(s.clone()),
-                NockAppWireTag::Direct(n) => crate::pb::wire_tag::Value::Number(*n),
+                NockAppWireTag::String(s) => wire_tag::Value::Text(s.clone()),
+                NockAppWireTag::Direct(n) => wire_tag::Value::Number(*n),
             };
             WireTag { value: Some(value) }
         })

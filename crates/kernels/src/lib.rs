@@ -6,3 +6,6 @@ pub mod dumb;
 
 #[cfg(feature = "miner")]
 pub mod miner;
+
+#[cfg(feature = "nockchain_peek")]
+pub mod nockchain_peek;

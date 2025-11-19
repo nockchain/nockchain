@@ -1,0 +1,25 @@
+[package]
+name = "nockchain-explorer-tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "nockchain-explorer-tui"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+chrono = { workspace = true }
+crossterm = { workspace = true }
+nockapp-grpc = { workspace = true }
+nockapp-grpc-proto = { workspace = true }
+nockchain-types = { workspace = true }
+nockchain-math = { workspace = true }
+ratatui = "0.28"
+tokio = { workspace = true, features = ["full"] }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tracing-tracy = { workspace = true }
+arboard = "3.3"

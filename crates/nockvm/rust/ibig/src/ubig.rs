@@ -7,6 +7,7 @@ use crate::arch::ntt;
 use crate::arch::word::Word;
 use crate::buffer::Buffer;
 use crate::math;
+use crate::memory::Stack;
 use crate::primitive::WORD_BITS_USIZE;
 
 /// Internal representation of UBig.
@@ -119,6 +120,7 @@ impl UBig {
 }
 
 impl Clone for UBig {
+    /// WARNING: This uses global allocator. Use clone_stack instead to prevent memory leaks.
     #[inline]
     fn clone(&self) -> UBig {
         match self.repr() {
@@ -136,6 +138,21 @@ impl Clone for UBig {
             }
         }
         *self = source.clone();
+    }
+}
+
+impl UBig {
+    /// Clone a UBig using a stack allocator
+    #[inline]
+    pub fn clone_stack<S: Stack>(&self, stack: &mut S) -> UBig {
+        match self.repr() {
+            Small(x) => UBig(Small(*x)),
+            Large(buffer) => {
+                let mut new_buffer = Buffer::allocate_stack(stack, buffer.len());
+                new_buffer.clone_from(buffer);
+                UBig(Large(new_buffer))
+            }
+        }
     }
 }
 

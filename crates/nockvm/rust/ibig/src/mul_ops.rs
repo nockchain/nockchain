@@ -18,6 +18,7 @@ use crate::{helper_macros, mul};
 impl Mul<UBig> for UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use mul_stack instead to prevent memory leaks.
     #[inline]
     fn mul(self, rhs: UBig) -> UBig {
         match (self.into_repr(), rhs.into_repr()) {
@@ -32,6 +33,7 @@ impl Mul<UBig> for UBig {
 impl Mul<&UBig> for UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use mul_stack instead to prevent memory leaks.
     #[inline]
     fn mul(self, rhs: &UBig) -> UBig {
         match (self.into_repr(), rhs.repr()) {
@@ -46,6 +48,7 @@ impl Mul<&UBig> for UBig {
 impl Mul<UBig> for &UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use mul_stack instead to prevent memory leaks.
     #[inline]
     fn mul(self, rhs: UBig) -> UBig {
         rhs.mul(self)
@@ -55,6 +58,7 @@ impl Mul<UBig> for &UBig {
 impl Mul<&UBig> for &UBig {
     type Output = UBig;
 
+    /// WARNING: This uses global allocator. Use mul_stack instead to prevent memory leaks.
     #[inline]
     fn mul(self, rhs: &UBig) -> UBig {
         match (self.repr(), rhs.repr()) {

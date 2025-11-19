@@ -68,7 +68,6 @@
   =/  tx  (~(get z-by raw-txs.c) tid)
   ?~  tx  ~  `raw-tx.u.tx
 ::
-::
 ++  got-raw-tx
   |=  tid=tx-id:t
   ^-  raw-tx:t
@@ -127,14 +126,14 @@
   ^-  ?
   ::  set of inputs required by tx that are not in balance
   =/  in-balance=(z-set nname:t)
-    (~(dif z-in (inputs-names:raw-tx:t raw)) balance)
+    (~(dif z-in ~(input-names get:raw-tx:t raw)) balance)
   ::  %.y: all inputs in .raw are in balance
   ::  %.n: input(s) in .raw not in balance
   =(*(z-set nname:t) in-balance)
 ::
 ++  get-cur-height
   ^-  page-number:t
-  height:(~(got z-by blocks.c) (need heaviest-block.c))
+  ~(height get:local-page:t (~(got z-by blocks.c) (need heaviest-block.c)))
 ::
 ++  get-cur-balance
   ^-  (z-map nname:t nnote:t)
@@ -235,54 +234,69 @@
   =?  balance.c  !=(~ balance.acc)
     ::  if balance.acc is empty, this would still add the following to balance.c,
     ::  so we do it conditionally.
-    (~(put z-by balance.c) digest.pag balance.acc)
+    (~(put z-by balance.c) ~(digest get:page:t pag) balance.acc)
+  =/  cb=coinbase-split:t  ~(coinbase get:page:t pag)
+  =/  height=page-number:t  ~(height get:page:t pag)
   =/  coinbases=(list coinbase:t)
-    %+  turn  ~(tap z-in ~(key z-by coinbase.pag))
-    |=  =lock:t
-    (new:coinbase:t pag lock)
+    ?-  -.cb
+      %0
+        ::  v0 coinbase only allowed before v1-phase
+        ?:  (gte height v1-phase.blockchain-constants)
+          ~|  %v0-coinbase-after-cutoff  !!
+        %+  turn  ~(tap z-in ~(key z-by +.cb))
+        |=  =sig:t
+        (new:v0:coinbase:t pag sig)
+      %1
+        ::  v1 coinbase only allowed at or after v1-phase
+        ?:  (lth height v1-phase.blockchain-constants)
+          ~|  %v1-coinbase-before-activation  !!
+        %+  turn  ~(tap z-in ~(key z-by +.cb))
+        |=  h=hash:t
+        (new:coinbase:t pag (~(put z-in *(z-set hash:t)) h))
+    ==
   =.  balance.c
     %+  roll  coinbases
     |=  [=coinbase:t bal=_balance.c]
-    (~(put z-bi bal) digest.pag name.coinbase coinbase)
+    (~(put z-bi bal) ~(digest get:page:t pag) ~(name get:nnote:t coinbase) coinbase)
   ::  update txs
   ::
   =.  txs.c
-    %-  ~(rep z-in txs.acc)
-    |=  [=tx:t txs=_txs.c]
-    (~(put z-bi txs) digest.pag id.tx tx)
+    %-  ~(rep z-by txs.acc)
+    |=  [[=tx-id:t =tx:t] txs=_txs.c]
+    (~(put z-bi txs) ~(digest get:page:t pag) tx-id tx)
   ::
   ::  update epoch map. the first block-id in an epoch maps to its parent,
   ::  and each subsequent block maps to the same block-id as the first. this is helpful
   ::  bookkeeping to avoid a length pointer chase of parent of parent of...
   ::  when reaching the end of an epoch and needing to compute its length.
   =.  epoch-start.c
-    ?:  =(*page-number:t height.pag)
+    ?:  =(*page-number:t ~(height get:page:t pag))
       ::  genesis block is also considered the last block of the "0th" epoch.
-      (~(put z-by epoch-start.c) digest.pag digest.pag)
-    ?:  =(0 epoch-counter.pag)
-      (~(put z-by epoch-start.c) digest.pag parent.pag)
+      (~(put z-by epoch-start.c) ~(digest get:page:t pag) ~(digest get:page:t pag))
+    ?:  =(0 ~(epoch-counter get:page:t pag))
+      (~(put z-by epoch-start.c) ~(digest get:page:t pag) ~(parent get:page:t pag))
     %-  ~(put z-by epoch-start.c)
-    :-  digest.pag
-    (~(got z-by epoch-start.c) parent.pag)
+    :-  ~(digest get:page:t pag)
+    (~(got z-by epoch-start.c) ~(parent get:page:t pag))
   =.  min-timestamps.c  (update-min-timestamps now pag)
   ::
   =.  targets.c
-    ?:  =(+(epoch-counter.pag) blocks-per-epoch:t)
+    ?:  =(+(~(epoch-counter get:page:t pag)) blocks-per-epoch:t)
       ::  last block of an epoch means update to target
       %-  ~(put z-by targets.c)
-      :-  digest.pag
-      (compute-target digest.pag target.pag)
-    ?:  =(height.pag *page-number:t)  ::  genesis block
+      :-  ~(digest get:page:t pag)
+      (compute-target ~(digest get:page:t pag) ~(target get:page:t pag))
+    ?:  =(~(height get:page:t pag) *page-number:t)  ::  genesis block
       %-  ~(put z-by targets.c)
-      [digest.pag target.pag]
+      [~(digest get:page:t pag) ~(target get:page:t pag)]
     ::  target remains the same throughout an epoch
     %-  ~(put z-by targets.c)
-    :-  digest.pag
-    (~(got z-by targets.c) parent.pag)
+    :-  ~(digest get:page:t pag)
+    (~(got z-by targets.c) ~(parent get:page:t pag))
   ::  note we do not update heaviest-block here, since that is conditional
   ::  and the effects emitted depend on whether we do it.
-  ?:  (~(has z-by pending-blocks.c) digest.pag)
-    (accept-pending-block digest.pag)
+  ?:  (~(has z-by pending-blocks.c) ~(digest get:page:t pag))
+    (accept-pending-block ~(digest get:page:t pag))
   (accept-block pag)
 ::
 ::  +validate-page-without-txs-da: helper for urbit time
@@ -300,28 +314,28 @@
 ++  validate-page-without-txs
   |=  [pag=page:t now-secs=@]
   ^-  (reason:dk ~)
-  =/  version  (height-to-proof-version height.pag)
+  =/  version  (height-to-proof-version ~(height get:page:t pag))
   =/  version-check=?
     ?.  check-pow-flag:t
       %.y
-    =(version version:(need pow.pag))
+    =(version version:(need ~(pow get:page:t pag)))
   ?.  version-check
-    ~&  [%expected-vs-actual version version:(need pow.pag)]
+    ~&  [%expected-vs-actual version version:(need ~(pow get:page:t pag))]
     [%.n %proof-version-invalid]
-  =/  par=page:t  (to-page:local-page:t (~(got z-by blocks.c) parent.pag))
+  =/  par=page:t  (to-page:local-page:t (~(got z-by blocks.c) ~(parent get:page:t pag)))
   ::  this is already checked in +heard-block but is done here again
   ::  to avoid a footgun
   ?.  (check-digest:page:t pag)
     [%.n %page-digest-invalid-2]
   ::
   =/  check-epoch-counter=?
-    ?&  (lth epoch-counter.pag blocks-per-epoch:t)
-      ?|  ?&  =(0 epoch-counter.pag)
+    ?&  (lth ~(epoch-counter get:page:t pag) blocks-per-epoch:t)
+      ?|  ?&  =(0 ~(epoch-counter get:page:t pag))
               ::  epoch-counter is zero-indexed so we decrement
-              =(epoch-counter.par (dec blocks-per-epoch:t))
+              =(~(epoch-counter get:page:t par) (dec blocks-per-epoch:t))
           ==  :: start of an epoch
           ::  counter is one greater than its parent's counter.
-          =(epoch-counter.pag +(epoch-counter.par))
+          =(~(epoch-counter get:page:t pag) +(~(epoch-counter get:page:t par)))
       ==
     ==
   ?.  check-epoch-counter
@@ -330,29 +344,29 @@
   =/  check-pow-hash=?
     ?.  check-pow-flag:t
       ::  this case only happens during testing
-      ::~&  "skipping pow hash check for {(trip (to-b58:hash:t digest.pag))}"
+      ::~&  "skipping pow hash check for {(trip (to-b58:hash:t ~(digest get:page:t pag)))}"
       %.y
     %-  check-target:mine
-    :_  target.pag
-    (proof-to-pow:t (need pow.pag))
+    :_  ~(target get:page:t pag)
+    (proof-to-pow:t (need ~(pow get:page:t pag)))
   ?.  check-pow-hash
     [%.n %pow-target-check-failed]
   ::
   =/  check-timestamp=?
-    ?&  %+  gte  timestamp.pag
-        (~(got z-by min-timestamps.c) parent.pag)
+    ?&  %+  gte  ~(timestamp get:page:t pag)
+        (~(got z-by min-timestamps.c) ~(parent get:page:t pag))
       ::
-        (lte timestamp.pag (add now-secs max-future-timestamp:t))
+        (lte ~(timestamp get:page:t pag) (add now-secs max-future-timestamp:t))
     ==
   ?.  check-timestamp
     [%.n %page-timestamp-invalid]
   ::
   ::  check target
-  ?.  =(target.pag (~(got z-by targets.c) parent.pag))
+  ?.  =(~(target get:page:t pag) (~(got z-by targets.c) ~(parent get:page:t pag)))
     [%.n %page-target-invalid]
   ::
   ::  check height
-  ?.  =(height.pag +(height.par))
+  ?.  =(~(height get:page:t pag) +(~(height get:page:t par)))
     [%.n %page-height-invalid]
   ::
   ::  check if digest matches checkpointed history, skip check if fakenet
@@ -360,31 +374,31 @@
     ~>  %slog.[1 'validate-page-without-txs: Fatal error: Genesis seal not set!']
     [%.n %genesis-seal-not-set]
   ?.  ?|  !=(realnet-genesis-msg:dk msg-hash.u.genesis-seal.c)
-          ?!((~(has z-by checkpointed-digests) height.pag))
-          =(digest.pag (~(got z-by checkpointed-digests) height.pag))
+          ?!((~(has z-by checkpointed-digests) ~(height get:page:t pag)))
+          =(~(digest get:page:t pag) (~(got z-by checkpointed-digests) ~(height get:page:t pag)))
       ==
     ~>  %slog.[1 'validate-page-without-txs: Checkpoint match failed']
     [%.n %checkpoint-match-failed]
   ::
   =/  check-heaviness=?
-    .=  accumulated-work.pag
+    .=  ~(accumulated-work get:page:t pag)
     %-  chunk:bignum:t
     %+  add
-      (merge:bignum:t accumulated-work.par)
-    (merge:bignum:t (compute-work:page:t target.pag))
+      (merge:bignum:t ~(accumulated-work get:page:t par))
+    (merge:bignum:t (compute-work:page:t ~(target get:page:t pag)))
   ?.  check-heaviness
     [%.n %page-heaviness-invalid]
   ::
   =/  check-based-coinbase-split=?
-    (based:coinbase-split:t coinbase.pag)
+    (based:coinbase-split:t ~(coinbase get:page:t pag))
   ?.  check-based-coinbase-split
     [%.n %coinbase-split-not-based]
   =/  check-msg-length=?
-    (lth (lent msg.pag) 20)
+    (lth (lent ~(msg get:page:t pag)) 20)
   ?.  check-msg-length
     [%.n %msg-too-large]
   =/  check-msg-valid=?
-    (validate:page-msg:t msg.pag)
+    (validate:page-msg:t ~(msg get:page:t pag))
   ?.  check-msg-valid
     [%.n %msg-not-valid]
   ::
@@ -400,32 +414,18 @@
 ++  validate-page-with-txs
   |=  pag=page:t
   ^-  (reason:dk tx-acc:t)
-  =/  digest-b58=cord  (to-b58:hash:t digest.pag)
+  =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))
   ?.  (check-size pag)
     ~>  %slog.[1 (cat 3 'validate-page-with-txs: Block too large: ' digest-b58)]
     [%.n %block-too-large]
   =/  raw-tx-set=(z-set (unit raw-tx:t))
-    (~(run z-in tx-ids.pag) |=(=tx-id:t (get-raw-tx tx-id)))
+    (~(run z-in ~(tx-ids get:page:t pag)) |=(=tx-id:t (get-raw-tx tx-id)))
   =/  raw-tx-list=(list (unit raw-tx:t))  ~(tap z-in raw-tx-set)
-  =|  tx-list=(list tx:t)
-  =.  tx-list
-    |-
-    ?~  raw-tx-list  tx-list
-    ?~  i.raw-tx-list
-      ~  :: exit early b/c raw-tx was not present in raw-tx-set
-    =/  utx=(unit tx:t)  (mole |.((new:tx:t u.i.raw-tx-list height.pag)))
-    ?~  utx  :: exit early b/c raw-tx failed to convert
-      ~
-    %=  $
-      tx-list  [u.utx tx-list]
-      raw-tx-list  t.raw-tx-list
-    ==
-  ?:  ?&(=(~ tx-list) !=(~ raw-tx-list))
-    :: failed to build a raw-tx, so the page is invalid
-    [%.n %raw-txs-failed-to-build]
   :: initialize balance transfer accumulator with parent block's balance
   =/  acc=tx-acc:t
-    (new:tx-acc:t (~(get z-by balance.c) parent.pag))
+    %+  new:tx-acc:t
+      (~(get z-by balance.c) ~(parent get:page:t pag))
+    ~(height get:page:t pag)
   ::
   ::  test to see that the input notes for all transactions
   ::  exist in the parent block's balance, that they are not
@@ -436,12 +436,18 @@
   ::
   =/  balance-transfer=(unit tx-acc:t)
     |-
-    ?~  tx-list
+    ?~  raw-tx-list
       (some acc)
-    =/  new-acc=(unit tx-acc:t)
-      (process:tx-acc:t acc i.tx-list height.pag)
-    ?~  new-acc  ~  :: tx failed to process
-    $(acc u.new-acc, tx-list t.tx-list)
+    ?~  i.raw-tx-list
+      $(raw-tx-list t.raw-tx-list)
+    =/  new-acc=(reason:dk tx-acc:t)
+      (process:tx-acc:t acc u.i.raw-tx-list)
+    ?.  ?=(%.y -.new-acc)
+      =/  tx-id-b58=cord  (to-b58:hash:t (compute-id:raw-tx:t u.i.raw-tx-list))
+      ~>  %slog.[1 (cat 3 'validate-page-with-txs: tx failed: ' tx-id-b58)]
+      ~>  %slog.[1 (cat 3 'reason: ' +.new-acc)]
+      ~  :: tx failed to process
+    $(acc +.new-acc, raw-tx-list t.raw-tx-list)
   ::
   ?~  balance-transfer
     ::  balance transfer failed
@@ -449,11 +455,16 @@
     [%.n %balance-transfer-failed]
   ::
   ::  check that the coinbase split adds up to emission+fees
+  =/  cb=coinbase-split:t  ~(coinbase get:page:t pag)
   =/  total-split=coins:t
-    %+  roll  ~(val z-by coinbase.pag)
-    |=([c=coins:t s=coins:t] (add c s))
+    ?-  -.cb
+      %0  %+  roll  ~(val z-by +.cb)
+          |=([c=coins:t s=coins:t] (add c s))
+      %1  %+  roll  ~(val z-by +.cb)
+          |=([c=coins:t s=coins:t] (add c s))
+    ==
   =/  emission-and-fees=coins:t
-    (add (emission-calc:coinbase:t height.pag) fees.u.balance-transfer)
+    (add (emission-calc:coinbase:t ~(height get:page:t pag)) fees.u.balance-transfer)
   ?.  =(emission-and-fees total-split)
     [%.n %improper-split]
   ~>  %slog.[0 (cat 3 'validate-page-with-txs: Block validated: ' digest-b58)]
@@ -463,7 +474,7 @@
 ++  update-heaviest
   |=  pag=page:t
   ^-  consensus-state:dk
-  =/  digest-b58=cord  (to-b58:hash:t digest.pag)
+  =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))
   =/  log-message
     %+  rap  3
     :~  'update-heaviest: '
@@ -475,8 +486,8 @@
   ?:  =(~ heaviest-block.c)
     :: if we have no heaviest block, this must be genesis block.
     ~|  "update-heaviest: Received non-genesis block before genesis block"
-    ?>  =(*page-number:t height.pag)
-    c(heaviest-block (some digest.pag))
+    ?>  =(*page-number:t ~(height get:page:t pag))
+    c(heaviest-block (some ~(digest get:page:t pag)))
   ::  > rather than >= since we take the first heaviest block we've heard
   ?:  %+  compare-heaviness:page:t  pag
       (~(got z-by blocks.c) (need heaviest-block.c))
@@ -488,7 +499,7 @@
           ' is new heaviest block'
       ==
     ~>  %slog.[0 log-message]
-    c(heaviest-block (some digest.pag))
+    c(heaviest-block (some ~(digest get:page:t pag)))
   =/  log-message
     %+  rap  3
     :~  'update-heaviest: '
@@ -511,7 +522,7 @@
     ?~  heaviest-block.c  `0
     =/  heaviest-block  (~(get z-by blocks.c) u.heaviest-block.c)
     ?~  heaviest-block  ~
-    `(min height.u.heaviest-block height.u.block)
+    `(min ~(height get:local-page:t u.heaviest-block) ~(height get:local-page:t u.block))
   ?~  unit-height  ~
   =/  height  u.unit-height
   =/  bid-at-height=(unit block-id:t)  (~(get z-by heaviest-chain.d) height)
@@ -539,20 +550,20 @@
     =/  b=@  (dec min-past-blocks:t)  :: iteration counter
     =/  cur-block=page:t  pag
     |-
-    =.  prev-timestamps  [timestamp.cur-block prev-timestamps]
+    =.  prev-timestamps  [~(timestamp get:page:t cur-block) prev-timestamps]
     ?:  ?|  =(0 b)  :: we've looked back +min-past-blocks blocks
             ::
             :: we've reached genesis block
-            =(*page-number:t height.cur-block)
+            =(*page-number:t ~(height get:page:t cur-block))
         ==
       ::  return median of timestamps
       (median:t prev-timestamps)
     %=  $
       b          (dec b)
-      cur-block  (to-page:local-page:t (~(got z-by blocks.c) parent.cur-block))
+      cur-block  (to-page:local-page:t (~(got z-by blocks.c) ~(parent get:page:t cur-block)))
     ==
   ::
-  (~(put z-by min-timestamps.c) digest.pag min-timestamp)
+  (~(put z-by min-timestamps.c) ~(digest get:page:t pag) min-timestamp)
 ::
 ::::  pending block and tx functionality
 ::
@@ -561,12 +572,12 @@
 ++  accept-block
   |=  pag=page:t
   ^-  consensus-state:dk
-  ?<  (~(has z-by blocks.c) digest.pag)
-  ?<  (~(has z-by pending-blocks.c) digest.pag)
-  =.  blocks.c  (~(put z-by blocks.c) digest.pag (to-local-page:page:t pag))
-  %-  ~(rep z-in tx-ids.pag)
+  ?<  (~(has z-by blocks.c) ~(digest get:page:t pag))
+  ?<  (~(has z-by pending-blocks.c) ~(digest get:page:t pag))
+  =.  blocks.c  (~(put z-by blocks.c) ~(digest get:page:t pag) (to-local-page:page:t pag))
+  %-  ~(rep z-in ~(tx-ids get:page:t pag))
   |=  [=tx-id:t c=_c]
-  =.  blocks-needed-by.c  (~(put z-ju blocks-needed-by.c) tx-id digest.pag)
+  =.  blocks-needed-by.c  (~(put z-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
   =.  excluded-txs.c  (~(del z-in excluded-txs.c) tx-id)
   c
 ::
@@ -576,21 +587,21 @@
 ++  add-pending-block
   |=  pag=page:t
   ^-  [(list tx-id:t) consensus-state:dk]
-  ?<  (~(has z-by blocks.c) digest.pag)
-  ?<  (~(has z-by pending-blocks.c) digest.pag)
+  ?<  (~(has z-by blocks.c) ~(digest get:page:t pag))
+  ?<  (~(has z-by pending-blocks.c) ~(digest get:page:t pag))
   =/  needed=(z-set tx-id:t)
-    %-  ~(rep z-in tx-ids.pag)
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t needed=(z-set tx-id:t)]
     ?.  (~(has z-by raw-txs.c) tx-id)
       (~(put z-in needed) tx-id)
     needed
   ?:  =(*(z-set tx-id:t) needed)
     [~ c] :: not missing any transactions
-  =.  pending-blocks.c  (~(put z-by pending-blocks.c) digest.pag [pag get-cur-height])
+  =.  pending-blocks.c  (~(put z-by pending-blocks.c) ~(digest get:page:t pag) [pag get-cur-height])
   =.  c
-    %-  ~(rep z-in tx-ids.pag)
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t c=_c]
-    =.  blocks-needed-by.c  (~(put z-ju blocks-needed-by.c) tx-id digest.pag)
+    =.  blocks-needed-by.c  (~(put z-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
     =.  excluded-txs.c  (~(del z-in excluded-txs.c) tx-id)
     c
   [~(tap z-in needed) c]
@@ -603,16 +614,16 @@
   ?<  (~(has z-by blocks.c) block-id)
   =/  pag  page:(~(got z-by pending-blocks.c) block-id)
   =.  c
-    %-  ~(rep z-by tx-ids.pag)
+    %-  ~(rep z-by ~(tx-ids get:page:t pag))
     |=  [=tx-id:t c=_c]
-    =.  blocks-needed-by.c  (~(del z-ju blocks-needed-by.c) tx-id digest.pag)
+    =.  blocks-needed-by.c  (~(del z-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
     =?  excluded-txs.c
         ?&  ?!((~(has z-by blocks-needed-by.c) tx-id))  ::  not in blocks-needed-by
             (~(has z-by raw-txs.c) tx-id)               ::  but in raw-txs
         ==
       (~(put z-in excluded-txs.c) tx-id)
     c
-  =.  pending-blocks.c  (~(del z-by pending-blocks.c) digest.pag)
+  =.  pending-blocks.c  (~(del z-by pending-blocks.c) ~(digest get:page:t pag))
   c
 ::
 ::  missing transaction ids from pending blocks
@@ -623,7 +634,7 @@
   %-  ~(rep z-by pending-blocks.c)
   |=  [[block-id:t pag=page:t *] all=(z-set tx-id:t)]
   ^-  (z-set tx-id:t)
-  %-  ~(rep z-in tx-ids.pag)
+  %-  ~(rep z-in ~(tx-ids get:page:t pag))
   |=  [=tx-id:t all=_all]
   ?.  (~(has z-by raw-txs.c) tx-id)
     (~(put z-in all) tx-id)
@@ -636,7 +647,7 @@
   ::  block must be pending
   ?<  (~(has z-by blocks.c) block-id)
   =/  pag  page:(~(got z-by pending-blocks.c) block-id)
-  =.  pending-blocks.c  (~(del z-by pending-blocks.c) digest.pag)
+  =.  pending-blocks.c  (~(del z-by pending-blocks.c) ~(digest get:page:t pag))
   =.  blocks.c  (~(put z-by blocks.c) block-id (to-local-page:page:t pag))
   c
 ::
@@ -647,7 +658,8 @@
   ?~  retain
     ~
   ?~  heaviest-block.c  ~
-  =/  height  height:(~(got z-by blocks.c) u.heaviest-block.c)
+  =/  pag=page:t  (to-page:local-page:t (~(got z-by blocks.c) u.heaviest-block.c))
+  =/  height  ~(height get:page:t pag)
   ?:  (lth height u.retain)
     ~
   =/  min-height  (sub height u.retain)
@@ -669,7 +681,10 @@
 ++  inputs-spent
   |=  =raw-tx:t
   ^-  ?
-  (~(any z-in (inputs-names:raw-tx:t raw-tx)) ~(has z-by spent-by.c))
+  =/  input-names=(z-set nname:t)
+    ~(input-names get:raw-tx:t raw-tx)
+  %-  ~(any z-in input-names)
+  ~(has z-by spent-by.c)
 ::
 ::  Is the transaction needed by a block?
 ++  needed-by-block
@@ -681,16 +696,17 @@
 ++  add-raw-tx
   |=  =raw-tx:t
   ^-  [(list block-id:t) consensus-state:dk]
-  ?<  (~(has z-by raw-txs.c) id.raw-tx)
-  =.  raw-txs.c  (~(put z-by raw-txs.c) id.raw-tx [raw-tx get-cur-height])
-  =/  input-names=(z-set nname:t)  (inputs-names:raw-tx:t raw-tx)
+  =/  =tx-id:t  ~(id get:raw-tx:t raw-tx)
+  ?<  (~(has z-by raw-txs.c) tx-id)
+  =.  raw-txs.c  (~(put z-by raw-txs.c) tx-id [raw-tx get-cur-height])
+  =/  input-names=(z-set nname:t)  ~(input-names get:raw-tx:t raw-tx)
   =.  spent-by.c
     %-  ~(rep z-in input-names)
     |=  [=nname:t sb=_spent-by.c]
-    (~(put z-ju sb) nname id.raw-tx)
-  =/  bnb  (~(get z-ju blocks-needed-by.c) id.raw-tx)
+    (~(put z-ju sb) nname tx-id)
+  =/  bnb  (~(get z-ju blocks-needed-by.c) tx-id)
   ?:  =(*(z-set block-id:t) bnb)
-    =.  excluded-txs.c  (~(put z-in excluded-txs.c) id.raw-tx)
+    =.  excluded-txs.c  (~(put z-in excluded-txs.c) tx-id)
     [~ c]
   =/  ready-blocks=(list block-id:t)
     %-  ~(rep z-in bnb)
@@ -699,7 +715,7 @@
     ?~  pending  ready
     =/  pag  page.u.pending
     =/  needed
-      %-  ~(rep z-in tx-ids.pag)
+      %-  ~(rep z-in ~(tx-ids get:page:t pag))
       |=  [=tx-id:t needed=(z-set tx-id:t)]
       ^-  (z-set tx-id:t)
       ?.  (~(has z-by raw-txs.c) tx-id)
@@ -721,9 +737,9 @@
   =.  raw-txs.c  (~(del z-by raw-txs.c) tx-id)
   =.  excluded-txs.c  (~(del z-in excluded-txs.c) tx-id)
   =.  spent-by.c
-    %-  ~(rep z-in (inputs-names:raw-tx:t raw-tx))
+    %-  ~(rep z-in ~(input-names get:raw-tx:t raw-tx))
     |=  [=nname:t sb=_spent-by.c]
-    (~(del z-ju sb) nname id.raw-tx)
+    (~(del z-ju sb) nname ~(id get:raw-tx:t raw-tx))
   c
 ::
 ::  transactions which may be dropped (excluded and lower than minimum retention height)
@@ -731,7 +747,7 @@
   |=  retain=(unit @)
   ^-  (z-set tx-id:t)
   ?~  heaviest-block.c  ~
-  =/  height  height:(~(got z-by blocks.c) u.heaviest-block.c)
+  =/  height  ~(height get:local-page:t (~(got z-by blocks.c) u.heaviest-block.c))
   =/  spent=(z-set tx-id:t)
     %-  ~(rep z-in excluded-txs.c)
     |=  [=tx-id:t spent=(z-set tx-id:t)]

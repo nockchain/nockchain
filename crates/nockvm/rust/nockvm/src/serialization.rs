@@ -644,8 +644,8 @@ mod tests {
                 done = true;
             }
 
-            let result = if rng.gen_bool(0.5) || done {
-                let value = rng.gen::<u64>();
+            let result = if rng.random_bool(0.5) || done {
+                let value = rng.random::<u64>();
                 let atom = Atom::new(stack, value);
                 let noun = atom.as_noun();
                 (noun, accumulated_size + noun.mass())
