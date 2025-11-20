@@ -345,9 +345,7 @@
   =/  =note-data:v1:transact
     ?:  include-data
       ?~  memo-data
-        ~&  "Adding lock data to note-data for spec"
         (~(put z-by:zo *note-data:v1:transact) %lock ^-(lock-data:wt [%0 output-lock]))
-      ~&  "Encoding memo --{(trip (bytes-to-text memo-data))}-- as bytes"
       (~(put z-by:zo *note-data:v1:transact) %memo ^-(memo-data:wt memo-data))
     ~
   =/  seed=seed:v1:transact

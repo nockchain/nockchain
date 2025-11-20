@@ -703,26 +703,43 @@
           ~>  %slog.[2 'lock data in note is missing']  'N/A'
         ?~  soft-lock=((soft lock-data:wt) u.lock-data)
           ~>  %slog.[2 'lock data in note is malformed']  'N/A'
-        ?:  ?=(@ -.lock.u.soft-lock)
-          ~>  %slog.[2 'expected m-of-n pkh lock']  'N/A'
-        =+  lp=`lock-primitive:transact`(head lock.u.soft-lock)
-        ?.  ?=(%pkh -.lp)
-          ~>  %slog.[2 'expected m-of-n pkh lock']  'N/A'
-        =/  signers=tape
-          %-  zing
-          %+  turn  ~(tap z-in:zo h.lp)
-          |=  =hash:transact
-          """
-              - {(trip (to-b58:hash:transact hash))}
-          """
-        %-  crip
-        """
-
-          - Required Signatures: {(trip (format-ui:common m.lp))}
-          - Signers:
-            {signers}
-
-        """
+        (lock lock.u.soft-lock)
+      ::
+      ++  bool-text
+        |=  flag=?
+        ^-  @t
+        ?:  flag  'yes'  'no'
+      ::
+      ++  render-lock-signers
+        |=  [required=@ participants=(list hash:transact)]
+        ^-  @t
+        =/  signer-text=@t
+          %+  roll  participants
+          |=  [hash=hash:transact acc=@t]
+          ;:  (cury cat 3)
+              acc
+              '\0a            - '
+              (to-b58:hash:transact hash)
+          ==
+        ;:  (cury cat 3)
+            '\0a        - Required Signatures: '
+            (format-ui:common required)
+            '\0a        - Signers:'
+            signer-text
+        ==
+      ::
+      ++  lock-metadata
+        |=  data=lock-metadata:wt
+        ^-  @t
+        =/  cond=(unit spend-condition:transact)
+          ((soft spend-condition:transact) lock.data)
+        ?~  cond
+          '\0a  - Lock data not displayable'
+        ;:  (cury cat 3)
+          '\0a  - Lock data included in note: '
+          (bool-text include-data.data)
+          (spend-condition u.cond)
+        ==
       ::
       ++  memo-data
         |=  data=note-data:v1:transact
@@ -767,11 +784,64 @@
              'N/A (output note has not been submitted yet)'
            (format-ui:common origin-page.note)
            '\0a- Lock Information: '
-           (lock-data note-data.note)
-           '\0a- Memo: '
+           output-lock-info
+            '\0a- Memo: '
            (memo-data note-data.note)
-
          ==
+    ::
+      ++  witness-data
+        |=  wd=witness-data:wt
+        ^-  @t
+        =;  signers=(set @t)
+          =/  signers-text=@t
+            %+  roll  ~(tap in signers)
+            |=  [signer=@t text=@t]
+            ;:  (cury cat 3)
+                text
+                '\0a        - '
+                signer
+            ==
+          ;:  (cury cat 3)
+              '\0a  - Number of Unique Signers So Far: '
+              (format-ui:common ~(wyt in signers))
+              '\0a  - Signers So Far: '
+              signers-text
+          ==
+        ?-    -.wd
+            %0
+          %-  ~(rep z-by:zo p.wd)
+          |=  $:  [=nname:transact =signature:transact]
+                  signers=(set @t)
+              ==
+          %-  ~(gas in signers)
+          %+  turn  ~(tap z-in:zo ~(key z-by:zo signature))
+          to-b58:schnorr-pubkey:transact
+        ::
+            %1
+          %-  ~(rep z-by:zo p.wd)
+          |=  $:  [=nname:transact =witness:transact]
+                  signers=(set @t)
+              ==
+          %-  ~(gas in signers)
+          %+  turn  ~(tap z-in:zo ~(key z-by:zo pkh.witness))
+          to-b58:hash:transact
+        ==
+      ::
+      ++  timelock-range
+        |=  [label=@t range=timelock-range:transact]
+        ^-  @t
+        =/  min-text=@t
+            ?~  min.range  'N/A'
+            (format-ui:common u.min.range)
+        =/  max-text=@t
+            ?~  max.range  'N/A'
+            (format-ui:common u.max.range)
+        ;:  (cury cat 3)
+            label
+            ' min: '
+            min-text  ', max: '  max-text
+        ==
+    ::
       ++  transaction
         |=  $:  name=@t
                 outs=outputs:v1:transact
