@@ -175,15 +175,29 @@
     --::v0
   ++  v1
     |%
+    ++  pkh-lp
+      |=  [m=@ key-hashes=(list hash)]
+      ^-  lock-primitive
+      =/  hash-set  (z-silt key-hashes)
+      ?>  (lte m ~(wyt z-in hash-set))
+      [%pkh [m hash-set]]
+    ::
     ++  simple-pkh-lp
       |=  key-hash=hash
       ^-  lock-primitive
-      [%pkh [m=1 (z-silt ~[key-hash])]]
+      (pkh-lp m=1 ~[key-hash])
     ::
     ++  simple
       |=  key-hash=hash
       ^-  form
       =/  pkh-lock=spend-condition  [(simple-pkh-lp key-hash)]~
+      =/  lock-hash  (hash:lock pkh-lock)
+      (first:nname (hash:lock pkh-lock))
+    ::
+    ++  multisig
+      |=  [m=@ key-hashes=(list hash)]
+      ^-  form
+      =/  pkh-lock=spend-condition  [(pkh-lp m key-hashes)]~
       =/  lock-hash  (hash:lock pkh-lock)
       (first:nname (hash:lock pkh-lock))
     ::

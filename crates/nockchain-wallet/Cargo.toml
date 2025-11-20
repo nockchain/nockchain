@@ -12,6 +12,9 @@ nockchain-math = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 noun-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+test-log = { workspace = true }
 
 bardecoder = { workspace = true }
 bs58 = { workspace = true }

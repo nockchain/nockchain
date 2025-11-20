@@ -3,6 +3,7 @@
 mod command;
 mod connection;
 mod error;
+mod recipient;
 
 use std::fs;
 use std::io::{self, Write};
@@ -13,7 +14,7 @@ use clap::Parser;
 use command::TimelockRangeCli;
 #[cfg(test)]
 use command::WalletWire;
-use command::{ClientType, CommandNoun, Commands, WalletCli};
+use command::{ClientType, CommandNoun, Commands, WalletCli, WatchSubcommand};
 use kernels::wallet::KERNEL;
 use nockapp::driver::*;
 use nockapp::kernel::boot::{self, NockStackSize};
@@ -34,6 +35,7 @@ use nockvm::jets::cold::Nounable;
 use nockvm::noun::{Atom, Cell, IndirectAtom, Noun, D, NO, SIG, T, YES};
 use noun_serde::prelude::*;
 use noun_serde::NounDecodeError;
+use recipient::{recipient_tokens_to_specs, RecipientSpec};
 use termimad::MadSkin;
 use tokio::fs as tokio_fs;
 use tracing::{error, info, warn};
@@ -79,7 +81,6 @@ async fn main() -> Result<(), NockAppError> {
         Commands::Keygen
         | Commands::DeriveChild { .. }
         | Commands::ImportKeys { .. }
-        | Commands::WatchAddress { .. }
         | Commands::ExportKeys
         | Commands::SignMessage { .. }
         | Commands::VerifyMessage { .. }
@@ -93,7 +94,10 @@ async fn main() -> Result<(), NockAppError> {
         | Commands::ShowSeedphrase
         | Commands::ShowMasterZPub
         | Commands::ShowMasterZPrv
+        | Commands::ShowKeyTree { .. }
         | Commands::ShowTx { .. }
+        | Commands::SignMultisigTx { .. }
+        | Commands::Watch { .. }
         | Commands::TxAccepted { .. } => false,
 
         // All other commands DO need sync
@@ -113,11 +117,6 @@ async fn main() -> Result<(), NockAppError> {
             hardened,
             label,
         } => Wallet::derive_child(*index, *hardened, label),
-        Commands::SignTx {
-            transaction,
-            index,
-            hardened,
-        } => Wallet::sign_tx(transaction, *index, *hardened),
         Commands::SignMessage {
             message,
             message_file,
@@ -233,11 +232,36 @@ async fn main() -> Result<(), NockAppError> {
                 .into());
             }
         }
-        Commands::WatchAddress { address } => match normalize_watch_address(address.clone())? {
-            Some(normalized) => Wallet::watch_address(&normalized),
-            None => {
-                return Err(CrownError::Unknown("Invalid watch identifier provided".into()).into());
-            }
+        Commands::Watch { subcommand } => match subcommand {
+            WatchSubcommand::Address { address } => match normalize_watch_address(address.clone())?
+            {
+                Some(normalized) => Wallet::watch_address(&normalized),
+                None => {
+                    return Err(
+                        CrownError::Unknown("Invalid watch identifier provided".into()).into(),
+                    );
+                }
+            },
+            WatchSubcommand::Pubkey { pubkey } => match normalize_watch_address(pubkey.clone())? {
+                Some(normalized) => Wallet::watch_address(&normalized),
+                None => {
+                    return Err(CrownError::Unknown("Invalid pubkey provided".into()).into());
+                }
+            },
+            //WatchSubcommand::FirstName { first_name } => {
+            //    match normalize_first_name(first_name.clone())? {
+            //        Some(name) => Wallet::watch_first_name(&name),
+            //        None => {
+            //            return Err(
+            //                CrownError::Unknown("Invalid first name provided".into()).into()
+            //            );
+            //        }
+            //    }
+            //}
+            WatchSubcommand::Multisig {
+                threshold,
+                participants,
+            } => Wallet::watch_multisig(*threshold, participants),
         },
         Commands::ExportKeys => Wallet::export_keys(),
         Commands::ListNotes => Wallet::list_notes(),
@@ -257,17 +281,25 @@ async fn main() -> Result<(), NockAppError> {
             index,
             hardened,
             include_data,
+            sign_keys,
             save_raw_tx,
-        } => Wallet::create_tx(
-            names.clone(),
-            recipients.clone(),
-            *fee,
-            refund_pkh.clone(),
-            *index,
-            *hardened,
-            *include_data,
-            *save_raw_tx,
-        ),
+        } => {
+            let recipient_specs = recipient_tokens_to_specs(recipients.clone())?;
+            let signing_keys = Wallet::collect_signing_keys(*index, *hardened, sign_keys)?;
+            Wallet::create_tx(
+                names.clone(),
+                recipient_specs,
+                *fee,
+                refund_pkh.clone(),
+                signing_keys,
+                *include_data,
+                *save_raw_tx,
+            )
+        }
+        Commands::SignMultisigTx {
+            transaction,
+            sign_keys,
+        } => Wallet::sign_multisig_tx(transaction, sign_keys.as_deref()),
         Commands::SendTx { transaction } => Wallet::send_tx(transaction),
         Commands::ShowTx { transaction } => Wallet::show_tx(transaction),
         Commands::ShowBalance => Wallet::show_balance(),
@@ -281,6 +313,7 @@ async fn main() -> Result<(), NockAppError> {
         Commands::ShowSeedphrase => Wallet::show_seed_phrase(),
         Commands::ShowMasterZPub => Wallet::show_master_pubkey(),
         Commands::ShowMasterZPrv => Wallet::show_master_privkey(),
+        Commands::ShowKeyTree { include_values } => Wallet::show_key_tree(*include_values),
         Commands::TxAccepted { .. } => {
             unreachable!("transaction-accepted handled earlier")
         }
@@ -293,15 +326,13 @@ async fn main() -> Result<(), NockAppError> {
         );
         let mut pubkey_peek_slab = NounSlab::new();
         let tracked_tag = make_tas(&mut pubkey_peek_slab, "tracked-pubkeys").as_noun();
-        let watch_only = cli.include_watch_only.to_noun(&mut pubkey_peek_slab);
-        let path = T(&mut pubkey_peek_slab, &[tracked_tag, watch_only, SIG]);
+        let path = T(&mut pubkey_peek_slab, &[tracked_tag, SIG]);
         pubkey_peek_slab.set_root(path);
         let pubkey_slab = wallet.app.peek_handle(pubkey_peek_slab).await?;
 
         let mut first_name_peek_slab = NounSlab::new();
         let tracked_tag = make_tas(&mut first_name_peek_slab, "tracked-names").as_noun();
-        let watch_only = cli.include_watch_only.to_noun(&mut first_name_peek_slab);
-        let path = T(&mut first_name_peek_slab, &[tracked_tag, watch_only, SIG]);
+        let path = T(&mut first_name_peek_slab, &[tracked_tag, SIG]);
         first_name_peek_slab.set_root(path);
         let first_name_slab = wallet.app.peek_handle(first_name_peek_slab).await?;
 
@@ -521,7 +552,7 @@ impl Wallet {
                 let hardened_noun = if hardened { YES } else { NO };
                 T(&mut slab, &[D(0), inner, hardened_noun])
             }
-            None => D(0),
+            None => SIG,
         };
 
         // Generate random entropy
@@ -560,7 +591,7 @@ impl Wallet {
                 let hardened_noun = if hardened { YES } else { NO };
                 T(&mut slab, &[D(0), inner, hardened_noun])
             }
-            None => D(0),
+            None => SIG,
         };
 
         Self::wallet(
@@ -607,7 +638,7 @@ impl Wallet {
                 let hardened_noun = if hardened { YES } else { NO };
                 T(&mut slab, &[D(0), inner, hardened_noun])
             }
-            None => D(0),
+            None => SIG,
         };
 
         Self::wallet(
@@ -694,6 +725,63 @@ impl Wallet {
         Self::wallet("watch-address", &[address_noun], Operation::Poke, &mut slab)
     }
 
+    /// Imports a watch-only first name.
+    ///
+    /// # Arguments
+    ///
+    /// * `first_name` - Base58-encoded first name hash.
+    fn watch_first_name(first_name: &str) -> CommandNoun<NounSlab> {
+        let mut slab = NounSlab::new();
+        let first_name_noun = make_tas(&mut slab, first_name).as_noun();
+        let lock_noun = SIG; // unit: no known lock provided
+        Self::wallet(
+            "watch-first-name",
+            &[first_name_noun, lock_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
+
+    /// Imports a watch-only multisig lock by its parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `m` - The M value of the multisig.
+    /// * `pubkeys_str` - Comma-separated list of base58 pubkey hashes.
+    fn watch_multisig(m: u64, pubkeys_str: &str) -> CommandNoun<NounSlab> {
+        if m == 0 {
+            return Err(
+                CrownError::Unknown("m must be greater than 0 for multisig watch".into()).into(),
+            );
+        }
+
+        let pubkey_hashes = Self::parse_pubkey_hashes(pubkeys_str)?;
+
+        if m as usize > pubkey_hashes.len() {
+            return Err(CrownError::Unknown(format!(
+                "m ({}) cannot exceed number of pubkeys ({})",
+                m,
+                pubkey_hashes.len()
+            ))
+            .into());
+        }
+
+        let mut slab = NounSlab::new();
+        let m_noun = D(m);
+        let pubkeys_noun = pubkey_hashes.into_iter().rev().fold(D(0), |acc, hash| {
+            let hash_b58 = hash.to_base58();
+            let hash_noun = make_tas(&mut slab, &hash_b58).as_noun();
+            Cell::new(&mut slab, hash_noun, acc).as_noun()
+        });
+
+        Self::wallet(
+            "watch-address-multisig",
+            &[m_noun, pubkeys_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
+
     /// Exports keys to a file.
     fn export_keys() -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
@@ -756,68 +844,34 @@ impl Wallet {
         Ok(names)
     }
 
-    fn parse_multiple_recipients(
-        recipients: &Vec<String>,
-    ) -> Result<Vec<(String, u64)>, NockAppError> {
-        recipients
-            .iter()
-            .map(|v| &**v)
-            .map(Self::parse_single_output)
-            .collect::<Result<Vec<_>, _>>()
+    fn collect_signing_keys(
+        index: Option<u64>,
+        hardened: bool,
+        sign_keys: &[String],
+    ) -> Result<Vec<(u64, bool)>, NockAppError> {
+        if !sign_keys.is_empty() {
+            sign_keys
+                .iter()
+                .map(|entry| Self::parse_sign_key_entry(entry))
+                .collect()
+        } else if let Some(idx) = index {
+            Ok(vec![(idx, hardened)])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
-    fn parse_single_output(raw: &str) -> Result<(String, u64), NockAppError> {
-        let specs: Vec<&str> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|spec| !spec.is_empty())
-            .collect();
-
-        if specs.is_empty() {
-            return Err(
-                CrownError::Unknown("At least one output must be provided".to_string()).into(),
-            );
+    fn parse_sign_key_entry(entry: &str) -> Result<(u64, bool), NockAppError> {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            return Err(CrownError::Unknown("Sign key entries cannot be empty".to_string()).into());
         }
 
-        if specs.len() > 1 {
-            return Err(CrownError::Unknown(
-                "Multiple outputs are not supported yet. Provide a single <pkh>:<amount> pair."
-                    .to_string(),
-            )
-            .into());
-        }
-
-        let spec = specs[0];
-        let (pkh, amount_str) = spec.split_once(':').ok_or_else(|| {
-            CrownError::Unknown(format!(
-                "Invalid output spec '{}', expected <pkh>:<amount>",
-                spec
-            ))
-        })?;
-
-        let pkh_trimmed = pkh.trim();
-        if pkh_trimmed.is_empty() {
-            return Err(
-                CrownError::Unknown("Output pubkey hash cannot be empty".to_string()).into(),
-            );
-        }
-
-        let amount = amount_str.trim().parse::<u64>().map_err(|err| {
-            CrownError::Unknown(format!(
-                "Invalid amount '{}' in output spec '{}': {}",
-                amount_str.trim(),
-                spec,
-                err
-            ))
-        })?;
-
-        if amount == 0 {
-            return Err(
-                CrownError::Unknown("Gift amount to recipient cannot be 0".to_string()).into(),
-            );
-        }
-
-        Ok((pkh_trimmed.to_string(), amount))
+        let (index_part, hardened_part) = trimmed
+            .split_once(':')
+            .map(|(index, hardened)| (index, Some(hardened)))
+            .unwrap_or((trimmed, None));
+        Self::parse_sign_key_components(index_part, hardened_part)
     }
 
     /// Creates a transaction. Use `--refund-pkh` when spending legacy v0 notes so the kernel
@@ -825,25 +879,20 @@ impl Wallet {
     /// defaults back to the note owner, so `--refund-pkh` can be omitted.
     fn create_tx(
         names: String,
-        recipients: Vec<String>,
+        recipients: Vec<RecipientSpec>,
         fee: u64,
         refund_pkh: Option<String>,
-        index: Option<u64>,
-        hardened: bool,
+        sign_keys: Vec<(u64, bool)>,
         include_data: bool,
         save_raw_tx: bool,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
         let names_vec = Self::parse_note_names(&names)?;
-        let recipients = Self::parse_multiple_recipients(&recipients)?;
-
-        // Convert names to list of pairs
         let names_noun = names_vec
             .into_iter()
             .rev()
             .fold(D(0), |acc, (first, last)| {
-                // Create a tuple [first_name last_name] for each name pair
                 let first_noun = make_tas(&mut slab, &first).as_noun();
                 let last_noun = make_tas(&mut slab, &last).as_noun();
                 let name_pair = T(&mut slab, &[first_noun, last_noun]);
@@ -851,32 +900,8 @@ impl Wallet {
             });
 
         let fee_noun = D(fee);
-
-        // Format information about signing key
-        let sign_key_noun = match index {
-            Some(i) => {
-                let inner = D(i);
-                let hardened_noun = if hardened { YES } else { NO };
-                T(&mut slab, &[D(0), inner, hardened_noun])
-            }
-            None => D(0),
-        };
-
-        let mut order_nouns = vec![];
-        for (pkh, amount) in recipients {
-            let recipient_pkh = Hash::from_base58(&pkh)
-                .map_err(|err| {
-                    NockAppError::from(CrownError::Unknown(format!(
-                        "Invalid output pubkey hash '{}': {}",
-                        pkh, err
-                    )))
-                })?
-                .to_noun(&mut slab);
-            let order_noun = T(&mut slab, &[recipient_pkh, D(amount)]);
-            order_nouns.push(order_noun);
-        }
-        order_nouns.push(D(0));
-        let order_noun = T(&mut slab, &order_nouns);
+        let order_noun = recipients.to_noun(&mut slab);
+        let sign_key_noun = Wallet::encode_sign_keys(&mut slab, sign_keys);
 
         let refund_noun = if let Some(refund) = refund_pkh {
             let refund_hash = Hash::from_base58(&refund).map_err(|err| {
@@ -902,6 +927,14 @@ impl Wallet {
             Operation::Poke,
             &mut slab,
         )
+    }
+
+    fn encode_sign_keys(slab: &mut NounSlab, keys: Vec<(u64, bool)>) -> Noun {
+        if keys.is_empty() {
+            SIG
+        } else {
+            Some(keys).to_noun(slab)
+        }
     }
 
     async fn update_balance_grpc_public(
@@ -1164,6 +1197,155 @@ impl Wallet {
         let mut slab = NounSlab::new();
         Self::wallet("show-master-zprv", &[], Operation::Poke, &mut slab)
     }
+
+    /// Shows the key tree structure.
+    fn show_key_tree(include_values: bool) -> CommandNoun<NounSlab> {
+        let mut slab = NounSlab::new();
+        let include_values_noun = if include_values { YES } else { NO };
+        Self::wallet(
+            "show-key-tree",
+            &[include_values_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
+
+    fn parse_sign_key_components(
+        index_str: &str,
+        hardened_str: Option<&str>,
+    ) -> Result<(u64, bool), NockAppError> {
+        let index = index_str.trim().parse::<u64>().map_err(|err| {
+            CrownError::Unknown(format!("Invalid key index '{}': {}", index_str.trim(), err))
+        })?;
+        if index >= 2 << 31 {
+            return Err(CrownError::Unknown("Key index must not exceed 2^31 - 1".into()).into());
+        }
+        let hardened = if let Some(flag) = hardened_str {
+            Self::parse_boolish(flag)?
+        } else {
+            false
+        };
+        Ok((index, hardened))
+    }
+
+    fn parse_boolish(flag: &str) -> Result<bool, NockAppError> {
+        match flag {
+            "true" | "t" | "1" | "yes" | "y" => Ok(true),
+            "false" | "f" | "0" | "no" | "n" => Ok(false),
+            _ => Err(CrownError::Unknown(format!(
+                "Invalid hardened value '{}', expected true/false",
+                flag
+            ))
+            .into()),
+        }
+    }
+
+    fn parse_sign_keys(sign_keys_str: &str) -> Result<Vec<(u64, bool)>, NockAppError> {
+        let mut sign_keys = Vec::new();
+        for piece in sign_keys_str.split(',') {
+            let trimmed = piece.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split(':').collect();
+            if parts.len() != 2 {
+                return Err(CrownError::Unknown(format!(
+                    "Invalid sign key '{}', expected index:hardened",
+                    trimmed
+                ))
+                .into());
+            }
+            sign_keys.push(Self::parse_sign_key_components(parts[0], Some(parts[1]))?);
+        }
+        if sign_keys.is_empty() {
+            return Err(
+                CrownError::Unknown("At least one sign key must be provided".to_string()).into(),
+            );
+        }
+        Ok(sign_keys)
+    }
+
+    fn parse_pubkey_hashes(pubkeys_str: &str) -> Result<Vec<Hash>, NockAppError> {
+        let pubkeys: Vec<Hash> = pubkeys_str
+            .split(',')
+            .map(|s| {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return Err(NockAppError::from(CrownError::Unknown(
+                        "Empty pubkey hash provided in list".into(),
+                    )));
+                }
+                Hash::from_base58(trimmed).map_err(|err| {
+                    NockAppError::from(CrownError::Unknown(format!(
+                        "Invalid pubkey hash '{}': {}",
+                        trimmed, err
+                    )))
+                })
+            })
+            .collect::<Result<Vec<Hash>, NockAppError>>()?;
+
+        if pubkeys.is_empty() {
+            return Err(
+                CrownError::Unknown("At least one pubkey hash must be provided".into()).into(),
+            );
+        }
+
+        Ok(pubkeys)
+    }
+
+    fn sign_multisig_tx(
+        transaction_path: &str,
+        sign_keys_str: Option<&str>,
+    ) -> CommandNoun<NounSlab> {
+        let mut slab = NounSlab::new();
+
+        let transaction_data = fs::read(transaction_path)
+            .map_err(|e| CrownError::Unknown(format!("Failed to read transaction file: {}", e)))?;
+
+        let transaction_noun = slab.cue_into(transaction_data.as_bytes()?).map_err(|e| {
+            CrownError::Unknown(format!("Failed to decode transaction data: {}", e))
+        })?;
+
+        let sign_keys_noun = if let Some(sign_keys_str) = sign_keys_str {
+            let sign_keys = Self::parse_sign_keys(sign_keys_str)?;
+            sign_keys
+                .into_iter()
+                .rev()
+                .fold(D(0), |acc, (index, hardened)| {
+                    let index_noun = D(index);
+                    let hardened_noun = if hardened { YES } else { NO };
+                    let pair = T(&mut slab, &[index_noun, hardened_noun]);
+                    Cell::new(&mut slab, pair, acc).as_noun()
+                })
+        } else {
+            SIG
+        };
+
+        Self::wallet(
+            "sign-multisig-tx",
+            &[transaction_noun, sign_keys_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
+
+    fn show_multisig_tx(transaction_path: &str) -> CommandNoun<NounSlab> {
+        let mut slab = NounSlab::new();
+
+        let transaction_data = fs::read(transaction_path)
+            .map_err(|e| CrownError::Unknown(format!("Failed to read transaction file: {}", e)))?;
+
+        let transaction_noun = slab.cue_into(transaction_data.as_bytes()?).map_err(|e| {
+            CrownError::Unknown(format!("Failed to decode transaction data: {}", e))
+        })?;
+
+        Self::wallet(
+            "show-multisig-tx",
+            &[transaction_noun],
+            Operation::Poke,
+            &mut slab,
+        )
+    }
 }
 
 pub async fn wallet_data_dir() -> Result<PathBuf, NockAppError> {
@@ -1224,6 +1406,16 @@ fn normalize_watch_address(value: String) -> Result<Option<String>, NockAppError
                 warn!("Skipping invalid watch-only hash '{}': {}", value, err);
                 Ok(None)
             }
+        }
+    }
+}
+
+fn normalize_first_name(value: String) -> Result<Option<String>, NockAppError> {
+    match Hash::from_base58(&value) {
+        Ok(hash) => Ok(Some(hash.to_base58())),
+        Err(err) => {
+            warn!("Skipping invalid first name '{}': {}", value, err);
+            Ok(None)
         }
     }
 }
@@ -1422,58 +1614,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_single_output_accepts_valid_spec() {
-        let (pkh, amount) = Wallet::parse_single_output(
-            "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt:65536",
-        )
-        .expect("valid");
-        assert_eq!(
-            pkh,
-            "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
-        );
-        assert_eq!(amount, 65_536);
+    fn collect_signing_keys_prefers_explicit_entries() {
+        let entries = vec!["0:true".to_string(), "1:false".to_string()];
+        let keys =
+            Wallet::collect_signing_keys(Some(5), false, &entries).expect("valid explicit keys");
+        assert_eq!(keys, vec![(0, true), (1, false)]);
     }
 
     #[test]
-    fn parse_multiple_output_accepts_valid_spec() -> Result<(), Box<dyn std::error::Error>> {
-        let recipients = vec![
-            "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt:65536".to_string(),
-            "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV:99999".to_string(),
-        ];
-        let allocations = Wallet::parse_multiple_recipients(&recipients)?;
-        assert_eq!(
-            allocations[0],
-            (
-                "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt".to_string(),
-                65536
-            )
-        );
-        assert_eq!(
-            allocations[1],
-            (
-                "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
-                99999
-            )
-        );
-        Ok(())
+    fn collect_signing_keys_falls_back_to_index() {
+        let keys = Wallet::collect_signing_keys(Some(3), true, &[]).expect("valid");
+        assert_eq!(keys, vec![(3, true)]);
     }
 
     #[test]
-    fn parse_single_output_rejects_multiple_outputs() {
-        let err = Wallet::parse_single_output("a:1,b:2").expect_err("expected failure");
-        assert!(
-            err.to_string().contains("Multiple outputs"),
-            "unexpected error message: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_single_output_rejects_bad_amount() {
-        let err = Wallet::parse_single_output("pkh:not-a-number").expect_err("expected failure");
-        assert!(
-            err.to_string().contains("Invalid amount"),
-            "unexpected error message: {err}"
-        );
+    fn collect_signing_keys_defaults_to_master() {
+        let keys = Wallet::collect_signing_keys(None, false, &[]).expect("valid");
+        assert!(keys.is_empty());
     }
 
     #[tokio::test]
@@ -1567,64 +1724,6 @@ mod tests {
         Ok(())
     }
 
-    // TODO make this a real test by creating and signing a real draft
-    #[tokio::test]
-    #[ignore]
-    async fn test_sign_tx() -> Result<(), NockAppError> {
-        init_tracing();
-        let cli = BootCli::parse_from(&[""]);
-        let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
-            .await
-            .map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let mut wallet = Wallet::new(nockapp);
-
-        // Create a temporary input bundle file
-        let bundle_path = "test_bundle.jam";
-        let test_data = vec![0u8; 32]; // TODO make this a real input bundle
-        fs::write(bundle_path, &test_data).map_err(|e| NockAppError::IoError(e))?;
-
-        let wire = WalletWire::Command(Commands::SignTx {
-            transaction: bundle_path.to_string(),
-            index: None,
-            hardened: false,
-        })
-        .to_wire();
-
-        // Test signing with valid indices
-        let (noun, op) = Wallet::sign_tx(bundle_path, None, false)?;
-        let sign_result = wallet.app.poke(wire, noun.clone()).await?;
-
-        println!("sign_result: {:?}", sign_result);
-
-        let wire = WalletWire::Command(Commands::SignTx {
-            transaction: bundle_path.to_string(),
-            index: Some(1),
-            hardened: false,
-        })
-        .to_wire();
-
-        let (noun, op) = Wallet::sign_tx(bundle_path, Some(1), false)?;
-        let sign_result = wallet.app.poke(wire, noun.clone()).await?;
-
-        println!("sign_result: {:?}", sign_result);
-
-        let wire = WalletWire::Command(Commands::SignTx {
-            transaction: bundle_path.to_string(),
-            index: Some(255),
-            hardened: false,
-        })
-        .to_wire();
-
-        let (noun, op) = Wallet::sign_tx(bundle_path, Some(255), false)?;
-        let sign_result = wallet.app.poke(wire, noun.clone()).await?;
-
-        println!("sign_result: {:?}", sign_result);
-
-        // Cleanup
-        fs::remove_file(bundle_path).map_err(|e| NockAppError::IoError(e))?;
-        Ok(())
-    }
-
     // Tests for Cold Side Commands
     #[tokio::test]
     #[cfg_attr(miri, ignore)]
@@ -1703,98 +1802,14 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_spend_multisig_format() -> Result<(), NockAppError> {
-        init_tracing();
-        let cli = BootCli::parse_from(&[""]);
-        let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
-            .await
-            .map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let mut wallet = Wallet::new(nockapp);
-
-        let names = "[first1 last1],[first2 last2]".to_string();
-        let recipients = vec!["pk1:1".to_string()];
-        let fee = 1;
-
-        let (noun, op) = Wallet::create_tx(
-            names.clone(),
-            recipients.clone(),
-            fee,
-            None::<String>,
-            None,
-            false,
-            true,
-            false,
-        )?;
-        let wire = WalletWire::Command(Commands::CreateTx {
-            names: names.clone(),
-            recipients: recipients.clone(),
-            fee: fee.clone(),
-            refund_pkh: None,
-            index: None,
-            hardened: false,
-            include_data: true,
-            save_raw_tx: false,
-        })
-        .to_wire();
-        let spend_result = wallet.app.poke(wire, noun.clone()).await?;
-        println!("spend_result: {:?}", spend_result);
-
+        // TODO: replace with an end-to-end test that exercises multisig recipient specs.
         Ok(())
     }
 
     #[tokio::test]
     #[ignore]
     async fn test_spend_single_sig_format() -> Result<(), NockAppError> {
-        let cli = BootCli::parse_from(&[""]);
-        let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
-            .await
-            .map_err(|e| CrownError::Unknown(e.to_string()))?;
-        init_tracing();
-        let mut wallet = Wallet::new(nockapp);
-
-        // these should be valid names of notes in the wallet balance
-        let names = "[Amt4GcpYievY4PXHfffiWriJ1sYfTXFkyQsGzbzwMVzewECWDV3Ad8Q BJnaDB3koU7ruYVdWCQqkFYQ9e3GXhFsDYjJ1vSmKFdxzf6Y87DzP4n]".to_string();
-        let recipients = vec!["3HKKp7xZgCw1mhzk4iw735S2ZTavCLHc8YDGRP6G9sSTrRGsaPBu1AqJ8cBDiw2LwhRFnQG7S3N9N9okc28uBda6oSAUCBfMSg5uC9cefhrFrvXVGomoGcRvcFZTWuJzm3ch:100".to_string()];
-        let fee = 0;
-
-        // generate keys
-        let version = 1;
-        let (genkey_noun, genkey_op) =
-            Wallet::import_seed_phrase("correct horse battery staple", version)?;
-        let (spend_noun, spend_op) = Wallet::create_tx(
-            names.clone(),
-            recipients.clone(),
-            fee,
-            None::<String>,
-            None,
-            false,
-            true,
-            false,
-        )?;
-
-        let wire1 = WalletWire::Command(Commands::ImportKeys {
-            file: None,
-            key: None,
-            seedphrase: Some("correct horse battery staple".to_string()),
-            version: Some(version),
-        })
-        .to_wire();
-        let genkey_result = wallet.app.poke(wire1, genkey_noun.clone()).await?;
-        println!("genkey_result: {:?}", genkey_result);
-
-        let wire2 = WalletWire::Command(Commands::CreateTx {
-            names: names.clone(),
-            recipients: recipients.clone(),
-            fee: fee.clone(),
-            refund_pkh: None,
-            index: None,
-            hardened: false,
-            include_data: true,
-            save_raw_tx: false,
-        })
-        .to_wire();
-        let spend_result = wallet.app.poke(wire2, spend_noun.clone()).await?;
-        println!("spend_result: {:?}", spend_result);
-
+        // TODO: replace with an end-to-end test for PKH recipients once fixtures exist.
         Ok(())
     }
 
