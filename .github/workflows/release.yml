@@ -1,0 +1,360 @@
+name: Release Binaries and Generate Manifests
+
+on:
+  push:
+    branches: ["master", "nightly"]
+    tags: ["v*"]
+  pull_request:
+    branches: ["master", "nightly"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Determine channel
+        id: channel
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "master" ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+            SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+            echo "version=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "nightly" ]]; then
+            echo "channel=nightly" >> $GITHUB_OUTPUT
+            DATE=$(date +%Y%m%d)
+            echo "version=${DATE}" >> $GITHUB_OUTPUT
+          else
+            echo "channel=dev" >> $GITHUB_OUTPUT
+            SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+            echo "version=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          fi
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "channel=pr" >> $GITHUB_OUTPUT
+            echo "version=pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+
+      - name: Install required tools for manifest generation
+        run: |
+          # Install blake3 hash tool for manifest generation
+          cargo install b3sum
+          # Ensure cargo binaries are on PATH
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          # Install jq for JSON parsing
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y jq
+          elif [[ "${{ matrix.os }}" == "macos-latest" ]]; then
+            brew install jq
+          fi
+
+      - name: Build hoon
+        run: |
+          cargo build --release --bin hoon --manifest-path crates/hoon/Cargo.toml
+          file target/release/hoon
+
+      - name: Build hoonc
+        run: |
+          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml
+          file target/release/hoonc
+
+      - name: Set up GPG
+        if: matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
+        run: |
+          # Import GPG private key securely
+          printf '%s' "${{ secrets.GPG_PRIVATE_KEY }}" | base64 --decode > /tmp/gpg_private.key
+          gpg --batch --import /tmp/gpg_private.key
+          shred -u /tmp/gpg_private.key || rm -f /tmp/gpg_private.key
+
+          # Configure GPG for non-interactive use
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "use-agent" >> ~/.gnupg/gpg.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          echo "batch" >> ~/.gnupg/gpg.conf
+
+          # Get the full fingerprint and trust the key
+          FINGERPRINT=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          echo "${FINGERPRINT}:6:" | gpg --import-ownertrust
+
+          # Verify key is available
+          gpg --list-secret-keys
+
+      - name: Package and sign binaries
+        run: |
+          mkdir -p dist
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          SHOULD_SIGN="${{ matrix.os == 'ubuntu-latest' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag') }}"
+          
+          if [[ "$CHANNEL" == "pr" ]]; then
+            echo "Skipping packaging for PRs"
+            exit 0
+          fi
+          
+          # Copy and make executable (using root target/release/)
+          if [ -f target/release/hoon ]; then
+            cp target/release/hoon dist/hoon
+            chmod +x dist/hoon
+          else
+            echo "Skipping hoon copy: binary missing"
+          fi
+          if [ -f target/release/hoonc ]; then
+            cp target/release/hoonc dist/hoonc
+            chmod +x dist/hoonc
+          else
+            echo "Skipping hoonc copy: binary missing"
+          fi
+          
+          # Sign individual binaries if this is a release build
+          if [[ "$SHOULD_SIGN" == "true" ]]; then
+            echo "Signing binaries..."
+            if [ -f dist/hoon ]; then
+              echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoon
+              echo "Created dist/hoon.asc"
+            fi
+            if [ -f dist/hoonc ]; then
+              echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoonc
+              echo "Created dist/hoonc.asc"
+            fi
+          else
+            echo "Skipping binary signing for non-release builds"
+          fi
+          
+          # Create archives with channel and per-crate versions
+          if [ -f dist/hoon ]; then
+            tar -czf dist/hoon-${CHANNEL}-latest-${{ matrix.target }}.tar.gz -C dist hoon
+            # Sign the archive if this is a release build
+            if [[ "$SHOULD_SIGN" == "true" ]]; then
+              gpg --batch --yes --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoon-${CHANNEL}-latest-${{ matrix.target }}.tar.gz
+            fi
+          fi
+          if [ -f dist/hoonc ]; then
+            tar -czf dist/hoonc-${CHANNEL}-latest-${{ matrix.target }}.tar.gz -C dist hoonc
+            # Sign the archive if this is a release build
+            if [[ "$SHOULD_SIGN" == "true" ]]; then
+              gpg --batch --yes --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/hoonc-${CHANNEL}-latest-${{ matrix.target }}.tar.gz
+            fi
+          fi
+          
+          echo "Packaged artifacts for channel $CHANNEL:"
+          ls -la dist/
+
+      - name: Generate individual manifests
+        if: steps.channel.outputs.channel != 'pr'
+        run: |
+          mkdir -p scripts
+
+          # Create manifest generation script
+          cat << 'EOF' > scripts/generate-manifest.sh
+          #!/bin/bash
+          set -euo pipefail
+
+          BINARY=$1
+          TARGET=$2
+          CHANNEL=$3
+          VERSION=$4
+          COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
+          DATE=$(date +%Y-%m-%d)
+
+          # Calculate hashes from the packaged archive
+          ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
+
+          if [ ! -f "$ARCHIVE_PATH" ]; then
+              echo "Error: Archive not found at $ARCHIVE_PATH" >&2
+              exit 1
+          fi
+
+          BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
+          SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
+
+          # Generate URL
+          URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
+
+          # Generate manifest
+          cat << MANIFEST_EOF
+          manifest-version = "1"
+          date = "$DATE"
+
+          [pkg.$BINARY]
+          version = "$VERSION"
+          components = ["core"]
+
+          [pkg.$BINARY.target.$TARGET]
+          available = true
+          url = "$URL"
+          hash_blake3 = "$BLAKE3_HASH"
+          hash_sha1 = "$SHA1_HASH"
+          MANIFEST_EOF
+          EOF
+
+          chmod +x scripts/generate-manifest.sh
+
+          # Generate manifests for each binary that was built
+          CHANNEL="${{ steps.channel.outputs.channel }}"
+          if [ -f "dist/hoon-${CHANNEL}-latest-${{ matrix.target }}.tar.gz" ]; then
+            ./scripts/generate-manifest.sh hoon ${{ matrix.target }} "${CHANNEL}" "latest" > "hoon-${{ matrix.target }}-manifest.toml"
+            echo "Generated manifest for hoon"
+          fi
+          if [ -f "dist/hoonc-${CHANNEL}-latest-${{ matrix.target }}.tar.gz" ]; then
+            ./scripts/generate-manifest.sh hoonc ${{ matrix.target }} "${CHANNEL}" "latest" > "hoonc-${{ matrix.target }}-manifest.toml"
+            echo "Generated manifest for hoonc"
+          fi
+
+      - name: Upload individual manifests
+        if: steps.channel.outputs.channel != 'pr'
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolchains-${{ matrix.target }}
+          path: "*-${{ matrix.target }}-manifest.toml"
+          retention-days: 7
+
+      - name: Upload release assets
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')  # Only on qualifying pushes/tags, not PRs
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.channel.outputs.channel }}-build-${{ github.sha }}
+          name: ${{ steps.channel.outputs.channel }} Build ${{ github.sha }}
+          files: |
+            dist/hoon-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
+            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoon-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
+            dist/hoonc-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
+            ${{ matrix.os == 'ubuntu-latest' && format('dist/hoonc-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
+
+  collate-manifests:
+    name: Collate Channel Manifests
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+        
+      - name: Download all manifest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: toolchains/
+          pattern: toolchains-*
+          merge-multiple: true
+          
+      - name: List downloaded manifests
+        run: |
+          echo "Downloaded manifests:"
+          find toolchains/ -name "*.toml" -type f | sort
+          
+      - name: Create collation script
+        run: |
+          mkdir -p scripts
+          cat << 'EOF' > scripts/collate-manifests.sh
+          #!/bin/bash
+          set -euo pipefail
+
+          CHANNEL=$1
+          MANIFEST_DIR=$2
+
+          # Start with global metadata
+          cat << HEADER_EOF
+          manifest-version = "1"
+          date = "$(date +%Y-%m-%d)"
+
+          # Profiles
+          [profiles.default]
+          components = ["core"]
+          [profiles.minimal]
+          components = ["core"]
+
+          HEADER_EOF
+
+          # Process manifests by package, then by target
+          for package in hoonc hoon; do
+              echo "# $package binaries"
+
+              # Find all manifests for this package
+              find "$MANIFEST_DIR" -name "${package}-*-manifest.toml" -type f | sort | while read manifest; do
+                  if [ -f "$manifest" ]; then
+                      echo "# From $(basename "$manifest")"
+                      # Extract only the target-specific sections
+                      awk -v pkg="$package" '
+                          /^\[pkg\./ {
+                              if ($0 ~ "\\[pkg\\." pkg "\\.target\\.") {
+                                  printing = 1
+                              } else {
+                                  printing = 0
+                              }
+                          }
+                          /^available|^url|^hash_/ {
+                              if (printing) print
+                          }
+                          /^\[pkg\..*\.target\./ {
+                              if (printing) print
+                          }
+                      ' "$manifest"
+                      echo ""
+                  fi
+              done
+          done
+          EOF
+
+          chmod +x scripts/collate-manifests.sh
+          
+      - name: Determine channel from ref
+        id: channel
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "master" ]]; then
+            echo "channel=stable" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == "nightly" ]]; then
+            echo "channel=nightly" >> $GITHUB_OUTPUT
+          else
+            echo "channel=dev" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Collate manifests
+        run: |
+          ./scripts/collate-manifests.sh ${{ steps.channel.outputs.channel }} toolchains/ > ${{ steps.channel.outputs.channel }}-manifest.toml
+          
+      - name: Show final manifest
+        run: |
+          echo "=== Final ${{ steps.channel.outputs.channel }} manifest ==="
+          cat ${{ steps.channel.outputs.channel }}-manifest.toml
+          
+      - name: Upload final manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.channel.outputs.channel }}-manifest
+          path: ${{ steps.channel.outputs.channel }}-manifest.toml
+          retention-days: 30
+          
+      - name: Add manifest to existing release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.channel.outputs.channel }}-build-${{ github.sha }}
+          files: |
+            ${{ steps.channel.outputs.channel }}-manifest.toml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
