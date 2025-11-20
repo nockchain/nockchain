@@ -90,6 +90,7 @@ nockchain-wallet watch-address <base58-pkh-or-pubkey>
 ```
 
 The wallet normalizes the identifier so you can supply either a v1 payee hash or a schnorr pubkey.
+Once added, watch-only addresses/first names are synced automatically alongside your signing keys, so their balances appear in all sync-heavy commands without additional flags.
 
 Use `.env_example` as a template and copy your pkh to the `.env` file.
 

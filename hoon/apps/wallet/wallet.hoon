@@ -10,7 +10,7 @@
 /=  *  /common/wrapper
 /=  wt  /apps/wallet/lib/types
 /=  wutils  /apps/wallet/lib/utils
-/=  tx-builder  /apps/wallet/lib/tx-builder-v1
+/=  tx-builder  /apps/wallet/lib/tx-builder
 /=  s10  /apps/wallet/lib/s10
 =>
 =|  bug=_&
@@ -83,16 +83,16 @@
     ^-  state-3:wt
     ?>  ?=(%2 -.old)
     ~>  %slog.[0 'upgrade version 2 to 3']
-    =/  new-keys=keys:wt
+    =/  new-keys=keys-v3:wt
       %+  roll  ~(tap of keys.old)
-      |=  [[=trek m=meta-v2:wt] new=keys:wt]
+      |=  [[=trek m=meta-v2:wt] new=keys-v3:wt]
       %-  ~(put of new)
       :-  trek
-      ^-  meta:wt
+      ^-  meta-v3:wt
       ?.  ?=(%coil -.m)
         m
       [%coil [%0 +.m]]
-    =/  new-master=active:wt
+    =/  new-master=active-v3:wt
       ?~  active-master.old  ~
       `[%0 +.u.active-master.old]
     :*  %3
@@ -134,7 +134,7 @@
     ``state
     ::
     ::  returns a list of tracked first names
-      [%tracked-names include-watch-only=? ~]
+      [%tracked-names ~]
     :+  ~
       ~
     =/  signing-names=(list @t)
@@ -147,27 +147,15 @@
       :+  (to-b58:hash:transact (simple-first-name:coil:wt coil))
         (to-b58:hash:transact (coinbase-first-name:coil:wt coil))
       names
-    ?.  include-watch-only.pole
-      signing-names
-    %+  weld  signing-names
-    %+  roll  watch-addrs:get:v
-    |=  [addr=@t first-names=(list @t)]
-    ::  v0 keys have at least 132 bytes
-    ?:  (gte (met 3 addr) 132)
-      ::  exclude names for v0 keys because those are handled through tracked pubkeys
-      first-names
-    =+  pubkey-hash=(from-b58:hash:transact addr)
-    :+  (to-b58:hash:transact (simple:v1:first-name:transact pubkey-hash))
-      (to-b58:hash:transact (coinbase:v1:first-name:transact pubkey-hash))
-    first-names
+    %~  tap  in
+    %-  silt
+    (weld signing-names watch-first-names:get:v)
     ::
     ::  returns a list of pubkeys
-      [%tracked-pubkeys include-watch-only=? ~]
+      [%tracked-pubkeys ~]
     :+  ~
       ~
     =;  signing-keys=(list @t)
-      ?.  include-watch-only.pole
-        signing-keys
       %+  weld  signing-keys
       %+  murn  watch-addrs:get:v
       |=  addr=@t
@@ -214,6 +202,7 @@
         %list-notes-by-address  (do-list-notes-by-address cause)
         %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
         %create-tx             (do-create-tx cause)
+        %sign-multisig-tx      (do-sign-multisig-tx cause)
         %update-balance-grpc   (do-update-balance-grpc cause)
         %sign-message          (do-sign-message cause)
         %verify-message        (do-verify-message cause)
@@ -221,14 +210,17 @@
         %verify-hash           (do-verify-hash cause)
         %import-keys           (do-import-keys cause)
         %import-extended       (do-import-extended cause)
-        %watch-address  (do-watch-address cause)
+        %watch-address         (do-watch-address cause)
+        ::%watch-first-name      (do-watch-first-name cause)
+        %watch-address-multisig  (do-watch-address-multisig cause)
         %export-keys           (do-export-keys cause)
         %export-master-pubkey  (do-export-master-pubkey cause)
         %import-master-pubkey  (do-import-master-pubkey cause)
         %import-seed-phrase    (do-import-seed-phrase cause)
         %send-tx               (do-send-tx cause)
-        %show-tx               (do-show-tx cause)
+        %show-tx                (do-show-tx cause)
         %list-active-addresses  (do-list-active-addresses cause)
+        %show-key-tree          (do-show-key-tree cause)
         %show-seed-phrase       (do-show-seed-phrase cause)
         %show-master-zpub    (do-show-master-zpub cause)
         %show-master-zprv  (do-show-master-zprv cause)
@@ -236,11 +228,20 @@
         %set-active-master-address  (do-set-active-master-address cause)
     ::
         %file
-      ::?>  ?=(%write +<.cause)
-      ::[[%exit 0]~ state]
-      ?-  +<.cause
-        %write  [[%exit 0]~ state]
-        %batch-write  [[%exit 0]~ state]
+      ?-    +<.cause
+          %write
+        [[%exit 0]~ state]
+      ::
+          %batch-write
+        [[%exit 0]~ state]
+      ::
+          %read
+        ?^  contents.cause
+          ~&  "success"
+          ::  file read response with contents
+          [[%exit 0]~ state]
+        ::  file read error
+        [[%exit 1]~ state]
       ==
     ==
   ==
@@ -381,14 +382,92 @@
   ++  do-watch-address
     |=  =cause:wt
     ?>  ?=(%watch-address -.cause)
-    :_  state(keys (watch-addrs:put:v address.cause))
+    :_  state(keys (watch-addr:put:v address.cause))
     :~  :-  %markdown
         %-  crip
         """
-        ## Imported watch-only pubkey
+        ## Imported watch-only address
 
-        - Imported key: {<address.cause>}
+        - Imported address: {<address.cause>}
         """
+        [%exit 0]
+    ==
+  ::
+  ::++  do-watch-first-name
+  ::  |=  =cause:wt
+  ::  ?>  ?=(%watch-first-name -.cause)
+  ::  =/  first-name=hash:transact  (from-b58:hash:transact first-name.cause)
+  ::  =/  maybe-lock=(unit lock:transact)  lock.cause
+  ::  =/  first-name-b58=@t  (to-b58:hash:transact first-name)
+  ::  :_  state(keys (watch-first-name:put:v first-name maybe-lock))
+  ::  :~  :-  %markdown
+  ::      %-  crip
+  ::      """
+  ::      ## Imported watch-only first name
+
+  ::      - First name: {(trip first-name-b58)}
+  ::      - Lock info: {?~(maybe-lock "N/A" (trip (lock:v1:display:utils u.maybe-lock)))}
+
+  ::      """
+  ::      [%exit 0]
+  ::  ==
+  ::
+  ++  do-watch-address-multisig
+    |=  =cause:wt
+    ?>  ?=(%watch-address-multisig -.cause)
+    =/  participant-count=@ud  (lent participants.cause)
+    ?:  =(0 participant-count)
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          No pubkeys were provided for the multisig watch request.
+          """
+          [%exit 0]
+      ==
+    ?:  ?|  (lte m.cause 0)
+            (gth m.cause participant-count)
+        ==
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Invalid m value: {<m.cause>}. Must be > 0 and <= number of participant addresses ({<participant-count>}).
+          """
+          [%exit 0]
+      ==
+    =/  address-hash-set=(z-set:zo hash:transact)
+      %+  roll  participants.cause
+      |=  [b58=@t acc=(z-set:zo hash:transact)]
+      (~(put z-in:zo acc) (from-b58:hash:transact b58))
+    =/  multisig=lock:transact
+      [%pkh m=m.cause address-hash-set]~
+    =/  first-name=hash:transact
+      (first:nname:transact (hash:lock:transact multisig))
+    =/  first-name-b58=@t  (to-b58:hash:transact first-name)
+    =.  keys.state  (watch-first-name:put:v first-name `multisig)
+    =/  keys=tape
+      %-  zing
+      %+  join  "\0a    "
+      %+  turn
+        participants.cause
+      |=  k=@t
+      """
+          - {(trip k)}
+      """
+    =/  summary=@t
+      %-  crip
+      """
+      ## Imported multisig watch
+
+      - First name: {(trip first-name-b58)}
+      - Required Signatures: {<m.cause>}
+      - Signers:
+          {keys}
+
+      """
+    :_  state
+    :~  [%markdown summary]
         [%exit 0]
     ==
   ::
@@ -625,27 +704,63 @@
     |=  =cause:wt
     ?>  ?=(%send-tx -.cause)
     %-  (debug "send-tx: creating raw-tx")
-    ::
-    =/  raw=raw-tx:v1:transact  (new:raw-tx:v1:transact p.dat.cause)
-    ?.  (validate:raw-tx:v1:transact raw)
+    =/  =transaction:wt  dat.cause
+    =/  transaction-name=@t  name.transaction
+    =/  =spends:transact  spends.transaction
+    =/  display=transaction-display:wt  display.transaction
+    =/  =witness-data:wt  witness-data.transaction
+    =/  signed-spends=spends:v1:transact
+      (apply:witness-data:wt witness-data spends)
+    =/  raw=raw-tx:v1:transact  (new:raw-tx:v1:transact signed-spends)
+    =/  =tx:v1:transact  (new:tx:v1:transact raw height.balance.state)
+    =/  fees=@  (roll-fees:spends:v1:transact signed-spends)
+    =/  tx-display=@t
+      (transaction:v1:display:utils transaction-name outputs.tx fees display.transaction `witness-data)
+    =+  data=data:*blockchain-constants:transact
+    =/  valid=(reason:dumb ~)
+      %-  validate-with-context:spends:transact
+      [notes.balance.state signed-spends height.balance.state max-size.data]
+    ?-    -.valid
+        %.y
+      =/  nock-cause=$>(%fact cause:dumb)
+        [%fact %0 %heard-tx raw]
+      %-  (debug "send-tx: made raw-tx, sending poke request over grpc")
+      ::  we currently do not need to assign pids. shim is here in case
+      =/  pid  *@
+      =/  msg=@t
+        %-  crip
+        """
+        ## Sent Tx
+        - Validation for TX {(trip (to-b58:hash:transact id.raw))} passed. TX has been submitted to node.
+        ---
+
+        """
       :_  state
-      :~  :-  %markdown
+      :~  [%markdown msg]
+          [%grpc %poke pid nock-cause]
+          [%nockchain-grpc %send-tx raw]
+          [%exit 0]
+      ==
+    ::
+        %.n
+      =/  msg=@t
           %-  crip
           """
-          Cannot send transaction: invalid raw-tx
+          # TX Validation Failed
+
+          Failed to validate the correctness of transaction {(trip transaction-name)}.
+          Reason: {(trip p.valid)}
+
+          {(trip tx-display)}
+          ---
+
           """
-          [%exit 1]
+      %-  (debug "{(trip msg)}")
+      :_  state
+      :~
+        [%markdown msg]
+        [%exit 1]
       ==
-    =/  nock-cause=$>(%fact cause:dumb)
-      [%fact %0 %heard-tx raw]
-    %-  (debug "send-tx: made raw-tx, sending poke request over grpc")
-    ::  we currently do not need to assign pids. shim is here in case
-    =/  pid  *@
-    :_  state
-    :~
-      [%grpc %poke pid nock-cause]
-      [%nockchain-grpc %send-tx raw]
-      [%exit 0]
     ==
   ::
   ++  do-show-tx
@@ -654,12 +769,20 @@
     %-  (debug "show-tx: displaying transaction")
     =/  =transaction:wt  dat.cause
     =/  transaction-name=@t  name.transaction
-    =/  =spends:transact  p.transaction
+    =/  =spends:transact  spends.transaction
+    =/  display=transaction-display:wt  display.transaction
     =/  fees=@  (roll-fees:spends:v1:transact spends)
     =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
     =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
+    ~&  display+display.transaction
     =/  markdown-text=@t
-      (transaction:v1:display:utils transaction-name outputs.tx fees)
+      %:  transaction:v1:display:utils
+          transaction-name
+          outputs.tx
+          fees
+          display.transaction
+          `witness-data.transaction
+      ==
     :_  state
     :~
       [%markdown markdown-text]
@@ -688,6 +811,15 @@
       ---
 
       """
+    =/  base58-watch-locks=(list tape)
+      %+  turn  watch-locks:get:v
+      |=  [name-b58=@t lock-b58=@t]
+      """
+      - First Name: {(trip name-b58)}
+      {(trip lock-b58)}
+      ---
+
+      """
     :_  state
     :~  :-  %markdown
         %-  crip
@@ -696,12 +828,176 @@
 
         {?~(base58-sign-keys "No pubkeys found" (zing base58-sign-keys))}
 
-        ## Addresses -- Watch only
+        ## Addresses -- Watch Only
 
         {?~(base58-watch-addrs "No pubkeys found" (zing base58-watch-addrs))}
+
+        ## Lock First Names -- Watch Only
+
+        {?~(base58-watch-locks "No watch only locks found" (zing base58-watch-locks))}
+
         """
         [%exit 0]
     ==
+  ::
+  ++  do-show-key-tree
+    |=  =cause:wt
+    ?>  ?=(%show-key-tree -.cause)
+    |^
+    =/  include-values=?  include-values.cause
+    =/  entries=(list [trek meta:wt])  ~(tap of keys.state)
+    =/  root=trek  (pave /keys)
+    =/  init=[seen=(set trek) ordered=(list trek)]
+      [(~(put in *(set trek)) root) ~[root]]
+    =/  final=[seen=(set trek) ordered=(list trek)]
+      %+  roll  entries
+      |=  [[path=trek meta=meta:wt] acc=[seen=(set trek) ordered=(list trek)]]
+      ^-  [seen=(set trek) ordered=(list trek)]
+      (add-prefixes (prefixes path) acc)
+    =/  paths=(list trek)
+      (flop ordered.final)
+    =/  lines=(list tape)
+      %+  turn  paths
+      |=  path=trek
+      (render-line path include-values)
+    =/  tree-text=tape
+      %-  zing
+      %+  turn  lines
+      |=  line=tape
+      (weld line "\0a")
+    :_  state
+    :~
+      :-  %markdown
+      %-  crip
+      """
+      ## Key Tree
+
+      ```
+      {tree-text}
+      ```
+
+      """
+      [%exit 0]
+    ==
+    ::
+    ++  prefixes
+      |=  path=trek
+      ^-  (list trek)
+      =|  acc=(list trek)
+      =|  cur=trek
+      |-  ^-  (list trek)
+      ?~  path
+        (flop acc)
+      =.  cur  (snoc cur i.path)
+      =.  acc  [cur acc]
+      $(path t.path)
+    ::
+    ++  add-prefixes
+      |=  [paths=(list trek) acc=[seen=(set trek) ordered=(list trek)]]
+      ^-  [seen=(set trek) ordered=(list trek)]
+      =/  seen=(set trek)  seen.acc
+      =/  ordered=(list trek)  ordered.acc
+      |-
+      ?~  paths
+        [seen ordered]
+      =/  path=trek  i.paths
+      ?:  (~(has in seen) path)
+        $(paths t.paths)
+      =.  seen  (~(put in seen) path)
+      =.  ordered  [path ordered]
+      $(paths t.paths)
+    ::
+    ++  render-line
+      |=  [path=trek include-values=?]
+      ^-  tape
+      =/  len=@ud  (lent path)
+      =/  depth=@ud  ?:(=(0 len) 0 (dec len))
+      =/  indent=tape  (indent depth)
+      =/  path-text=tape  (spud (pout path))
+      =/  base=tape  (weld indent path-text)
+      =/  value=(unit meta:wt)  (~(get of keys.state) path)
+      ?~  value
+        base
+      ?:  include-values
+        (weld base (weld "\0a {indent}  -> " (summarize-meta u.value indent)))
+      base
+    ::
+    ++  indent
+      |=  depth=@ud
+      ^-  tape
+      =|  i=@ud
+      =|  acc=tape
+      |-  ^-  tape
+      ?:  =(i depth)
+        acc
+      $(i +(i), acc (weld acc "  "))
+    ::
+    ++  summarize-meta
+      |=  [=meta:wt indent=tape]
+      ^-  tape
+      ?-  -.meta
+          %coil  (summarize-coil p.meta)
+          %label  "label {<p.meta>}"
+          %seed  "seed {<p.meta>}"
+          %watch-key  "watch-key {<p.meta>}"
+          %first-name  (summarize-first-name indent +.meta)
+      ==
+    ::
+    ++  summarize-first-name
+      |=  [indent=tape first-name=hash:transact lock=(unit lock:transact)]
+      ^-  tape
+      """
+      first-name {(trip (to-b58:hash:transact first-name))}
+      """
+    ::
+    ++  summarize-coil
+      |=  =coil:wt
+      ^-  tape
+      =/  version-text=tape  (scow %ud -.coil)
+      =/  key-type=@tas
+        =<  -
+        ~(key get:coil:wt coil)
+      =/  type-text=tape  (scow %tas key-type)
+      "coil {version-text} {type-text}"
+    ::
+    ++  pout
+      |=  pit=pith
+      ^-  path
+      %+  turn  pit
+      |=  iot=iota
+      ^-  @ta
+      ?-  iot
+        @tas  iot
+        [%ub @]  (scot %ub +.iot)
+        [%uc @]  (scot %uc +.iot)
+        [%ud @]  (scot %ud +.iot)
+        [%ui @]  (scot %ui +.iot)
+        [%ux @]  (scot %ux +.iot)
+        [%uv @]  (scot %uv +.iot)
+        [%uw @]  (scot %uw +.iot)
+        [%sb @]  (scot %sb +.iot)
+        [%sc @]  (scot %sc +.iot)
+        [%sd @]  (scot %sd +.iot)
+        [%si @]  (scot %si +.iot)
+        [%sx @]  (scot %sx +.iot)
+        [%sv @]  (scot %sv +.iot)
+        [%sw @]  (scot %sw +.iot)
+        [%da @]  (scot %da +.iot)
+        [%dr @]  (scot %dr +.iot)
+        [%f ?]   (scot %f +.iot)
+        [%n ~]   (scot %n ~)
+        [%if @]  (scot %if +.iot)
+        [%is @]  (scot %is +.iot)
+        [%t @]   (scot %tas +.iot)
+        [%ta @]  (scot %tas +.iot)
+        [%p @]   (scot %p +.iot)
+        [%q @]   (scot %q +.iot)
+        [%rs @]  (scot %rs +.iot)
+        [%rd @]  (scot %rd +.iot)
+        [%rh @]  (scot %rh +.iot)
+        [%rq @]  (scot %rq +.iot)
+      ==
+    --
   ::
   ++  do-show-seed-phrase
     |=  =cause:wt
@@ -803,6 +1099,8 @@
       %+  welp
       """
       ## Wallet Notes
+      - Height: {(trip (format-ui:common:display:utils height.balance.state))}
+      - Block id: {(trip (to-b58:hash:transact block-id.balance.state))}
 
       """
       =-  ?:  =("" -)  "No notes found"  -
@@ -811,7 +1109,7 @@
       |=  note=nnote:transact
       ?^  -.note
         (trip (note:v0:display:utils note))
-      (trip (note:v1:display:utils note %.n))
+      (trip (note:v1:display:utils note %.n ~))
       ::
       [%exit 0]
     ==
@@ -855,6 +1153,8 @@
         %+  welp
           """
           ## Wallet Notes for Address {(trip address.cause)}
+          - Height: {(trip (format-ui:common:display:utils height.balance.state))}
+          - Block id: {(trip (to-b58:hash:transact block-id.balance.state))}
 
           """
         =-  ?:  =("" -)  "No notes found"  -
@@ -864,7 +1164,7 @@
         %-  trip
         ?^  -.nnote
           (note:v0:display:utils nnote)
-        (note:v1:display:utils nnote output=%.n)
+        (note:v1:display:utils nnote output=%.n ~)
         ::
         [%exit 0]
     ==
@@ -945,6 +1245,7 @@
     |^
     %-  (debug "create-tx: {<names.cause>}")
     =/  names=(list nname:transact)  (parse-names names.cause)
+    =/  orders=(list order:wt)  orders.cause
     ?~  active-master.state
       :_  state
       :~  :-  %markdown
@@ -954,13 +1255,41 @@
           """
           [%exit 0]
       ==
-    =/  sign-key  (sign-key:get:v sign-key.cause)
-    =/  pubkey=schnorr-pubkey:transact
-      %-  from-sk:schnorr-pubkey:transact
-      (to-atom:schnorr-seckey:transact sign-key)
-    =/  [=spends:transact primary-pkh=hash:transact]
-      (tx-builder names orders.cause fee.cause sign-key pubkey refund-pkh.cause get-note:v memo-data.cause include-data.cause)
-    (save-transaction spends primary-pkh)
+    =/  sign-keys=(list schnorr-seckey:transact)
+      ?~  sign-keys.cause
+        ~[(sign-key:get:v ~)]
+      %+  turn  u.sign-keys.cause
+      |=  key-info=[child-index=@ud hardened=?]
+      (sign-key:get:v [~ key-info])
+    =/  [=spends:v1:transact =witness-data:wt display=transaction-display:wt]
+      %:  tx-builder
+        names
+        orders
+        fee.cause
+        sign-keys
+        refund-pkh.cause
+        get-note:v
+        memo-data.cause
+        include-data.cause
+      ==
+    =/  multisig-recv-locks=(z-set:zo lock:transact)
+      (gather-multisig-locks orders)
+    =/  transaction-name=@t
+      %-  to-b58:hash:transact
+      id:(new:raw-tx:v1:transact spends)
+    =/  =transaction:wt
+      %*  .  *transaction:wt
+        name     transaction-name
+        spends   spends
+        display  display
+        witness-data  witness-data
+      ==
+    =/  res=effects=(list effect:wt)
+      (save-transaction transaction)
+    ?:  ?=(~ multisig-recv-locks)
+      [effects.res state]
+    :-  effects.res
+    state(keys (watch-multisig-locks multisig-recv-locks))
     ::
     ++  parse-names
       |=  raw-names=(list [first=@t last=@t])
@@ -970,71 +1299,69 @@
       (from-b58:nname:transact [first last])
     ::
     ++  save-transaction
-      |=  [=spends:transact primary-pkh=hash:transact]
-      ^-  [(list effect:wt) state:wt]
-      ~&  "Validating transaction before saving"
+      |=  tx-ser=transaction:wt
+      ^-  (list effect:wt)
       ::  we fallback to the hash of the spends as the transaction name
-      ::  if the tx is invalid. this is just for display
-      ::  in the error message, as an invalid tx is not saved.
-      =/  transaction-name=@t
-        %-  to-b58:hash:transact
-        id:(new:raw-tx:v1:transact spends)
-      ::  TODO: modulate blockchain constants from wallet with poke
-      =+  data=data:*blockchain-constants:transact
-      =/  valid=(reason:dumb ~)
-        %-  validate-with-context:spends:transact
-        [notes.balance.state spends height.balance.state max-size.data]
-      =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
+      ::  when generating filenames to ensure uniqueness.
+      =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends.tx-ser)
       =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
-      =/  fees=@  (roll-fees:spends:v1:transact spends)
-      =/  markdown-text=@t  (transaction:v1:display:utils transaction-name outputs.tx fees)
-      ?-    -.valid
-          %.y
-        ::  jam inputs and save as transaction
-        =/  =transaction:wt  [transaction-name spends]
-        =/  transaction-jam  (jam transaction)
-        =/  tx-path=@t
+      =/  =witness-data:wt  witness-data.tx-ser
+      =/  fees=@  (roll-fees:spends:v1:transact spends.tx-ser)
+      =/  markdown-text=@t
+        (transaction:v1:display:utils name.tx-ser outputs.tx fees display.tx-ser `witness-data)
+      ::  jam inputs and save as transaction
+      =/  transaction-jam  (jam tx-ser)
+      =/  tx-path=@t
+        (crip "./txs/{(trip name.tx-ser)}.tx")
+      %-  (debug "saving transaction to {<path>}")
+      =/  write-effect=effect:wt
+        ?.  save-raw-tx.cause
+          [%file %write tx-path transaction-jam]
+        =/  hashable-path=@t
           %-  crip
-          "./txs/{(trip name.transaction)}.tx"
-        %-  (debug "saving transaction to {<path>}")
-        =/  write-effect=effect:wt
-          ?.  save-raw-tx.cause
-            [%file %write tx-path transaction-jam]
-          =/  hashable-path=@t
-            %-  crip
-            "./txs-debug/{(trip name.transaction)}-hashable.jam"
-          =/  raw-tx-path=@t
-            %-  crip
-            "./txs-debug/{(trip name.transaction)}.jam"
-          :*  %file
-              %batch-write
-              :~  [hashable-path (jam [leaf+%1 (hashable:spends:transact spends)])]
-                  [tx-path transaction-jam]
-                  [raw-tx-path (jam raw-tx)]
-              ==
-          ==
-        :_  state
-        ~[write-effect [%markdown markdown-text]]
-      ::
-          %.n
-        =/  msg=@t
-            %-  crip
-            """
-            # TX Validation Failed
-
-            Failed to validate the correctness of transaction {(trip transaction-name)}.
-            Reason: {(trip p.valid)}
-
-            {(trip markdown-text)}
-            ---
-
-            """
-        %-  (debug "{(trip msg)}")
-        :_  state
-        :~  [%markdown msg]
-            [%exit 1]
+          "./txs-debug/{(trip name.tx-ser)}-hashable.jam"
+        =/  raw-tx-path=@t
+          %-  crip
+          "./txs-debug/{(trip name.tx-ser)}.jam"
+        :*  %file
+            %batch-write
+            :~  [hashable-path (jam [leaf+%1 (hashable:spends:transact spends.tx-ser)])]
+                [tx-path transaction-jam]
+                [raw-tx-path (jam raw-tx)]
+            ==
         ==
+        =.  markdown-text
+          ;:  (cury cat 3)
+            '\0a## Create Tx'
+            '\0a - Saved transaction to '
+            tx-path
+            '\0a '
+            markdown-text
+          ==
+      ~[write-effect [%markdown markdown-text]]
+    ::
+    ++  gather-multisig-locks
+      |=  orders=(list order:wt)
+      ^-  (z-set:zo lock:transact)
+      %-  z-silt:zo
+      %+  murn  orders
+      |=  ord=order:wt
+      ?-    -.ord
+          %pkh  ~
+      ::
+          %multisig
+        =/  allowed=(z-set:zo hash:transact)  (z-silt:zo participants.ord)
+        `[%pkh [m=threshold.ord allowed]]~
       ==
+    ::
+    ++  watch-multisig-locks
+      |=  locks=(z-set:zo lock:transact)
+      ^-  keys:wt
+      %-  ~(rep z-in:zo locks)
+      |=  [lock=lock:transact acc=_keys.state]
+      %-  watch-first-name:put:v
+      [(first:nname:transact (hash:lock:transact lock)) `lock]
+    ::
     --
   ::
   ++  do-keygen
@@ -1315,5 +1642,147 @@
         [%exit 0]
     ==
   ::
+  ++  do-sign-multisig-tx
+    |=  =cause:wt
+    ?>  ?=(%sign-multisig-tx -.cause)
+    |^
+    %-  (debug "sign-multisig-tx: {<name.dat.cause>}")
+    ?~  active-master.state
+      :_  state
+      :~  :-  %markdown
+          %-  crip
+          """
+          Cannot sign without active master address. Please import a master key.
+          """
+          [%exit 1]
+      ==
+    =/  =transaction:wt  dat.cause
+    =/  =witness-data:wt  witness-data.transaction
+    =/  =spends:v1:transact  spends.transaction
+    ?>  ?=(%1 -.witness-data)
+    ::  get sign-keys from wallet
+    ::  if sign-keys is not provided, use master key
+    =/  sign-keys=(list schnorr-seckey:transact)
+      ?~  sign-keys.cause
+        ~[(sign-key:get:v ~)]
+      %+  turn  u.sign-keys.cause
+      |=  key-info=[child-index=@ud hardened=?]
+      (sign-key:get:v [~ key-info])
+    ::  sign all spends with all sign-keys
+    =.  witness-data
+      :-  %1
+      %-  ~(rep z-by:zo spends)
+      |=  $:  [name=nname:transact =spend:v1:transact]
+              wd=(z-map:zo nname:transact witness:transact)
+          ==
+      ?>  ?=(%1 -.spend)
+      =+  sig-hash=(sig-hash:spend-1:v1:transact +.spend)
+      =+  curr-witness=(~(got z-by:zo p.witness-data) name)
+      %+  ~(put z-by:zo wd)  name
+      %+  roll  sign-keys
+      |=  [sk=schnorr-seckey:transact acc=_curr-witness]
+      (sign:witness:transact acc sk sig-hash)
+    ::>) TODO: should the transaction name be changed to reflect the new signature?
+    (save-signed-transaction transaction(witness-data witness-data) sign-keys)
+    ::
+    ++  save-signed-transaction
+      |=  [=transaction:wt sign-keys=(list schnorr-seckey:transact)]
+      ^-  [(list effect:wt) state:wt]
+      =/  transaction-jam  (jam transaction)
+      =/  path=@t
+        %-  crip
+        "./txs/{(trip name.transaction)}.tx"
+      %-  (debug "saving signed transaction to {<path>}")
+      =/  =witness-data:wt  witness-data.transaction
+      ?>  ?=(%1 -.witness-data)
+      =/  sign-pkhs=@t
+        %+  roll  sign-keys
+        |=  [sk=schnorr-seckey:transact pkhs-list=@t]
+        ;:  (cury cat 3)
+            pkhs-list
+            '\0a  - '
+            %-  to-b58:hash:transact
+            %-  hash:schnorr-pubkey:transact
+            %-  from-seckey:schnorr-pubkey:transact
+            sk
+        ==
+      =/  markdown-text=@t
+        %-  crip
+        """
+
+        ### Transaction Signed
+
+        - Transaction {(trip name.transaction)} has been signed with: {(trip sign-pkhs)}
+        - Saved to: {(trip path)}
+
+        ### Witness Data
+        {(trip (witness-data:v1:display:utils witness-data))}
+
+        """
+      =/  =effect:wt  [%file %write path transaction-jam]
+      :_  state
+      :~  [%file %write path transaction-jam]
+          [%markdown markdown-text]
+          [%exit 0]
+      ==
+    --
+  ::
+  ::++  do-show-multisig-tx
+  ::  |=  =cause:wt
+  ::  ?>  ?=(%show-multisig-tx -.cause)
+  ::  %-  (debug "show-multisig-tx: {<name.dat.cause>}")
+  ::  =/  =transaction:wt  dat.cause
+  ::  =/  =spends:transact  spends.transaction
+  ::  =/  display=transaction-display:wt  display.transaction
+  ::  =/  fees=@  (roll-fees:spends:v1:transact spends)
+  ::  =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
+  ::  =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
+  ::  ::  count signatures
+  ::  =/  sig-count=@ud
+  ::    %+  roll  ~(val z-by:zo spends)
+  ::    |=  [spend=spend:v1:transact count=@ud]
+  ::    ?-    -.spend
+  ::        %0  count
+  ::        %1
+  ::      =/  sigs=(list *)  ~(tap z-in:zo pkh.witness.spend)
+  ::      (add count (lent sigs))
+  ::    ==
+  ::  ::  extract required m from lock (if possible)
+  ::  =/  required-m=(unit @ud)
+  ::    =/  first-spend=(unit [name=nname:transact spend=spend:v1:transact])
+  ::      %-  mole
+  ::      |.((head ~(tap z-by:zo spends)))
+  ::    ?~  first-spend  ~
+  ::    ?-    -.spend.u.first-spend
+  ::        %0  ~
+  ::        %1
+  ::      =/  first-seed=(unit seed:v1:transact)
+  ::        %-  mole
+  ::        |.
+  ::        (head ~(tap z-in:zo seeds.spend.u.first-spend))
+  ::      ?~  first-seed  ~
+  ::      ::  would need to decode lock from lock-root to get m
+  ::      ::  for now just show ~
+  ::      ~
+  ::    ==
+  ::  =/  markdown-text=@t
+  ::    %-  crip
+  ::    """
+  ::    # Multisig Transaction Details
+
+  ::    Transaction: {(trip name.transaction)}
+  ::    Total signatures: {<sig-count>}
+  ::    {?~(required-m "" "Required signatures: {<u.required-m>}\0a")}
+  ::    Fee: {(trip (format-ui:common:display:utils fees))} nicks
+
+  ::    ## Outputs
+
+  ::    {(trip (transaction:v1:display:utils name.transaction outputs.tx fees display.transaction))}
+  ::    """
+  ::  :_  state
+  ::  :~  [%markdown markdown-text]
+  ::      [%exit 0]
+  ::  ==
+  ::::
   --  ::+poke
 --

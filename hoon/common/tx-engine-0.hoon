@@ -199,6 +199,8 @@
   ++  to-sig  |=(sop=form (new:sig sop))
   ++  from-sk
     |=(sk=@ux (ch-scal:affine:curve:cheetah sk a-gen:curve:cheetah))
+  ++  from-seckey
+    |=(sk=schnorr-seckey (from-sk (to-atom:schnorr-seckey sk)))
   ++  hash  |=(=form (hash-hashable:tip5 leaf+form))
   --
 ++  schnorr-seckey
@@ -241,6 +243,17 @@
   =<  form
   |%
   +$  form  (z-map schnorr-pubkey schnorr-signature)
+  ++  sign
+    |=  [=form sk=schnorr-seckey sig-hash=^hash]
+    ^-  ^form
+    =/  pk=schnorr-pubkey
+      %-  ch-scal:affine:curve:cheetah
+      :*  (t8-to-atom:belt-schnorr:cheetah sk)
+          a-gen:curve:cheetah
+      ==
+    =/  sig=schnorr-signature
+      (sign:affine:belt-schnorr:cheetah sk sig-hash)
+    (~(put z-by form) pk sig)
   ::
   ++  based
     |=  =form

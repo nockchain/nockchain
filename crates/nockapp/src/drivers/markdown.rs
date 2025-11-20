@@ -25,6 +25,7 @@ pub fn markdown() -> IODriverFn {
                             error!("Failed to convert markdown text to string");
                             continue;
                         };
+                        tracing::debug!("Markdown text: {}", text);
 
                         println!("{}", skin.term_text(&text));
                     }
