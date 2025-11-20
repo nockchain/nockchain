@@ -9,3 +9,4 @@ target
 assets/*.jam
 !crates/nockapp/test-jams
 keys.export
+.github/copilot-instructions.md

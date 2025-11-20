@@ -484,26 +484,6 @@
         =+  (to-b58:nname:transact name)
         :((cury cat 3) '[' first ' ' last ']')
       ::
-      :: ++  memo-data
-      ::   |=  memo=note-data:v1:transact
-      ::   ^-  @t
-      ::   ?~  memo-val=(~(get z-by:zo memo) %memo)
-      ::     ~>  %slog.[0 'memo data in note is missing']  'N/A'
-      ::   ?~  soft-memo=((soft memo-data:wt) u.memo-val)
-      ::     ~>  %slog.[2 'memo data in note is malformed']  'N/A'
-      ::   =/  memo-content=@t
-      ::     ?>  ?=(^ -.u.memo-val)
-      ::     ?>  ?=(^ -.+.u.memo-val)
-      ::     ?>  ?=(@ +.+.u.memo-val)
-      ::     +.+.u.memo-val
-      ::   %-  crip
-      ::   """
-
-      ::     - Memo: 
-      ::       {(trip memo-content)}
-
-      ::   """
-      ::
       ++  lock-data
         |=  data=note-data:v1:transact
         ^-  @t
@@ -532,6 +512,22 @@
 
         """
       ::
+      ++  memo-data
+        |=  data=note-data:v1:transact
+        ^-  @t
+        ?~  memo-val=(~(get z-by:zo data) %memo)
+          'N/A'
+        ?~  soft-memo=((soft memo-data:wt) u.memo-val)
+          ~>  %slog.[2 'memo data in note is malformed']  'N/A'
+        =/  memo-bytes=(list @ux)  +.u.soft-memo
+        =/  memo-text=@t  (crip (turn memo-bytes @tD))
+        %-  crip
+        """
+
+        {(trip memo-text)}
+
+        """
+      ::
       ++  note
         |=  [note=nnote:transact output=?]
         ^-  @t
@@ -554,8 +550,9 @@
            (format-ui:common origin-page.note)
            '\0a- Lock Information: '
            (lock-data note-data.note)
-          ::  '\0a- Memo: '
-          ::  (memo-data note-data.note)
+           '\0a- Memo: '
+           (memo-data note-data.note)
+
          ==
       ++  transaction
         |=  [name=@t outs=outputs:v1:transact fees=@]
