@@ -678,6 +678,8 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                             .map(|f| &f.ty)
                             .collect();
 
+                        let variant_name_str = variant_name.to_string();
+
                         if is_tagged {
                             // Tagged decoding: [%tag [[%field1 value1] [%field2 value2] ...]]
                             let variant_name_str = variant_name.to_string();
@@ -740,23 +742,86 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                 }
                             }
                         } else {
-                            // Untagged decoding: [%tag value1 value2 ...]
+                            let num_fields = field_names.len();
+                            let field_decoders = field_names.iter().zip(field_types.iter()).enumerate()
+                                .map(|(i, (name, ty))| {
+                                    let field = fields.named.iter().find(|f| {
+                                        f.ident.as_ref().unwrap().to_string() == name.to_string()
+                                    }).unwrap();
+
+                                    let custom_axis = parse_axis_attr(&field.attrs);
+
+                                    let default_axis = if i == 0 {
+                                        2  // first field at axis 2
+                                    } else if i == num_fields - 1 {
+                                        let mut axis = 2;
+                                        for _ in 1..i {
+                                            axis = 2 * axis + 2;
+                                        }
+                                        axis + 1
+                                    } else {
+                                        let mut axis = 2;
+                                        for _ in 1..=i {
+                                            axis = 2 * axis + 2;
+                                        }
+                                        axis
+                                    };
+
+                                    let axis = custom_axis.unwrap_or(default_axis);
+                                    let field_name_str = name.to_string();
+                                    quote! {
+                                        ::tracing::trace!(target: "noun_serde_decode", "  variant={} field={} type={} axis={}", #variant_name_str, #field_name_str, stringify!(#ty), #axis);
+                                        let field_noun = ::nockvm::noun::Slots::slot(&data_cell, #axis)
+                                            .map_err(|e| {
+                                                ::tracing::trace!(target: "noun_serde_decode", "  FAILED to get slot {} for field {} in variant {}: {:?}", #axis, #field_name_str, #variant_name_str, e);
+                                                ::noun_serde::NounDecodeError::ExpectedCell
+                                            })?;
+                                        ::tracing::trace!(target: "noun_serde_decode", "  variant={} field={} is_atom={} is_cell={}", #variant_name_str, #field_name_str, field_noun.is_atom(), field_noun.is_cell());
+                                        let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)
+                                            .map_err(|e| {
+                                                ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field {} in variant {}: {:?}", #field_name_str, #variant_name_str, e);
+                                                e
+                                            })?;
+                                        ::tracing::trace!(target: "noun_serde_decode", "  SUCCESS decoded field {} in variant {}", #field_name_str, #variant_name_str);
+                                    }
+                                });
+
+                            let payload_atom_handler = if num_fields == 1 {
+                                let field_name = field_names[0];
+                                let field_type = field_types[0];
+                                let field_name_str = field_name.to_string();
+                                quote! {
+                                    ::tracing::trace!(target: "noun_serde_decode", "Matched variant {} (untagged named fields, payload atom)", #variant_name_str);
+                                    let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun(&payload)
+                                        .map_err(|e| {
+                                            ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field {} in variant {}: {:?}", #field_name_str, #variant_name_str, e);
+                                            e
+                                        })?;
+                                    ::tracing::trace!(target: "noun_serde_decode", "SUCCESS decoded variant {}", #variant_name_str);
+                                    Ok(Self::#variant_name { #field_name })
+                                }
+                            } else {
+                                quote! {
+                                    ::tracing::trace!(target: "noun_serde_decode", "FAILED variant {} payload atom but multiple fields expected", #variant_name_str);
+                                    Err(::noun_serde::NounDecodeError::ExpectedCell)
+                                }
+                            };
+
                             quote! {
                                 tag if tag == #tag => {
+                                    ::tracing::trace!(target: "noun_serde_decode", "Matched variant {} (untagged named fields)", #variant_name_str);
                                     if let Ok(cell) = noun.as_cell() {
-                                        let tail = cell.tail();
-                                        let tail_cell = tail.as_cell()?;
-                                        #(
-                                            let #field_names = <#field_types as ::noun_serde::NounDecode>::from_noun(
-                                                &if stringify!(#field_names) == stringify!(x) {
-                                                    tail_cell.head()
-                                                } else {
-                                                    tail_cell.tail()
-                                                }
-                                            )?;
-                                        )*
-                                        Ok(Self::#variant_name { #(#field_names),* })
+                                        let payload = cell.tail();
+                                        if let Ok(payload_cell) = payload.as_cell() {
+                                            let data_cell = payload_cell;
+                                            #(#field_decoders)*
+                                            ::tracing::trace!(target: "noun_serde_decode", "SUCCESS decoded variant {}", #variant_name_str);
+                                            Ok(Self::#variant_name { #(#field_names),* })
+                                        } else {
+                                            #payload_atom_handler
+                                        }
                                     } else {
+                                        ::tracing::trace!(target: "noun_serde_decode", "FAILED variant {} expected cell", #variant_name_str);
                                         Err(::noun_serde::NounDecodeError::ExpectedCell)
                                     }
                                 }

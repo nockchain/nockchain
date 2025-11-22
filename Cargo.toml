@@ -114,6 +114,7 @@ tempfile = "3.3"
 termcolor = "1.4"
 termimad = "0.33.0"
 testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "54851fd9faf9b9cded9d681b46f87c056880d870" }
+test-log = "0.2.18"
 thiserror = "2.0.11"
 tikv-jemallocator = { version = "0.6" }
 tiny-keccak = { version = "2", features = ["keccak"] }

@@ -125,7 +125,7 @@ pub fn create_mining_driver(
                 share: 1,
                 m: 1,
                 // hardcoded key to satisfy pass-through for v0 pubkey mining infra
-                keys: vec!["2qwq9dQRZfpFx8BDicghpMRnYGKZsZGxxhh9m362pzpM9aeo276pR1yHZPS41y3CW3vPKxeYM8p8fzZS8GXmDGzmNNCnVNekjrSYogqfEFMqwhHh5iCjaKPaDTwhupWqiXj6".to_string()],
+                keys: vec!["2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ".to_string()],
             });
 
             let Some(pkh_configs) = mining_pkh_config else {

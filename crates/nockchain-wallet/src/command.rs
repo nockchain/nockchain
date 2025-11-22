@@ -10,6 +10,7 @@ use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::v0;
 
 use crate::connection::ConnectionCli;
+use crate::recipient::{parse_recipient_arg, RecipientSpecToken};
 
 /// CLI helper that captures optional lower and upper bounds for timelocks.
 #[allow(dead_code)]
@@ -179,12 +180,39 @@ pub struct WalletCli {
     #[command(flatten)]
     pub connection: ConnectionCli,
 
-    /// Include watch-only pubkeys when synchronizing wallet balance
-    #[arg(long, global = true, default_value_t = false)]
-    pub include_watch_only: bool,
-
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum WatchSubcommand {
+    /// Add a watch-only address (base58 pkh or schnorr pubkey)
+    Address {
+        /// Base58-encoded address or schnorr pubkey
+        #[arg(value_name = "address")]
+        address: String,
+    },
+    /// Add a watch-only schnorr pubkey
+    Pubkey {
+        /// Base58-encoded schnorr pubkey
+        #[arg(value_name = "pubkey")]
+        pubkey: String,
+    },
+    /// Add a watch-only first name (base58 hash)
+    //FirstName {
+    //    /// Base58-encoded first name hash
+    //    #[arg(value_name = "first-name")]
+    //    first_name: String,
+    //},
+    /// Import a multisig lock for watch-only tracking
+    Multisig {
+        /// Threshold (m) value for the m-of-n multisig
+        #[arg(short = 't', long = "threshold")]
+        threshold: u64,
+        /// Comma-separated list of base58 pubkey hashes for the multisig
+        #[arg(long)]
+        participants: String,
+    },
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, PartialEq, Eq)]
@@ -276,11 +304,10 @@ pub enum Commands {
         version: Option<u64>,
     },
 
-    /// Add a watch-only address or pubkey to the wallet
-    WatchAddress {
-        /// Public key hash (v1 address) or schnorr pubkey (v0 address). base58 encoded.
-        #[arg(value_name = "address")]
-        address: String,
+    /// Watch addresses, pubkeys, multisigs, or first-names
+    Watch {
+        #[command(subcommand)]
+        subcommand: WatchSubcommand,
     },
 
     /// Export keys to a file
@@ -323,31 +350,23 @@ pub enum Commands {
         tx_id: String,
     },
 
-    /// Signs a transaction (for multisigs only)
-    SignTx {
-        /// Path to input bundle file
-        transaction: String,
-
-        /// Optional key index to use for signing [0, 2^31)
-        #[arg(short, long, value_parser = clap::value_parser!(u64).range(0..2 << 31))]
-        index: Option<u64>,
-        /// Hardened or unhardened child key
-        #[arg(long, default_value = "false")]
-        hardened: bool,
-    },
-
     /// Create a transaction (use --refund-pkh when spending legacy v0 notes)
     #[command(
         name = "create-tx",
-        override_usage = "nockchain-wallet create-tx --names <NAMES> --recipient <RECIPIENT> --fee <FEE> [--refund-pkh <REFUND_PKH>] [--include-data <BOOL>] [--save-raw-tx] \n\n# NOTE: --refund-pkh is required when spending from v0 notes. For v1 notes, the refund defaults to the note owner. --include-data defaults to true (pass 'false' to exclude note data). \n\nExamples:\n  # Send to a single recipient\n  nockchain-wallet create-tx \\\n    --names \"[first1 last1],[first2 last2]\" \\\n    --recipient \"<pkh-b58>:<amount>\" \\\n    --fee 10 \\\n    --refund-pkh <pkh-b58>"
+        override_usage = "nockchain-wallet create-tx --names <NAMES> --recipient <RECIPIENT>... --fee <FEE> [--refund-pkh <REFUND_PKH>] [--include-data <BOOL>]\n\n# NOTE: --refund-pkh is required when spending from v0 notes. For v1 notes, the refund defaults to the note owner. --include-data defaults to true (pass 'false' to exclude note data).\n# RECIPIENT accepts either legacy '<p2pkh>:<amount>' strings or JSON objects like '{\"kind\":\"multisig\",\"threshold\":2,\"addresses\":[\"pkh-a\",\"pkh-b\"],\"amount\":9000}'.\n\nExamples:\n  # Pay a simple recipient\n  nockchain-wallet create-tx \\\n    --names \"[first1 last1],[first2 last2]\" \\\n    --recipient '{\"kind\":\"p2pkh\",\"address\":\"<p2pkh-b58>\",\"amount\":10000}' \\\n    --fee 10 \\\n    --refund-pkh <p2pkh-b58>\n\n  # Create a multisig recipient\n  nockchain-wallet create-tx \\\n    --names \"[first1 last1],[first2 last2]\" \\\n    --recipient '{\"kind\":\"multisig\",\"threshold\":2,\"addresses\":[\"<pkh-a>\",\"<pkh-b>\",\"<pkh-c>\"],\"amount\":9000}' \\\n    --fee 10"
     )]
     CreateTx {
         /// Names of notes to spend (comma-separated)
         #[arg(long)]
         names: String,
-        /// Transaction output, formatted as "<recipient>:<amount>"
-        #[arg(long = "recipient")]
-        recipients: Vec<String>,
+        /// Recipient specifications (repeat --recipient for each output)
+        #[arg(
+            long = "recipient",
+            value_name = "RECIPIENT",
+            value_parser = parse_recipient_arg,
+            action = ArgAction::Append
+        )]
+        recipients: Vec<RecipientSpecToken>,
         /// Transaction fee
         #[arg(long)]
         fee: u64,
@@ -368,10 +387,22 @@ pub enum Commands {
             default_value_t = true
         )]
         include_data: bool,
+        /// Additional signing keys. Accepts `index` or `index:hardened`.
+        #[arg(long = "sign-key", value_name = "INDEX[:HARDENED]", action = ArgAction::Append)]
+        sign_keys: Vec<String>,
         /// For debugging purposes. If true, the raw-tx jam will be saved in the
         /// txs-debug folder in the current working directory.
         #[arg(long, default_value = "false")]
         save_raw_tx: bool,
+    },
+
+    /// Sign a multisig transaction
+    SignMultisigTx {
+        /// Path to transaction file
+        transaction: String,
+        /// Comma-separated list of key indices to sign with (format: index:hardened). If not provided, uses master key.
+        #[arg(long)]
+        sign_keys: Option<String>,
     },
 
     /// Export a master public key
@@ -406,6 +437,14 @@ pub enum Commands {
     /// Show the master zprv extended private key
     #[command(name = "show-master-zprv")]
     ShowMasterZPrv,
+
+    /// Show the key tree structure
+    #[command(name = "show-key-tree")]
+    ShowKeyTree {
+        /// Include values at each path
+        #[arg(long)]
+        include_values: bool,
+    },
 
     /// Fetch confirmation depth for a transaction ID
     // Confirmations {
@@ -511,12 +550,12 @@ impl Commands {
             Commands::DeriveChild { .. } => "derive-child",
             Commands::ImportKeys { .. } => "import-keys",
             Commands::ExportKeys => "export-keys",
-            Commands::SignTx { .. } => "sign-tx",
             Commands::ListNotes => "list-notes",
             Commands::ListNotesByAddress { .. } => "list-notes-by-address",
             Commands::ListNotesByAddressCsv { .. } => "list-notes-by-address-csv",
             Commands::SetActiveMasterAddress { .. } => "set-active-master-address",
             Commands::CreateTx { .. } => "create-tx",
+            Commands::SignMultisigTx { .. } => "sign-multisig-tx",
             Commands::SendTx { .. } => "send-tx",
             Commands::ShowTx { .. } => "show-tx",
             Commands::ShowBalance => "show",
@@ -527,12 +566,18 @@ impl Commands {
             Commands::ShowSeedphrase => "show-seed-phrase",
             Commands::ShowMasterZPub => "show-master-zpub",
             Commands::ShowMasterZPrv => "show-master-zprv",
+            Commands::ShowKeyTree { .. } => "show-key-tree",
             Commands::SignMessage { .. } => "sign-message",
             Commands::VerifyMessage { .. } => "verify-message",
             Commands::SignHash { .. } => "sign-hash",
             Commands::VerifyHash { .. } => "verify-hash",
             Commands::TxAccepted { .. } => "tx-accepted",
-            Commands::WatchAddress { .. } => "watch-address",
+            Commands::Watch { subcommand } => match subcommand {
+                WatchSubcommand::Address { .. } => "watch-address",
+                WatchSubcommand::Pubkey { .. } => "watch-address",
+                //WatchSubcommand::FirstName { .. } => "watch-first-name",
+                WatchSubcommand::Multisig { .. } => "watch-address-multisig",
+            },
         }
     }
 }
