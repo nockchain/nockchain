@@ -81,19 +81,15 @@
 ::
 ~>  %slog.[0 'Notes must all be the same version!!!']  !!
 
-:: add memo
-=/  final-spends=spends:v1:transact
-  ?~(memo-data raw-spends (apply-memo-to-spends raw-spends))
-
 :: calculate fee based on final spends (with memo if present)
-=+  min-fee=(spends:estimate-fee:utils final-spends inputs.display)
+=+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display)
 :: uncomment to debug out of band fee estimation
 :: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data raw-spends))
 :: ~&  min-fee-est+min-fee
 :: ~&  min-fee-ref+min-fee-ref
 ?:  (lth fee min-fee)
   ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
-  [final-spends witness-data display]
+  [raw-spends witness-data display]
 ::
 ::  helpers for building display metadata
 ::
@@ -190,7 +186,7 @@
     ~|('No seeds were provided' !!)
   =/  spend=spend-0:v1:transact
     %*  .  *spend-0:v1:transact
-      seeds  seeds
+      seeds  (apply-memo seeds)
       fee    fee-portion
     ==
   %=  $
@@ -226,18 +222,6 @@
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
   [spends.final-state wd.final-state display.final-state]
-::
-++  apply-memo-to-spends
-  |=  [=spends:v1:transact]
-  %-  ~(gas z-by:zo *spends:v1:transact)
-  %+  turn  ~(tap z-by:zo spends)
-  |=  [name=nname:transact spend=spend:v1:transact]
-  =/  updated-spend=spend:v1:transact
-    ?-  -.spend
-      %0  [%0 +.spend(seeds (apply-memo seeds.+.spend))]
-      %1  [%1 +.spend(seeds (apply-memo seeds.+.spend))]
-    ==
-  [name updated-spend]
 ::
 ++  apply-memo
   |=  =seeds:v1:transact
@@ -295,7 +279,7 @@
     (build-lock-merkle-proof:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
     %*  .  *spend-1:v1:transact
-      seeds  seeds
+      seeds  (apply-memo seeds)
       fee    fee-portion
     ==
   =.  witness.spend
@@ -378,9 +362,10 @@
   =?  include-data  ?=(%multisig -.spec)
     %.y
   =/  =note-data:v1:transact
-    ?:  include-data
-      (~(put z-by:zo *note-data:v1:transact) %lock ^-(lock-data:wt [%0 output-lock]))
-    ~
+    ?.  include-data
+      ~
+    %-  ~(put z-by:zo *note-data:v1:transact)
+    [%lock ^-(lock-data:wt [%0 output-lock])]
   =/  seed=seed:v1:transact
     :*  output-source=~
         lock-root=(hash:lock:transact output-lock)
