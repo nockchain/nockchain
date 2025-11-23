@@ -421,7 +421,8 @@
                                                           ::  if the lock is not a standard 1-of-1 pkh or coinbase, the wallet won't
                                                           ::  be able to guess it, so the funds could be lost forever if the user.
                                                           ::  doesn't keep track of the lock.
-            memo-data=(list @ux)                   ::  optional custom string to override note data instead of lock data
+            memo-data=(list @ux)                          ::  Include arbitrary data on the note, each txn gets 
+                                                          ::  one memo only on the note data of the seed with highest gift
             save-raw-tx=?                                 ::  if %.y, saves jams of the raw-tx and its hashable into a txs-debug folder
                                                           ::  in the current working directory
         ==
