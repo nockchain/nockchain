@@ -748,8 +748,8 @@
           'N/A'
         ?~  soft-memo=((soft memo-data:wt) u.memo-val)
           ~>  %slog.[2 'memo data in note is malformed']  'N/A'
-        =/  memo-bytes=(list @ux)  +.u.soft-memo
-        =/  memo-text=@t  (crip (turn memo-bytes @tD))
+        =/  memo-bytes=(list @ux)  u.soft-memo
+        =/  memo-text=@t  (crip (turn memo-bytes @t))
         %-  crip
         """
 
@@ -785,7 +785,7 @@
            (format-ui:common origin-page.note)
            '\0a- Lock Information: '
            output-lock-info
-            '\0a- Memo: '
+           '\0a- Memo: '
            (memo-data note-data.note)
          ==
     ::
