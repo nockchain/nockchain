@@ -390,7 +390,7 @@ pub enum Commands {
         /// Additional signing keys. Accepts `index` or `index:hardened`.
         #[arg(long = "sign-key", value_name = "INDEX[:HARDENED]", action = ArgAction::Append)]
         sign_keys: Vec<String>,
-        /// Override note data with custom string instead of lock data
+        /// Include arbitrary data on the note (max ~2048 bytes)
         #[arg(long = "memo-data", value_name = "MEMO")]
         memo_data: Option<String>,
         /// For debugging purposes. If true, the raw-tx jam will be saved in the

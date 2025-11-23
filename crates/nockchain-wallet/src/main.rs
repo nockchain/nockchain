@@ -1375,7 +1375,7 @@ fn validate_memo(memo_data: &Option<String>) -> Option<Result<(NounSlab, Operati
         let estimated_leaves = memo_bytes + 128;
         if estimated_leaves > 2048 {
             return Some(Err(NockAppError::from(CrownError::Unknown(format!(
-                "Memo too large: {} bytes would use ~{} leaves (max 2,048 leaves)",
+                "Memo too large: {} bytes would use ~{} leaves (max 2,048 bytes)",
                 memo_bytes, estimated_leaves
             )))));
         }
