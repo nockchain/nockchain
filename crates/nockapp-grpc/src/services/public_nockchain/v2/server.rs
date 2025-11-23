@@ -234,10 +234,7 @@ impl PublicNockchainGrpcServer {
         });
     }
 
-    fn start_block_explorer_refresh(
-        &self,
-        health_reporter: tonic_health::server::HealthReporter,
-    ) {
+    fn start_block_explorer_refresh(&self, health_reporter: tonic_health::server::HealthReporter) {
         let server = self.clone();
         tokio::spawn(async move {
             health_reporter

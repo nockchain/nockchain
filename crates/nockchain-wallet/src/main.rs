@@ -1369,7 +1369,9 @@ impl Wallet {
     }
 }
 
-fn validate_memo(memo_data: &Option<String>) -> Option<Result<(NounSlab, Operation), NockAppError>> {
+fn validate_memo(
+    memo_data: &Option<String>,
+) -> Option<Result<(NounSlab, Operation), NockAppError>> {
     if let Some(memo) = memo_data {
         let memo_bytes = memo.as_bytes().len();
         let estimated_leaves = memo_bytes + 128;
