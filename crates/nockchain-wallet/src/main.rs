@@ -925,7 +925,7 @@ impl Wallet {
             return err;
         }
         // Memo: Option<String> to (list @ux)
-        let memo_data_noun = if let Some(memo_str) = memo_data.as_ref() {
+        let memo_data_noun = if let Some(memo_str) = memo_data {
             let bytes = memo_str.as_bytes();
             let mut list = D(0);
             for &byte in bytes.iter().rev() {
