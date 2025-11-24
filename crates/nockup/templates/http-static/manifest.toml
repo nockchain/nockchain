@@ -1,0 +1,12 @@
+[project]
+name = "{{name}}"
+project_name = "{{project_name}}"
+version = "{{version}}"
+description = "{{description}}"
+author_name = "{{author_name}}"
+author_email = "{{author_email}}"
+github_username = "{{github_username}}"
+license = "{{license}}"
+keywords = ["nockapp", "nockchain", "hoon"]
+nockapp_commit_hash = "{{nockapp_commit_hash}}"
+template = "http-static"

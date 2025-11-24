@@ -1,0 +1,11 @@
+run = "bash ./setup-nockup.sh && chmod 644 ~/.bashrc"
+
+[env]
+PATH = "$HOME/.nockup/bin:$HOME/.cargo/bin:$PATH"
+
+[nix]
+channel = "stable-23_11"
+
+deps = ["curl", "git", "screen", "python3", "rustup"]
+
+packages = ["gnupg"]

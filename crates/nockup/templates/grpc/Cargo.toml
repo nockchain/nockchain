@@ -1,0 +1,40 @@
+[package]
+name = "grpc"
+version = "0.1.0"
+edition = "2021"
+authors = ["N. E. Davis <neal@zorp.io>"]
+description = "A NockApp project"
+
+[[bin]]
+name = "grpc"
+path = "src/main.rs"
+
+[dependencies]
+# NockVM dependency
+nockapp = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+nockvm = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+nockvm_macros = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+noun-serde = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+noun-serde-derive = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+nockapp-grpc = { git = "https://github.com/nockchain/nockchain.git", rev = "485e914b389a1e518d4aaaa24f5f079d0ad894be" }
+
+# Common dependencies for NockApps
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+anyhow = "1.0"
+bytes = "1.5.0"
+clap = "4.4.4"
+tokio = { version = "1.32", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "rt",
+  "signal",
+] }
+tokio-util = "0.7.11"
+tracing = "0.1.41"
+
+[build-dependencies]
+# Build script dependencies if needed

@@ -1,0 +1,31 @@
+[project]
+name = "Et In Arcadia Ego"
+project_name = "arcadia"
+version = "1.0.0"
+description = "I too was in Arcadia."
+author_name = "Nicolas Poussin"
+author_email = "nicolas@poussin.edu"
+github_username = "arcadia"
+license = "MIT"
+keywords = ["nockapp", "nockchain", "hoon"]
+nockapp_commit_hash = "336f744b6b83448ec2b86473a3dec29b15858999"
+template = "basic"
+
+[libraries.sequent]
+url = "https://github.com/jackfoxy/sequent"
+commit = "0f6e6777482447d4464948896b763c080dc9e559"
+
+[libraries.math]
+url = "https://github.com/urbit/numerics"
+branch = "main"
+directory = "libmath"
+
+[libraries.lagoon]
+url = "https://github.com/urbit/numerics"
+directory = "lagoon"
+commit = "7c11c48ab3f21135caa5a4e8744a9c3f828f2607"
+
+[libraries.bits]
+url = "https://github.com/urbit/urbit"
+branch = "develop"
+file = "pkg/arvo/lib/bits.hoon"

@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/nockapp",
+    "crates/nockvm/rust/nockvm",
+    "crates/nockvm/rust/nockvm_crypto",
+    "crates/nockvm/rust/nockvm_macros",
+    "crates/nockvm/rust/ibig",
+    "crates/nockvm/rust/murmur3",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Core workspace crates
+nockapp = { path = "crates/nockapp" }
+nockvm = { path = "crates/nockvm/rust/nockvm" }
+nockvm_crypto = { path = "crates/nockvm/rust/nockvm_crypto" }
+nockvm_macros = { path = "crates/nockvm/rust/nockvm_macros" }
+ibig = { path = "crates/nockvm/rust/ibig" }
+murmur3 = { path = "crates/nockvm/rust/murmur3" }
