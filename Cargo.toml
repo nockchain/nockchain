@@ -1,7 +1,7 @@
 resolver = "2"
 
 [workspace]
-members = ["crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-peek", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-types", "crates/nockchain-wallet", "crates/raw-tx-checker", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack"]
+members = ["crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-peek", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-types", "crates/nockchain-wallet", "crates/raw-tx-checker", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack", "crates/nockup"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,7 +27,7 @@ bytes = "1.5.0"
 cbor4ii = "1.0.0"
 cfg-if = "1.0.0"
 chrono = "0.4.40"
-clap = "4.4.4"
+clap = { version = "4.4.4", features = ["derive"] }
 config = "0.15"
 console-subscriber = "0.4.1"
 criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485aece85a3546126b06cc25d33e14aba829b3", features = [
@@ -92,6 +92,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "http2",
     "charset",
+    "json",
 ] }
 rkyv = "0.8.10"
 rustls = "0.23.0"
