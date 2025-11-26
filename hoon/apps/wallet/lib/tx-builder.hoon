@@ -10,6 +10,7 @@
         sign-keys=(list schnorr-seckey:transact)
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
+        memo-data=(list @ux)
         include-data=?
     ==
 |^
@@ -183,7 +184,7 @@
     ~|('No seeds were provided' !!)
   =/  spend=spend-0:v1:transact
     %*  .  *spend-0:v1:transact
-      seeds  seeds
+      seeds  (apply-memo seeds)
       fee    fee-portion
     ==
   %=  $
@@ -219,6 +220,23 @@
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
   [spends.final-state wd.final-state display.final-state]
+::
+++  apply-memo
+  |=  =seeds:v1:transact
+  =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
+  ::  Sort seeds by gift amount descending and pick the first (largest)
+  =/  sorted-seeds=(list seed:v1:transact)
+    %+  sort  seeds-list
+    |=  [a=seed:v1:transact b=seed:v1:transact]
+    (gth gift.a gift.b)
+  =/  memo-seed=seed:v1:transact  (snag 0 sorted-seeds)
+  =/  updated-note-data=note-data:v1:transact
+    (~(put z-by:zo note-data.memo-seed) %memo ^-(memo-data:wt memo-data))
+  =/  updated-seed=seed:v1:transact
+    memo-seed(note-data updated-note-data)
+  ::  Reconstruct the seeds set with the updated seed at the beginning (largest assets)
+  =/  rest-seeds=(list seed:v1:transact)  (slag 1 sorted-seeds)
+  (~(gas z-in:zo *(z-set:zo seed:v1:transact)) [updated-seed rest-seeds])
 ::
 ++  process-spends-1
   |=  $:  notes=(list nnote-1:v1:transact)
@@ -259,7 +277,7 @@
     (build-lock-merkle-proof:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
     %*  .  *spend-1:v1:transact
-      seeds  seeds
+      seeds  (apply-memo seeds)
       fee    fee-portion
     ==
   =.  witness.spend
@@ -341,7 +359,7 @@
   =/  output-lock=lock:transact  (order-lock spec)
   =?  include-data  ?=(%multisig -.spec)
     %.y
-  =/  nd=note-data:v1:transact
+  =/  =note-data:v1:transact
     ?.  include-data
       ~
     %-  ~(put z-by:zo *note-data:v1:transact)
@@ -349,7 +367,7 @@
   =/  seed=seed:v1:transact
     :*  output-source=~
         lock-root=(hash:lock:transact output-lock)
-        note-data=nd
+        note-data
         gift=(order-gift spec)
         parent-hash=(hash:nnote:transact note)
     ==

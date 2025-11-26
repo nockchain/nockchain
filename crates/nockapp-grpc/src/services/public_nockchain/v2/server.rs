@@ -128,7 +128,7 @@ impl PublicNockchainGrpcServer {
     pub async fn serve(self, addr: SocketAddr) -> Result<()> {
         tracing::Span::current().record("addr", &tracing::field::display(addr));
         info!("Starting PublicNockchain gRPC server on {}", addr);
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_serving::<NockchainServiceServer<PublicNockchainGrpcServer>>()
             .await;
@@ -234,10 +234,7 @@ impl PublicNockchainGrpcServer {
         });
     }
 
-    fn start_block_explorer_refresh(
-        &self,
-        mut health_reporter: tonic_health::server::HealthReporter,
-    ) {
+    fn start_block_explorer_refresh(&self, health_reporter: tonic_health::server::HealthReporter) {
         let server = self.clone();
         tokio::spawn(async move {
             health_reporter

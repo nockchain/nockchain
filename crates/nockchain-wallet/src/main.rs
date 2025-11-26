@@ -282,6 +282,7 @@ async fn main() -> Result<(), NockAppError> {
             hardened,
             include_data,
             sign_keys,
+            memo_data,
             save_raw_tx,
         } => {
             let recipient_specs = recipient_tokens_to_specs(recipients.clone())?;
@@ -293,6 +294,7 @@ async fn main() -> Result<(), NockAppError> {
                 refund_pkh.clone(),
                 signing_keys,
                 *include_data,
+                memo_data.clone(),
                 *save_raw_tx,
             )
         }
@@ -884,6 +886,7 @@ impl Wallet {
         refund_pkh: Option<String>,
         sign_keys: Vec<(u64, bool)>,
         include_data: bool,
+        memo_data: Option<String>,
         save_raw_tx: bool,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
@@ -916,13 +919,31 @@ impl Wallet {
             SIG
         };
         let include_data_noun = include_data.to_noun(&mut slab);
+
+        // Validate memo data
+        if let Some(err) = validate_memo(&memo_data) {
+            return err;
+        }
+        // Memo: Option<String> to (list @ux)
+        let memo_data_noun = if let Some(memo_str) = memo_data {
+            let bytes = memo_str.as_bytes();
+            let mut list = D(0);
+            for &byte in bytes.iter().rev() {
+                let byte_noun = D(u64::from(byte));
+                list = Cell::new(&mut slab, byte_noun, list).as_noun();
+            }
+            list
+        } else {
+            SIG
+        };
+
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
 
         Self::wallet(
             "create-tx",
             &[
                 names_noun, order_noun, fee_noun, sign_key_noun, refund_noun, include_data_noun,
-                save_raw_tx_noun,
+                memo_data_noun, save_raw_tx_noun,
             ],
             Operation::Poke,
             &mut slab,
@@ -1346,6 +1367,27 @@ impl Wallet {
             &mut slab,
         )
     }
+}
+
+fn validate_memo(
+    memo_data: &Option<String>,
+) -> Option<Result<(NounSlab, Operation), NockAppError>> {
+    if let Some(memo) = memo_data {
+        let memo_bytes = memo.as_bytes().len();
+        let estimated_leaves = memo_bytes + 128;
+        if estimated_leaves > 2048 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(format!(
+                "Memo too large: {} bytes would use ~{} leaves (max 2,048 bytes)",
+                memo_bytes, estimated_leaves
+            )))));
+        }
+        if memo_bytes == 0 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(
+                "Memo cannot be empty. Omit --memo-data flag instead.".to_string(),
+            ))));
+        }
+    }
+    None
 }
 
 pub async fn wallet_data_dir() -> Result<PathBuf, NockAppError> {
@@ -1802,6 +1844,43 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_spend_multisig_format() -> Result<(), NockAppError> {
+        init_tracing();
+        let cli = BootCli::parse_from(&[""]);
+        let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
+            .await
+            .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        let mut wallet = Wallet::new(nockapp);
+
+        let names = "[first1 last1],[first2 last2]".to_string();
+        let recipients = vec!["pk1:1".to_string()];
+        let fee = 1;
+
+        let (noun, op) = Wallet::create_tx(
+            names.clone(),
+            recipients.clone(),
+            fee,
+            None::<String>,
+            None,
+            false,
+            true,
+            None::<String>,
+            false,
+        )?;
+        let wire = WalletWire::Command(Commands::CreateTx {
+            names: names.clone(),
+            recipients: recipients.clone(),
+            fee: fee.clone(),
+            refund_pkh: None,
+            index: None,
+            hardened: false,
+            include_data: true,
+            memo_data: None,
+            save_raw_tx: false,
+        })
+        .to_wire();
+        let spend_result = wallet.app.poke(wire, noun.clone()).await?;
+        println!("spend_result: {:?}", spend_result);
+
         // TODO: replace with an end-to-end test that exercises multisig recipient specs.
         Ok(())
     }
@@ -1809,6 +1888,59 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_spend_single_sig_format() -> Result<(), NockAppError> {
+        let cli = BootCli::parse_from(&[""]);
+        let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
+            .await
+            .map_err(|e| CrownError::Unknown(e.to_string()))?;
+        init_tracing();
+        let mut wallet = Wallet::new(nockapp);
+
+        // these should be valid names of notes in the wallet balance
+        let names = "[Amt4GcpYievY4PXHfffiWriJ1sYfTXFkyQsGzbzwMVzewECWDV3Ad8Q BJnaDB3koU7ruYVdWCQqkFYQ9e3GXhFsDYjJ1vSmKFdxzf6Y87DzP4n]".to_string();
+        let recipients = vec!["3HKKp7xZgCw1mhzk4iw735S2ZTavCLHc8YDGRP6G9sSTrRGsaPBu1AqJ8cBDiw2LwhRFnQG7S3N9N9okc28uBda6oSAUCBfMSg5uC9cefhrFrvXVGomoGcRvcFZTWuJzm3ch:100".to_string()];
+        let fee = 0;
+
+        // generate keys
+        let version = 1;
+        let (genkey_noun, genkey_op) =
+            Wallet::import_seed_phrase("correct horse battery staple", version)?;
+        let (spend_noun, spend_op) = Wallet::create_tx(
+            names.clone(),
+            recipients.clone(),
+            fee,
+            None::<String>,
+            None,
+            false,
+            true,
+            None,
+            false,
+        )?;
+
+        let wire1 = WalletWire::Command(Commands::ImportKeys {
+            file: None,
+            key: None,
+            seedphrase: Some("correct horse battery staple".to_string()),
+            version: Some(version),
+        })
+        .to_wire();
+        let genkey_result = wallet.app.poke(wire1, genkey_noun.clone()).await?;
+        println!("genkey_result: {:?}", genkey_result);
+
+        let wire2 = WalletWire::Command(Commands::CreateTx {
+            names: names.clone(),
+            recipients: recipients.clone(),
+            fee: fee.clone(),
+            refund_pkh: None,
+            index: None,
+            hardened: false,
+            include_data: true,
+            memo_data: None,
+            save_raw_tx: false,
+        })
+        .to_wire();
+        let spend_result = wallet.app.poke(wire2, spend_noun.clone()).await?;
+        println!("spend_result: {:?}", spend_result);
+
         // TODO: replace with an end-to-end test for PKH recipients once fixtures exist.
         Ok(())
     }

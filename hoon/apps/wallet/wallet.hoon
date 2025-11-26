@@ -1269,6 +1269,7 @@
         sign-keys
         refund-pkh.cause
         get-note:v
+        memo-data.cause
         include-data.cause
       ==
     =/  multisig-recv-locks=(z-set:zo lock:transact)
