@@ -2,14 +2,6 @@
 
 *Nockup* is a command-line tool to produce [NockApps](https://github.com/nockchain/nockchain) and manage project builds and dependencies.
 
-> 🚨 **Status**  Pre-release development.
->
-> * Nockup has CLI functionality and basic project templating.
->
-> * Nockchain interaction templates are in active development.
->
-> * Nockup will be officially released as a crate within [Nockchain](https://github.com/nockchain/nockchain).
-
 [The NockApp platform](https://github.com/nockchain/nockchain) is a general-purpose framework for building apps that run using the Nock instruction set architecture.  It is particularly well-suited for use with [Nockchain](https://nockchain.org) and the Nock ZKVM.
 
 ![](./img/hero.jpg)
