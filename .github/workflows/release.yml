@@ -120,6 +120,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Install Protocol Buffers compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
       - name: Install required tools for manifest generation
         run: |
           # Install blake3 hash tool from pre-built binaries
