@@ -245,17 +245,17 @@ jobs:
             file target/release/nockchain
           fi
 
-      - name: Build nockchain-wallet (Stage 3 - needs .jam files)
+      - name: Build nockchain-wallet
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
           CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
             file target/${{ matrix.target }}/release/nockchain-wallet
           else
-            cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain/Cargo.toml --locked
+            cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --locked
             file target/release/nockchain-wallet
           fi
 
