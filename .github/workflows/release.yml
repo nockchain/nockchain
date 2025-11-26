@@ -150,6 +150,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y perl
 
+      # Stage 1a: Build native hoonc for .jam generation (cross-compile only)
+      - name: Build hoonc-native (for .jam generation)
+        if: matrix.use_zigbuild == true
+        run: |
+          echo "Building native x86_64 hoonc for .jam generation..."
+          cargo build --release --bin hoonc --manifest-path crates/hoonc/Cargo.toml --locked
+          # Save it with a different name
+          cp target/release/hoonc target/release/hoonc-native
+          file target/release/hoonc-native
+
+      # Stage 1b: Build hoon (all platforms)
       - name: Build hoon
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
@@ -164,7 +175,8 @@ jobs:
             file target/release/hoon
           fi
 
-      - name: Build hoonc
+      # Stage 1c: Build hoonc for target platform
+      - name: Build hoonc (target)
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
           CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
@@ -178,7 +190,34 @@ jobs:
             file target/release/hoonc
           fi
 
-      - name: Build nockup
+      # Stage 2: Generate .jam files using native hoonc
+      - name: Generate .jam assets
+        run: |
+          # Use the appropriate hoonc for .jam generation
+          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
+            # Cross-compile: use native hoonc
+            HOONC_PATH="target/release/hoonc-native"
+            echo "Using native hoonc for .jam generation: $HOONC_PATH"
+          else
+            # Native build: use regular hoonc
+            HOONC_PATH="target/release/hoonc"
+            echo "Using regular hoonc for .jam generation: $HOONC_PATH"
+          fi
+          
+          # Make hoonc available in PATH
+          export PATH="$(dirname $(readlink -f $HOONC_PATH)):$PATH"
+          
+          # Verify hoonc works
+          hoonc --version
+          
+          # Generate .jam files using Makefile
+          mkdir -p assets hoon
+          make assets/dumb.jam assets/miner.jam assets/wal.jam assets/peek.jam
+          
+          # Verify they were created
+          ls -lah assets/*.jam
+
+      - name: Build nockup (Stage 3 - independent)
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
           CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
@@ -192,7 +231,7 @@ jobs:
             file target/release/nockup
           fi
 
-      - name: Build nockchain
+      - name: Build nockchain (Stage 3 - needs .jam files)
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
           CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
@@ -206,7 +245,7 @@ jobs:
             file target/release/nockchain
           fi
 
-      - name: Build nockchain-wallet
+      - name: Build nockchain-wallet (Stage 3 - needs .jam files)
         env:
           CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
           CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
