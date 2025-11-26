@@ -13,7 +13,7 @@
 Prerequisites: Rust toolchain (`rustup`, `cargo`, &c.), Git.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/nockchain/nockchain/refs/head/master/crates/nockup/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/nockchain/nockchain/refs/heads/master/crates/nockup/install.sh | bash
 ```
 
 This checks for dependencies and then installs the Nockup binary and its requirements, including the GPG key used to verify binaries on Linux.  (This is from the `stable` channel by default; see [Channels](#channels) for more information.)
