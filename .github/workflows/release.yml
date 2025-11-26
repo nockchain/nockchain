@@ -322,7 +322,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
-    
+    permissions:
+        contents: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
