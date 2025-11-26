@@ -370,6 +370,26 @@ jobs:
             dist/nockchain-${{ matrix.target }}.tar.gz
             dist/nockchain-wallet-${{ matrix.target }}.tar.gz
 
+      - name: Clean up old releases
+        run: |
+          # Get the last N commits
+          KEEP_COUNT=10
+          COMMITS_TO_KEEP=$(git rev-list --max-count=$KEEP_COUNT HEAD)
+          
+          # Get all releases
+          ALL_RELEASES=$(gh release list --limit 1000 --json tagName -q '.[].tagName')
+          
+          # Delete releases not in the keep list
+          for release_tag in $ALL_RELEASES; do
+            # Extract commit from tag (build-<commit>)
+            COMMIT=${release_tag#build-}
+            
+            if ! echo "$COMMITS_TO_KEEP" | grep -q "$COMMIT"; then
+              echo "Deleting old release: $release_tag"
+              gh release delete "$release_tag" --yes
+            fi
+          done
+
   collate-manifests:
     name: Collate Channel Manifests
     needs: build
