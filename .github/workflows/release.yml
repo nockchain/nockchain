@@ -115,11 +115,6 @@ jobs:
           # Add target
           rustup target add ${{ matrix.target }}
 
-      - name: Cache Rust dependencies
-        uses: swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
       - name: Install Protocol Buffers compiler (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -129,6 +124,11 @@ jobs:
       - name: Install Protocol Buffers compiler (macOS)
         if: runner.os == 'macOS'
         run: brew install protobuf
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install required tools for manifest generation
         run: |
