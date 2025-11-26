@@ -120,10 +120,15 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Protocol Buffers compiler
+      - name: Install Protocol Buffers compiler (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler
+
+      - name: Install Protocol Buffers compiler (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
 
       - name: Install required tools for manifest generation
         run: |
