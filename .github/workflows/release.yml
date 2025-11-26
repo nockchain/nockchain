@@ -64,21 +64,26 @@ jobs:
           # Get nockup version  
           NOCKUP_VERSION=$(grep '^version' crates/nockup/Cargo.toml | cut -d'"' -f2)
           
+          # Get nockchain version
+          NOCKCHAIN_VERSION=$(grep '^version' crates/nockchain/Cargo.toml | cut -d'"' -f2)
+          
           # For nightly, append date
           if [[ "${{ steps.channel.outputs.channel }}" == "nightly" ]]; then
             DATE=$(date +%Y%m%d)
             HOON_VERSION="${HOON_VERSION}-${DATE}"
             HOONC_VERSION="${HOONC_VERSION}-${DATE}"
             NOCKUP_VERSION="${NOCKUP_VERSION}-${DATE}"
+            NOCKCHAIN_VERSION="${NOCKCHAIN_VERSION}-${DATE}"
           fi
           
           # Debug output
           echo "HOON_VERSION='$HOON_VERSION'"
           echo "HOONC_VERSION='$HOONC_VERSION'"
           echo "NOCKUP_VERSION='$NOCKUP_VERSION'"
+          echo "NOCKCHAIN_VERSION='$NOCKCHAIN_VERSION'"
           
           # Validate versions
-          if [[ -z "$HOON_VERSION" || -z "$HOONC_VERSION" || -z "$NOCKUP_VERSION" ]]; then
+          if [[ -z "$HOON_VERSION" || -z "$HOONC_VERSION" || -z "$NOCKUP_VERSION" || -z "$NOCKCHAIN_VERSION" ]]; then
             echo "Error: Missing version in one or more Cargo.toml files"
             exit 1
           fi
@@ -86,7 +91,8 @@ jobs:
           echo "hoon_version=$HOON_VERSION" >> $GITHUB_OUTPUT
           echo "hoonc_version=$HOONC_VERSION" >> $GITHUB_OUTPUT
           echo "nockup_version=$NOCKUP_VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION, nockup=$NOCKUP_VERSION"
+          echo "nockchain_version=$NOCKCHAIN_VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted versions: hoon=$HOON_VERSION, hoonc=$HOONC_VERSION, nockup=$NOCKUP_VERSION, nockchain=$NOCKCHAIN_VERSION"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
@@ -176,6 +182,34 @@ jobs:
             file target/release/nockup
           fi
 
+      - name: Build nockchain
+        env:
+          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
+          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
+          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
+        run: |
+          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
+            cargo zigbuild --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            file target/${{ matrix.target }}/release/nockchain
+          else
+            cargo build --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --locked
+            file target/release/nockchain
+          fi
+
+      - name: Build nockchain-wallet
+        env:
+          CC: ${{ matrix.use_zigbuild && 'zig cc -target aarch64-linux-gnu' || '' }}
+          CXX: ${{ matrix.use_zigbuild && 'zig c++ -target aarch64-linux-gnu' || '' }}
+          AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
+        run: |
+          if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
+            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            file target/${{ matrix.target }}/release/nockchain-wallet
+          else
+            cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain/Cargo.toml --locked
+            file target/release/nockchain-wallet
+          fi
+
       - name: Set up GPG
         if: runner.os == 'Linux' && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         run: |
@@ -209,25 +243,25 @@ jobs:
             BINARY_DIR="target/release"
           fi
           
-          # Copy and make executable
-          for binary in hoon hoonc nockup; do
+          # Package each binary: sign it, then include both binary and .asc in tarball
+          for binary in hoon hoonc nockup nockchain nockchain-wallet; do
             if [ -f "$BINARY_DIR/$binary" ]; then
               cp "$BINARY_DIR/$binary" dist/$binary
               chmod +x dist/$binary
               
-              # Sign individual binary if this is a release build
+              # Sign the binary if this is a release build
               if [[ "$SHOULD_SIGN" == "true" ]]; then
                 echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/$binary
                 echo "Created dist/$binary.asc"
+                
+                # Create tarball with both binary and signature
+                tar -czf dist/${binary}-${{ matrix.target }}.tar.gz -C dist $binary ${binary}.asc
+              else
+                # No signing, just create tarball with binary
+                tar -czf dist/${binary}-${{ matrix.target }}.tar.gz -C dist $binary
               fi
               
-              # Create archive
-              tar -czf dist/${binary}-${CHANNEL}-latest-${{ matrix.target }}.tar.gz -C dist $binary
-              
-              # Sign the archive if this is a release build
-              if [[ "$SHOULD_SIGN" == "true" ]]; then
-                echo "${{ secrets.GPG_PASSPHRASE }}" | gpg --batch --yes --passphrase-fd 0 --pinentry-mode loopback --detach-sign --armor --default-key "${{ secrets.GPG_KEY_ID }}" dist/${binary}-${CHANNEL}-latest-${{ matrix.target }}.tar.gz
-              fi
+              echo "Created dist/${binary}-${{ matrix.target }}.tar.gz"
             else
               echo "Skipping $binary: binary missing at $BINARY_DIR/$binary"
             fi
@@ -248,13 +282,13 @@ jobs:
           
           BINARY=$1
           TARGET=$2
-          CHANNEL=$3
-          VERSION=$4
+          VERSION=$3
           COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
+          COMMIT_SHORT=$(echo $COMMIT_SHA | cut -c1-7)
           DATE=$(date +%Y-%m-%d)
           
           # Calculate hashes from the packaged archive
-          ARCHIVE_PATH="dist/${BINARY}-${CHANNEL}-latest-${TARGET}.tar.gz"
+          ARCHIVE_PATH="dist/${BINARY}-${TARGET}.tar.gz"
           
           if [ ! -f "$ARCHIVE_PATH" ]; then
               echo "Error: Archive not found at $ARCHIVE_PATH" >&2
@@ -264,13 +298,15 @@ jobs:
           BLAKE3_HASH=$(b3sum "$ARCHIVE_PATH" | cut -d' ' -f1)
           SHA1_HASH=$(sha1sum "$ARCHIVE_PATH" 2>/dev/null | cut -d' ' -f1 || shasum -a 1 "$ARCHIVE_PATH" | cut -d' ' -f1)
           
-          # Generate URL
-          URL="https://github.com/nockchain/nockchain/releases/download/$CHANNEL-build-$COMMIT_SHA/$BINARY-$CHANNEL-latest-$TARGET.tar.gz"
+          # Generate URL - using commit-based release tag
+          URL="https://github.com/nockchain/nockchain/releases/download/build-$COMMIT_SHA/$BINARY-$TARGET.tar.gz"
           
           # Generate manifest
           cat << MANIFEST_EOF
           manifest-version = "1"
           date = "$DATE"
+          commit = "$COMMIT_SHA"
+          commit_short = "$COMMIT_SHORT"
           
           [pkg.$BINARY]
           version = "$VERSION"
@@ -286,12 +322,30 @@ jobs:
           
           chmod +x scripts/generate-manifest.sh
           
+          # Get version for nockchain binaries (same for both)
+          NOCKCHAIN_VERSION="${{ steps.cargo-versions.outputs.nockchain_version }}"
+          
           # Generate manifests for each binary that was built
-          CHANNEL="${{ steps.channel.outputs.channel }}"
-          for binary in hoon hoonc nockup; do
-            if [ -f "dist/${binary}-${CHANNEL}-latest-${{ matrix.target }}.tar.gz" ]; then
-              ./scripts/generate-manifest.sh $binary ${{ matrix.target }} "${CHANNEL}" "latest" > "${binary}-${{ matrix.target }}-manifest.toml"
-              echo "Generated manifest for $binary"
+          for binary in hoon hoonc nockup nockchain nockchain-wallet; do
+            if [ -f "dist/${binary}-${{ matrix.target }}.tar.gz" ]; then
+              # Determine version based on binary name
+              case "$binary" in
+                hoon)
+                  VERSION="${{ steps.cargo-versions.outputs.hoon_version }}"
+                  ;;
+                hoonc)
+                  VERSION="${{ steps.cargo-versions.outputs.hoonc_version }}"
+                  ;;
+                nockup)
+                  VERSION="${{ steps.cargo-versions.outputs.nockup_version }}"
+                  ;;
+                nockchain|nockchain-wallet)
+                  VERSION="$NOCKCHAIN_VERSION"
+                  ;;
+              esac
+              
+              ./scripts/generate-manifest.sh $binary ${{ matrix.target }} "$VERSION" > "${binary}-${{ matrix.target }}-manifest.toml"
+              echo "Generated manifest for $binary (version $VERSION)"
             fi
           done
 
@@ -307,15 +361,14 @@ jobs:
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.channel.outputs.channel }}-build-${{ github.sha }}
-          name: ${{ steps.channel.outputs.channel }} Build ${{ github.sha }}
+          tag_name: build-${{ github.sha }}
+          name: Build ${{ github.sha }}
           files: |
-            dist/hoon-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ runner.os == 'Linux' && format('dist/hoon-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
-            dist/hoonc-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ runner.os == 'Linux' && format('dist/hoonc-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
-            dist/nockup-${{ steps.channel.outputs.channel }}-latest-${{ matrix.target }}.tar.gz
-            ${{ runner.os == 'Linux' && format('dist/nockup-{0}-latest-{1}.tar.gz.asc', steps.channel.outputs.channel, matrix.target) || '' }}
+            dist/hoon-${{ matrix.target }}.tar.gz
+            dist/hoonc-${{ matrix.target }}.tar.gz
+            dist/nockup-${{ matrix.target }}.tar.gz
+            dist/nockchain-${{ matrix.target }}.tar.gz
+            dist/nockchain-wallet-${{ matrix.target }}.tar.gz
 
   collate-manifests:
     name: Collate Channel Manifests
@@ -349,8 +402,9 @@ jobs:
           #!/bin/bash
           set -euo pipefail
           
-          CHANNEL=$1
-          MANIFEST_DIR=$2
+          MANIFEST_DIR=$1
+          COMMIT_SHA=${GITHUB_SHA:-$(git rev-parse HEAD)}
+          COMMIT_SHORT=$(echo $COMMIT_SHA | cut -c1-7)
           
           # Get nockup version from the workspace
           NOCKUP_VERSION=$(grep '^version[[:space:]]*=' crates/nockup/Cargo.toml | sed 's/.*=[[:space:]]*"\([^"]*\)".*/\1/' | head -1)
@@ -360,16 +414,12 @@ jobs:
               exit 1
           fi
           
-          # For nightly, append date
-          if [[ "$CHANNEL" == "nightly" ]]; then
-            DATE=$(date +%Y%m%d)
-            NOCKUP_VERSION="${NOCKUP_VERSION}-${DATE}"
-          fi
-          
           # Start with global metadata
           cat << HEADER_EOF
           manifest-version = "1"
           date = "$(date +%Y-%m-%d)"
+          commit = "$COMMIT_SHA"
+          commit_short = "$COMMIT_SHORT"
           
           # Global package info
           [pkg.nockup]
@@ -386,7 +436,7 @@ jobs:
           HEADER_EOF
           
           # Process manifests by package, then by target
-          for package in nockup hoonc hoon; do
+          for package in nockup nockchain nockchain-wallet hoonc hoon; do
               echo "# $package binaries"
               
               # Find all manifests for this package
@@ -417,40 +467,27 @@ jobs:
           
           chmod +x scripts/collate-manifests.sh
           
-      - name: Determine channel from ref
-        id: channel
-        run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "channel=stable" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "master" ]]; then
-            echo "channel=stable" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref_name }}" == "nightly" ]]; then
-            echo "channel=nightly" >> $GITHUB_OUTPUT
-          else
-            echo "channel=dev" >> $GITHUB_OUTPUT
-          fi
-          
       - name: Collate manifests
         run: |
-          ./scripts/collate-manifests.sh ${{ steps.channel.outputs.channel }} toolchains/ > ${{ steps.channel.outputs.channel }}-manifest.toml
+          ./scripts/collate-manifests.sh toolchains/ > nockchain-manifest.toml
           
       - name: Show final manifest
         run: |
-          echo "=== Final ${{ steps.channel.outputs.channel }} manifest ==="
-          cat ${{ steps.channel.outputs.channel }}-manifest.toml
+          echo "=== Final nockchain manifest ==="
+          cat nockchain-manifest.toml
           
       - name: Upload final manifest
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.channel.outputs.channel }}-manifest
-          path: ${{ steps.channel.outputs.channel }}-manifest.toml
+          name: nockchain-manifest
+          path: nockchain-manifest.toml
           retention-days: 30
           
       - name: Add manifest to existing release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.channel.outputs.channel }}-build-${{ github.sha }}
+          tag_name: build-${{ github.sha }}
           files: |
-            ${{ steps.channel.outputs.channel }}-manifest.toml
+            nockchain-manifest.toml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
