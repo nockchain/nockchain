@@ -11,6 +11,7 @@
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
+        note-selection=selection-strategy:wt
     ==
 |^
 ^-  $:  spends:v1:transact
@@ -30,6 +31,7 @@
 =/  sender-pubkey=schnorr-pubkey:transact  i.signer-pubkeys
 =/  sender-pkh=hash:transact  (hash:schnorr-pubkey:transact sender-pubkey)
 =/  notes=(list nnote:transact)  (turn names get-note)
+=/  ascending=?  ?=(%asc note-selection)
 ::  If all notes are v0
 =/  [raw-spends=spends:v1:transact =witness-data:wt display=transaction-display:wt]
   ?:  (levy notes |=(=nnote:transact ?=(^ -.nnote)))
@@ -43,7 +45,7 @@
     =.  notes-v0
       %+  sort  notes-v0
       |=  [a=nnote:v0:transact b=nnote:v0:transact]
-      (gth assets.a assets.b)
+      ?:(ascending (lth assets.a assets.b) (gth assets.a assets.b))
     =/  refund-lock=lock:transact  [%pkh [m=1 (z-silt:zo ~[u.refund-pkh])]]~
     (create-spends-0 notes-v0 orders fee sender-pubkey refund-lock)
   ::  If all notes are v1
@@ -56,7 +58,7 @@
     =.  notes-v1
       %+  sort  notes-v1
       |=  [a=nnote-1:v1:transact b=nnote-1:v1:transact]
-      (gth assets.a assets.b)
+      ?:(ascending (lth assets.a assets.b) (gth assets.a assets.b))
     =/  multisig-lock=(unit lock:transact)
       ::
       ::  ensure that all multisig locks are the same in the input notes
@@ -162,8 +164,10 @@
   ?~  notes
     state
   =/  note  i.notes
-  ?.  ?&  =(1 m.sig.note)
-          (~(has z-in:zo pubkeys.sig.note) pubkey)
+  ?.  ?|  =(pubkeys.sig.note (z-silt:zo ~[pubkey]))
+          ?&  =(1 m.sig.note)
+              (~(has z-in:zo pubkeys.sig.note) pubkey)
+          ==
       ==
     ~>  %slog.[0 'Note not spendable by signing key']  !!
   =/  [pending-orders=(list order:wt) specs=(list order:wt) remainder=@]
@@ -234,10 +238,34 @@
     ((soft note-data:v1:transact) note-data.note)
   ?~  nd
     ~>  %slog.[0 'error: note-data malformed in note!']  !!
-  =+  pulled=(pull-lock:locks:utils [u.nd name.note (some sender-pkh)])
+  =+  pulled=(pull:locks:utils [u.nd name.note (some sender-pkh)])
   ?~  pulled
     =+  name-cord=(name:v1:display:utils name.note)
     ~|  "Error processing note {<name-cord>}. Reason: first-name did not correspond to a supported lock."  !!
+  =/  pkh=(unit pkh:v1:transact)
+    =/  input-lock=spend-condition:transact  u.pulled
+    |-
+    ?~  input-lock
+      ~
+    ?:  ?=(%pkh -.i.input-lock)
+      `+.i.input-lock
+    $(input-lock t.input-lock)
+  =/  signable=?
+    ?~  pkh  %.y
+    %+  levy  sign-keys
+    |=  sk=schnorr-seckey:transact
+    %-  ~(has z-in:zo h.u.pkh)
+    %-  hash:schnorr-pubkey:transact
+    %-  from-sk:schnorr-pubkey:transact
+    (to-atom:schnorr-seckey:transact sk)
+  ?.  signable
+    ~|  ^-  @t
+        ;:  (cury cat 3)
+            'One or more of the provided signing keys is not required by note '
+            (name:v1:display:utils name.note)
+            '.'
+        ==
+    !!
   =/  input-lock=lock:transact  u.pulled
   =/  allocation  (allocate-orders orders.state assets.note)
   =/  [pending-orders=(list order:wt) specs=(list order:wt) remainder=@]

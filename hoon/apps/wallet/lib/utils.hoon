@@ -110,9 +110,9 @@
   --
 ++  locks
   |%
-  ++  pull-lock-inner
+  ++  pull-inner
     |=  [nd=note-data:v1:transact nn=nname:transact pkh=(unit hash:transact)]
-    ^-  (unit lock:transact)
+    ^-  (unit spend-condition:transact)
     ?~  lock-noun=(~(get z-by:zo nd) %lock)
       ?~  pkh
         ~
@@ -127,11 +127,13 @@
       ~
     ?~  soft-lock=((soft lock-data:wt) u.lock-noun)
       ~>  %slog.[0 'lock data in note is malformed']  ~
+    ?@  -.lock.u.soft-lock
+      ~>  %slog.[0 'lock data in note is not a single spend condition']  ~
     (some lock.u.soft-lock)
-  ++  pull-lock
+  ++  pull
     |=  [nd=note-data:v1:transact nn=nname:transact pkh=(unit hash:transact)]
-    ^-  (unit lock:transact)
-    ?~  lok=(pull-lock-inner [nd nn pkh])
+    ^-  (unit spend-condition:transact)
+    ?~  lok=(pull-inner [nd nn pkh])
       ~
     ?:  =((first:nname:transact (hash:lock:transact u.lok)) -.nn)
       lok
@@ -740,17 +742,38 @@
           (bool-text include-data.data)
           (spend-condition u.cond)
         ==
-      ::
-      ++  note
-        |=  [note=nnote:transact output=? output-lock-map=output-lock-map:wt]
-        ^-  @t
+    ::
+      ++  note-from-balance
+        |=  note=nnote-1:v1:transact
+        (^note note (lock-data note-data.note) %.n)
+    ::
+      ++  note-from-output
+        |=  $:  note=nnote-1:v1:transact
+                metadata=(unit lock-metadata:wt)
+            ==
         ?>  ?=(@ -.note)
-        =/  metadata=(unit lock-metadata:wt)
-          (~(get z-by:zo output-lock-map) -.name.note)
-        =/  output-lock-info=@t
+        =/  lock-info=@t
           ?~  metadata
             (lock-data note-data.note)
           (lock-metadata u.metadata)
+        (^note note lock-info %.y)
+    ::
+      ++  note-from-input
+        |=  $:  note=nnote-1:v1:transact
+                sc=spend-condition:transact
+            ==
+        =/  lock-info=@t  (spend-condition sc)
+        (^note note lock-info %.n)
+    ::
+      ::
+      ::  +note: display note. Sometimes lock data is not included in note, it can be passed in
+      ::    separately in the output-lock-map which is accumulated in the tx-builder.
+      ++  note
+        |=  $:  note=nnote-1:v1:transact
+                lock-info=@t
+                output=?
+            ==
+        ^-  @t
         ;:  (cury cat 3)
            '''
 
@@ -768,7 +791,7 @@
              'N/A (output note has not been submitted yet)'
            (format-ui:common origin-page.note)
            '\0a- Lock Information: '
-           output-lock-info
+           lock-info
          ==
     ::
       ++  witness-data
@@ -824,27 +847,53 @@
             min-text  ', max: '  max-text
         ==
     ::
+    ::  show-tx should require sync now
       ++  transaction
         |=  $:  name=@t
                 outs=outputs:v1:transact
                 fees=@
                 display=transaction-display:wt
+                get-note=$-(nname:transact nnote:transact)
                 wd=(unit witness-data:wt)
             ==
         ^-  @t
+        =/  input-notes=tape
+          ?:  ?=(%0 -.inputs.display)
+            %-  zing
+            %+  turn
+            ~(tap z-in:zo ~(key z-by:zo p.inputs.display))
+            |=  =nname:transact
+            =+  note=(get-note nname)
+            ?@  -.note
+              ~|  %expected-v0-note-but-got-v1-note  !!
+            "\0a{(trip (note:v0 note))}"
+          %-  zing
+          %+  turn
+            ~(tap z-by:zo p.inputs.display)
+          |=  [name=nname:transact sc=spend-condition:transact]
+          =/  out-note=nnote:transact  (get-note name)
+          ?^  -.out-note
+            ~|  %expected-v1-note-but-got-v0-note  !!
+          "\0a{(trip (note-from-input out-note sc))}"
         =/  output-notes=tape
           %-  zing
           %+  turn
             ~(tap z-in:zo outs)
           |=  out=output:v1:transact
           =/  out-note=nnote:v1:transact  note.out
-          "\0a{(trip (note out-note %.y outputs.display))}"
-        ::  Input note display is not working because they are not accumulate in builder
+          =+  fn=~(first-name get:nnote:transact out-note)
+          =+  metadata=(~(get z-by:zo outputs.display) fn)
+          ?^  -.out-note
+            "\0a{(trip (note:v0 out-note))}"
+          "\0a{(trip (note-from-output out-note metadata))}"
         %-  crip
         """
         ## Transaction Information
         - Name: {(trip name)}
         - Fee: {(trip (format-ui:common fees))}
+
+        ### Input Notes
+        {input-notes}
 
         ### Output Notes
         {output-notes}

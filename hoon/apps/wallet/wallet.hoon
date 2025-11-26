@@ -715,7 +715,14 @@
     =/  =tx:v1:transact  (new:tx:v1:transact raw height.balance.state)
     =/  fees=@  (roll-fees:spends:v1:transact signed-spends)
     =/  tx-display=@t
-      (transaction:v1:display:utils transaction-name outputs.tx fees display.transaction `witness-data)
+      %:  transaction:v1:display:utils
+          transaction-name
+          outputs.tx
+          fees
+          display.transaction
+          get-note:v
+          `witness-data
+      ==
     =+  data=data:*blockchain-constants:transact
     =/  valid=(reason:dumb ~)
       %-  validate-with-context:spends:transact
@@ -774,13 +781,13 @@
     =/  fees=@  (roll-fees:spends:v1:transact spends)
     =/  =raw-tx:v1:transact  (new:raw-tx:v1:transact spends)
     =/  =tx:v1:transact  (new:tx:v1:transact raw-tx height.balance.state)
-    ~&  display+display.transaction
     =/  markdown-text=@t
       %:  transaction:v1:display:utils
           transaction-name
           outputs.tx
           fees
           display.transaction
+          get-note:v
           `witness-data.transaction
       ==
     :_  state
@@ -1109,7 +1116,7 @@
       |=  note=nnote:transact
       ?^  -.note
         (trip (note:v0:display:utils note))
-      (trip (note:v1:display:utils note %.n ~))
+      (trip (note-from-balance:v1:display:utils note))
       ::
       [%exit 0]
     ==
@@ -1164,7 +1171,7 @@
         %-  trip
         ?^  -.nnote
           (note:v0:display:utils nnote)
-        (note:v1:display:utils nnote output=%.n ~)
+        (note-from-balance:v1:display:utils nnote)
         ::
         [%exit 0]
     ==
@@ -1270,6 +1277,7 @@
         refund-pkh.cause
         get-note:v
         include-data.cause
+        selection-strategy.cause
       ==
     =/  multisig-recv-locks=(z-set:zo lock:transact)
       (gather-multisig-locks orders)
@@ -1307,7 +1315,14 @@
       =/  =witness-data:wt  witness-data.tx-ser
       =/  fees=@  (roll-fees:spends:v1:transact spends.tx-ser)
       =/  markdown-text=@t
-        (transaction:v1:display:utils name.tx-ser outputs.tx fees display.tx-ser `witness-data)
+        %:  transaction:v1:display:utils
+            name.tx-ser
+            outputs.tx
+            fees
+            display.tx-ser
+            get-note:v
+            `witness-data
+        ==
       ::  jam inputs and save as transaction
       =/  transaction-jam  (jam tx-ser)
       =/  tx-path=@t
@@ -1657,8 +1672,10 @@
       ==
     =/  =transaction:wt  dat.cause
     =/  =witness-data:wt  witness-data.transaction
+    ?>  ?&  ?=(%1 -.witness-data)
+            ?=(%1 -.inputs.display.transaction)
+        ==
     =/  =spends:v1:transact  spends.transaction
-    ?>  ?=(%1 -.witness-data)
     ::  get sign-keys from wallet
     ::  if sign-keys is not provided, use master key
     =/  sign-keys=(list schnorr-seckey:transact)
@@ -1667,6 +1684,53 @@
       %+  turn  u.sign-keys.cause
       |=  key-info=[child-index=@ud hardened=?]
       (sign-key:get:v [~ key-info])
+    =+  num-keys-provided=(lent sign-keys)
+    =/  signer-pkhs=(z-set:zo hash:transact)
+      %-  z-silt:zo
+      %+  turn  sign-keys
+      |=  sk=schnorr-seckey:transact
+      %-  hash:schnorr-pubkey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact sk)
+    ::
+    ::  we assume that there is at most one pkh in a single-spend condition
+    =/  pkh-lps=(z-map:zo nname:transact pkh:v1:transact)
+      %-  ~(rep z-by:zo p.inputs.display.transaction)
+      |=  $:  [k=nname:transact v=spend-condition:transact]
+              acc=(z-map:zo nname:transact pkh:v1:transact)
+          ==
+      ?~  v
+        acc
+      ?:  ?=(%pkh -.i.v)
+        (~(put z-by:zo acc) k +.i.v)
+      $(v t.v)
+    =/  not-required=(z-set:zo hash:transact)
+      %-  ~(rep z-by:zo pkh-lps)
+      |=  $:  [k=* =pkh:v1:transact]
+              acc=(z-set:zo hash:transact)
+          ==
+      %-  ~(uni z-in:zo acc)
+      (~(dif z-in:zo signer-pkhs) h.pkh)
+    ?^  not-required
+      =/  pkhs-list=@t
+        %+  roll  ~(tap z-in:zo `(z-set:zo hash:transact)`not-required)
+        |=  [=hash:transact acc=@t]
+        ;:  (cury cat 3)
+            acc
+            '\0a  - '
+            (to-b58:hash:transact hash)
+        ==
+      =/  markdown-text=@t
+        ;:  (cury cat 3)
+            '\0a## Error signing multisig'
+            '\0a- Attempted to sign transaction with keys that are not required by inputs.'
+            '\0a- PKHs that are not required: '
+            pkhs-list
+        ==
+      :_  state
+      :~  [%exit 0]
+          [%markdown markdown-text]
+      ==
     ::  sign all spends with all sign-keys
     =.  witness-data
       :-  %1
@@ -1677,11 +1741,31 @@
       ?>  ?=(%1 -.spend)
       =+  sig-hash=(sig-hash:spend-1:v1:transact +.spend)
       =+  curr-witness=(~(got z-by:zo p.witness-data) name)
+      =+  curr-pkh=(~(got z-by:zo pkh-lps) name)
+      =+  num-signed=~(wyt z-by:zo pkh.curr-witness)
+      ?:  =(m.curr-pkh num-signed)
+        ~|  ^-  @t
+            ;:  (cury cat 3)
+                'No more signatures are required to spend note: '
+                (name:v1:display:utils name)
+                '. Providing more signatures than required will result in an invalid transaction.'
+            ==
+        !!
+      =+  num-needed=(sub m.curr-pkh num-signed)
+      ?:  (gth num-keys-provided num-needed)
+        ~|  ^-  @t
+            ;:  (cury cat 3)
+                'Number of sign keys exceeds the required remaining signatures. '
+                'Needed: '
+                (format-ui:common:display:utils num-needed)
+                ', but provided: '
+                (format-ui:common:display:utils num-keys-provided)
+            ==
+        !!
       %+  ~(put z-by:zo wd)  name
       %+  roll  sign-keys
       |=  [sk=schnorr-seckey:transact acc=_curr-witness]
       (sign:witness:transact acc sk sig-hash)
-    ::>) TODO: should the transaction name be changed to reflect the new signature?
     (save-signed-transaction transaction(witness-data witness-data) sign-keys)
     ::
     ++  save-signed-transaction

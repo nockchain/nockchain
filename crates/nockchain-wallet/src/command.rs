@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use clap::builder::BoolishValueParser;
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use nockapp::driver::Operation;
 use nockapp::kernel::boot::Cli as BootCli;
 use nockapp::wire::{Wire, WireRepr};
@@ -167,6 +167,21 @@ impl FromStr for TimelockRangeCli {
             // Single value -> lower bound only
             let min = Self::parse_bound(trimmed)?;
             TimelockRangeCli::from_bounds(min, None)
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+pub enum NoteSelectionStrategyCli {
+    Ascending,
+    Descending,
+}
+
+impl NoteSelectionStrategyCli {
+    pub fn tas_label(&self) -> &'static str {
+        match self {
+            NoteSelectionStrategyCli::Ascending => "asc",
+            NoteSelectionStrategyCli::Descending => "desc",
         }
     }
 }
@@ -394,6 +409,9 @@ pub enum Commands {
         /// txs-debug folder in the current working directory.
         #[arg(long, default_value = "false")]
         save_raw_tx: bool,
+        /// Note selection strategy (ascending selects smallest notes first)
+        #[arg(long = "note-selection", value_enum, default_value = "ascending")]
+        note_selection_strategy: NoteSelectionStrategyCli,
     },
 
     /// Sign a multisig transaction
