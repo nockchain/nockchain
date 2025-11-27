@@ -420,6 +420,8 @@ jobs:
             dist/nockchain-wallet-${{ matrix.target }}.tar.gz
 
       - name: Clean up old releases
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           # Get the last N commits
           KEEP_COUNT=10
