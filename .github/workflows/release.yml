@@ -420,6 +420,7 @@ jobs:
             dist/nockchain-wallet-${{ matrix.target }}.tar.gz
 
       - name: Clean up old releases
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/nightly' || github.ref_type == 'tag')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
