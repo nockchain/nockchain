@@ -300,14 +300,13 @@ async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
     );
 
     async fn get_latest_manifest(channel: &str, toolchain_dir: &PathBuf) -> Result<()> {
-        let manifest_file = format!("nockchain-manifest.toml");  // ← Changed from "{channel}-manifest.toml"
+        let manifest_file = format!("nockchain-manifest.toml");
         let output_file = toolchain_dir.join(format!("channel-nockup-{}.toml", channel));
 
         println!("{} Fetching manifest for {}...", "🔍".yellow(), channel);
 
         let latest_tag = get_git_commit_id().await?;
 
-        // New URL format: build-{commit}/nockchain-manifest.toml
         let manifest_url = format!(
             "https://github.com/nockchain/nockchain/releases/download/build-{}/{}",
             latest_tag, manifest_file
@@ -348,7 +347,6 @@ async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
         Ok(())
     }
 
-    // For now, only "stable" channel exists (no more stable/nightly separation in tags)
     let channels = ["stable"];
     let mut errors = Vec::new();
 
@@ -419,7 +417,6 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("{} Invalid URL for {} binary", "❌".red(), index))?;
         let archive_url = archive_url.replace("http://", "https://");
-        // NOTE: No more separate signature_url - it's inside the tarball!
 
         let archive_blake3 = manifest["pkg"][index]["target"][architecture]["hash_blake3"]
             .as_str()
@@ -434,7 +431,6 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
 
         let archive_path = download_file(&archive_url).await?;
 
-        // Verify checksums of the tarball FIRST (before extraction)
         verify_checksums(&archive_path, &archive_blake3, &archive_sha1).await?;
         println!("{} Blake3 checksum passed.", "✅".green());
         println!("{} SHA1 checksum passed.", "✅".green());
@@ -443,20 +439,19 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
         let binary_path = target_dir.join("bin");
         fs::create_dir_all(&binary_path)?;
 
-        // Extract binary and signature from archive to temp directory
         let temp_extract_dir = std::env::temp_dir().join(format!("nockup_extract_{}", index));
         if temp_extract_dir.exists() {
             fs::remove_dir_all(&temp_extract_dir)?;
         }
         fs::create_dir_all(&temp_extract_dir)?;
-        
+
         extract_archive_contents(&archive_path, &temp_extract_dir, index).await?;
 
-        // Verify GPG signature if on Linux (signature is NOW inside tarball)
+        // Verify GPG signature if on Linux
         if std::env::consts::OS == "linux" {
             let binary_temp_path = temp_extract_dir.join(index);
             let signature_temp_path = temp_extract_dir.join(format!("{}.asc", index));
-            
+
             if signature_temp_path.exists() {
                 verify_gpg_signature(&binary_temp_path, &signature_temp_path).await?;
             } else {
@@ -474,14 +469,13 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
             );
         }
 
-        // Move binary to final location
         let final_binary_path = binary_path.join(index);
         let binary_temp_path = temp_extract_dir.join(index);
-        
+
         if final_binary_path.exists() {
             fs::remove_file(&final_binary_path)?;
         }
-        
+
         fs::rename(&binary_temp_path, &final_binary_path)?;
 
         #[cfg(unix)]
@@ -650,19 +644,14 @@ async fn extract_archive_contents(
                 target_path.display()
             ))?;
 
-            println!(
-                "{} Extracted {}",
-                "✅".green(),
-                target_path.display()
-            );
+            println!("{} Extracted {}", "✅".green(), target_path.display());
         }
     }
 
     // Verify binary was extracted
     if !target_dir.join(binary_name).exists() {
         return Err(anyhow::anyhow!(
-            "Binary '{}' not found in archive",
-            binary_name
+            "Binary '{}' not found in archive", binary_name
         ));
     }
 
