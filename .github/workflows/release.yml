@@ -238,7 +238,7 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            cargo zigbuild --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/nockchain
           else
             cargo build --release --bin nockchain --manifest-path crates/nockchain/Cargo.toml --locked
@@ -252,7 +252,7 @@ jobs:
           AR: ${{ matrix.use_zigbuild && 'zig ar' || '' }}
         run: |
           if [[ "${{ matrix.use_zigbuild }}" == "true" ]]; then
-            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --target ${{ matrix.target }} --features vendored-openssl
+            cargo zigbuild --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --target ${{ matrix.target }}
             file target/${{ matrix.target }}/release/nockchain-wallet
           else
             cargo build --release --bin nockchain-wallet --manifest-path crates/nockchain-wallet/Cargo.toml --locked
