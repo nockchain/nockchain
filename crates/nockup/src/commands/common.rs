@@ -300,41 +300,21 @@ async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
     );
 
     async fn get_latest_manifest(channel: &str, toolchain_dir: &PathBuf) -> Result<()> {
-        let manifest_file = format!("{}-manifest.toml", channel);
+        let manifest_file = format!("nockchain-manifest.toml");
         let output_file = toolchain_dir.join(format!("channel-nockup-{}.toml", channel));
 
-        println!("{} Fetching latest {} manifest...", "🔍".yellow(), channel);
-
-        let api_url = "https://api.github.com/repos/nockchain/nockchain/releases";
-        let client = reqwest::Client::new();
-        let response = client
-            .get(api_url)
-            .header("User-Agent", "nockup")
-            .send()
-            .await
-            .context("Failed to fetch releases from GitHub API")?;
-
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
-                "Failed to fetch releases: HTTP {}",
-                response.status()
-            ));
-        }
-
-        let releases: serde_json::Value = response
-            .json()
-            .await
-            .context("Failed to parse releases JSON")?;
+        println!("{} Fetching manifest for {}...", "🔍".yellow(), channel);
 
         let latest_tag = get_git_commit_id().await?;
 
         let manifest_url = format!(
-            "https://github.com/nockchain/nockchain/releases/download/{}-build-{}/{}",
-            channel, latest_tag, manifest_file
+            "https://github.com/nockchain/nockchain/releases/download/build-{}/{}",
+            latest_tag, manifest_file
         );
 
         println!("{} Downloading from: {}", "⬇️".blue(), manifest_url);
 
+        let client = reqwest::Client::new();
         let response = client
             .get(&manifest_url)
             .header("User-Agent", "nockup")
@@ -367,7 +347,7 @@ async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
         Ok(())
     }
 
-    let channels = ["stable", "nightly"];
+    let channels = ["stable"];
     let mut errors = Vec::new();
 
     for channel in &channels {
@@ -437,7 +417,6 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("{} Invalid URL for {} binary", "❌".red(), index))?;
         let archive_url = archive_url.replace("http://", "https://");
-        let signature_url = format!("{}.asc", archive_url);
 
         let archive_blake3 = manifest["pkg"][index]["target"][architecture]["hash_blake3"]
             .as_str()
@@ -450,15 +429,38 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
                 anyhow::anyhow!("{} Invalid SHA1 hash for {} binary", "❌".red(), index)
             })?;
 
+        let archive_path = download_file(&archive_url).await?;
+
+        verify_checksums(&archive_path, &archive_blake3, &archive_sha1).await?;
         println!("{} Blake3 checksum passed.", "✅".green());
         println!("{} SHA1 checksum passed.", "✅".green());
 
-        let archive_path = download_file(&archive_url).await?;
+        let target_dir = get_cache_dir()?;
+        let binary_path = target_dir.join("bin");
+        fs::create_dir_all(&binary_path)?;
 
+        let temp_extract_dir = std::env::temp_dir().join(format!("nockup_extract_{}", index));
+        if temp_extract_dir.exists() {
+            fs::remove_dir_all(&temp_extract_dir)?;
+        }
+        fs::create_dir_all(&temp_extract_dir)?;
+
+        extract_archive_contents(&archive_path, &temp_extract_dir, index).await?;
+
+        // Verify GPG signature if on Linux
         if std::env::consts::OS == "linux" {
-            let signature_path = download_file(&signature_url).await?;
-            verify_gpg_signature(&archive_path, &signature_path).await?;
-            fs::remove_file(&signature_path)?;
+            let binary_temp_path = temp_extract_dir.join(index);
+            let signature_temp_path = temp_extract_dir.join(format!("{}.asc", index));
+
+            if signature_temp_path.exists() {
+                verify_gpg_signature(&binary_temp_path, &signature_temp_path).await?;
+            } else {
+                println!(
+                    "{} Warning: No signature file found in archive for {}",
+                    "⚠️".yellow(),
+                    index
+                );
+            }
         } else {
             println!(
                 "{} Skipping signature verification on {} (not yet supported)",
@@ -467,14 +469,32 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
             );
         }
 
-        verify_checksums(&archive_path, &archive_blake3, &archive_sha1).await?;
+        let final_binary_path = binary_path.join(index);
+        let binary_temp_path = temp_extract_dir.join(index);
 
-        let target_dir = get_cache_dir()?;
-        let binary_path = target_dir.join("bin");
-        fs::create_dir_all(&binary_path)?;
+        if final_binary_path.exists() {
+            fs::remove_file(&final_binary_path)?;
+        }
 
-        extract_binary_from_archive(&archive_path, &binary_path, index).await?;
+        fs::rename(&binary_temp_path, &final_binary_path)?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&final_binary_path)?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&final_binary_path, perms)?;
+        }
+
+        println!(
+            "{} Installed {} to {}",
+            "✅".green(),
+            index,
+            final_binary_path.display()
+        );
+
+        // Clean up
+        fs::remove_dir_all(&temp_extract_dir)?;
         fs::remove_file(&archive_path)?;
     }
 
@@ -583,13 +603,13 @@ async fn verify_gpg_signature(
     Ok(())
 }
 
-async fn extract_binary_from_archive(
+async fn extract_archive_contents(
     archive_path: &std::path::Path,
     target_dir: &std::path::Path,
     binary_name: &str,
 ) -> Result<()> {
     println!(
-        "{} Extracting {} from archive...",
+        "{} Extracting {} and signature from archive...",
         "📦".yellow(),
         binary_name
     );
@@ -598,49 +618,38 @@ async fn extract_binary_from_archive(
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
-    let mut found_binary = false;
-
     for entry in archive
         .entries()
         .context("Failed to read archive entries")?
     {
         let mut entry = entry.context("Failed to read archive entry")?;
         let entry_path = entry.path().context("Failed to get entry path")?;
+        let file_name = entry_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid file name in archive"))?;
 
-        if entry_path.file_name() == Some(std::ffi::OsStr::new(binary_name)) {
-            let target_path = target_dir.join(binary_name);
+        // Extract both the binary and its .asc signature
+        if file_name == std::ffi::OsStr::new(binary_name)
+            || file_name == std::ffi::OsStr::new(&format!("{}.asc", binary_name))
+        {
+            let target_path = target_dir.join(file_name);
 
             let mut buffer = Vec::new();
             entry
                 .read_to_end(&mut buffer)
-                .context("Failed to read binary from archive")?;
+                .context("Failed to read file from archive")?;
 
-            let temp_path = target_path.with_extension("tmp");
-            std::fs::write(&temp_path, buffer).context("Failed to write extracted binary")?;
-
-            std::fs::rename(&temp_path, &target_path)
-                .context("Failed to move binary to final location")?;
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&target_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&target_path, perms)?;
-            }
-
-            println!(
-                "{} Extracted {} to {}",
-                "✅".green(),
-                binary_name,
+            std::fs::write(&target_path, buffer).context(format!(
+                "Failed to write extracted file: {}",
                 target_path.display()
-            );
-            found_binary = true;
-            break;
+            ))?;
+
+            println!("{} Extracted {}", "✅".green(), target_path.display());
         }
     }
 
-    if !found_binary {
+    // Verify binary was extracted
+    if !target_dir.join(binary_name).exists() {
         return Err(anyhow::anyhow!(
             "Binary '{}' not found in archive", binary_name
         ));
