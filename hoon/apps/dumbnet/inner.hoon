@@ -297,6 +297,11 @@
       ^-  (unit (unit (z-map tx-id:t [=raw-tx:t heard-at=@])))
       ``raw-txs.c.k
     ::
+      :: transactions unneeded by any block
+        [%excluded-txs ~]
+      ^-  (unit (unit (z-set tx-id:t)))
+      ``excluded-txs.c.k
+    ::
     ::  For %block, %transaction, %raw-transaction, and %balance scries, the ID is
     ::  passed as a base58 encoded string in the scry path.
         [%block bid=@ ~]
