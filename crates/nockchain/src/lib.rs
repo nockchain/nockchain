@@ -516,6 +516,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     nockapp
         .add_io_driver(nockapp_grpc::private_nockapp::grpc_server_driver(
             cli.bind_private_grpc_port,
+            cli.private_grpc_max_recv,
+            cli.private_grpc_max_send,
         ))
         .await;
 

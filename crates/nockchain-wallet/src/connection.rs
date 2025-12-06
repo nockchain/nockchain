@@ -151,15 +151,21 @@ pub(crate) async fn sync_wallet_balance(
 ) -> Result<Vec<NounSlab>, NockAppError> {
     match target {
         GrpcTarget::Private { endpoint } => {
-            let mut client = private_nockapp::PrivateNockAppGrpcClient::connect(endpoint.clone())
-                .await
-                .map_err(|err| connection_error(target.label(), endpoint, err))?;
+            let mut client = private_nockapp::PrivateNockAppGrpcClient::connect(
+                endpoint.clone(),
+                None,
+                None,
+            )
+            .await
+            .map_err(|err| connection_error(target.label(), endpoint, err))?;
             info!(endpoint = %endpoint, "Connected to private NockApp gRPC server");
 
             wallet
                 .app
                 .add_io_driver(private_nockapp::driver::grpc_listener_driver(
                     endpoint.clone(),
+                    None,
+                    None,
                 ))
                 .await;
             Wallet::update_balance_grpc_private(&mut client, pubkeys, tracked_names).await

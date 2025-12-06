@@ -30,14 +30,18 @@ use crate::wire_conversion::create_grpc_wire;
 /// // in an async context with a NockApp instance:
 /// // app.add_io_driver(grpc_server_driver()).await;
 /// ```
-pub fn grpc_server_driver(port: u16) -> IODriverFn {
+pub fn grpc_server_driver(
+    port: u16,
+    max_recv: Option<usize>,
+    max_send: Option<usize>,
+) -> IODriverFn {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     make_driver(move |handle: NockAppHandle| async move {
         info!("Starting private gRPC server on {}", addr);
 
         let server = PrivateNockAppGrpcServer::new(handle);
 
-        match server.serve(addr).await {
+        match server.serve(addr, max_recv, max_send).await {
             Ok(_) => {
                 info!("gRPC server shutting down gracefully");
                 Ok(())
@@ -108,13 +112,18 @@ impl NounDecode for PrivateGrpcEffect {
     }
 }
 
-pub fn grpc_listener_driver(addr: String) -> IODriverFn {
+pub fn grpc_listener_driver(
+    addr: String,
+    max_recv: Option<usize>,
+    max_send: Option<usize>,
+) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
-        let mut client = PrivateNockAppGrpcClient::connect(addr.to_string())
-            .await
-            .map_err(|e| {
-                NockAppError::OtherError(format!("gRPC client failed to connect: {}", e))
-            })?;
+        let mut client =
+            PrivateNockAppGrpcClient::connect(addr.to_string(), max_recv, max_send)
+                .await
+                .map_err(|e| {
+                    NockAppError::OtherError(format!("gRPC client failed to connect: {}", e))
+                })?;
 
         loop {
             match handle.next_effect().await {
