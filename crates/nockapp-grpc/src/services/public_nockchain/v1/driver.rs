@@ -71,16 +71,15 @@ pub fn grpc_listener_driver(
 ) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
         tracing::debug!("Starting public grpc listener driver");
-        let mut client =
-            PublicNockchainGrpcClient::connect(addr.to_string(), max_recv, max_send)
-                .await
-                .map_err(|e| {
-                    info!("Public gRPC client failed to connect: {}", e);
-                    nockapp::NockAppError::OtherError(format!(
-                        "Public gRPC client failed to connect: {}",
-                        e
-                    ))
-                })?;
+        let mut client = PublicNockchainGrpcClient::connect(addr.to_string(), max_recv, max_send)
+            .await
+            .map_err(|e| {
+                info!("Public gRPC client failed to connect: {}", e);
+                nockapp::NockAppError::OtherError(format!(
+                    "Public gRPC client failed to connect: {}",
+                    e
+                ))
+            })?;
 
         loop {
             let effect = match handle.next_effect().await {

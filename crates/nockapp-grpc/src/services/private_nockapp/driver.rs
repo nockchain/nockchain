@@ -118,12 +118,11 @@ pub fn grpc_listener_driver(
     max_send: Option<usize>,
 ) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
-        let mut client =
-            PrivateNockAppGrpcClient::connect(addr.to_string(), max_recv, max_send)
-                .await
-                .map_err(|e| {
-                    NockAppError::OtherError(format!("gRPC client failed to connect: {}", e))
-                })?;
+        let mut client = PrivateNockAppGrpcClient::connect(addr.to_string(), max_recv, max_send)
+            .await
+            .map_err(|e| {
+                NockAppError::OtherError(format!("gRPC client failed to connect: {}", e))
+            })?;
 
         loop {
             match handle.next_effect().await {
