@@ -131,6 +131,16 @@ pub struct NockchainCli {
     #[arg(long, default_value = "5555")]
     pub bind_private_grpc_port: u16,
     #[arg(
+        long = "public-grpc-max-recv",
+        help = "Max public gRPC recv size in bytes (tonic default 4 MiB if unset)"
+    )]
+    pub public_grpc_max_recv: Option<usize>,
+    #[arg(
+        long = "public-grpc-max-send",
+        help = "Max public gRPC send size in bytes (tonic default 4 MiB if unset)"
+    )]
+    pub public_grpc_max_send: Option<usize>,
+    #[arg(
         long = "private-grpc-max-recv",
         help = "Max private gRPC recv size in bytes (tonic default 4 MiB if unset)"
     )]
@@ -213,6 +223,8 @@ mod tests {
             fakenet_coinbase_timelock_min: None,
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
             bind_private_grpc_port: 5555,
+            public_grpc_max_recv: None,
+            public_grpc_max_send: None,
             private_grpc_max_recv: None,
             private_grpc_max_send: None,
             fast_sync: false,

@@ -510,7 +510,11 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             .addr()
             .expect("addr should be Some when deploy_public is true");
         nockapp
-            .add_io_driver(nockapp_grpc::public_nockchain::grpc_server_driver(addr))
+            .add_io_driver(nockapp_grpc::public_nockchain::grpc_server_driver(
+                addr,
+                cli.public_grpc_max_recv,
+                cli.public_grpc_max_send,
+            ))
             .await;
     }
     nockapp

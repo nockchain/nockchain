@@ -100,7 +100,12 @@ impl PublicNockchainGrpcServer {
         }
     }
 
-    pub async fn serve(self, addr: SocketAddr) -> Result<()> {
+    pub async fn serve(
+        self,
+        addr: SocketAddr,
+        max_recv: Option<usize>,
+        max_send: Option<usize>,
+    ) -> Result<()> {
         info!("Starting PublicNockchain gRPC server on {}", addr);
         let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
@@ -117,7 +122,16 @@ impl PublicNockchainGrpcServer {
             warn!("Failed to seed heaviest chain cache: {}", err);
         }
         self.start_heaviest_chain_refresh();
-        let nockchain_api = NockchainServiceServer::new(self);
+        let mut nockchain_api = NockchainServiceServer::new(self);
+
+        // tonic defaults to 4 MiB per message when no override is provided
+        if let Some(limit) = max_recv {
+            nockchain_api = nockchain_api.max_decoding_message_size(limit);
+        }
+        if let Some(limit) = max_send {
+            nockchain_api = nockchain_api.max_encoding_message_size(limit);
+        }
+
         Server::builder()
             .add_service(health_service)
             .add_service(reflection_service_v1)

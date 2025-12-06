@@ -40,10 +40,14 @@ impl NounDecode for PublicNockchainEffect {
 }
 
 /// Create a public gRPC server driver for NockApp (read-only/public API)
-pub fn grpc_server_driver(addr: SocketAddr) -> IODriverFn {
+pub fn grpc_server_driver(
+    addr: SocketAddr,
+    max_recv: Option<usize>,
+    max_send: Option<usize>,
+) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
         let server = PublicNockchainGrpcServer::new(handle);
-        match server.serve(addr).await {
+        match server.serve(addr, max_recv, max_send).await {
             Ok(_) => {
                 info!("Public gRPC server shutting down gracefully");
                 Ok(())
@@ -60,18 +64,23 @@ pub fn grpc_server_driver(addr: SocketAddr) -> IODriverFn {
 }
 
 /// Connect to the public gRPC server and provide a client to the app if needed
-pub fn grpc_listener_driver(addr: String) -> IODriverFn {
+pub fn grpc_listener_driver(
+    addr: String,
+    max_recv: Option<usize>,
+    max_send: Option<usize>,
+) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
         tracing::debug!("Starting public grpc listener driver");
-        let mut client = PublicNockchainGrpcClient::connect(addr.to_string())
-            .await
-            .map_err(|e| {
-                info!("Public gRPC client failed to connect: {}", e);
-                nockapp::NockAppError::OtherError(format!(
-                    "Public gRPC client failed to connect: {}",
-                    e
-                ))
-            })?;
+        let mut client =
+            PublicNockchainGrpcClient::connect(addr.to_string(), max_recv, max_send)
+                .await
+                .map_err(|e| {
+                    info!("Public gRPC client failed to connect: {}", e);
+                    nockapp::NockAppError::OtherError(format!(
+                        "Public gRPC client failed to connect: {}",
+                        e
+                    ))
+                })?;
 
         loop {
             let effect = match handle.next_effect().await {

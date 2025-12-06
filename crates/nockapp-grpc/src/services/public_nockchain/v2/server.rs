@@ -133,7 +133,12 @@ impl PublicNockchainGrpcServer {
         skip(self),
         fields(addr = tracing::field::Empty)
     )]
-    pub async fn serve(self, addr: SocketAddr) -> Result<()> {
+    pub async fn serve(
+        self,
+        addr: SocketAddr,
+        max_recv: Option<usize>,
+        max_send: Option<usize>,
+    ) -> Result<()> {
         tracing::Span::current().record("addr", &tracing::field::display(addr));
         info!("Starting PublicNockchain gRPC server on {}", addr);
         let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
@@ -161,19 +166,31 @@ impl PublicNockchainGrpcServer {
         // For now, we'll initialize in the background task
         self.start_block_explorer_refresh(health_reporter.clone());
 
-        let nockchain_api = NockchainServiceServer::new(self.clone());
+        let mut nockchain_api = NockchainServiceServer::new(self.clone());
 
         // Create block explorer service
-        let block_explorer_api = NockchainBlockServiceServer::new(NockchainBlockServer::new(
+        let mut block_explorer_api = NockchainBlockServiceServer::new(NockchainBlockServer::new(
             self.handle.clone(),
             self.block_explorer_cache.clone(),
             self.metrics.clone(),
         ));
-        let metrics_api = NockchainMetricsServiceServer::new(NockchainMetricsServer::new(
+        let mut metrics_api = NockchainMetricsServiceServer::new(NockchainMetricsServer::new(
             self.handle.clone(),
             self.block_explorer_cache.clone(),
             self.metrics.clone(),
         ));
+
+        // tonic defaults to 4 MiB per message when no override is provided
+        if let Some(limit) = max_recv {
+            nockchain_api = nockchain_api.max_decoding_message_size(limit);
+            block_explorer_api = block_explorer_api.max_decoding_message_size(limit);
+            metrics_api = metrics_api.max_decoding_message_size(limit);
+        }
+        if let Some(limit) = max_send {
+            nockchain_api = nockchain_api.max_encoding_message_size(limit);
+            block_explorer_api = block_explorer_api.max_encoding_message_size(limit);
+            metrics_api = metrics_api.max_encoding_message_size(limit);
+        }
 
         Server::builder()
             .add_service(health_service)

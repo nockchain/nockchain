@@ -1437,7 +1437,11 @@ async fn run_transaction_accepted(
     }
 
     let endpoint = connection.public_grpc_server_addr.to_string();
-    let mut client = public_nockchain::PublicNockchainGrpcClient::connect(endpoint.clone())
+    let mut client = public_nockchain::PublicNockchainGrpcClient::connect(
+        endpoint.clone(),
+        None,
+        None,
+    )
         .await
         .map_err(|err| {
             NockAppError::OtherError(format!(
