@@ -78,25 +78,19 @@
         [%pkh [m=1 (z-silt:zo ~[u.refund-pkh])]]~
       %+  fall  multisig-lock
       [%pkh [m=1 (z-silt:zo ~[sender-pkh])]]~
-    (create-spends-1 notes-v1 orders fee sender-pkh refund-lock)
+    (create-spends-1 notes-v1 orders fee sender-pkh refund-lock memo-data)
 ::
 ~>  %slog.[0 'Notes must all be the same version!!!']  !!
 
-:: apply memo once across spends
-=/  spends=spends:v1:transact
-  ?:  =(~ memo-data)
-    raw-spends
-  (apply-memo-to-spends raw-spends)
-
-:: calculate fee based on raw spends (with memo if present)
-=+  min-fee=(spends:estimate-fee:utils spends inputs.display)
+:: calculate fee based on spends (with memo if present)
+=+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display)
 :: uncomment to debug out of band fee estimation
-:: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data spends))
+:: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data raw-spends))
 :: ~&  min-fee-est+min-fee
 :: ~&  min-fee-ref+min-fee-ref
 ?:  (lth fee min-fee)
   ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
-  [spends witness-data display]
+  [raw-spends witness-data display]
 ::
 ::  helpers for building display metadata
 ::
@@ -213,6 +207,7 @@
           fee=@
           sender-pkh=hash:transact
           refund-lock=lock:transact
+          =memo-data:wt
       ==
   ^-  [=spends:v1:transact witness-data:wt transaction-display:wt]
   =/  initial-state=spend-build-state:wt
@@ -223,7 +218,7 @@
       display  [[%1 ~] ~]
     ==
   =/  final-state
-    (process-spends-1 notes initial-state sender-pkh refund-lock)
+    (process-spends-1 notes initial-state sender-pkh refund-lock memo-data)
   =+  remaining-orders=orders.final-state
   =+  remaining-fee=fee.final-state
   ?.  ?&  =(~ remaining-orders)
@@ -232,75 +227,34 @@
     ~|('Insufficient funds to pay fee and gift' !!)
   [spends.final-state wd.final-state display.final-state]
 ::
-++  apply-memo-to-spends
-  |=  [=spends:v1:transact]
-  =/  spend-list=(list [nname:transact spend:v1:transact])  ~(tap z-by:zo spends)
-  :: collect best seed per spend
-  =/  candidates=(list [seed=seed:v1:transact])
-    %+  murn  spend-list
-    |=  [name=nname:transact spend=spend:v1:transact]
-    =/  seeds=(z-set:zo seed:v1:transact)  seeds.+.spend
-    =/  local-best=(unit [seed=seed:v1:transact])  (max-seed-by-gift seeds)
-    ?~  local-best  ~
-    `seed.u.local-best
-  :: find the global best candidate
-  =/  best  (max-candidate candidates)
-  ?~  best  spends
-  =+  best-seed=u.best
-  :: rebuild spends, updating only the chosen seed
-  %-  ~(gas z-by:zo *spends:v1:transact)
-  %+  turn  spend-list
-  |=  [name=nname:transact spend=spend:v1:transact]
-  =/  seeds=(z-set:zo seed:v1:transact)  seeds.+.spend
-  =/  updated-seeds  (add-memo-to-seed seeds best-seed)
-  =/  updated-spend=spend:v1:transact
-    ?-  -.spend
-      %0  [%0 +.spend(seeds updated-seeds)]
-      %1  [%1 +.spend(seeds updated-seeds)]
-    ==
-  [name updated-spend]
-::
-++  add-memo-to-seed
-  |=  [seeds=(z-set:zo seed:v1:transact) target=seed:v1:transact]
+++  add-memo-to-best-seed
+  |=  [seeds=(z-set:zo seed:v1:transact) =memo-data:wt]
   =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
-  %-  ~(gas z-in:zo *(z-set:zo seed:v1:transact))
-    %+  turn  seeds-list
-    |=  s=seed:v1:transact
-    ?:  =(s target)
-      =/  new-note-data=note-data:v1:transact
-        (~(put z-by:zo note-data.s) %memo ^-(memo-data:wt memo-data))
-      s(note-data new-note-data)
-    s
-::
-++  max-seed-by-gift
-  |=  [seeds=(z-set:zo seed:v1:transact)]
-  =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
-  =/  max-seed=(unit [seed=seed:v1:transact])
+  ::  find seed with highest gift
+  =/  best=(unit seed:v1:transact)
     %+  roll  seeds-list
-    |=  [seed=seed:v1:transact acc=(unit [seed=seed:v1:transact])]
-      ?~  acc
-      (some [seed])
-    ?:  (gth gift.seed gift.seed.u.acc)
-      (some [seed])
+    |=  [s=seed:v1:transact acc=(unit seed:v1:transact)]
+    ?~  acc  (some s)
+    ?:  (gth gift.s gift.u.acc)
+      (some s)
     acc
-  max-seed
-::
-++  max-candidate
-  |=  candidates=(list [seed=seed:v1:transact])
-  =/  best=(unit [seed=seed:v1:transact])
-    %+  roll  candidates
-    |=  [[seed=seed:v1:transact] acc=(unit [seed=seed:v1:transact])]
-    ?~  acc  (some [seed])
-    ?:  (gth gift.seed gift.seed.u.acc)
-      (some [seed])
-    acc
-  best
+  ?~  best  seeds
+  ::  add memo to the best seed
+  %-  ~(gas z-in:zo *(z-set:zo seed:v1:transact))
+  %+  turn  seeds-list
+  |=  s=seed:v1:transact
+  ?:  =(s u.best)
+    =/  new-note-data=note-data:v1:transact
+      (~(put z-by:zo note-data.s) %memo memo-data)
+    s(note-data new-note-data)
+  s
 ::
 ++  process-spends-1
   |=  $:  notes=(list nnote-1:v1:transact)
           state=spend-build-state:wt
           sender-pkh=hash:transact
           refund-lock=lock:transact
+          =memo-data:wt
       ==
   ^-  spend-build-state:wt
   ?~  notes
@@ -351,10 +305,17 @@
     [(build-refund-order refund refund-lock) specs]
   ?:  =(~ specs-with-refund)
     $(notes t.notes)
-  =/  [=seeds:v1:transact output-map=output-lock-map:wt]
+  =/  [raw-seeds=seeds:v1:transact output-map=output-lock-map:wt]
     (seeds-from-specs specs-with-refund note fee-portion)
-  ?~  seeds
+  ?~  raw-seeds
     ~|('No seeds were provided' !!)
+  ::  apply memo to seed with highest gift if memo-data exists and not yet applied
+  =/  =seeds:v1:transact
+    ?:  =(~ memo-data)
+      raw-seeds
+    (add-memo-to-best-seed raw-seeds memo-data)
+  ?~  seeds
+    ~|('No seeds after memo application' !!)
   =/  lmp=lock-merkle-proof:transact
     (build-lock-merkle-proof:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
@@ -373,6 +334,7 @@
     orders.state   pending-orders
     display.state  (update-display-1 name.note display.state output-map input-lock)
     wd.state       (sign-spend name.note [%1 spend] wd.state)
+    memo-data      ~
   ==
 ++  sign-spend
   |=  [name=nname:transact =spend:v1:transact wd=witness-data:wt]
