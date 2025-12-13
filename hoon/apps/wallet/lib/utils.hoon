@@ -801,10 +801,14 @@
            ?:  output
              'N/A (output note has not been submitted yet)'
            (format-ui:common origin-page.note)
+            ?~  memo-val=(~(get z-by:zo note-data.note) %memo)
+              ''
+            ;:  (cury cat 3)
+                '\0a- Memo: '
+                (memo-data note-data.note)
+            ==
            '\0a- Lock Information: '
            lock-info
-          '\0a- Memo: '
-          (memo-data note-data.note)
          ==
     ::
       ++  witness-data

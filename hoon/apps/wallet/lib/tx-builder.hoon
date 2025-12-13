@@ -82,15 +82,21 @@
 ::
 ~>  %slog.[0 'Notes must all be the same version!!!']  !!
 
+:: apply memo once across spends
+=/  spends=spends:v1:transact
+  ?:  =(~ memo-data)
+    raw-spends
+  (apply-memo-to-spends raw-spends)
+
 :: calculate fee based on raw spends (with memo if present)
-=+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display)
+=+  min-fee=(spends:estimate-fee:utils spends inputs.display)
 :: uncomment to debug out of band fee estimation
-:: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data raw-spends))
+:: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data spends))
 :: ~&  min-fee-est+min-fee
 :: ~&  min-fee-ref+min-fee-ref
 ?:  (lth fee min-fee)
   ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
-  [raw-spends witness-data display]
+  [spends witness-data display]
 ::
 ::  helpers for building display metadata
 ::
@@ -189,7 +195,7 @@
     ~|('No seeds were provided' !!)
   =/  spend=spend-0:v1:transact
     %*  .  *spend-0:v1:transact
-      seeds  (apply-memo seeds)
+      seeds  seeds
       fee    fee-portion
     ==
   %=  $
@@ -228,32 +234,67 @@
 ::
 ++  apply-memo-to-spends
   |=  [=spends:v1:transact]
+  =/  spend-list=(list [nname:transact spend:v1:transact])  ~(tap z-by:zo spends)
+  :: collect best seed per spend
+  =/  candidates=(list [seed=seed:v1:transact])
+    %+  murn  spend-list
+    |=  [name=nname:transact spend=spend:v1:transact]
+    =/  seeds=(z-set:zo seed:v1:transact)  seeds.+.spend
+    =/  local-best=(unit [seed=seed:v1:transact])  (max-seed-by-gift seeds)
+    ?~  local-best  ~
+    `seed.u.local-best
+  :: find the global best candidate
+  =/  best  (max-candidate candidates)
+  ?~  best  spends
+  =+  best-seed=u.best
+  :: rebuild spends, updating only the chosen seed
   %-  ~(gas z-by:zo *spends:v1:transact)
-  %+  turn  ~(tap z-by:zo spends)
+  %+  turn  spend-list
   |=  [name=nname:transact spend=spend:v1:transact]
+  =/  seeds=(z-set:zo seed:v1:transact)  seeds.+.spend
+  =/  updated-seeds  (add-memo-to-seed seeds best-seed)
   =/  updated-spend=spend:v1:transact
     ?-  -.spend
-      %0  [%0 +.spend(seeds (apply-memo seeds.+.spend))]
-      %1  [%1 +.spend(seeds (apply-memo seeds.+.spend))]
+      %0  [%0 +.spend(seeds updated-seeds)]
+      %1  [%1 +.spend(seeds updated-seeds)]
     ==
   [name updated-spend]
 ::
-++  apply-memo
-  |=  =seeds:v1:transact
+++  add-memo-to-seed
+  |=  [seeds=(z-set:zo seed:v1:transact) target=seed:v1:transact]
   =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
-  ::  Sort seeds by gift amount descending and pick the first (largest)
-  =/  sorted-seeds=(list seed:v1:transact)
-    %+  sort  seeds-list
-    |=  [a=seed:v1:transact b=seed:v1:transact]
-    (gth gift.a gift.b)
-  =/  memo-seed=seed:v1:transact  (snag 0 sorted-seeds)
-  =/  updated-note-data=note-data:v1:transact
-    (~(put z-by:zo note-data.memo-seed) %memo ^-(memo-data:wt memo-data))
-  =/  updated-seed=seed:v1:transact
-    memo-seed(note-data updated-note-data)
-  ::  Reconstruct the seeds set with the updated seed at the beginning (largest assets)
-  =/  rest-seeds=(list seed:v1:transact)  (slag 1 sorted-seeds)
-  (~(gas z-in:zo *(z-set:zo seed:v1:transact)) [updated-seed rest-seeds])
+  %-  ~(gas z-in:zo *(z-set:zo seed:v1:transact))
+    %+  turn  seeds-list
+    |=  s=seed:v1:transact
+    ?:  =(s target)
+      =/  new-note-data=note-data:v1:transact
+        (~(put z-by:zo note-data.s) %memo ^-(memo-data:wt memo-data))
+      s(note-data new-note-data)
+    s
+::
+++  max-seed-by-gift
+  |=  [seeds=(z-set:zo seed:v1:transact)]
+  =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
+  =/  max-seed=(unit [seed=seed:v1:transact])
+    %+  roll  seeds-list
+    |=  [seed=seed:v1:transact acc=(unit [seed=seed:v1:transact])]
+      ?~  acc
+      (some [seed])
+    ?:  (gth gift.seed gift.seed.u.acc)
+      (some [seed])
+    acc
+  max-seed
+::
+++  max-candidate
+  |=  candidates=(list [seed=seed:v1:transact])
+  =/  best=(unit [seed=seed:v1:transact])
+    %+  roll  candidates
+    |=  [[seed=seed:v1:transact] acc=(unit [seed=seed:v1:transact])]
+    ?~  acc  (some [seed])
+    ?:  (gth gift.seed gift.seed.u.acc)
+      (some [seed])
+    acc
+  best
 ::
 ++  process-spends-1
   |=  $:  notes=(list nnote-1:v1:transact)
@@ -318,7 +359,7 @@
     (build-lock-merkle-proof:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
     %*  .  *spend-1:v1:transact
-      seeds  (apply-memo seeds)
+      seeds  seeds
       fee    fee-portion
     ==
   =.  witness.spend
