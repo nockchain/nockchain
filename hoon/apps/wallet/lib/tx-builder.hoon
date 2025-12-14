@@ -218,43 +218,117 @@
       display  [[%1 ~] ~]
     ==
   =/  final-state
-    (process-spends-1 notes initial-state sender-pkh refund-lock memo-data)
+    (process-spends-1 notes initial-state sender-pkh refund-lock)
   =+  remaining-orders=orders.final-state
   =+  remaining-fee=fee.final-state
   ?.  ?&  =(~ remaining-orders)
           =(0 remaining-fee)
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
-  [spends.final-state wd.final-state display.final-state]
+  ::  apply memo to all spends after they're built, then re-sign the modified spend
+  =/  [final-spends=spends:v1:transact modified-name=(unit nname:transact)]
+    ?:  =(~ memo-data)
+      [spends.final-state ~]
+    (add-memo-to-last-seed-by-lock spends.final-state memo-data)
+  ::  re-sign the modified spend since we changed its seeds
+  =/  final-wd=witness-data:wt
+    ?~  modified-name
+      wd.final-state
+    =/  modified-spend=(unit spend:v1:transact)
+      (~(get z-by:zo final-spends) u.modified-name)
+    ?~  modified-spend
+      wd.final-state
+    (sign-spend u.modified-name u.modified-spend wd.final-state)
+  [final-spends final-wd display.final-state]
 ::
-++  add-memo-to-best-seed
-  |=  [seeds=(z-set:zo seed:v1:transact) =memo-data:wt]
-  =/  seeds-list=(list seed:v1:transact)  ~(tap z-in:zo seeds)
-  ::  find seed with highest gift
-  =/  best=(unit seed:v1:transact)
-    %+  roll  seeds-list
-    |=  [s=seed:v1:transact acc=(unit seed:v1:transact)]
-    ?~  acc  (some s)
-    ?:  (gth gift.s gift.u.acc)
-      (some s)
+++  add-memo-to-last-seed-by-lock
+  |=  [=spends:v1:transact =memo-data:wt]
+  ^-  [spends:v1:transact (unit nname:transact)]
+  =/  all-seeds=(list [=nname:transact seed-idx=@ =seed:v1:transact])
+    %+  roll  ~(tap z-by:zo spends)
+    |=  $:  [nam=nname:transact sp=spend:v1:transact]
+            acc=(list [nname:transact @ seed:v1:transact])
+        ==
+    =/  seed-list=(list seed:v1:transact)
+      ?-  -.sp
+        %0  ~(tap z-in:zo seeds.+.sp)
+        %1  ~(tap z-in:zo seeds.+.sp)
+      ==
+    %+  weld  acc
+    %+  turn  (gulf 0 (dec (lent seed-list)))
+    |=  idx=@
+    [nam idx (snag idx seed-list)]
+  ::
+  ::  group seeds by lock-root
+  =/  by-lock=(z-map:zo hash:transact (list [nname:transact @ seed:v1:transact]))
+    %+  roll  all-seeds
+    |=  $:  item=[nam=nname:transact idx=@ sed=seed:v1:transact]
+            acc=(z-map:zo hash:transact (list [nname:transact @ seed:v1:transact]))
+        ==
+    =/  existing=(unit (list [nname:transact @ seed:v1:transact]))
+      (~(get z-by:zo acc) lock-root.sed.item)
+    %+  ~(put z-by:zo acc)
+      lock-root.sed.item
+    ?~  existing  ~[item]
+    [item u.existing]
+  ::
+  ::  NOTE: tx-engine processes seeds in order and only preserves note-data
+  ::  from the FIRST seed for each lock-root. We add memo to the FIRST seed
+  ::  so it survives the merge.
+  ::
+  ::  find the lock-root with highest total gift and add memo to its first seed
+  =/  best-lock-info=(unit [hash:transact @])
+    %+  roll  ~(tap z-by:zo by-lock)
+    |=  $:  [lock=hash:transact seeds=(list [nname:transact @ seed:v1:transact])]
+            acc=(unit [hash:transact @])
+        ==
+    =/  total-gift=@
+      %+  roll  seeds
+      |=([[* * sed=seed:v1:transact] sum=@] (add gift.sed sum))
+    ?~  acc  `[lock total-gift]
+    ?:  (gth total-gift +.u.acc)  `[lock total-gift]
     acc
-  ?~  best  seeds
-  ::  add memo to the best seed
-  %-  ~(gas z-in:zo *(z-set:zo seed:v1:transact))
-  %+  turn  seeds-list
-  |=  s=seed:v1:transact
-  ?:  =(s u.best)
-    =/  new-note-data=note-data:v1:transact
-      (~(put z-by:zo note-data.s) %memo memo-data)
-    s(note-data new-note-data)
-  s
+  ::
+  ?~  best-lock-info  [spends ~]
+  =/  best-lock=hash:transact  -.u.best-lock-info
+  =/  target-seeds=(unit (list [nname:transact @ seed:v1:transact]))
+    (~(get z-by:zo by-lock) best-lock)
+  ?~  target-seeds  [spends ~]
+  ::  get the first seed in the group (last in list since we prepended)
+  =/  target=[nam=nname:transact idx=@ sed=seed:v1:transact]
+    (snag (dec (lent u.target-seeds)) u.target-seeds)
+  =/  target-spend=(unit spend:v1:transact)
+    (~(get z-by:zo spends) nam.target)
+  ?~  target-spend  [spends ~]
+  =/  seed-list=(list seed:v1:transact)
+    ?-  -.u.target-spend
+      %0  ~(tap z-in:zo seeds.+.u.target-spend)
+      %1  ~(tap z-in:zo seeds.+.u.target-spend)
+    ==
+  =/  updated-seeds=seeds:v1:transact
+    %-  z-silt:zo
+    %+  turn  (gulf 0 (dec (lent seed-list)))
+    |=  i=@
+    =/  s=seed:v1:transact  (snag i seed-list)
+    ?:  &(=(i idx.target) =(lock-root.s lock-root.sed.target))
+      =/  new-note-data=note-data:v1:transact
+        (~(put z-by:zo note-data.s) %memo memo-data)
+      s(note-data new-note-data)
+    s
+  =/  updated-spend=spend:v1:transact
+    ?-  -.u.target-spend
+      %0  [%0 +.u.target-spend(seeds updated-seeds)]
+      %1  [%1 +.u.target-spend(seeds updated-seeds)]
+    ==
+  =/  updated-spends=spends:v1:transact
+    (~(put z-by:zo spends) nam.target updated-spend)
+  [updated-spends `nam.target]
 ::
 ++  process-spends-1
   |=  $:  notes=(list nnote-1:v1:transact)
           state=spend-build-state:wt
           sender-pkh=hash:transact
           refund-lock=lock:transact
-          =memo-data:wt
       ==
   ^-  spend-build-state:wt
   ?~  notes
@@ -305,17 +379,10 @@
     [(build-refund-order refund refund-lock) specs]
   ?:  =(~ specs-with-refund)
     $(notes t.notes)
-  =/  [raw-seeds=seeds:v1:transact output-map=output-lock-map:wt]
+  =/  [=seeds:v1:transact output-map=output-lock-map:wt]
     (seeds-from-specs specs-with-refund note fee-portion)
-  ?~  raw-seeds
-    ~|('No seeds were provided' !!)
-  ::  apply memo to seed with highest gift if memo-data exists and not yet applied
-  =/  =seeds:v1:transact
-    ?:  =(~ memo-data)
-      raw-seeds
-    (add-memo-to-best-seed raw-seeds memo-data)
   ?~  seeds
-    ~|('No seeds after memo application' !!)
+    ~|('No seeds were provided' !!)
   =/  lmp=lock-merkle-proof:transact
     (build-lock-merkle-proof:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
@@ -334,7 +401,6 @@
     orders.state   pending-orders
     display.state  (update-display-1 name.note display.state output-map input-lock)
     wd.state       (sign-spend name.note [%1 spend] wd.state)
-    memo-data      ~
   ==
 ++  sign-spend
   |=  [name=nname:transact =spend:v1:transact wd=witness-data:wt]
