@@ -82,7 +82,6 @@
 ::
 ~>  %slog.[0 'Notes must all be the same version!!!']  !!
 
-:: calculate fee based on spends (with memo if present)
 =+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display)
 :: uncomment to debug out of band fee estimation
 :: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data raw-spends))
@@ -225,7 +224,7 @@
           =(0 remaining-fee)
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
-  ::  apply memo to all spends after they're built, then re-sign the modified spend
+  ::  apply memo to spends after they're built, then re-sign modified spend
   =/  [final-spends=spends:v1:transact modified-name=(unit nname:transact)]
     ?:  =(~ memo-data)
       [spends.final-state ~]
