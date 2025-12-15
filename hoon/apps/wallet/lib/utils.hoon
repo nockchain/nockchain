@@ -743,6 +743,17 @@
           (spend-condition u.cond)
         ==
     ::
+      ++  memo-data
+        |=  data=note-data:v1:transact
+        ^-  @t
+        ?~  memo-val=(~(get z-by:zo data) %memo)
+          'N/A'
+        ?~  soft-memo=((soft memo-data:wt) u.memo-val)
+          ~>  %slog.[2 'memo data in note is malformed']  'N/A'
+        =/  memo-bytes=memo-data:wt  u.soft-memo
+        =/  memo-text=@t  (crip (turn memo-bytes @tD))
+        memo-text
+    ::
       ++  note-from-balance
         |=  note=nnote-1:v1:transact
         (^note note (lock-data note-data.note) %.n)
@@ -790,6 +801,12 @@
            ?:  output
              'N/A (output note has not been submitted yet)'
            (format-ui:common origin-page.note)
+            ?~  memo-val=(~(get z-by:zo note-data.note) %memo)
+              ''
+            ;:  (cury cat 3)
+                '\0a- Memo: '
+                (memo-data note-data.note)
+            ==
            '\0a- Lock Information: '
            lock-info
          ==

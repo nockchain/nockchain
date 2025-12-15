@@ -191,11 +191,11 @@ impl TraceBackend for TracingBackend {
             .expect("No subscriber with a trace stack");
 
         loop {
-            let id = Id::from_u64((*trace_stack).span_id);
+            let id = Id::from_u64((&(*trace_stack)).span_id);
 
             subscriber.exit(&id);
 
-            trace_stack = (*trace_stack).next;
+            trace_stack = (&(*trace_stack)).next;
 
             if trace_stack.is_null() {
                 break Ok(());
