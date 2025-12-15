@@ -1857,8 +1857,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn test_spend_single_sig_format() -> Result<(), NockAppError> {
-         // TODO: replace with an end-to-end test for PKH recipients once fixtures exist.
-         Ok(())
+        // TODO: replace with an end-to-end test for PKH recipients once fixtures exist.
+        Ok(())
     }
 
     #[tokio::test]
