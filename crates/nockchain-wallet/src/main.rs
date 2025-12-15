@@ -301,6 +301,7 @@ async fn main() -> Result<(), NockAppError> {
             index,
             hardened,
             include_data,
+            memo_data,
             sign_keys,
             save_raw_tx,
             note_selection_strategy,
@@ -315,6 +316,7 @@ async fn main() -> Result<(), NockAppError> {
                 refund_pkh.clone(),
                 signing_keys,
                 *include_data,
+                memo_data.clone(),
                 *save_raw_tx,
                 *note_selection_strategy,
             )
@@ -938,6 +940,7 @@ impl Wallet {
         refund_pkh: Option<String>,
         sign_keys: Vec<(u64, bool)>,
         include_data: bool,
+        memo_data: Option<String>,
         save_raw_tx: bool,
         note_selection: NoteSelectionStrategyCli,
     ) -> CommandNoun<NounSlab> {
@@ -972,6 +975,24 @@ impl Wallet {
         };
         let include_data_noun = include_data.to_noun(&mut slab);
         let allow_low_fee_noun = allow_low_fee.to_noun(&mut slab);
+
+        // Validate memo data
+        if let Some(err) = validate_memo(&memo_data) {
+            return err;
+        }
+        // Memo: Option<String> to (list @ux)
+        let memo_data_noun = if let Some(memo_str) = memo_data.as_ref() {
+            let bytes = memo_str.as_bytes();
+            let mut list = D(0);
+            for &byte in bytes.iter().rev() {
+                let byte_noun = D(u64::from(byte));
+                list = Cell::new(&mut slab, byte_noun, list).as_noun();
+            }
+            list
+        } else {
+            SIG
+        };
+
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
         let note_selection_noun = make_tas(&mut slab, note_selection.tas_label()).as_noun();
 
@@ -979,7 +1000,7 @@ impl Wallet {
             "create-tx",
             &[
                 names_noun, order_noun, fee_noun, allow_low_fee_noun, sign_key_noun, refund_noun,
-                include_data_noun, save_raw_tx_noun, note_selection_noun,
+                include_data_noun, memo_data_noun, save_raw_tx_noun, note_selection_noun,
             ],
             Operation::Poke,
             &mut slab,
@@ -1404,6 +1425,27 @@ impl Wallet {
             &mut slab,
         )
     }
+}
+
+fn validate_memo(
+    memo_data: &Option<String>,
+) -> Option<Result<(NounSlab, Operation), NockAppError>> {
+    if let Some(memo) = memo_data {
+        let memo_bytes = memo.as_bytes().len();
+        let estimated_leaves = memo_bytes + 128;
+        if estimated_leaves > 2048 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(format!(
+                "Memo too large: {} bytes would use ~{} leaves (max 2,048 bytes)",
+                memo_bytes, estimated_leaves
+            )))));
+        }
+        if memo_bytes == 0 {
+            return Some(Err(NockAppError::from(CrownError::Unknown(
+                "Memo cannot be empty. Omit --memo-data flag instead.".to_string(),
+            ))));
+        }
+    }
+    None
 }
 
 pub async fn wallet_data_dir() -> Result<PathBuf, NockAppError> {
