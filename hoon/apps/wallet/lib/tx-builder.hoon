@@ -224,20 +224,16 @@
           =(0 remaining-fee)
       ==
     ~|('Insufficient funds to pay fee and gift' !!)
-  ::  apply memo to spends after they're built, then re-sign modified spend
+  ::  apply memo to spends after they're built (before signing)
   =/  [final-spends=spends:v1:transact modified-name=(unit nname:transact)]
     ?:  =(~ memo-data)
       [spends.final-state ~]
     (add-memo-to-last-seed-by-lock spends.final-state memo-data)
-  ::  re-sign the modified spend since we changed its seeds
+  ::  sign all spends once (including any with memo applied)
   =/  final-wd=witness-data:wt
-    ?~  modified-name
-      wd.final-state
-    =/  modified-spend=(unit spend:v1:transact)
-      (~(get z-by:zo final-spends) u.modified-name)
-    ?~  modified-spend
-      wd.final-state
-    (sign-spend u.modified-name u.modified-spend wd.final-state)
+    %+  roll  ~(tap z-by:zo final-spends)
+    |=  [[nam=nname:transact sp=spend:v1:transact] acc=witness-data:wt]
+    (sign-spend nam sp acc)
   [final-spends final-wd display.final-state]
 ::
 ++  add-memo-to-last-seed-by-lock
@@ -271,11 +267,11 @@
     ?~  existing  ~[item]
     [item u.existing]
   ::
-  ::  NOTE: tx-engine processes seeds in order and only preserves note-data
-  ::  from the FIRST seed for each lock-root. We add memo to the FIRST seed
+  ::  NOTE: tx engine processes seeds in order and only preserves note-data
+  ::  from the LAST seed for each lock-root. We add memo to the LAST seed
   ::  so it survives the merge.
   ::
-  ::  find the lock-root with highest total gift and add memo to its first seed
+  ::  find the lock-root with highest total gift and add memo to its last seed
   =/  best-lock-info=(unit [hash:transact @])
     %+  roll  ~(tap z-by:zo by-lock)
     |=  $:  [lock=hash:transact seeds=(list [nname:transact @ seed:v1:transact])]
@@ -293,9 +289,9 @@
   =/  target-seeds=(unit (list [nname:transact @ seed:v1:transact]))
     (~(get z-by:zo by-lock) best-lock)
   ?~  target-seeds  [spends ~]
-  ::  get the first seed in the group (last in list since we prepended)
+  ::  get the LAST seed in the group (first in list since we prepended)
   =/  target=[nam=nname:transact idx=@ sed=seed:v1:transact]
-    (snag (dec (lent u.target-seeds)) u.target-seeds)
+    (snag 0 u.target-seeds)
   =/  target-spend=(unit spend:v1:transact)
     (~(get z-by:zo spends) nam.target)
   ?~  target-spend  [spends ~]
@@ -399,7 +395,6 @@
     fee.state      new-fee
     orders.state   pending-orders
     display.state  (update-display-1 name.note display.state output-map input-lock)
-    wd.state       (sign-spend name.note [%1 spend] wd.state)
   ==
 ++  sign-spend
   |=  [name=nname:transact =spend:v1:transact wd=witness-data:wt]
