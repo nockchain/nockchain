@@ -3,6 +3,7 @@
 /=  *  /common/zose
 /=  bridge  /apps/bridge/types
 /=  *  /common/zeke
+/=  bridge  /apps/bridge/types
 /=  dumb  /apps/dumbnet/lib/types
 /=  s10  /apps/wallet/lib/s10
 |_  bc=blockchain-constants:transact
