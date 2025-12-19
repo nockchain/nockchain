@@ -1087,26 +1087,24 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
 
     loop {
         let running_status = context.running_status.load(Ordering::SeqCst);
-        if running_status < NockCancelToken::RUNNING_IDLE {
-            if context
-                .running_status
-                .compare_exchange(
-                    running_status,
-                    running_status + 1,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                )
-                .is_ok()
-            {
-                break;
-            }
-        } else if running_status == NockCancelToken::RUNNING_IDLE {
+
+        // Already idle - no action needed
+        if running_status == NockCancelToken::RUNNING_IDLE {
             break;
-        } else if context
+        }
+
+        // Adjust status: increment if below idle (cancellation pending), decrement if above (multiple runners)
+        let new_status = if running_status < NockCancelToken::RUNNING_IDLE {
+            running_status + 1
+        } else {
+            running_status - 1
+        };
+
+        if context
             .running_status
             .compare_exchange(
                 running_status,
-                running_status - 1,
+                new_status,
                 Ordering::SeqCst,
                 Ordering::SeqCst,
             )
@@ -1153,7 +1151,7 @@ mod cold_paths {
                 if vale.tail {
                     stack.pop::<NockWork>();
                     *subject = vale.subject;
-                    try_or_bail!(push_formula(stack, res.clone(), true));
+                    try_or_bail!(push_formula(stack, *res, true));
                     return OK_CONTINUE;
                 } else {
                     vale.todo = Todo2::RestoreSubject;
@@ -1220,7 +1218,7 @@ mod cold_paths {
             Todo11S::Done => {
                 opcode_tick!(WORK11S);
                 if let Some(found) =
-                    hint::match_post_nock(context, *subject, sint.tag, None, sint.body, res.clone())
+                    hint::match_post_nock(context, *subject, sint.tag, None, sint.body, *res)
                 {
                     *res = found;
                 }
@@ -1248,17 +1246,17 @@ mod cold_paths {
             Todo12::ComputePath => {
                 opcode_tick!(WORK12);
                 scry.todo = Todo12::Scry;
-                scry.reff = res.clone();
+                scry.reff = *res;
                 try_or_bail!(push_formula(&mut context.stack, scry.path, false));
                 return OK_CONTINUE;
             }
             Todo12::Scry => {
                 if let Some(cell) = context.scry_stack.cell() {
-                    scry.path = res.clone();
+                    scry.path = *res;
                     let scry_stack = context.scry_stack;
                     let scry_handler = cell.head();
                     let scry_gate = scry_handler.as_cell()?;
-                    let payload = T(&mut context.stack, &[scry.reff, res.clone()]);
+                    let payload = T(&mut context.stack, &[scry.reff, *res]);
                     let scry_core = T(
                         &mut context.stack,
                         &[scry_gate.head(), payload, scry_gate.tail().as_cell()?.tail()],

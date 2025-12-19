@@ -3,6 +3,7 @@ use ibig::{ubig, Stack, UBig};
 use nockapp::NockAppError;
 use nockvm::noun::Noun;
 use noun_serde::prelude::*;
+use num_bigint::BigUint;
 
 //TODO all this stuff would be useful as jets, which mostly just requires
 //using the Atom::as_ubig with the NockStack instead of ibig's heap version
@@ -40,9 +41,17 @@ pub fn tip5_hash_to_base58_stack<S: Stack>(
     Ok(base58_string)
 }
 
-// FIXME: This use of ibig's pow will leak memory.
-fn accum_prime_ubig(prime: &UBig, acc: &mut UBig, value: u64, i: usize) {
-    *acc += UBig::from(value) * prime.pow(i);
+fn biguint_to_ubig(value: BigUint) -> UBig {
+    UBig::from_be_bytes(&value.to_bytes_be())
+}
+
+fn ubig_to_biguint(value: &UBig) -> BigUint {
+    BigUint::from_bytes_be(&value.to_be_bytes())
+}
+
+fn accum_prime_biguint(prime: &BigUint, acc: &mut BigUint, value: u64, i: usize) {
+    let pow = prime.pow(i as u32);
+    *acc += BigUint::from(value) * pow;
 }
 
 fn accum_prime_ubig_stack<S: Stack>(
@@ -58,14 +67,13 @@ fn accum_prime_ubig_stack<S: Stack>(
 }
 
 pub fn base_p_to_decimal(hash: [u64; 5]) -> Result<UBig, NockAppError> {
-    let prime_ubig = UBig::from(P);
-    let mut result = ubig!(0);
+    let prime = BigUint::from(P);
+    let mut result = BigUint::from(0u8);
 
     for (i, value) in hash.iter().enumerate() {
-        // Add the value * P^i to the result
-        accum_prime_ubig(&prime_ubig, &mut result, *value, i);
+        accum_prime_biguint(&prime, &mut result, *value, i);
     }
-    Ok(result)
+    Ok(biguint_to_ubig(result))
 }
 
 pub fn base_p_to_decimal_stack<S: Stack>(
@@ -101,16 +109,23 @@ pub fn base58_to_ubig(value: String) -> Result<UBig, NockAppError> {
 
 pub fn decimal_to_base_p(value: UBig) -> Result<[u64; 5], NockAppError> {
     let mut result = [0; 5];
-    let mut value = value.clone();
-    for i in 0..5 {
-        // TODO: I shouldn't have to clone here
-        result[i] = (value.clone() % P) as u64;
-        value /= P;
+    let prime = BigUint::from(P);
+    let mut value = ubig_to_biguint(&value);
+    for (i, result_elem) in result.iter_mut().enumerate() {
+        let rem = &value % &prime;
+        *result_elem = rem.try_into().map_err(|_| {
+            NockAppError::NounDecodeError(Box::new(bs58::decode::Error::InvalidCharacter {
+                character: '?',
+                index: i,
+            }))
+        })?;
+        value /= &prime;
     }
     Ok(result)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use nockapp::noun::slab::NounSlab;
     use nockvm::noun::{D, T};
@@ -119,10 +134,10 @@ mod tests {
     use super::*;
 
     fn iso(tip5: [u64; 5]) {
-        let ubig = base_p_to_decimal(tip5).unwrap();
+        let ubig = base_p_to_decimal(tip5).expect("base_p_to_decimal should work");
         let base58 = ubig_to_base58(ubig);
-        let ubig2 = base58_to_ubig(base58).unwrap();
-        let tip5_2 = decimal_to_base_p(ubig2).unwrap();
+        let ubig2 = base58_to_ubig(base58).expect("base58_to_ubig should work");
+        let tip5_2 = decimal_to_base_p(ubig2).expect("decimal_to_base_p should work");
         assert_eq!(tip5, tip5_2);
     }
 
@@ -213,11 +228,11 @@ mod tests {
         fn arbitrary(g: &mut Gen) -> Self {
             // Generate 5 u64 values modulo the Goldilocks prime P
             let mut hash = [0u64; 5];
-            for i in 0..5 {
+            for hash_elem in &mut hash {
                 // Generate a random u32 and convert to u64 to avoid very large values
                 // This helps avoid triggering ibig buffer capacity issues
                 let value: u32 = u32::arbitrary(g);
-                hash[i] = (value as u64) % P;
+                *hash_elem = (value as u64) % P;
             }
             Tip5Hash(hash)
         }
@@ -284,13 +299,13 @@ mod tests {
             };
 
             // Manually calculate the expected value
-            let prime_ubig = UBig::from(P);
-            let mut expected = ubig!(0);
+            let prime_big = BigUint::from(P);
+            let mut expected = BigUint::from(0u8);
             for (i, &value) in tip5.iter().enumerate() {
-                expected += UBig::from(value) * prime_ubig.pow(i);
+                expected += BigUint::from(value) * prime_big.pow(i as u32);
             }
 
-            TestResult::from_bool(ubig == expected)
+            TestResult::from_bool(ubig == biguint_to_ubig(expected))
         }
 
         QuickCheck::new()
@@ -414,13 +429,7 @@ mod tests {
             // Create a noun from the tip5 hash
             let noun = T(
                 &mut slab,
-                &[
-                    D(tip5[0] as u64),
-                    D(tip5[1] as u64),
-                    D(tip5[2] as u64),
-                    D(tip5[3] as u64),
-                    D(tip5[4] as u64),
-                ],
+                &[D(tip5[0]), D(tip5[1]), D(tip5[2]), D(tip5[3]), D(tip5[4])],
             );
 
             // Convert to base58 and back

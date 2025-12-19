@@ -1,4 +1,6 @@
 #![feature(cold_path)]
+// Allow unwrap in test code - standard practice for test assertions
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod form;
 pub mod hot;

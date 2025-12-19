@@ -56,7 +56,7 @@ pub fn bpadd_jet(context: &mut Context, subject: Noun) -> Result {
 
     let res_len = std::cmp::max(bp_poly.len(), bq_poly.len());
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(res_len as usize));
+        new_handle_mut_slice(&mut context.stack, Some(res_len));
     bpadd(bp_poly.0, bq_poly.0, res_poly);
 
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
@@ -91,7 +91,7 @@ pub fn bpsub_jet(context: &mut Context, subject: Noun) -> Result {
 
     let res_len = std::cmp::max(p_poly.len(), q_poly.len());
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(res_len as usize));
+        new_handle_mut_slice(&mut context.stack, Some(res_len));
     bpsub(p_poly.0, q_poly.0, res_poly);
 
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);

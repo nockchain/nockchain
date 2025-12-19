@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use nockchain_types::common::Hash;
+use nockchain_types::{EthAddress, EthAddressParseError};
 use noun_serde::{NounDecode, NounEncode};
 use serde::Deserialize;
 
@@ -18,6 +19,12 @@ pub enum RecipientSpecToken {
         addresses: Vec<String>,
         amount: u64,
     },
+    #[serde(rename = "bridge-deposit")]
+    BridgeDeposit {
+        #[serde(rename = "evm-address")]
+        evm_address: String,
+        amount: u64,
+    },
 }
 
 #[derive(Debug, Clone, NounEncode, NounDecode, PartialEq)]
@@ -28,6 +35,11 @@ pub enum RecipientSpec {
     Multisig {
         threshold: u64,
         addresses: Vec<Hash>,
+        amount: u64,
+    },
+    #[noun(tag = "bridge-deposit")]
+    BridgeDeposit {
+        evm_address: EthAddress,
         amount: u64,
     },
 }
@@ -153,7 +165,40 @@ impl RecipientSpecToken {
                     amount,
                 })
             }
+            RecipientSpecToken::BridgeDeposit {
+                evm_address,
+                amount,
+            } => {
+                if amount == 0 {
+                    return Err(CrownError::Unknown(
+                        "Recipient amount must be greater than zero".into(),
+                    )
+                    .into());
+                }
+                let parsed = EthAddress::from_hex_str(&evm_address).map_err(|err| {
+                    NockAppError::from(CrownError::Unknown(format!(
+                        "Invalid EVM address '{}': {}",
+                        evm_address,
+                        format_eth_addr_error(err)
+                    )))
+                })?;
+                Ok(RecipientSpec::BridgeDeposit {
+                    evm_address: parsed,
+                    amount,
+                })
+            }
         }
+    }
+}
+
+fn format_eth_addr_error(err: EthAddressParseError) -> String {
+    match err {
+        EthAddressParseError::Empty => "address cannot be empty".into(),
+        EthAddressParseError::WrongLength(len) => {
+            format!("expected 40 hex chars (20 bytes), got length {}", len)
+        }
+        EthAddressParseError::InvalidCharacters => "contains non-hex characters".into(),
+        EthAddressParseError::InvalidHex(msg) => msg,
     }
 }
 
@@ -183,6 +228,7 @@ mod tests {
 
     const SAMPLE_P2PKH: &str = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV";
     const SAMPLE_P2PKH_ALT: &str = "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt";
+    const SAMPLE_EVM_ADDRESS: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
     fn parse_recipient_arg_accepts_json_p2pkh() {
@@ -220,6 +266,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_recipient_arg_accepts_bridge_deposit() {
+        let raw = format!(
+            "{{\"kind\":\"bridge-deposit\",\"evm-address\":\"{}\",\"amount\":123456}}",
+            SAMPLE_EVM_ADDRESS
+        );
+        let token = RecipientSpecToken::from_cli_arg(&raw).expect("bridge deposit parses");
+        assert!(matches!(
+            token,
+            RecipientSpecToken::BridgeDeposit { amount, .. } if amount == 123456
+        ));
+    }
+
+    #[test]
+    fn bridge_deposit_rejects_bad_address() {
+        let raw = "{\"kind\":\"bridge-deposit\",\"evm-address\":\"0xdeadbeef\",\"amount\":10}";
+        let token =
+            RecipientSpecToken::from_cli_arg(raw).expect("json parsing should succeed initially");
+        let err = token
+            .into_recipient_spec()
+            .expect_err("invalid bridge deposit should fail conversion");
+        assert!(
+            format!("{err}").contains("EVM address"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn parse_recipient_arg_rejects_empty() {
         let err = RecipientSpecToken::from_cli_arg("   ").expect_err("empty spec should fail");
         assert!(format!("{err}").contains("cannot be empty"));
@@ -237,9 +310,13 @@ mod tests {
                 addresses: vec![SAMPLE_P2PKH_ALT.to_string(), SAMPLE_P2PKH.to_string()],
                 amount: 5,
             },
+            RecipientSpecToken::BridgeDeposit {
+                evm_address: SAMPLE_EVM_ADDRESS.to_string(),
+                amount: 9,
+            },
         ];
         let specs = recipient_tokens_to_specs(tokens).expect("tokens -> specs");
-        assert_eq!(specs.len(), 2);
+        assert_eq!(specs.len(), 3);
         match &specs[0] {
             RecipientSpec::P2pkh { address, amount } => {
                 assert_eq!(*amount, 1000);
@@ -270,6 +347,20 @@ mod tests {
             }
             _ => panic!("second spec should be multisig"),
         }
+        match &specs[2] {
+            RecipientSpec::BridgeDeposit {
+                evm_address,
+                amount,
+                ..
+            } => {
+                assert_eq!(*amount, 9);
+                assert_eq!(
+                    evm_address,
+                    &EthAddress::from_hex_str(SAMPLE_EVM_ADDRESS).expect("sample evm address")
+                );
+            }
+            _ => panic!("third spec should be bridge deposit"),
+        }
     }
 
     #[test]
@@ -292,6 +383,11 @@ mod tests {
                     Hash::from_base58(SAMPLE_P2PKH).expect("p2pkh hash"),
                 ],
                 amount: 20,
+            },
+            RecipientSpec::BridgeDeposit {
+                evm_address: EthAddress::from_hex_str(SAMPLE_EVM_ADDRESS)
+                    .expect("sample evm address"),
+                amount: 30,
             },
         ];
 

@@ -167,7 +167,9 @@ pub fn based_noun(n: Noun) -> bool {
         return based(n);
     }
 
-    let n_cell = n.as_cell().unwrap();
+    let n_cell = n
+        .as_cell()
+        .expect("n should be a cell since it's not an atom");
     let res1 = based_noun(n_cell.head());
     if !res1 {
         return false;

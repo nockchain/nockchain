@@ -192,7 +192,7 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
             let field_encoders = match data.fields {
                 Fields::Named(fields) => {
                     let field_encoders = fields.named.iter().enumerate().map(|(i, field)| {
-                        let field_name = field.ident.as_ref().unwrap();
+                        let field_name = field.ident.as_ref().expect("named field must have ident");
                         let field_var = format_ident!("field_{}", i);
                         quote! {
                             let #field_var = ::noun_serde::NounEncode::to_noun(&self.#field_name, allocator);
@@ -204,7 +204,13 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
                         quote! { ::nockvm::noun::D(0) }
                     } else if fields.named.len() == 1 {
                         // Single field: just return the field itself
-                        let field_name = fields.named.first().unwrap().ident.as_ref().unwrap();
+                        let field_name = fields
+                            .named
+                            .first()
+                            .expect("field must exist")
+                            .ident
+                            .as_ref()
+                            .expect("named field must have ident");
                         quote! {
                             ::noun_serde::NounEncode::to_noun(&self.#field_name, allocator)
                         }
@@ -305,7 +311,7 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
                             let field_names: Vec<_> = fields
                                 .named
                                 .iter()
-                                .map(|f| f.ident.as_ref().unwrap())
+                                .map(|f| f.ident.as_ref().expect("named field must have ident"))
                                 .collect();
 
                             if is_tagged {
@@ -429,7 +435,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                     let field_names: Vec<_> = fields
                         .named
                         .iter()
-                        .map(|f| f.ident.as_ref().unwrap())
+                        .map(|f| f.ident.as_ref().expect("named field must have ident"))
                         .collect();
 
                     let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
@@ -467,8 +473,8 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                 let field = fields
                                     .named
                                     .iter()
-                                    .find(|f| f.ident.as_ref().unwrap().to_string() == name.to_string())
-                                    .unwrap();
+                                    .find(|f| f.ident.as_ref().expect("named field must have ident") == *name)
+                                    .expect("field must exist");
 
                                 // Check for custom axis
                                 let custom_axis = parse_axis_attr(&field.attrs);
@@ -671,7 +677,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                 match &variant.fields {
                     Fields::Named(fields) => {
                         let field_names: Vec<_> = fields.named.iter()
-                            .map(|f| f.ident.as_ref().unwrap())
+                            .map(|f| f.ident.as_ref().expect("named field must have ident"))
                             .collect();
 
                         let field_types: Vec<_> = fields.named.iter()
@@ -688,8 +694,8 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                     let field_name_str = name.to_string();
                                     // Get the corresponding field
                                     let field = fields.named.iter().find(|f| {
-                                        f.ident.as_ref().unwrap().to_string() == name.to_string()
-                                    }).unwrap();
+                                        f.ident.as_ref().expect("named field must have ident") == *name
+                                    }).expect("field must exist");
 
                                     // Check for custom axis
                                     let custom_axis = parse_axis_attr(&field.attrs);
@@ -746,8 +752,8 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                             let field_decoders = field_names.iter().zip(field_types.iter()).enumerate()
                                 .map(|(i, (name, ty))| {
                                     let field = fields.named.iter().find(|f| {
-                                        f.ident.as_ref().unwrap().to_string() == name.to_string()
-                                    }).unwrap();
+                                        f.ident.as_ref().expect("named field must have ident") == *name
+                                    }).expect("field must exist");
 
                                     let custom_axis = parse_axis_attr(&field.attrs);
 

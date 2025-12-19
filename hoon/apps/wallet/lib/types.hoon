@@ -1,10 +1,12 @@
 /=  transact  /common/tx-engine
 /=  zo  /common/zoon
 /=  *  /common/zose
+/=  bridge  /apps/bridge/types
 /=  *  /common/zeke
 /=  dumb  /apps/dumbnet/lib/types
 /=  s10  /apps/wallet/lib/s10
-|%
+|_  bc=blockchain-constants:transact
++*  t  ~(. transact bc)
 ::    $key: public or private key
 ::
 ::   both private and public keys are in serialized cheetah point form
@@ -75,13 +77,13 @@
           %0
         =/  key=schnorr-pubkey:transact
           (from-ser:schnorr-pubkey:transact p.key.form)
-        (coinbase:v0:first-name:transact key)
+        (coinbase:v0:first-name:t key)
       ::
           %1
         =/  key-hash=hash:transact
           %-  hash:schnorr-pubkey:transact
           (from-ser:schnorr-pubkey:transact p.key.form)
-        (coinbase:v1:first-name:transact key-hash)
+        (coinbase:v1:first-name:t key-hash)
       ==
     ::
     ++  simple-first-name
@@ -384,6 +386,14 @@
         keys=keys-v4
     ==
   ::
+  +$  state-5
+    $:  %5
+        balance=balance-v4
+        active-master=active-v4
+        keys=keys-v4
+        bc=blockchain-constants:transact
+    ==
+  ::
   ::  $versioned-state: wallet state
   ::
   +$  versioned-state
@@ -392,9 +402,10 @@
         state-2
         state-3
         state-4
+        state-5
     ==
   ::
-  +$  state  $>(%4 versioned-state)
+  +$  state  $>(%5 versioned-state)
   ::
   +$  seed-name   $~('default-seed' @t)
   ::
@@ -402,19 +413,24 @@
   ::
   +$  input-name  $~('default-input' @t)
   ::
+::
 ++  order
   =<  form
   |%
   +$  form
     $%  [%pkh recipient=hash:transact gift=coins:transact]
         [%multisig threshold=@ participants=(list hash:transact) gift=coins:transact]
+        [%lock-root root=hash:transact gift=coins:transact]
+        [%bridge-deposit address=evm-address:bridge gift=coins:transact]
     ==
   ++  gift
     |=  =form
     ^-  coins:transact
     ?-    -.form
-        %pkh       gift.form
-        %multisig  gift.form
+        %pkh        gift.form
+        %multisig   gift.form
+        %lock-root  gift.form
+        %bridge-deposit  gift.form
     ==
   --
 ::
@@ -477,6 +493,7 @@
             dat=transaction
             sign-keys=(unit (list [child-index=@ud hardened=?]))
         ==
+        [%fakenet ~]
     ==
   +$  file-cause
     $%  [%write path=@t contents=@t success=?]
@@ -520,10 +537,17 @@
         [%1 p=(z-map:zo nname:transact sc=spend-condition:transact)]
     ==
   ::
-  +$  lock-metadata
-    $:  lock=lock:transact
-        include-data=?
+  +$  lock-metadata-0  [=lock:transact include-data=?]
+  +$  lock-metadata-1
+    $:  %1
+      $%  [%lock =lock:transact include-data=?]
+          [%lock-root root=hash:transact]
+          [%bridge-deposit root=hash:transact addr=evm-address:bridge]
+      ==
     ==
+  +$  lock-metadata
+    $^  lock-metadata-0
+    lock-metadata-1
   ::
   +$  output-lock-map  (z-map:zo hash:transact lock-metadata)
   ::

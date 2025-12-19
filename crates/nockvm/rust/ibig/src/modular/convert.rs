@@ -218,7 +218,7 @@ impl<'a> ModuloLarge<'a> {
                 }
             }
         }
-        vec.extend(iter::repeat(0).take(modulus.len() - vec.len()));
+        vec.extend(iter::repeat_n(0, modulus.len() - vec.len()));
         ModuloLarge::new(vec, ring)
     }
 }

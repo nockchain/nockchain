@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use nockvm::mem::NockStack;
 use noun_serde::{NounDecode, NounEncode};
 

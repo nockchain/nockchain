@@ -51,7 +51,7 @@ pub fn double_tip<H: TipHasher, A: NounAllocator>(
     let mut ten_cell = [0; 10];
     ten_cell[0..5].copy_from_slice(&hash);
     ten_cell[5..].copy_from_slice(&hash);
-    Ok(hasher.hash_ten_cell(ten_cell)?)
+    hasher.hash_ten_cell(ten_cell)
 }
 
 pub fn lth_tip(a: &[u64; 5], b: &[u64; 5]) -> bool {
@@ -62,7 +62,7 @@ pub fn lth_tip(a: &[u64; 5], b: &[u64; 5]) -> bool {
             return false;
         }
     }
-    return false;
+    false
 }
 
 pub fn gor_tip<A: NounAllocator, H: TipHasher>(

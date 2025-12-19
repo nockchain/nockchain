@@ -1101,7 +1101,12 @@ mod tests {
     fn test_cell_construction_for_noun_slab() {
         let mut slab: NounSlab = NounSlab::new();
         let (cell, cell_mem_ptr) = unsafe { Cell::new_raw_mut(&mut slab) };
-        unsafe { assert!(cell_mem_ptr as *const CellMemory == cell.to_raw_pointer()) };
+        unsafe {
+            assert!(std::ptr::eq(
+                cell_mem_ptr as *const CellMemory,
+                cell.to_raw_pointer()
+            ))
+        };
     }
 
     #[test]

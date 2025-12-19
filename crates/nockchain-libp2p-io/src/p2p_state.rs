@@ -16,20 +16,11 @@ use crate::metrics::NockchainP2PMetrics;
 use crate::p2p_util::MultiaddrExt;
 use crate::tip5_util::tip5_hash_to_base58;
 
+#[derive(Default)]
 struct IpInfo {
     request_count: u64,
     ping_failure_count: u64,
     connections: BTreeSet<ConnectionId>,
-}
-
-impl Default for IpInfo {
-    fn default() -> Self {
-        IpInfo {
-            request_count: 0,
-            ping_failure_count: 0,
-            connections: BTreeSet::new(),
-        }
-    }
 }
 
 pub struct P2PState {
@@ -418,6 +409,7 @@ pub enum CacheResponse {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::LazyLock;
@@ -430,7 +422,7 @@ mod tests {
     use crate::config::LibP2PConfig;
     use crate::p2p_util::PeerIdExt;
 
-    pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(|| LibP2PConfig::default());
+    pub static LIBP2P_CONFIG: LazyLock<LibP2PConfig> = LazyLock::new(LibP2PConfig::default);
 
     #[test]
     #[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test

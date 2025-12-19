@@ -733,11 +733,11 @@ impl BlockExplorerCache {
         }
 
         let index = self.tx_b58_index.read().await;
-        let mut iter = index.range(prefix.to_string()..);
+        let iter = index.range(prefix.to_string()..);
         let mut first_match: Option<(String, Hash)> = None;
         let mut conflicts: Vec<String> = Vec::new();
 
-        while let Some((key, hash)) = iter.next() {
+        for (key, hash) in iter {
             if !key.starts_with(prefix) {
                 break;
             }
@@ -1023,6 +1023,7 @@ impl BlockExplorerCache {
 
     /// Peek /heaviest-chain-blocks-range/[start]/[end] ~
     /// Returns: Vec<(height, block_id, parent_id, timestamp, tx_ids)>
+    #[allow(dead_code)]
     #[tracing::instrument(
         name = "block_explorer_cache.peek_blocks_range_chunked",
         skip(self, handle)

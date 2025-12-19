@@ -2,32 +2,35 @@
 name = "nockchain-api"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [features]
 default = []
 tracing-heap = ["tracy-client"]
 malloc = []
 
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["unprefixed_malloc_on_supported_platforms"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+tikv-jemallocator = { workspace = true }
+
 [dependencies]
+
+clap.workspace = true
 kernels = { workspace = true, features = ["dumb"] }
 nockapp.workspace = true
 nockchain.workspace = true
 nockvm.workspace = true
-zkvm-jetpack.workspace = true
-
-clap.workspace = true
-tikv-jemallocator = { workspace = true, features = [
-    "unprefixed_malloc_on_supported_platforms",
-] }
 tokio.workspace = true
 tracy-client = { workspace = true, optional = true }
+zkvm-jetpack.workspace = true
 
 [dev-dependencies]
+nockapp-grpc-proto = { workspace = true }
 nockchain-types = { workspace = true }
 noun-serde = { workspace = true }
-tokio-test = "0.4"
 tempfile = { workspace = true }
-nockapp-grpc-proto = { workspace = true }
 tonic = { workspace = true }
 
 [[bench]]

@@ -31,14 +31,14 @@ pub struct Table<'a> {
 }
 
 impl Mary {
-    pub fn as_slice(&self) -> MarySlice {
+    pub fn as_slice(&self) -> MarySlice<'_> {
         MarySlice {
             step: self.step,
             len: self.len,
             dat: self.dat.as_slice(),
         }
     }
-    pub fn as_mut_slice(&mut self) -> MarySliceMut {
+    pub fn as_mut_slice(&mut self) -> MarySliceMut<'_> {
         MarySliceMut {
             step: self.step,
             len: self.len,
@@ -104,8 +104,7 @@ impl NounEncode for Mary {
 
         res_poly.dat.copy_from_slice(&self.dat[..]);
 
-        let res_cell = finalize_mary(allocator, self.step as usize, self.len as usize, res);
-        res_cell
+        finalize_mary(allocator, self.step as usize, self.len as usize, res)
     }
 }
 
@@ -169,7 +168,7 @@ pub fn mary_transpose(fpolys: MarySlice, offset: usize, res: &mut MarySliceMut) 
 }
 
 #[inline(always)]
-pub fn snag_as_bpoly(a: MarySlice, i: usize) -> &[Belt] {
+pub fn snag_as_bpoly(a: MarySlice<'_>, i: usize) -> &[Belt] {
     let step = a.step as usize;
     to_belts(&a.dat[step * i..(step * (i + 1))])
 }

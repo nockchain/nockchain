@@ -1,0 +1,28 @@
+[package]
+name = "arcadia"
+version = "0.1.0"
+description = "My famous game."
+authors = ["sigilante"]
+license = "MIT"
+template = "basic"
+
+[dependencies]
+"urbit/lull" = "@k409"
+"urbit/zuse" = "^k409"
+"urbit/bits" = "latest"
+"nockchain/zose" = "latest"
+"nockchain/wallet" = "latest"
+
+[dependencies.lagoon]
+git = "https://github.com/urbit/numerics"
+commit = "01905f364178958bb2d0c1a7ce009b6f3e68f737"
+# Specify only the subdirectory within the repository; if no files, all will be included.
+path = "lagoon/desk"
+
+[dependencies.sequent]
+git = "https://github.com/jackfoxy/sequent"
+commit = "7fc95fd4d6df7548cf354c9c91df2980e902770d"
+# Specify the subdirectory within the repository (which will be omitted)
+path = "desk"
+# Keep the part of the path you need to preserve
+files = ["lib/seq"]

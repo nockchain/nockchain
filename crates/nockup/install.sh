@@ -482,13 +482,13 @@ main() {
     add_to_path "$install_dir"
 
     print_step "Setting channel to $CHANNEL and running installation"
-    if "$nockup_path" channel set "$CHANNEL" && "$nockup_path" install; then
+    if "$nockup_path" channel set "$CHANNEL" && "$nockup_path" update; then
         print_success "Nockup installation completed successfully!"
     else
         print_error "Installation failed"
         print_info "You can try running manually:"
         print_info "  $nockup_path channel set $CHANNEL"
-        print_info "  $nockup_path install"
+        print_info "  $nockup_path update"
         exit 1
     fi
 
@@ -507,7 +507,7 @@ main() {
     print_info "Next steps:"
     print_info "  1. Run the export command above, OR restart your shell"
     print_info "  2. Verify installation: nockup --help"
-    print_info "  3. Create a project: nockup start <project-name>"
+    print_info "  3. Create a project: nockup project init"
     echo "" >&2
 }
 

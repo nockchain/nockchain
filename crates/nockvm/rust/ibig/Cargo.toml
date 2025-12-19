@@ -3,7 +3,7 @@ name = "ibig"
 version = "0.3.6"
 authors = ["Tomek Czajka <tczajka@gmail.com>"]
 edition = "2021"
-rust-version = "1.56.0"
+rust-version = "1.87.0"
 description = "A big integer library with good performance"
 keywords = ["bigint", "bignum", "mathematics", "modular", "modulo"]
 categories = ["mathematics", "no-std"]
@@ -13,11 +13,13 @@ homepage = "https://github.com/tczajka/ibig-rs"
 readme = "README.md"
 exclude = ["generate_coverage.sh"]
 
-[lints.clippy]
-missing_safety_doc = "allow"
-
 [package.metadata.docs.rs]
 all-features = true
+
+[lib]
+bench = false
+test = false
+doctest = false
 
 [features]
 default = ["std", "rand", "num-traits"]
@@ -28,23 +30,23 @@ std = []
 [dependencies.cfg-if]
 workspace = true
 
-[dependencies.static_assertions]
-workspace = true
-
 [dependencies.num-traits]
 default-features = false
 optional = true
-workspace = true
+version = "0.2"
 
 [dependencies.rand]
 default-features = false
 optional = true
-workspace = true
+version = "0.9.2"
 
 [dependencies.serde]
 default-features = false
 features = ["derive"]
 optional = true
+version = "1.0.217"
+
+[dependencies.static_assertions]
 workspace = true
 
 [dev-dependencies.criterion]
@@ -54,20 +56,15 @@ features = ["html_reports"]
 [dev-dependencies.rand]
 workspace = true
 
-[dev-dependencies.serde_test]
-version = "1.0.130"
-
-[lib]
-bench = false
-test = false
-doctest = false
-
-[[bench]]
-name = "benchmarks"
-required-features = ["rand"]
-harness = false
+[lints.clippy]
+missing_safety_doc = "allow"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(force_bits, values("16","32","64"))',
 ] }
+
+[[bench]]
+name = "benchmarks"
+required-features = ["rand"]
+harness = false

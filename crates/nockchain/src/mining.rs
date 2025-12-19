@@ -111,7 +111,7 @@ struct MiningData {
 }
 
 pub fn create_mining_driver(
-    mining_config: Option<Vec<MiningKeyConfig>>,
+    _mining_config: Option<Vec<MiningKeyConfig>>,
     mining_pkh_config: Option<Vec<MiningPkhConfig>>,
     mine: bool,
     num_threads: u64,
@@ -416,13 +416,13 @@ async fn start_mining_attempt(
     id: u64,
 ) {
     let nonce = nonce.unwrap_or_else(|| {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut nonce_slab = NounSlab::new();
-        let mut nonce_cell = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+        let mut nonce_cell = Atom::from_value(&mut nonce_slab, rng.random::<u64>() % PRIME)
             .expect("Failed to create nonce atom")
             .as_noun();
         for _ in 1..5 {
-            let nonce_atom = Atom::from_value(&mut nonce_slab, rng.gen::<u64>() % PRIME)
+            let nonce_atom = Atom::from_value(&mut nonce_slab, rng.random::<u64>() % PRIME)
                 .expect("Failed to create nonce atom")
                 .as_noun();
             nonce_cell = T(&mut nonce_slab, &[nonce_atom, nonce_cell]);

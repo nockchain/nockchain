@@ -3,8 +3,10 @@ name = "murmur3-sys"
 version = "0.1.0"
 authors = ["Stu Small <stuart.small@threat-x.com>"]
 edition = "2018"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 
 [build-dependencies]
 bindgen = "0.69.1"
+cc = "1.0"

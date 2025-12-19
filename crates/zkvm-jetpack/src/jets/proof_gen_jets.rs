@@ -223,19 +223,19 @@ impl TryFrom<Noun> for MPDenseConstraints {
         let [boundary, row, transition, terminal, extra] = noun.uncell()?;
 
         let boundary: Vec<ConstraintData> = HoonList::try_from(boundary)?
-            .map(|n| ConstraintData::try_from(n))
+            .map(ConstraintData::try_from)
             .collect::<Result<Vec<ConstraintData>, _>>()?;
         let row: Vec<ConstraintData> = HoonList::try_from(row)?
-            .map(|n| ConstraintData::try_from(n))
+            .map(ConstraintData::try_from)
             .collect::<Result<Vec<ConstraintData>, _>>()?;
         let transition: Vec<ConstraintData> = HoonList::try_from(transition)?
-            .map(|n| ConstraintData::try_from(n))
+            .map(ConstraintData::try_from)
             .collect::<Result<Vec<ConstraintData>, _>>()?;
         let terminal: Vec<ConstraintData> = HoonList::try_from(terminal)?
-            .map(|n| ConstraintData::try_from(n))
+            .map(ConstraintData::try_from)
             .collect::<Result<Vec<ConstraintData>, _>>()?;
         let extra: Vec<ConstraintData> = HoonList::try_from(extra)?
-            .map(|n| ConstraintData::try_from(n))
+            .map(ConstraintData::try_from)
             .collect::<Result<Vec<ConstraintData>, _>>()?;
 
         Ok(MPDenseConstraints {
@@ -259,7 +259,7 @@ impl TryFrom<Noun> for ConstraintData {
             .collect::<Result<Vec<u64>, _>>()?;
         Ok(ConstraintData {
             constraint: cs,
-            degs: degs,
+            degs,
         })
     }
 }
@@ -307,14 +307,19 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
 
     let dyn_list: Vec<BPolySlice<'_>> = HoonList::try_from(dyn_list)?
         .into_iter()
-        .map(|x| BPolySlice::try_from(x))
+        .map(BPolySlice::try_from)
         .collect::<Result<Vec<BPolySlice<'_>>, _>>()?;
     let weights_map = IndexBPolyMap::try_from(weights_map)?;
     let challenges = BPolySlice::try_from(challenges)?;
     let deep_challenge = deep_challange.as_felt()?;
     let table_full_widths: Vec<u64> = HoonList::try_from(table_full_widths)?
         .into_iter()
-        .map(|x| x.as_atom().unwrap().as_u64().unwrap())
+        .map(|x| {
+            x.as_atom()
+                .expect("table_full_widths element should be an atom")
+                .as_u64()
+                .expect("table_full_widths element should be a u64")
+        })
         .collect();
     let is_extra = unsafe { is_extra.raw_equals(&D(0)) };
 
@@ -328,16 +333,17 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
     Ok(res_atom.as_noun())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn eval_composition_poly(
     trace_evaluations: &FPolySlice<'_>,
-    heights: &Vec<u64>,
+    heights: &[u64],
     constraint_map: &Constraints,
     counts_map: &CountMap,
-    dyn_list: &Vec<BPolySlice<'_>>,
+    dyn_list: &[BPolySlice<'_>],
     weights_map: &IndexBPolyMap<'_>,
     challenges: &BPolySlice<'_>,
     deep_challenge: &Felt,
-    table_full_widths: &Vec<u64>,
+    table_full_widths: &[u64],
     is_extra: bool,
 ) -> Result<Felt, JetErr> {
     let dp = degree_processing(heights, is_extra, constraint_map);
@@ -353,9 +359,18 @@ fn eval_composition_poly(
         let last_row = fsub_(deep_challenge, &finv_(&omicron));
         let terminal_zerofier = finv_(&last_row);
 
-        let weights = weights_map.0.get(&i).unwrap();
-        let constraints = dp.constraints.get(&i).unwrap();
-        let counts = counts_map.0.get(&i).unwrap();
+        let weights = weights_map
+            .0
+            .get(&i)
+            .expect("weights_map should have entry for index");
+        let constraints = dp
+            .constraints
+            .get(&i)
+            .expect("constraints should have entry for index");
+        let counts = counts_map
+            .0
+            .get(&i)
+            .expect("counts_map should have entry for index");
         let dyns = &dyn_list[i];
 
         let row_zerofier = finv_(&fsub_(&fpow_(deep_challenge, height), &Felt::one()));
@@ -431,7 +446,7 @@ fn eval_composition_poly(
 }
 
 fn evaluate_constraints(
-    constraints: &Vec<PolyWithDegreeFudges<'_>>,
+    constraints: &[PolyWithDegreeFudges<'_>],
     dyns: &BPolySlice<'_>,
     evals: &[Felt],
     weights: &[Belt],
@@ -443,7 +458,7 @@ fn evaluate_constraints(
     let mut idx = 0;
 
     for constraint in constraints {
-        let evaled = mpeval_ultra_felt(&constraint.poly, evals, challenges, dyns.0)?;
+        let evaled = mpeval_ultra_felt(constraint.poly, evals, challenges, dyns.0)?;
         for (deg, eval) in constraint.degrees.iter().zip(evaled.iter()) {
             let alpha = Felt::lift(weights[2 * idx]);
             let beta = Felt::lift(weights[2 * idx + 1]);
@@ -452,7 +467,7 @@ fn evaluate_constraints(
             let degree_factor = fpow_(deep_challenge, fri_degree_bound - deg);
             let weight_factor = fadd_(&beta, &fmul_(&alpha, &degree_factor));
 
-            acc = fadd_(&acc, &fmul_(&eval, &weight_factor));
+            acc = fadd_(&acc, &fmul_(eval, &weight_factor));
             idx += 1;
         }
     }
@@ -488,13 +503,13 @@ struct DegreeData<'a> {
 }
 
 pub fn degree_processing<'a>(
-    heights: &Vec<u64>,
+    heights: &[u64],
     is_extra: bool,
     constraint_map: &'a Constraints,
 ) -> ProcessedDegrees<'a> {
     let mut max_degree: u64 = 0;
     let mut res = ProofMap::<usize, ConstraintsWDegree<'a>>::new();
-    for (i, &height) in heights.into_iter().enumerate() {
+    for (i, &height) in heights.iter().enumerate() {
         let constraints = constraint_map.0.get(&i).unwrap_or_else(|| {
             panic!(
                 "Panicked at {}:{} (git sha: {:?})",
@@ -542,7 +557,7 @@ pub fn degree_processing<'a>(
     }
 }
 
-fn do_degree_processing(height: u64, cs: &Vec<ConstraintData>, typ: ConstraintType) -> DegreeData {
+fn do_degree_processing(height: u64, cs: &[ConstraintData], typ: ConstraintType) -> DegreeData<'_> {
     let mut max_degree: u64 = 0;
     let mut res = Vec::<PolyWithDegreeFudges>::new();
     cs.iter().for_each(|cd| {

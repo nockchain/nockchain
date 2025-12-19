@@ -2,14 +2,15 @@
 name = "hoon"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
+
+clap.workspace = true
 hoonc.workspace = true
 nockapp.workspace = true
 nockvm.workspace = true
-zkvm-jetpack.workspace = true
-
-clap.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+zkvm-jetpack.workspace = true

@@ -27,13 +27,13 @@ pub(crate) const DIRECT_MASK: u64 = !(u64::MAX >> 1);
 pub const DIRECT_MAX: u64 = u64::MAX >> 1;
 
 /** Tag for an indirect atom. */
-pub(crate) const INDIRECT_TAG: u64 = u64::MAX & DIRECT_MASK;
+pub(crate) const INDIRECT_TAG: u64 = DIRECT_MASK;
 
 /** Tag mask for an indirect atom. */
 pub(crate) const INDIRECT_MASK: u64 = !(u64::MAX >> 2);
 
 /** Tag for a cell. */
-pub(crate) const CELL_TAG: u64 = u64::MAX & INDIRECT_MASK;
+pub(crate) const CELL_TAG: u64 = INDIRECT_MASK;
 
 /** Tag mask for a cell. */
 pub(crate) const CELL_MASK: u64 = !(u64::MAX >> 3);
@@ -57,7 +57,7 @@ pub(crate) const CELL_MASK: u64 = !(u64::MAX >> 3);
  */
 
 /** Tag for a forwarding pointer */
-const FORWARDING_TAG: u64 = u64::MAX & CELL_MASK;
+const FORWARDING_TAG: u64 = CELL_MASK;
 
 /** Tag mask for a forwarding pointer */
 const FORWARDING_MASK: u64 = CELL_MASK;
@@ -731,7 +731,7 @@ impl Cell {
     pub unsafe fn new_raw_mut<A: NounAllocator>(allocator: &mut A) -> (Cell, *mut CellMemory) {
         let memory = allocator.alloc_cell();
         assert!(
-            memory as usize % std::mem::align_of::<CellMemory>() == 0,
+            (memory as usize).is_multiple_of(std::mem::align_of::<CellMemory>()),
             "Memory is not aligned, {} {}",
             memory as usize,
             std::mem::align_of::<CellMemory>()
@@ -819,7 +819,7 @@ impl fmt::Debug for FullDebugCell<'_> {
             Ok(())
         }
 
-        do_fmt(&*self.0, true, f)?;
+        do_fmt(self.0, true, f)?;
         Ok(())
     }
 }
@@ -1766,16 +1766,25 @@ mod tests {
         let cell = Cell::new(&mut context.stack, D(1), D(2));
 
         // axis 1 returns the whole cell
-        assert_eq!(
-            unsafe { cell.slot(1).unwrap().raw_equals(&cell.as_noun()) },
-            true
-        );
+        assert!(unsafe {
+            cell.slot(1)
+                .expect("slot(1) should exist")
+                .raw_equals(&cell.as_noun())
+        });
 
         // axis 2 returns head
-        assert_eq!(unsafe { cell.slot(2).unwrap().raw_equals(&D(1)) }, true);
+        assert!(unsafe {
+            cell.slot(2)
+                .expect("slot(2) should exist")
+                .raw_equals(&D(1))
+        });
 
         // axis 3 returns tail
-        assert_eq!(unsafe { cell.slot(3).unwrap().raw_equals(&D(2)) }, true);
+        assert!(unsafe {
+            cell.slot(3)
+                .expect("slot(3) should exist")
+                .raw_equals(&D(2))
+        });
     }
 
     #[test]
@@ -1786,10 +1795,18 @@ mod tests {
         let cell = Cell::new(&mut context.stack, D(1), inner.as_noun());
 
         // axis 6 = 110 binary = tail then head = head of tail = 3
-        assert_eq!(unsafe { cell.slot(6).unwrap().raw_equals(&D(3)) }, true);
+        assert!(unsafe {
+            cell.slot(6)
+                .expect("slot(6) should exist")
+                .raw_equals(&D(3))
+        });
 
         // axis 7 = 111 binary = tail then tail = tail of tail = 4
-        assert_eq!(unsafe { cell.slot(7).unwrap().raw_equals(&D(4)) }, true);
+        assert!(unsafe {
+            cell.slot(7)
+                .expect("slot(7) should exist")
+                .raw_equals(&D(4))
+        });
 
         // axis 4 = 100 binary = head then stop = should fail (head is atom)
         assert!(cell.slot(4).is_err());
@@ -1797,7 +1814,12 @@ mod tests {
         // cell2 = [[3 4] 2]
         let cell2 = Cell::new(&mut context.stack, inner.as_noun(), D(2));
         // axis 5 = 101 binary = head then tail = tail of head = 4
-        assert_eq!(unsafe { cell2.slot(5).unwrap().raw_equals(&D(4)) }, true);
+        assert!(unsafe {
+            cell2
+                .slot(5)
+                .expect("slot(5) should exist")
+                .raw_equals(&D(4))
+        });
     }
 
     #[test]

@@ -11,22 +11,13 @@ jemalloc = ["tikv-jemallocator"]
 tracing-heap = ["tikv-jemallocator", "tracy-client"]
 
 [dependencies]
-hoonc.workspace = true
-kernels = { workspace = true, features = ["dumb", "miner"] }
-nockapp.workspace = true
-nockapp-grpc.workspace = true
-nockvm.workspace = true
-nockvm_macros.workspace = true
-noun-serde.workspace = true
-nockchain-types.workspace = true
-nockchain-math.workspace = true
 
-bitcoincore-rpc.workspace = true
 bs58.workspace = true
 clap.workspace = true
 equix.workspace = true
 futures.workspace = true
 ibig.workspace = true
+kernels = { workspace = true, features = ["dumb", "miner"] }
 libp2p = { workspace = true, features = [
     "ping",
     "kad",
@@ -39,7 +30,14 @@ libp2p = { workspace = true, features = [
     "request-response",
     "cbor",
 ] }
+nockapp.workspace = true
+nockapp-grpc.workspace = true
 nockchain-libp2p-io.workspace = true
+nockchain-math.workspace = true
+nockchain-types.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+noun-serde.workspace = true
 num_cpus = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
@@ -47,17 +45,6 @@ termcolor.workspace = true
 tikv-jemallocator = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
-tracing-test.workspace = true
 tracy-client = { workspace = true, optional = true }
 
 zkvm-jetpack.workspace = true
-
-[build-dependencies]
-vergen = { workspace = true, features = [
-    "build",
-    "cargo",
-    "git",
-    "gitcl",
-    "rustc",
-    "si",
-] }

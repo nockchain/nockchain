@@ -134,13 +134,10 @@ fn validate_library_spec(spec: &LibrarySpec) -> Result<()> {
     }
 
     // Ensure mutually exclusive directory/file
-    match (&spec.directory, &spec.file) {
-        (Some(_), Some(_)) => {
-            return Err(anyhow::anyhow!(
-                "Library spec cannot have both 'directory' and 'file' specified. Please use only one."
-            ));
-        }
-        _ => {} // Valid: can have neither, or exactly one
+    if let (Some(_), Some(_)) = (&spec.directory, &spec.file) {
+        return Err(anyhow::anyhow!(
+            "Library spec cannot have both 'directory' and 'file' specified. Please use only one."
+        ));
     }
 
     // Validate URL is GitHub (for now)
@@ -166,7 +163,7 @@ fn get_library_cache_dir() -> Result<PathBuf> {
 
 async fn fetch_library_repo(
     cache_dir: &Path,
-    lib_name: &str,
+    _lib_name: &str,
     spec: &LibrarySpec,
 ) -> Result<PathBuf> {
     // Create a unique directory name based on URL and commit/branch
@@ -188,11 +185,11 @@ async fn fetch_library_repo(
     println!("    ⬇️ Cloning repository...");
 
     let mut git_cmd = Command::new("git");
-    git_cmd.args(&["clone", &spec.url]);
+    git_cmd.args(["clone", &spec.url]);
 
     // If branch specified, clone that branch
     if let Some(branch) = &spec.branch {
-        git_cmd.args(&["--branch", branch]);
+        git_cmd.args(["--branch", branch]);
     }
 
     git_cmd.arg(&repo_cache_dir);
@@ -209,7 +206,7 @@ async fn fetch_library_repo(
     // If commit specified, checkout that commit
     if let Some(commit) = &spec.commit {
         let checkout_output = Command::new("git")
-            .args(&["checkout", commit])
+            .args(["checkout", commit])
             .current_dir(&repo_cache_dir)
             .output()
             .context("Failed to checkout commit")?;
@@ -267,17 +264,20 @@ fn find_library_source_dir(repo_dir: &Path, spec: &LibrarySpec) -> Result<PathBu
 fn copy_library_files(
     source_dir: &Path,
     dest_lib_dir: &Path,
-    lib_name: &str,
-    spec: &LibrarySpec,
+    _lib_name: &str,
+    _spec: &LibrarySpec,
 ) -> Result<()> {
     // Always use flattened approach - copy contents directly to appropriate directories
-    let project_hoon_dir = dest_lib_dir.parent().unwrap(); // Get /hoon from /hoon/lib
+    let project_hoon_dir = dest_lib_dir
+        .parent()
+        .expect("dest_lib_dir should have a parent directory"); // Get /hoon from /hoon/lib
 
     copy_top_level_library(source_dir, project_hoon_dir, source_dir)?;
 
     Ok(())
 }
 
+#[allow(dead_code)]
 fn ensure_directory_exists(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)
         .with_context(|| format!("Failed to create directory '{}'", dir.display()))
@@ -299,7 +299,9 @@ fn copy_single_file(repo_dir: &Path, project_lib_dir: &Path, file_path: &str) ->
         .ok_or_else(|| anyhow::anyhow!("Invalid file path: {}", file_path))?;
 
     // Get the project's /hoon directory (parent of /hoon/lib)
-    let project_hoon_dir = project_lib_dir.parent().unwrap();
+    let project_hoon_dir = project_lib_dir
+        .parent()
+        .expect("project_lib_dir should have a parent directory");
 
     // Determine destination directory based on file path
     let dest_dir = if file_path.contains("/lib/") {
@@ -353,15 +355,13 @@ fn copy_top_level_library(src_dir: &Path, dest_dir: &Path, root_src: &Path) -> R
                 format!("Failed to create directory '{}'", dest_subdir.display())
             })?;
             copy_directory_contents(&src_path, &dest_subdir, root_src)?;
-        } else {
-            if should_copy_file(&src_path) {
-                let dest_path = dest_dir.join(&file_name);
-                fs::copy(&src_path, &dest_path)
-                    .with_context(|| format!("Failed to copy file '{}'", src_path.display()))?;
+        } else if should_copy_file(&src_path) {
+            let dest_path = dest_dir.join(&file_name);
+            fs::copy(&src_path, &dest_path)
+                .with_context(|| format!("Failed to copy file '{}'", src_path.display()))?;
 
-                let relative_src = src_path.strip_prefix(root_src).unwrap_or(&src_path);
-                println!("      copy {}", relative_src.display());
-            }
+            let relative_src = src_path.strip_prefix(root_src).unwrap_or(&src_path);
+            println!("      copy {}", relative_src.display());
         }
     }
 

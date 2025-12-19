@@ -18,18 +18,17 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
         let kv = T(stack, &[*b, *c]);
         Ok(T(stack, &[kv, D(0), D(0)]))
     } else {
-        let [mut an, mut al, mut ar] = a.uncell()?;
+        let [mut an, al, ar] = a.uncell()?;
         let [mut anp, mut anq] = an.uncell()?;
         if unsafe { stack.equals(b, &mut anp) } {
             if unsafe { stack.equals(c, &mut anq) } {
                 return Ok(*a);
-            } else {
-                an = T(stack, &[*b, *c]);
-                let anbc = T(stack, &[an, al, ar]);
-                return Ok(anbc);
             }
+            an = T(stack, &[*b, *c]);
+            let anbc = T(stack, &[an, al, ar]);
+            Ok(anbc)
         } else if gor_tip(stack, b, &mut anp, hasher)? {
-            let d = z_map_put(stack, &mut al, b, c, hasher)?;
+            let d = z_map_put(stack, &al, b, c, hasher)?;
             let [dn, dl, dr] = d.uncell()?;
             let [mut dnp, _dnq] = dn.uncell()?;
             if mor_tip(stack, &mut anp, &mut dnp, hasher)? {
@@ -39,7 +38,7 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
                 Ok(T(stack, &[dn, dl, new_a]))
             }
         } else {
-            let d = z_map_put(stack, &mut ar, b, c, hasher)?;
+            let d = z_map_put(stack, &ar, b, c, hasher)?;
             let [dn, dl, dr] = d.uncell()?;
             let [mut dnp, _dnq] = dn.uncell()?;
             if mor_tip(stack, &mut anp, &mut dnp, hasher)? {

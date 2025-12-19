@@ -1,13 +1,11 @@
+#![allow(clippy::items_after_test_module)]
 use std::path::PathBuf;
 
 use chrono;
-use clap::{arg, command, Args, ColorChoice, Parser, ValueEnum};
+use clap::{Args, ColorChoice, Parser, ValueEnum};
 use nockvm::jets::hot::HotEntry;
 use nockvm::noun::Atom;
-use nockvm::trace::{
-    IntervalFilter, JsonBackend, KeywordFilter, TraceBackend, TraceFilter, TraceInfo,
-    TracingBackend,
-};
+use nockvm::trace::{IntervalFilter, KeywordFilter, TraceFilter, TraceInfo, TracingBackend};
 use tokio::fs;
 use tracing::{debug, info, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
@@ -15,7 +13,9 @@ use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{fmt, EnvFilter, Layer};
+#[cfg(feature = "tracing-tracy")]
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::{fmt, EnvFilter};
 
 use crate::export::ExportedState;
 use crate::kernel::form::Kernel;
@@ -40,16 +40,14 @@ pub enum NockStackSize {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum TraceMode {
-    Json,
     Tracing,
 }
 
 /// Trace options for NockApp
 #[derive(Args, Clone, Debug, Default)]
 pub struct TraceOpts {
-    /// You don't really need this, but it is here in case a new tracing backend is added or you want to use JSON tracing.
-    /// We strongly recommend using Tracy
-    #[arg(long = "trace", help = "Make a Sword trace in json or tracing mode")]
+    /// Enable nock interpreter tracing (integrates with Tracy profiler)
+    #[arg(long = "trace", help = "Enable nock interpreter tracing")]
     pub mode: Option<TraceMode>,
 
     #[arg(long, requires = "mode")]
@@ -76,24 +74,10 @@ impl From<TraceOpts> for Option<TraceInfo> {
             (None, None) => None,
         };
 
-        trace_opts
-            .mode
-            .map(|mode| match mode {
-                TraceMode::Json => {
-                    let file = std::fs::File::create("trace.json")
-                        .expect("Cannot create trace file trace.json");
-                    let pid = std::process::id();
-                    let process_start = std::time::Instant::now();
-
-                    Box::new(JsonBackend {
-                        file,
-                        pid,
-                        process_start,
-                    }) as Box<dyn TraceBackend>
-                }
-                TraceMode::Tracing => Box::new(TracingBackend::new()),
-            })
-            .map(|backend| TraceInfo { backend, filter })
+        trace_opts.mode.map(|_mode| TraceInfo {
+            backend: Box::new(TracingBackend::new()),
+            filter,
+        })
     }
 }
 
@@ -168,16 +152,19 @@ mod tests {
 
     #[test]
     fn parse_save_interval_none_variants() {
-        assert_eq!(parse_save_interval("none").unwrap(), 0);
-        assert_eq!(parse_save_interval("NoNe").unwrap(), 0);
-        assert_eq!(parse_save_interval("0").unwrap(), 0);
-        assert_eq!(parse_save_interval(" 0 ").unwrap(), 0);
+        assert_eq!(parse_save_interval("none").expect("should parse"), 0);
+        assert_eq!(parse_save_interval("NoNe").expect("should parse"), 0);
+        assert_eq!(parse_save_interval("0").expect("should parse"), 0);
+        assert_eq!(parse_save_interval(" 0 ").expect("should parse"), 0);
     }
 
     #[test]
     fn parse_save_interval_positive_values() {
-        assert_eq!(parse_save_interval("1").unwrap(), 1);
-        assert_eq!(parse_save_interval(" 120000 ").unwrap(), 120000);
+        assert_eq!(parse_save_interval("1").expect("should parse"), 1);
+        assert_eq!(
+            parse_save_interval(" 120000 ").expect("should parse"),
+            120000
+        );
     }
 
     #[test]
@@ -197,6 +184,7 @@ mod tests {
 }
 
 /// Result of setting up a NockApp
+#[allow(clippy::large_enum_variant)]
 pub enum SetupResult<J> {
     /// A fully initialized NockApp
     App(NockApp<J>),
@@ -517,7 +505,8 @@ pub fn parse_test_jets(jets: &str) -> Vec<NounSlab> {
                     .as_noun();
                 let ver_atom = Atom::from_value(
                     &mut slab,
-                    u64::from_str_radix(ver_split[1], 10)
+                    ver_split[1]
+                        .parse::<u64>()
                         .expect("Could not parse cold path version"),
                 )
                 .expect("Could not construct version atom")

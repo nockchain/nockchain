@@ -2,15 +2,17 @@
 name = "kernels"
 version.workspace = true
 edition.workspace = true
-
-[dependencies]
+license = "MIT OR Apache-2.0"
 
 [features]
 default = []
 bazel_build = []
 
 # Specific kernels
+bridge = []
 dumb = []
 wallet = []
 miner = []
 nockchain_peek = []
+
+[dependencies]

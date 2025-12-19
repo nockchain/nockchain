@@ -122,7 +122,7 @@ impl TracingBackend {
 
 impl Drop for TracingBackend {
     fn drop(&mut self) {
-        let mut entries = GLOBAL_ENTRIES.lock().unwrap();
+        let mut entries = GLOBAL_ENTRIES.lock().expect("GLOBAL_ENTRIES lock poisoned");
         if entries.as_ref().map(|v| v.len()).unwrap_or(0) <= self.entries.len() {
             *entries = Some(core::mem::take(&mut self.entries));
         }
@@ -153,7 +153,7 @@ impl TraceBackend for TracingBackend {
             self.subscriber = Some(dispatcher::get_default(Clone::clone));
         }
 
-        let subscriber = self.subscriber.as_ref().unwrap();
+        let subscriber = self.subscriber.as_ref().expect("subscriber should be set");
 
         let id = if let Some(entry) = self.entries.get(chum) {
             entry.id.clone()
@@ -191,11 +191,11 @@ impl TraceBackend for TracingBackend {
             .expect("No subscriber with a trace stack");
 
         loop {
-            let id = Id::from_u64((&(*trace_stack)).span_id);
+            let id = Id::from_u64((&*trace_stack).span_id);
 
             subscriber.exit(&id);
 
-            trace_stack = (&(*trace_stack)).next;
+            trace_stack = (&*trace_stack).next;
 
             if trace_stack.is_null() {
                 break Ok(());

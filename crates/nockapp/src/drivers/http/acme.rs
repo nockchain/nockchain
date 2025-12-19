@@ -8,6 +8,7 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
     NewAccount, NewOrder, Order, OrderStatus,
 };
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use serde_json;
@@ -93,10 +94,10 @@ impl AcmeManager {
         let key_pem = fs::read_to_string(key_path).await?;
 
         let cert_chain: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+            CertificateDer::pem_reader_iter(&mut cert_pem.as_bytes())
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let private_key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
-            .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
+        let private_key: PrivateKeyDer = PrivateKeyDer::from_pem_reader(&mut key_pem.as_bytes())?;
 
         let config = ServerConfig::builder()
             .with_no_client_auth()
@@ -107,8 +108,8 @@ impl AcmeManager {
 
     async fn certificate_is_valid(&self, cert_path: &Path) -> Result<bool> {
         let cert_pem = fs::read_to_string(cert_path).await?;
-        let certs: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut cert_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+        let certs: Vec<CertificateDer> = CertificateDer::pem_reader_iter(&mut cert_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()?;
 
         if let Some(cert_der) = certs.first() {
             let cert = x509_parser::parse_x509_certificate(cert_der.as_ref())?;
@@ -245,10 +246,10 @@ impl AcmeManager {
 
         // Build rustls config
         let cert_chain: Vec<CertificateDer> =
-            rustls_pemfile::certs(&mut cert_chain_pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+            CertificateDer::pem_reader_iter(&mut cert_chain_pem.as_bytes())
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let private_key: PrivateKeyDer = rustls_pemfile::private_key(&mut key_pem.as_bytes())?
-            .ok_or_else(|| anyhow::anyhow!("No private key found"))?;
+        let private_key: PrivateKeyDer = PrivateKeyDer::from_pem_reader(&mut key_pem.as_bytes())?;
 
         let config = ServerConfig::builder()
             .with_no_client_auth()

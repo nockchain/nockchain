@@ -15,7 +15,7 @@ pub fn assert_all_based(vecbelt: &Vec<Belt>) {
 }
 
 // calc q and r for vecbelt, based on RATE
-pub fn tip5_calc_q_r(input_vec: &Vec<Belt>) -> (usize, usize) {
+pub fn tip5_calc_q_r(input_vec: &[Belt]) -> (usize, usize) {
     let lent_input = input_vec.len();
     let (q, r) = (lent_input / RATE, lent_input % RATE);
     (q, r)
@@ -30,9 +30,9 @@ pub fn tip5_pad_vecbelt(input_vec: &mut Vec<Belt>, r: usize) {
 }
 
 // monitify vecbelt (bring into montgomery space)
-pub fn tip5_montify_vecbelt(input_vec: &mut Vec<Belt>) {
-    for i in 0..input_vec.len() {
-        input_vec[i] = Belt(montify(input_vec[i].0));
+pub fn tip5_montify_vecbelt(input_vec: &mut [Belt]) {
+    for belt in input_vec.iter_mut() {
+        *belt = Belt(montify(belt.0));
     }
 }
 

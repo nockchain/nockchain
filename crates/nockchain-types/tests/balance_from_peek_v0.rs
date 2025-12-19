@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use bytes::Bytes;
 use nockapp::noun::slab::NounSlab;
 use nockchain_math::belt::Belt;

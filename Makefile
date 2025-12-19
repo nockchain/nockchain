@@ -84,7 +84,7 @@ build-trivial: ensure-dirs
 	echo '%trivial' > hoon/trivial.hoon
 	hoonc --arbitrary hoon/trivial.hoon
 
-HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam
+HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam
 
 .PHONY: nuke-hoonc-data
 nuke-hoonc-data:
@@ -136,3 +136,10 @@ assets/peek.jam: ensure-dirs hoon/apps/peek/peek.hoon $(HOON_SRCS)
 	rm -f assets/peek.jam
 	hoonc hoon/apps/peek/peek.hoon hoon
 	mv out.jam assets/peek.jam
+
+## Build bridge.jam
+assets/bridge.jam: ensure-dirs hoon/apps/bridge/bridge.hoon $(HOON_SRCS)
+	$(call show_env_vars)
+	rm -f assets/bridge.jam
+	hoonc hoon/apps/bridge/bridge.hoon hoon
+	mv out.jam assets/bridge.jam

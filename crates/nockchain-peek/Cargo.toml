@@ -12,8 +12,8 @@ nockapp-grpc = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 rustls.workspace = true
-zkvm-jetpack.workspace = true
 
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+zkvm-jetpack.workspace = true
 

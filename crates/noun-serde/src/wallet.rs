@@ -293,21 +293,11 @@ impl NounDecode for Effect {
 }
 
 /// A mask tracking which fields of a spend have been set
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SpendMask {
     pub signature: bool,
     pub seeds: bool,
     pub fee: bool,
-}
-
-impl Default for SpendMask {
-    fn default() -> Self {
-        SpendMask {
-            signature: false,
-            seeds: false,
-            fee: false,
-        }
-    }
 }
 
 impl NounEncode for SpendMask {
@@ -338,19 +328,10 @@ impl NounDecode for SpendMask {
 }
 
 /// A mask tracking which fields of an input have been set
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct InputMask {
     pub note: bool,
     pub spend: SpendMask,
-}
-
-impl Default for InputMask {
-    fn default() -> Self {
-        InputMask {
-            note: false,
-            spend: SpendMask::default(),
-        }
-    }
 }
 
 impl NounEncode for InputMask {
@@ -378,25 +359,13 @@ pub struct PreSeed {
     pub mask: SeedMask,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SeedMask {
     pub output_source: bool,
     pub recipient: bool,
     pub timelock_intent: bool,
     pub gift: bool,
     pub parent_hash: bool,
-}
-
-impl Default for SeedMask {
-    fn default() -> Self {
-        SeedMask {
-            output_source: false,
-            recipient: false,
-            timelock_intent: false,
-            gift: false,
-            parent_hash: false,
-        }
-    }
 }
 
 impl NounEncode for SeedMask {
@@ -785,7 +754,7 @@ impl NounEncode for WalletState {
         .iter()
         .rev()
         {
-            current = T(allocator, &[noun.clone(), current]);
+            current = T(allocator, &[*noun, current]);
         }
         current
     }
@@ -808,7 +777,7 @@ impl NounEncode for Trek {
 
 impl NounDecode for Trek {
     fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let mut current = noun.clone();
+        let mut current = *noun;
         let mut parts = Vec::new();
         while let Ok(cell) = current.as_cell() {
             let part = cell.head().as_atom()?.into_string()?;

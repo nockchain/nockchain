@@ -225,7 +225,7 @@ fn hash_hashable_leaf(stack: &mut NockStack, p: Noun) -> Result<Noun, JetErr> {
 fn hash_hashable_list(stack: &mut NockStack, p: Noun) -> Result<Noun, JetErr> {
     let turn: Vec<Noun> = HoonList::try_from(p)?
         .into_iter()
-        .map(|x| hash_hashable(stack, x).unwrap())
+        .map(|x| hash_hashable(stack, x).expect("hash_hashable should succeed for list element"))
         .collect();
     let turn_list = vecnoun_to_hoon_list(stack, &turn);
     tip5::hash::hash_noun_varlen(stack, turn_list)

@@ -188,7 +188,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
             .await
             .expect("Failed to provide metrics to kernel");
 
-        let signals = Signals::new(&[TERM_SIGNALS, &[SIGHUP]].concat())
+        let signals = Signals::new([TERM_SIGNALS, &[SIGHUP]].concat())
             .expect("Failed to create signal handler");
 
         let (exit, exit_recv) = NockAppExit::new();
@@ -317,9 +317,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         let guard = self.save_mutex.clone().lock_owned().await;
         trace!("save_blocking: save_mutex locked");
         let join_handle = self.save_f(async {}, guard).await?;
-        join_handle
-            .await
-            .map_err(|e| NockAppError::JoinError(e))??;
+        join_handle.await.map_err(NockAppError::JoinError)??;
         Ok(())
     }
 
@@ -463,10 +461,8 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                                 if let Err(e) = exit.done(Err(NockAppError::from(e))).await {
                                     error!("Error completing shutdown: {e}");
                                 }
-                            } else {
-                                if let Err(e) = exit.done(res).await {
-                                    error!("Error completing shutdown: {e}");
-                                }
+                            } else if let Err(e) = exit.done(res).await {
+                                error!("Error completing shutdown: {e}");
                             }
                         });
                         Ok(NockAppRun::Pending)
@@ -510,7 +506,9 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                                 break Ok(NockAppRun::Pending);
                             }
                         } else {
-                            std::process::exit(code.try_into().unwrap());
+                            std::process::exit(
+                                code.try_into().expect("exit code should fit in i32"),
+                            );
                         }
                     }
                 } else {
@@ -589,7 +587,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         if let Some(timeout) = timeout {
             let poke_future = self.kernel.poke_timeout(wire, cause, timeout);
             let effect_broadcast = self.effect_broadcast.clone();
-            let _ = self.tasks.spawn(async move {
+            drop(self.tasks.spawn(async move {
                 let poke_result = poke_future.await;
                 match poke_result {
                     Ok(effects) => {
@@ -602,11 +600,11 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                         let _ = ack_channel.send(PokeResult::Nack);
                     }
                 }
-            });
+            }));
         } else {
             let poke_future = self.kernel.poke(wire, cause);
             let effect_broadcast = self.effect_broadcast.clone();
-            let _ = self.tasks.spawn(async move {
+            drop(self.tasks.spawn(async move {
                 let poke_result = poke_future.await;
                 match poke_result {
                     Ok(effects) => {
@@ -619,7 +617,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                         let _ = ack_channel.send(PokeResult::Nack);
                     }
                 }
-            });
+            }));
         }
     }
 
@@ -630,7 +628,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         result_channel: tokio::sync::oneshot::Sender<Option<NounSlab>>,
     ) {
         let peek_future = self.kernel.peek(path);
-        let _ = self.tasks.spawn(async move {
+        drop(self.tasks.spawn(async move {
             let peek_res = peek_future.await;
 
             match peek_res {
@@ -642,7 +640,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
                     let _ = result_channel.send(None);
                 }
             }
-        });
+        }));
     }
 
     // TODO: We should explicitly kick off a save somehow

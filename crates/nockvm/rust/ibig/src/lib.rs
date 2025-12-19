@@ -61,6 +61,8 @@
 //! * `serde`: serialization and deserialization.
 
 #![cfg_attr(not(feature = "std"), no_std)]
+// Allow internal uses of deprecated pow APIs and lifetime syntax compat noise; host code should prefer num-bigint.
+#![allow(deprecated, mismatched_lifetime_syntaxes, unused_unsafe)]
 
 extern crate alloc;
 

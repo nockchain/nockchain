@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use quickcheck::{Arbitrary, Gen};
 use serde_bytes::ByteBuf;
 
@@ -36,8 +37,8 @@ impl Arbitrary for NockchainRequest {
             false => NockchainRequest::Request {
                 pow: {
                     let mut arr = [0u8; 16];
-                    for i in 0..16 {
-                        arr[i] = u8::arbitrary(g);
+                    for elem in &mut arr {
+                        *elem = u8::arbitrary(g);
                     }
                     arr
                 },
@@ -140,7 +141,6 @@ impl Arbitrary for CorruptedCborData {
 #[cfg(test)]
 mod tests {
     use quickcheck::TestResult;
-    use serde_cbor;
 
     use super::*;
 
@@ -439,9 +439,7 @@ mod tests {
                 }
                 Err(e) => {
                     let error_msg = format!("{:?}", e);
-                    if error_msg.contains("Eof") && error_msg.contains("enum") && error_msg.contains("Small(1)") {
-                        TestResult::from_bool(true)
-                    } else if error_msg.contains("Eof") {
+                    if error_msg.contains("Eof") {
                         TestResult::from_bool(true)
                     } else {
                         TestResult::error(format!("Unexpected error type: {}", error_msg))
@@ -592,21 +590,14 @@ mod tests {
 
             match cbor4ii_serde::from_slice::<NockchainResponse>(&corrupted_data) {
                 Ok(_) => TestResult::from_bool(true),
-                Err(e) => {
-                    let error_msg = format!("{:?}", e);
-                    if error_msg.contains("Eof") && error_msg.contains("enum") && error_msg.contains("Small(1)") {
-                        TestResult::from_bool(true)
-                    } else {
-                        TestResult::from_bool(true)
-                    }
-                }
+                Err(_) => TestResult::from_bool(true),
             }
         }
     }
 
     #[test]
     fn test_comprehensive_eof_enum_search() {
-        let test_messages = vec![
+        let test_messages = [
             NockchainRequest::Gossip {
                 message: ByteBuf::from(vec![]),
             },
@@ -630,7 +621,7 @@ mod tests {
 
         let mut exact_error_found = false;
 
-        for (_msg_idx, message) in test_messages.iter().enumerate() {
+        for message in test_messages.iter() {
             let cbor_data = serde_cbor::to_vec(message).expect("Serialization should work");
 
             for corruption_type in 0..4 {
@@ -709,7 +700,8 @@ mod tests {
             }
         }
 
-        assert!(exact_error_found || !exact_error_found, "Test completed");
+        // Just ensure test executes completely
+        let _ = exact_error_found;
     }
 
     #[test]
@@ -756,7 +748,7 @@ mod tests {
 
     #[test]
     fn test_cbor_baseline_robustness() {
-        let request_cases = vec![
+        let request_cases = [
             NockchainRequest::Gossip {
                 message: ByteBuf::from(b"test message".to_vec()),
             },
@@ -767,7 +759,7 @@ mod tests {
             },
         ];
 
-        let response_cases = vec![
+        let response_cases = [
             NockchainResponse::Ack { acked: true },
             NockchainResponse::Result {
                 message: ByteBuf::from(b"response data".to_vec()),
@@ -802,12 +794,8 @@ mod tests {
 
         let ack_response = NockchainResponse::Ack { acked: true };
 
-        let serde_cbor_result = serde_cbor::to_vec(&ack_response);
-        match serde_cbor_result {
-            Ok(serde_cbor_bytes) => {
-                let _result = serde_cbor::from_slice::<NockchainResponse>(&serde_cbor_bytes);
-            }
-            Err(_) => {}
+        if let Ok(serde_cbor_bytes) = serde_cbor::to_vec(&ack_response) {
+            let _result = serde_cbor::from_slice::<NockchainResponse>(&serde_cbor_bytes);
         }
 
         let mut cbor4ii_buffer = Vec::new();
@@ -897,10 +885,7 @@ mod tests {
             }
         }
 
-        assert!(
-            true,
-            "Test completed - documented the EOF enum error pattern"
-        );
+        // Test completed - documented the EOF enum error pattern
     }
 
     #[test]
@@ -920,7 +905,7 @@ mod tests {
                     && error_msg.contains("enum")
                     && error_msg.contains("Small(1)")
                 {
-                    return; // Successfully reproduced the error
+                    // Successfully reproduced the error
                 } else {
                     panic!("Got EOF error but not the expected pattern: {}", error_msg);
                 }

@@ -445,7 +445,7 @@ fn get_opcode(row: &[u64]) -> Result<u64, JetErr> {
     } else if grab_belt(row, OP9_IDX).0 == 1 {
         Ok(9)
     } else {
-        return Err(BAIL_EXIT);
+        Err(BAIL_EXIT)
     }
 }
 

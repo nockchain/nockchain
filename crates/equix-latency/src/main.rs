@@ -5,7 +5,9 @@ use rand::TryRngCore;
 
 fn main() {
     let mut msg = [0u8; 65536];
-    OsRng.try_fill_bytes(&mut msg).unwrap();
+    OsRng
+        .try_fill_bytes(&mut msg)
+        .expect("random bytes should be available");
     let mut builder = equix::EquiXBuilder::new();
     builder.runtime(equix::RuntimeOption::CompileOnly);
 

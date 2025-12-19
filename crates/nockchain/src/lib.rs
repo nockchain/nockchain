@@ -1,3 +1,13 @@
+// Allow architectural patterns
+#![allow(clippy::result_large_err)]
+#![allow(clippy::collapsible_else_if)]
+#![allow(clippy::let_underscore_future)]
+#![allow(clippy::manual_map)]
+#![allow(clippy::redundant_field_names)]
+#![allow(clippy::new_without_default)]
+#![allow(clippy::vec_init_then_push)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 pub mod config;
 pub mod mining;
 pub mod setup;
@@ -392,9 +402,6 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         // Set the require fakenet constants first, then handle the optional ones
         let mut fakenet_constants =
             fakenet_blockchain_constants(cli.fakenet_pow_len, cli.fakenet_log_difficulty);
-        if let Some(coinbase_timelock_min) = cli.fakenet_coinbase_timelock_min {
-            fakenet_constants = fakenet_constants.with_coinbase_timelock_min(coinbase_timelock_min);
-        }
         if let Some(v1_phase) = cli.fakenet_v1_phase {
             fakenet_constants = fakenet_constants.with_v1_phase(v1_phase);
         }

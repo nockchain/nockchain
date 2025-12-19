@@ -1,6 +1,5 @@
 use thiserror::Error;
 use tokio::sync::mpsc::error::{SendError, TrySendError};
-use tracing::error;
 
 use super::driver::IOAction;
 use crate::nockapp::save::CheckpointError;

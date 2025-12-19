@@ -1,14 +1,12 @@
 // Execute nock scripts
-use std::fs::File;
-
-use clap::{arg, command, Parser};
+use clap::Parser;
 use hoonc::kick_and_save_generator;
 use nockapp::utils::NOCK_STACK_SIZE;
 use nockvm::interpreter::Context;
 use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{HotEntry, URBIT_HOT_STATE};
 use nockvm::mem::NockStack;
-use nockvm::trace::{JsonBackend, TraceInfo};
+use nockvm::trace::TraceInfo;
 
 /// Command line arguments
 #[derive(Parser, Debug, Clone)]
@@ -41,35 +39,7 @@ pub async fn run(cli: HoonCli, hot_state: &[HotEntry]) -> Result<(), Box<dyn std
     // } else {
     //     None
     // };
-    let trace_info = if let Some(trace_mode) = cli.boot.trace_opts.mode {
-        match trace_mode {
-            nockapp::kernel::boot::TraceMode::Json => {
-                let file = File::create("trace.json").expect("Cannot create trace file trace.json");
-                let pid = std::process::id();
-                let process_start = std::time::Instant::now();
-                Some(
-                    JsonBackend {
-                        file,
-                        pid,
-                        process_start,
-                    }
-                    .into(),
-                )
-            }
-            _ => None,
-        }
-        // let file = File::create("trace.json").expect("Cannot create trace file trace.json");
-        // let pid = std::process::id();
-        // let process_start = std::time::Instant::now();
-        // let json_backend = JsonBackend {
-        //     file,
-        //     pid,
-        //     process_start,
-        // };
-        // Some(json_backend.into())
-    } else {
-        None
-    };
+    let trace_info: Option<TraceInfo> = cli.boot.trace_opts.into();
     let mut context: Context = init_context(Some(hot_state), trace_info);
 
     kick_and_save_generator(&mut context, &cli.nock_script, cli.dep_dir, cli.out_dir).await

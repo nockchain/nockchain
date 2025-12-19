@@ -131,7 +131,7 @@ impl Buffer {
     /// Panics if there is not enough capacity.
     pub(crate) fn push_zeros(&mut self, n: usize) {
         assert!(n <= self.capacity() - self.len());
-        self.0.extend(iter::repeat(0).take(n));
+        self.0.extend(iter::repeat_n(0, n));
     }
 
     /// Insert `n` zeros in front.
@@ -141,7 +141,7 @@ impl Buffer {
     /// Panics if there is not enough capacity.
     pub(crate) fn push_zeros_front(&mut self, n: usize) {
         assert!(n <= self.capacity() - self.len());
-        self.0.splice(..0, iter::repeat(0).take(n));
+        self.0.splice(..0, iter::repeat_n(0, n));
     }
 
     /// Pop the most significant `Word`.
@@ -283,6 +283,7 @@ impl<'a> Extend<&'a Word> for Buffer {
 mod tests {
     use alloc::alloc;
     use core::alloc::Layout;
+    use core::ptr::NonNull;
 
     use super::*;
     use crate::memory::Stack;
@@ -299,7 +300,7 @@ mod tests {
     impl Stack for TestStack {
         unsafe fn alloc_layout(&mut self, layout: Layout) -> *mut u64 {
             if layout.size() == 0 {
-                layout.dangling().as_ptr()
+                NonNull::<u64>::dangling().as_ptr()
             } else {
                 let ptr = alloc::alloc(layout);
                 ptr as *mut u64

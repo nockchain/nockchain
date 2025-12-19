@@ -1,0 +1,650 @@
+# ============================================================================
+# Registry metadata
+# ============================================================================
+[registry]
+name = "typhoon"
+version = "0.1.0"
+description = "TYPical HOON package registry"
+url = "https://github.com/sigilante/typhoon"
+
+[config]
+default_ref = "latest"
+
+# ============================================================================
+# Workspaces
+# ============================================================================
+
+[workspace.urbit]
+# Public Git URL
+git_url = "https://github.com/urbit/urbit"
+# Tag or commit hash
+ref = "409k"
+# Plaintext description
+description = "Urbit OS"
+# Path in repo; preserve structure after this point
+root_path = "pkg/arvo"
+
+[workspace.nockchain]
+git_url = "https://github.com/nockchain/nockchain"
+ref = "a19ad4dc"
+description = "Nockchain standard library"
+root_path = "hoon"
+
+# ============================================================================
+# Packages
+# ============================================================================
+
+# Urbit standard libraries from /sys
+[[package]]
+name = "urbit/hoon"
+workspace = "urbit"
+path = "sys"
+file = "hoon.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/lull"
+workspace = "urbit"
+path = "sys"
+file = "lull.hoon"
+dependencies = ["urbit/hoon"]
+
+[[package]]
+name = "urbit/zuse"
+workspace = "urbit"
+path = "sys"
+file = "zuse.hoon"
+dependencies = ["urbit/lull"]
+
+[[package]]
+name = "urbit/arvo"
+workspace = "urbit"
+path = "sys"
+file = "arvo.hoon"
+dependencies = ["urbit/lull", "urbit/zuse"]
+
+# Urbit vanes from /sys/vanes
+[[package]]
+name = "urbit/ames"
+workspace = "urbit"
+path = "sys/vanes"
+file = "ames.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/behn"
+workspace = "urbit"
+path = "sys/vanes"
+file = "behn.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/clay"
+workspace = "urbit"
+path = "sys/vanes"
+file = "clay.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/dill"
+workspace = "urbit"
+path = "sys/vanes"
+file = "dill.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/eyre"
+workspace = "urbit"
+path = "sys/vanes"
+file = "eyre.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/gall"
+workspace = "urbit"
+path = "sys/vanes"
+file = "gall.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/iris"
+workspace = "urbit"
+path = "sys/vanes"
+file = "iris.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/jael"
+workspace = "urbit"
+path = "sys/vanes"
+file = "jael.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/khan"
+workspace = "urbit"
+path = "sys/vanes"
+file = "khan.hoon"
+dependencies = ["urbit/arvo"]
+
+[[package]]
+name = "urbit/lick"
+workspace = "urbit"
+path = "sys/vanes"
+file = "lick.hoon"
+dependencies = ["urbit/arvo"]
+
+# Urbit libraries from /lib
+[[package]]
+name = "urbit/bits"
+workspace = "urbit"
+path = "lib"
+file = "bits.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/list"
+workspace = "urbit"
+path = "lib"
+file = "list.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/map"
+workspace = "urbit"
+path = "lib"
+file = "map.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/math"
+workspace = "urbit"
+path = "lib"
+file = "math.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/mapset"
+workspace = "urbit"
+path = "lib"
+file = "mapset.hoon"
+dependencies = ["urbit/map"]
+
+[[package]]
+name = "urbit/set"
+workspace = "urbit"
+path = "lib"
+file = "set.hoon"
+dependencies = []
+
+[[package]]
+name = "urbit/tiny"
+workspace = "urbit"
+path = "lib"
+file = "tiny.hoon"
+dependencies = []
+
+# Nockchain standard library
+[[package]]
+name = "nockchain/apps/dumbnet/inner"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet"
+file = "inner.hoon"
+dependencies = ["nockchain/apps/dumbnet/lib/types", "nockchain/common/stark/prover", "nockchain/common/tx-engine", "nockchain/apps/dumbnet/lib/miner", "nockchain/apps/dumbnet/lib/derived", "nockchain/apps/dumbnet/lib/consensus", "nockchain/common/pow", "nockchain/common/nock-verifier", "nockchain/common/zeke", "nockchain/common/zoon", "nockchain/common/wrapper"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/lib/consensus"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet/lib"
+file = "consensus.hoon"
+dependencies = ["nockchain/apps/dumbnet/lib/types", "nockchain/common/stark/prover", "nockchain/common/pow", "nockchain/common/tx-engine", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/lib/derived"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet/lib"
+file = "derived.hoon"
+dependencies = ["nockchain/apps/dumbnet/lib/types", "nockchain/common/tx-engine", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/lib/miner"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet/lib"
+file = "miner.hoon"
+dependencies = ["nockchain/apps/dumbnet/lib/types", "nockchain/common/stark/prover", "nockchain/common/tx-engine", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/lib/types"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet/lib"
+file = "types.hoon"
+dependencies = ["nockchain/common/zoon", "nockchain/common/zeke", "nockchain/common/wrapper", "nockchain/common/tx-engine", "nockchain/common/stark/prover", "nockchain/apps/dumbnet/miner"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/miner"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet"
+file = "miner.hoon"
+dependencies = ["nockchain/common/pow", "nockchain/common/stark/prover", "nockchain/common/zoon", "nockchain/common/zeke", "nockchain/common/wrapper"]
+
+[[package]]
+name = "nockchain/apps/dumbnet/outer"
+workspace = "nockchain"
+path = "hoon/apps/dumbnet"
+file = "outer.hoon"
+dependencies = ["nockchain/apps/dumbnet/inner"]
+
+[[package]]
+name = "nockchain/apps/hoonc/hoonc"
+workspace = "nockchain"
+path = "hoon/apps/hoonc"
+file = "hoonc.hoon"
+dependencies = ["nockchain/common/wrapper"]
+
+[[package]]
+name = "nockchain/apps/peek/peek"
+workspace = "nockchain"
+path = "hoon/apps/peek"
+file = "peek.hoon"
+dependencies = ["nockchain/common/tx-engine", "nockchain/common/wrapper", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/apps/wallet/lib/s10"
+workspace = "nockchain"
+path = "hoon/apps/wallet/lib"
+file = "s10.hoon"
+dependencies = ["nockchain/common/slip10", "nockchain/common/bip39", "nockchain/common/zose"]
+
+[[package]]
+name = "nockchain/apps/wallet/lib/tx-builder"
+workspace = "nockchain"
+path = "hoon/apps/wallet/lib"
+file = "tx-builder.hoon"
+dependencies = ["nockchain/common/tx-engine", "nockchain/apps/wallet/lib/utils", "nockchain/apps/wallet/lib/types", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/apps/wallet/lib/types"
+workspace = "nockchain"
+path = "hoon/apps/wallet/lib"
+file = "types.hoon"
+dependencies = ["nockchain/common/tx-engine", "nockchain/common/zoon", "nockchain/common/zose", "nockchain/apps/dumbnet/lib/types", "nockchain/apps/wallet/lib/s10"]
+
+[[package]]
+name = "nockchain/apps/wallet/lib/utils"
+workspace = "nockchain"
+path = "hoon/apps/wallet/lib"
+file = "utils.hoon"
+dependencies = ["nockchain/apps/wallet/lib/s10", "nockchain/common/markdown/types", "nockchain/common/markdown/markdown", "nockchain/common/tx-engine", "nockchain/common/zoon", "nockchain/common/zose", "nockchain/common/zeke", "nockchain/apps/wallet/lib/types"]
+
+[[package]]
+name = "nockchain/apps/wallet/wallet"
+workspace = "nockchain"
+path = "hoon/apps/wallet"
+file = "wallet.hoon"
+dependencies = ["nockchain/common/bip39", "nockchain/common/markdown/types", "nockchain/common/markdown/markdown", "nockchain/common/tx-engine", "nockchain/common/zeke", "nockchain/common/zoon", "nockchain/apps/dumbnet/lib/types", "nockchain/common/zose", "nockchain/common/wrapper", "nockchain/apps/wallet/lib/types", "nockchain/apps/wallet/lib/utils", "nockchain/apps/wallet/lib/tx-builder", "nockchain/apps/wallet/lib/s10"]
+
+[[package]]
+name = "nockchain/common/bip39"
+workspace = "nockchain"
+path = "hoon/common"
+file = "bip39.hoon"
+dependencies = ["nockchain/common/bip39-english", "nockchain/common/zose"]
+
+[[package]]
+name = "nockchain/common/bip39-english"
+workspace = "nockchain"
+path = "hoon/common"
+file = "bip39-english.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/hoon"
+workspace = "nockchain"
+path = "hoon/common"
+file = "hoon.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/markdown/markdown"
+workspace = "nockchain"
+path = "hoon/common/markdown"
+file = "markdown.hoon"
+dependencies = ["nockchain/common/markdown/types"]
+
+[[package]]
+name = "nockchain/common/markdown/types"
+workspace = "nockchain"
+path = "hoon/common/markdown"
+file = "types.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/nock-prover"
+workspace = "nockchain"
+path = "hoon/common"
+file = "nock-prover.hoon"
+dependencies = ["nockchain/common/zeke", "nockchain/common/stark/prover", "nockchain/dat/softed-constraints"]
+
+[[package]]
+name = "nockchain/common/nock-verifier"
+workspace = "nockchain"
+path = "hoon/common"
+file = "nock-verifier.hoon"
+dependencies = ["nockchain/common/zeke", "nockchain/common/stark/verifier", "nockchain/dat/softed-constraints"]
+
+[[package]]
+name = "nockchain/common/pow"
+workspace = "nockchain"
+path = "hoon/common"
+file = "pow.hoon"
+dependencies = ["nockchain/common/stark/prover", "nockchain/common/nock-prover", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/schedule"
+workspace = "nockchain"
+path = "hoon/common"
+file = "schedule.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/slip10"
+workspace = "nockchain"
+path = "hoon/common"
+file = "slip10.hoon"
+dependencies = ["nockchain/common/zose", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/stark/prover"
+workspace = "nockchain"
+path = "hoon/common/stark"
+file = "prover.hoon"
+dependencies = ["nockchain/common/v0-v1/table/prover/compute", "nockchain/common/v2/table/prover/compute", "nockchain/common/v0-v1/table/prover/memory", "nockchain/common/v2/table/prover/memory", "nockchain/common/zeke", "nockchain/common/v0-v1/nock-common", "nockchain/common/v2/nock-common"]
+
+[[package]]
+name = "nockchain/common/stark/verifier"
+workspace = "nockchain"
+path = "hoon/common/stark"
+file = "verifier.hoon"
+dependencies = ["nockchain/common/v0-v1/nock-common", "nockchain/common/v2/nock-common", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/test"
+workspace = "nockchain"
+path = "hoon/common"
+file = "test.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/tx-engine"
+workspace = "nockchain"
+path = "hoon/common"
+file = "tx-engine.hoon"
+dependencies = ["nockchain/common/tx-engine-0", "nockchain/common/tx-engine-1", "nockchain/common/zeke", "nockchain/common/zoon", "nockchain/common/zose"]
+
+[[package]]
+name = "nockchain/common/tx-engine-0"
+workspace = "nockchain"
+path = "hoon/common"
+file = "tx-engine-0.hoon"
+dependencies = ["nockchain/common/schedule", "nockchain/common/pow", "nockchain/common/zeke", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/common/tx-engine-1"
+workspace = "nockchain"
+path = "hoon/common"
+file = "tx-engine-1.hoon"
+dependencies = ["nockchain/common/tx-engine-0", "nockchain/common/zeke", "nockchain/common/zoon"]
+
+[[package]]
+name = "nockchain/common/v0-v1/nock-common"
+workspace = "nockchain"
+path = "hoon/common/v0-v1"
+file = "nock-common.hoon"
+dependencies = ["nockchain/common/v0-v1/table/verifier/compute", "nockchain/common/v0-v1/table/verifier/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/compute"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table"
+file = "compute.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/memory"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table"
+file = "memory.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/prover/compute"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table/prover"
+file = "compute.hoon"
+dependencies = ["nockchain/common/v0-v1/table/compute", "nockchain/common/v0-v1/table/verifier/compute", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/prover/memory"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table/prover"
+file = "memory.hoon"
+dependencies = ["nockchain/common/v0-v1/table/memory", "nockchain/common/v0-v1/table/verifier/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/verifier/compute"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table/verifier"
+file = "compute.hoon"
+dependencies = ["nockchain/common/v0-v1/table/compute", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v0-v1/table/verifier/memory"
+workspace = "nockchain"
+path = "hoon/common/v0-v1/table/verifier"
+file = "memory.hoon"
+dependencies = ["nockchain/common/v0-v1/table/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/nock-common"
+workspace = "nockchain"
+path = "hoon/common/v2"
+file = "nock-common.hoon"
+dependencies = ["nockchain/common/v2/table/verifier/compute", "nockchain/common/v2/table/verifier/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/compute"
+workspace = "nockchain"
+path = "hoon/common/v2/table"
+file = "compute.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/memory"
+workspace = "nockchain"
+path = "hoon/common/v2/table"
+file = "memory.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/prover/compute"
+workspace = "nockchain"
+path = "hoon/common/v2/table/prover"
+file = "compute.hoon"
+dependencies = ["nockchain/common/v2/table/compute", "nockchain/common/v2/table/verifier/compute", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/prover/memory"
+workspace = "nockchain"
+path = "hoon/common/v2/table/prover"
+file = "memory.hoon"
+dependencies = ["nockchain/common/v2/table/memory", "nockchain/common/v2/table/verifier/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/verifier/compute"
+workspace = "nockchain"
+path = "hoon/common/v2/table/verifier"
+file = "compute.hoon"
+dependencies = ["nockchain/common/v2/table/compute", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/v2/table/verifier/memory"
+workspace = "nockchain"
+path = "hoon/common/v2/table/verifier"
+file = "memory.hoon"
+dependencies = ["nockchain/common/v2/table/memory", "nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/wrapper"
+workspace = "nockchain"
+path = "hoon/common"
+file = "wrapper.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/zeke"
+workspace = "nockchain"
+path = "hoon/common"
+file = "zeke.hoon"
+dependencies = ["nockchain/common/ztd/eight"]
+
+[[package]]
+name = "nockchain/common/zoon"
+workspace = "nockchain"
+path = "hoon/common"
+file = "zoon.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/zose"
+workspace = "nockchain"
+path = "hoon/common"
+file = "zose.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/common/ztd/eight"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "eight.hoon"
+dependencies = ["nockchain/common/ztd/seven"]
+
+[[package]]
+name = "nockchain/common/ztd/five"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "five.hoon"
+dependencies = ["nockchain/common/ztd/four"]
+
+[[package]]
+name = "nockchain/common/ztd/four"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "four.hoon"
+dependencies = ["nockchain/common/ztd/three"]
+
+[[package]]
+name = "nockchain/common/ztd/one"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "one.hoon"
+dependencies = []
+
+[[package]]
+name = "nockchain/common/ztd/seven"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "seven.hoon"
+dependencies = ["nockchain/common/ztd/six"]
+
+[[package]]
+name = "nockchain/common/ztd/six"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "six.hoon"
+dependencies = ["nockchain/common/ztd/five"]
+
+[[package]]
+name = "nockchain/common/ztd/three"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "three.hoon"
+dependencies = ["nockchain/common/ztd/two"]
+
+[[package]]
+name = "nockchain/common/ztd/two"
+workspace = "nockchain"
+path = "hoon/common/ztd"
+file = "two.hoon"
+dependencies = ["nockchain/common/ztd/one"]
+
+[[package]]
+name = "nockchain/dat/constraints-v0-v1"
+workspace = "nockchain"
+path = "hoon/dat"
+file = "constraints-v0-v1.hoon"
+dependencies = ["nockchain/common/zeke", "nockchain/common/v0-v1/nock-common"]
+
+[[package]]
+name = "nockchain/dat/constraints-v2"
+workspace = "nockchain"
+path = "hoon/dat"
+file = "constraints-v2.hoon"
+dependencies = ["nockchain/common/zeke", "nockchain/common/v2/nock-common"]
+
+[[package]]
+name = "nockchain/dat/softed-constraints"
+workspace = "nockchain"
+path = "hoon/dat"
+file = "softed-constraints.hoon"
+dependencies = ["nockchain/common/zeke"]
+
+[[package]]
+name = "nockchain/trivial"
+workspace = "nockchain"
+path = "hoon"
+file = "trivial.hoon"
+dependencies = []
+
+# ============================================================================
+# Aliases
+# ============================================================================
+
+[[alias]]
+name = "nockchain/eight"
+target = "nockchain/common/ztd/eight"
+
+[[alias]]
+name = "nockchain/five"
+target = "nockchain/common/ztd/five"
+
+[[alias]]
+name = "nockchain/four"
+target = "nockchain/common/ztd/four"
+
+[[alias]]
+name = "nockchain/one"
+target = "nockchain/common/ztd/one"
+
+[[alias]]
+name = "nockchain/seven"
+target = "nockchain/common/ztd/seven"
+
+[[alias]]
+name = "nockchain/six"
+target = "nockchain/common/ztd/six"
+
+[[alias]]
+name = "nockchain/two"
+target = "nockchain/common/ztd/two"
+
+[[alias]]
+name = "nockchain/zeke"
+target = "nockchain/common/zeke"
+
+[[alias]]
+name = "nockchain/zoon"
+target = "nockchain/common/zoon"
+
+[[alias]]
+name = "nockchain/zose"
+target = "nockchain/common/zose"

@@ -8,8 +8,12 @@ keywords = ["hash", "murmur3", "murmur"]
 license = "MIT/Apache-2.0"
 edition = "2021"
 
+[features]
+default = []
+c-ffi = ["murmur3-sys"]
+
 [dependencies]
+murmur3-sys = { path = "./murmur3-sys", optional = true }
 
 [dev-dependencies]
-murmur3-sys = { path = "./murmur3-sys" }
 quickcheck = "1.0.3"

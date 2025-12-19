@@ -2,6 +2,8 @@
 //!
 //! Note: these don't work on 16-bit machines.
 
+#![allow(deprecated)]
+
 use std::fmt::Write;
 
 use criterion::{

@@ -1,3 +1,14 @@
+// Allow architectural patterns
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::needless_borrows_for_generic_args)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::or_fun_call)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::unwrap_or_default)]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -38,7 +49,7 @@ use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tonic::Request;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_tracy::TracyLayer;
@@ -147,6 +158,7 @@ struct App {
     last_successful_connection: Option<Instant>,
     last_connection_attempt: Instant,
     last_connection_error: Option<String>,
+    #[allow(dead_code)]
     fail_fast: bool,
 
     // Prefetch state - background loading of block details to avoid loading screens
@@ -293,11 +305,8 @@ impl App {
                     (None, ConnectionStatus::NeverConnected, Some(e.to_string()))
                 }
             };
-        let metrics_client = match NockchainMetricsServiceClient::connect(server_uri.clone()).await
-        {
-            Ok(client) => Some(client),
-            Err(_) => None,
-        };
+        let metrics_client =
+            (NockchainMetricsServiceClient::connect(server_uri.clone()).await).ok();
 
         let (wallet_cmd_tx, wallet_cmd_rx) = mpsc::unbounded_channel();
         let (wallet_res_tx, wallet_res_rx) = mpsc::unbounded_channel();
@@ -3989,7 +3998,7 @@ async fn wallet_index_worker(
 
             let fetch_result = client
                 .as_mut()
-                .unwrap()
+                .expect("client should be connected")
                 .get_transaction_details(Request::new(request))
                 .await;
 

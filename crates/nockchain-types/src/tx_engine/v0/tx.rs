@@ -68,7 +68,8 @@ impl NounEncode for Inputs {
         self.0.iter().fold(D(0), |map, (name, input)| {
             let mut key = name.to_noun(stack);
             let mut value = input.to_noun(stack);
-            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher).unwrap()
+            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher)
+                .expect("Failed to put into z_map")
         })
     }
 }

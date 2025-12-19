@@ -6,9 +6,10 @@
 /=  z   /common/zeke
 /=  zo  /common/zoon
 /=  dumb  /apps/dumbnet/lib/types
+/=  bridge  /apps/bridge/types
 /=  *   /common/zose
 /=  *  /common/wrapper
-/=  wt  /apps/wallet/lib/types
+/=  wallet-types  /apps/wallet/lib/types
 /=  wutils  /apps/wallet/lib/utils
 /=  tx-builder  /apps/wallet/lib/tx-builder
 /=  s10  /apps/wallet/lib/s10
@@ -16,26 +17,24 @@
 =|  bug=_&
 |%
 ::
-::  re-exporting names from wallet types while passing the bug flag
-++  utils  ~(. wutils bug)
-++  debug  debug:utils
-++  warn  warn:utils
-++  moat  (keep state:wt)
+++  moat  (keep state:wallet-types)
 --
 ::
 %-  (moat &)
 ^-  fort:moat
-|_  =state:wt
-+*  v  ~(. vault:utils state)
-    d  ~(. draw:utils state)
-    p  ~(. plan:utils transaction-tree.state)
+|_  =state:wallet-types
++*  utils  ~(. wutils bug bc.state)
+    v  ~(. vault:utils state)
+    debug  debug:utils
+    warn  warn:utils
+    wt  ~(. wallet-types bc.state)
 ::
 ++  load
   |=  old=versioned-state:wt
   ^-  state:wt
   |^
   |-
-  ?:  ?=(%4 -.old)
+  ?:  ?=(%5 -.old)
     old
   ~>  %slog.[0 'load: State upgrade required']
   ?-  -.old
@@ -43,6 +42,7 @@
     %1  $(old state-1-2)
     %2  $(old state-2-3)
     %3  $(old state-3-4)
+    %4  $(old state-4-5)
   ==
   ::
   ++  state-0-1
@@ -109,7 +109,7 @@
     ==
   ::
   ++  state-3-4
-    ^-  state:wt
+    ^-  state-4:wt
     ?>  ?=(%3 -.old)
     ~>  %slog.[0 'upgrade version 3 to 4']
     :*  %4
@@ -117,6 +117,17 @@
         :: delete active master
         active-master.old
         keys.old
+    ==
+  ::
+  ++  state-4-5
+    ^-  state:wt
+    ?>  ?=(%4 -.old)
+    ~>  %slog.[0 'upgrade version 4 to 5']
+    :*  %5
+        balance.old
+        active-master.old
+        keys.old
+        *blockchain-constants:transact
     ==
   --
 ::
@@ -126,6 +137,8 @@
   %-  (debug "peek: {<arg>}")
   =/  =(pole)  arg
   ?+  pole  ~
+      [%fakenet ~]
+    ``!=(bc.state *blockchain-constants:transact)
     ::
       [%balance ~]
     ``balance.state
@@ -226,6 +239,7 @@
         %show-master-zprv  (do-show-master-zprv cause)
         %list-master-addresses  (do-list-master-addresses cause)
         %set-active-master-address  (do-set-active-master-address cause)
+        %fakenet               [[%exit 0]~ state(bc bc.state(coinbase-timelock-min 1))]
     ::
         %file
       ?-    +<.cause
@@ -1269,7 +1283,7 @@
       |=  key-info=[child-index=@ud hardened=?]
       (sign-key:get:v [~ key-info])
     =/  [=spends:v1:transact =witness-data:wt display=transaction-display:wt]
-      %:  tx-builder
+      %:  ~(build tx-builder bc.state)
         names
         orders
         fee.cause
@@ -1280,8 +1294,8 @@
         memo-data.cause 
         selection-strategy.cause
       ==
-    =/  multisig-recv-locks=(z-set:zo lock:transact)
-      (gather-multisig-locks orders)
+    =/  lock-roots-to-watch=(z-set:zo [hash:transact (unit lock:transact)])
+      (gather-watch-roots orders)
     =/  transaction-name=@t
       %-  to-b58:hash:transact
       id:(new:raw-tx:v1:transact spends)
@@ -1294,10 +1308,10 @@
       ==
     =/  res=effects=(list effect:wt)
       (save-transaction transaction)
-    ?:  ?=(~ multisig-recv-locks)
+    ?:  ?=(~ lock-roots-to-watch)
       [effects.res state]
     :-  effects.res
-    state(keys (watch-multisig-locks multisig-recv-locks))
+    state(keys (watch-root-locks lock-roots-to-watch))
     ::
     ++  parse-names
       |=  raw-names=(list [first=@t last=@t])
@@ -1355,9 +1369,9 @@
           ==
       ~[write-effect [%markdown markdown-text]]
     ::
-    ++  gather-multisig-locks
+    ++  gather-watch-roots
       |=  orders=(list order:wt)
-      ^-  (z-set:zo lock:transact)
+      ^-  (z-set:zo [hash:transact (unit lock:transact)])
       %-  z-silt:zo
       %+  murn  orders
       |=  ord=order:wt
@@ -1366,16 +1380,25 @@
       ::
           %multisig
         =/  allowed=(z-set:zo hash:transact)  (z-silt:zo participants.ord)
-        `[%pkh [m=threshold.ord allowed]]~
+        =/  lock  [%pkh [m=threshold.ord allowed]]~
+        %-  some
+        :-  (hash:lock:transact lock)
+        `lock
+      ::
+          %lock-root
+       `[root.ord ~]
+      ::
+          %bridge-deposit
+        `[bridge-lock-root-default:bridge ~]
       ==
     ::
-    ++  watch-multisig-locks
-      |=  locks=(z-set:zo lock:transact)
+    ++  watch-root-locks
+      |=  roots=(z-set:zo [hash:transact (unit lock:transact)])
       ^-  keys:wt
-      %-  ~(rep z-in:zo locks)
-      |=  [lock=lock:transact acc=_keys.state]
+      %-  ~(rep z-in:zo roots)
+      |=  [[root=hash:transact lock=(unit lock:transact)] acc=_keys.state]
       %-  watch-first-name:put:v
-      [(first:nname:transact (hash:lock:transact lock)) `lock]
+      [(first:nname:transact root) lock]
     ::
     --
   ::

@@ -1,14 +1,14 @@
 pub mod page;
 
 use anyhow::Result;
-use ibig::{ubig, UBig};
 use nockchain_math::belt::{Belt, PRIME};
-use nockchain_math::crypto::cheetah::{CheetahError, CheetahPoint, P_BIG};
+use nockchain_math::crypto::cheetah::{CheetahError, CheetahPoint};
 use nockchain_math::noun_ext::NounMathExt;
 use nockchain_math::zoon::common::DefaultTipHasher;
 use nockchain_math::zoon::zmap;
 use nockvm::noun::{Noun, NounAllocator, D};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
+use num_bigint::BigUint;
 pub use page::{BigNum, BlockId, CoinbaseSplit, Page, PageMsg};
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +19,7 @@ impl SchnorrPubkey {
     pub const BYTES_BASE58: usize = 132;
 
     pub fn to_base58(&self) -> Result<String, CheetahError> {
-        Ok(CheetahPoint::into_base58(&self.0)?)
+        CheetahPoint::into_base58(&self.0)
     }
 
     pub fn from_base58(b58: &str) -> Result<Self, CheetahError> {
@@ -150,15 +150,15 @@ pub struct Hash(pub [Belt; 5]);
 impl Hash {
     pub fn to_base58(&self) -> String {
         fn base_p_to_decimal<const N: usize>(belts: [Belt; N]) -> String {
-            let prime_ubig = UBig::from(PRIME);
-            let mut result = ubig!(0);
+            let prime = BigUint::from(PRIME);
+            let mut result = BigUint::from(0u8);
 
             for (i, value) in belts.iter().enumerate() {
-                result += UBig::from(value.0) * prime_ubig.pow(i);
+                let pow = prime.pow(i as u32);
+                result += BigUint::from(value.0) * pow;
             }
 
-            let bytes = result.to_be_bytes();
-            bs58::encode(bytes).into_string()
+            bs58::encode(result.to_bytes_be()).into_string()
         }
 
         base_p_to_decimal(self.0)
@@ -166,13 +166,18 @@ impl Hash {
 
     pub fn from_base58(s: &str) -> Result<Self, HashDecodeError> {
         let bytes = bs58::decode(s).into_vec()?;
-        let mut value = UBig::from_be_bytes(&bytes);
+        let mut value = BigUint::from_bytes_be(&bytes);
+        let prime = BigUint::from(PRIME);
         let mut belts = [Belt(0); 5];
-        for i in 0..5 {
-            belts[i] = Belt((value.clone() % PRIME) as u64);
-            value /= PRIME;
+        for belt in &mut belts {
+            let rem = &value % &prime;
+            let rem_u64: u64 = rem
+                .try_into()
+                .map_err(|_| HashDecodeError::ProvidedValueTooLarge)?;
+            *belt = Belt(rem_u64);
+            value /= &prime;
         }
-        if value > *P_BIG {
+        if value > prime {
             return Err(HashDecodeError::ProvidedValueTooLarge);
         }
         Ok(Hash(belts))
@@ -180,6 +185,21 @@ impl Hash {
 
     pub fn to_array(&self) -> [u64; 5] {
         [self.0[0].0, self.0[1].0, self.0[2].0, self.0[3].0, self.0[4].0]
+    }
+}
+
+/// Peek response for the heaviest block ID.
+/// Wraps `(unit (unit Hash))` - the Hoon peek response encoding.
+#[derive(Debug, Clone, PartialEq, Eq, NounDecode, NounEncode)]
+pub struct Heavy(pub Option<Option<Option<Hash>>>);
+
+impl Heavy {
+    /// Convert to Base58 string if the heavy block ID exists.
+    pub fn to_base58(&self) -> Option<String> {
+        match &self.0 {
+            Some(Some(Some(hash))) => Some(hash.to_base58()),
+            _ => None,
+        }
     }
 }
 

@@ -64,13 +64,7 @@ Prerequisites: Rust toolchain, Git
 4. Install `nockup` and dependencies.
 
     ```sh
-    nockup install
-    ```
-
-5. Check for updates.
-
-    ```sh
-    $ nockup update
+    nockup update
     ```
 
 ### On Replit
@@ -85,33 +79,51 @@ Nockup provides a command-line interface for managing NockApp projects.  It uses
 # Show basic program information.  (On some systems, like Docker 
 # containers, the hoon and hoonc binaries are not identified.)
 $ nockup
-nockup version 0.0.1
+nockup version 0.5.0
 hoon   version 0.1.0
 hoonc  version 0.2.0
 current channel stable
-current architecture aarch64
+current architecture aarch64-apple-darwin
 
 # Start the nockup environment.
-$ nockup install
-🚀 Setting up nockup cache directory...
+$ nockup update
+🔄 Updating nockup...
 📁 Cache location: /Users/myuser/.nockup
-📁 Creating cache directory structure...
-✓ Created directory structure
-⬇️ Downloading templates from GitHub...
-Cloning into '/Users/myuser/.nockup/temp_repo'...
-remote: Enumerating objects: 36, done.
-remote: Counting objects: 100% (36/36), done.
-remote: Compressing objects: 100% (30/30), done.
-remote: Total 36 (delta 1), reused 18 (delta 0), pack-reused 0 (from 0)
-Receiving objects: 100% (36/36), 45.18 KiB | 1.56 MiB/s, done.
-Resolving deltas: 100% (1/1), done.
-✓ Templates downloaded successfully
-✅ Setup complete!
-📂 Templates are now available in: /Users/myuser/.nockup/templates
+⬇️  Downloading templates from GitHub...
+✓ Templates and manifests downloaded successfully
+🔄 Existing toolchain files found, updating...
+⬇️ Fetching latest channel manifests from GitHub releases...
+🔍 Fetching manifest for stable...
+⬇️ Downloading from: https://github.com/nockchain/nockchain/releases/download/build-a19ad4dc66c81ec4d97134dd11a7425bc88b4d7b/nockchain-manifest.toml
+✅ Downloaded: channel-nockup-stable.toml
+✅ Toolchain files setup complete
+⬇️ Downloading binaries for channel 'channel-nockup-stable' and architecture 'aarch64-apple-darwin'...
+⬇️ Downloading hoon binary...
+✅ Blake3 checksum passed.
+✅ SHA1 checksum passed.
+📦 Extracting hoon and signature from archive...
+✅ Extracted /var/folders/6_/nx76z6bs66q9y177y1ggfs100000gn/T/nockup_extract_hoon/hoon
+⚠️ Skipping signature verification on macos (not yet supported)
+✅ Installed hoon to /Users/myuser/.nockup/bin/hoon
+⬇️ Downloading hoonc binary...
+✅ Blake3 checksum passed.
+✅ SHA1 checksum passed.
+📦 Extracting hoonc and signature from archive...
+✅ Extracted /var/folders/6_/nx76z6bs66q9y177y1ggfs100000gn/T/nockup_extract_hoonc/hoonc
+⚠️ Skipping signature verification on macos (not yet supported)
+✅ Installed hoonc to /Users/myuser/.nockup/bin/hoonc
+⬇️ Downloading nockup binary...
+✅ Blake3 checksum passed.
+✅ SHA1 checksum passed.
+📦 Extracting nockup and signature from archive...
+✅ Extracted /var/folders/6_/nx76z6bs66q9y177y1ggfs100000gn/T/nockup_extract_nockup/nockup
+⚠️ Skipping signature verification on macos (not yet supported)
+✅ Installed nockup to /Users/myuser/.nockup/bin/nockup
+✅ Update complete!
 
 # Initialize a default project.
-$ cp ~/.nockup/manifests/example-manifest.toml arcadia.toml
-$ nockup init arcadia
+$ cp ~/.nockup/manifests/example-nockapp.toml nockapp.toml
+$ nockup project init
 Initializing new NockApp project 'arcadia'...
   create Cargo.toml
   create manifest.toml
@@ -132,8 +144,8 @@ Initializing new NockApp project 'arcadia'...
 ✓ All libraries processed successfully!
 ✓ New project created in ./arcadia//
 To get started:
-  nockup build arcadia
-  nockup run arcadia
+  nockup project build
+  nockup project run
 
 # Show project settings.
 $ cd arcadia
@@ -142,8 +154,8 @@ Cargo.lock    Cargo.toml    hoon          manifest.toml README.md     src
 
 $ cd ..
 
-# Build the project (wraps hoonc).
-$ nockup build arcadia
+# Build the project (wraps hoonc and uses local nockapp.toml).
+$ nockup project build
 🔨 Building project 'arcadia'...
     Updating crates.io index
     Updating git repository `https://github.com/nockchain/nockchain.git`
@@ -158,7 +170,7 @@ no panic!
 ✓ Hoon compilation completed successfully!
 
 # Run the project (wraps hoon).
-$ nockup run arcadia
+$ nockup project run
 🔨 Running project 'arcadia'...
     Finished `release` profile [optimized] target(s) in 0.31s
      Running `target/release/arcadia`
@@ -170,7 +182,7 @@ I (11:53:15) Pokes awaiting implementation
 ✓ Run completed successfully!
 ```
 
-The final product is, of course, a binary which you may run either via `nockup run` (as demonstrated here) or directly (from `./target/release`).
+The final product is, of course, a binary which you may run either via `nockup project run` (as demonstrated here) or directly (from `./target/release`).
 
 ### Project Templates and Manifests
 
@@ -201,21 +213,20 @@ A project is specified by its manifest file, which includes details like the pro
 
 #### Manifests
 
-A project manifest is a file containing sufficient information to produce a basic NockApp from a template with specified imports.
+A project manifest is a file containing sufficient information to produce a basic NockApp from a template with specified imports.  Only one `nockapp.toml` should be present in a project directory, and it will result in a NockApp build directory with the package `name`.
 
 ```toml
-[project]
-name = "Et In Arcadia Ego"
-project_name = "arcadia"
-version = "1.0.0"
-description = "I too was in Arcadia."
-author_name = "Nicolas Poussin"
-author_email = "nicolas@poussin.edu"
-github_username = "arcadia"
+[package]
+name = "arcadia"
+version = "0.1.0"
+description = "My famous game."
+authors = ["sigilante"]
 license = "MIT"
-keywords = ["nockapp", "nockchain", "hoon"]
-nockapp_commit_hash = "336f744b6b83448ec2b86473a3dec29b15858999"
 template = "basic"
+
+[dependencies]
+"urbit/bits" = "latest"
+"nockchain/zose" = "latest"
 ```
 
 Manifests let you set several project parameters and specify the template to use.  This information will also be used to populate a README file.  (By default we supply the [MIT License](https://opensource.org/licenses/MIT) and we specify the version as [0.1.0](https://0ver.org/).)
@@ -251,24 +262,24 @@ path = "src/bin/main2.rs"
 Nockup is opinionated here, and will match `hoon/app/main1.hoon`, etc., as kernels; that is,
 
 ```sh
-nockup build myproject
+nockup project build
 ```
 
 will produce both `target/release/main1` and `target/release/main2`.
 
-Projects which produce more than one binary cannot be used directly with `nockup run` since more than one process must be started.  This should be kept in mind when using templates which produce more than one binary (like `grpc`).
+Projects which produce more than one binary cannot be used directly with `nockup project run` since more than one process must be started.  This should be kept in mind when using templates which produce more than one binary (like `grpc`).
 
 #### Nockchain Interactions
 
 A Nockchain must be running locally in order to obtain chain state data.
 
-For instance, with a NockApp based on the template `chain`, you need to connect to a running NockApp instance at port 5555:
+<!-- For instance, with a NockApp based on the template `chain`, you need to connect to a running NockApp instance at port 5555:
 
 ```
-nockup run chain -- --nockchain-socket=5555 get-heaviest-block
+nockup project run -- --nockchain-socket=5555 get-heaviest-block
 # - or -
 ./chain/target/release/chain --nockchain-socket=5555 get-heaviest-block
-```
+``` -->
 
 ### Libraries
 
@@ -284,18 +295,16 @@ Examples of each are provided in [`example-manifest-with-libraries.toml`](https:
 
 #### Single Libraries
 
-A single file may be plucked out of context from a public repo for inclusion.
+A single file may be plucked out of context from a public repo for inclusion.  If it is aliased in the [Typhoon registry](https://github.com/sigilante/typhoon), you may specify it by its registry name and version:
 
 - [`urbit/urbit`:  `bits.hoon`](https://github.com/urbit/urbit/blob/develop/pkg/arvo/lib/bits.hoon) bitwise aliases for Hoon stdlib
 
 ```toml
-[libraries.bits]
-url = "https://github.com/urbit/urbit"
-branch = "develop"
-file = "pkg/arvo/lib/bits.hoon"
+[dependencies]
+"urbit/bits" = "latest"
 ```
 
-This supplies `bits.hoon` at `/hoon/lib/bits.hoon`.  (The developer is responsible for managing dependencies such as `/sur` structure files.)
+This supplies `bits.hoon` at `/hoon/lib/bits.hoon`.  Registry entries track dependencies automatically.
 
 #### Top-Level Libraries
 
@@ -305,15 +314,21 @@ Sequent is a good example of the simplest possible structure:
 
 - [`jackfoxy/sequent`](https://github.com/jackfoxy/sequent) list functions
 
-This is imported via the `configuration.toml` manifest:
+This is imported via the `nockapp.toml` manifest:
 
 ```toml
-[libraries.sequent]
-url = "https://github.com/jackfoxy/sequent"
-commit = "0f6e6777482447d4464948896b763c080dc9e559"
+[dependencies.sequent]
+git = "https://github.com/jackfoxy/sequent"
+commit = "7fc95fd4d6df7548cf354c9c91df2980e902770d"
+# Specify the subdirectory within the repository (which will be omitted)
+path = "desk"
+# Keep the part of the path you need to preserve
+files = ["lib/seq"]
 ```
 
 which supplies `/desk/lib/seq.hoon` at `/hoon/lib/seq.hoon` and ignores `/mar` and `/tests` (which are both Urbit-specific affordances).
+
+For libraries not included in the registry, the developer is responsible for managing dependencies such as `/sur` structure files explicitly.
 
 Other Hoon libraries of note include:
 
@@ -326,18 +341,19 @@ A more complex structure features top-level nesting before the Hoon source libra
 
 - [`urbit/numerics`](https://github.com/urbit/numerics)
 
-```toml
-[libraries.math]
-url = "https://github.com/urbit/numerics"
-branch = "main"
-directory = "libmath"
-commit = "7c11c48ab3f21135caa5a4e8744a9c3f828f2607"
+A complete library may be imported by omitting the `files` key:
 
-[libraries.lagoon]
-url = "https://github.com/urbit/numerics"
-branch = "main"
-directory = "lagoon"
+```toml
+[dependencies.lagoon]
+git = "https://github.com/urbit/numerics"
+commit = "01905f364178958bb2d0c1a7ce009b6f3e68f737"
+# Specify only the subdirectory within the repository; if no files, all will be included.
+path = "lagoon/desk"
+
+[dependencies.math]
+git = "https://github.com/urbit/numerics"
 commit = "7c11c48ab3f21135caa5a4e8744a9c3f828f2607"
+path = "libmath/desk"
 ```
 
 which supplies these files (among others) in the following pattern:
@@ -379,20 +395,45 @@ Nockup supports the following `nockup` commands.
 
 ### Operations
 
-- `nockup install`:  Initialize Nockup cache and download binaries and templates.
-- `nockup update`:  Check for updates to binaries and templates.
+- `nockup`:  Print version information for Nockup and installed binaries.
+- `nockup update`:  Initialize and check for updates to binaries and templates.
 - `nockup help`:  Print this message or the help of the given subcommand(s).
 
 ### Project
 
-- `nockup init`:  Initialize a new NockApp project from a `.toml` config file.
+- `nockup build init`:  Initialize a new NockApp project from a `.toml` config file.
 - `nockup build`:  Build a NockApp project using Cargo.
-- `nockup run`:  Run a NockApp project.
+- `nockup build run`:  Run a NockApp project.
 
-### channel
+### Channels
 
 - `nockup channel show`: Show currently active channel.
 - `nockup channel set`: Set the active channel, from `stable` and `nightly`.  (Most users will prefer `stable`.)
+
+### Packages
+
+- `nockup package install`:  Install Hoon libraries specified in a project manifest.
+- `nockup package list`:  List installed Hoon libraries in a project.
+- `nockup package add`:  Add a Hoon library to a project manifest at a particular version.
+- `nockup package remove`:  Remove an installed Hoon library from a project.
+- `nockup package purge`:  Clear the package cache.
+- `nockup package purge --dry-run`:  Preview what would be deleted.
+
+## Registry
+
+Nockup supports publishing and consuming Hoon libraries via a registry.  A registry is a Git repository which contains a `registry.toml` file listing available packages.  The standard registry is currently hosted at [Typhoon, `sigilante/typhoon`](https://github.com/sigilante/typhoon).
+
+To generate a registry file for your Hoon library, you may use the `scan-deps-v2.py` script included in the Nockup repository.  This script scans a directory for Hoon files and their dependencies, then produces a registry-compatible TOML segment.
+
+```sh
+python3 scan-deps-v2.py \
+    --workspace nockchain \
+    --root-path "hoon" \
+    --git-url "https://github.com/nockchain/nockchain" \
+    --ref "a19ad4dc" \
+    --description "Nockchain standard library" \
+    /path/to/nockchain/hoon/common
+```
 
 ## Security
 
@@ -430,6 +471,9 @@ Code building is a general-purpose computing process, like `eval`.  You should n
 
 ### Release Roadmap
 
+* [x] support registry and dependency management
+* [ ] support multiple files per library (limited to one now)
+* [ ] detect dependencies in non-registry libraries
 * [ ] Replit instance (needs better memory swap management)
 * [ ] add Apple code signing support
 * [x] update manifest files (and install/update strings) to `nockchain/nockchain`
@@ -441,6 +485,12 @@ Code building is a general-purpose computing process, like `eval`.  You should n
 * expand repertoire of templates
   * list and ship appropriate Hoon libraries
 * `nockup publish`/`nockup clone` (awaiting PKI/namespace)
+* The current code handles a single `specific_file`. To support multiple files, the changes needed are:
+  1. Change GitSpec struct to store files: `Option<Vec<String>>` instead of file: `Option<String>`
+  2. Change ResolvedPackage struct to store source_files: `Option<Vec<String>>` instead of source_file: `Option<String>`
+  3. Update resolver to pass all files from the manifest to `GitSpec`
+  4. Update installer to loop through all files and create symlinks for each
+  The key change is in the install logic - instead of handling specific_file: `Option<&str>`, it needs to handle specific_files: `Option<&[String]>` and loop through them.
 
 ## Contributor's Guide
 

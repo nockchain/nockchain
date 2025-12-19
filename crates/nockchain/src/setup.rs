@@ -40,6 +40,7 @@ pub fn fakenet_blockchain_constants(pow_len: u64, target_bex: u64) -> Blockchain
         .with_pow_len(pow_len)
         .with_genesis_target_atom_bex(target_bex as u128)
         .with_first_month_coinbase_min(0)
+        .with_coinbase_timelock_min(1)
 }
 
 pub async fn poke<J: Jammer + Send + 'static>(

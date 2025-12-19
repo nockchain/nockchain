@@ -1,3 +1,6 @@
+#[cfg(feature = "bridge")]
+pub mod bridge;
+
 #[cfg(feature = "wallet")]
 pub mod wallet;
 

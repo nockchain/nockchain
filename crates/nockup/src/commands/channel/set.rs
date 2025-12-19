@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::cli::ChannelAction;
-
-fn set_channel(channel: &str) -> Result<()> {
+pub fn run(channel: &str) -> Result<()> {
     // validate that is 'nightly' or 'stable', change later when more are supported
     if channel != "nightly" && channel != "stable" {
         return Err(anyhow::anyhow!("Invalid channel: {}", channel));
@@ -16,13 +14,6 @@ fn set_channel(channel: &str) -> Result<()> {
     std::fs::write(config_path, toml::to_string(&config)?)
         .context("Failed to write config file")?;
     println!("Set default channel to '{}'.", channel);
-    Ok(())
-}
-
-fn show_channel() -> Result<()> {
-    let config = get_config()?;
-    println!("Default channel: {}", config["channel"]);
-    println!("Architecture: {}", config["architecture"]);
     Ok(())
 }
 
@@ -38,11 +29,4 @@ fn get_config() -> Result<toml::Value> {
     let config: toml::Value =
         toml::de::from_str(&config_str).context("Failed to parse config file")?;
     Ok(config)
-}
-
-pub async fn run(command: ChannelAction) -> Result<()> {
-    match command {
-        ChannelAction::Set { channel } => set_channel(&channel),
-        ChannelAction::Show => show_channel(),
-    }
 }

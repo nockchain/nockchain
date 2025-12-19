@@ -410,13 +410,13 @@ main() {
 
     # Set channel and run install
     print_step "Setting channel to $CHANNEL and running installation"
-    if "$nockup_path" channel set "$CHANNEL" && "$nockup_path" install; then
+    if "$nockup_path" channel set "$CHANNEL" && "$nockup_path" update; then
         print_success "Nockup installation completed successfully!"
     else
         print_error "Installation failed"
         print_info "You can try running manually:"
         print_info "  $nockup_path channel set $CHANNEL"
-        print_info "  $nockup_path install"
+        print_info "  $nockup_path update"
         exit 1
     fi
 
@@ -429,9 +429,9 @@ main() {
     echo ""
     print_info "🚀 Next steps:"
     print_info "  1. Verify installation: nockup --help"
-    print_info "  2. Create a project: cp example-manifest.toml my-project.toml"
-    print_info "  3. Initialize project: nockup start my-project.toml"
-    print_info "  4. Build and run: nockup build my-project && nockup run my-project"
+    print_info "  2. Create a nockapp.toml manifest for your project"
+    print_info "  3. Initialize project: nockup project init"
+    print_info "  4. Build and run: nockup project build && nockup project run"
     echo ""
     print_info "📁 Installation directory: $install_dir"
     print_info "📄 Configuration file: $HOME/.nockup/config.toml"

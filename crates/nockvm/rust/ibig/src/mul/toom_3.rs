@@ -110,7 +110,7 @@ pub(crate) fn add_signed_mul_same_len(
     // t2 = (V(1) + V(-1))/2
 
     // Split into 3 parts. Note: a2, b2 may be shorter.
-    let n3 = (n + 2) / 3;
+    let n3 = n.div_ceil(3);
     let n3_short = n - 2 * n3;
 
     let (a0, a12) = a.split_at(n3);

@@ -24,6 +24,7 @@ pub fn precompute_ntts(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compute_deep(
     trace_polys: HoonList,
     trace_openings: &[Felt],

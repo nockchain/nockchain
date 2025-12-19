@@ -11,41 +11,113 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Initialize nockup cache and download templates
-    Install,
-    /// Initialize a new NockApp project from a .toml config file
-    Init {
-        /// Name of the project config file (looks for <name>.toml)
-        name: String,
+    // Hierarchical commands
+    /// Project management (build, run, init)
+    #[command(subcommand)]
+    Project(ProjectCommand),
+
+    /// Package and dependency management
+    #[command(subcommand)]
+    Package(PackageCommand),
+
+    /// Toolchain / channel management
+    #[command(subcommand)]
+    Channel(ChannelCommand),
+
+    // Legacy flat commands (backward compatible)
+    /// Build a NockApp project
+    #[command(hide = true)]
+    Build {
+        #[arg(value_name = "PROJECT")]
+        project: String,
     },
+
+    /// Initialize a new NockApp project
+    #[command(hide = true)]
+    Init {
+        #[arg(value_name = "NAME")]
+        project: String,
+    },
+
     /// Check for updates to nockup, hoon, and hoonc
     Update,
-    /// Build a NockApp project
-    Build {
-        /// Path to the project directory
-        project: String,
-    },
+
+    /// Initialize nockup cache and download templates
+    Install,
+
     /// Run a NockApp project
+    #[command(hide = true)]
     Run {
-        /// Path to the project directory  
         project: String,
-        /// Additional arguments to pass to the running application
-        #[arg(last = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Manage channels (e.g., set default)
-    Channel {
-        #[command(subcommand)]
-        action: ChannelAction,
-    },
+
+    /// Test Phase 1 infrastructure (temporary demo command)
+    #[command(hide = true)]
+    TestPhase1,
 }
 
-#[derive(Subcommand)]
-pub enum ChannelAction {
-    /// Set the default channel (e.g., stable, nightly)
-    Set {
-        channel: String, // e.g., "stable" or "nightly"
+#[derive(clap::Subcommand, Debug)]
+pub enum ProjectCommand {
+    /// Build a NockApp project
+    Build { project: Option<String> },
+    /// Run a NockApp project
+    Run {
+        project: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
-    /// Show the current channel
+    /// Initialize a new NockApp project
+    Init,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum PackageCommand {
+    /// Initialize a new NockApp project
+    Init { name: Option<String> },
+
+    /// Add a dependency to nockapp.toml
+    Add {
+        /// Package name
+        name: String,
+        /// Version specification (e.g., @k409, ^1.2.3, @tag:v1.0.0)
+        #[arg(short, long)]
+        version: Option<String>,
+    },
+
+    /// Remove a dependency from nockapp.toml
+    Remove {
+        /// Package name to remove
+        name: String,
+    },
+
+    /// List all dependencies and their installation status
+    List,
+
+    /// Install dependencies from nockapp.toml
+    Install,
+
+    /// Update dependencies to latest versions
+    Update,
+
+    /// Clear the package cache
+    Purge {
+        /// Only show what would be deleted without actually deleting
+        #[arg(short = 'n', long)]
+        dry_run: bool,
+    },
+
+    /// Grab a package (deprecated - use add)
+    #[command(hide = true)]
+    Grab { spec: String },
+
+    /// Generate proxy files for a package
+    GenerateProxy { url: String, path: Option<String> },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum ChannelCommand {
     Show,
+    Set { channel: String },
 }

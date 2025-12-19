@@ -133,6 +133,7 @@ impl CachedResponse {
         self.timestamp.elapsed() > max_age
     }
 
+    #[allow(clippy::result_large_err)]
     fn to_response(&self) -> Result<Response<Body>, HttpError> {
         let mut res = Response::builder().status(self.status);
         for (k, v) in &self.headers {
@@ -300,7 +301,8 @@ pub fn http() -> IODriverFn {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             // Start certificate generation in background - don't block main loop
-            let acme_manager = acme_manager_opt.unwrap();
+            let acme_manager =
+                acme_manager_opt.expect("acme_manager should be set when https is enabled");
             let app_for_https = app.clone();
             tokio::spawn(async move {
                 match tokio::time::timeout(
@@ -315,15 +317,24 @@ pub fn http() -> IODriverFn {
 
                         match tokio::net::TcpListener::bind("0.0.0.0:443").await {
                             Ok(https_listener) => {
-                                let https_addr = https_listener.local_addr().unwrap();
+                                let https_addr = https_listener
+                                    .local_addr()
+                                    .expect("listener should have local addr");
                                 info!("HTTPS server listening on {}", https_addr);
-                                let std_listener = https_listener.into_std().unwrap();
-                                if let Err(e) =
-                                    axum_server::from_tcp_rustls(std_listener, rustls_config)
-                                        .serve(app_for_https.into_make_service())
-                                        .await
-                                {
-                                    error!("HTTPS server error: {}", e);
+                                let std_listener = https_listener
+                                    .into_std()
+                                    .expect("listener should convert to std");
+                                match axum_server::from_tcp_rustls(std_listener, rustls_config) {
+                                    Ok(server) => {
+                                        if let Err(e) =
+                                            server.serve(app_for_https.into_make_service()).await
+                                        {
+                                            error!("HTTPS server error: {}", e);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to create HTTPS server: {}", e);
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -778,5 +789,5 @@ async fn favicon_handler() -> Response {
         .header("content-type", "image/svg+xml")
         .header("cache-control", "public, max-age=86400")
         .body(Body::from(svg))
-        .unwrap()
+        .expect("static response should build successfully")
 }

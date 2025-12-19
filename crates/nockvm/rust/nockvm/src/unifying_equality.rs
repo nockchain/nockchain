@@ -3,7 +3,7 @@ use libc::{c_void, memcmp};
 
 use crate::mem::{NockStack, ALLOC, FRAME, STACK};
 use crate::noun::Noun;
-use crate::{assert_acyclic, assert_no_forwarding_pointers, assert_no_junior_pointers};
+use crate::{assert_acyclic, assert_no_forwarding_pointers};
 
 #[cfg(feature = "check_junior")]
 #[macro_export]
@@ -446,8 +446,8 @@ unsafe fn senior_pointer_first(
     let arena_end = arena_start.add(stack.get_size());
 
     let mut frame_pointer: *const u64 = stack.get_frame_pointer();
-    let mut stack_pointer: *const u64 = stack.get_stack_pointer() as *const u64;
-    let mut alloc_pointer: *const u64 = stack.get_alloc_pointer() as *const u64;
+    let mut stack_pointer: *const u64 = stack.get_stack_pointer();
+    let mut alloc_pointer: *const u64 = stack.get_alloc_pointer();
     let prev_stack_pointer = *(stack.prev_stack_pointer_pointer()) as *const u64;
 
     let mut low_pointer;

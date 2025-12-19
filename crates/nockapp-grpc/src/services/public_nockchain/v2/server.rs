@@ -136,7 +136,7 @@ impl PublicNockchainGrpcServer {
     pub async fn serve(self, addr: SocketAddr) -> Result<()> {
         tracing::Span::current().record("addr", &tracing::field::display(addr));
         info!("Starting PublicNockchain gRPC server on {}", addr);
-        let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
+        let (health_reporter, health_service) = tonic_health::server::health_reporter();
         health_reporter
             .set_serving::<NockchainServiceServer<PublicNockchainGrpcServer>>()
             .await;
@@ -248,10 +248,7 @@ impl PublicNockchainGrpcServer {
         });
     }
 
-    fn start_block_explorer_refresh(
-        &self,
-        mut health_reporter: tonic_health::server::HealthReporter,
-    ) {
+    fn start_block_explorer_refresh(&self, health_reporter: tonic_health::server::HealthReporter) {
         let server = self.clone();
         tokio::spawn(async move {
             health_reporter
@@ -263,7 +260,7 @@ impl PublicNockchainGrpcServer {
             let exit = server.exit.clone();
 
             // Helper to handle fatal decode errors
-            let handle_fatal_error = |err: &NockAppGrpcError, exit: &Option<_>, context: &str| {
+            let handle_fatal_error = |err: &NockAppGrpcError, _exit: &Option<_>, context: &str| {
                 if matches!(err, NockAppGrpcError::NounDecode(_)) {
                     error!(
                         "Fatal decode error during {}: {}. Signaling server shutdown.",
@@ -428,6 +425,7 @@ pub struct NockchainBlockServer {
 
 #[derive(Clone)]
 pub struct NockchainMetricsServer {
+    #[allow(dead_code)]
     handle: Arc<dyn BalanceHandle>,
     block_explorer_cache: Arc<BlockExplorerCache>,
     metrics: Arc<NockchainGrpcApiMetrics>,
@@ -622,7 +620,7 @@ impl NockchainService for PublicNockchainGrpcServer {
             );
         };
 
-        match selector.unwrap() {
+        match selector.expect("selector should be set") {
             Selector::Address(address) => {
                 let cursor: Option<PageCursorAddress> = if !token.is_empty() {
                     match decode_cursor_address(&token) {

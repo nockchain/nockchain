@@ -2,6 +2,7 @@
 name = "nockchain-math"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 argon2.workspace = true
@@ -9,7 +10,6 @@ arrayref.workspace = true
 bs58.workspace = true
 bytes.workspace = true
 either.workspace = true
-hex-literal.workspace = true
 ibig.workspace = true
 nockvm.workspace = true
 nockvm_macros.workspace = true
@@ -18,9 +18,9 @@ num-traits.workspace = true
 once_cell.workspace = true
 quickcheck.workspace = true
 rkyv.workspace = true
-serde = { workspace = true, features = ["derive"], default-features = false }
-tracing.workspace = true
+serde = { version = "1.0.217", features = ["derive"], default-features = false }
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 quickcheck.workspace = true

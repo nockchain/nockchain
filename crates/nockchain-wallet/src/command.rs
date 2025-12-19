@@ -95,11 +95,11 @@ impl TimelockIntentCli {
     pub fn has_upper_bound(&self) -> bool {
         self.absolute
             .as_ref()
-            .map_or(false, TimelockRangeCli::has_upper_bound)
+            .is_some_and(TimelockRangeCli::has_upper_bound)
             || self
                 .relative
                 .as_ref()
-                .map_or(false, TimelockRangeCli::has_upper_bound)
+                .is_some_and(TimelockRangeCli::has_upper_bound)
     }
 }
 
@@ -191,6 +191,9 @@ impl NoteSelectionStrategyCli {
 pub struct WalletCli {
     #[command(flatten)]
     pub boot: BootCli,
+
+    #[arg(long, default_value = "false")]
+    pub fakenet: bool,
 
     #[command(flatten)]
     pub connection: ConnectionCli,

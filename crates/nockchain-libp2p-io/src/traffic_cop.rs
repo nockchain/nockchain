@@ -135,18 +135,16 @@ async fn traffic_cop_task(
                 Some((_peer_id,TrafficCopPoke { wire, cause, result, enable, timing })) => {
                     let enabled = enable.await;
                     if !(enabled) {
-                        let _ = result.send(Ok(PokeResult::Nack)).map_err(|e| {
+                        let _ = result.send(Ok(PokeResult::Nack)).inspect_err(|_e| {
                             error!("Failed to send high priority poke result");
-                            e
                         });
                         continue;
                     }
                     let now = Instant::now();
                     let res = handle.poke_timeout(wire, cause, poke_timeout).await;
                     timing.map(|c| c.send(now.elapsed()));
-                    let _ = result.send(res).map_err(|e| {
+                    let _ = result.send(res).inspect_err(|_e| {
                         error!("Failed to send high priority poke result");
-                        e
                     });
                 }
                 None => {
@@ -158,9 +156,8 @@ async fn traffic_cop_task(
                 Some((_peer_id, TrafficCopAction::Poke(TrafficCopPoke { wire, cause, result, enable, timing }))) => {
                     let enabled = enable.await;
                     if !enabled {
-                        let _ = result.send(Ok(PokeResult::Nack)).map_err(|e| {
+                        let _ = result.send(Ok(PokeResult::Nack)).inspect_err(|_e| {
                             error!("Failed to send low priority peek result");
-                            e
                         });
                         continue;
                     }
@@ -168,16 +165,14 @@ async fn traffic_cop_task(
                     let res = handle.poke_timeout(wire, cause, poke_timeout).await;
                     let elapsed = now.elapsed();
                     timing.map(|c| c.send(elapsed));
-                    let _ = result.send(res).map_err(|e| {
+                    let _ = result.send(res).inspect_err(|_e| {
                         error!("Failed to send low priority poke result");
-                        e
                     });
                 }
                 Some((_peer_id, TrafficCopAction::Peek { path, result })) => {
                     let res = handle.peek(path).await;
-                    let _ = result.send(res).map_err(|e| {
+                    let _ = result.send(res).inspect_err(|_e| {
                         error!("Failed to send low priority peek result");
-                        e
                     });
                 }
                 None => {

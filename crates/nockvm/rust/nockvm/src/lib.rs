@@ -1,6 +1,7 @@
 #![feature(cold_path)]
-#![feature(cfg_boolean_literals)]
 #![allow(dead_code)]
+#![allow(clippy::needless_return)]
+#![allow(clippy::should_implement_trait)]
 
 extern crate lazy_static;
 extern crate num_derive;

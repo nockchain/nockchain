@@ -2,6 +2,7 @@
 name = "nockchain-explorer-tui"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 
 [[bin]]
 name = "nockchain-explorer-tui"
@@ -9,17 +10,16 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
+arboard = "3.3"
 chrono = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 crossterm = { workspace = true }
-nockapp-grpc = { workspace = true }
 nockapp-grpc-proto = { workspace = true }
-nockchain-types = { workspace = true }
 nockchain-math = { workspace = true }
+nockchain-types = { workspace = true }
 ratatui = "0.28"
 tokio = { workspace = true, features = ["full"] }
 tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing-tracy = { workspace = true }
-arboard = "3.3"

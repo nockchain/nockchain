@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -66,8 +66,8 @@ impl<J> Saver<J> {
     /// around the 'Saver' is released, or a deadlock will result.
     #[tracing::instrument(skip(self))]
     #[allow(clippy::async_yields_async)]
-    pub async fn wait_for_snapshot<'a>(
-        &'a mut self,
+    pub async fn wait_for_snapshot(
+        &mut self,
         wait_for_event_num: u64,
     ) -> impl Future<Output = Result<(), oneshot::error::RecvError>> {
         if self.last_event_num >= wait_for_event_num {
@@ -159,7 +159,7 @@ impl<J: Jammer> Saver<J> {
             }
         };
         let last_event_num = loaded_checkpoint.event_num();
-        let saveable = loaded_checkpoint.into_saveable::<J>(metrics.clone())?;
+        let saveable = loaded_checkpoint.into_saveable(metrics.clone())?;
         trace!("After from_jammed_checkpoint");
         let c = C::from_saveable(saveable)?;
         Ok((
@@ -191,10 +191,7 @@ impl<J: Jammer> Saver<J> {
         jammed.save_to_file(&path).await?;
         self.save_to_next = self.save_to_next.next();
         std::mem::drop(jammed);
-        debug!(
-            "Saved checkpoint to file: {}",
-            &path.as_os_str().to_str().unwrap()
-        );
+        debug!("Saved checkpoint to file: {}", path.display());
         let mut still_waiting = Vec::new();
         for (waiting_event_num, waiter) in self.waiters.drain(..) {
             if waiting_event_num <= event_num {
@@ -228,6 +225,7 @@ pub struct SaveableCheckpoint {
 }
 
 impl SaveableCheckpoint {
+    #[allow(clippy::wrong_self_convention)]
     #[tracing::instrument(skip(self, metrics))]
     fn to_jammed_checkpoint<J: Jammer>(self, metrics: Arc<NockAppMetrics>) -> JammedCheckpointV2 {
         let SaveableCheckpoint {
@@ -245,7 +243,7 @@ impl SaveableCheckpoint {
         JammedCheckpointV2::new(ker_hash, event_num, cold_jam, state_jam)
     }
 
-    fn from_jammed_checkpoint_v1<'a, J: Jammer>(
+    fn from_jammed_checkpoint_v1(
         jammed: JammedCheckpointV1,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<Self, CheckpointError> {
@@ -274,7 +272,7 @@ impl SaveableCheckpoint {
         })
     }
 
-    fn from_jammed_checkpoint_v2<'a, J: Jammer>(
+    fn from_jammed_checkpoint_v2(
         jammed: JammedCheckpointV2,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<Self, CheckpointError> {
@@ -391,11 +389,11 @@ impl JammedCheckpointV1 {
         }
     }
 
-    pub fn validate(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    pub fn validate(&self, path: &Path) -> Result<(), CheckpointError> {
         if self.version != SNAPSHOT_VERSION_1 {
-            Err(CheckpointError::InvalidVersion(path.clone()))
+            Err(CheckpointError::InvalidVersion(path.to_path_buf()))
         } else if self.checksum != Self::checksum(self.event_num, &self.jam.0) {
-            Err(CheckpointError::InvalidChecksum(path.clone()))
+            Err(CheckpointError::InvalidChecksum(path.to_path_buf()))
         } else {
             Ok(())
         }
@@ -417,11 +415,8 @@ impl JammedCheckpointV1 {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn load_from_file(path: &PathBuf) -> Result<Self, CheckpointError> {
-        debug!(
-            "Loading jammed checkpoint from file: {}",
-            path.as_os_str().to_str().unwrap()
-        );
+    async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
+        debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
         let config = bincode::config::standard();
         let (checkpoint, _) = bincode::decode_from_slice::<Self, Configuration>(&bytes, config)?;
@@ -431,7 +426,7 @@ impl JammedCheckpointV1 {
 
     #[allow(dead_code)]
     #[tracing::instrument(skip(self))]
-    async fn save_to_file(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
         let bytes = self.encode()?;
         trace!("Saving jammed checkpoint to file: {}", path.display());
         tokio::fs::write(path, bytes).await?;
@@ -478,9 +473,9 @@ impl JammedCheckpointV2 {
         }
     }
 
-    pub fn validate(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    pub fn validate(&self, path: &Path) -> Result<(), CheckpointError> {
         if self.checksum != Self::checksum(self.event_num, &self.cold_jam.0, &self.state_jam.0) {
-            Err(CheckpointError::InvalidChecksum(path.clone()))
+            Err(CheckpointError::InvalidChecksum(path.to_path_buf()))
         } else {
             Ok(())
         }
@@ -511,11 +506,8 @@ impl JammedCheckpointV2 {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn load_from_file(path: &PathBuf) -> Result<Self, CheckpointError> {
-        debug!(
-            "Loading jammed checkpoint from file: {}",
-            path.as_os_str().to_str().unwrap()
-        );
+    async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
+        debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
         let config = bincode::config::standard();
         let (envelope, _) = bincode::decode_from_slice::<JammedCheckpointV2Envelope, Configuration>(
@@ -527,7 +519,7 @@ impl JammedCheckpointV2 {
     }
 
     #[tracing::instrument(skip(self))]
-    async fn save_to_file(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
         let bytes = self.encode()?;
         trace!("Saving jammed checkpoint to file: {}", path.display());
         tokio::fs::write(path, bytes).await?;
@@ -536,7 +528,7 @@ impl JammedCheckpointV2 {
 
     fn from_envelope(
         envelope: JammedCheckpointV2Envelope,
-        path: Option<&PathBuf>,
+        path: Option<&Path>,
     ) -> Result<Self, CheckpointError> {
         if envelope.magic_bytes != JAM_MAGIC_BYTES {
             return Err(CheckpointError::InvalidVersion(path_or_memory(path)));
@@ -563,8 +555,9 @@ impl JammedCheckpointV2 {
     }
 }
 
-fn path_or_memory(path: Option<&PathBuf>) -> PathBuf {
-    path.cloned().unwrap_or_else(|| PathBuf::from("<memory>"))
+fn path_or_memory(path: Option<&Path>) -> PathBuf {
+    path.map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("<memory>"))
 }
 
 #[derive(Clone, Debug)]
@@ -588,22 +581,18 @@ impl LoadedCheckpoint {
         }
     }
 
-    fn into_saveable<J: Jammer>(
+    fn into_saveable(
         self,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<SaveableCheckpoint, CheckpointError> {
         match self {
-            LoadedCheckpoint::V2(cp) => {
-                SaveableCheckpoint::from_jammed_checkpoint_v2::<J>(cp, metrics)
-            }
-            LoadedCheckpoint::V1(cp) => {
-                SaveableCheckpoint::from_jammed_checkpoint_v1::<J>(cp, metrics)
-            }
+            LoadedCheckpoint::V2(cp) => SaveableCheckpoint::from_jammed_checkpoint_v2(cp, metrics),
+            LoadedCheckpoint::V1(cp) => SaveableCheckpoint::from_jammed_checkpoint_v1(cp, metrics),
         }
     }
 }
 
-async fn load_checkpoint_file(path: &PathBuf) -> Result<LoadedCheckpoint, CheckpointError> {
+async fn load_checkpoint_file(path: &Path) -> Result<LoadedCheckpoint, CheckpointError> {
     match JammedCheckpointV2::load_from_file(path).await {
         Ok(cp) => Ok(LoadedCheckpoint::V2(cp)),
         Err(e_v2) => match JammedCheckpointV1::load_from_file(path).await {
@@ -687,11 +676,11 @@ impl JammedCheckpointV0 {
         }
     }
 
-    pub fn validate(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    pub fn validate(&self, path: &Path) -> Result<(), CheckpointError> {
         if self.version != SNAPSHOT_VERSION_0 {
-            Err(CheckpointError::InvalidVersion(path.clone()))
+            Err(CheckpointError::InvalidVersion(path.to_path_buf()))
         } else if self.checksum != Self::checksum(self.event_num, &self.jam.0) {
-            Err(CheckpointError::InvalidChecksum(path.clone()))
+            Err(CheckpointError::InvalidChecksum(path.to_path_buf()))
         } else {
             Ok(())
         }
@@ -713,11 +702,8 @@ impl JammedCheckpointV0 {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn load_from_file(path: &PathBuf) -> Result<Self, CheckpointError> {
-        debug!(
-            "Loading jammed checkpoint from file: {}",
-            path.as_os_str().to_str().unwrap()
-        );
+    async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
+        debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
         let config = bincode::config::standard();
         let (checkpoint, _) = bincode::decode_from_slice::<Self, Configuration>(&bytes, config)?;
@@ -727,7 +713,7 @@ impl JammedCheckpointV0 {
 
     #[tracing::instrument(skip(self))]
     #[allow(dead_code)] // Preserving this for posterity
-    async fn save_to_file(&self, path: &PathBuf) -> Result<(), CheckpointError> {
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
         let bytes = self.encode()?;
         trace!("Saving jammed checkpoint to file: {}", path.display());
         tokio::fs::write(path, bytes).await?;

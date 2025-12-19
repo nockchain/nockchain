@@ -82,6 +82,6 @@ impl TraceFilter for IntervalFilter {
     fn should_trace(&mut self, _: Noun) -> bool {
         let c = self.cnt;
         self.cnt += 1;
-        c % self.interval == 0
+        c.is_multiple_of(self.interval)
     }
 }

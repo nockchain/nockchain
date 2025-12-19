@@ -1,9 +1,14 @@
 /=  transact  /common/tx-engine
-/=  utils  /apps/wallet/lib/utils
+/=  wutils  /apps/wallet/lib/utils
 /=  wt  /apps/wallet/lib/types
 /=  zo  /common/zoon
+/=  bridge  /apps/bridge/types
 ::
-::  Builds a fan-in transaction that can emit both simple PKH and multisig locks.
+::  Builds m-to-n transaction that can emit both simple PKH and multisig locks.
+|_  bc=blockchain-constants:transact
++*  t  ~(. transact bc)
+    utils  ~(. wutils %.y bc)
+++  build
 |=  $:  names=(list nname:transact)
         orders=(list order:wt)
         fee=coins:transact
@@ -451,8 +456,9 @@
       ==
   ^-  [seeds:v1:transact output-lock-map:wt]
   =;  [seeds=(list seed:v1:transact) total-gifts=@ =output-lock-map:wt]
-    ~|  "assets in must equal gift + fee + refund"
-    ?>  =(assets.note (add total-gifts fee-portion))
+    ?.  =(assets.note (add total-gifts fee-portion))
+      ~&  [assets+assets.note total-gifts+total-gifts fee-portion+fee-portion]
+      ~|  "assets in must equal gift + fee + refund"  !!
     [(z-silt:zo seeds) output-lock-map]
   %+  roll  specs
   |=  $:  spec=order:wt
@@ -460,23 +466,33 @@
           gifts=@
           =output-lock-map:wt
       ==
-  =/  output-lock=lock:transact  (order-lock spec)
+  =/  metadata=lock-metadata-1:wt  (extract-metadata spec)
   =?  include-data  ?=(%multisig -.spec)
     %.y
-  =/  nd=note-data:v1:transact
-    ?.  include-data
-      ~
-    %-  ~(put z-by:zo *note-data:v1:transact)
-    [%lock ^-(lock-data:wt [%0 output-lock])]
+  =|  nd=note-data:v1:transact
+  =/  [lock-root=hash:transact nd=note-data:v1:transact]
+    ?-    -.+.metadata
+        %lock
+      =?  nd  include-data
+        %-  ~(put z-by:zo nd)
+        [%lock ^-(lock-data:wt [%0 lock.metadata])]
+      [(hash:lock:transact lock.metadata) nd]
+    ::
+        %lock-root
+      [root.metadata nd]
+    ::
+        %bridge-deposit
+      :-  root.metadata
+      %-  ~(put z-by:zo nd)
+      [%bridge [%0 %base (evm-address-to-based:bridge addr.metadata)]]
+    ==
   =/  seed=seed:v1:transact
     :*  output-source=~
-        lock-root=(hash:lock:transact output-lock)
+        lock-root=lock-root
         note-data=nd
         gift=(order-gift spec)
         parent-hash=(hash:nnote:transact note)
     ==
-  =/  metadata=lock-metadata:wt
-    [output-lock include-data]
   :*  [seed seeds]
       (add gifts (order-gift spec))
       %-  ~(put z-by:zo output-lock-map)
@@ -488,8 +504,11 @@
   ^-  (reason:transact ~)
   ?:  =(0 (lent orders))
     [%.n 'cannot create transaction with no orders']
+  =|  num-bridge-orders=@
   |-
   ?~  orders
+    ?:  (gth num-bridge-orders 1)
+      [%.n %bridge-orders-exceeds-one]
     [%.y ~]
   =/  ord=order:wt  i.orders
   ?-    -.ord
@@ -513,6 +532,16 @@
     ?:  =(0 gift.ord)
       [%.n 'order must include a gift greater than 0']
     $(orders t.orders)
+  ::
+     %bridge-deposit
+   ?.  (gte gift.ord *minimum-event-nocks:bridge)
+     [%.n %gift-amount-is-less-than-minimum-bridge-deposit]
+   $(orders t.orders, num-bridge-orders +(num-bridge-orders))
+  ::
+     %lock-root
+    ?:  =(0 gift.ord)
+      [%.n %gift-cannot-be-zero]
+    $(orders t.orders)
   ==
 ::
 ++  order-gift
@@ -521,27 +550,39 @@
   ?-    -.ord
       %pkh       gift.ord
       %multisig  gift.ord
+      %lock-root  gift.ord
+      %bridge-deposit  gift.ord
     ==
 ::
 ++  with-gift
   |=  [ord=order:wt gift=coins:transact]
   ^-  order:wt
   ?-    -.ord
-      %pkh       [%pkh recipient=recipient.ord gift=gift]
-      %multisig  [%multisig threshold=threshold.ord participants=participants.ord gift=gift]
+      %pkh       ord(gift gift)
+      %multisig  ord(gift gift)
+      %lock-root  ord(gift gift)
+      %bridge-deposit  ord(gift gift)
     ==
 ::
-++  order-lock
+++  extract-metadata
   |=  ord=order:wt
-  ^-  lock:transact
+  ^-  lock-metadata-1:wt
+  :-  %1
   ?-    -.ord
+      %bridge-deposit
+    [%bridge-deposit root=bridge-lock-root-default:bridge addr=address.ord]
+  ::
+      %lock-root
+    [%lock-root root=root.ord]
+  ::
       %pkh
-        [%pkh [m=1 (z-silt:zo ~[recipient.ord])]]~
+    [%lock [%pkh [m=1 (z-silt:zo ~[recipient.ord])]]~ include-data]
+    ::
       %multisig
-        =/  participants=(list hash:transact)  participants.ord
-        =/  allowed=(z-set:zo hash:transact)  (z-silt:zo participants)
-        [%pkh [m=threshold.ord allowed]]~
-    ==
+    =/  participants=(list hash:transact)  participants.ord
+    =/  allowed=(z-set:zo hash:transact)  (z-silt:zo participants)
+    [%lock [%pkh [m=threshold.ord allowed]]~ include-data=%.y]
+  ==
 ::
 ++  order-from-lock
   |=  [lok=lock:transact gift=@]
@@ -585,4 +626,5 @@
    ~
   `pulled
 ::
+--
 --

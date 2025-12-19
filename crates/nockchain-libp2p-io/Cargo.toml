@@ -2,13 +2,9 @@
 name = "nockchain-libp2p-io"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-nockapp = { workspace = true }
-nockvm = { workspace = true }
-nockvm_macros = { workspace = true }
-noun-serde = { workspace = true }
-zkvm-jetpack = { workspace = true }
 
 bs58 = { workspace = true }
 bytes = { workspace = true }
@@ -35,14 +31,18 @@ libp2p = { workspace = true, features = [
   "cbor",
   "peer-store",
 ] }
+nockapp = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
+num-bigint.workspace = true
 rand = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["alloc", "derive", "serde_derive"] }
 serde_bytes = { workspace = true, features = ["alloc"] }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
-void = { workspace = true }
 
 [dev-dependencies]
+cbor4ii = { workspace = true, features = ["serde1", "use_std"] }
 quickcheck = { workspace = true }
 serde_cbor = { workspace = true }
-cbor4ii = { workspace = true, features = ["serde1", "use_std"] }

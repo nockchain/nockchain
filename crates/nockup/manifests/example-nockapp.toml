@@ -1,0 +1,14 @@
+[package]
+name = "arcadia"
+version = "0.1.0"
+authors = ["sigilante"]
+description = "My famous game."
+license = "MIT"
+
+template = "http-server"
+template-commit = "a19ad4dc66c81ec4d97134dd11a7425bc88b4d7b"
+
+[dependencies]
+zuse   = "@k409"
+lagoon = { git = "https://github.com/urbit/numerics", path = "lagoon", commit = "01905f364178958bb2d0c1a7ce009b6f3e68f737" }
+sequent = { git = "https://github.com/jackfoxy/sequent", commit = "7fc95fd4d6df7548cf354c9c91df2980e902770d" }

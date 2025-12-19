@@ -9,8 +9,6 @@ use nockchain_math::zoon::{zmap, zset};
 use nockvm::noun::{NounAllocator, D, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
-#[cfg(test)]
-use crate::tx_engine::common::BlockHeightDelta;
 use crate::tx_engine::common::{
     BlockHeight, Hash, Name, Nicks, SchnorrPubkey, Source, TimelockRangeAbsolute,
     TimelockRangeRelative, Version,
@@ -56,15 +54,14 @@ impl NounEncode for Lock {
                 zset::z_set_put(stack, &map, &mut val, &DefaultTipHasher)
                     .expect("Failed to put public key into set")
             });
-        let lock_noun = nockvm::noun::T(stack, &[m, keys_noun_map]);
-        lock_noun
+        nockvm::noun::T(stack, &[m, keys_noun_map])
     }
 }
 
 impl NounDecode for Lock {
     fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun.as_cell()?;
-        let keys_required = cell.head().as_atom()?.as_u64()? as u64;
+        let keys_required = cell.head().as_atom()?.as_u64()?;
 
         // It is called HoonMapIter, but it can be used for sets as well
         let pubkeys_iter = HoonMapIter::from(cell.tail());
@@ -124,12 +121,12 @@ pub struct Balance(pub Vec<(Name, NoteV0)>);
 
 impl NounEncode for Balance {
     fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
-        let keys_noun_map = self.0.iter().fold(D(0), |map, (name, note)| {
+        self.0.iter().fold(D(0), |map, (name, note)| {
             let mut key = name.to_noun(stack);
             let mut value = note.to_noun(stack);
-            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher).unwrap()
-        });
-        keys_noun_map
+            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher)
+                .expect("Failed to put into z_map")
+        })
     }
 }
 
@@ -192,9 +189,9 @@ mod test {
     fn try_path(jam: &str) -> Result<Bytes, Box<dyn std::error::Error>> {
         let possible_paths = [
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("jams")
+                .join("jams/v0")
                 .join(jam),
-            std::path::Path::new("open/crates/nockchain-types/jams").join(jam),
+            std::path::Path::new("open/crates/nockchain-types/jams/v0").join(jam),
         ];
 
         let jam_path = possible_paths
@@ -402,7 +399,7 @@ mod test {
 
     impl Arbitrary for Name {
         fn arbitrary(g: &mut Gen) -> Self {
-            return Name::new(arb_hash(g), arb_hash(g));
+            Name::new(arb_hash(g), arb_hash(g))
         }
     }
 
@@ -460,12 +457,13 @@ mod test {
         }
     }
 
+    #[allow(clippy::clone_on_copy)]
     impl Arbitrary for Balance {
         fn arbitrary(g: &mut Gen) -> Self {
             use std::collections::HashSet;
             let mut set: HashSet<(Hash, Hash)> = HashSet::new();
             let mut items: Vec<(Name, NoteV0)> = Vec::new();
-            let len = 1 + (usize::arbitrary(g) % 5) as usize;
+            let len = 1 + (usize::arbitrary(g) % 5);
             for _ in 0..len {
                 let name = Name::arbitrary(g);
                 if set.insert((name.first.clone(), name.last.clone())) {

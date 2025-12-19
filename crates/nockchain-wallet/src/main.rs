@@ -1,4 +1,15 @@
 #![allow(clippy::doc_overindented_list_items)]
+// Allow architectural patterns that would be disruptive to change
+#![allow(clippy::io_other_error)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::unnecessary_fallible_conversions)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::unnecessary_lazy_evaluations)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::unused_enumerate_index)]
+#![allow(clippy::option_as_ref_cloned)]
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 
 mod command;
 mod connection;
@@ -75,7 +86,13 @@ async fn main() -> Result<(), NockAppError> {
 
     let mut wallet = Wallet::new(kernel);
 
-    // Determine if this command requires chain synchronization
+    if cli.fakenet {
+        wallet.set_fakenet().await?;
+    } else if wallet.is_fakenet().await? {
+        return Err(NockAppError::OtherError(
+            "Attempted to boot the wallet in mainnet mode, but the loaded state is in fakenet mode. Please use the --fakenet flag to boot the wallet or boot the wallet with the --new flag to create a new mainnet wallet".to_string(),
+        ));
+    }
 
     let requires_sync = match &cli.command {
         // Commands that DON'T need syncing either because they don't sync
@@ -372,7 +389,11 @@ async fn main() -> Result<(), NockAppError> {
                 .await?;
 
         for poke in pokes {
-            let _ = wallet.app.poke(SystemWire.to_wire(), poke).await.unwrap();
+            let _ = wallet
+                .app
+                .poke(SystemWire.to_wire(), poke)
+                .await
+                .expect("poke should succeed");
         }
     }
 
@@ -427,6 +448,30 @@ impl Wallet {
     /// as a NockApp.
     fn new(nockapp: NockApp) -> Self {
         Wallet { app: nockapp }
+    }
+
+    async fn set_fakenet(&mut self) -> Result<(), NockAppError> {
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let tag = String::from("fakenet").to_noun(&mut slab);
+        slab.modify(|_| vec![tag, SIG]);
+        let wire = SystemWire.to_wire();
+        let _ = self.app.poke(wire, slab).await?;
+        Ok(())
+    }
+
+    async fn is_fakenet(&mut self) -> Result<bool, NockAppError> {
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let tag = String::from("fakenet").to_noun(&mut slab);
+        slab.modify(|_| vec![tag, SIG]);
+        let result = self.app.peek(slab).await?;
+        let is_fakenet: Option<Option<bool>> =
+            unsafe { <Option<Option<bool>>>::from_noun(result.root())? };
+        match is_fakenet {
+            Some(Some(res)) => Ok(res),
+            _ => Err(NockAppError::OtherError(
+                "Unexpected result from is_fakenet".to_string(),
+            )),
+        }
     }
 
     /// Prepares a wallet command for execution.
@@ -526,6 +571,7 @@ impl Wallet {
     ///
     /// * `transaction_path` - Path to the transaction file
     /// * `index` - Optional index of the key to use for signing
+    #[allow(dead_code)]
     fn sign_tx(
         transaction_path: &str,
         index: Option<u64>,
@@ -736,6 +782,7 @@ impl Wallet {
     /// # Arguments
     ///
     /// * `first_name` - Base58-encoded first name hash.
+    #[allow(dead_code)]
     fn watch_first_name(first_name: &str) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
         let first_name_noun = make_tas(&mut slab, first_name).as_noun();
@@ -1356,6 +1403,7 @@ impl Wallet {
         )
     }
 
+    #[allow(dead_code)]
     fn show_multisig_tx(transaction_path: &str) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
@@ -1433,7 +1481,7 @@ fn confirm_upper_bound_warning() -> Result<(), NockAppError> {
 }
 
 fn normalize_watch_address(value: String) -> Result<Option<String>, NockAppError> {
-    if value.as_bytes().len() >= SchnorrPubkey::BYTES_BASE58 {
+    if value.len() >= SchnorrPubkey::BYTES_BASE58 {
         match SchnorrPubkey::from_base58(&value) {
             Ok(pubkey) => pubkey
                 .to_base58()
@@ -1458,6 +1506,7 @@ fn normalize_watch_address(value: String) -> Result<Option<String>, NockAppError
     }
 }
 
+#[allow(dead_code)]
 fn normalize_first_name(value: String) -> Result<Option<String>, NockAppError> {
     match Hash::from_base58(&value) {
         Ok(hash) => Ok(Some(hash.to_base58())),

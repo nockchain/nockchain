@@ -10,7 +10,7 @@ pub trait Required<T> {
 
 impl<T> Required<T> for Option<T> {
     fn required(self, kind: &'static str, field: &'static str) -> Result<T, ConversionError> {
-        self.ok_or_else(|| ConversionError::MissingField(kind, field))
+        self.ok_or(ConversionError::MissingField(kind, field))
     }
 }
 

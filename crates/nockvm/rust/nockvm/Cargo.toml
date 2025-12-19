@@ -3,43 +3,7 @@ name = "nockvm"
 version = "0.1.0"
 authors = ["Edward Amsden <edward@tlon.io>"]
 edition = "2021"
-
-[lints.clippy]
-missing_safety_doc = "allow"
-
-# Please keep these alphabetized
-[dependencies]
-ibig.workspace = true
-murmur3.workspace = true
-nockvm_crypto = { workspace = true }
-nockvm_macros.workspace = true
-
-bincode = { workspace = true, features = ["serde"] }
-bytes = { workspace = true, features = ["serde"] }
-bitvec = { workspace = true }
-either = { workspace = true }
-intmap = { workspace = true }
-json = { workspace = true }
-lazy_static = { workspace = true }
-libc = { workspace = true }
-memmap2 = { workspace = true }
-num-derive = { workspace = true }
-num-traits = { workspace = true }
-rand = { workspace = true }
-serde = { workspace = true }
-signal-hook = { workspace = true }
-slotmap = { workspace = true }
-static_assertions = { workspace = true }
-thiserror = { workspace = true }
-tracing.workspace = true
-tracing-core.workspace = true
-
-[dev-dependencies]
-criterion = { workspace = true }
-
-[build-dependencies]
-autotools = "0.2"
-cc = "1.0"
+license = "MIT OR Apache-2.0"
 
 # run with e.g. 'cargo build --features check_forwarding,check_acyclic'
 [features]
@@ -57,6 +21,41 @@ check_junior = []
 sham_hints = []
 stop_for_debug = []
 hint_dont = []
+
+# Please keep these alphabetized
+[dependencies]
+
+bincode = { workspace = true, features = ["serde"] }
+bitvec = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+either = { workspace = true }
+ibig.workspace = true
+intmap = { workspace = true }
+lazy_static = { workspace = true }
+libc = { workspace = true }
+memmap2 = { workspace = true }
+murmur3.workspace = true
+nockvm_crypto = { workspace = true }
+nockvm_macros.workspace = true
+num-derive = { workspace = true }
+num-traits = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+slotmap = { workspace = true }
+static_assertions = { workspace = true }
+thiserror = { workspace = true }
+tracing.workspace = true
+tracing-core.workspace = true
+
+[build-dependencies]
+autotools = "0.2"
+cc = "1.0"
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[lints.clippy]
+missing_safety_doc = "allow"
 
 [[bench]]
 name = "hoonc_hotspots"

@@ -1,5 +1,4 @@
 use std::io::Error;
-use std::path::PathBuf;
 use std::ptr::NonNull;
 use std::result::Result;
 use std::time::Instant;
@@ -14,9 +13,6 @@ use crate::jets::form::util::scow;
 use crate::mem::NockStack;
 use crate::mug::met3_usize;
 use crate::noun::{Atom, DirectAtom, IndirectAtom, Noun};
-
-mod json;
-pub use json::*;
 
 mod tracing_backend;
 pub use tracing_backend::*;
@@ -94,15 +90,6 @@ impl TraceInfo {
         }
 
         self.backend.append_trace(stack, path);
-    }
-}
-
-impl From<JsonBackend> for TraceInfo {
-    fn from(backend: JsonBackend) -> Self {
-        Self {
-            backend: Box::new(backend),
-            filter: None,
-        }
     }
 }
 

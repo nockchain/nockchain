@@ -164,7 +164,7 @@ mod tests {
             if unsafe { tree.raw_equals(&D(0)) } {
                 return false;
             }
-            let (value, left, right) = decompose(tree).unwrap();
+            let (value, left, right) = decompose(tree).expect("tree should be valid set node");
             if unsafe { value.raw_equals(&elem) } {
                 return true;
             }
@@ -295,8 +295,10 @@ mod tests {
 
             for val in perm {
                 let noun_val = D(val);
-                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val).unwrap();
-                rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val).unwrap();
+                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val)
+                    .expect("put_iter should succeed");
+                rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val)
+                    .expect("put_recursive should succeed");
             }
 
             assert_eq!(tree_height(jet_tree), tree_height(rec_tree));
@@ -316,8 +318,10 @@ mod tests {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let value = (seed >> 32) & 0xFFFF;
                 let noun_val = D(value);
-                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val).unwrap();
-                rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val).unwrap();
+                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val)
+                    .expect("put_iter should succeed");
+                rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val)
+                    .expect("put_recursive should succeed");
             }
 
             assert_eq!(tree_height(jet_tree), tree_height(rec_tree));

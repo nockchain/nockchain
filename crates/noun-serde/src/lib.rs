@@ -1,3 +1,6 @@
+// Allow unwrap in test code - standard practice for test assertions
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str;
 
@@ -8,7 +11,6 @@ pub mod wallet;
 use nockvm::ext::{make_tas, AtomExt};
 use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
-#[allow(unused_imports)]
 #[allow(unused_imports)]
 use nockvm::noun::{Atom, FullDebugCell, Noun, NounAllocator, Slots, D, T};
 use nockvm::noun::{NO, YES};
@@ -406,7 +408,7 @@ impl<T: NounDecode> NounDecode for Vec<T> {
             let item = T::from_noun(&cell.head())?;
             result.push(item);
             current_tail = Some(cell.tail());
-            current = current_tail.as_ref().unwrap();
+            current = current_tail.as_ref().expect("current_tail was just set");
         }
 
         if let Ok(atom) = current.as_atom() {
@@ -495,7 +497,7 @@ where
             let mid = entries.len() / 2;
             let (k, v) = &entries[mid];
 
-            let node = T(allocator, &[(*k).clone(), (*v).clone()]);
+            let node = T(allocator, &[**k, **v]);
             let left = build_tree(allocator, &entries[..mid]);
             let right = build_tree(allocator, &entries[mid + 1..]);
 

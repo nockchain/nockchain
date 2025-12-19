@@ -1,3 +1,9 @@
+// Allow architectural design choices that would be disruptive to change
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::items_after_test_module)]
+
 mod behaviour; // Nockchain libp2p behavior type
 pub mod config; // Configurable values for the Nockchain libp2p driver
 pub mod driver; // Nockchain libp2p driver for NockApp

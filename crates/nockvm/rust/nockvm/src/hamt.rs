@@ -305,7 +305,7 @@ impl<T: Copy + Preserve> Hamt<T> {
     }
 
     /// Borrowing iterator for Hamt, the type name is a portmanteau of Hamt, iterator, and hamster.
-    pub fn iter(&self) -> Hamsterator<T> {
+    pub fn iter(&self) -> Hamsterator<'_, T> {
         Hamsterator::new(self)
     }
 

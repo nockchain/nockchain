@@ -24,12 +24,12 @@ pub struct Balance(pub Vec<(Name, Note)>);
 
 impl NounEncode for Balance {
     fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
-        let keys_noun_map = self.0.iter().fold(D(0), |map, (name, note)| {
+        self.0.iter().fold(D(0), |map, (name, note)| {
             let mut key = name.to_noun(stack);
             let mut value = note.to_noun(stack);
-            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher).unwrap()
-        });
-        keys_noun_map
+            zmap::z_map_put(stack, &map, &mut key, &mut value, &DefaultTipHasher)
+                .expect("Failed to put into z_map")
+        })
     }
 }
 
@@ -67,8 +67,8 @@ pub struct NoteV1 {
 impl NounEncode for Note {
     fn to_noun<A: NounAllocator>(&self, stack: &mut A) -> Noun {
         match self {
-            Note::V0(note) => NoteV0::to_noun(&note, stack),
-            Note::V1(note) => NoteV1::to_noun(&note, stack),
+            Note::V0(note) => NoteV0::to_noun(note, stack),
+            Note::V1(note) => NoteV1::to_noun(note, stack),
         }
     }
 }

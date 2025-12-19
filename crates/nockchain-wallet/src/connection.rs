@@ -86,8 +86,8 @@ impl GrpcEndpoint {
             ));
         }
 
-        let host = uri.host().unwrap();
-        let port = uri.port_u16().unwrap_or_else(|| match scheme_str {
+        let host = uri.host().expect("URI should have a host");
+        let port = uri.port_u16().unwrap_or(match scheme_str {
             "https" => 443,
             _ => 80,
         });

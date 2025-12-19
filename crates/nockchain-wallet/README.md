@@ -219,11 +219,13 @@ Gifts and fees are denominated in nicks (65536 nicks = 1 nock).
 ```json
 {"kind":"p2pkh","address":"<base58-pkh>","amount":10000}
 {"kind":"multisig","threshold":2,"addresses":["<pkh-a>","<pkh-b>","<pkh-c>"],"amount":9000}
+{"kind":"bridge-deposit","evm-address":"0x0123abcd...","amount":500000000}
 ```
 
 - `kind` must be either `p2pkh` or `multisig`
 - `amount` is specified in nicks
 - Multisig objects also require a `threshold` (m) and at least one `addresses` entry
+- Bridge deposits route funds to the Base bridge; `evm-address` expects a 20-byte hex string (40 hex chars, case-insensitive) with or without the `0x` prefix. Only one `%bridge-deposit` output is allowed per transaction, and the bridge enforces a protocol-level minimum gift size.
 
 Provide multiple `--recipient` flags to fan out to several recipients in one transaction.
 
@@ -238,6 +240,21 @@ Multisig outputs are expressed via the JSON form. Supply each output as:
 - `threshold` defines the `m` value (must be ≥1 and ≤ number of addresses)
 - `addresses` is the list of base58 payee hashes that define the lock
 - `amount` is denominated in nicks
+
+### Bridge Deposits
+
+Send Nockchain assets to Base by targeting the on-chain bridge lock root:
+
+```bash
+nockchain-wallet create-tx \
+  --names "[first1 last1]" \
+  --recipient '{"kind":"bridge-deposit","evm-address":"0x0c8d9cf278d4f3e23b00ea0a16bba2d05c07a7b6","amount":100000000}' \
+  --fee 60000000
+```
+
+- The `evm-address` is the Base/ETH recipient; provide exactly 20 bytes of hex (`0x` prefix optional).
+- Only a single bridge deposit output is allowed per transaction.
+- The bridge kernel enforces a minimum deposit amount; use docs/BRIDGE.md for current values.
 
 ```bash
 nockchain-wallet create-tx \

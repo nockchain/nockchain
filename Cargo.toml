@@ -1,6 +1,7 @@
-[workspace]
 resolver = "2"
-members = ["crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-peek", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-types", "crates/nockchain-wallet", "crates/raw-tx-checker", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockup", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/zkvm-jetpack"]
+
+[workspace]
+members = ["crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/zkvm-jetpack"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,12 +10,14 @@ edition = "2021"
 [workspace.dependencies]
 aes = { version = "0.8.3", default-features = false }
 aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
+alloy = "1.1.2"
 anyhow = "1.0"
 argon2 = "0.5.3"
 arrayref = "0.3.7"
+assert_cmd = "2.0"
 async-trait = "0.1"
 axum = "0.8.1"
-axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 bardecoder = "0.5.0"
 bincode = "2.0.0-rc.3"
 bitcoincore-rpc = "0.19.0"
@@ -26,7 +29,8 @@ bytes = "1.5.0"
 cbor4ii = "1.0.0"
 cfg-if = "1.0.0"
 chrono = "0.4.40"
-clap = { version = "4.4.4", features = ["derive"] }
+clap = "4.4.4"
+colored = "2.0"
 config = "0.15"
 console-subscriber = "0.4.1"
 criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485aece85a3546126b06cc25d33e14aba829b3", features = [
@@ -40,11 +44,14 @@ divan = "0.1.21"
 ed25519-dalek = { version = "2.1.0", default-features = false }
 either = "1.9.0"
 equix = "0.2.2"
+flate2 = "1.1.5"
+fs_extra = "1.3"
 futures = "0.3.31"
 gdt-cpus = "25.5.0"
 getrandom = { version = "0.3.3", features = ["std"] }
 glob = "0.3"
 gnort = "0.2.0"
+handlebars = "6.3.2"
 hex = "0.4"
 hex-literal = "1.0.0"
 hickory-proto = "0.25.0-alpha.4"
@@ -52,15 +59,18 @@ hickory-resolver = { version = "0.25.0-alpha.4", features = ["system-config"] }
 image = "0.24.7"
 instant-acme = "0.7.2"
 intmap = "3.1.0"
-json = "0.12.4"
 lazy_static = "1.4.0"
 libc = "0.2.171"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
 memmap2 = "^0.9.5"
+nu-ansi-term = "0.50"
+num-bigint = "0.4.6"
 num-derive = "0.4.2"
 num-traits = "0.2"
 num_cpus = "1.16.0"
 once_cell = "1.21.3"
+op-alloy = "0.23.1"
+openssl-sys = "0.9"
 opentelemetry = { version = "0.30.0", features = [
     "trace",
     "logs",
@@ -75,7 +85,9 @@ opentelemetry-otlp = { version = "0.30.0", features = [
 opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
 parking_lot = "0.12.4"
 pin-project-lite = "0.2.16"
+predicates = "3.0"
 proc-macro2 = "1.0.91"
+proptest = "1.9.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
 prost-types = "0.14.1"
@@ -92,10 +104,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "http2",
     "charset",
     "json",
+    "blocking",
 ] }
 rkyv = "0.8.10"
 rustls = "0.23.0"
-rustls-pemfile = "2.0.0"
+rustls-pki-types = "1.13.1"
 serde = "1.0.217"
 serde_bytes = { version = "0.11.15", features = ["alloc"] }
 serde_cbor = "0.11"
@@ -110,11 +123,12 @@ smallvec = "1.15.1"
 static_assertions = "1.1.0"
 strum = { version = "0.27.2", features = ["derive"] }
 syn = { version = "2.0.39", features = ["full"] }
+tar = "0.4.44"
 tempfile = "3.3"
 termcolor = "1.4"
 termimad = "0.33.0"
-testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "54851fd9faf9b9cded9d681b46f87c056880d870" }
 test-log = "0.2.18"
+testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "17c00e411341943196ccd9df1165e60a4d1c40f9" }
 thiserror = "2.0.11"
 tikv-jemallocator = { version = "0.6" }
 tiny-keccak = { version = "2", features = ["keccak"] }
@@ -131,6 +145,7 @@ tokio = { version = "1.32", features = [
 tokio-rustls = "0.26.0"
 tokio-stream = "0.1"
 tokio-util = "0.7.11"
+toml = "0.9.8"
 tonic = { version = "0.14.0", features = ["tls-webpki-roots"] }
 tonic-build = "0.14"
 tonic-health = "0.14.2"
@@ -152,7 +167,9 @@ tracy-client = { version = "0.18.2" }
 unroll = "0.1.5"
 vergen = "8.3.2"
 void = "1.0.2"
+walkdir = "2.5.0"
 webpki-roots = "1.0.2"
+which = "8.0"
 x25519-dalek = { version = "2.0.0", features = [
     "static_secrets",
 ], default-features = false }
@@ -177,11 +194,11 @@ path = "crates/nockvm/rust/murmur3"
 [workspace.dependencies.nockapp]
 path = "crates/nockapp"
 
-[workspace.dependencies.nockapp-grpc-proto]
-path = "crates/nockapp-grpc-proto"
-
 [workspace.dependencies.nockapp-grpc]
 path = "crates/nockapp-grpc"
+
+[workspace.dependencies.nockapp-grpc-proto]
+path = "crates/nockapp-grpc-proto"
 
 [workspace.dependencies.nockchain]
 path = "crates/nockchain"
@@ -200,7 +217,6 @@ path = "crates/nockchain-wallet"
 
 [workspace.dependencies.nockvm]
 path = "crates/nockvm/rust/nockvm"
-
 
 [workspace.dependencies.nockvm_crypto]
 path = "crates/nockvm/rust/nockvm_crypto"

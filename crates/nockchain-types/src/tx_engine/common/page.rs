@@ -198,6 +198,8 @@ pub struct Page {
 
 impl NounEncode for Page {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        // TODO: should not be hardcoding v1 here, need a better solution
+        let version = nockvm::noun::D(1);
         let digest = self.digest.to_noun(allocator);
 
         let pow = if let Some(ref pow_data) = self.pow {
@@ -220,7 +222,7 @@ impl NounEncode for Page {
         nockvm::noun::T(
             allocator,
             &[
-                digest, pow, parent, tx_ids, coinbase, timestamp, epoch_counter, target,
+                version, digest, pow, parent, tx_ids, coinbase, timestamp, epoch_counter, target,
                 accumulated_work, height, msg,
             ],
         )

@@ -2,15 +2,18 @@
 name = "hoonc"
 version = "0.2.0"
 edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "hoonc"
+path = "src/main.rs"
 
 [features]
 default = []
 tracing-tracy = ["dep:tracing-tracy"]
+no_check_oom = ["nockvm/no_check_oom"]
 
 [dependencies]
-nockapp = { workspace = true }
-nockvm = { workspace = true, features = ["no_check_oom"] }
-nockvm_macros = { workspace = true }
 
 bincode = { workspace = true }
 blake3 = { workspace = true }
@@ -18,6 +21,9 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "cargo", "color", "env"] }
 dirs = { workspace = true }
 futures = { workspace = true }
+nockapp = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
@@ -29,7 +35,3 @@ tracing-tracy = { workspace = true, optional = true, features = [
     "ondemand",
 ] }
 walkdir = "2.5.0"
-
-[[bin]]
-name = "hoonc"
-path = "src/main.rs"

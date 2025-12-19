@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(clippy::items_after_test_module)]
 use std::any::Any;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

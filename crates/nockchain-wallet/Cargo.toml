@@ -2,31 +2,27 @@
 name = "nockchain-wallet"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
-kernels = { workspace = true, features = ["wallet"] }
-nockapp = { workspace = true }
-nockapp-grpc = { workspace = true }
-nockchain-types = { workspace = true }
-nockchain-math = { workspace = true }
-nockvm = { workspace = true }
-nockvm_macros = { workspace = true }
-noun-serde = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
-test-log = { workspace = true }
 
-bardecoder = { workspace = true }
 bs58 = { workspace = true }
 clap = { workspace = true, features = ["derive", "cargo"] }
 crossterm.workspace = true
 either.workspace = true
 getrandom.workspace = true
 http = "1"
-image = { workspace = true }
-qrcode = { workspace = true }
-ratatui.workspace = true
+kernels = { workspace = true, features = ["wallet"] }
+nockapp = { workspace = true }
+nockapp-grpc = { workspace = true }
+nockchain-math = { workspace = true }
+nockchain-types = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
 rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 tempfile.workspace = true
 termimad.workspace = true
 thiserror.workspace = true

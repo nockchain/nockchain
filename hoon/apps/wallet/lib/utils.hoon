@@ -6,7 +6,8 @@
 /=  *   /common/zose
 /=  *  /common/zeke
 /=  wt  /apps/wallet/lib/types
-|_  bug=?
+|_  [bug=? bc=blockchain-constants:transact]
++*  t  ~(. transact bc)
 ::
 ::  print helpers
 ++  warn
@@ -120,7 +121,7 @@
       =/  simple-lock  [(simple-pkh-lp:v1:first-name:transact u.pkh)]~
       ?:  =((first:nname:transact (hash:lock:transact simple-lock)) -.nn)
         (some simple-lock)
-      =/  coinbase-lock  (coinbase-pkh-sc:v1:first-name:transact u.pkh)
+      =/  coinbase-lock  (coinbase-pkh-sc:v1:first-name:t u.pkh)
       ?:  =((first:nname:transact (hash:lock:transact coinbase-lock)) -.nn)
         (some coinbase-lock)
       ~>  %slog.[2 'unsupported lock type']
@@ -496,6 +497,11 @@
           |=  @
           ^-  @t
           (rsh [3 2] (scot %ui +<))
+        ++  format-ux
+          |=  @ux
+          ^-  @t
+          %-  crip
+          (z-co:co +<)
         ::
         ++  poke
           |=  =cause:wt
@@ -632,8 +638,6 @@
       ++  lock-primitive
         |=  prim=lock-primitive:transact
         ^-  cord
-        =;  txt=@t
-          (cat 3 txt '\0a---')
         ?-    -.prim
             %pkh
           =/  participants=(list hash:transact)  ~(tap z-in:zo h.prim)
@@ -672,9 +676,9 @@
             ?~  min.abs.prim  'N/A'
             (format-ui:common u.min.abs.prim)
           =/  abs-max=@t
-            ?~  max.abs.prim  'N/A'
             %^  cat  3
               '\0a      - Max Absolute Height: '
+            ?~  max.abs.prim  'N/A'
             (format-ui:common u.max.abs.prim)
           ;:  (cury cat 3)
               '\0a    - Time Lock'
@@ -733,14 +737,39 @@
       ++  lock-metadata
         |=  data=lock-metadata:wt
         ^-  @t
-        =/  cond=(unit spend-condition:transact)
-          ((soft spend-condition:transact) lock.data)
-        ?~  cond
-          '\0a  - Lock data not displayable'
-        ;:  (cury cat 3)
-          '\0a  - Lock data included in note: '
-          (bool-text include-data.data)
-          (spend-condition u.cond)
+        =?  data  ?=(^ -.data)
+          [%1 %lock data]
+        ?>  ?=(@ -.data)
+        ?-    -.+.data
+            %lock
+          =/  cond=(unit spend-condition:transact)
+            ((soft spend-condition:transact) lock.data)
+          ?~  cond
+            '\0a  - Lock data not displayable'
+          ;:  (cury cat 3)
+            '\0a  - Lock data included in note: '
+            (bool-text include-data.data)
+            (spend-condition u.cond)
+          ==
+        ::
+            %lock-root
+          ;:  (cury cat 3)
+            '\0a  - Lock data included in note: '
+            (bool-text %.n)
+            '\0a  - Assets should go to lock script root: '
+            (to-b58:hash:transact root.data)
+          ==
+        ::
+            %bridge-deposit
+          ;:  (cury cat 3)
+            '\0a  - Lock data included in note: '
+            (bool-text %.n)
+            '\0a  - Bridge Deposit: '
+            '\0a          - Assets should go to lock script root (this should be bridge operator lock root): '
+            (to-b58:hash:transact root.data)
+            '\0a          - EVM recipient address (tokens should mint to this address): '
+            (format-ux:common addr.data)
+          ==
         ==
     ::
       ++  memo-data
@@ -905,7 +934,8 @@
           "\0a{(trip (note-from-output out-note metadata))}"
         %-  crip
         """
-        ## Transaction Information
+
+        ### Transaction Information
         - Name: {(trip name)}
         - Fee: {(trip (format-ui:common fees))}
 
@@ -993,4 +1023,10 @@
       ^-  tape
       %-  trip
       (rsh [3 2] (scot %ui +<))
+  ::
+  ++  ux-to-tape
+      |=  @
+      ^-  tape
+      %-  trip
+      (rsh [3 2] (scot %ux +<))
   --

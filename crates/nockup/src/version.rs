@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio::process::Command as TokioCommand;
 
+use crate::commands::common;
+
 pub async fn show_version_info() -> Result<()> {
     // Show nockup version
     println!("nockup version {}", env!("FULL_VERSION"));
@@ -89,7 +91,7 @@ fn extract_version_string(version_line: &str) -> String {
 
     // Look for a word that looks like a version (starts with digit or 'v').
     for word in &words {
-        if word.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if word.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return word.to_string();
         }
         if word.starts_with('v') && word.len() > 1 {
@@ -109,6 +111,18 @@ fn get_cache_dir() -> Result<PathBuf> {
 fn get_config() -> Result<toml::Value> {
     let cache_dir = get_cache_dir()?;
     let config_path = cache_dir.join("config.toml");
+    if !config_path.exists() {
+        let mut table = toml::map::Map::new();
+        table.insert(
+            "channel".to_string(),
+            toml::Value::String("stable".to_string()),
+        );
+        table.insert(
+            "architecture".to_string(),
+            toml::Value::String(common::get_target_identifier()),
+        );
+        return Ok(toml::Value::Table(table));
+    }
     let config_str = std::fs::read_to_string(&config_path)?;
     let config: toml::Value = toml::de::from_str(&config_str)?;
     Ok(config)

@@ -423,8 +423,16 @@ impl NockStack {
     // Types of size: word (words: usize)
     /// Check if an allocation or pointer retrieval indicates an invalid request or an invalid state
     pub(crate) fn alloc_would_oom_(&self, alloc: Allocation, words: usize) {
+        // When the fast path is enabled, make the parameters count as used to avoid
+        // unused-variable warnings while still short-circuiting.
         #[cfg(feature = "no_check_oom")]
-        return;
+        {
+            let _ = (&alloc, words);
+        }
+
+        if cfg!(feature = "no_check_oom") {
+            return;
+        }
         let _memory_state = self.memory_state(Some(words));
         if self.pc && !alloc.alloc_type.allowed_when_pc() {
             panic_any(self.cannot_alloc_in_pc(Some(words)));
@@ -622,9 +630,17 @@ impl NockStack {
             self.frame_offset = new_frame_offset;
             self.stack_offset = new_frame_offset;
             self.alloc_offset = new_alloc_offset;
-            self.least_space = new_frame_offset
-                .checked_sub(new_alloc_offset)
-                .expect("Uncaught OOM in flip_top_frame west->east");
+            self.least_space = match new_frame_offset.checked_sub(new_alloc_offset) {
+                Some(space) => space,
+                None => panic_any(self.out_of_memory(
+                    Allocation {
+                        orientation: ArenaOrientation::West,
+                        alloc_type: AllocationType::FlipTopFrame,
+                        pc: self.pc,
+                    },
+                    Some(size),
+                )),
+            };
             self.pc = false;
 
             assert!(!self.is_west());
@@ -653,9 +669,17 @@ impl NockStack {
             self.frame_offset = new_frame_offset;
             self.stack_offset = new_frame_offset;
             self.alloc_offset = new_alloc_offset;
-            self.least_space = new_alloc_offset
-                .checked_sub(new_frame_offset)
-                .expect("Uncaught OOM in flip_top_frame east->west");
+            self.least_space = match new_alloc_offset.checked_sub(new_frame_offset) {
+                Some(space) => space,
+                None => panic_any(self.out_of_memory(
+                    Allocation {
+                        orientation: ArenaOrientation::East,
+                        alloc_type: AllocationType::FlipTopFrame,
+                        pc: self.pc,
+                    },
+                    Some(size),
+                )),
+            };
             self.pc = false;
 
             assert!(self.is_west());
@@ -1030,9 +1054,12 @@ impl NockStack {
         };
 
         // Update the space low-water-mark
-        let new_space = new_alloc_offset
-            .checked_sub(self.stack_offset)
-            .expect("Uncaught OOM in raw_alloc_west");
+        let new_space = match new_alloc_offset.checked_sub(self.stack_offset) {
+            Some(space) => space,
+            None => panic_any(
+                self.out_of_memory(self.get_alloc_config(AllocationType::Alloc), Some(words)),
+            ),
+        };
         self.least_space = new_space.min(self.least_space);
 
         // Derive pointer from the new offset
@@ -1062,10 +1089,12 @@ impl NockStack {
             None => panic!("Alloc offset overflow in East frame"),
         };
 
-        let new_space = self
-            .stack_offset
-            .checked_sub(new_alloc_offset)
-            .expect("Uncaught OOM in raw_alloc_east");
+        let new_space = match self.stack_offset.checked_sub(new_alloc_offset) {
+            Some(space) => space,
+            None => panic_any(
+                self.out_of_memory(self.get_alloc_config(AllocationType::Alloc), Some(words)),
+            ),
+        };
         self.least_space = new_space.min(self.least_space);
 
         // Check that the new offset is within bounds

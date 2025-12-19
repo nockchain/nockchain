@@ -2,19 +2,22 @@
 name = "nockchain-types"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
+alloy = { workspace = true }
 anyhow = { workspace = true }
-bytes = { workspace = true }
 bs58 = { workspace = true }
-nockapp = { workspace = true }
-nockvm = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
 ibig = { workspace = true }
+nockapp = { workspace = true }
 nockchain-math = { workspace = true }
+nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 noun-serde = { workspace = true }
-serde = { workspace = true, features = ["derive"], default-features = false }
-
+num-bigint.workspace = true
+serde = { version = "1.0.217", features = ["derive"], default-features = false }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

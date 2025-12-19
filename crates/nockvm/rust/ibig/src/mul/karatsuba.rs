@@ -74,7 +74,7 @@ pub(crate) fn add_signed_mul_same_len(
     debug_assert!(b.len() == n && c.len() == 2 * n);
     debug_assert!(n >= MIN_LEN);
 
-    let mid = (n + 1) / 2;
+    let mid = n.div_ceil(2);
 
     let (a_lo, a_hi) = a.split_at(mid);
     let (b_lo, b_hi) = b.split_at(mid);

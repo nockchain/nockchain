@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{anyhow, Context, Result};
@@ -61,7 +61,7 @@ pub fn get_or_create_config() -> Result<toml::Value> {
     Ok(config)
 }
 
-fn write_default_config(config_path: &PathBuf) -> Result<()> {
+fn write_default_config(config_path: &Path) -> Result<()> {
     let default_config = format!(
         r#"channel = "stable"
 architecture = "{}"
@@ -72,7 +72,7 @@ architecture = "{}"
     Ok(())
 }
 
-pub async fn download_templates(cache_dir: &PathBuf) -> Result<()> {
+pub async fn download_templates(cache_dir: &Path) -> Result<()> {
     let templates_dir = cache_dir.join("templates");
 
     if has_existing_templates(&templates_dir).await? {
@@ -86,7 +86,7 @@ pub async fn download_templates(cache_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn has_existing_templates(templates_dir: &PathBuf) -> Result<bool> {
+async fn has_existing_templates(templates_dir: &Path) -> Result<bool> {
     if !templates_dir.exists() {
         return Ok(false);
     }
@@ -112,7 +112,7 @@ async fn has_existing_templates(templates_dir: &PathBuf) -> Result<bool> {
     Ok(false)
 }
 
-async fn clone_templates(templates_dir: &PathBuf) -> Result<()> {
+async fn clone_templates(templates_dir: &Path) -> Result<()> {
     let commit_id = get_git_commit_id().await?;
     let commit_file = templates_dir.join("commit.toml");
 
@@ -146,7 +146,10 @@ async fn clone_templates(templates_dir: &PathBuf) -> Result<()> {
         }
     }
 
-    let temp_dir = templates_dir.parent().unwrap().join("temp_repo");
+    let temp_dir = templates_dir
+        .parent()
+        .expect("templates_dir should have a parent")
+        .join("temp_repo");
     if temp_dir.exists() {
         fs::remove_dir_all(&temp_dir)?;
     }
@@ -198,7 +201,10 @@ async fn clone_templates(templates_dir: &PathBuf) -> Result<()> {
         ));
     }
 
-    let manifests_dir = templates_dir.parent().unwrap().join("manifests");
+    let manifests_dir = templates_dir
+        .parent()
+        .expect("templates_dir should have a parent")
+        .join("manifests");
     if manifests_dir.exists() {
         fs::remove_dir_all(&manifests_dir)?;
     }
@@ -227,7 +233,7 @@ async fn clone_templates(templates_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
 
     for entry in fs::read_dir(src)? {
@@ -246,11 +252,11 @@ fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn update_templates(templates_dir: &PathBuf) -> Result<()> {
+async fn update_templates(templates_dir: &Path) -> Result<()> {
     clone_templates(templates_dir).await
 }
 
-pub async fn download_toolchain_files(cache_dir: &PathBuf) -> Result<()> {
+pub async fn download_toolchain_files(cache_dir: &Path) -> Result<()> {
     let toolchain_dir = cache_dir.join("toolchains");
 
     if has_existing_toolchain_files(&toolchain_dir).await? {
@@ -270,7 +276,7 @@ pub async fn download_toolchain_files(cache_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn has_existing_toolchain_files(toolchain_dir: &PathBuf) -> Result<bool> {
+async fn has_existing_toolchain_files(toolchain_dir: &Path) -> Result<bool> {
     if !toolchain_dir.exists() {
         return Ok(false);
     }
@@ -284,11 +290,11 @@ async fn has_existing_toolchain_files(toolchain_dir: &PathBuf) -> Result<bool> {
     Ok(false)
 }
 
-async fn update_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
+async fn update_toolchain_files(toolchain_dir: &Path) -> Result<()> {
     clone_toolchain_files(toolchain_dir).await
 }
 
-async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
+async fn clone_toolchain_files(toolchain_dir: &Path) -> Result<()> {
     if toolchain_dir.exists() {
         fs::remove_dir_all(toolchain_dir)?;
     }
@@ -299,8 +305,8 @@ async fn clone_toolchain_files(toolchain_dir: &PathBuf) -> Result<()> {
         "⬇️".green()
     );
 
-    async fn get_latest_manifest(channel: &str, toolchain_dir: &PathBuf) -> Result<()> {
-        let manifest_file = format!("nockchain-manifest.toml");
+    async fn get_latest_manifest(channel: &str, toolchain_dir: &Path) -> Result<()> {
+        let manifest_file = "nockchain-manifest.toml";
         let output_file = toolchain_dir.join(format!("channel-nockup-{}.toml", channel));
 
         println!("{} Fetching manifest for {}...", "🔍".yellow(), channel);
@@ -431,7 +437,7 @@ pub async fn download_binaries(config: &toml::Value) -> Result<()> {
 
         let archive_path = download_file(&archive_url).await?;
 
-        verify_checksums(&archive_path, &archive_blake3, &archive_sha1).await?;
+        verify_checksums(&archive_path, archive_blake3, archive_sha1).await?;
         println!("{} Blake3 checksum passed.", "✅".green());
         println!("{} SHA1 checksum passed.", "✅".green());
 
@@ -521,7 +527,15 @@ async fn verify_gpg_signature(
     }
 
     let output = Command::new("gpg")
-        .args(["--verify", signature_path.to_str().unwrap(), archive_path.to_str().unwrap()])
+        .args([
+            "--verify",
+            signature_path
+                .to_str()
+                .expect("signature_path should be valid UTF-8"),
+            archive_path
+                .to_str()
+                .expect("archive_path should be valid UTF-8"),
+        ])
         .output()
         .await
         .context("Failed to execute gpg command")?;
@@ -572,8 +586,12 @@ async fn verify_gpg_signature(
             .args([
                 "--verify",
                 "--verbose",
-                signature_path.to_str().unwrap(),
-                archive_path.to_str().unwrap(),
+                signature_path
+                    .to_str()
+                    .expect("signature_path should be valid UTF-8"),
+                archive_path
+                    .to_str()
+                    .expect("archive_path should be valid UTF-8"),
             ])
             .output()
             .await
@@ -670,10 +688,10 @@ async fn download_file(url: &str) -> Result<PathBuf> {
         ));
     }
 
-    let url_filename = url.split('/').last().unwrap_or("download");
+    let url_filename = url.split('/').next_back().unwrap_or("download");
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("SystemTime should be after UNIX_EPOCH")
         .as_secs();
     let filename = format!("nockup_{}_{}", timestamp, url_filename);
     let temp_file = std::env::temp_dir().join(filename);
@@ -706,8 +724,8 @@ async fn verify_checksums(
         .map_err(|e| anyhow::anyhow!("Invalid hex SHA-1: {}", e))?
         .try_into()
         .map_err(|_| anyhow!("Failed to convert to fixed array (length mismatch)"))?;
-    if computed_sha1.as_slice() != &expected_sha1 {
-        let expected_hex = hex::encode(&expected_sha1);
+    if computed_sha1.as_slice() != expected_sha1 {
+        let expected_hex = hex::encode(expected_sha1);
         let computed_hex = hex::encode(computed_sha1.as_slice());
         return Err(anyhow::anyhow!(
             "Checksum verification failed: expected {}, got {}", expected_hex, computed_hex
@@ -716,7 +734,7 @@ async fn verify_checksums(
     Ok(())
 }
 
-pub async fn write_commit_details(cache_dir: &PathBuf) -> Result<()> {
+pub async fn write_commit_details(cache_dir: &Path) -> Result<()> {
     let status_file = cache_dir.join("status.toml");
     let mut config = toml::map::Map::new();
     config.insert("commit".into(), toml::Value::Table(toml::map::Map::new()));
@@ -731,10 +749,10 @@ pub async fn write_commit_details(cache_dir: &PathBuf) -> Result<()> {
 }
 
 async fn get_git_commit_id() -> Result<String> {
-    let repo_url = format!("https://api.github.com/repos/nockchain/nockchain/commits/master");
+    let repo_url = "https://api.github.com/repos/nockchain/nockchain/commits/master";
     let client = reqwest::Client::new();
     let response = client
-        .get(&repo_url)
+        .get(repo_url)
         .header("User-Agent", "nockup")
         .send()
         .await

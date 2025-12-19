@@ -1,8 +1,17 @@
 use std::process::Command;
 
+#[allow(deprecated)]
+use assert_cmd::cargo::cargo_bin;
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
+
+// Helper to get the cargo bin path
+// Note: cargo_bin function is deprecated but the macro isn't exposed through prelude
+fn nockup_bin() -> std::path::PathBuf {
+    #[allow(deprecated)]
+    cargo_bin("nockup")
+}
 
 #[cfg(test)]
 mod cli_input_validation_tests {
@@ -11,7 +20,7 @@ mod cli_input_validation_tests {
     // Test basic command structure
     #[test]
     fn test_no_args_shows_version() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.assert()
             .success()
             .stdout(predicate::str::contains("version"));
@@ -19,7 +28,7 @@ mod cli_input_validation_tests {
 
     #[test]
     fn test_help_command() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.arg("help");
         cmd.assert()
             .success()
@@ -28,7 +37,7 @@ mod cli_input_validation_tests {
 
     #[test]
     fn test_invalid_command() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.arg("invalid-command");
         cmd.assert()
             .failure()
@@ -39,8 +48,8 @@ mod cli_input_validation_tests {
     // Test install command validation
     #[test]
     fn test_install_with_invalid_flags() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.args(&["install", "--invalid-flag"]);
+        let mut cmd = Command::new(nockup_bin());
+        cmd.args(["install", "--invalid-flag"]);
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("unexpected argument"));
@@ -48,34 +57,34 @@ mod cli_input_validation_tests {
 
     // Test start command validation
     #[test]
-    fn test_start_without_project_name() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.arg("start");
+    fn test_init_without_project_name() {
+        let mut cmd = Command::new(nockup_bin());
+        cmd.arg("init");
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("required"));
     }
 
     #[test]
-    fn test_start_with_empty_project_name() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.args(&["start", ""]);
+    fn test_init_with_empty_project_name() {
+        let mut cmd = Command::new(nockup_bin());
+        cmd.args(["init", ""]);
         cmd.assert().failure().stderr(predicate::str::contains(
             "Error: Project configuration file '.toml' not found",
         ));
     }
 
     #[test]
-    fn test_start_with_valid_project_names() {
+    fn test_init_with_valid_project_names() {
         let valid_names = vec!["myproject", "my-project", "my_project", "project123"];
 
         for name in valid_names {
-            let temp_dir = TempDir::new().unwrap();
-            let mut cmd = Command::cargo_bin("nockup").unwrap();
-            cmd.current_dir(temp_dir.path()).args(&["start", name]);
+            let temp_dir = TempDir::new().expect("Failed to create temp dir");
+            let mut cmd = Command::new(nockup_bin());
+            cmd.current_dir(temp_dir.path()).args(["init", name]);
 
             // This might fail due to missing cache, but shouldn't fail on name validation
-            let output = cmd.output().unwrap();
+            let output = cmd.output().expect("Failed to run command");
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("invalid project name"));
         }
@@ -84,7 +93,7 @@ mod cli_input_validation_tests {
     // Test build command validation
     #[test]
     fn test_build_without_project_name() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.arg("build");
         cmd.assert()
             .failure()
@@ -93,10 +102,10 @@ mod cli_input_validation_tests {
 
     #[test]
     fn test_build_nonexistent_project() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let mut cmd = Command::new(nockup_bin());
         cmd.current_dir(temp_dir.path())
-            .args(&["build", "nonexistent-project"]);
+            .args(["build", "nonexistent-project"]);
         cmd.assert().failure().stderr(
             predicate::str::contains("Project directory")
                 .and(predicate::str::contains("not found")),
@@ -106,7 +115,7 @@ mod cli_input_validation_tests {
     // Test run command validation
     #[test]
     fn test_run_without_project_name() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.arg("run");
         cmd.assert()
             .failure()
@@ -116,7 +125,7 @@ mod cli_input_validation_tests {
     // Test channel command validation
     #[test]
     fn test_channel_without_subcommand() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
+        let mut cmd = Command::new(nockup_bin());
         cmd.arg("channel");
         cmd.assert()
             .failure()
@@ -124,9 +133,9 @@ mod cli_input_validation_tests {
     }
 
     #[test]
-    fn test_channel_list_with_extra_args() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.args(&["channel", "list", "extra-arg"]);
+    fn test_channel_show_with_extra_args() {
+        let mut cmd = Command::new(nockup_bin());
+        cmd.args(["channel", "show", "extra-arg"]);
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("unexpected argument"));
@@ -134,8 +143,8 @@ mod cli_input_validation_tests {
 
     #[test]
     fn test_channel_set_without_channel_name() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.args(&["channel", "set"]);
+        let mut cmd = Command::new(nockup_bin());
+        cmd.args(["channel", "set"]);
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("required"));
@@ -143,8 +152,8 @@ mod cli_input_validation_tests {
 
     #[test]
     fn test_channel_set_invalid_channel() {
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.args(&["channel", "set", "invalid-channel"]);
+        let mut cmd = Command::new(nockup_bin());
+        cmd.args(["channel", "set", "invalid-channel"]);
         cmd.assert()
             .failure()
             .stderr(predicate::str::contains("Invalid channel"));
@@ -155,51 +164,25 @@ mod cli_input_validation_tests {
         let channels = vec!["stable", "nightly"];
 
         for channel in channels {
-            let mut cmd = Command::cargo_bin("nockup").unwrap();
-            cmd.args(&["channel", "set", channel]);
+            let mut cmd = Command::new(nockup_bin());
+            cmd.args(["channel", "set", channel]);
 
             // This might fail due to missing cache, but shouldn't fail on channel validation
-            let output = cmd.output().unwrap();
+            let output = cmd.output().expect("Failed to run command");
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(!stderr.contains("invalid channel"));
         }
     }
 
-    // // Test path validation
-    // #[test]
-    // fn test_start_in_existing_directory() {
-    //     let temp_dir = TempDir::new().unwrap();
-    //     let project_path = temp_dir.path().join("existing-project");
-    //     std::fs::create_dir_all(&project_path).unwrap();
-    //     std::fs::write(project_path.join("dummy.txt"), "exists").unwrap();
-
-    //     let mut cmd = Command::cargo_bin("nockup").unwrap();
-    //     // copy the local default-manifest.toml file to tempdir
-    //     std::fs::copy("default-manifest.toml", temp_dir.path().join("default-manifest.toml")).unwrap();
-    //     cmd.current_dir(temp_dir.path())
-    //        .args(&["start", "default-manifest"]);
-    //     cmd.assert()
-    //         .success()
-    //         .stdout(predicate::str::contains("Project 'arcadia' created successfully"));
-    //     // new command
-    //     cmd.current_dir(temp_dir.path())
-    //        .args(&["start", "default-manifest"]);
-    //     cmd.assert()
-    //         .failure()
-    //         .stderr(predicate::str::contains("already exists. Please choose"));
-    //     // Clear ./default-manifest
-    //     std::fs::remove_dir_all(temp_dir.path().join("default-manifest")).unwrap();
-    // }
-
     // Test configuration file validation (if manifest is required)
     #[test]
     fn test_build_without_manifest() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let project_dir = temp_dir.path().join("test-project");
-        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::create_dir_all(&project_dir).expect("Failed to create project dir");
 
-        let mut cmd = Command::cargo_bin("nockup").unwrap();
-        cmd.current_dir(&project_dir).args(&["build", "."]);
+        let mut cmd = Command::new(nockup_bin());
+        cmd.current_dir(&project_dir).args(["build", "."]);
         cmd.assert().failure().stderr(predicate::str::contains(
             "Error: Not a NockApp project: '.' missing manifest.toml",
         ));

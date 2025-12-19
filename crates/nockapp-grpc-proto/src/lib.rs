@@ -3,6 +3,10 @@
 //! This crate provides a gRPC interface to NockApp, replacing the old socket-based
 //! interface with modern RPC patterns for easier cross-language compatibility.
 
+// Allow clippy lints for generated protobuf code
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::unnecessary_fallible_conversions)]
+
 // Include the generated protobuf code
 pub mod pb {
     pub mod common {

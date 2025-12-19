@@ -789,7 +789,7 @@ mod tests {
     fn test_cell_construction() {
         let mut stack = setup_stack();
         let (cell, cell_mem_ptr) = unsafe { Cell::new_raw_mut(&mut stack) };
-        unsafe { assert!(cell_mem_ptr as *const CellMemory == cell.to_raw_pointer()) };
+        unsafe { assert!(std::ptr::eq(cell_mem_ptr, cell.to_raw_pointer())) };
     }
 
     #[test]

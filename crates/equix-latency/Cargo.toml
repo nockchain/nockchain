@@ -2,6 +2,7 @@
 name = "equix-latency"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 equix.workspace = true

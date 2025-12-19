@@ -365,22 +365,22 @@ pub fn bpegcd(a: &[Belt], b: &[Belt], d: &mut [Belt], u: &mut [Belt], v: &mut [B
         b = r;
 
         let q_len = q.len();
-        let m1_u_len = m1_u.len() as usize;
+        let m1_u_len = m1_u.len();
 
         let mut res1_len = q_len + m1_u_len - 1;
-        let mut res1 = vec![Belt(0); res1_len as usize];
+        let mut res1 = vec![Belt(0); res1_len];
         bpmul(q.as_slice(), m1_u.as_slice(), res1.as_mut_slice());
 
         let m2_u_len = m2_u.len();
 
         let len_res2 = std::cmp::max(m2_u_len, res1_len);
-        let mut res2 = vec![Belt(0); len_res2 as usize];
+        let mut res2 = vec![Belt(0); len_res2];
         bpsub(m2_u.as_slice(), res1.as_slice(), res2.as_mut_slice());
 
         m2_u = m1_u;
         m1_u = res2;
 
-        let m1_v_len = m1_v.len() as usize;
+        let m1_v_len = m1_v.len();
 
         res1.fill(Belt(0));
         res1_len = q_len + m1_v_len - 1;
@@ -390,7 +390,7 @@ pub fn bpegcd(a: &[Belt], b: &[Belt], d: &mut [Belt], u: &mut [Belt], v: &mut [B
         let m2_v_len = m2_v.len();
 
         let len_res3 = std::cmp::max(m2_v_len, res1_len);
-        let mut res3 = vec![Belt(0); len_res3 as usize];
+        let mut res3 = vec![Belt(0); len_res3];
 
         bpsub(m2_v.as_slice(), res1.as_slice(), res3.as_mut_slice());
 
@@ -404,8 +404,8 @@ pub fn bpegcd(a: &[Belt], b: &[Belt], d: &mut [Belt], u: &mut [Belt], v: &mut [B
     let m2_u_len = m2_u.len();
     let m2_v_len = m2_v.len();
 
-    u[0..(m2_u_len as usize)].copy_from_slice(&m2_u[0..(m2_u_len as usize)]);
-    v[0..(m2_v_len as usize)].copy_from_slice(&m2_v[0..(m2_v_len as usize)]);
+    u[..m2_u_len].copy_from_slice(&m2_u[..m2_u_len]);
+    v[..m2_v_len].copy_from_slice(&m2_v[..m2_v_len]);
 }
 
 #[inline(always)]

@@ -25,7 +25,7 @@ fn main() {
 
     // Create version string like your example: "0.1.0"
     let version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".to_string());
-    let full_version = format!("{}", version);
+    let full_version = version.to_string();
     println!("cargo:rustc-env=FULL_VERSION={}", full_version);
 
     // Tell cargo to re-run if git state changes
@@ -35,7 +35,7 @@ fn main() {
 
 fn get_git_hash() -> Option<String> {
     let output = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()?;
 

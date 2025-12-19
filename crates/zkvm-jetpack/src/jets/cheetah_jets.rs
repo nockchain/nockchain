@@ -96,7 +96,7 @@ pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<N
                 chal,
                 sig,
             } = arg;
-            verify_affine(*pubkey, m, chal, sig).unwrap()
+            verify_affine(*pubkey, m, chal, sig).expect("signature verification should succeed")
         })
         //  check if any result is invalid and try to short-circuit as soon as an
         //  invalid result is found
@@ -111,8 +111,8 @@ pub fn verify_affine(
     chal: &UBig,
     sig: &UBig,
 ) -> Result<bool, JetErr> {
-    let left = ch_scal_big(&sig, &A_GEN)?;
-    let right = ch_neg(&ch_scal_big(&chal, &pubkey)?);
+    let left = ch_scal_big(sig, &A_GEN)?;
+    let right = ch_neg(&ch_scal_big(chal, &pubkey)?);
     let sum = ch_add(&left, &right)?;
     if sum.x == F6_ZERO {
         return Err(BAIL_FAIL);
@@ -153,7 +153,7 @@ mod tests {
     fn test_b58_roundtrip() {
         for x in ["32KVTmv3ofSyACq9nC1Hgnk4Jt8rs2hj1cvDZWC1EQuiYFMDg8MaLtF3ntafJbEUH5XPV1pK3K4xkxfjRPAWprBb7LYCVv4HF7817Bwh9M9xAdmgrPt77j4xejihNFd9h5Eo",
             "2Xu6FtvopCS69Ko2YnC99B9SVVZ7PLoVn7WvEdDpJKRxW1pmj51uBQdYfADEbRUFYwG55Wi2Qwa3f6Y6WTev5jLcvfJFDEr2Wwt8rViQeLsz1XwEPah5pxtwHTm2nmecjJNW"] {
-                let point = CheetahPoint::from_base58(&x).unwrap();
+                let point = CheetahPoint::from_base58(x).unwrap();
                 let x_round = point.into_base58().unwrap();
                 assert_eq!(x, x_round)
             }
@@ -161,20 +161,19 @@ mod tests {
 
     #[test]
     fn test_cheetah_point_from_b58() {
-        for expected_point in [A_GEN] {
-            // Create a known CheetahPoint with specific x and y coordinates
-            // Encode the bytes to base58
-            let b58_str = expected_point.into_base58().unwrap();
+        let expected_point = A_GEN;
+        // Create a known CheetahPoint with specific x and y coordinates
+        // Encode the bytes to base58
+        let b58_str = expected_point.into_base58().unwrap();
 
-            // Now test decoding
-            let decoded_point =
-                CheetahPoint::from_base58(&b58_str).expect("Failed to decode valid base58 string");
+        // Now test decoding
+        let decoded_point =
+            CheetahPoint::from_base58(&b58_str).expect("Failed to decode valid base58 string");
 
-            // Check if the decoded point matches our expected point
-            assert_eq!(decoded_point.x.0, expected_point.x.0);
-            assert_eq!(decoded_point.y.0, expected_point.y.0);
-            assert_eq!(decoded_point.inf, expected_point.inf);
-        }
+        // Check if the decoded point matches our expected point
+        assert_eq!(decoded_point.x.0, expected_point.x.0);
+        assert_eq!(decoded_point.y.0, expected_point.y.0);
+        assert_eq!(decoded_point.inf, expected_point.inf);
 
         // Test error cases
 
@@ -340,7 +339,7 @@ mod tests {
 
         let a_gen_noun = A_GEN.to_noun(&mut context.stack);
 
-        let n = A(&mut context.stack, &*G_ORDER);
+        let n = A(&mut context.stack, &G_ORDER);
         let sample = T(&mut context.stack, &[n, a_gen_noun]);
 
         let exp_noun = A_ID.to_noun(&mut context.stack);

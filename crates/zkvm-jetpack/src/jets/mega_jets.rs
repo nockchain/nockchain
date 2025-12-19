@@ -141,7 +141,7 @@ pub fn mp_substitute_mega_jet(context: &mut Context, subject: Noun) -> Result {
                     let com_noun = com_map_opt
                         .as_ref()
                         .and_then(|m| m.get(stack, D(idx as u64)))
-                        .ok_or_else(|| BAIL_EXIT)?;
+                        .ok_or(BAIL_EXIT)?;
                     let Ok(com_slice) = BPolySlice::try_from(com_noun) else {
                         return Err(BAIL_FAIL);
                     };

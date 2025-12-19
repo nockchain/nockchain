@@ -5,12 +5,33 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
 
-pub async fn run(project: String) -> Result<()> {
+pub async fn run(project: &str) -> Result<()> {
     let project_dir = Path::new(&project);
 
     // Check if project directory exists
     if !project_dir.exists() {
         return Err(anyhow::anyhow!("Project directory '{}' not found", project));
+    }
+
+    // Auto-install dependencies if nockapp.toml exists
+    let nockapp_manifest = project_dir.join("nockapp.toml");
+    if nockapp_manifest.exists() {
+        // Check if dependencies need to be installed
+        if should_install_dependencies(project_dir).await? {
+            println!("{} Installing dependencies...", "📦".cyan());
+            // Change to project directory to run install
+            let original_dir = std::env::current_dir()?;
+            std::env::set_current_dir(project_dir)?;
+
+            // Run package install
+            let install_result = crate::commands::package::install::run().await;
+
+            // Change back to original directory
+            std::env::set_current_dir(original_dir)?;
+
+            install_result?;
+            println!();
+        }
     }
 
     // Check if it's a valid NockApp project (has manifest.toml)
@@ -49,19 +70,13 @@ pub async fn run(project: String) -> Result<()> {
     };
 
     // Check number of expected binaries; if more than one, check primary source files.
-    let binaries: Vec<std::path::PathBuf> = {
-        if expected_binaries.is_empty() {
-            vec![project_dir.join("src").join("main.rs")]
-        } else if expected_binaries.len() == 1 {
-            vec![project_dir.join("src").join("main.rs")]
-        } else {
-            let mut binaries = Vec::new();
-            for bin_name in &expected_binaries {
-                let bin_path = project_dir.join("src").join(format!("{}.rs", bin_name));
-                binaries.push(bin_path);
-            }
-            binaries
-        }
+    let binaries: Vec<std::path::PathBuf> = if expected_binaries.len() > 1 {
+        expected_binaries
+            .iter()
+            .map(|bin_name| project_dir.join("src").join(format!("{}.rs", bin_name)))
+            .collect()
+    } else {
+        vec![project_dir.join("src").join("main.rs")]
     };
 
     // Run cargo build in the project directory
@@ -92,10 +107,18 @@ pub async fn run(project: String) -> Result<()> {
     //  If there are multiple binaries, then check at each location by name.
     for bin_path in &binaries {
         // if this is main.rs, then load app.hoon
-        let name = if bin_path.file_name().unwrap() == "main.rs" {
+        let name = if bin_path
+            .file_name()
+            .expect("bin_path should have a file name")
+            == "main.rs"
+        {
             "app".to_string()
         } else {
-            bin_path.file_stem().unwrap().to_string_lossy().to_string()
+            bin_path
+                .file_stem()
+                .expect("bin_path should have a file stem")
+                .to_string_lossy()
+                .to_string()
         };
         let hoon_app_path = project_dir.join(format!("hoon/app/{}.hoon", name));
         println!("Compiling Hoon app file at: {}", hoon_app_path.display());
@@ -112,7 +135,11 @@ pub async fn run(project: String) -> Result<()> {
         // Run hoonc command from project directory
         let mut hoonc_command = Command::new("hoonc");
         hoonc_command
-            .arg(hoon_app_path.strip_prefix(project_dir).unwrap())
+            .arg(
+                hoon_app_path
+                    .strip_prefix(project_dir)
+                    .expect("hoon_app_path should be under project_dir"),
+            )
             .current_dir(project_dir) // Run in project directory
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -132,7 +159,10 @@ pub async fn run(project: String) -> Result<()> {
         if binaries.len() > 1 {
             let target_jam = project_dir.join(format!(
                 "{}.jam",
-                bin_path.file_stem().unwrap().to_string_lossy()
+                bin_path
+                    .file_stem()
+                    .expect("bin_path should have a file stem")
+                    .to_string_lossy()
             ));
             tokio::fs::rename(project_dir.join("out.jam"), &target_jam)
                 .await
@@ -151,4 +181,71 @@ pub async fn run(project: String) -> Result<()> {
     println!("{} Hoon compilation completed successfully!", "✓".green());
 
     Ok(())
+}
+
+/// Check if dependencies need to be installed
+async fn should_install_dependencies(project_dir: &Path) -> Result<bool> {
+    use crate::manifest::{HoonPackage, NockAppLock};
+
+    // Load the manifest
+    let manifest_path = project_dir.join("nockapp.toml");
+    let manifest = match HoonPackage::load(&manifest_path)? {
+        Some(m) => m,
+        None => return Ok(false), // No manifest, no dependencies needed
+    };
+
+    // Check if there are any dependencies
+    let has_deps = manifest
+        .dependencies
+        .as_ref()
+        .map(|deps| !deps.is_empty())
+        .unwrap_or(false);
+
+    if !has_deps {
+        return Ok(false); // No dependencies to install
+    }
+
+    // Check if lockfile exists
+    let lock_path = project_dir.join("nockapp.lock");
+    if !lock_path.exists() {
+        return Ok(true); // Lockfile missing, need to install
+    }
+
+    // Load lockfile
+    let lockfile = NockAppLock::load(&lock_path)?;
+
+    // Check if all dependencies in manifest are in lockfile
+    let manifest_deps: std::collections::HashSet<&String> = manifest
+        .dependencies
+        .as_ref()
+        .map(|deps| deps.keys().collect())
+        .unwrap_or_default();
+
+    let lockfile_deps: std::collections::HashSet<String> = lockfile
+        .package
+        .iter()
+        .map(|pkg| pkg.name.clone())
+        .collect();
+
+    // If any manifest dependency is missing from lockfile, need to install
+    for dep_name in manifest_deps {
+        if !lockfile_deps.contains(dep_name) {
+            return Ok(true);
+        }
+    }
+
+    // Check if hoon/packages directories exist for all locked packages
+    let packages_dir = project_dir.join("hoon").join("packages");
+    if !packages_dir.exists() {
+        return Ok(true); // Packages directory missing, need to install
+    }
+
+    for pkg in &lockfile.package {
+        let pkg_dir = packages_dir.join(format!("{}@{}", pkg.name, pkg.version));
+        if !pkg_dir.exists() {
+            return Ok(true); // Package directory missing, need to install
+        }
+    }
+
+    Ok(false) // Everything looks good, no install needed
 }

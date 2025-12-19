@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use colored::Colorize;
@@ -53,7 +53,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn create_cache_structure(cache_dir: &PathBuf) -> Result<()> {
+async fn create_cache_structure(cache_dir: &Path) -> Result<()> {
     println!("{} Creating cache directory structure...", "📁".green());
 
     fs::create_dir_all(cache_dir)?;
@@ -68,12 +68,16 @@ async fn create_cache_structure(cache_dir: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn prepend_path_to_shell_rc(bin_dir: &PathBuf) -> Result<()> {
+async fn prepend_path_to_shell_rc(bin_dir: &Path) -> Result<()> {
     let shell = std::env::var("SHELL").unwrap_or_default();
     let rc_file = if shell.contains("zsh") {
-        dirs::home_dir().unwrap().join(".zshrc")
+        dirs::home_dir()
+            .expect("home directory should exist")
+            .join(".zshrc")
     } else if shell.contains("bash") {
-        dirs::home_dir().unwrap().join(".bashrc")
+        dirs::home_dir()
+            .expect("home directory should exist")
+            .join(".bashrc")
     } else {
         return Ok(());
     };

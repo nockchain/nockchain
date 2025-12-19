@@ -107,9 +107,9 @@ impl NounMathExt for Noun {
         });
         if let Some(e) = ret.iter_mut().find(|v| v.is_err()) {
             let n = core::mem::replace(e, Ok(D(0)));
-            return Err(n.unwrap_err());
+            return Err(n.expect_err("checked is_err above"));
         }
-        Ok(ret.map(|v| v.unwrap()))
+        Ok(ret.map(|v| v.expect("all results are Ok after filtering errors")))
     }
 }
 
@@ -340,9 +340,9 @@ impl NounDecode for FPolyVec {
 impl NounEncode for FPolyVec {
     fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
         let (res, res_poly): (IndirectAtom, &mut [Felt]) =
-            new_handle_mut_slice(allocator, Some(self.0.len() as usize));
+            new_handle_mut_slice(allocator, Some(self.0.len()));
         res_poly.copy_from_slice(&self.0);
-        finalize_poly(allocator, Some(self.0.len() as usize), res)
+        finalize_poly(allocator, Some(self.0.len()), res)
     }
 }
 
@@ -358,8 +358,8 @@ impl NounDecode for BPolyVec {
 impl NounEncode for BPolyVec {
     fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
         let (res, res_poly): (IndirectAtom, &mut [Belt]) =
-            new_handle_mut_slice(allocator, Some(self.0.len() as usize));
+            new_handle_mut_slice(allocator, Some(self.0.len()));
         res_poly.copy_from_slice(&self.0);
-        finalize_poly(allocator, Some(self.0.len() as usize), res)
+        finalize_poly(allocator, Some(self.0.len()), res)
     }
 }

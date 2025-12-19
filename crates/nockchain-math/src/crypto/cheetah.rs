@@ -12,7 +12,7 @@ pub static G_ORDER: Lazy<UBig> = Lazy::new(|| {
     UBig::from_str_radix(
         "7af2599b3b3f22d0563fbf0f990a37b5327aa72330157722d443623eaed4accf", 16,
     )
-    .unwrap()
+    .expect("G_ORDER constant is valid hex")
 });
 
 pub static P_BIG: Lazy<UBig> = Lazy::new(|| UBig::from(PRIME));
@@ -99,12 +99,8 @@ impl CheetahPoint {
         v64.reverse();
 
         let c_pt = CheetahPoint {
-            x: F6lt {
-                0: <[Belt; 6]>::try_from(&v64[..6]).map_err(|_| CheetahError::ArrayConversion)?,
-            },
-            y: F6lt {
-                0: <[Belt; 6]>::try_from(&v64[6..]).map_err(|_| CheetahError::ArrayConversion)?,
-            },
+            x: F6lt(<[Belt; 6]>::try_from(&v64[..6]).map_err(|_| CheetahError::ArrayConversion)?),
+            y: F6lt(<[Belt; 6]>::try_from(&v64[6..]).map_err(|_| CheetahError::ArrayConversion)?),
             inf: false,
         };
 
@@ -119,7 +115,7 @@ impl CheetahPoint {
         if *self == A_ID {
             return true;
         }
-        let scaled = ch_scal_big(&G_ORDER, self).unwrap();
+        let scaled = ch_scal_big(&G_ORDER, self).expect("scalar multiplication should succeed");
         scaled == A_ID
     }
 }

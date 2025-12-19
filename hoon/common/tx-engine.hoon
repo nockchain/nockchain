@@ -13,6 +13,7 @@
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
 ++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bignum max-target-atom))
+++  nicks-per-nock  ^~((bex 16))
 ::
 ++  bignum  bignum:v0
 ++  block-commitment  block-commitment:v0
@@ -108,6 +109,7 @@
 ++  lock  lock:v1
 ++  lock-primitive  lock-primitive:v1
 ++  nname  nname:v1
+++  note-data  note-data:v1
 ++  page-msg  page-msg:v0
 ++  page-number  page-number:v0
 ++  page-summary  page-summary:v0

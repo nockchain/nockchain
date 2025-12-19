@@ -12,8 +12,6 @@ use serde::de::Error as SerdeError;
 use serde::{Deserialize as SerdeDeserialize, Serialize as SerdeSerialize};
 use tracing::debug;
 
-use crate::based;
-
 // Base field arithmetic functions.
 pub const PRIME: u64 = 18446744069414584321;
 pub const PRIME_PRIME: u64 = PRIME - 2;

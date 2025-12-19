@@ -2,6 +2,11 @@
 name = "nockapp"
 version.workspace = true
 edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "nockapp"
+path = "src/lib.rs"
 
 [features]
 default = ["slog-tracing", "tracing-tracy"]
@@ -11,15 +16,13 @@ bazel_build = []
 tracing-tracy = ["dep:tracing-tracy"]
 
 [dependencies]
-nockvm = { workspace = true }
-nockvm_macros = { workspace = true }
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
 bincode = { workspace = true, features = ["serde"] }
-bitvec = { workspace = true, default-features = false, features = ["alloc"] }
+bitvec = { version = "1.0.1", default-features = false, features = ["alloc"] }
 blake3 = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
@@ -34,13 +37,16 @@ gnort = { workspace = true }
 ibig = { workspace = true }
 instant-acme = { workspace = true }
 intmap = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+noun-serde = { workspace = true }
 opentelemetry.workspace = true
 opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
 opentelemetry_sdk.workspace = true
 rand = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 signal-hook = { workspace = true }
@@ -65,8 +71,3 @@ tracing-tracy = { workspace = true, optional = true, features = [
 webpki-roots = { workspace = true }
 x509-parser = { workspace = true }
 yaque = { workspace = true }
-noun-serde = { workspace = true }
-
-[lib]
-name = "nockapp"
-path = "src/lib.rs"

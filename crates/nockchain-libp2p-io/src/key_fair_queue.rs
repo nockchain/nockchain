@@ -50,7 +50,7 @@ impl<K> From<mpsc::error::SendError<K>> for Error<K> {
 impl<K: Eq + Hash + Clone, V> Sender<K, V> {
     pub fn send(&self, key: K, value: V) -> Result<(), Error<K>> {
         let value_mutex = Mutex::new(value);
-        if let None = self.enqueued.insert(key.clone(), value_mutex) {
+        if self.enqueued.insert(key.clone(), value_mutex).is_none() {
             Ok(self.key_sender.send(key)?)
         } else {
             Ok(())

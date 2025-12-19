@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{arg, command, ColorChoice, Parser};
+use clap::{ColorChoice, Parser};
 use nockapp::driver::Operation;
 use nockapp::kernel::boot::{self, default_boot_cli, Cli as BootCli};
 use nockapp::noun::slab::{Jammer, NockJammer, NounSlab};
@@ -244,12 +244,13 @@ async fn initialize_hoonc_inner<J: Jammer + Send + 'static>(
         && boot_cli.state_jam.is_none()
         && (boot_cli.new || !has_existing_checkpoint);
 
-    let mut prewarm_state_file: Option<NamedTempFile> = None;
+    // Keep the prewarm tempfile alive for the duration of this function when used.
+    let mut _prewarm_state_file: Option<NamedTempFile> = None;
     if should_use_prewarm {
         let mut tmp = NamedTempFile::new()?;
         tmp.write_all(PREWARM_STATE_JAM)?;
         boot_cli.state_jam = Some(tmp.path().to_string_lossy().into_owned());
-        prewarm_state_file = Some(tmp);
+        _prewarm_state_file = Some(tmp);
     }
     let mut nockapp =
         boot::setup::<J>(KERNEL_JAM, boot_cli.clone(), &[], "hoonc", Some(data_dir)).await?;

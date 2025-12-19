@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use clap::{arg, command, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use nockapp::driver::Operation;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;

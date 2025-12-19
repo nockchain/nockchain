@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)]
 use std::collections::{HashMap, HashSet};
 
 #[allow(unused)]
@@ -6,7 +7,7 @@ use nockvm::noun::FullDebugCell;
 use noun_serde::{NounDecode, NounEncode};
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
-enum Key {
+pub enum Key {
     Pub(u64),
     Prv(u64),
 }
