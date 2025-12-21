@@ -534,7 +534,7 @@
     $(orders t.orders)
   ::
      %bridge-deposit
-   ?.  (gte gift.ord *minimum-event-nocks:bridge)
+   ?.  (gte gift.ord (mul *minimum-event-nocks:bridge nicks-per-nock:transact))
      [%.n %gift-amount-is-less-than-minimum-bridge-deposit]
    $(orders t.orders, num-bridge-orders +(num-bridge-orders))
   ::

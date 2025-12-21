@@ -218,7 +218,7 @@
         $(outputs-list t.outputs-list)
       ~&  output-note+note.out
       =/  =note-data:t  note-data.note.out
-      ?:  (lth assets.note.out minimum-event-nocks.constants.state)
+      ?:  (lth assets.note.out (mul minimum-event-nocks.constants.state nicks-per-nock:t))
         ~>  %slog.[0 'deposit-does-not-meet-minimum-requirement']
         $(outputs-list t.outputs-list)
       ?:  ?&  (~(has z-by note-data) %bridge)
