@@ -5227,7 +5227,7 @@ dependencies = [
 
 [[package]]
 name = "nockup"
-version = "0.5.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
