@@ -379,20 +379,28 @@ pub async fn initialize_hoonc_(
     initialize_hoonc_with_jammer::<NockJammer>(entry, deps_dir, arbitrary, out, boot_cli).await
 }
 
-pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
-    let is_dir = entry
-        .metadata()
-        .unwrap_or_else(|_| {
-            panic!(
-                "Panicked at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )
-        })
-        .is_dir();
+const BLACKLISTED_DIRS: &[&str] = &["packages", "node_modules", ".git", "target"];
 
-    let is_valid = entry
+pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
+    let metadata = entry.metadata().unwrap_or_else(|_| {
+        panic!(
+            "Panicked at {}:{} (git sha: {:?})",
+            file!(),
+            line!(),
+            option_env!("GIT_SHA")
+        )
+    });
+
+    let is_dir = metadata.is_dir();
+    let file_name = entry.file_name().to_str().unwrap_or("");
+
+    // Skip blacklisted directories
+    if is_dir && BLACKLISTED_DIRS.contains(&file_name) {
+        return false;
+    }
+
+    // Whitelist valid file extensions
+    let is_valid_file = entry
         .file_name()
         .to_str()
         .map(|s| {
@@ -400,7 +408,6 @@ pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
                 || s.ends_with(".hoon")
                 || s.ends_with(".txt")
                 || s.ends_with(".jam")
-                // Include common web asset types
                 || s.ends_with(".html")
                 || s.ends_with(".css")
                 || s.ends_with(".js")
@@ -410,7 +417,7 @@ pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
         })
         .unwrap_or(false);
 
-    is_dir || is_valid
+    is_dir || is_valid_file
 }
 
 #[instrument]

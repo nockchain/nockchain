@@ -81,7 +81,7 @@ pub enum DependencySpec {
         tag: Option<String>,
         branch: Option<String>,
         path: Option<String>,
-        files: Option<Vec<String>>, // Specific files to extract (e.g., ["seq", "test"])
+        files: Option<Vec<String>>,
         kelvin: Option<String>,
     },
 }

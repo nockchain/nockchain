@@ -16,8 +16,7 @@ pub async fn run() -> Result<()> {
         anyhow::bail!(
             "No nockapp.toml found in current directory.\n\
              → Create one with your desired name, template, and dependencies,\n\
-             → then run `nockup project init` again.\n\n\
-             Example: https://github.com/nockchain/nockchain/wiki/Project-Templates"
+             → then run `nockup project init` again."
         );
     }
 

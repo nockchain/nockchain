@@ -56,8 +56,8 @@ pub async fn run(project_name: String) -> Result<()> {
         format!("./{}/", project_name).cyan()
     );
     println!("To get started:");
-    println!("  nockup build {}", project_name.cyan());
-    println!("  nockup run {}", project_name.cyan());
+    println!("  nockup project build {}", project_name.cyan());
+    println!("  nockup project run {}", project_name.cyan());
 
     Ok(())
 }

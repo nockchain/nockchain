@@ -145,17 +145,8 @@ impl Resolver {
             );
         }
 
-        // If a specific file is requested, verify it exists
-        if let Some(ref filename) = git_spec.file {
-            let file_path = source_dir.join(filename);
-            if !file_path.exists() {
-                anyhow::bail!(
-                    "Specific file {} not found at {}",
-                    filename,
-                    source_dir.display()
-                );
-            }
-        }
+        // Validate all requested source files exist
+        let source_files = self.validate_source_files(&source_dir, spec)?;
 
         // Check for transitive dependencies (look for hoon.toml in fetched repo)
         let transitive_deps = self
@@ -197,7 +188,11 @@ impl Resolver {
             source_url: git_spec.url.clone(),
             source_path: git_spec.path.clone(),
             install_path: git_spec.install_path.clone(),
-            source_file: git_spec.file.clone(),
+            source_files: if source_files.is_empty() {
+                None
+            } else {
+                Some(source_files)
+            },
             dependencies: transitive_deps,
         })
     }
@@ -212,8 +207,16 @@ impl Resolver {
         let version_str = version_spec.to_canonical_string();
 
         if let Some(cached) = self.cache.find_cached(name, &version_str).await? {
-            // Reconstruct the GitSpec to get source_path and source_file
+            // Reconstruct the GitSpec to get source_path and source_files
             let git_spec = self.dep_spec_to_git_spec(spec, name).await?;
+
+            // Extract files list from spec
+            let source_files = match spec {
+                DependencySpec::Full { files, .. } => files
+                    .as_ref()
+                    .map(|f| f.iter().map(|s| format!("{}.hoon", s)).collect()),
+                _ => None,
+            };
 
             return Ok(Some(ResolvedPackage {
                 name: name.to_string(),
@@ -222,7 +225,7 @@ impl Resolver {
                 source_url: cached.source_url,
                 source_path: git_spec.path,
                 install_path: git_spec.install_path,
-                source_file: git_spec.file,
+                source_files,
                 dependencies: HashMap::new(), // TODO: Store in cache metadata
             }));
         }
@@ -291,22 +294,11 @@ impl Resolver {
                 tag,
                 branch,
                 path,
-                files,
                 ..
             } => {
                 let url = git.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("Git URL is required (registry not yet implemented)")
                 })?;
-
-                // If files is specified with exactly one entry, use it as the specific file
-                // If files has multiple entries, we'll need to handle that differently (TODO)
-                let file = files.as_ref().and_then(|f| {
-                    if f.len() == 1 {
-                        Some(format!("{}.hoon", f[0]))
-                    } else {
-                        None
-                    }
-                });
 
                 Ok(GitSpec {
                     url: url.clone(),
@@ -315,7 +307,7 @@ impl Resolver {
                     branch: branch.clone(),
                     path: path.clone(),
                     install_path: None, // Don't auto-set for manifest packages; let install.rs handle it
-                    file,
+                    file: None,         // Multiple files handled separately in source_files
                 })
             }
         }
@@ -368,6 +360,36 @@ impl Resolver {
             Some(pkg) => Ok(pkg.dependencies.unwrap_or_default().into_iter().collect()),
             None => Ok(HashMap::new()),
         }
+    }
+
+    /// Validate that all requested source files exist and return the list
+    fn validate_source_files(
+        &self,
+        source_dir: &Path,
+        spec: &DependencySpec,
+    ) -> Result<Vec<String>> {
+        let files = match spec {
+            DependencySpec::Full { files: Some(f), .. } => f.clone(),
+            _ => return Ok(Vec::new()),
+        };
+
+        let mut validated = Vec::new();
+        for file_path in &files {
+            let full_path = format!("{}.hoon", file_path);
+            let abs_path = source_dir.join(&full_path);
+
+            if !abs_path.exists() {
+                anyhow::bail!(
+                    "Requested file '{}' not found in package at {}",
+                    full_path,
+                    source_dir.display()
+                );
+            }
+
+            validated.push(full_path);
+        }
+
+        Ok(validated)
     }
 
     /// Convert DependencySpec to VersionSpec for caching

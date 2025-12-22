@@ -13,7 +13,10 @@ pub async fn run(cmd: ProjectCommand) -> Result<()> {
             let project = project.as_deref().unwrap_or(".");
             builder_impl::run(project).await
         }
-        ProjectCommand::Run { project, args } => run::run(project, args).await,
+        ProjectCommand::Run { project, args } => {
+            let project = project.as_deref().unwrap_or(".");
+            run::run(project.to_string(), args).await
+        }
         ProjectCommand::Init => init::run().await,
     }
 }

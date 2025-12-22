@@ -13,14 +13,6 @@ pub async fn run(project: String, args: Vec<String>) -> Result<()> {
         return Err(anyhow::anyhow!("Project directory '{}' not found", project));
     }
 
-    // Check if it's a valid NockApp project (has manifest.toml)
-    let manifest_path = project_dir.join("manifest.toml");
-    if !manifest_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Not a NockApp project: '{}' missing manifest.toml", project
-        ));
-    }
-
     // Check if Cargo.toml exists
     let cargo_toml = project_dir.join("Cargo.toml");
     if !cargo_toml.exists() {

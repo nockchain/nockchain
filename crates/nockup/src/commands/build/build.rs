@@ -5,12 +5,32 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use tokio::process::Command;
 
+use crate::manifest::NockAppManifest;
+
 pub async fn run(project: &str) -> Result<()> {
-    let project_dir = Path::new(&project);
+    // If project is ".", try to read nockapp.toml to get the actual project name
+    let project_name = if project == "." {
+        let cwd = std::env::current_dir()?;
+        let manifest_path = cwd.join("nockapp.toml");
+
+        if manifest_path.exists() {
+            let manifest =
+                NockAppManifest::load(&manifest_path).context("Failed to parse nockapp.toml")?;
+            manifest.package.name.trim().to_string()
+        } else {
+            project.to_string()
+        }
+    } else {
+        project.to_string()
+    };
+
+    let project_dir = Path::new(&project_name);
 
     // Check if project directory exists
     if !project_dir.exists() {
-        return Err(anyhow::anyhow!("Project directory '{}' not found", project));
+        return Err(anyhow::anyhow!(
+            "Project directory '{}' not found", project_name
+        ));
     }
 
     // Auto-install dependencies if nockapp.toml exists
@@ -34,21 +54,17 @@ pub async fn run(project: &str) -> Result<()> {
         }
     }
 
-    // Check if it's a valid NockApp project (has manifest.toml)
-    let manifest_path = project_dir.join("manifest.toml");
-    if !manifest_path.exists() {
-        return Err(anyhow::anyhow!(
-            "Not a NockApp project: '{}' missing manifest.toml", project
-        ));
-    }
-
     // Check if Cargo.toml exists
     let cargo_toml = project_dir.join("Cargo.toml");
     if !cargo_toml.exists() {
-        return Err(anyhow::anyhow!("No Cargo.toml found in '{}'", project));
+        return Err(anyhow::anyhow!("No Cargo.toml found in '{}'", project_name));
     }
 
-    println!("{} Building project '{}'...", "🔨".green(), project.cyan());
+    println!(
+        "{} Building project '{}'...",
+        "🔨".green(),
+        project_name.cyan()
+    );
 
     // Extract expected binary names from Cargo.toml
     let cargo_toml_content = tokio::fs::read_to_string(&cargo_toml)
@@ -241,7 +257,11 @@ async fn should_install_dependencies(project_dir: &Path) -> Result<bool> {
     }
 
     for pkg in &lockfile.package {
-        let pkg_dir = packages_dir.join(format!("{}@{}", pkg.name, pkg.version));
+        let pkg_dir = packages_dir.join(format!(
+            "{}--{}",
+            pkg.name.replace('/', "-"),
+            pkg.version.replace(['.', ':'], "-")
+        ));
         if !pkg_dir.exists() {
             return Ok(true); // Package directory missing, need to install
         }

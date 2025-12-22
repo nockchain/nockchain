@@ -20,6 +20,10 @@ pub enum Commands {
     #[command(subcommand)]
     Package(PackageCommand),
 
+    /// Cache management
+    #[command(subcommand)]
+    Cache(CacheCommand),
+
     /// Toolchain / channel management
     #[command(subcommand)]
     Channel(ChannelCommand),
@@ -64,7 +68,7 @@ pub enum ProjectCommand {
     Build { project: Option<String> },
     /// Run a NockApp project
     Run {
-        project: String,
+        project: Option<String>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -114,6 +118,25 @@ pub enum PackageCommand {
 
     /// Generate proxy files for a package
     GenerateProxy { url: String, path: Option<String> },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CacheCommand {
+    /// Clear cache directories
+    Clear {
+        /// Clear git repository cache
+        #[arg(long)]
+        git: bool,
+        /// Clear processed packages cache
+        #[arg(long)]
+        packages: bool,
+        /// Clear registry cache
+        #[arg(long)]
+        registry: bool,
+        /// Clear all caches
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(clap::Subcommand, Debug)]

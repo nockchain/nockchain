@@ -6,8 +6,12 @@ authors = ["N. E. Davis <neal@zorp.io>"]
 description = "A NockApp project"
 
 [[bin]]
-name = "grpc"
-path = "src/main.rs"
+name = "listen"
+path = "src/listen.rs"
+
+[[bin]]
+name = "talk"
+path = "src/talk.rs"
 
 [dependencies]
 # NockVM dependency

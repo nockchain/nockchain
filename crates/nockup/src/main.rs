@@ -13,6 +13,7 @@ async fn main() {
         // Hierarchical commands
         Some(Commands::Project(cmd)) => commands::build::run(cmd).await,
         Some(Commands::Package(cmd)) => commands::package::run(cmd).await,
+        Some(Commands::Cache(cmd)) => commands::cache::run(cmd).await,
         Some(Commands::Channel(cmd)) => commands::channel::run(cmd).await,
 
         // Legacy flat commands (backward compatible)
@@ -36,7 +37,11 @@ async fn main() {
             commands::package::run(PackageCommand::Install).await
         }
         Some(Commands::Run { project, args }) => {
-            commands::build::run(ProjectCommand::Run { project, args }).await
+            commands::build::run(ProjectCommand::Run {
+                project: Some(project),
+                args,
+            })
+            .await
         }
         Some(Commands::TestPhase1) => commands::test_phase1::run().await,
 

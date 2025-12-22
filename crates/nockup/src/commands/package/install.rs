@@ -111,10 +111,11 @@ pub async fn run() -> Result<()> {
             continue;
         }
 
-        // Install to hoon/packages/<name>@<version>/
-        // Sanitize package name (replace / with -) for use in directory names
+        // Install to hoon/packages/<name>--<version>/
+        // Sanitize package name (replace / with -) and version (replace : with -) for use in directory names
         let safe_name = sanitize_package_name(&pkg.name);
-        let install_dir = packages_dir.join(format!("{}@{}", safe_name, display_version));
+        let safe_version = sanitize_version(&display_version);
+        let install_dir = packages_dir.join(format!("{}--{}", safe_name, safe_version));
 
         if install_dir.exists() {
             println!("    {} Already installed, skipping", "✓".green());
@@ -127,33 +128,21 @@ pub async fn run() -> Result<()> {
             println!(
                 "    {} Installed to {}",
                 "✓".green(),
-                format!("hoon/packages/{}@{}", pkg.name, display_version).cyan()
+                format!("hoon/packages/{}--{}", safe_name, safe_version).cyan()
             );
         }
 
         // Create symlinks for .hoon files
         // If install_path is specified (from registry), preserve directory structure
-        // Otherwise, link to hoon/lib/
-        // println!("    {} Creating symlinks...", "🔗".cyan());
-        // println!("pkg: {:?}", pkg);
-        // if pkg.source_file == Some("seq.hoon".to_string()) {
-        //     println!("source_file is seq.hoon");
-        //     println!("install_dir: {:?}", install_dir);
-        //     println!("lib_dir: {:?}", lib_dir);
-        //     println!("pkg.name: {:?}", pkg.name);
-        //     println!("pkg.source_file: {:?}", pkg.source_file.as_deref());
-        //     link_package_files(&install_dir, &lib_dir, &pkg.name, pkg.install_path.as_deref(), pkg.source_file.as_deref())?;
-        // }
-        // should have install_path AND files
-        // if let Some(ref install_path) = pkg.install_path {
-        if let (Some(ref install_path), Some(_)) = (&pkg.install_path, &pkg.source_file) {
+        // Otherwise, link to hoon/lib/ and hoon/sur/
+        if let (Some(ref install_path), Some(ref files)) = (&pkg.install_path, &pkg.source_files) {
             println!("install_path: {:?}", install_path);
             link_registry_package(
                 install_dir.as_path(),
                 hoon_dir.as_path(),
                 install_path,
                 &pkg.name,
-                pkg.source_file.as_deref(),
+                files,
             )?;
         } else {
             println!("No install_path specified, linking to hoon/lib/ and hoon/sur/");
@@ -163,7 +152,7 @@ pub async fn run() -> Result<()> {
                 sur_dir.as_path(),
                 &pkg.name,
                 pkg.source_path.as_deref(),
-                pkg.source_file.as_deref(),
+                pkg.source_files.as_ref(),
             )?;
         }
 
@@ -203,6 +192,16 @@ fn sanitize_package_name(name: &str) -> String {
     name.replace('/', "-")
 }
 
+/// Sanitize version string for Hoon @tas compatibility
+/// Replaces dots and colons with hyphens to ensure valid @tas
+/// Examples:
+///   "0.1.0" -> "0-1-0"
+///   "commit:abc123" -> "commit-abc123"
+///   "v1.2.3" -> "v1-2-3"
+fn sanitize_version(version: &str) -> String {
+    version.replace(['.', ':'], "-")
+}
+
 /// Recursively copy a directory
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
@@ -225,16 +224,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
 /// Create symlinks for registry packages that preserve directory structure
 /// For example:
-/// - nockchain/common/zose with install_path="common" and file="zose.hoon"
+/// - nockchain/common/zose with install_path="common" and files=["zose.hoon"]
 ///   creates arcadia/hoon/common/zose.hoon -> ../packages/nockchain-common-zose@latest/zose.hoon
-/// - urbit/zuse with install_path="sys" and file="zuse.hoon"
+/// - urbit/zuse with install_path="sys" and files=["zuse.hoon"]
 ///   creates arcadia/hoon/sys/zuse.hoon -> ../packages/urbit-zuse@latest/zuse.hoon
 fn link_registry_package(
     package_dir: &Path,
     hoon_dir: &Path,
     install_path: &str,
     package_name: &str,
-    specific_file: Option<&str>,
+    source_files: &Vec<String>,
 ) -> Result<()> {
     let package_dir_name = package_dir_basename(package_dir)?;
 
@@ -247,68 +246,70 @@ fn link_registry_package(
     let target_dir = hoon_dir.join(relative_path);
     fs::create_dir_all(&target_dir)
         .with_context(|| format!("Failed to create directory {}", target_dir.display()))?;
-    println!("  specific_file is {:?}", specific_file);
+    println!("  source_files: {:?}", source_files);
 
-    if let Some(filename) = specific_file {
-        // Link only the specific file
-        let source_file = package_dir.join(filename);
-        if !source_file.exists() {
-            anyhow::bail!("Specific file {} not found in package {}", filename, package_name);
-        }
+    if !source_files.is_empty() {
+        // Link each specified file
+        for filename in source_files {
+            let source_file = package_dir.join(filename);
+            if !source_file.exists() {
+                anyhow::bail!("Specific file {} not found in package {}", filename, package_name);
+            }
 
-        let link_path = target_dir.join(filename);
-        println!("  link_path: {:?}", link_path);
+            let link_path = target_dir.join(filename);
+            println!("  link_path: {:?}", link_path);
 
-        // Remove existing symlink if it exists
-        if link_path.exists() || link_path.is_symlink() {
-            fs::remove_file(&link_path).with_context(|| {
-                format!("Failed to remove existing symlink {}", link_path.display())
-            })?;
-        }
+            // Remove existing symlink if it exists
+            if link_path.exists() || link_path.is_symlink() {
+                fs::remove_file(&link_path).with_context(|| {
+                    format!("Failed to remove existing symlink {}", link_path.display())
+                })?;
+            }
 
-        // Create relative symlink
-        // Calculate path from target_dir back to packages/
-        // For hoon/common/, we need: ../../packages/package@version/file
-        let depth = relative_path.split('/').filter(|s| !s.is_empty()).count();
-        let mut relative_target = PathBuf::new();
-        for _ in 0..depth {
-            relative_target.push("..");
-        }
-        relative_target.push("packages");
-        relative_target.push(Path::new(&package_dir_name));
-        relative_target.push(filename);
-        println!("  relative_target: {:?}", relative_target);
+            // Create relative symlink
+            // Calculate path from target_dir back to packages/
+            // For hoon/common/, we need: ../../packages/package@version/file
+            let depth = relative_path.split('/').filter(|s| !s.is_empty()).count();
+            let mut relative_target = PathBuf::new();
+            for _ in 0..depth {
+                relative_target.push("..");
+            }
+            relative_target.push("packages");
+            relative_target.push(Path::new(&package_dir_name));
+            relative_target.push(filename);
+            println!("  relative_target: {:?}", relative_target);
 
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
-                format!(
-                    "Failed to create symlink {} -> {}",
-                    link_path.display(),
-                    relative_target.display()
-                )
-            })?;
-        }
-
-        #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(
-                || {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
                     format!(
                         "Failed to create symlink {} -> {}",
                         link_path.display(),
                         relative_target.display()
                     )
-                },
-            )?;
-        }
+                })?;
+            }
 
-        println!(
-            "    {} Linked {} to hoon/{}/",
-            "🔗".cyan(),
-            filename.yellow(),
-            relative_path.cyan()
-        );
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(
+                    || {
+                        format!(
+                            "Failed to create symlink {} -> {}",
+                            link_path.display(),
+                            relative_target.display()
+                        )
+                    },
+                )?;
+            }
+
+            println!(
+                "    {} Linked {} to hoon/{}/",
+                "🔗".cyan(),
+                filename.yellow(),
+                relative_path.cyan()
+            );
+        }
     } else {
         // No specific file - link all .hoon files from common library/structure paths
         // When there's no specific file, we assume the package follows Urbit desk structure
@@ -418,78 +419,106 @@ fn link_registry_package(
 }
 
 /// Create symlinks in hoon/lib/ and hoon/sur/ for .hoon files in the package
-/// If `specific_file` is Some, only link that file. Otherwise, link all .hoon files.
+/// If `source_files` is Some with files, only link those files. Otherwise, link all .hoon files.
 fn link_package_files(
     package_dir: &Path,
     lib_dir: &Path,
     sur_dir: &Path,
     package_name: &str,
     _path_from_root: Option<&str>,
-    specific_file: Option<&str>,
+    source_files: Option<&Vec<String>>,
 ) -> Result<()> {
     let package_dir_name = package_dir_basename(package_dir)?;
-    println!("  specific_file is {:?}", specific_file);
-    if let Some(filename) = specific_file {
-        // Link only the specific file
-        // The filename may include subdirectories (e.g., "lib/seq.hoon")
+    println!("  source_files is {:?}", source_files);
+
+    // Get the parent hoon/ directory from lib_dir
+    let hoon_dir = lib_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("lib_dir has no parent directory"))?;
+
+    if let Some(files) = source_files {
+        // Link each specified file
+        // Files may include subdirectories (e.g., "lib/lagoon.hoon", "sur/lagoon.hoon")
         // The package is cached with contents of source_path, so we don't prepend it
-        let source_file = package_dir.join(filename);
-        println!("  source_file: {:?}", source_file);
-        if !source_file.exists() {
-            anyhow::bail!("Specific file {} not found in package {}", filename, package_name);
-        }
+        for filename in files {
+            let source_file = package_dir.join(filename);
+            println!("  source_file: {:?}", source_file);
+            if !source_file.exists() {
+                anyhow::bail!("Specific file {} not found in package {}", filename, package_name);
+            }
 
-        // Extract just the filename (last component) for the link path in hoon/lib/
-        let file_name = PathBuf::from(filename)
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", filename))?
-            .to_os_string();
-        let link_path = lib_dir.join(&file_name);
-        println!("  link_path: {:?}", link_path);
+            // Determine destination directory based on path prefix
+            // Extract the first path component (e.g., "lib" from "lib/lagoon.hoon")
+            let (dest_dir, dest_subdir, file_name) =
+                if let Some((prefix, rest)) = filename.split_once('/') {
+                    // File has a prefix like "lib/lagoon.hoon" or "sys/zuse.hoon"
+                    let dest = hoon_dir.join(prefix);
+                    (dest, prefix.to_string(), rest.to_string())
+                } else {
+                    // No prefix, default to lib for backward compatibility
+                    (lib_dir.to_path_buf(), "lib".to_string(), filename.clone())
+                };
 
-        // Remove existing symlink if it exists
-        if link_path.exists() || link_path.is_symlink() {
-            fs::remove_file(&link_path).with_context(|| {
-                format!("Failed to remove existing symlink {}", link_path.display())
-            })?;
-        }
+            // Extract just the filename (last component) for the link path
+            let file_name = PathBuf::from(&file_name)
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("Invalid filename: {}", filename))?
+                .to_os_string();
+            let link_path = dest_dir.join(&file_name);
+            println!("  link_path: {:?}", link_path);
 
-        // Create relative symlink
-        // filename may include subdirectories (e.g., "lib/seq.hoon")
-        let mut relative_target = PathBuf::from("../packages");
-        relative_target.push(Path::new(&package_dir_name));
-        relative_target.push(Path::new(filename));
-        println!("  relative_target: {:?}", relative_target);
+            // Ensure destination directory exists
+            if !dest_dir.exists() {
+                fs::create_dir_all(&dest_dir).with_context(|| {
+                    format!("Failed to create directory {}", dest_dir.display())
+                })?;
+            }
 
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
-                format!(
-                    "Failed to create symlink {} -> {}",
-                    link_path.display(),
-                    relative_target.display()
-                )
-            })?;
-        }
+            // Remove existing symlink if it exists
+            if link_path.exists() || link_path.is_symlink() {
+                fs::remove_file(&link_path).with_context(|| {
+                    format!("Failed to remove existing symlink {}", link_path.display())
+                })?;
+            }
 
-        #[cfg(windows)]
-        {
-            std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(
-                || {
+            // Create relative symlink
+            // filename may include subdirectories (e.g., "lib/lagoon.hoon")
+            let mut relative_target = PathBuf::from("../packages");
+            relative_target.push(Path::new(&package_dir_name));
+            relative_target.push(Path::new(filename));
+            println!("  relative_target: {:?}", relative_target);
+
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
                     format!(
                         "Failed to create symlink {} -> {}",
                         link_path.display(),
                         relative_target.display()
                     )
-                },
-            )?;
-        }
+                })?;
+            }
 
-        println!(
-            "    {} Linked {} to hoon/lib/",
-            "🔗".cyan(),
-            filename.yellow()
-        );
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(
+                    || {
+                        format!(
+                            "Failed to create symlink {} -> {}",
+                            link_path.display(),
+                            relative_target.display()
+                        )
+                    },
+                )?;
+            }
+
+            println!(
+                "    {} Linked {} to hoon/{}/",
+                "🔗".cyan(),
+                filename.yellow(),
+                dest_subdir.cyan()
+            );
+        }
 
         return Ok(());
     }

@@ -252,11 +252,11 @@ In the `Cargo.toml` file, include both targets explicitly:
 ```toml
 [[bin]]
 name = "main1"
-path = "src/bin/main1.rs"
+path = "src/main1.rs"
 
 [[bin]]
 name = "main2"
-path = "src/bin/main2.rs"
+path = "src/main2.rs"
 ```
 
 Nockup is opinionated here, and will match `hoon/app/main1.hoon`, etc., as kernels; that is,
@@ -268,6 +268,11 @@ nockup project build
 will produce both `target/release/main1` and `target/release/main2`.
 
 Projects which produce more than one binary cannot be used directly with `nockup project run` since more than one process must be started.  This should be kept in mind when using templates which produce more than one binary (like `grpc`).
+
+```sh
+cargo run --release --bin main1
+cargo run --release --bin main2
+```
 
 #### Nockchain Interactions
 
@@ -347,12 +352,15 @@ A complete library may be imported by omitting the `files` key:
 [dependencies.lagoon]
 git = "https://github.com/urbit/numerics"
 commit = "01905f364178958bb2d0c1a7ce009b6f3e68f737"
-# Specify only the subdirectory within the repository; if no files, all will be included.
+# Specify the subdirectory within the repository.
 path = "lagoon/desk"
+# Keep the parts of the path you need to preserve.
+files = ["lib/lagoon", "sur/lagoon"]
 
 [dependencies.math]
 git = "https://github.com/urbit/numerics"
 commit = "7c11c48ab3f21135caa5a4e8744a9c3f828f2607"
+# Specify the subdirectory within the repository; if no files, all will be included.
 path = "libmath/desk"
 ```
 
@@ -363,6 +371,24 @@ which supplies these files (among others) in the following pattern:
 * `/lagoon/desk/sur/lagoon.hoon` at `/hoon/sur/lagoon.hoon`.
 
 These are simply copied over from the source directory in the repository, so care should be taken to ensure that files with the same name do not conflict (such as `types.hoon`).
+
+## Registry
+
+Nockup supports publishing and consuming Hoon libraries via a registry.  A registry is a Git repository which contains a `registry.toml` file listing available packages.  The standard registry is currently hosted at [Typhoon, `sigilante/typhoon`](https://github.com/sigilante/typhoon).
+
+To generate a registry file for your Hoon library, you may use the `scan-deps-v2.py` script included in the Nockup repository.  This script scans a directory for Hoon files and their dependencies, then produces a registry-compatible TOML segment.
+
+```sh
+python3 scan-deps-v2.py \
+    --workspace nockchain \
+    --root-path "hoon" \
+    --git-url "https://github.com/nockchain/nockchain" \
+    --ref "a19ad4dc" \
+    --description "Nockchain standard library" \
+    /path/to/nockchain/hoon/common
+```
+
+Developers should not commit symlinked upstream dependencies into their own repositories.  Instead, they should list them in the `[dependencies]` section of their `nockapp.toml` manifest files and let them be automatically fetched by Nockup.
 
 ### Channels
 
@@ -396,14 +422,14 @@ Nockup supports the following `nockup` commands.
 ### Operations
 
 - `nockup`:  Print version information for Nockup and installed binaries.
-- `nockup update`:  Initialize and check for updates to binaries and templates.
+- `nockup update`:  Update Nockup toolchain binaries (hoon, hoonc, nockup) and templates.
 - `nockup help`:  Print this message or the help of the given subcommand(s).
 
 ### Project
 
-- `nockup build init`:  Initialize a new NockApp project from a `.toml` config file.
-- `nockup build`:  Build a NockApp project using Cargo.
-- `nockup build run`:  Run a NockApp project.
+- `nockup project init`:  Initialize a new NockApp project from a `.toml` config file.
+- `nockup project build`:  Build a NockApp project using Cargo.
+- `nockup project run`:  Run a NockApp project.
 
 ### Channels
 
@@ -416,24 +442,11 @@ Nockup supports the following `nockup` commands.
 - `nockup package list`:  List installed Hoon libraries in a project.
 - `nockup package add`:  Add a Hoon library to a project manifest at a particular version.
 - `nockup package remove`:  Remove an installed Hoon library from a project.
-- `nockup package purge`:  Clear the package cache.
-- `nockup package purge --dry-run`:  Preview what would be deleted.
+- `nockup package purge [--dry-run]`:  Clear the package cache.
 
-## Registry
+### Cache
 
-Nockup supports publishing and consuming Hoon libraries via a registry.  A registry is a Git repository which contains a `registry.toml` file listing available packages.  The standard registry is currently hosted at [Typhoon, `sigilante/typhoon`](https://github.com/sigilante/typhoon).
-
-To generate a registry file for your Hoon library, you may use the `scan-deps-v2.py` script included in the Nockup repository.  This script scans a directory for Hoon files and their dependencies, then produces a registry-compatible TOML segment.
-
-```sh
-python3 scan-deps-v2.py \
-    --workspace nockchain \
-    --root-path "hoon" \
-    --git-url "https://github.com/nockchain/nockchain" \
-    --ref "a19ad4dc" \
-    --description "Nockchain standard library" \
-    /path/to/nockchain/hoon/common
-```
+- `nockup cache clear [--git --packages --registry --all]`:  Clear the Nockup cache (more extensive than `nockup package purge`).
 
 ## Security
 
@@ -483,14 +496,7 @@ Code building is a general-purpose computing process, like `eval`.  You should n
 
 * `nockup test` to run unit tests
 * expand repertoire of templates
-  * list and ship appropriate Hoon libraries
-* `nockup publish`/`nockup clone` (awaiting PKI/namespace)
-* The current code handles a single `specific_file`. To support multiple files, the changes needed are:
-  1. Change GitSpec struct to store files: `Option<Vec<String>>` instead of file: `Option<String>`
-  2. Change ResolvedPackage struct to store source_files: `Option<Vec<String>>` instead of source_file: `Option<String>`
-  3. Update resolver to pass all files from the manifest to `GitSpec`
-  4. Update installer to loop through all files and create symlinks for each
-  The key change is in the install logic - instead of handling specific_file: `Option<&str>`, it needs to handle specific_files: `Option<&[String]>` and loop through them.
+* `nockup package publish` (awaiting PKI/namespace)
 
 ## Contributor's Guide
 

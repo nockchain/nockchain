@@ -12,7 +12,7 @@ pub struct ResolvedPackage {
     pub source_url: String,
     pub source_path: Option<String>, // Subdir within repo to fetch from (e.g., "pkg/arvo/sys")
     pub install_path: Option<String>, // Subdir to install to (e.g., "sys")
-    pub source_file: Option<String>, // Specific file to extract (if any)
+    pub source_files: Option<Vec<String>>, // Specific files to extract (if any)
     pub dependencies: HashMap<String, DependencySpec>, // Transitive deps
 }
 

@@ -85,8 +85,12 @@ pub async fn run() -> Result<()> {
         // Check installation status
         if let Some(installed_version) = installed.get(name) {
             // Verify the package directory exists
-            // Package directories use hyphens instead of slashes
-            let package_dir_name = format!("{}@{}", name.replace('/', "-"), installed_version);
+            // Package directories must be @tas compatible (lowercase, numbers, hyphens only)
+            let package_dir_name = format!(
+                "{}--{}",
+                name.replace('/', "-"),
+                installed_version.replace(['.', ':'], "-")
+            );
             let package_dir = project_dir
                 .join("hoon")
                 .join("packages")
