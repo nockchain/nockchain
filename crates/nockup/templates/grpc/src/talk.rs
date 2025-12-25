@@ -59,7 +59,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .add_io_driver(nockapp::one_punch_driver(poke_slab, Operation::Poke))
         .await;
     nockapp
-        .add_io_driver(grpc_listener_driver(format!("http://127.0.0.1:{}", grpc::GRPC_PORT.to_string())))
+        .add_io_driver(grpc_listener_driver(
+            format!("http://127.0.0.1:{}", grpc::GRPC_PORT.to_string()),
+            None,
+            None,
+        ))
         .await;
     nockapp
         .add_io_driver(exit_driver())

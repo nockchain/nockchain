@@ -37,7 +37,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|e| format!("Kernel setup failed: {}", e))?;
 
     //  Set up drivers.
-    nockapp.add_io_driver(grpc_server_driver()).await;
+    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5555);
+    // Passing None keeps tonic's 4 MiB defaults for encode/decode.
+    nockapp
+        .add_io_driver(grpc_server_driver(addr, None, None))
+        .await;
     nockapp.add_io_driver(exit_driver()).await;
 
     //  Run app kernel.

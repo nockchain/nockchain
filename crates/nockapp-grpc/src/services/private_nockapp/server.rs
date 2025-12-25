@@ -23,10 +23,22 @@ impl PrivateNockAppGrpcServer {
         Self { handle }
     }
 
-    pub async fn serve(self, addr: SocketAddr) -> Result<()> {
+    pub async fn serve(
+        self,
+        addr: SocketAddr,
+        max_recv: Option<usize>,
+        max_send: Option<usize>,
+    ) -> Result<()> {
         info!("Starting private gRPC server on {}", addr);
 
-        let service = PrivateNockAppServer::new(self);
+        let mut service = PrivateNockAppServer::new(self);
+        // tonic defaults to 4 MiB per message when no override is provided
+        if let Some(limit) = max_recv {
+            service = service.max_decoding_message_size(limit);
+        }
+        if let Some(limit) = max_send {
+            service = service.max_encoding_message_size(limit);
+        }
 
         Server::builder()
             .add_service(service)

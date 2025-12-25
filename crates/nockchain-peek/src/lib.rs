@@ -84,7 +84,7 @@ pub async fn init_with_kernel(
     nockapp.add_io_driver(file_driver()).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
     nockapp
-        .add_io_driver(grpc_listener_driver(cli.grpc_address.clone()))
+        .add_io_driver(grpc_listener_driver(cli.grpc_address.clone(), None, None))
         .await;
     info!("Connected gRPC listener to {}", cli.grpc_address);
 

@@ -14,8 +14,19 @@ pub struct PublicNockchainGrpcClient {
 }
 
 impl PublicNockchainGrpcClient {
-    pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
-        let client = PublicNockchainClient::connect(address.as_ref().to_string()).await?;
+    pub async fn connect<T: AsRef<str>>(
+        address: T,
+        max_recv: Option<usize>,
+        max_send: Option<usize>,
+    ) -> Result<Self> {
+        // tonic defaults to 4 MiB per message when no override is provided
+        let mut client = PublicNockchainClient::connect(address.as_ref().to_string()).await?;
+        if let Some(limit) = max_recv {
+            client = client.max_decoding_message_size(limit);
+        }
+        if let Some(limit) = max_send {
+            client = client.max_encoding_message_size(limit);
+        }
         Ok(Self { client })
     }
 
