@@ -1,4 +1,5 @@
 use nockapp::wire::{WireRepr, WireTag as NockAppWireTag};
+use nockvm::noun::DIRECT_MAX;
 
 use crate::error::{NockAppGrpcError, Result};
 use crate::pb::common::v1::{wire_tag, Wire, WireTag};
@@ -23,7 +24,14 @@ pub fn grpc_wire_to_nockapp(wire: &Wire) -> Result<WireRepr> {
     for tag in &wire.tags {
         let nockapp_tag = match &tag.value {
             Some(wire_tag::Value::Text(s)) => NockAppWireTag::String(s.clone()),
-            Some(wire_tag::Value::Number(n)) => NockAppWireTag::Direct(*n),
+            Some(wire_tag::Value::Number(n)) => {
+                if *n > DIRECT_MAX {
+                    return Err(NockAppGrpcError::InvalidRequest(
+                        format!("WireTag number {} exceeds maximum allowed value", n),
+                    ));
+                }
+                NockAppWireTag::Direct(*n)
+            }
             None => {
                 return Err(NockAppGrpcError::InvalidRequest(
                     "WireTag value is required".to_string(),
