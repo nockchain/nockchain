@@ -1,0 +1,28 @@
+[package]
+name = "poc_p2p_heard_elders_gossip"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+# Use same libp2p as nockchain workspace
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d", features = ["tokio", "quic", "identify", "request-response", "noise", "macros", "cbor"] }
+tokio = { version = "1", features = ["full"] }
+
+# Serialization - use cbor for the protocol
+serde = { version = "1.0", features = ["derive"] }
+serde_cbor = "0.11"
+serde_bytes = "0.11"
+bytes = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Bit manipulation for JAM encoding
+bitvec = "1.0"
+
+# Use actual nockapp for proper JAM encoding
+nockapp = { path = "../crates/nockapp" }
+nockvm = { path = "../crates/nockvm/rust/nockvm" }
