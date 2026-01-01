@@ -738,6 +738,10 @@ impl Jammer for NockJammer {
     }
 
     fn cue(slab: &mut NounSlab, jammed: Bytes) -> Result<Noun, CueError> {
+        if jammed.is_empty() {
+            return Err(CueError::TruncatedBuffer);
+        }
+
         fn rub_backref(cursor: &mut usize, buffer: &BitSlice<u8, Lsb0>) -> Result<usize, CueError> {
             if let Some(idx) = buffer[*cursor..].first_one() {
                 if idx == 0 {
