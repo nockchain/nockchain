@@ -11,6 +11,8 @@ kernels-open-jojo.workspace = true
 nockapp.workspace = true
 nockvm.workspace = true
 nockvm_macros.workspace = true
+nockapp-grpc = { workspace = true, features = ["client"] }
+nockapp-grpc-proto = { workspace = true, features = ["client"] }
 bitvec.workspace = true
 either.workspace = true
 

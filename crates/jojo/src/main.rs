@@ -12,7 +12,7 @@ use zkvm_jetpack::hot::produce_prover_hot_state;
 
 mod parse;
 mod shell;
-use shell::Shell;
+use shell::{Shell, ShellArgs};
 
 struct SendSlab(NounSlab);
 
@@ -43,7 +43,7 @@ impl Wire for JojoWire {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Mode {
-    Shell,
+    Shell(ShellArgs),
 }
 
 /// Command line arguments
@@ -100,6 +100,6 @@ async fn main() -> Result<()> {
     boot::init_default_tracing(&cli.nockapp_cli);
 
     match cli.mode {
-        Mode::Shell => Shell::default().run(cli.nockapp_cli).await,
+        Mode::Shell(a) => Shell::default().run(cli.nockapp_cli, a).await,
     }
 }

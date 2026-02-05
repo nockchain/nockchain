@@ -4481,6 +4481,8 @@ dependencies = [
  "hoonc",
  "kernels-open-jojo",
  "nockapp",
+ "nockapp-grpc",
+ "nockapp-grpc-proto",
  "nockvm",
  "nockvm_macros",
  "rayon",
