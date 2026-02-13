@@ -1,0 +1,49 @@
+# Tenderly configuration for Foundry project
+compiler:
+  name: "foundry"
+  version: "auto"
+  out_dir: "out"
+  build_dir_path: "out/build-info"
+  sources_dir: "src"
+
+# Project settings
+project_slug: "bridge"
+account_id: "zorp"
+
+# Networks configuration
+networks:
+  mainnet:
+    network_id: "1"
+  sepolia:
+    network_id: "11155111"
+  base:
+    network_id: "8453"
+  base-sepolia:
+    network_id: "84532"
+  local:
+    network_id: "31337"
+
+# Optional: Enable automatic verification
+auto_verify: true
+
+# Deployment settings
+deployments:
+  auto_export: true
+  include_traces: true
+
+# Simulation settings
+simulations:
+  enable_forks: true
+  gas_limit: 30000000
+
+# Contracts to verify (Base Sepolia deployment - 2025-12-17)
+contracts:
+  - contract_name: "Nock"
+    address: "0xA9cd4087D9B050D8B35727AAf810296CA957c7B3"
+    network_id: "84532"
+  - contract_name: "MessageInbox"
+    address: "0x7627Db3A99596668c9d42693efa352Ca69F089e3"
+    network_id: "84532"
+  - contract_name: "ERC1967Proxy"
+    address: "0x9b1becA13c39b9Be10dB616F1bE10C3CeF9Dfb36"
+    network_id: "84532"

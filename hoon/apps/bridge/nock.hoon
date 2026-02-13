@@ -14,6 +14,12 @@
   ~|  %txs-provided-check
   ::  save old-state in case we need to revert after an error
   =/  old-state  state
+  ::
+  ::  avoiding ?^ because it gives too much information to compiler about the shape of base-hold
+  ::  if there is a hold, do not process
+  ?:  !=(~ nock-hold.hash-state.state)
+    ~>  %slog.[0 'nock hold active, not processing incoming nockchain-block']
+    [~ old-state]
   =/  stop-info  (get-stop-info old-state)
   ?.  ?=(%1 -.block.nockchain-block)
     ~>  %slog.[0 'ignoring v0 block, bridge starts after v0 cutover']
@@ -40,10 +46,6 @@
       %&
     ::  if process block was successful, update state and carry on
     =.  state  p.process-block
-    =?  nock-hold.hash-state.state  ?=(^ nock-hold.hash-state.state)
-      =+  nock-hash=(hash:nock-block latest-block)
-      ?:  =(nock-hash hash.u.nock-hold.hash-state.state)  ~
-      nock-hold.hash-state.state
     =?  base-hold.hash-state.state  ?=(^ base-hold.hash-state.state)
       =+  nock-hash=(hash:nock-block latest-block)
       ?:  =(nock-hash hash.u.base-hold.hash-state.state)  ~
@@ -65,7 +67,7 @@
     ?~  eth-sig-requests
       [~ state]
     ~&  eth-sig-requests+eth-sig-requests
-    [[%0 %propose-base-call eth-sig-requests]~ state]
+    [[%0 %commit-nock-deposits eth-sig-requests]~ state]
   ==
 ::
 ::  check if nockchain page belongs to hashchain
@@ -75,6 +77,7 @@
   =/  height  ~(height get:page:t page)
   ?.  =(height.page nock-hashchain-next-height.hash-state.state)
     ~&  %driver-malfunction-received-block-with-height-greater-than-next-height
+    ~&  [received+height.page expected+nock-hashchain-next-height.hash-state.state]
      [~ 'received block with height not equal to next height']
   ?:  =(height.page nockchain-start-height.constants.state)
     ~
@@ -125,6 +128,8 @@
       %-  ~(put z-bi unsettled-deposits.hash-state)
       [nock-blk-hash name deposit]
     hash-state
+  =?  last-nock-deposit-height.state  !=(~ deposits.nock-blk)
+    height.nock-blk
   [nock-blk (nockchain-process-withdrawal-settlements nock-blk)]
   ::
   ++  process-nock-txs
@@ -274,37 +279,27 @@
 ::    This arm only gets called if its our turn to propose and there are deposits in the newst nock block.
 ++  nockchain-propose-deposits
   |=  =nock-block
-  ^-  [(list eth-signature-request:effect) bridge-state]
+  ^-  [(list nock-deposit-request:effect) bridge-state]
   =+  block-hash=(hash:^nock-block nock-block)
-  =^  requests=(list eth-signature-request:effect)  state
-    %+  roll
+  =/  requests=(list nock-deposit-request:effect)
+    %+  murn
       ~(tap z-by deposits.nock-block)
-    |=  $:  [name=nname =deposit]
-            [requests=(list eth-signature-request:effect) state=_state]
-        ==
+    |=  [name=nname =deposit]
     ::  if the recipient is malformed, we keep the funds in the bridge nock address
-    ?~  dest.deposit
-      [requests state]
-    =.  unsettled-deposits.hash-state.state
-      (~(del z-bi unsettled-deposits.hash-state.state) block-hash name)
-    =.  unconfirmed-settled-deposits.hash-state.state
-      (~(put z-bi unconfirmed-settled-deposits.hash-state.state) block-hash name deposit)
-    :_  state(next-nonce +(next-nonce.state))
-    :_  requests
+    ?~  dest.deposit  ~
     ::  NOTE: as-of must be block-hash (hash of nock-block structure), NOT block-id (page digest).
     ::  Deposits are stored in unsettled-deposits keyed by block-hash, so peers must use
     ::  block-hash to look them up during validation.
+    %-  some
     :*  tx-id.deposit
         name
         u.dest.deposit
         amount-to-mint.deposit
         height.nock-block
         block-hash
-        next-nonce.state
     ==
   ::
-  ::  flop requests because they are getting prepended in the +roll and the
-  ::  contract requires that deposits are processed in ascending nonce order
+  ::  flop requests because they are getting prepended in the +roll
   [(flop requests) state]
 ::
 ++  is-bridge-withdrawal-tx

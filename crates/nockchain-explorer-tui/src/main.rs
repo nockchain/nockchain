@@ -46,6 +46,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
+use rustls::crypto::aws_lc_rs;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tonic::Request;
@@ -3934,6 +3935,9 @@ fn init_tracing() -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing()?;
+    aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|e| anyhow!("failed to install rustls provider: {e:?}"))?;
     // Parse CLI args
     let args = Args::parse();
 

@@ -1,0 +1,93 @@
+# Bridge Node Configuration Example
+# Copy this file to bridge-conf.toml and fill in with your actual values
+#
+# Logging:
+#   --log-dir <PATH>  Custom log directory (default: {data_dir}/logs/)
+#   RUST_LOG=<level>  Log verbosity via env var (default: info)
+# Logs rotate daily and files older than 7 days are automatically deleted.
+
+# Bridge node identity (0-4, must be unique for each node)
+node_id = 0
+
+# Ethereum Base L2 WebSocket URL
+base_ws_url = "wss://virtual.base-sepolia.us-east.rpc.tenderly.co/YOUR-TENDERLY-PROJECT-ID"
+
+# Address of the MessageInbox contract on Base L2
+inbox_contract_address = "0x68487BbaE6210a7A5d92c1D3D620e7AC9f7Ae29E"
+nock_contract_address = "0x9f5D8976f0F89eC92241850A585B313F31Ab8b62"
+
+# This node's private keys
+my_eth_key = "0x..."  # Hex encoded Ethereum private key
+my_nock_key = "..."   # Base58 encoded Schnorr private key for Nockchain
+
+# gRPC address for communicating with Nockchain node
+grpc_address = "http://localhost:5555"
+
+# Finality / confirmation settings (driver-side).
+# The bridge kernel assumes all blocks are final; the Rust driver enforces finality by withholding
+# blocks until they reach these confirmation depths.
+base_confirmation_depth = 300
+nockchain_confirmation_depth = 100
+
+# Runtime nonce epoch base.
+# Set this to the last successful deposit nonce on Base at activation time.
+# If you omit the start height/tx-id, this must be 0.
+nonce_epoch_base = 150
+
+# Runtime nonce epoch start height (required when nonce_epoch_base is non-zero).
+# This must be the height of the anchor deposit that produced nonce_epoch_base.
+nonce_epoch_start_height = 50009
+
+# Runtime nonce epoch start tx-id (required when nonce_epoch_base is non-zero).
+# This tx-id is the anchor deposit whose nonce is nonce_epoch_base.
+# Set it to the tx_id corresponding to the last successful deposit
+nonce_epoch_start_tx_id_base58 = "2uYre9HXRP8X6BD7w3GvgfUAU47RSmZDGkz9uJgJmD9CxN7JA69k6MF"
+
+# Bridge ingress gRPC listen address (must match this node's entry in [[nodes]])
+ingress_listen_address = "127.0.0.1:8001"
+
+# All 5 bridge nodes configuration
+# Each node needs IP address, Base address (eth_pubkey), and Nockchain public key hash (nock_pkh).
+# Peers dial these IPs for health checks, so keep each node's ingress_listen_address
+# synchronized with its corresponding entry.
+#
+# nock_pkh is the ~52 character base58-encoded public key hash (NOT the full ~130 char pubkey).
+# Operators share their PKH, not their full public key.
+
+# Example placeholder values - replace with actual operator data
+[[nodes]]
+ip = "localhost:8001"
+eth_pubkey = "0x..."  # Operator 0 Base address
+nock_pkh = "..."      # Operator 0 PKH (~52 char base58)
+
+[[nodes]]
+ip = "localhost:8002"
+eth_pubkey = "0x..."  # Operator 1 Base address
+nock_pkh = "..."      # Operator 1 PKH
+
+[[nodes]]
+ip = "localhost:8003"
+eth_pubkey = "0x..."  # Operator 2 Base address
+nock_pkh = "..."      # Operator 2 PKH
+
+[[nodes]]
+ip = "localhost:8004"
+eth_pubkey = "0x..."  # Operator 3 Base address
+nock_pkh = "..."      # Operator 3 PKH
+
+[[nodes]]
+ip = "localhost:8005"
+eth_pubkey = "0x..."  # Operator 4 Base address
+nock_pkh = "..."      # Operator 4 PKH
+
+# Bridge constants (optional - defaults shown below)
+# These configure the bridge kernel's operational parameters.
+# Omit this section entirely to use Hoon defaults.
+[constants]
+min_signers = 3                  # Minimum signatures required for proposals
+total_signers = 5                # Total number of bridge nodes
+minimum_event_nocks = 100000    # Minimum nocks for a bridge event
+nicks_fee_per_nock = 195         # Fee per nock in nicks
+base_blocks_chunk = 100          # Base L2 blocks per processing chunk
+base_start_height = 33387036     # Base L2 block height to start watching
+nockchain_start_height = 25      # Nockchain block height to start watching

@@ -1,0 +1,20 @@
+name: Sync to nockchain/nockchain
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Push to nockchain/nockchain
+        run: |
+          git remote add nockchain https://bitemyapp:${{ secrets.NOCKCHAIN_SYNC_TOKEN }}@github.com/nockchain/nockchain.git
+          git push nockchain master:master

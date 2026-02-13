@@ -1,0 +1,29 @@
+# Real Base Sepolia (via Tenderly Node RPC - unlimited blocks)
+# Source this file: source environments/base-sepolia.example
+#
+# Get your access key from: https://dashboard.tenderly.co -> Node RPCs
+
+# Tenderly Node RPC URL (real Base Sepolia, no block limits)
+export TENDERLY_RPC_URL="https://base-sepolia.gateway.tenderly.co/YOUR_ACCESS_KEY"
+
+# Deployer private key (must have Base Sepolia ETH from faucet)
+export TENDERLY_PRIVATE_KEY="0x..."
+
+# Bridge node Ethereum public keys
+export BRIDGE_NODE_0="0x..."
+export BRIDGE_NODE_1="0x..."
+export BRIDGE_NODE_2="0x..."
+export BRIDGE_NODE_3="0x..."
+export BRIDGE_NODE_4="0x..."
+
+export NOCK_NAME="Nock"
+export NOCK_SYMBOL="NOCK"
+
+export DEPLOY_TARGET_NETWORK="base-sepolia"
+export DEPLOYER_ADDRESS="0x..."
+
+# Optional: for contract verification
+export TENDERLY_ACCESS_KEY="YOUR_ACCESS_KEY"
+export TENDERLY_ACCOUNT_ID="littel_wolfur"
+export TENDERLY_PROJECT_SLUG="bridge-contracts"
+

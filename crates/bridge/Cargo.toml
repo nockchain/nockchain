@@ -1,0 +1,75 @@
+[package]
+name = "bridge"
+version.workspace = true
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+name = "bridge"
+path = "src/lib.rs"
+
+[features]
+bazel_build = []
+snmalloc = ["dep:snmalloc-rs"]
+jemalloc = ["dep:tikv-jemallocator"]
+
+[dependencies]
+alloy = { workspace = true, features = ["provider-ws", "signer-local"] }
+anyhow.workspace = true
+async-trait.workspace = true
+backon.workspace = true
+bincode.workspace = true
+blake3.workspace = true
+bs58.workspace = true
+chrono.workspace = true
+clap = { workspace = true, features = ["derive"] }
+crossterm.workspace = true
+deadpool-diesel.workspace = true
+diesel.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+gnort = { workspace = true }
+hex.workspace = true
+# Force SQLite to be built from source for the target (Linux)
+ibig.workspace = true
+kernels-open-bridge = { workspace = true }
+libsqlite3-sys = { workspace = true }
+nockapp.workspace = true
+nockapp-grpc = { workspace = true, default-features = false, features = [
+  "client",
+] }
+nockchain-libp2p-io.workspace = true
+nockchain-math.workspace = true
+nockchain-types.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+noun-serde.workspace = true
+nu-ansi-term.workspace = true
+num-bigint.workspace = true
+op-alloy = { workspace = true, features = ["network"] }
+prost = { workspace = true }
+ratatui.workspace = true
+rustls = { workspace = true, features = ["aws_lc_rs"] }
+serde.workspace = true
+serde_bytes.workspace = true
+serde_json.workspace = true
+snmalloc-rs = { workspace = true, optional = true }
+thiserror.workspace = true
+tikv-jemallocator = { workspace = true, optional = true }
+tiny-keccak.workspace = true
+tokio = { workspace = true, features = ["full"] }
+toml.workspace = true
+tonic.workspace = true
+tonic-prost = { workspace = true }
+tonic-reflection = { workspace = true }
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+zkvm-jetpack.workspace = true
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.8"

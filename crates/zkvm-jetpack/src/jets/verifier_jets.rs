@@ -161,7 +161,7 @@ pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
 
     //  TODO use g defined wherever it is
     let g = Felt::lift(Belt(7));
-    let omega_pow = fmul_(&fpow_(omega, index as u64), &g);
+    let omega_pow = fmul_(&fpow_(omega, index), &g);
 
     let mut acc = Felt::zero();
     let mut num = 0usize;
@@ -211,7 +211,7 @@ pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     }
 
     // Process composition elements
-    let denom = fsub_(&omega_pow, &fpow_(deep_challenge, num_comp_pieces as u64));
+    let denom = fsub_(&omega_pow, &fpow_(deep_challenge, num_comp_pieces));
 
     (acc, _) = process_belt(
         &comp_elems,

@@ -2,11 +2,10 @@ use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 
-use nockapp::http_driver;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{SystemWire, Wire};
-use nockapp::{AtomExt, NockApp};
+use nockapp::{http_driver, AtomExt, NockApp};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
 

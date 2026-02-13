@@ -10,10 +10,14 @@
   |=  [raw=raw-base-blocks:cause rest=[=wire eny=@ our=@ux now=@da]]
   ^-  [(list effect) bridge-state]
   ~&  %incoming-base-blocks
-  ::~&  [%incoming-base-blocks raw rest]
   ::
   ::  hold onto old state in case the deposit process fails
   =/  old-state  state
+  ::
+  ::  avoiding ?^ because it gives too much information to compiler about the shape of base-hold
+  ?:  !=(~ base-hold.hash-state.state)
+    ~>  %slog.[0 'base hold active, not processing incoming base-blocks']
+    [~ old-state]
   =/  stop-info  (get-stop-info old-state)
   =/  blocks=base-blocks  (cook-base-blocks raw)
   =/  first=@  first-height.blocks
@@ -181,8 +185,6 @@
   =/  [event-id=beid settlement=deposit-settlement]
     i.settlements
   =/  [name=nname:t as-of=nock-hash height=@]  [counterpart as-of nock-height]:settlement
-  ?.  (lth nonce.settlement next-nonce.state)
-    [%| [%stop 'nonce in deposit settlement is not less than next nonce']]
   ?.  (~(has z-by nock-hashchain.hash-state.state) as-of)
    ::  this means that we still have not processed the nockchain deposit tx
    ::  corresponding to the settlement. put a hold on it. if there is already a
@@ -197,8 +199,8 @@
       `[as-of height]
     ==
   ::
-  ::  If there are any holds, do not process the settlement
-  ?.  =(~ hold)
+  ::  If there is a hold, do not process the settlement
+  ?:  !=(~ hold)
     $(settlements t.settlements)
   =/  counterpart=deposit
     =+  block-with-deposit=(~(got z-by nock-hashchain.hash-state.state) as-of)
@@ -207,28 +209,21 @@
   ::  find the corresponding unsettled deposit in the hash-state.
   ::  we do not require the bridge node to have seen the proposal prior to observing
   ::  the deposit settlement.
-  ::    - if bridge node has seen proposal, the deposit will be in the unconfirmed-settled set.
-  ::    - if bridge node has not seen proposal, the deposit will be in the unsettled deposit set.
-  ::    - if the unsettled deposit is in neither, this is a STOP condition.
+  ::    - if bridge node has seen proposal, the deposit will be in the unsettled deposit set.
+  ::    - if the unsettled deposit is not the unsettled deposit set, this is a STOP condition.
   ?.  (has-unsettled-deposit as-of name)
     [%| [%stop 'failed to process deposit settlement: cannot find unsettled deposit in state']]
   ?.  (check-deposit-settlement counterpart settlement)
     [%| [%stop 'failed to process deposit settlement: counterpart does not match settlement']]
   ::
   ::  now that the deposit settled on base, delete it from the tracked state
-  ::  we delete from both the unconfirmed and unsettled deposit sets because
-  ::  the deposit it could have been in either.
-  =.  unconfirmed-settled-deposits.hash-state.state
-    (~(del z-bi unconfirmed-settled-deposits.hash-state.state) [as-of name])
   =.  unsettled-deposits.hash-state.state
     (~(del z-bi unsettled-deposits.hash-state.state) [as-of name])
   $(settlements t.settlements)
 ::
 ++  has-unsettled-deposit
   |=  [as-of=nock-hash name=nname:t]
-  ?|  (~(has z-bi unconfirmed-settled-deposits.hash-state.state) as-of name)
-      (~(has z-bi unsettled-deposits.hash-state.state) as-of name)
-  ==
+  (~(has z-bi unsettled-deposits.hash-state.state) as-of name)
 ::
 ++  check-deposit-settlement
   |=  $:  counterpart=deposit

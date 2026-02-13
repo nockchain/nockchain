@@ -1,0 +1,312 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::{env, fs};
+
+fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if env::var_os("PROTOC").is_some() {
+        return Ok(());
+    }
+    Err("PROTOC is not set; Bazel should pass it via //tools/protoc:protoc".into())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=contracts/out/MessageInbox.sol/MessageInbox.json");
+    println!("cargo:rerun-if-changed=contracts/out/Nock.sol/Nock.json");
+    println!("cargo:rerun-if-changed=contracts/MessageInbox.sol");
+    println!("cargo:rerun-if-changed=contracts/Nock.sol");
+    println!("cargo:rerun-if-changed=contracts/foundry.toml");
+    println!("cargo:rerun-if-changed=proto/bridge_ingress.proto");
+    println!("cargo:rerun-if-changed=proto/bridge_status.proto");
+    println!("cargo:rerun-if-changed=proto/bridge_tui.proto");
+
+    ensure_protoc()?;
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    // Helper to expand ${pwd} in paths from environment variables
+    let expand_path = |path_str: &str| -> PathBuf {
+        if path_str.contains("${pwd}") {
+            let pwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            PathBuf::from(path_str.replace("${pwd}", &pwd.to_string_lossy()))
+        } else {
+            PathBuf::from(path_str)
+        }
+    };
+
+    // Try to get contract file paths from rustc_env first (they contain ${pwd} which we expand)
+    // If not available, search for them relative to CARGO_MANIFEST_DIR
+    let mut inbox_src = if let Some(path) = env::var_os("MESSAGE_INBOX_SOL") {
+        expand_path(&path.to_string_lossy())
+    } else {
+        manifest_dir.join("contracts/MessageInbox.sol")
+    };
+
+    let mut nock_src = if let Some(path) = env::var_os("NOCK_SOL") {
+        expand_path(&path.to_string_lossy())
+    } else {
+        manifest_dir.join("contracts/Nock.sol")
+    };
+
+    // If files don't exist at expected location, search more broadly
+    // compile_data files might be at different locations in the sandbox
+    if !inbox_src.exists() {
+        // Try searching from current directory (might be output directory)
+        if let Ok(current_dir) = env::current_dir() {
+            for ancestor in current_dir.ancestors() {
+                let candidate = ancestor.join("open/crates/bridge/contracts/MessageInbox.sol");
+                if candidate.exists() {
+                    inbox_src = candidate;
+                    break;
+                }
+            }
+        }
+        // Also try from manifest_dir
+        if !inbox_src.exists() {
+            for ancestor in manifest_dir.ancestors() {
+                let candidate = ancestor.join("open/crates/bridge/contracts/MessageInbox.sol");
+                if candidate.exists() {
+                    inbox_src = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !nock_src.exists() {
+        if let Ok(current_dir) = env::current_dir() {
+            for ancestor in current_dir.ancestors() {
+                let candidate = ancestor.join("open/crates/bridge/contracts/Nock.sol");
+                if candidate.exists() {
+                    nock_src = candidate;
+                    break;
+                }
+            }
+        }
+        if !nock_src.exists() {
+            for ancestor in manifest_dir.ancestors() {
+                let candidate = ancestor.join("open/crates/bridge/contracts/Nock.sol");
+                if candidate.exists() {
+                    nock_src = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Determine contracts_root from where we found the source files
+    let contracts_root = if let Some(parent) = inbox_src.parent() {
+        parent.to_path_buf()
+    } else {
+        manifest_dir.join("contracts")
+    };
+
+    let inbox_abi = contracts_root.join("out/MessageInbox.sol/MessageInbox.json");
+    let nock_abi = contracts_root.join("out/Nock.sol/Nock.json");
+
+    // Verify source files exist
+    if !inbox_src.exists() {
+        return Err(format!(
+            "Contract source file not found: {:?} (MESSAGE_INBOX_SOL={:?}, manifest_dir: {:?}, current_dir: {:?})",
+            inbox_src, env::var_os("MESSAGE_INBOX_SOL"), manifest_dir, env::current_dir().ok()
+        ).into());
+    }
+    if !nock_src.exists() {
+        return Err(format!(
+            "Contract source file not found: {:?} (NOCK_SOL={:?}, manifest_dir: {:?}, current_dir: {:?})",
+            nock_src, env::var_os("NOCK_SOL"), manifest_dir, env::current_dir().ok()
+        ).into());
+    }
+
+    // Check if artifacts already exist and are up to date.
+    //
+    // For normal Cargo builds we can (and should) regenerate stale artifacts to keep the ABI in
+    // sync with the Solidity sources.
+    //
+    // For Bazel builds, contract artifacts are generated by a Bazel genrule and are provided as
+    // inputs; running `forge build` again inside the sandbox is slow and can be flaky.
+    let artifacts_exist = inbox_abi.exists() && nock_abi.exists();
+    let needs_build = if artifacts_exist {
+        // If artifacts exist, check if they're stale
+        is_stale(&inbox_src, &inbox_abi)? || is_stale(&nock_src, &nock_abi)?
+    } else {
+        // If artifacts don't exist, we need to build
+        true
+    };
+
+    let is_bazel_build = env::var_os("CARGO_FEATURE_BAZEL_BUILD").is_some();
+    if needs_build && !(is_bazel_build && artifacts_exist) {
+        let forge = resolve_forge_bin()?;
+        // Verify the file exists before trying to run it
+        if !forge.exists() {
+            return Err(format!(
+                "forge binary not found at {:?} (FORGE_BIN={:?}, CARGO_MANIFEST_DIR={:?})",
+                forge,
+                env::var_os("FORGE_BIN"),
+                env!("CARGO_MANIFEST_DIR")
+            )
+            .into());
+        }
+        if !forge.is_file() {
+            return Err(format!("forge path {:?} is not a file", forge).into());
+        }
+
+        // Try to execute forge - use sh -c to handle path and execution issues.
+        // Use a per-invocation HOME to avoid cross-process collisions in parallel builds.
+        // Allow shared SVM_HOME/FOUNDRY_CACHE_PATH for CI caching when explicitly configured.
+        let forge_path = forge.to_string_lossy().to_string();
+        let forge_home = create_unique_temp_dir("bridge-forge")?;
+        let svm_home = env::var_os("SVM_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| forge_home.join(".svm"));
+        let foundry_cache = env::var_os("FOUNDRY_CACHE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| forge_home.join(".foundry/cache"));
+        fs::create_dir_all(&svm_home)?;
+        fs::create_dir_all(&foundry_cache)?;
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(format!("{} build --via-ir", forge_path))
+            .current_dir(&contracts_root)
+            .env("HOME", &forge_home)
+            .env("SVM_HOME", &svm_home)
+            .env("FOUNDRY_CACHE_PATH", &foundry_cache);
+        let status = cmd.status().map_err(|e| {
+            format!(
+                "Failed to execute forge at {:?} via sh: {} (file exists: {}, is_file: {})",
+                forge,
+                e,
+                forge.exists(),
+                forge.is_file()
+            )
+        })?;
+        if !status.success() {
+            return Err(format!(
+                "forge build failed with exit code {}",
+                status.code().unwrap_or(-1)
+            )
+            .into());
+        }
+    }
+
+    // Make sure the ABI JSONs are available under OUT_DIR and tell rustc where to find them.
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_else(|| "../generated".into()));
+    let abi_out_dir = out_dir.join("abi");
+    fs::create_dir_all(&abi_out_dir)?;
+    let inbox_out_path = abi_out_dir.join("MessageInbox.json");
+    let nock_out_path = abi_out_dir.join("Nock.json");
+    fs::copy(&inbox_abi, &inbox_out_path)?;
+    fs::copy(&nock_abi, &nock_out_path)?;
+    println!(
+        "cargo:rustc-env=MESSAGE_INBOX_JSON={}",
+        inbox_out_path.display()
+    );
+    println!("cargo:rustc-env=NOCK_JSON={}", nock_out_path.display());
+
+    tonic_prost_build::configure()
+        .file_descriptor_set_path(out_dir.join("bridge_descriptor.bin"))
+        .build_server(true)
+        .compile_protos(
+            &[
+                "proto/bridge_ingress.proto", "proto/bridge_status.proto", "proto/bridge_tui.proto",
+            ],
+            &["proto"],
+        )?;
+    Ok(())
+}
+
+fn is_stale(src: &Path, artifact: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    // If source doesn't exist, error (source must exist)
+    let src_meta =
+        fs::metadata(src).map_err(|e| format!("Source file {:?} not found: {}", src, e))?;
+    // If artifact doesn't exist, it's stale (needs building)
+    let artifact_meta = match fs::metadata(artifact) {
+        Ok(m) => m,
+        Err(_) => return Ok(true),
+    };
+    Ok(src_meta.modified()? > artifact_meta.modified()?)
+}
+
+fn resolve_forge_bin() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Check FORGE_BIN environment variable first (set by Bazel via rustc_env)
+    // This should give us the correct path in the sandbox
+    // Note: ${pwd} in the path will be expanded by the shell, but we need to handle it
+    if let Some(bin) = env::var_os("FORGE_BIN") {
+        let bin_str = bin.to_string_lossy();
+        // Replace ${pwd} with actual current working directory if present
+        let expanded = if bin_str.contains("${pwd}") {
+            let pwd = env::current_dir()
+                .map_err(|e| format!("Failed to get current directory: {}", e))?;
+            bin_str.replace("${pwd}", &pwd.to_string_lossy())
+        } else {
+            bin_str.to_string()
+        };
+        let path = PathBuf::from(&expanded);
+        if path.is_file() {
+            return Ok(path);
+        }
+        // Try canonicalizing in case it's a symlink or needs resolution
+        if let Ok(canonical) = path.canonicalize() {
+            if canonical.is_file() {
+                return Ok(canonical);
+            }
+        }
+    }
+
+    // Fall back to PATH lookup (most reliable in sandbox)
+    if let Some(paths) = env::var_os("PATH") {
+        for entry in env::split_paths(&paths) {
+            let candidate = entry.join("forge");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // In Bazel sandbox, compile_data files are available relative to CARGO_MANIFEST_DIR
+    // Try to find forge relative to manifest dir
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for ancestor in manifest_dir.ancestors() {
+        let candidate = ancestor.join("tools/bin/forge_bin"); // genrule output name
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        let candidate_placeholder = ancestor.join("tools/bin/forge_placeholder");
+        if candidate_placeholder.is_file() {
+            return Ok(candidate_placeholder);
+        }
+    }
+
+    Err(format!(
+        "forge not found; checked FORGE_BIN={:?}, PATH, ancestors of manifest_dir={:?}",
+        env::var_os("FORGE_BIN"),
+        manifest_dir
+    )
+    .into())
+}
+
+fn create_unique_temp_dir(prefix: &str) -> std::io::Result<PathBuf> {
+    use std::io;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let base = env::temp_dir();
+    let pid = std::process::id();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    for attempt in 0..1000u32 {
+        let candidate = base.join(format!("{prefix}-{pid}-{now}-{attempt}"));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to allocate unique temp dir",
+    ))
+}

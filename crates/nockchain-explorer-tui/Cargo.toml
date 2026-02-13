@@ -18,6 +18,7 @@ nockapp-grpc-proto = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { workspace = true }
 ratatui = "0.28"
+rustls = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tonic = { workspace = true }
 tracing = { workspace = true }

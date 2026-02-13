@@ -568,10 +568,18 @@ impl NockchainService for PublicNockchainGrpcServer {
         request: Request<WalletGetBalanceRequest>,
     ) -> std::result::Result<Response<WalletGetBalanceResponse>, Status> {
         let remote_addr = request.remote_addr();
+        let x_forwarded_for = request
+            .metadata()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let req = request.into_inner();
         let request_start = Instant::now();
         let metrics = &self.metrics;
-        info!("WalletGetBalance client_ip={:?}", remote_addr);
+        info!(
+            "WalletGetBalance client_ip={:?} x_forwarded_for={:?}",
+            remote_addr, x_forwarded_for
+        );
 
         let WalletGetBalanceRequest { selector, page, .. } = req;
         if selector.is_none() {
@@ -739,8 +747,8 @@ impl NockchainService for PublicNockchainGrpcServer {
                 path_slab.set_root(path_noun);
 
                 info!(
-                    "peek path=balance-by-pubkey address={} client_ip={:?}",
-                    address.key, remote_addr
+                    "peek path=balance-by-pubkey address={} client_ip={:?} x_forwarded_for={:?}",
+                    address.key, remote_addr, x_forwarded_for
                 );
                 let peek_start = Instant::now();
                 let peek_result = self.handle.peek(path_slab).await;
@@ -961,8 +969,8 @@ impl NockchainService for PublicNockchainGrpcServer {
 
                 self.metrics.balance_cache_first_name_miss.increment();
                 info!(
-                    "peek path=balance-by-first-name first_name={} client_ip={:?}",
-                    first_name_str.hash, remote_addr
+                    "peek path=balance-by-first-name first_name={} client_ip={:?} x_forwarded_for={:?}",
+                    first_name_str.hash, remote_addr, x_forwarded_for
                 );
                 let path = vec!["balance-by-first-name".to_string(), first_name_str.hash];
                 let mut path_slab = NounSlab::new();
@@ -1079,12 +1087,17 @@ impl NockchainService for PublicNockchainGrpcServer {
         request: Request<WalletSendTransactionRequest>,
     ) -> std::result::Result<Response<WalletSendTransactionResponse>, Status> {
         let remote_addr = request.remote_addr();
+        let x_forwarded_for = request
+            .metadata()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let req = request.into_inner();
         let request_start = Instant::now();
         let metrics = &self.metrics;
         debug!(
-            "WalletSendTransaction tx_id={:?} client_ip={:?}",
-            req.tx_id, remote_addr
+            "WalletSendTransaction tx_id={:?} client_ip={:?} x_forwarded_for={:?}",
+            req.tx_id, remote_addr, x_forwarded_for
         );
         let tx_id_pb = match req.tx_id.clone() {
             Some(id) => id,
@@ -1247,12 +1260,17 @@ impl NockchainService for PublicNockchainGrpcServer {
         request: Request<TransactionAcceptedRequest>,
     ) -> std::result::Result<Response<TransactionAcceptedResponse>, Status> {
         let remote_addr = request.remote_addr();
+        let x_forwarded_for = request
+            .metadata()
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let req = request.into_inner();
         let request_start = Instant::now();
         let metrics = &self.metrics;
         debug!(
-            "TransactionAccepted tx_id={:?} client_ip={:?}",
-            req.tx_id, remote_addr
+            "TransactionAccepted tx_id={:?} client_ip={:?} x_forwarded_for={:?}",
+            req.tx_id, remote_addr, x_forwarded_for
         );
 
         let Some(pb_hash) = req.tx_id else {

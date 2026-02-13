@@ -485,7 +485,7 @@ impl IndirectAtom {
         (noun, &mut *(ptr as *mut [u8; N]))
     }
 
-    /** Size of an indirect atom in 64-bit words */
+    /** Size of an indirect atom in 64-bit words (not bytes) */
     pub fn size(&self) -> usize {
         unsafe { *(self.to_raw_pointer().add(1)) as usize }
     }
@@ -1246,6 +1246,7 @@ impl Atom {
         }
     }
 
+    /// Size of the atom in 64-bit words (not bytes). Direct atoms return 1.
     pub fn size(&self) -> usize {
         match self.as_either() {
             Left(_direct) => 1,

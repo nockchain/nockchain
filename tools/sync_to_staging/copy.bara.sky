@@ -1,0 +1,28 @@
+"""Configuration for syncing code to the staging repository."""
+
+core.workflow(
+    name = "sync_to_staging",
+    # Run from the checked-out open branch contents in CI.
+    origin = folder.origin(),
+    destination = git.destination(
+        url = "https://github.com/zorp-corp/nockchain-staging.git",
+        fetch = "master",
+        push = "staging",
+    ),
+    origin_files = glob(
+        [
+            "**",
+        ],
+        exclude = [
+            "**/.git/**",
+            "**/target/**",
+            "**/bazel-*/**",
+            "**/.idea/**",
+            "**/node_modules/**",
+            "*.chkjam",
+            "**/.data*",
+        ],
+    ),
+    mode = "SQUASH",
+    authoring = authoring.pass_thru("bitemyapp <bitemyapp@users.noreply.github.com>"),
+)

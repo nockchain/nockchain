@@ -92,23 +92,27 @@
     ^-  [(list effect) bridge-state]
     ?>  ?=(%0 -.cause)
     ~&  %handle-cause
-    ?^  stop.state
-      =+  base-hash-b58=(to-b58:hash:t hash.base.u.stop.state)
-      =+  nock-hash-b58=(to-b58:hash:t hash.nock.u.stop.state)
-      =/  msg=@t
-        ;:  (cury cat 3)
-            'bridge was stopped. no causes will be processed. last known good base blocks hash: '
-            base-hash-b58
-            '. last known good nock block hash: '
-            nock-hash-b58
-            '.'
-        ==
+    ?:  ?=(%start +<.cause)
+      =/  msg=@t  'bridge stop state removed. resuming cause processing.'
       ~>  %slog.[0 msg]
-      [~ state]
-    ?:  ?|  ?=(^ base-hold.hash-state.state)
+      [~ state(stop ~)]
+    ?^  stop.state
+       =+  base-hash-b58=(to-b58:hash:t hash.base.u.stop.state)
+       =+  nock-hash-b58=(to-b58:hash:t hash.nock.u.stop.state)
+       =/  msg=@t
+          ;:  (cury cat 3)
+              'bridge was stopped. no causes will be processed. last known good base blocks hash: '
+              base-hash-b58
+              '. last known good nock block hash: '
+              nock-hash-b58
+             '.'
+          ==
+        ~>  %slog.[0 msg]
+        [~ state]
+    ?:  ?&  ?=(^ base-hold.hash-state.state)
             ?=(^ nock-hold.hash-state.state)
         ==
-      [[%0 %stop 'hold detected. we do not handle holds at the moment, so we treat them as a stop condition' (get-stop-info state)]~ state]
+      [[%0 %stop 'fatal: hold on both nock and base detected' (get-stop-info state)]~ state]
     ::  virtualize the cause handler to catch crashes that may not have been caught.
     =;  result
       ?-    -.result
@@ -126,10 +130,8 @@
         %cfg-load             (config-load config.cause)
         %set-constants        (set-constants constants.cause)
         %stop                 [~ state(stop `last.cause)]
-        %start                [~ state(stop ~)]
         %base-blocks          (incoming-base-blocks:base +>.cause rest)
         %nockchain-block      (incoming-nockchain-block:nock +>.cause rest)
-        %proposed-base-call   (evaluate-base-call +>.cause rest)
         %proposed-nock-tx     (evaluate-proposed-nock-tx +>.cause rest)
     ==
   ++  config-load
@@ -176,54 +178,11 @@
     base-start-height.new-constants
     [~ new-state]
   ::
-  ::  +evaluate-base-call:
-  ::    Invoke this function only after confirming that every proposed deposit corresponds
-  ::    exactly to an unsettled deposit in the hash-state, matching both the recipient
-  ::    EVM address and the amount.
-  ::
-  ::    This function moves the proposed deposit from unsettled-deposits to
-  ::    unconfirmed-settled-deposits, signalling that the deposit has been seen
-  ::    by the node, is considered valid, and is now awaiting confirmation
-  ::    base.
-  ++  evaluate-base-call
-    |=  [proposal=proposed-base-call:cause rest=[=wire eny=@ our=@ux now=@da]]
-    ^-  [(list effect) bridge-state]
-    ~&  %evaluate-base-call
-    =+  old-state=state
-    =/  stop-info  (get-stop-info old-state)
-    =/  template  |=(msg=@t [%0 %stop msg stop-info])
-    |-
-    ?~  proposal
-      [~ old-state]
-    =+  [name as-of nonce]=[name as-of nonce]:i.proposal
-    ?:  (gte nonce next-nonce.state)
-      ::  Proposed nonces must refer to an already-assigned nonce. This condition
-      ::  should never trigger because %proposed-deposit checks if the nonce was already assigned.
-      ::  If it triggers, it is a sign of rust driver malfunciton.
-      [[(template 'nonce in proposed base call is greater than or equal to next-nonce')]~ old-state]
-    ::
-    ::  The two conditionals below can be removed if we confirm that the driver is
-    ::  checking the pre-conditions before calling this arm. I will keep them here
-    ::  for now out of paranoia.
-    ?.  (~(has z-bi unsettled-deposits.hash-state.state) as-of name)
-      [[(template 'proposed deposit not in unsettled-deposits')]~ old-state]
-    ?:  (~(has z-bi unconfirmed-settled-deposits.hash-state.state) as-of name)
-      [[(template 'encountered double proposal. proposed deposit already in unconfirmed-settled-deposits.')]~ old-state]
-    =+  deposit=(~(got z-bi unsettled-deposits.hash-state.state) as-of name)
-    ::
-    ::  proposal should have already been checked against deposit through a rust peek
-    =.  unsettled-deposits.hash-state.state
-      (~(del z-bi unsettled-deposits.hash-state.state) as-of name)
-    =.  unconfirmed-settled-deposits.hash-state.state
-      (~(put z-bi unconfirmed-settled-deposits.hash-state.state) as-of name deposit)
-    $(proposal t.proposal)
-  ::
   ++  evaluate-proposed-nock-tx
     |=  [proposal=proposed-nock-tx:cause rest=[=wire eny=@ our=@ux now=@da]]
     ^-  [(list effect) bridge-state]
     ~&  [%evaluate-proposed-nock-tx proposal rest]
     ~|  %todo  !!
-  ::
   --
 --
 ::
@@ -239,10 +198,55 @@
 ::  the bridge state with node identity and network configuration.
 ::
 ++  load
-  |=  arg=bridge-state
+  |=  old=versioned-bridge-state
   ^-  bridge-state
-  arg
-::
+  |^
+  |-
+  ?:  ?=(%1 -.old)
+    old
+  ~>  %slog.[0 'bridge: +load state upgrade required']
+  ?-  -.old
+    %0  $(old state-0-1)
+  ==
+  ::
+  ++  state-0-1
+    ^-  bridge-state
+    ?>  ?=(%0 -.old)
+    ~>  %slog.[0 'bridge: upgrade state %0 -> %1']
+    =/  new-unsettled-deposits=(z-mip nock-hash nname:t deposit)
+      =/  blocks=(z-set nock-hash)
+        %-  ~(uni z-in ~(key z-by unconfirmed-settled-deposits.hash-state.old))
+        ~(key z-by unsettled-deposits.hash-state.old)
+      %-  ~(gas z-by *(z-mip nock-hash nname:t deposit))
+      %+  turn  ~(tap z-in blocks)
+      |=  as-of=nock-hash
+      =+  a=(~(gut z-by unconfirmed-settled-deposits.hash-state.old) as-of ~)
+      =+  b=(~(gut z-by unsettled-deposits.hash-state.old) as-of ~)
+      [as-of (~(uni z-by a) b)]
+    =/  new-hash-state=hash-state-1
+      %*  .  *hash-state-1
+          last-nock-block   last-nock-block.hash-state.old
+          last-base-blocks  last-base-blocks.hash-state.old
+          nock-hashchain    nock-hashchain.hash-state.old
+          base-hashchain    base-hashchain.hash-state.old
+          nock-hold         nock-hold.hash-state.old
+          base-hold         base-hold.hash-state.old
+          nock-hashchain-next-height  nock-hashchain-next-height.hash-state.old
+          base-hashchain-next-height  base-hashchain-next-height.hash-state.old
+          unsettled-deposits          new-unsettled-deposits
+          unsettled-withdrawals       unsettled-withdrawals.hash-state.old
+      ==
+    :*  %1
+        config.old
+        constants.old
+        new-hash-state
+        nockchain-start-height.constants.old
+        last-block.old
+        bridge-lock-root.old
+        stop.old
+    ==
+  --
+  ::
 ::    +peek: read-only queries into bridge state
 ::
 ::  handles scry requests to inspect bridge state.
@@ -250,7 +254,7 @@
 ++  peek
   |=  arg=path
   ^-  (unit (unit *))
-  ~&  bridge-peek+arg
+  ~&  >>  bridge-peek+arg
   =/  =(pole)  arg
   ?+    pole  ~
         :: Use this peek to ensure that the bridge is booting in mainnet mode with the correct deployment constants
@@ -265,26 +269,118 @@
         [%base-hold ~]
       =+  base-hold=base-hold.hash-state.state
       ?~  base-hold
-        ``%.n
-      ``(~(has z-by base-hashchain.hash-state.state) hash.u.base-hold)
+        [~ ~]
+      ``u.base-hold
+    ::
+        [%base-hold-height ~]
+      =+  base-hold=base-hold.hash-state.state
+      ?~  base-hold
+        [~ ~]
+      ``height.u.base-hold
     ::
         [%nock-hold ~]
       =+  nock-hold=nock-hold.hash-state.state
       ?~  nock-hold
-        ``%.n
-      ``(~(has z-by nock-hashchain.hash-state.state) hash.u.nock-hold)
+        [~ ~]
+      ``u.nock-hold
+    ::
+        [%nock-hold-height ~]
+      =+  nock-hold=nock-hold.hash-state.state
+      ?~  nock-hold
+        [~ ~]
+      ``height.u.nock-hold
     ::
         [%unsettled-deposit-count ~]
-      ``~(wyt z-by unsettled-deposits.hash-state.state)
+      %-  some  %-  some
+      %+  roll  ~(val z-by unsettled-deposits.hash-state.state)
+      |=  [m=(z-map nname:t deposit) acc=@]
+      (add acc ~(wyt z-by m))
     ::
-        [%unconfirmed-settled-deposit-count ~]
-      ``~(wyt z-by unconfirmed-settled-deposits.hash-state.state)
+        [%nock-last-deposit-height ~]
+      =/  last=@  last-nock-deposit-height.state
+      ``last
+    ::
+        [%nock-hashchain-deposits ~]
+      =/  blocks=(list [as-of=nock-hash block=nock-block])
+        ~(tap z-by nock-hashchain.hash-state.state)
+      =/  reqs=(list nock-deposit-request:effect)
+        %+  roll  blocks
+        |=  [[as-of=nock-hash block=nock-block] reqs=(list nock-deposit-request:effect)]
+        =/  dep-entries=(list [name=nname:t =deposit])
+          ~(tap z-by deposits.block)
+        %+  roll  dep-entries
+        |=  [[name=nname:t =deposit] reqs=_reqs]
+        ?~  dest.deposit  reqs
+        :_  reqs
+        :*  tx-id.deposit
+            name
+            u.dest.deposit
+            amount-to-mint.deposit
+            height.block
+            as-of
+        ==
+      ::  flop not required, but nice because it gives deposits in order of earliest to latest blocks
+      ``(flop reqs)
+    ::
+        [%nock-hashchain-deposits-since-height start-height=@t ~]
+      =/  start=@  (slav %ud start-height.pole)
+      =|  reqs=(list nock-deposit-request:effect)
+      =/  cur-hash=nock-hash  last-nock-block.hash-state.state
+      ?:  =(*hash:t last-nock-block.hash-state.state)
+        [~ ~]
+      =/  cur-block=nock-block
+        (~(got z-by nock-hashchain.hash-state.state) cur-hash)
+      |-
+      =/  blk=nock-block  cur-block
+      ?:  (lth height.blk start)
+        ::  flop not required, but nice because it gives deposits in order of earliest to latest blocks
+        ``(flop reqs)
+      =/  dep-entries=(list [name=nname:t =deposit])
+        ~(tap z-by deposits.blk)
+      =.  reqs
+        %+  roll  dep-entries
+        |=  [[name=nname:t =deposit] reqs=_reqs]
+        ?~  dest.deposit  reqs
+        :_  reqs
+        =;  dep=nock-deposit-request:effect  ~&  deposit+dep  dep
+        :*  tx-id.deposit
+            name
+            u.dest.deposit
+            amount-to-mint.deposit
+            height.blk
+            cur-hash
+        ==
+      ?:  =(*hash:t prev.blk)
+        ``(flop reqs)
+      =.  cur-hash  prev.blk
+      =.  cur-block  (~(got z-by nock-hashchain.hash-state.state) cur-hash)
+      $(reqs reqs)
+    ::
+        [%unsettled-deposits ~]
+      =/  entries=(list [nock-hash [name=nname:t =deposit]])
+        ~(tap z-bi unsettled-deposits.hash-state.state)
+      =/  reqs=(list nock-deposit-request:effect)
+        %+  murn  entries
+        |=  [as-of=nock-hash [name=nname:t =deposit]]
+        ?~  dest.deposit  ~
+        =/  block=(unit nock-block)
+          (~(get z-by nock-hashchain.hash-state.state) as-of)
+        ?~  block  ~
+        %-  some
+        :*  tx-id.deposit
+            name
+            u.dest.deposit
+            amount-to-mint.deposit
+            height.u.block
+            as-of
+        ==
+      ``(flop reqs)
     ::
         [%unsettled-withdrawal-count ~]
-      ``~(wyt z-by unsettled-withdrawals.hash-state.state)
-    ::
-        [%unconfirmed-settled-withdrawal-count ~]
-      ``~(wyt z-by unconfirmed-settled-withdrawals.hash-state.state)
+      %-  some  %-  some
+      %+  roll  ~(val z-by unsettled-withdrawals.hash-state.state)
+      |=  [m=(z-map beid withdrawal) acc=@]
+      (add acc ~(wyt z-by m))
     ::
         [%nock-hashchain-next-height ~]
       ``nock-hashchain-next-height.hash-state.state
@@ -293,66 +389,15 @@
       =/  stored  base-hashchain-next-height.hash-state.state
       =/  start   base-start-height.constants.state
       =/  result  ?:((lth stored start) start stored)
-      ~&  base-next-height+[stored=stored start=start result=result]
       ``result
+    ::
+        [%stop-state ~]
+      ?~  stop.state
+        ``%.n
+      ``%.y
     ::
         [%stop-info ~]
       ``(get-stop-info state)
-    ::
-        [%proposed-deposit tx-id=@t nock-hash=@t first-name=@t last-name=@t receiver=@t amount-to-mint=@ nonce=@ ~]
-      ::  check if deposit exists under key (nock-hash [first-name last-name]). Then check if
-      ::  the evm receiver address matches and the amount-to-mint = raw-amount - fee(raw-amount)
-      ::  notes:
-      ::  - consider storing minted-amount in deposit to simplify the check.
-      ::  - do we need to check if the deposit tx-id matches with the tx-id in the proposal?
-      ::
-      =+  tx-id=(from-b58:hash:t tx-id.pole)
-      =+  block-hash=(from-b58:hash:t nock-hash.pole)
-      =+  name=(from-b58:nname:t [first-name last-name]:pole)
-      =/  receiver=evm-address  (de-base58 (trip receiver.pole))
-      ::
-      ::  if this condition is hit, it should result in a stop condition because
-      ::  it means that this node has already processed this deposit proposal.
-      ::  do not call %evaluate-base-call, do not sign the proposal, emit a STOP.
-      ?:  (~(has z-bi unconfirmed-settled-deposits.hash-state.state) block-hash name)
-        [~ ~ %.n]
-      ::  returning [~ ~] means that a deposit corresponding to (block-hash, name) was not found.
-      ::  if [~ ~] is returned, do not call %evaluate-base-call and do not sign the proposal.
-      ::  This is not a stop condition because it is possible that the node is still syncing.
-      ?.  (~(has z-bi unsettled-deposits.hash-state.state) block-hash name)
-        [~ ~]
-      ::
-      ::  If we have the deposit in our hash-state, but the nonce is greater than the next
-      ::  nonce, we may be getting asked to sign an invalid nonce.
-      ::
-      ::  This is a STOP condition because we should have processed the deposit and produced
-      ::  the proposal, which resulted in the next-nonce getting incremented, in the same atomic event.
-      ?:  (gte nonce.pole next-nonce.state)
-        [~ ~ %.n]
-      =+  deposit=(~(got z-bi unsettled-deposits.hash-state.state) block-hash name)
-      =/  dest-matches=?
-        ?~  dest.deposit  %.n
-        =(u.dest.deposit receiver)
-      =/  amount-matches=?
-        =(amount-to-mint.pole amount-to-mint.deposit)
-      =/  tx-id-matches=?
-        =(tx-id tx-id.deposit)
-      ::
-      ::  returning %.y means that a matching deposit was present in the hash-state.
-      ::  call %evaluate-base-call and sign the proposal.
-      ?:  ?&(dest-matches amount-matches tx-id-matches)
-        [~ ~ %.y]
-      ::
-      ::  if this condition is hit, it should result in a stop condition because
-      ::  it means the deposit entry under (block-hash, name) exists, but the
-      ::  the destination and/or amount does not match. This means that the proposer
-      ::  submitted an invalid proposal.
-      ::
-      ::  this goes without saying, if [~ ~ %.n] is returned:
-      ::    - do not call %evaluate-base-call
-      ::    - do not sign the proposal
-      ::    - return a STOP condition
-      [~ ~ %.n]
   ==
 ::
 ::    +poke: handle incoming bridge events

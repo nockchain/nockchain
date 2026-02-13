@@ -6,7 +6,7 @@ edition.workspace = true
 
 [dependencies]
 clap.workspace = true
-kernels = { workspace = true, features = ["nockchain_peek"] }
+kernels-open-nockchain-peek = { workspace = true }
 nockapp.workspace = true
 nockapp-grpc = { workspace = true }
 nockvm = { workspace = true }
@@ -16,4 +16,3 @@ rustls.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 zkvm-jetpack.workspace = true
-

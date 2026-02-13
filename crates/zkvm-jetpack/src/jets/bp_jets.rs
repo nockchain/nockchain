@@ -172,7 +172,7 @@ pub fn bp_ntt_jet(context: &mut Context, subject: Noun) -> Result {
     let returned_bpoly = bp_ntt(bp_poly.0, &Belt(root_64));
     // TODO: preallocate and pass res buffer into bp_ntt?
     let (res_atom, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len() as usize));
+        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len()));
     res_poly.copy_from_slice(&returned_bpoly[..]);
 
     let res_cell: Noun = finalize_poly(&mut context.stack, Some(res_poly.len()), res_atom);
@@ -188,7 +188,7 @@ pub fn bp_fft_jet(context: &mut Context, subject: Noun) -> Result {
     };
     let returned_bpoly = bp_fft(p_poly.0)?;
     let (res_atom, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len() as usize));
+        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len()));
 
     res_poly.copy_from_slice(&returned_bpoly);
 
@@ -229,7 +229,7 @@ pub fn bp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
     let root = Belt(order_32 as u64).ordered_root()?;
     let returned_bpoly = bp_coseword(p_poly.0, &offset_belt, order_32, &root);
     let (res, res_poly): (IndirectAtom, &mut [Belt]) =
-        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len() as usize));
+        new_handle_mut_slice(&mut context.stack, Some(returned_bpoly.len()));
     res_poly.copy_from_slice(&returned_bpoly);
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
 

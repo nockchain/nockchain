@@ -12,7 +12,7 @@ crossterm.workspace = true
 either.workspace = true
 getrandom.workspace = true
 http = "1"
-kernels = { workspace = true, features = ["wallet"] }
+kernels-open-wallet = { workspace = true }
 nockapp = { workspace = true }
 nockapp-grpc = { workspace = true }
 nockchain-math = { workspace = true }

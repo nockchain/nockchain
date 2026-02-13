@@ -191,9 +191,54 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
         Data::Struct(data) => {
             let field_encoders = match data.fields {
                 Fields::Named(fields) => {
-                    let field_encoders = fields.named.iter().enumerate().map(|(i, field)| {
+                    let field_count = fields.named.len();
+                    let mut field_infos: Vec<(u64, &syn::Field, usize)> = fields
+                        .named
+                        .iter()
+                        .enumerate()
+                        .map(|(i, field)| {
+                            let default_axis = if i == 0 {
+                                2
+                            } else if i == field_count - 1 {
+                                let mut axis = 2;
+                                for _ in 1..i {
+                                    axis = 2 * axis + 2;
+                                }
+                                axis + 1
+                            } else {
+                                let mut axis = 2;
+                                for _ in 1..=i {
+                                    axis = 2 * axis + 2;
+                                }
+                                axis
+                            };
+                            let axis = parse_axis_attr(&field.attrs).unwrap_or(default_axis);
+                            (axis, field, i)
+                        })
+                        .collect();
+
+                    let has_custom_axis = field_infos
+                        .iter()
+                        .any(|(_axis, field, _)| parse_axis_attr(&field.attrs).is_some());
+                    if has_custom_axis {
+                        field_infos.sort_by_key(|(axis, _field, _i)| *axis);
+                        let mut axes = field_infos
+                            .iter()
+                            .map(|(axis, _, _)| *axis)
+                            .collect::<Vec<_>>();
+                        axes.sort();
+                        if axes.windows(2).any(|w| w[0] == w[1]) {
+                            return syn::Error::new_spanned(
+                                &name, "duplicate #[noun(axis = ...)] values in struct fields",
+                            )
+                            .to_compile_error()
+                            .into();
+                        }
+                    }
+
+                    let field_encoders = field_infos.iter().enumerate().map(|(out_i, (_axis, field, _in_i))| {
                         let field_name = field.ident.as_ref().expect("named field must have ident");
-                        let field_var = format_ident!("field_{}", i);
+                        let field_var = format_ident!("field_{}", out_i);
                         quote! {
                             let #field_var = ::noun_serde::NounEncode::to_noun(&self.#field_name, allocator);
                             encoded_fields.push(#field_var);
@@ -238,9 +283,53 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
                             ::noun_serde::NounEncode::to_noun(&self.0, allocator)
                         }
                     } else {
-                        let field_encoders = (0..field_count).map(|i| {
-                            let idx = syn::Index::from(i);
-                            let field_var = format_ident!("field_{}", i);
+                        let mut field_infos: Vec<(u64, usize)> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, field)| {
+                                let default_axis = if i == 0 {
+                                    2
+                                } else if i == field_count - 1 {
+                                    let mut axis = 2;
+                                    for _ in 1..i {
+                                        axis = 2 * axis + 2;
+                                    }
+                                    axis + 1
+                                } else {
+                                    let mut axis = 2;
+                                    for _ in 1..=i {
+                                        axis = 2 * axis + 2;
+                                    }
+                                    axis
+                                };
+                                let axis = parse_axis_attr(&field.attrs).unwrap_or(default_axis);
+                                (axis, i)
+                            })
+                            .collect();
+
+                        let has_custom_axis = field_infos
+                            .iter()
+                            .any(|(_axis, i)| parse_axis_attr(&fields.unnamed[*i].attrs).is_some());
+                        if has_custom_axis {
+                            field_infos.sort_by_key(|(axis, _i)| *axis);
+                            let mut axes = field_infos
+                                .iter()
+                                .map(|(axis, _)| *axis)
+                                .collect::<Vec<_>>();
+                            axes.sort();
+                            if axes.windows(2).any(|w| w[0] == w[1]) {
+                                return syn::Error::new_spanned(
+                                    &name, "duplicate #[noun(axis = ...)] values in tuple fields",
+                                )
+                                .to_compile_error()
+                                .into();
+                            }
+                        }
+
+                        let field_encoders = field_infos.iter().enumerate().map(|(out_i, (_axis, i))| {
+                            let idx = syn::Index::from(*i);
+                            let field_var = format_ident!("field_{}", out_i);
                             quote! {
                                 let #field_var = ::noun_serde::NounEncode::to_noun(&self.#idx, allocator);
                                 encoded_fields.push(#field_var);

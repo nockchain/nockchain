@@ -16,3 +16,4 @@ pub mod tip5_jets;
 pub mod tip5_sponge;
 pub mod trace_gen_jets;
 pub mod verifier_jets;
+pub mod zoon_jets;

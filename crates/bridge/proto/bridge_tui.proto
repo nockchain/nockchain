@@ -1,0 +1,293 @@
+syntax = "proto3";
+
+package bridge.tui.v1;
+
+enum RunningState {
+  RUNNING_STATE_UNSPECIFIED = 0;
+  RUNNING = 1;
+  STOPPED = 2;
+}
+
+message GetSnapshotRequest {
+  DepositLogView deposit_log_view = 1;
+  AlertView alert_view = 2;
+}
+
+message Base58Hash {
+  string value = 1;
+}
+
+message EthAddress {
+  string value = 1;
+}
+
+message LastDeposit {
+  Base58Hash tx_id = 1;
+  Base58Hash name_first = 2;
+  Base58Hash name_last = 3;
+  EthAddress recipient = 4;
+  uint64 amount = 5;
+  uint64 block_height = 6;
+  Base58Hash as_of = 7;
+  uint64 nonce = 8;
+  string base_tx_hash = 9;
+  uint64 base_block_number = 10;
+}
+
+message SuccessfulDeposit {
+  Base58Hash tx_id = 1;
+  Base58Hash name_first = 2;
+  Base58Hash name_last = 3;
+  EthAddress recipient = 4;
+  uint64 amount = 5;
+  uint64 block_height = 6;
+  Base58Hash as_of = 7;
+  uint64 nonce = 8;
+}
+
+message DepositLogView {
+  uint64 offset = 1;
+  uint64 limit = 2;
+}
+
+message DepositLogRow {
+  uint64 nonce = 1;
+  uint64 block_height = 2;
+  string tx_id_base58 = 3;
+  string recipient_hex = 4;
+  uint64 amount = 5;
+}
+
+message DepositLogSnapshot {
+  uint64 total_count = 1;
+  uint64 first_epoch_nonce = 2;
+  repeated DepositLogRow rows = 3;
+}
+
+message AlertView {
+  uint32 limit = 1;
+}
+
+enum AlertSeverity {
+  ALERT_SEVERITY_UNSPECIFIED = 0;
+  INFO = 1;
+  WARNING = 2;
+  ERROR = 3;
+  CRITICAL = 4;
+}
+
+message Alert {
+  uint64 id = 1;
+  AlertSeverity severity = 2;
+  string title = 3;
+  string message = 4;
+  string source = 5;
+  uint64 created_at_ms = 6;
+}
+
+message AlertsSnapshot {
+  repeated Alert alerts = 1;
+}
+
+message ChainState {
+  uint64 height = 1;
+  string tip_hash = 2;
+  uint64 confirmations = 3;
+  bool is_syncing = 4;
+  optional uint64 last_updated_ms = 5;
+}
+
+message NockchainApiStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    CONNECTED = 1;
+    CONNECTING = 2;
+    DISCONNECTED = 3;
+  }
+
+  State state = 1;
+  optional uint64 since_ms = 2;
+  optional uint32 attempt = 3;
+  optional string last_error = 4;
+}
+
+message BatchStatus {
+  oneof status {
+    BatchIdle idle = 1;
+    BatchProcessing processing = 2;
+    BatchAwaitingSignatures awaiting_signatures = 3;
+    BatchSubmitting submitting = 4;
+  }
+}
+
+message BatchIdle {}
+
+message BatchProcessing {
+  uint64 batch_id = 1;
+  uint32 progress_pct = 2;
+}
+
+message BatchAwaitingSignatures {
+  uint64 batch_id = 1;
+  uint32 collected = 2;
+  uint32 required = 3;
+}
+
+message BatchSubmitting {
+  uint64 batch_id = 1;
+}
+
+message NetworkState {
+  ChainState base = 1;
+  ChainState nockchain = 2;
+  uint64 pending_deposits = 3;
+  uint64 pending_withdrawals = 4;
+  uint64 unsettled_deposit_count = 5;
+  uint64 unsettled_withdrawal_count = 6;
+  BatchStatus batch_status = 7;
+  optional bool is_mainnet = 8;
+  NockchainApiStatus nockchain_api_status = 9;
+  optional uint64 base_next_height = 10;
+  optional uint64 nock_next_height = 11;
+  optional string degradation_warning = 12;
+}
+
+enum ProposalStatus {
+  PROPOSAL_STATUS_UNSPECIFIED = 0;
+  PENDING = 1;
+  READY = 2;
+  SUBMITTED = 3;
+  EXECUTED = 4;
+  EXPIRED = 5;
+  FAILED = 6;
+}
+
+message Proposal {
+  string id = 1;
+  string proposal_type = 2;
+  string description = 3;
+  uint32 signatures_collected = 4;
+  uint32 signatures_required = 5;
+  repeated uint64 signers = 6;
+  optional uint64 created_at_ms = 7;
+  ProposalStatus status = 8;
+  string data_hash = 9;
+  optional uint64 submitted_at_block = 10;
+  optional uint64 submitted_at_ms = 11;
+  optional string tx_hash = 12;
+  optional uint64 time_to_submit_ms = 13;
+  optional uint64 executed_at_block = 14;
+  optional uint64 source_block = 15;
+  // NOCK amount as a decimal string (1 NOCK = 65,536 nicks).
+  optional string amount = 16;
+  optional string recipient = 17;
+  optional uint64 nonce = 18;
+  optional string source_tx_id = 19;
+  optional uint64 current_proposer = 20;
+  bool is_my_turn = 21;
+  optional uint64 time_until_takeover_ms = 22;
+  optional string failure_reason = 23;
+}
+
+message ProposalState {
+  Proposal last_submitted = 1;
+  repeated Proposal pending_inbound = 2;
+  repeated Proposal history = 3;
+}
+
+enum TxDirection {
+  TX_DIRECTION_UNSPECIFIED = 0;
+  DEPOSIT = 1;
+  WITHDRAWAL = 2;
+}
+
+message TxStatus {
+  oneof status {
+    TxStatusPending pending = 1;
+    TxStatusConfirming confirming = 2;
+    TxStatusProcessing processing = 3;
+    TxStatusCompleted completed = 4;
+    TxStatusFailed failed = 5;
+  }
+}
+
+message TxStatusPending {}
+
+message TxStatusConfirming {
+  uint64 confirmations = 1;
+  uint64 required = 2;
+}
+
+message TxStatusProcessing {}
+
+message TxStatusCompleted {}
+
+message TxStatusFailed {
+  string reason = 1;
+}
+
+message BridgeTx {
+  string tx_hash = 1;
+  TxDirection direction = 2;
+  string from = 3;
+  string to = 4;
+  string amount = 5;
+  TxStatus status = 6;
+  uint64 timestamp_ms = 7;
+  optional uint64 base_block = 8;
+  optional uint64 nock_height = 9;
+}
+
+message TransactionState {
+  repeated BridgeTx transactions = 1;
+  uint64 max_transactions = 2;
+}
+
+message MetricsState {
+  string total_deposited = 1;
+  string total_withdrawn = 2;
+  repeated uint64 hourly_tx_counts = 3;
+  double avg_latency_secs = 4;
+  double success_rate = 5;
+  string total_fees = 6;
+  uint64 tx_count = 7;
+  uint64 latency_sum_ms = 8;
+  uint64 latency_count = 9;
+}
+
+enum PeerHealthStatus {
+  PEER_HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTHY = 1;
+  UNREACHABLE = 2;
+}
+
+message PeerStatus {
+  uint64 node_id = 1;
+  string address = 2;
+  PeerHealthStatus status = 3;
+  optional string error = 4;
+  optional uint64 latency_ms = 5;
+  optional uint64 peer_uptime_ms = 6;
+  optional uint64 last_updated_ms = 7;
+}
+
+message GetSnapshotResponse {
+  RunningState running_state = 1;
+  bool nock_hold = 2;
+  bool base_hold = 3;
+  optional uint64 nock_hold_height = 4;
+  optional uint64 base_hold_height = 5;
+  NetworkState network_state = 6;
+  DepositLogSnapshot deposit_log = 7;
+  ProposalState proposals = 8;
+  repeated PeerStatus peer_statuses = 9;
+  LastDeposit last_submitted_deposit = 10;
+  SuccessfulDeposit last_successful_deposit = 11;
+  AlertsSnapshot alerts = 12;
+  MetricsState metrics = 13;
+  TransactionState transactions = 14;
+}
+
+service BridgeTui {
+  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
+}

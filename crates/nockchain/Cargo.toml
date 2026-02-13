@@ -17,7 +17,8 @@ clap.workspace = true
 equix.workspace = true
 futures.workspace = true
 ibig.workspace = true
-kernels = { workspace = true, features = ["dumb", "miner"] }
+kernels-open-dumb = { workspace = true }
+kernels-open-miner = { workspace = true }
 libp2p = { workspace = true, features = [
     "ping",
     "kad",

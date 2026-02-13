@@ -52,9 +52,7 @@ pub fn validate_channel_name(channel: &str) -> ValidationResult<()> {
 
 pub fn validate_project_path(path: &Path) -> ValidationResult<()> {
     if path.exists() {
-        return Err(ValidationError::DirectoryExists(
-            path.display().to_string(),
-        ));
+        return Err(ValidationError::DirectoryExists(path.display().to_string()));
     }
     Ok(())
 }
@@ -77,7 +75,8 @@ pub fn validate_existing_project(path: &Path) -> ValidationResult<()> {
 
 // src/cli.rs - CLI argument structure with validation
 use clap::{Parser, Subcommand};
-use crate::validation::{validate_project_name, validate_channel_name, ValidationResult};
+
+use crate::validation::{validate_channel_name, validate_project_name, ValidationResult};
 
 #[derive(Parser)]
 #[command(name = "nockup")]
@@ -140,15 +139,17 @@ fn validate_channel_name_arg(s: &str) -> Result<String, String> {
 }
 
 // src/lib.rs - Expose modules for testing
-pub mod validation;
 pub mod cli;
+pub mod validation;
 
 // Unit tests for validation functions
 #[cfg(test)]
 mod validation_tests {
-    use super::validation::*;
     use std::path::PathBuf;
+
     use tempfile::TempDir;
+
+    use super::validation::*;
 
     #[test]
     fn test_validate_project_name_valid() {
@@ -179,10 +180,7 @@ mod validation_tests {
     #[test]
     fn test_validate_project_name_invalid_chars() {
         let invalid_names = vec![
-            "project with spaces",
-            "project/with/slashes",
-            "project@with@symbols",
-            "project!",
+            "project with spaces", "project/with/slashes", "project@with@symbols", "project!",
             "project.dot",
         ];
 
@@ -198,7 +196,7 @@ mod validation_tests {
     fn test_validate_channel_name() {
         assert!(validate_channel_name("stable").is_ok());
         assert!(validate_channel_name("nightly").is_ok());
-        
+
         assert!(matches!(
             validate_channel_name("invalid"),
             Err(ValidationError::InvalidChannelName(_))
@@ -228,7 +226,7 @@ mod validation_tests {
         let temp_dir = TempDir::new().unwrap();
         let project_dir = temp_dir.path().join("project");
         let non_existing = temp_dir.path().join("non-existing");
-        
+
         // Test non-existing project
         assert!(matches!(
             validate_existing_project(&non_existing),
@@ -251,8 +249,9 @@ mod validation_tests {
 // Property-based testing with proptest (optional)
 #[cfg(feature = "proptest")]
 mod proptest_validation {
-    use super::validation::*;
     use proptest::prelude::*;
+
+    use super::validation::*;
 
     proptest! {
         #[test]
@@ -281,9 +280,9 @@ mod proptest_validation {
 pub fn handle_start_command(project_name: &str) -> Result<(), Box<dyn std::error::Error>> {
     // Validation is already done by clap, but you can add additional checks
     let project_path = std::path::Path::new(project_name);
-    
+
     validate_project_path(project_path)?;
-    
+
     // Proceed with project creation...
     println!("Creating project: {}", project_name);
     Ok(())
@@ -291,9 +290,9 @@ pub fn handle_start_command(project_name: &str) -> Result<(), Box<dyn std::error
 
 pub fn handle_build_command(project_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let path = std::path::Path::new(project_path);
-    
+
     validate_existing_project(path)?;
-    
+
     // Proceed with build...
     println!("Building project at: {}", project_path);
     Ok(())

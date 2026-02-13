@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use clap::Parser;
-use kernels::nockchain_peek::KERNEL;
+use kernels_open_nockchain_peek::KERNEL;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

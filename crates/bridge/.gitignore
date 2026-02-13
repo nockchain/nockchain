@@ -1,0 +1,41 @@
+# Devenv
+.devenv*
+devenv.lock
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+
+# Test data from scripts
+test_run_data/
+
+# Environment files with secrets (use .env.example templates)
+*.env
+!*.env.example
+bridge-conf.mainnet.toml
+bridge-conf.sepolia.toml
+
+# Transaction files (test artifacts)
+txs/
+scripts/txs/
+contracts/txs/
+
+# Deployment outputs (contain addresses, regenerated on deploy)
+contracts/deployments/
+contracts/out
+
+# Contract dependencies (must be built locally)
+contracts/lib

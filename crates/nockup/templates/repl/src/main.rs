@@ -3,11 +3,10 @@ use std::fs;
 use std::io::{self, Write};
 
 use bytes::Bytes;
-use nockapp::exit_driver;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{SystemWire, Wire};
-use nockapp::{AtomExt, NockApp};
+use nockapp::{exit_driver, AtomExt, NockApp};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
 
@@ -28,9 +27,7 @@ async fn process_input(nockapp: &mut NockApp, input: &str) -> Result<String, Box
     let command_noun = T(&mut poke_slab, &[D(tas!(b"call")), str_atom.as_noun()]);
     poke_slab.set_root(command_noun);
 
-    nockapp
-        .add_io_driver(exit_driver())
-        .await;
+    nockapp.add_io_driver(exit_driver()).await;
 
     match nockapp.poke(SystemWire.to_wire(), poke_slab).await {
         Ok(effects) => {
@@ -45,7 +42,7 @@ async fn process_input(nockapp: &mut NockApp, input: &str) -> Result<String, Box
                         .trim_end_matches(char::from(0))
                         .to_string();
                     if code == "exit" {
-                      return Err("Exit command received".into());
+                        return Err("Exit command received".into());
                     }
                     let Ok(tail_atom) = cell.tail().as_atom() else {
                         todo!()

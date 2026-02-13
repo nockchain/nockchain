@@ -1,7 +1,7 @@
 use std::error::Error;
 
 use clap::Parser;
-use kernels::dumb::KERNEL;
+use kernels_open_dumb::KERNEL;
 use nockapp::kernel::boot;
 use nockchain::NockchainAPIConfig;
 use zkvm_jetpack::hot::produce_prover_hot_state;

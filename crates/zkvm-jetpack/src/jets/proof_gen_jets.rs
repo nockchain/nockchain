@@ -654,7 +654,7 @@ pub fn compute_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, Je
     );
 
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =
-        new_handle_mut_slice(&mut context.stack, Some(compute_deep_res.len() as usize));
+        new_handle_mut_slice(&mut context.stack, Some(compute_deep_res.len()));
 
     res_poly.copy_from_slice(compute_deep_res.as_slice());
 

@@ -28,7 +28,7 @@ pub fn fp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
     let returned_fpoly = fp_coseword(p_poly.0, offset_felt, order_32, &root);
 
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =
-        new_handle_mut_slice(&mut context.stack, Some(returned_fpoly.len() as usize));
+        new_handle_mut_slice(&mut context.stack, Some(returned_fpoly.len()));
     res_poly.copy_from_slice(&returned_fpoly[..]);
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
 
@@ -42,7 +42,7 @@ pub fn init_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
     let count = list_felt.count();
 
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =
-        new_handle_mut_slice(&mut context.stack, Some(count as usize));
+        new_handle_mut_slice(&mut context.stack, Some(count));
     for (i, felt_noun) in list_felt.enumerate() {
         let Ok(felt) = felt_noun.as_felt() else {
             debug!("list element not a felt");

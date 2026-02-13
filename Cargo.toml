@@ -1,7 +1,7 @@
 resolver = "2"
 
 [workspace]
-members = ["crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/zkvm-jetpack"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,6 +18,7 @@ assert_cmd = "2.0"
 async-trait = "0.1"
 axum = "0.8.1"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+backon = { version = "1.6", features = ["tokio-sleep"] }
 bardecoder = "0.5.0"
 bincode = "2.0.0-rc.3"
 bitcoincore-rpc = "0.19.0"
@@ -39,6 +40,8 @@ criterion = { git = "https://github.com/vlovich/criterion.rs.git", rev = "9b485a
 crossterm = "0.29"
 curve25519-dalek = { version = "4.1.1", default-features = false }
 dashmap = "6.1.0"
+deadpool-diesel = { version = "0.6.1", features = ["rt_tokio_1", "sqlite"] }
+diesel = { version = "2.1.4", features = ["sqlite"] }
 dirs = "6.0.0"
 divan = "0.1.21"
 ed25519-dalek = { version = "2.1.0", default-features = false }
@@ -62,6 +65,7 @@ intmap = "3.1.0"
 lazy_static = "1.4.0"
 libc = "0.2.171"
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", rev = "da0017ee887a868e231ed78c7de892779c17800d" }
+libsqlite3-sys = { version = "0.35.0", features = ["bundled"] }
 memmap2 = "^0.9.5"
 nu-ansi-term = "0.50"
 num-bigint = "0.4.6"
@@ -120,6 +124,7 @@ signal-hook = "0.3"
 signal-hook-tokio = "0.3.1"
 slotmap = "1.0.7"
 smallvec = "1.15.1"
+snmalloc-rs = { git = "https://github.com/litlep-nibbyt/snmalloc.git", rev = "060d5b9fa1c5777a52deae8dbdd82da91babf35f", default-features = false, features = ["build_cc", "usewait-on-address"] }
 static_assertions = "1.1.0"
 strum = { version = "0.27.2", features = ["derive"] }
 syn = { version = "2.0.39", features = ["full"] }
@@ -154,6 +159,7 @@ tonic-prost-build = "0.14.0"
 tonic-reflection = "0.14.0"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.41"
+tracing-appender = "0.2.4"
 tracing-core = "0.1"
 tracing-opentelemetry = { version = "0.31.0", features = ["metrics"] }
 tracing-subscriber = { version = "0.3.18", features = [
@@ -185,8 +191,20 @@ path = "crates/hoonc"
 [workspace.dependencies.ibig]
 path = "crates/nockvm/rust/ibig"
 
-[workspace.dependencies.kernels]
-path = "crates/kernels"
+[workspace.dependencies.kernels-open-bridge]
+path = "crates/kernels/bridge"
+
+[workspace.dependencies.kernels-open-dumb]
+path = "crates/kernels/dumb"
+
+[workspace.dependencies.kernels-open-miner]
+path = "crates/kernels/miner"
+
+[workspace.dependencies.kernels-open-nockchain-peek]
+path = "crates/kernels/nockchain-peek"
+
+[workspace.dependencies.kernels-open-wallet]
+path = "crates/kernels/wallet"
 
 [workspace.dependencies.murmur3]
 path = "crates/nockvm/rust/murmur3"
@@ -254,3 +272,13 @@ debug = 1
 opt-level = 3
 codegen-units = 1
 debug = 1
+
+# Memory profiling with bytehound. Keeps release optimizations but emits full debug info.
+[profile.bytehound]
+inherits = "release"
+debug = 2
+
+[profile.bytehound.package."*"]
+opt-level = 3
+codegen-units = 1
+debug = 2

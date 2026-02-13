@@ -1,9 +1,15 @@
-use std::{path::PathBuf, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::Duration};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::{fs, io::AsyncWriteExt as _, sync::mpsc};
+use tokio::fs;
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::mpsc;
 use tracing::{error, trace};
 
-use crate::{kernel::checkpoint::JammedCheckpoint, nockapp::NockAppError};
+use crate::kernel::checkpoint::JammedCheckpoint;
+use crate::nockapp::NockAppError;
 
 // Save actor messages
 pub(crate) enum SaveMessage {
@@ -81,9 +87,7 @@ impl SaveActor {
             .await
             .map_err(NockAppError::SaveError)?;
 
-        file.sync_all()
-            .await
-            .map_err(NockAppError::SaveError)?;
+        file.sync_all().await.map_err(NockAppError::SaveError)?;
 
         trace!(
             "Write to {:?} successful, ker_hash: {}, event: {}",
@@ -93,7 +97,8 @@ impl SaveActor {
         );
 
         // Flip toggle after successful write
-        self.buffer_toggle.store(!self.buffer_toggle.load(Ordering::SeqCst), Ordering::SeqCst);
+        self.buffer_toggle
+            .store(!self.buffer_toggle.load(Ordering::SeqCst), Ordering::SeqCst);
         self.event_sender.send(checkpoint.event_num)?;
         self.last_save = std::time::Instant::now();
 

@@ -1,6 +1,7 @@
-use ibig::UBig;
+use nockvm::ext::AtomExt;
 use nockvm::noun::{Noun, NounAllocator};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
+use num_bigint::BigUint;
 
 use super::{Hash, TxId};
 
@@ -50,17 +51,21 @@ fn collect_zset_items<T: NounDecode>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BigNum(pub UBig);
+pub struct BigNum(pub BigUint);
 
 impl BigNum {
     pub fn from_u64(value: u64) -> Self {
-        BigNum(UBig::from(value))
+        BigNum(BigUint::from(value))
     }
 }
 
 impl NounEncode for BigNum {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
-        nockvm::noun::Atom::from_ubig(allocator, &self.0).as_noun()
+        let bytes = self.0.to_bytes_le();
+        if bytes.is_empty() {
+            return nockvm::noun::Atom::new(allocator, 0).as_noun();
+        }
+        nockvm::noun::Atom::from_bytes(allocator, &bytes).as_noun()
     }
 }
 
@@ -92,10 +97,12 @@ impl NounDecode for BigNum {
                     if let Ok(end) = current.as_atom() {
                         if end.as_u64() == Ok(0) {
                             // Reconstruct the number: chunks are in LSB order, each is 32 bits
-                            let mut result = UBig::from(0u32);
-                            for (i, chunk) in chunks.iter().enumerate() {
-                                let shift = i * 32;
-                                result += UBig::from(*chunk) << shift;
+                            let mut result = BigUint::from(0u8);
+                            let mut factor = BigUint::from(1u8);
+                            let base = BigUint::from(1u64) << 32;
+                            for chunk in chunks {
+                                result += BigUint::from(chunk) * &factor;
+                                factor *= &base;
                             }
                             return Ok(BigNum(result));
                         }
@@ -120,8 +127,8 @@ impl NounDecode for BigNum {
             NounDecodeError::Custom("BigNum: expected atom or [%bn list] cell".into())
         })?;
         let bytes = atom.as_ne_bytes();
-        let ubig = UBig::from_le_bytes(bytes);
-        Ok(BigNum(ubig))
+        let biguint = BigUint::from_bytes_le(bytes);
+        Ok(BigNum(biguint))
     }
 }
 
@@ -230,6 +237,8 @@ impl NounEncode for Page {
 }
 
 impl NounDecode for Page {
+    // TODO: Purge these custom Page NounDecode/NounEncode implementations in favor of
+    // the standard noun-serde path once it can represent this shape directly.
     fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
         let cell = noun
             .as_cell()

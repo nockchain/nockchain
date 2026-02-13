@@ -1,0 +1,29 @@
+# Tenderly Virtual Testnet (50 block limit, state manipulation available)
+# Source this file: source environments/devnet.example
+#
+# Create a Virtual Testnet at: https://dashboard.tenderly.co -> Virtual Testnets
+
+# Virtual Testnet RPC URL (HTTP version for deployment)
+# Format: https://virtual.base-sepolia.<region>.rpc.tenderly.co/<virtual-testnet-id>
+export TENDERLY_RPC_URL="https://virtual.base-sepolia.us-east.rpc.tenderly.co/YOUR_VIRTUAL_TESTNET_ID"
+
+# Deployer private key (fund with tenderly_setBalance RPC call)
+export TENDERLY_PRIVATE_KEY="0x..."
+
+# Bridge node Ethereum public keys
+export BRIDGE_NODE_0="0x..."
+export BRIDGE_NODE_1="0x..."
+export BRIDGE_NODE_2="0x..."
+export BRIDGE_NODE_3="0x..."
+export BRIDGE_NODE_4="0x..."
+
+export NOCK_NAME="Nock"
+export NOCK_SYMBOL="NOCK"
+
+export DEPLOY_TARGET_NETWORK="tenderly-devnet"
+export DEPLOYER_ADDRESS="0x..."
+
+# Optional verification
+export TENDERLY_ACCOUNT_ID="littel_wolfur"
+export TENDERLY_PROJECT_SLUG="bridge-contracts"
+

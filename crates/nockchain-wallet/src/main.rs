@@ -28,7 +28,7 @@ use command::WalletWire;
 use command::{
     ClientType, CommandNoun, Commands, NoteSelectionStrategyCli, WalletCli, WatchSubcommand,
 };
-use kernels::wallet::KERNEL;
+use kernels_open_wallet::KERNEL;
 use nockapp::driver::*;
 use nockapp::kernel::boot::{self, NockStackSize};
 use nockapp::noun::slab::{NockJammer, NounSlab};

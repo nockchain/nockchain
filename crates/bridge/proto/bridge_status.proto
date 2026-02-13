@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package bridge.status.v1;
+
+enum RunningState {
+  RUNNING_STATE_UNSPECIFIED = 0;
+  RUNNING = 1;
+  STOPPED = 2;
+}
+
+message GetStatusRequest {}
+
+message Base58Hash {
+  string value = 1;
+}
+
+message EthAddress {
+  string value = 1;
+}
+
+message LastDeposit {
+  Base58Hash tx_id = 1;
+  Base58Hash name_first = 2;
+  Base58Hash name_last = 3;
+  EthAddress recipient = 4;
+  uint64 amount = 5;
+  uint64 block_height = 6;
+  Base58Hash as_of = 7;
+  uint64 nonce = 8;
+  string base_tx_hash = 9;
+  uint64 base_block_number = 10;
+}
+
+message SuccessfulDeposit {
+  Base58Hash tx_id = 1;
+  Base58Hash name_first = 2;
+  Base58Hash name_last = 3;
+  EthAddress recipient = 4;
+  uint64 amount = 5;
+  uint64 block_height = 6;
+  Base58Hash as_of = 7;
+  uint64 nonce = 8;
+}
+
+message GetStatusResponse {
+  RunningState running_state = 1;
+  bool nock_hold = 2;
+  bool base_hold = 3;
+  optional uint64 nock_hold_height = 4;
+  optional uint64 base_hold_height = 5;
+  optional uint64 nock_height = 6;
+  optional uint64 base_height = 7;
+  optional LastDeposit last_submitted_deposit = 8;
+  optional SuccessfulDeposit last_successful_deposit = 9;
+}
+
+service BridgeStatus {
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+}

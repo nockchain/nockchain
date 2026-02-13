@@ -4,12 +4,12 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
+use grpc::string_to_atom;
 use nockapp::driver::{make_driver, IODriverFn, NockAppHandle, Operation};
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{SystemWire, Wire, WireRepr, WireTag as AppWireTag};
-use nockapp::{exit_driver, file_driver};
-use nockapp::{AtomExt, Bytes, NockApp, NockAppError, Noun};
+use nockapp::{exit_driver, file_driver, AtomExt, Bytes, NockApp, NockAppError, Noun};
 use nockapp_grpc::client::NockAppGrpcClient;
 use nockapp_grpc::driver::{grpc_listener_driver, grpc_server_driver};
 use nockapp_grpc::wire_conversion::create_grpc_wire;
@@ -18,8 +18,6 @@ use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tracing::{error, info};
-
-use grpc::string_to_atom;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {

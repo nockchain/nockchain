@@ -210,16 +210,35 @@
 +$  stop-info  [base=[hash=base-hash height=@] nock=[hash=nock-hash height=@]]
 ::
 ::  $bridge-state: state of the bridge
-+$  bridge-state
++$  bridge-state-0
   $:  %0
       config=node-config                                    ::  node configuration
       constants=bridge-constants                            ::  static bridge parameters
-      =hash-state                                           ::  hashlogged cross-chain state
-      next-nonce=$~(1 @)                                    ::  nonce to track processed deposits
+      hash-state=hash-state-0                               ::  hashlogged cross-chain state
+      next-nonce=$~(1 @)                                    ::  DEPRECATED: runtime assigns deposit nonces
       last-block=page:t                                     ::  for determining proposer
       =bridge-lock-root                                     ::  script hash: receive address for bridge deposits
       stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
   ==
+::
++$  bridge-state-1
+  $:  %1
+      config=node-config                                    ::  node configuration
+      constants=bridge-constants                            ::  static bridge parameters
+      hash-state=hash-state-1                               ::  hashlogged cross-chain state
+      last-nock-deposit-height=@                            ::  last nockchain height containing a deposit (0 = none)
+      last-block=page:t                                     ::  for determining proposer
+      =bridge-lock-root                                     ::  script hash: receive address for bridge deposits
+      stop=(unit stop-info)                                 ::  flag to stop the bridge. populated with last known good block hashes if stop is true.
+  ==
+::
++$  versioned-bridge-state
+  $%  bridge-state-0
+      bridge-state-1
+  ==
+::
++$  bridge-state  bridge-state-1
+::
 ++  get-stop-info
   |=  state=bridge-state
   ^-  stop-info
@@ -238,7 +257,8 @@
   ==
 ::
 :::
-++  hash-state
++$  hash-state  hash-state-1
+++  hash-state-0
   =<  form
   |%
   +$  form
@@ -281,10 +301,6 @@
         ::  seen a settlement transaction.
         ::
         ::  If a deposit is not in this set we will not sign a settlement transaction for it.
-        ::
-        ::  unconfirmed-settled-deposits tracks deposits for which we have seen a deposit user action,
-        ::  but which we have not yet seen confirmed on BASE. This allows us to
-        ::  validate the BASE consensus.
         ::
         ::  unsettled-withdrawals and unconfirmed-settled-withdrawals work similarly,
         ::  but for withdrawals initiated on BASE and settled on Nockchain
@@ -329,6 +345,65 @@
         ::  withdrawals are removed from this set when the withdrawal settlement is
         ::  confirmed on Nockchain
         unconfirmed-settled-withdrawals=(z-mip base-hash beid withdrawal)
+    ==
+  --
+++  hash-state-1
+  =<  form
+  |%
+  +$  form
+    $+  hash-state-1
+    $:  version=%1
+        ::
+        ::  hashchains
+        last-nock-block=nock-hash
+        last-base-blocks=base-hash
+        nock-hashchain=(z-map nock-hash nock-block)
+        base-hashchain=(z-map base-hash base-blocks)
+        ::
+        ::
+        ::  nock-hold blocks the advancement of nock hashchain until the
+        ::  the base block with the specified hash is processed
+        nock-hold=(unit [hash=base-hash height=@])
+        ::
+        ::  base-hold blocks the advancement of base hashchain until the
+        ::  the nock block with the specified hash is processed
+        base-hold=(unit [hash=nock-hash height=@])
+        ::
+        :: Next Nockchain block height required for the hashchain
+        nock-hashchain-next-height=nockchain-start-height
+        ::
+        :: Next highest-in-the-batch height required for the BASE hashchain
+        base-hashchain-next-height=base-start-height
+        ::
+        ::  track unsettled asset allocations
+        ::
+        ::  For each hashchain we need:
+        ::
+        ::  unsettled-deposits tracks deposits
+        ::  which have confirmed on Nockchain but for which our node has never
+        ::  seen a settlement transaction.
+        ::
+        ::  If a deposit is not in this set we will not sign a settlement transaction for it.
+        ::
+        ::  unsettled-deposits are tracked post-fee, so the amount recorded
+        ::  is the exact amount which should be minted in Base NOCK
+        ::
+        ::  deposits are removed from this set when we propose, sign, or
+        ::  observe a transaction settling them, even if not posted to or
+        ::  confirmed on BASE
+        ::
+        ::  Populated by nock hashchain: when a nock block is confirmed,
+        ::  deposit notes are added to this set
+        unsettled-deposits=(z-mip nock-hash nname:t deposit)
+        ::
+        ::  unsettled-withdrawals are tracked pre-fee, so the amount recorded
+        ::  is exact amount which is burned on Base NOCK, but not the exact amount
+        ::  which will be received on nockchain
+        ::
+        ::  withdrawals are removed from this set when we the transaction settling
+        ::  them is posted on nockchain
+        unsettled-withdrawals=(z-mip base-hash beid withdrawal)
+        ::
     ==
   --
 :::
@@ -784,7 +859,6 @@
           [%set-constants constants=bridge-constants]
           [%base-blocks raw-base-blocks]
           [%nockchain-block nockchain-block]
-          [%proposed-base-call proposed-base-call]
           [%proposed-nock-tx proposed-nock-tx]  ::  TODO: fill in when we do withdrawals
           [%stop last=stop-info]
           [%start ~]
@@ -795,7 +869,7 @@
   ::
   +$  nockchain-block  [block=page:t txs=(z-map tx-id:t tx:t)]
   ::
-  +$  proposed-base-call  (list eth-signature-request:effect)
+  +$  proposed-base-call  (list nock-deposit-request:effect)
   ::
   +$  proposed-nock-tx  raw-tx:t
   ::
@@ -810,9 +884,9 @@
     $:  %0
       $%  [%base-call base-call]
           [%assemble-base-call data-part:deposit-settlement]
-          [%eth-signature-request eth-signature-request]
+          [%nock-deposit-request nock-deposit-request]
           ::  broadcast signature requests to peer nodes for signing
-          [%propose-base-call reqs=(list eth-signature-request)]
+          [%commit-nock-deposits reqs=(list nock-deposit-request)]
           [%nockchain-tx nockchain-tx]
           [%propose-nockchain-tx propose-nockchain-tx]
           [%grpc grpc-effect]
@@ -830,12 +904,16 @@
   ::      bytes32 asOf,
   ::
   ::  proposal hash is computed as:
-  ::  keccak256(abi.encode(txId, name, recipient, amount, blockHeight, asOf))
+  ::  keccak256(abi.encode(txId, name, recipient, amount, blockHeight, asOf, depositNonce))
   ::
-  +$  eth-signature-request
-    [tx-id=tx-id:t name=nname:t recipient=base-addr amount=@ block-height=@ as-of=nock-hash nonce=@]
+  ::  NOTE: The kernel does not assign deposit nonces. The Rust runtime assigns
+  ::  nonces deterministically and constructs the final proposal hash/signature
+  ::  request used for contract submission.
   ::
-  +$  propose-base-call  [peer=nock-pubkey req=eth-signature-request]
+  +$  nock-deposit-request
+    [tx-id=tx-id:t name=nname:t recipient=base-addr amount=@ block-height=@ as-of=nock-hash]
+  ::
+  +$  commit-nock-deposits  [peer=nock-pubkey req=nock-deposit-request]
   ::
   +$  nockchain-tx  [tx=raw-tx:t]
   ::

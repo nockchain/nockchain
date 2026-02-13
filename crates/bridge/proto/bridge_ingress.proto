@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package bridge.ingress.v1;
+
+enum ProposalKind {
+  PROPOSAL_KIND_UNSPECIFIED = 0;
+  PROPOSAL_KIND_BASE = 1;
+  // PROPOSAL_KIND_NOCKCHAIN = 2; // Removed: bridge only handles deposit proposals
+}
+
+message ProposalRequest {
+  string proposer = 1;
+  bytes payload = 2;
+  uint64 request_id = 3;
+  ProposalKind kind = 4;
+}
+
+message ProposalResponse {
+  string event_id = 1;
+  // Signature from this node if the proposal was validated and signed
+  bytes signature = 2;
+  // The proposal hash that was signed (for verification)
+  bytes proposal_hash = 3;
+}
+
+// EthSignatureRequest contains the structured fields needed to compute
+// the proposal hash: keccak256(abi.encode(txId, name, recipient, amount, blockHeight, asOf, nonce))
+message EthSignatureRequest {
+  bytes tx_id = 1;          // 40-byte nockchain transaction ID (5 uint64 limbs)
+  bytes name = 2;            // 80-byte note name (first + last Tip5 hashes)
+  bytes recipient = 3;       // 20-byte Ethereum address
+  uint64 amount = 4;         // Amount in nocks
+  uint64 block_height = 5;   // Block height
+  bytes as_of = 6;           // 32-byte as-of hash
+  uint64 nonce = 7;          // Deposit nonce for event ordering
+}
+
+message SignatureRequest {
+  reserved 1;
+  reserved "signer";
+  // proposal_hash is keccak256(abi.encode(txId, name, recipient, amount, blockHeight, asOf))
+  bytes proposal_hash = 2;
+  bytes signature = 3;
+  uint64 request_id = 4;
+  EthSignatureRequest eth_signature_request = 5;
+}
+
+message SignatureResponse {
+  string event_id = 1;
+}
+
+message HealthCheckRequest {
+  uint64 requester_node_id = 1;
+  string requester_address = 2;
+}
+
+message HealthCheckResponse {
+  uint64 responder_node_id = 1;
+  uint64 uptime_millis = 2;
+  string status = 3;
+  uint64 timestamp_millis = 4;
+}
+
+message SignatureBroadcast {
+  bytes deposit_id = 1;        // DepositId serialized (120 bytes)
+  bytes proposal_hash = 2;     // 32 bytes
+  bytes signature = 3;         // 65 bytes (r, s, v)
+  bytes signer_address = 4;    // 20 bytes
+  uint64 timestamp = 5;        // Unix timestamp
+}
+
+message SignatureBroadcastResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+message ProposalStatusRequest {
+  bytes deposit_id = 1;
+}
+
+message ProposalStatusResponse {
+  string status = 1;
+  uint32 signature_count = 2;
+  repeated bytes signers = 3;
+  optional bytes tx_hash = 4;
+}
+
+// Broadcast when a proposal has been confirmed on-chain
+// Sent by the node that successfully posted to BASE
+message ConfirmationBroadcast {
+  bytes deposit_id = 1;        // DepositId serialized (120 bytes)
+  bytes proposal_hash = 2;     // 32 bytes
+  bytes tx_hash = 3;           // 32 bytes - the BASE transaction hash
+  uint64 block_number = 4;     // BASE block number where confirmed
+  uint64 timestamp = 5;        // Unix timestamp
+}
+
+message ConfirmationBroadcastResponse {
+  bool accepted = 1;
+}
+
+// Broadcast when the bridge should stop processing.
+// The recipient should poke its kernel with `%stop last=[base-hash nock-hash]`.
+message StopBroadcast {
+  uint64 sender_node_id = 1;
+  string reason = 2;
+  optional bytes last_base_hash = 3;   // 40 bytes (5 uint64 limbs)
+  optional uint64 last_base_height = 4;
+  optional bytes last_nock_hash = 5;   // 40 bytes (5 uint64 limbs)
+  optional uint64 last_nock_height = 6;
+  uint64 timestamp = 7;       // Unix timestamp
+}
+
+message StopBroadcastResponse {
+  bool accepted = 1;
+}
+
+service BridgeIngress {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc BroadcastSignature(SignatureBroadcast) returns (SignatureBroadcastResponse);
+  rpc GetProposalStatus(ProposalStatusRequest) returns (ProposalStatusResponse);
+  rpc BroadcastConfirmation(ConfirmationBroadcast) returns (ConfirmationBroadcastResponse);
+  rpc BroadcastStop(StopBroadcast) returns (StopBroadcastResponse);
+}

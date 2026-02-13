@@ -18,6 +18,7 @@ use crate::jets::tip5_jets::*;
 use crate::jets::tip5_sponge::*;
 use crate::jets::trace_gen_jets::*;
 use crate::jets::verifier_jets::*;
+use crate::jets::zoon_jets::*;
 
 pub fn produce_prover_hot_state() -> Vec<HotEntry> {
     let mut jets: Vec<HotEntry> = Vec::new();
@@ -26,6 +27,7 @@ pub fn produce_prover_hot_state() -> Vec<HotEntry> {
     jets.extend(CURVE_JETS);
     jets.extend(ZTD_JETS);
     jets.extend(KEYGEN_JETS);
+    jets.extend(ZOON_JETS);
     jets.extend(XTRA_JETS);
     jets.extend(EXTENSION_FIELD_JETS);
     jets.extend(ZKVM_TABLE_JETS_V2);
@@ -1285,6 +1287,84 @@ pub const KEYGEN_JETS: &[HotEntry] = &[(
     1,
     argon2_jet,
 )];
+
+pub const ZOON_JETS: &[HotEntry] = &[
+    (
+        &[
+            K_138,
+            Left(b"one"),
+            Left(b"two"),
+            Left(b"tri"),
+            Left(b"qua"),
+            Left(b"pen"),
+            Left(b"zeke"),
+            Left(b"ext-field"),
+            Left(b"misc-lib"),
+            Left(b"proof-lib"),
+            Left(b"utils"),
+            Left(b"fri"),
+            Left(b"table-lib"),
+            Left(b"stark-core"),
+            Left(b"fock-core"),
+            Left(b"pow"),
+            Left(b"stark-engine"),
+            Left(b"zoon"),
+            Left(b"dor-tip"),
+        ],
+        1,
+        dor_tip_jet,
+    ),
+    (
+        &[
+            K_138,
+            Left(b"one"),
+            Left(b"two"),
+            Left(b"tri"),
+            Left(b"qua"),
+            Left(b"pen"),
+            Left(b"zeke"),
+            Left(b"ext-field"),
+            Left(b"misc-lib"),
+            Left(b"proof-lib"),
+            Left(b"utils"),
+            Left(b"fri"),
+            Left(b"table-lib"),
+            Left(b"stark-core"),
+            Left(b"fock-core"),
+            Left(b"pow"),
+            Left(b"stark-engine"),
+            Left(b"zoon"),
+            Left(b"gor-tip"),
+        ],
+        1,
+        gor_tip_jet,
+    ),
+    (
+        &[
+            K_138,
+            Left(b"one"),
+            Left(b"two"),
+            Left(b"tri"),
+            Left(b"qua"),
+            Left(b"pen"),
+            Left(b"zeke"),
+            Left(b"ext-field"),
+            Left(b"misc-lib"),
+            Left(b"proof-lib"),
+            Left(b"utils"),
+            Left(b"fri"),
+            Left(b"table-lib"),
+            Left(b"stark-core"),
+            Left(b"fock-core"),
+            Left(b"pow"),
+            Left(b"stark-engine"),
+            Left(b"zoon"),
+            Left(b"mor-tip"),
+        ],
+        1,
+        mor_tip_jet,
+    ),
+];
 
 pub const CURVE_JETS: &[HotEntry] = &[
     (

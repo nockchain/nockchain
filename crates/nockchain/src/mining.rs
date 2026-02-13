@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use kernels::miner::KERNEL;
+use kernels_open_miner::KERNEL;
 use nockapp::kernel::form::SerfThread;
 use nockapp::nockapp::driver::{IODriverFn, NockAppHandle, PokeResult};
 use nockapp::nockapp::wire::Wire;

@@ -748,6 +748,7 @@
 ::
 +|  %base58
 ++  en-base58
+  ~/  %en-base58
   |=  dat=@
   =/  cha
     '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
@@ -758,6 +759,7 @@
   $(dat (div dat 58))
 ::
 ++  de-base58
+  ~/  %de-base58
   |=  t=tape
   =-  (scan t (bass 58 (plus -)))
   ;~  pose

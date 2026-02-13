@@ -18,7 +18,7 @@ tikv-jemallocator = { workspace = true }
 [dependencies]
 
 clap.workspace = true
-kernels = { workspace = true, features = ["dumb"] }
+kernels-open-dumb = { workspace = true }
 nockapp.workspace = true
 nockchain.workspace = true
 nockvm.workspace = true

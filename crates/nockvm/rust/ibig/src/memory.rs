@@ -232,12 +232,15 @@ mod tests {
 
     #[test]
     fn test_memory() {
-        let mut scratchpad = MemoryAllocation::new(Layout::from_size_align(8, 4).expect(&format!(
-            "Called `expect()` at {}:{} (git sha: {:?})",
-            file!(),
-            line!(),
-            option_env!("GIT_SHA")
-        )));
+        let mut scratchpad =
+            MemoryAllocation::new(Layout::from_size_align(8, 4).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }));
         let mut memory = scratchpad.memory();
         let (a, mut new_memory) = memory.allocate_slice_fill::<u32>(1, 3);
         assert_eq!(a, &[3]);
@@ -257,12 +260,15 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_memory_ran_out() {
-        let mut scratchpad = MemoryAllocation::new(Layout::from_size_align(8, 4).expect(&format!(
-            "Called `expect()` at {}:{} (git sha: {:?})",
-            file!(),
-            line!(),
-            option_env!("GIT_SHA")
-        )));
+        let mut scratchpad =
+            MemoryAllocation::new(Layout::from_size_align(8, 4).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }));
         let mut memory = scratchpad.memory();
         let (a, mut new_memory) = memory.allocate_slice_fill::<u32>(1, 3);
         assert_eq!(a, &[3]);
@@ -272,18 +278,22 @@ mod tests {
     #[test]
     fn test_add_layout() {
         let layout = add_layout(
-            Layout::from_size_align(1, 1).expect(&format!(
-                "Called `expect()` at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )),
-            Layout::from_size_align(8, 4).expect(&format!(
-                "Called `expect()` at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )),
+            Layout::from_size_align(1, 1).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }),
+            Layout::from_size_align(8, 4).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }),
         );
         assert_eq!(layout.size(), 12);
         assert_eq!(layout.align(), 4);
@@ -292,18 +302,22 @@ mod tests {
     #[test]
     fn test_max_layout() {
         let layout = max_layout(
-            Layout::from_size_align(100, 1).expect(&format!(
-                "Called `expect()` at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )),
-            Layout::from_size_align(8, 4).expect(&format!(
-                "Called `expect()` at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )),
+            Layout::from_size_align(100, 1).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }),
+            Layout::from_size_align(8, 4).unwrap_or_else(|_| {
+                panic!(
+                    "Called `expect()` at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            }),
         );
         assert_eq!(layout.size(), 100);
         assert_eq!(layout.align(), 4);
