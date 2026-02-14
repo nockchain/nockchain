@@ -31,3 +31,8 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 zkvm-jetpack = { workspace = true }
+
+[build-dependencies]
+anyhow.workspace = true
+vergen = { workspace = true, features = ["git", "gitcl"] }
+

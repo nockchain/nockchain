@@ -37,7 +37,10 @@ pub const GENESIS_HEIGHT: u64 = 897767;
 
 /// Command line arguments
 #[derive(Parser, Debug, Clone)]
-#[command(name = "nockchain")]
+#[command(
+    name = "nockchain",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VERGEN_GIT_SHA"), ")") 
+)]
 pub struct NockchainCli {
     #[command(flatten)]
     pub nockapp_cli: nockapp::kernel::boot::Cli,

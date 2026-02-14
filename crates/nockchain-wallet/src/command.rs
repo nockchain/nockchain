@@ -187,7 +187,7 @@ impl NoteSelectionStrategyCli {
 }
 
 #[derive(Parser, Debug, Clone)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("VERGEN_GIT_SHA"), ")"), about, long_about = None)] 
 pub struct WalletCli {
     #[command(flatten)]
     pub boot: BootCli,

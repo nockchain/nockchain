@@ -10,10 +10,14 @@ bazel_build = []
 jemalloc = ["tikv-jemallocator"]
 tracing-heap = ["tikv-jemallocator", "tracy-client"]
 
+[build-dependencies]
+anyhow.workspace = true
+vergen = { workspace = true, features = ["git", "gitcl"] }
+
 [dependencies]
 
 bs58.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["cargo"] }
 equix.workspace = true
 futures.workspace = true
 ibig.workspace = true
@@ -49,3 +53,4 @@ tracing.workspace = true
 tracy-client = { workspace = true, optional = true }
 
 zkvm-jetpack.workspace = true
+

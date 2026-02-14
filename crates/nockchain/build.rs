@@ -1,4 +1,7 @@
-fn main() {
+use anyhow::Result;
+use vergen::EmitBuilder;
+
+fn main() -> Result<()> {
     // List of Bazel built-in stamping variables to embed
     let bazel_vars = [
         "BUILD_EMBED_LABEL", "BUILD_HOST", "BUILD_USER", "BUILD_TIMESTAMP",
@@ -11,4 +14,11 @@ fn main() {
         let value = std::env::var(var).unwrap_or_else(|_| "unknown".to_string());
         println!("cargo:rustc-env={var}={value}");
     }
+
+    // Emit vergen git SHA (full + short auto-emitted)
+    EmitBuilder::builder()
+        .git_sha(true)
+        .emit()?;
+
+    Ok(())
 }
