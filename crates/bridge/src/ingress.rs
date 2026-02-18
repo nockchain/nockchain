@@ -396,7 +396,9 @@ impl BridgeIngress for IngressService {
         if signer_is_known {
             metrics.ingress_broadcast_signature_known_signer.increment();
         } else {
-            metrics.ingress_broadcast_signature_unknown_signer.increment();
+            metrics
+                .ingress_broadcast_signature_unknown_signer
+                .increment();
         }
 
         info!(
@@ -422,14 +424,18 @@ impl BridgeIngress for IngressService {
         };
 
         if let Some(state) = existing_state.as_ref() {
-            metrics.ingress_broadcast_signature_known_proposal.increment();
+            metrics
+                .ingress_broadcast_signature_known_proposal
+                .increment();
             if !signer_is_known {
                 metrics
                     .ingress_broadcast_signature_unknown_signer_known_proposal
                     .increment();
             }
             if state.proposal_hash != proposal_hash {
-                metrics.ingress_broadcast_signature_hash_mismatch.increment();
+                metrics
+                    .ingress_broadcast_signature_hash_mismatch
+                    .increment();
                 let expected_hex = encode(state.proposal_hash);
                 let received_hex = encode(proposal_hash);
                 warn!(
@@ -458,7 +464,9 @@ impl BridgeIngress for IngressService {
                 }));
             }
         } else {
-            metrics.ingress_broadcast_signature_unknown_proposal.increment();
+            metrics
+                .ingress_broadcast_signature_unknown_proposal
+                .increment();
         }
 
         // TODO: Verify signer is authorized bridge node (check against node config)
@@ -553,7 +561,9 @@ impl BridgeIngress for IngressService {
                 }))
             }
             Ok(SignatureAddResult::Invalid(msg)) => {
-                metrics.ingress_broadcast_signature_result_invalid.increment();
+                metrics
+                    .ingress_broadcast_signature_result_invalid
+                    .increment();
                 warn!(
                     target: "bridge.ingress",
                     deposit_id = ?deposit_id,

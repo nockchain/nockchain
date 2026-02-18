@@ -296,6 +296,7 @@ async fn main() -> Result<(), NockAppError> {
             names,
             recipients,
             fee,
+            allow_low_fee,
             refund_pkh,
             index,
             hardened,
@@ -311,6 +312,7 @@ async fn main() -> Result<(), NockAppError> {
                 names.clone(),
                 recipient_specs,
                 *fee,
+                *allow_low_fee,
                 refund_pkh.clone(),
                 signing_keys,
                 *include_data,
@@ -934,6 +936,7 @@ impl Wallet {
         names: String,
         recipients: Vec<RecipientSpec>,
         fee: u64,
+        allow_low_fee: bool,
         refund_pkh: Option<String>,
         sign_keys: Vec<(u64, bool)>,
         include_data: bool,
@@ -971,6 +974,7 @@ impl Wallet {
             SIG
         };
         let include_data_noun = include_data.to_noun(&mut slab);
+        let allow_low_fee_noun = allow_low_fee.to_noun(&mut slab);
 
         // Validate memo data
         if let Some(err) = validate_memo(&memo_data) {
@@ -995,8 +999,8 @@ impl Wallet {
         Self::wallet(
             "create-tx",
             &[
-                names_noun, order_noun, fee_noun, sign_key_noun, refund_noun, include_data_noun,
-                memo_data_noun, save_raw_tx_noun, note_selection_noun,
+                names_noun, order_noun, fee_noun, allow_low_fee_noun, sign_key_noun, refund_noun,
+                include_data_noun, memo_data_noun, save_raw_tx_noun, note_selection_noun,
             ],
             Operation::Poke,
             &mut slab,

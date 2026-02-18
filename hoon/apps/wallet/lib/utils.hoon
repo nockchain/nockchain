@@ -37,16 +37,20 @@
 ++  estimate-fee
   |%
   ++  spends
-    |=  [raw-spends=spends:v1:transact =input-display:wt]
+    |=  [raw-spends=spends:v1:transact =input-display:wt page-num=page-number:transact]
     =+  bc=*blockchain-constants:transact
-    =/  word-count=@
+    =/  seeds-count  (count-seed-words:spends:transact raw-spends)
+    =/  witness-count=@
       %-  ~(rep z-by:zo raw-spends)
       |=  [[nam=nname:transact sp=spend:v1:transact] acc=@]
       %+  add  acc
-      %+  add
-        (witness-words sp nam input-display)
-      (count-seed-words:spend-v1:transact sp)
-    =/  word-fee=@  (mul word-count base-fee.bc)
+      (witness-words sp nam input-display)
+    ::  match consensus formula: outputs at base-fee, inputs at base-fee/divisor
+    =/  bythos-active=?  (gte page-num bythos-phase.bc)
+    =/  witness-divisor=@  ?:(bythos-active input-fee-divisor.bc 1)
+    =/  seed-fee=@  (mul seeds-count base-fee.bc)
+    =/  witness-fee=@  (div (mul witness-count base-fee.bc) witness-divisor)
+    =/  word-fee=@  (add seed-fee witness-fee)
     (max word-fee min-fee.data.bc)
   ::
   ::  +witness-words: estimate the number of words in a witness

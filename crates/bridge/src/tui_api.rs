@@ -113,7 +113,9 @@ impl BridgeTui for BridgeTuiService {
             .tui_snapshot_alert_limit_requested
             .swap(alert_limit as f64);
         metrics.tui_snapshot_limit_requested.swap(view.limit as f64);
-        metrics.tui_snapshot_offset_requested.swap(view.offset as f64);
+        metrics
+            .tui_snapshot_offset_requested
+            .swap(view.offset as f64);
         if view.limit > SNAPSHOT_CACHE_LIMIT {
             metrics.tui_snapshot_limit_over_cache.increment();
         }
@@ -128,7 +130,9 @@ impl BridgeTui for BridgeTuiService {
             .and_then(|guard| guard.clone());
 
         let Some(snapshot) = cached else {
-            metrics.tui_snapshot_response_time.add_timing(&started.elapsed());
+            metrics
+                .tui_snapshot_response_time
+                .add_timing(&started.elapsed());
             return Err(Status::unavailable("snapshot cache is not ready"));
         };
 
@@ -157,7 +161,9 @@ impl BridgeTui for BridgeTuiService {
                 .add_timing(&uncached_started.elapsed());
         }
 
-        metrics.tui_snapshot_response_time.add_timing(&started.elapsed());
+        metrics
+            .tui_snapshot_response_time
+            .add_timing(&started.elapsed());
         Ok(Response::new(response))
     }
 }
@@ -409,14 +415,13 @@ async fn build_cached_snapshot(
     metrics
         .tui_proposals_history_count
         .swap(proposals_state.history.len() as f64);
-    metrics.tui_proposals_last_submitted_present.swap(if proposals_state
-        .last_submitted
-        .is_some()
-    {
-        1.0
-    } else {
-        0.0
-    });
+    metrics.tui_proposals_last_submitted_present.swap(
+        if proposals_state.last_submitted.is_some() {
+            1.0
+        } else {
+            0.0
+        },
+    );
     metrics
         .tui_proposals_pending_inbound_signature_count
         .swap(pending_inbound_signature_count as f64);
@@ -678,7 +683,12 @@ fn approximate_tui_proposal_bytes(proposal: &TuiProposal) -> usize {
         .saturating_add(proposal.proposal_type.len())
         .saturating_add(proposal.description.len())
         .saturating_add(proposal.data_hash.len())
-        .saturating_add(proposal.signers.len().saturating_mul(std::mem::size_of::<u64>()));
+        .saturating_add(
+            proposal
+                .signers
+                .len()
+                .saturating_mul(std::mem::size_of::<u64>()),
+        );
 
     if let Some(tx_hash) = &proposal.tx_hash {
         bytes = bytes.saturating_add(tx_hash.len());

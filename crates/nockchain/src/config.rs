@@ -117,6 +117,13 @@ pub struct NockchainCli {
         requires = "fakenet"
     )]
     pub fakenet_v1_phase: Option<u64>,
+    #[arg(
+        long,
+        help = "Override the bythos-phase activation height when running on fakenet. Requires --fakenet.",
+        default_value = "1",
+        requires = "fakenet"
+    )]
+    pub fakenet_bythos_phase: Option<u64>,
     #[arg(long, help = "Path to fake genesis block jam file")]
     pub fakenet_genesis_jam_path: Option<PathBuf>,
     #[arg(long, help = "Public gRPC binding address (off by default), recommended value = \"127.0.0.1:5555\"", value_parser = clap::value_parser!(std::net::SocketAddr))]
@@ -192,6 +199,7 @@ mod tests {
             fakenet_pow_len: 2,
             fakenet_log_difficulty: 1,
             fakenet_v1_phase: None,
+            fakenet_bythos_phase: None,
             fakenet_genesis_jam_path: None,
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
             bind_private_grpc_port: 5555,

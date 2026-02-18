@@ -7,6 +7,7 @@ use nockchain_types::tx_engine::v1::{
     Witness as V1Witness,
 };
 use nockchain_types::{v0, v1};
+use nockvm_macros::tas;
 
 use crate::common::{ConversionError, Required};
 use crate::pb::common::v1::{
@@ -315,10 +316,19 @@ impl From<MerkleProof> for PbMerkleProof {
 
 impl From<LockMerkleProof> for PbLockMerkleProof {
     fn from(proof: LockMerkleProof) -> Self {
-        PbLockMerkleProof {
-            spend_condition: Some(PbSpendCondition::from(proof.spend_condition)),
-            axis: proof.axis,
-            proof: Some(PbMerkleProof::from(proof.proof)),
+        match proof {
+            LockMerkleProof::Full(full) => PbLockMerkleProof {
+                spend_condition: Some(PbSpendCondition::from(full.spend_condition)),
+                axis: full.axis,
+                proof: Some(PbMerkleProof::from(full.proof)),
+                lmp_version: Some(full.version),
+            },
+            LockMerkleProof::Stub(stub) => PbLockMerkleProof {
+                spend_condition: Some(PbSpendCondition::from(stub.spend_condition)),
+                axis: stub.axis,
+                proof: Some(PbMerkleProof::from(stub.proof)),
+                lmp_version: None,
+            },
         }
     }
 }
@@ -455,15 +465,27 @@ impl TryFrom<PbSpendCondition> for SpendCondition {
 impl TryFrom<PbLockMerkleProof> for LockMerkleProof {
     type Error = ConversionError;
     fn try_from(proof: PbLockMerkleProof) -> Result<Self, Self::Error> {
-        Ok(LockMerkleProof {
-            spend_condition: SpendCondition::try_from(
-                proof
-                    .spend_condition
-                    .required("LockMerkleProof", "spend_condition")?,
-            )?,
-            axis: proof.axis,
-            proof: MerkleProof::try_from(proof.proof.required("LockMerkleProof", "proof")?)?,
-        })
+        let pb_version = proof.lmp_version;
+        let spend_condition = SpendCondition::try_from(
+            proof
+                .spend_condition
+                .required("LockMerkleProof", "spend_condition")?,
+        )?;
+        let axis = proof.axis;
+        let merkle_proof =
+            MerkleProof::try_from(proof.proof.required("LockMerkleProof", "proof")?)?;
+        if let Some(version) = pb_version {
+            if version != tas!(b"full") {
+                return Err(ConversionError::Invalid("invalid lmp version"));
+            }
+            return Ok(LockMerkleProof::new_full(
+                spend_condition, axis, merkle_proof,
+            ));
+        }
+
+        Ok(LockMerkleProof::new_stub(
+            spend_condition, axis, merkle_proof,
+        ))
     }
 }
 
@@ -521,6 +543,74 @@ impl TryFrom<PbWitnessSpend> for Spend1 {
             seeds: nockchain_types::tx_engine::v1::Seeds(seeds),
             fee: spend.fee.required("WitnessSpend", "fee")?.into(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nockchain_types::tx_engine::common::Hash;
+
+    use super::*;
+
+    fn sample_spend_condition() -> SpendCondition {
+        SpendCondition::new(vec![LockPrimitive::Burn])
+    }
+
+    fn sample_merkle_proof() -> MerkleProof {
+        MerkleProof {
+            root: Hash::from_limbs(&[1, 2, 3, 4, 5]),
+            path: vec![Hash::from_limbs(&[6, 7, 8, 9, 10])],
+        }
+    }
+
+    #[test]
+    fn test_lock_merkle_proof_stub_roundtrip() {
+        let spend_condition = sample_spend_condition();
+        let merkle_proof = sample_merkle_proof();
+        let stub = LockMerkleProof::new_stub(spend_condition, 42, merkle_proof);
+
+        let pb = PbLockMerkleProof::from(stub.clone());
+        assert!(pb.lmp_version.is_none());
+
+        let decoded = LockMerkleProof::try_from(pb).expect("decode stub");
+        assert_eq!(decoded, stub);
+    }
+
+    #[test]
+    fn test_lock_merkle_proof_full_roundtrip() {
+        let spend_condition = sample_spend_condition();
+        let merkle_proof = sample_merkle_proof();
+        let full = LockMerkleProof::new_full(spend_condition, 84, merkle_proof);
+        let expected_version = match &full {
+            LockMerkleProof::Full(proof) => proof.version,
+            LockMerkleProof::Stub(_) => panic!("expected full proof"),
+        };
+
+        let pb = PbLockMerkleProof::from(full.clone());
+        assert_eq!(pb.lmp_version, Some(expected_version));
+
+        let decoded = LockMerkleProof::try_from(pb).expect("decode full");
+        assert_eq!(decoded, full);
+    }
+
+    #[test]
+    fn test_lock_merkle_proof_invalid_version_rejected() {
+        let spend_condition = sample_spend_condition();
+        let merkle_proof = sample_merkle_proof();
+        let stub = LockMerkleProof::new_stub(spend_condition.clone(), 7, merkle_proof.clone());
+        let expected_version = match LockMerkleProof::new_full(spend_condition, 7, merkle_proof) {
+            LockMerkleProof::Full(proof) => proof.version,
+            LockMerkleProof::Stub(_) => panic!("expected full proof"),
+        };
+
+        let mut pb = PbLockMerkleProof::from(stub);
+        pb.lmp_version = Some(expected_version + 1);
+
+        let err = LockMerkleProof::try_from(pb).expect_err("invalid version should fail");
+        match err {
+            ConversionError::Invalid(_) => {}
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 }
 

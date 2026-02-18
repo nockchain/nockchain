@@ -7,7 +7,7 @@
     ++  blockchain-constants  blockchain-constants:v1
     --
 |_  blockchain-constants
-+*  v0  ~(. ^v0 +15:+<)
++*  v0  ~(. ^v0 +63:+<)
 ::  constants
 ++  quarter-ted  ^~((div target-epoch-duration 4))
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
@@ -224,69 +224,6 @@
   =+  witness:v1
   |%
   +$  form  $|(^form |=(* %&))
-  ::
-  ::  +make-pkh: build witness with pkh signatures for sig-hash
-  ++  make-pkh
-    |=  $:  root=^hash
-            sc=spend-condition
-            sig-hash=^hash
-            keys=(list [schnorr-seckey schnorr-pubkey])
-        ==
-    ^-  form
-    =/  pmap=pkh-signature:v1
-      %+  roll  keys
-      |=  $:  kp=[sk=schnorr-seckey pk=schnorr-pubkey]
-              acc=pkh-signature:v1
-          ==
-      =/  sig=schnorr-signature
-        %+  sign:affine:belt-schnorr:cheetah
-          sk.kp
-        sig-hash
-      (~(put z-by acc) (hash:schnorr-pubkey pk.kp) [pk.kp sig])
-    %*  .  *^form
-      lmp  (build-lock-merkle-proof:lock sc 1)
-      pkh  pmap
-      hax  *(z-map ^hash *)
-      tim  ~
-    ==
-  ::
-  ::  +make-hax: build witness for %hax lock with preimage
-  ++  make-hax
-    |=  [root=^hash sc=spend-condition h=^hash pre=*]
-    ^-  form
-    %*  .  *^form
-      lmp  (build-lock-merkle-proof:lock sc 1)
-      pkh  *(z-map ^hash [pk=schnorr-pubkey sig=schnorr-signature])
-      hax  (~(put z-by *(z-map ^hash *)) h pre)
-      tim  ~
-    ==
-  ::
-  ::  +make-hax-pkh: build witness for combined %hax AND %pkh
-  ++  make-hax-pkh
-    |=  $:  root=^hash
-            sc=spend-condition
-            sig-hash=^hash
-            keys=(list [schnorr-seckey schnorr-pubkey])
-            h=^hash
-            pre=*
-        ==
-    ^-  form
-    =/  pmap=pkh-signature:v1
-      %+  roll  keys
-      |=  $:  kp=[sk=schnorr-seckey pk=schnorr-pubkey]
-              acc=pkh-signature:v1
-          ==
-      =/  sig=schnorr-signature
-        %+  sign:affine:belt-schnorr:cheetah
-          sk.kp
-        sig-hash
-      (~(put z-by acc) (hash:schnorr-pubkey pk.kp) [pk.kp sig])
-    %*  .  *^form
-      lmp  (build-lock-merkle-proof:lock sc 1)
-      pkh  pmap
-      hax  (~(put z-by *(z-map ^hash *)) h pre)
-      tim  ~
-    ==
   --::+witness
 ::
 ::  TODO: remove
@@ -364,8 +301,7 @@
     =/  pkh=lock-primitive  [%pkh [m pkh-hashes]]
     =/  tim=lock-primitive  tim-lp
     =/  lk=lock  ~[pkh tim]
-    =/  lmp=lock-merkle-proof  (build-lock-merkle-proof:lock lk 1)
-    =/  root=hash  root.merk-proof.lmp
+    =/  root=hash  (hash:lock lk)
     (new-v1:nname [root [parent %.y]])
   --
 ::
@@ -581,7 +517,9 @@
     =/  parent-lock=lock  (from-sig:lock parent)
     =/  recipient-lock=lock  (from-sig:lock recipient)
     =/  parent-lmp=lock-merkle-proof
-      (build-lock-merkle-proof:lock parent-lock 1)
+      ?:  (gte origin-page.note bythos-phase)
+        (build-lock-merkle-proof-full:lock parent-lock 1)
+      (build-lock-merkle-proof-stub:lock parent-lock 1)
     ::  build seeds for recipient lock
     =/  lock-root=hash  (hash:lock recipient-lock)
     =/  sed=seed:v1
@@ -891,8 +829,7 @@
     =/  hs=(z-set ^hash)  (~(put z-in *(z-set ^hash)) h)
     =/  prim=lock-primitive  [%hax hs]
     =/  sc=form  ~[prim]
-    =/  lmp=lock-merkle-proof  (build-lock-merkle-proof:lock sc 1)
-    =/  root=hash  root.merk-proof.lmp
+    =/  root=hash  (hash:lock sc)
     [root sc h]
   --
 ++  spends
@@ -900,17 +837,62 @@
   =+  spends:v1
   |%
   +$  form  $|(^form |=(* %&))
-  ++  calculate-min-fee
+  ::  count note-data words as stored on output notes (outputs are built by
+  ::  grouping all seeds across the tx by lock-root)
+  ++  note-data-by-lock-root
     |=  sps=form
+    ^-  (z-mip ^hash @tas *)
+    =/  all-seeds=(list seed-v1)
+      %-  zing
+      %+  turn  ~(tap z-by sps)
+      |=  [nam=nname sp=spend]
+      ?-  -.sp
+        %0  ~(tap z-in seeds.+.sp)
+        %1  ~(tap z-in seeds.+.sp)
+      ==
+    =/  by-lock-root=(z-mip ^hash @tas *)
+      %+  roll  all-seeds
+      |=  [sed=seed-v1 acc=(z-mip ^hash @tas *)]
+      =/  key=hash  lock-root.sed
+      =/  existing=(unit (z-map @tas *))
+        (~(get z-by acc) key)
+      ?~  existing
+        (~(put z-by acc) key note-data.sed)
+      =/  merged=(z-map @tas *)
+        (~(uni z-by u.existing) note-data.sed)
+      (~(put z-by acc) key merged)
+    by-lock-root
+  ++  count-seed-words
+    |=  sps=form
+    ^-  @
+    =/  merged-by-lock-root=(z-mip ^hash @tas *)
+      (note-data-by-lock-root sps)
+    %+  roll  ~(tap z-by merged-by-lock-root)
+    |=  [[key=hash note-data=(z-map @tas *)] acc=@]
+    %+  add  acc
+    %-  num-of-leaves:shape
+    %-  ~(rep z-by note-data)
+    |=  [[k=@tas v=*] tree=*]
+    [k v tree]
+  ::
+  ++  calculate-min-fee
+    |=  [sps=form page-num=page-number]
     ^-  coins
-    =/  word-count=@
+    =/  seed-word-count=@  (count-seed-words sps)
+    =/  witness-word-count=@
       %+  roll  ~(tap z-by sps)
       |=  [[nam=nname sp=spend] acc=@]
-      %+  add  acc
-      %+  add
-        (count-seed-words:spend-v1 sp)
-      (count-witness-words:spend-v1 sp)
-    =/  word-fee=coins  (mul word-count base-fee)
+      (add acc (count-witness-words:spend-v1 sp))
+    ::  inputs pay discounted fee only at/after bythos activation
+    =/  witness-divisor=@
+      ?:  (gte page-num bythos-phase)
+        input-fee-divisor
+      1
+    ::  outputs (seeds) pay full base-fee per word
+    =/  seed-fee=coins  (mul seed-word-count base-fee)
+    ::  inputs (witnesses) pay base-fee / input-fee-divisor per word
+    =/  witness-fee=coins  (div (mul witness-word-count base-fee) witness-divisor)
+    =/  word-fee=coins  (add seed-fee witness-fee)
     (max word-fee min-fee.data)
   --
 ::
@@ -931,7 +913,14 @@
     ^-  form
     ::  build witness for parent lock
     =/  parent-lock=lock  (from-sig:lock parent)
-    =/  parent-lmp=lock-merkle-proof  (build-lock-merkle-proof:lock parent-lock 1)
+    =/  bythos-active=?
+      ?:  ?=(@ -.note)
+        (gte origin-page.note bythos-phase)
+      %.n
+    =/  parent-lmp=lock-merkle-proof
+      ?:  bythos-active
+        (build-lock-merkle-proof-full:lock parent-lock 1)
+      (build-lock-merkle-proof-stub:lock parent-lock 1)
     =/  recipient-lock=lock  (from-sig:lock recipient)
     ::  build seeds for recipient lock
     =/  lock-root=hash  (hash:lock recipient-lock)
@@ -946,21 +935,6 @@
         fee      0
       ==
     [%1 sp]
-  ++  count-seed-words
-    |=  sp=form
-    ^-  @
-    =/  seed-list=(list seed-v1)
-      ?-  -.sp
-        %0  ~(tap z-in seeds.+.sp)
-        %1  ~(tap z-in seeds.+.sp)
-      ==
-    %+  roll  seed-list
-    |=  [sed=seed-v1 acc=@]
-    %+  add  acc
-    %-  num-of-leaves:shape
-    %-  ~(rep z-by note-data.sed)
-    |=  [[k=@tas v=*] tree=*]
-    [k v tree]
   ::
   ++  count-witness-words
     |=  sp=form
@@ -1190,10 +1164,10 @@
     ::  validate all spends against their parent notes
     =/  validate-result
       %-  validate-with-context:spends
-      [balance.form spends.raw1 height.form max-size.data]
+      [balance.form spends.raw1 height.form max-size.data bythos-phase]
     ?.  ?=(%.y -.validate-result)  validate-result
     ::  check fee covers word count
-    =/  min-fee=coins  (calculate-min-fee:spends spends.raw1)
+    =/  min-fee=coins  (calculate-min-fee:spends [spends.raw1 height.form])
     =/  paid-fee=coins  (roll-fees:spends spends.raw1)
     ?.  (gte paid-fee min-fee)
       [%.n %v1-insufficient-fee]

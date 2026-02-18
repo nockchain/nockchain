@@ -173,8 +173,10 @@ pub struct BlockchainConstants {
     pub max_coinbase_split: u64,
     pub first_month_coinbase_min: u64,
     pub v1_phase: u64,
+    pub bythos_phase: u64,
     pub note_data: NoteDataConstraints,
     pub base_fee: u64,
+    pub input_fee_divisor: u64,
 }
 
 impl BlockchainConstants {
@@ -197,9 +199,14 @@ impl BlockchainConstants {
     pub const DEFAULT_FIRST_MONTH_COINBASE_MIN: u64 = 4383;
     // TODO: update these for FINAL RELEASE
     pub const DEFAULT_V1_PHASE: u64 = 40_000;
+    pub const DEFAULT_BYTHOS_PHASE: u64 = 54_000;
     pub const DEFAULT_NOTE_DATA_MAX_SIZE: u64 = 2_048;
     pub const DEFAULT_NOTE_DATA_MIN_FEE: u64 = 256;
-    pub const DEFAULT_BASE_FEE: u64 = 256;
+
+    // Fakenet-only fee constants. These are poked to the kernel only when --fakenet is set.
+    // Mainnet uses the Hoon bunt defaults in tx-engine-1.hoon (base-fee=16384, divisor=4).
+    pub const DEFAULT_BASE_FEE: u64 = 128;
+    pub const DEFAULT_INPUT_FEE_DIVISOR: u64 = 4;
 
     pub fn new() -> Self {
         let max_tip5_atom = UBig::from_str_with_radix_prefix(Self::DEFAULT_MAX_TIP5_ATOM)
@@ -223,11 +230,13 @@ impl BlockchainConstants {
             max_coinbase_split: Self::DEFAULT_MAX_COINBASE_SPLIT,
             first_month_coinbase_min: Self::DEFAULT_FIRST_MONTH_COINBASE_MIN,
             v1_phase: Self::DEFAULT_V1_PHASE,
+            bythos_phase: Self::DEFAULT_BYTHOS_PHASE,
             note_data: NoteDataConstraints {
                 max_size: Self::DEFAULT_NOTE_DATA_MAX_SIZE,
                 min_fee: Self::DEFAULT_NOTE_DATA_MIN_FEE,
             },
             base_fee: Self::DEFAULT_BASE_FEE,
+            input_fee_divisor: Self::DEFAULT_INPUT_FEE_DIVISOR,
         }
     }
 
@@ -253,6 +262,11 @@ impl BlockchainConstants {
         self
     }
 
+    pub fn with_bythos_phase(mut self, bythos_phase: u64) -> Self {
+        self.bythos_phase = bythos_phase;
+        self
+    }
+
     pub fn with_first_month_coinbase_min(mut self, coinbase_min: u64) -> Self {
         self.first_month_coinbase_min = coinbase_min;
         self
@@ -263,12 +277,13 @@ impl BlockchainConstants {
         self
     }
 
-    fn to_blockchain_constants_v0_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+    fn to_blockchain_constants_v0_fields<A: NounAllocator>(&self, allocator: &mut A) -> Vec<Noun> {
         let max_block_size = Atom::new(allocator, self.max_block_size).as_noun();
         let blocks_per_epoch = Atom::new(allocator, self.blocks_per_epoch).as_noun();
         let target_epoch_duration = self.target_epoch_duration.to_noun(allocator);
+        // @dr atoms are seconds in the top 64 bits (kernel default uses ~m5).
         let update_candidate_timestamp_interval_atoms =
-            UBig::from(self.update_candidate_timestamp_interval.0) << 64; // convert seconds to atoms
+            UBig::from(self.update_candidate_timestamp_interval.0) << 64;
         let update_candidate_timestamp_interval =
             Atom::from_ubig(allocator, &update_candidate_timestamp_interval_atoms).as_noun();
         let max_future_timestamp = self.max_future_timestamp.to_noun(allocator);
@@ -282,28 +297,28 @@ impl BlockchainConstants {
         let first_month_coinbase_min =
             Atom::new(allocator, self.first_month_coinbase_min).as_noun();
 
-        T(
-            allocator,
-            &[
-                max_block_size, blocks_per_epoch, target_epoch_duration,
-                update_candidate_timestamp_interval, max_future_timestamp, min_past_blocks,
-                genesis_target_atom, max_target_atom, check_pow_flag, coinbase_timelock_min,
-                pow_len, max_coinbase_split, first_month_coinbase_min,
-            ],
-        )
+        vec![
+            max_block_size, blocks_per_epoch, target_epoch_duration,
+            update_candidate_timestamp_interval, max_future_timestamp, min_past_blocks,
+            genesis_target_atom, max_target_atom, check_pow_flag, coinbase_timelock_min, pow_len,
+            max_coinbase_split, first_month_coinbase_min,
+        ]
     }
 }
 
 impl NounEncode for BlockchainConstants {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
         let v1_phase = Atom::new(allocator, self.v1_phase).as_noun();
+        let bythos_phase = Atom::new(allocator, self.bythos_phase).as_noun();
         let note_data = self.note_data.to_noun(allocator);
         let base_fee = Atom::new(allocator, self.base_fee).as_noun();
-        let blockchain_constants_v0 = self.to_blockchain_constants_v0_noun(allocator);
+        let input_fee_divisor = Atom::new(allocator, self.input_fee_divisor).as_noun();
+        let v0_fields = self.to_blockchain_constants_v0_fields(allocator);
+        let v0_constants = T(allocator, &v0_fields);
 
         T(
             allocator,
-            &[v1_phase, note_data, base_fee, blockchain_constants_v0],
+            &[v1_phase, bythos_phase, note_data, base_fee, input_fee_divisor, v0_constants],
         )
     }
 }
@@ -323,8 +338,23 @@ mod tests {
 
     use super::*;
 
+    fn tuple_len(noun: Noun) -> usize {
+        let mut len = 0;
+        let mut cur = noun;
+        loop {
+            if let Ok(cell) = cur.as_cell() {
+                len += 1;
+                cur = cell.tail();
+            } else {
+                len += 1;
+                break;
+            }
+        }
+        len
+    }
+
     #[test]
-    fn default_blockchain_constants_match_hoon_definition() {
+    fn fakenet_blockchain_constants_are_valid() {
         let constants = BlockchainConstants::new();
 
         assert_eq!(
@@ -381,6 +411,7 @@ mod tests {
             "first-month-coinbase-min mismatch",
         );
         assert_eq!(constants.v1_phase, 40_000, "v1-phase mismatch");
+        assert_eq!(constants.bythos_phase, 54_000, "bythos-phase mismatch",);
         assert_eq!(
             constants.note_data,
             NoteDataConstraints {
@@ -389,7 +420,8 @@ mod tests {
             },
             "note-data mismatch",
         );
-        assert_eq!(constants.base_fee, 256, "base-fee mismatch");
+        assert_eq!(constants.base_fee, 128, "base-fee mismatch");
+        assert_eq!(constants.input_fee_divisor, 4, "input-fee-divisor mismatch");
     }
 
     #[test]
@@ -412,6 +444,13 @@ mod tests {
         );
 
         let rest = outer.tail().as_cell().expect("rest tuple");
+        let bythos_phase_atom = rest.head().as_atom().expect("bythos-phase should be atom");
+        assert_eq!(
+            bythos_phase_atom.as_u64().expect("bythos-phase as u64"),
+            BlockchainConstants::DEFAULT_BYTHOS_PHASE
+        );
+
+        let rest = rest.tail().as_cell().expect("note-data and rest tuple");
         let note_data = rest.head().as_cell().expect("note-data tuple");
         let note_data_max_size = note_data
             .head()
@@ -434,15 +473,36 @@ mod tests {
             BlockchainConstants::DEFAULT_NOTE_DATA_MIN_FEE
         );
 
-        let base_fee_and_v0 = rest.tail().as_cell().expect("base-fee and v0 tuple");
-        let base_fee_atom = base_fee_and_v0.head().as_atom().expect("base-fee atom");
+        let base_fee_and_rest = rest.tail().as_cell().expect("base-fee and rest tuple");
+        let base_fee_atom = base_fee_and_rest.head().as_atom().expect("base-fee atom");
         assert_eq!(
             base_fee_atom.as_u64().expect("base-fee as u64"),
             BlockchainConstants::DEFAULT_BASE_FEE
         );
 
-        let v0_tuple = base_fee_and_v0.tail().as_cell().expect("v0 tuple");
-        let max_block_size_atom = v0_tuple.head().as_atom().expect("max-block-size atom");
+        let input_fee_divisor_and_rest = base_fee_and_rest
+            .tail()
+            .as_cell()
+            .expect("input-fee-divisor and rest tuple");
+        let input_fee_divisor_atom = input_fee_divisor_and_rest
+            .head()
+            .as_atom()
+            .expect("input-fee-divisor atom");
+        assert_eq!(
+            input_fee_divisor_atom
+                .as_u64()
+                .expect("input-fee-divisor as u64"),
+            BlockchainConstants::DEFAULT_INPUT_FEE_DIVISOR
+        );
+
+        let v0_constants = input_fee_divisor_and_rest.tail();
+        assert_eq!(
+            tuple_len(v0_constants),
+            13,
+            "v0 constants should be a 13-tuple"
+        );
+        let v0_cell = v0_constants.as_cell().expect("v0 constants tuple");
+        let max_block_size_atom = v0_cell.head().as_atom().expect("max-block-size atom");
         assert_eq!(
             max_block_size_atom.as_u64().expect("max-block-size as u64"),
             BlockchainConstants::DEFAULT_MAX_BLOCK_SIZE

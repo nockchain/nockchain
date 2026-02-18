@@ -388,6 +388,9 @@ pub enum Commands {
         /// Transaction fee
         #[arg(long)]
         fee: u64,
+        /// Allow fees below the estimated minimum (unsafe, testing only)
+        #[arg(long, default_value = "false")]
+        allow_low_fee: bool,
         /// Optional refund recipient pubkey hash (base58). Required for legacy v0 notes; v1 notes default to the note owner.
         #[arg(long = "refund-pkh", value_name = "REFUND_PKH")]
         refund_pkh: Option<String>,

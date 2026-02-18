@@ -1,7 +1,7 @@
 resolver = "2"
 
 [workspace]
-members = ["crates/bridge", "crates/equix-latency", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/zkvm-jetpack"]
 
 [workspace.package]
 version = "0.1.0"
@@ -181,6 +181,12 @@ x25519-dalek = { version = "2.0.0", features = [
 ], default-features = false }
 x509-parser = "0.17.0"
 yaque = "0.6.6"
+
+[workspace.dependencies.chaff]
+path = "crates/chaff"
+
+[workspace.dependencies.habit]
+path = "crates/habit"
 
 [workspace.dependencies.hoon]
 path = "crates/hoon"

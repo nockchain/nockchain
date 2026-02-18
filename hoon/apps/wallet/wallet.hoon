@@ -740,7 +740,7 @@
     =+  data=data:*blockchain-constants:transact
     =/  valid=(reason:dumb ~)
       %-  validate-with-context:spends:transact
-      [notes.balance.state signed-spends height.balance.state max-size.data]
+      [notes.balance.state signed-spends height.balance.state max-size.data bythos-phase.bc.state]
     ?-    -.valid
         %.y
       =/  nock-cause=$>(%fact cause:dumb)
@@ -1287,12 +1287,14 @@
         names
         orders
         fee.cause
+        allow-low-fee.cause
         sign-keys
         refund-pkh.cause
         get-note:v
         include-data.cause
         memo-data.cause 
         selection-strategy.cause
+        height.balance.state
       ==
     =/  lock-roots-to-watch=(z-set:zo [hash:transact (unit lock:transact)])
       (gather-watch-roots orders)

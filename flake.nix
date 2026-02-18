@@ -262,9 +262,6 @@
             export CARGO="${rustToolchain}/bin/cargo"
             export RUSTC="${rustToolchain}/bin/rustc"
             export RUSTDOC="${rustToolchain}/bin/rustdoc"
-            if command -v protoc >/dev/null 2>&1; then
-              export PROTOC="$(command -v protoc)"
-            fi
             # Add libstdc++ to library paths for lld linker
             # LIBRARY_PATH is for compile-time linking, LD_LIBRARY_PATH is for runtime loading
             # NOTE: We do NOT append to parent shell's $LIBRARY_PATH/$LD_LIBRARY_PATH to ensure

@@ -12,12 +12,14 @@
 |=  $:  names=(list nname:transact)
         orders=(list order:wt)
         fee=coins:transact
+        allow-low-fee=?
         sign-keys=(list schnorr-seckey:transact)
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
         memo-data=memo-data:wt
         note-selection=selection-strategy:wt
+        height=page-number:transact
     ==
 |^
 ^-  $:  spends:v1:transact
@@ -87,13 +89,15 @@
 ::
 ~>  %slog.[0 'Notes must all be the same version!!!']  !!
 
-=+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display)
+=+  min-fee=(spends:estimate-fee:utils raw-spends inputs.display height)
 :: uncomment to debug out of band fee estimation
 :: =+  min-fee-ref=(calculate-min-fee:spends:transact (apply:witness-data:wt witness-data raw-spends))
 :: ~&  min-fee-est+min-fee
 :: ~&  min-fee-ref+min-fee-ref
 ?:  (lth fee min-fee)
-  ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
+  ?:  =(allow-low-fee %.n)
+    ~|("Min fee not met. This transaction requires at least: {(trip (format-ui:common:display:utils min-fee))} nicks" !!)
+    [raw-spends witness-data display]
   [raw-spends witness-data display]
 ::
 ::  helpers for building display metadata
@@ -383,8 +387,12 @@
     (seeds-from-specs specs-with-refund note fee-portion)
   ?~  seeds
     ~|('No seeds were provided' !!)
+  =/  bythos-active=?
+    (gte origin-page.note bythos-phase.bc)
   =/  lmp=lock-merkle-proof:transact
-    (build-lock-merkle-proof:lock:transact input-lock 1)
+    ?:  bythos-active
+      (build-lock-merkle-proof-full:lock:transact input-lock 1)
+    (build-lock-merkle-proof-stub:lock:transact input-lock 1)
   =/  spend=spend-1:v1:transact
     %*  .  *spend-1:v1:transact
       seeds  seeds

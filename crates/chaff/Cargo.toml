@@ -1,0 +1,29 @@
+[package]
+name = "chaff"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "large_checkpoint_bench"
+
+[dependencies]
+bincode.workspace = true
+bytes.workspace = true
+either.workspace = true
+habit.workspace = true
+intmap.workspace = true
+nockapp.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+criterion.workspace = true
+quickcheck.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[[bench]]
+name = "jam_checkpoint"
+harness = false

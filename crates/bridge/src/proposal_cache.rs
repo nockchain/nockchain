@@ -306,7 +306,9 @@ impl ProposalCache {
         };
 
         if recovered != sig_data.signer_address {
-            metrics.proposal_cache_signature_address_mismatch.increment();
+            metrics
+                .proposal_cache_signature_address_mismatch
+                .increment();
             return Err(format!(
                 "Signature address mismatch: expected {}, recovered {}",
                 sig_data.signer_address, recovered
@@ -399,7 +401,9 @@ impl ProposalCache {
                     expected_hash: state.proposal_hash,
                     received_hash: pending.proposal_hash,
                 });
-                metrics.proposal_cache_pending_signature_mismatched.increment();
+                metrics
+                    .proposal_cache_pending_signature_mismatched
+                    .increment();
                 continue;
             }
 
@@ -416,7 +420,9 @@ impl ProposalCache {
                     signer = %pending.signer_address,
                     "Pending signature verification failed - discarding"
                 );
-                metrics.proposal_cache_pending_signature_verify_failed.increment();
+                metrics
+                    .proposal_cache_pending_signature_verify_failed
+                    .increment();
                 continue;
             };
 
@@ -677,10 +683,9 @@ impl ProposalCache {
                     snapshot.max_peer_signatures_per_proposal.max(peer_count);
 
                 for sig in state.peer_signatures.values() {
-                    snapshot.approx_peer_signature_bytes =
-                        snapshot.approx_peer_signature_bytes.saturating_add(
-                            size_of::<Address>() + size_of::<Vec<u8>>() + sig.len(),
-                        );
+                    snapshot.approx_peer_signature_bytes = snapshot
+                        .approx_peer_signature_bytes
+                        .saturating_add(size_of::<Address>() + size_of::<Vec<u8>>() + sig.len());
                 }
             }
         }
@@ -700,9 +705,10 @@ impl ProposalCache {
                     snapshot.pending_oldest_age_secs = snapshot
                         .pending_oldest_age_secs
                         .max(now.saturating_sub(pending_sig.received_at));
-                    snapshot.approx_pending_signature_bytes = snapshot
-                        .approx_pending_signature_bytes
-                        .saturating_add(size_of::<PendingSignature>() + pending_sig.signature.len());
+                    snapshot.approx_pending_signature_bytes =
+                        snapshot.approx_pending_signature_bytes.saturating_add(
+                            size_of::<PendingSignature>() + pending_sig.signature.len(),
+                        );
                 }
             }
         }

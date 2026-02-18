@@ -464,6 +464,7 @@
             names=(list [first=@t last=@t])               ::  base58-encoded name hashes
             orders=(list order)
             fee=coins:transact                            ::  fee
+            allow-low-fee=?                               ::  bypass min fee check (unsafe, testing only)
             sign-keys=(unit (list [child-index=@ud hardened=?]))  ::  child key information to sign from
             refund-pkh=(unit hash:transact)               ::  refund pkh for spends over v0 notes
             include-data=?                                ::  whether or not we should include note-data. defaults

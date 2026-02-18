@@ -322,40 +322,88 @@ impl PkhSignatureEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
-pub struct LockMerkleProof {
+pub struct LockMerkleProofStub {
     pub spend_condition: SpendCondition,
     pub axis: u64,
     pub proof: MerkleProof,
 }
 
-//impl NounEncode for LockMerkleProof {
-//    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
-//        let condition = self.spend_condition.to_noun(allocator);
-//        let axis = self.axis.to_noun(allocator);
-//        let proof = self.proof.to_noun(allocator);
-//        nockvm::noun::T(allocator, &[condition, axis, proof])
-//    }
-//}
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub struct LockMerkleProofFull {
+    pub version: u64,
+    pub spend_condition: SpendCondition,
+    pub axis: u64,
+    pub proof: MerkleProof,
+}
 
-//impl NounDecode for LockMerkleProof {
-//    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-//        let cell = noun.as_cell()?;
-//        let spend_condition = SpendCondition::from_noun(&cell.head())?;
-//
-//        let tail = cell.tail();
-//        let cell = tail
-//            .as_cell()
-//            .map_err(|_| NounDecodeError::Custom("lock-merkle-proof tail not a cell".into()))?;
-//        let axis = u64::from_noun(&cell.head())?;
-//        let proof = MerkleProof::from_noun(&cell.tail())?;
-//
-//        Ok(Self {
-//            spend_condition,
-//            axis,
-//            proof,
-//        })
-//    }
-//}
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode)]
+#[noun(untagged)]
+pub enum LockMerkleProof {
+    Full(LockMerkleProofFull),
+    Stub(LockMerkleProofStub),
+}
+
+impl LockMerkleProof {
+    pub fn new_full(spend_condition: SpendCondition, axis: u64, proof: MerkleProof) -> Self {
+        use nockvm_macros::tas;
+        Self::Full(LockMerkleProofFull {
+            version: tas!(b"full"),
+            spend_condition,
+            axis,
+            proof,
+        })
+    }
+
+    pub fn new_stub(spend_condition: SpendCondition, axis: u64, proof: MerkleProof) -> Self {
+        Self::Stub(LockMerkleProofStub {
+            spend_condition,
+            axis,
+            proof,
+        })
+    }
+
+    pub fn spend_condition(&self) -> &SpendCondition {
+        match self {
+            Self::Full(proof) => &proof.spend_condition,
+            Self::Stub(proof) => &proof.spend_condition,
+        }
+    }
+
+    pub fn axis(&self) -> u64 {
+        match self {
+            Self::Full(proof) => proof.axis,
+            Self::Stub(proof) => proof.axis,
+        }
+    }
+
+    pub fn proof(&self) -> &MerkleProof {
+        match self {
+            Self::Full(proof) => &proof.proof,
+            Self::Stub(proof) => &proof.proof,
+        }
+    }
+
+    pub fn into_parts(self) -> (SpendCondition, u64, MerkleProof) {
+        match self {
+            Self::Full(proof) => (proof.spend_condition, proof.axis, proof.proof),
+            Self::Stub(proof) => (proof.spend_condition, proof.axis, proof.proof),
+        }
+    }
+}
+
+impl NounDecode for LockMerkleProof {
+    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+        if let Ok(full) = LockMerkleProofFull::from_noun(noun) {
+            if full.version != nockvm_macros::tas!(b"full") {
+                return Err(NounDecodeError::Custom(
+                    "lock-merkle-proof version must be %full".into(),
+                ));
+            }
+            return Ok(Self::Full(full));
+        }
+        Ok(Self::Stub(LockMerkleProofStub::from_noun(noun)?))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleProof {

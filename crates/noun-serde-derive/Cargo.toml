@@ -17,4 +17,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 nockapp.workspace = true
+nockvm_macros.workspace = true
 noun-serde.workspace = true

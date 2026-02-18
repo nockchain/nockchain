@@ -1596,7 +1596,9 @@ fn update_proposal_cache_metrics(proposal_cache: &ProposalCache) {
         }
     };
 
-    metrics.proposal_cache_total.swap(snapshot.proposal_total as f64);
+    metrics
+        .proposal_cache_total
+        .swap(snapshot.proposal_total as f64);
     metrics
         .proposal_cache_collecting
         .swap(snapshot.collecting as f64);

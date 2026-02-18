@@ -405,6 +405,9 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(v1_phase) = cli.fakenet_v1_phase {
             fakenet_constants = fakenet_constants.with_v1_phase(v1_phase);
         }
+        if let Some(bythos_phase) = cli.fakenet_bythos_phase {
+            fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
+        }
         setup::poke(
             &mut nockapp,
             setup::SetupCommand::PokeFakenetConstants(fakenet_constants),

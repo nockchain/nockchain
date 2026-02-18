@@ -159,7 +159,7 @@ impl<J: Jammer> Saver<J> {
             }
         };
         let last_event_num = loaded_checkpoint.event_num();
-        let saveable = loaded_checkpoint.into_saveable(metrics.clone())?;
+        let saveable = loaded_checkpoint.into_saveable::<J>(metrics.clone())?;
         trace!("After from_jammed_checkpoint");
         let c = C::from_saveable(saveable)?;
         Ok((
@@ -243,11 +243,11 @@ impl SaveableCheckpoint {
         JammedCheckpointV2::new(ker_hash, event_num, cold_jam, state_jam)
     }
 
-    fn from_jammed_checkpoint_v1(
+    fn from_jammed_checkpoint_v1<J: Jammer>(
         jammed: JammedCheckpointV1,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<Self, CheckpointError> {
-        let mut slab: NounSlab = NounSlab::new();
+        let mut slab: NounSlab<J> = NounSlab::new();
         let cue_start = Instant::now();
         let root = slab.cue_into(jammed.jam.0)?;
         metrics.map(|m| m.load_cue_time.add_timing(&cue_start.elapsed()));
@@ -272,23 +272,25 @@ impl SaveableCheckpoint {
         })
     }
 
-    fn from_jammed_checkpoint_v2(
+    fn from_jammed_checkpoint_v2<J: Jammer>(
         jammed: JammedCheckpointV2,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<Self, CheckpointError> {
         let mut durations = std::time::Duration::ZERO;
 
-        let mut state_slab: NounSlab = NounSlab::new();
+        let mut state_slab: NounSlab<J> = NounSlab::new();
         let state_start = Instant::now();
         let state_root = state_slab.cue_into(jammed.state_jam.0.clone())?;
         durations += state_start.elapsed();
         state_slab.set_root(state_root);
+        let state_slab = state_slab.coerce_jammer::<NockJammer>();
 
-        let mut cold_slab: NounSlab = NounSlab::new();
+        let mut cold_slab: NounSlab<J> = NounSlab::new();
         let cold_start = Instant::now();
         let cold_root = cold_slab.cue_into(jammed.cold_jam.0.clone())?;
         durations += cold_start.elapsed();
         cold_slab.set_root(cold_root);
+        let cold_slab = cold_slab.coerce_jammer::<NockJammer>();
 
         if let Some(metrics) = metrics {
             metrics.load_cue_time.add_timing(&durations);
@@ -581,13 +583,17 @@ impl LoadedCheckpoint {
         }
     }
 
-    fn into_saveable(
+    fn into_saveable<J: Jammer>(
         self,
         metrics: Option<Arc<NockAppMetrics>>,
     ) -> Result<SaveableCheckpoint, CheckpointError> {
         match self {
-            LoadedCheckpoint::V2(cp) => SaveableCheckpoint::from_jammed_checkpoint_v2(cp, metrics),
-            LoadedCheckpoint::V1(cp) => SaveableCheckpoint::from_jammed_checkpoint_v1(cp, metrics),
+            LoadedCheckpoint::V2(cp) => {
+                SaveableCheckpoint::from_jammed_checkpoint_v2::<J>(cp, metrics)
+            }
+            LoadedCheckpoint::V1(cp) => {
+                SaveableCheckpoint::from_jammed_checkpoint_v1::<J>(cp, metrics)
+            }
         }
     }
 }

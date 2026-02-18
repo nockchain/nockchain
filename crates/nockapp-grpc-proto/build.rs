@@ -1,13 +1,26 @@
 #![allow(dead_code)]
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PROTOC");
-    if env::var_os("PROTOC").is_some() {
+    println!("cargo:rerun-if-env-changed=PATH");
+    if let Some(protoc) = env::var_os("PROTOC") {
+        let path = PathBuf::from(protoc);
+        if !path.is_file() {
+            return Err(format!("PROTOC is set but not a file: {}", path.display()).into());
+        }
         return Ok(());
     }
-    Err("PROTOC is not set; Bazel should pass it via //tools/protoc:protoc".into())
+    match Command::new("protoc").arg("--version").status() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "protoc from PATH exited with status {status}; set PROTOC to a valid binary path"
+        )
+        .into()),
+        Err(_) => Err("PROTOC is not set and protoc was not found on PATH".into()),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

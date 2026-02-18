@@ -36,15 +36,15 @@ use tokio::{fs as tokio_fs, signal};
 use tracing::info;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
-// When enabled, use snmalloc as the global allocator.
+// Default to jemalloc unless opted out via `malloc` or `snmalloc`.
+#[cfg(all(not(miri), not(feature = "malloc"), not(feature = "snmalloc")))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+// Opt into snmalloc as the global allocator.
 #[cfg(feature = "snmalloc")]
 #[global_allocator]
 static ALLOC: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
-
-// When enabled, use jemalloc as the global allocator.
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]

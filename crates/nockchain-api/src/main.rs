@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use chaff::Chaff;
 use clap::Parser;
 use kernels_open_dumb::KERNEL;
 use nockapp::kernel::boot;
@@ -36,8 +37,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         NockchainAPIConfig::DisablePublicServer
     };
 
-    let mut nockchain: nockapp::NockApp =
-        nockchain::init_with_kernel(cli, KERNEL, prover_hot_state.as_slice(), api_config).await?;
+    let mut nockchain =
+        nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
+            .await?;
     nockchain.run().await?;
     Ok(())
 }

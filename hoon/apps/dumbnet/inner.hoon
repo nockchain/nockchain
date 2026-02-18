@@ -96,7 +96,13 @@
         ==
       =/  default-constants=blockchain-constants:t  *blockchain-constants:t
       =/  new-constants=blockchain-constants:t
-        default-constants(+>+ constants.arg)
+        :*  v1-phase.default-constants
+            bythos-phase.default-constants
+            data.default-constants
+            base-fee.default-constants
+            input-fee-divisor.default-constants
+            constants.arg
+        ==
       :*  %6
           c=new-c
           a=a.arg
@@ -965,6 +971,22 @@
         ~>  %slog.[1 'heard-tx: Transaction invalid, discarding']
         :_  k
         [(liar-effect wir %tx-inputs-not-in-spent-by-and-invalid)]~
+      ::
+      ::  for v1 transactions, validate against current context so
+      ::  timelocks and lock requirements are enforced at receipt
+      =/  ctx-valid=(reason:t ~)
+        ?^  -.raw
+          [%.y ~]
+        %-  validate-with-context:spends:t
+        :*  get-cur-balance:con
+            spends.raw
+            get-cur-height:con
+            max-size.data.constants.k
+            bythos-phase.constants.k
+        ==
+      ?.  ?=(%.y -.ctx-valid)
+        ~>  %slog.[1 (cat 3 'heard-tx: Transaction context invalid: ' +.ctx-valid)]
+        `k
       ::
       =^  work  c.k
         (add-raw-tx:con raw)

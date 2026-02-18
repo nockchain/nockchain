@@ -160,18 +160,24 @@
 +$  blockchain-constants
   $+  blockchain-constants
   $~  :*
+          ::  activation heights
           v1-phase=39.000
+          bythos-phase=54.000
           ::  note data field constraints
           ::    max-size: maximum number of leaves in the data field noun
           ::    min-fee:  minimum fee (in nicks)
           data=[max-size=2.048 min-fee=256]
           ::  base fee per word for witness and note-data storage
-          base-fee=(bex 15)
+          base-fee=(bex 14)
+          ::  divisor for input fees (inputs cost 1/divisor of outputs)
+          input-fee-divisor=4
           *blockchain-constants:v0
       ==
   $:  v1-phase=@
+      bythos-phase=@
       data=[max-size=@ min-fee=@]
       base-fee=@
+      input-fee-divisor=@
       blockchain-constants:v0
   ==
 :: $nname
@@ -788,28 +794,56 @@
     %-  hash-hashable:tip5
     (hashable form)
   ::
-  ++  validate-with-context
-    |=  [balance=(z-map nname nnote) sps=form page-num=page-number max-size=@]
-    ^-  (reason ~)
-    %+  roll  ~(tap z-by sps)
-    |=  [[nam=nname sp=spend] acc=(reason ~)]
-    ?.  ?=(%.y -.acc)  acc
-    ::  check note-data size limits
-    =/  seed-list=(list seed)
+  ::  merge note-data across all seeds by lock-root (same as build-outputs)
+  ++  note-data-by-lock-root
+    |=  sps=form
+    ^-  (z-mip ^hash @tas *)
+    =/  all-seeds=(list seed)
+      %-  zing
+      %+  turn  ~(tap z-by sps)
+      |=  [nam=nname sp=spend]
       ?-  -.sp
         %0  ~(tap z-in seeds.+.sp)
         %1  ~(tap z-in seeds.+.sp)
       ==
-    =/  exceeds-size=?
-      %+  lien  seed-list
-      |=  sed=seed
-      =/  data-size=@
-        %-  num-of-leaves:shape
-        %-  ~(rep z-by note-data.sed)
-        |=  [[k=@tas v=*] tree=*]
-        [k v tree]
-      (gth data-size max-size)
-    ?:  exceeds-size  [%.n %v1-note-data-exceeds-max-size]
+    =/  by-lock-root=(z-mip ^hash @tas *)
+      %+  roll  all-seeds
+      |=  [sed=seed acc=(z-mip ^hash @tas *)]
+      =/  key=hash  lock-root.sed
+      =/  existing=(unit (z-map @tas *))
+        (~(get z-by acc) key)
+      ?~  existing
+        (~(put z-by acc) key note-data.sed)
+      =/  merged=(z-map @tas *)
+        (~(uni z-by u.existing) note-data.sed)
+      (~(put z-by acc) key merged)
+    by-lock-root
+  ::
+  ++  note-data-exceeds-max
+    |=  [sps=form max=@]
+    ^-  ?
+    %+  lien  ~(tap z-by (note-data-by-lock-root sps))
+    |=  [key=hash note-data=(z-map @tas *)]
+    =/  data-size=@
+      %-  num-of-leaves:shape
+      %-  ~(rep z-by note-data)
+      |=  [[k=@tas v=*] tree=*]
+      [k v tree]
+    (gth data-size max)
+  ::
+  ++  validate-with-context
+    |=  $:  balance=(z-map nname nnote)
+            sps=form
+            page-num=page-number
+            max-size=@
+            bythos-phase=page-number
+        ==
+    ^-  (reason ~)
+    ?:  (note-data-exceeds-max sps max-size)
+      [%.n %v1-note-data-exceeds-max-size]
+    %+  roll  ~(tap z-by sps)
+    |=  [[nam=nname sp=spend] acc=(reason ~)]
+    ?.  ?=(%.y -.acc)  acc
     =/  mnote=(unit nnote)  (~(get z-by balance) nam)
     ?~  mnote  [%.n %v1-input-missing]
     =/  note=nnote  u.mnote
@@ -834,6 +868,7 @@
             origin-page.note
             (sig-hash:spend-1 +.sp)
             witness.+.sp
+            bythos-phase
         ==
       ?.  %+  check:check-context  ctx
           (lock-hash:nnote-1 note)
@@ -1316,9 +1351,9 @@
       (hashable-v8 q.v16)
     --
   ::
-  ++  build-lock-merkle-proof
+  ++  build-lock-merkle-proof-stub
     |=  [=form leaf-number=@]
-    ^-  lock-merkle-proof
+    ^-  [=spend-condition axis=@ =merk-proof:merkle]
     |^
     ?>  !=(leaf-number 0)
     ::
@@ -1359,19 +1394,36 @@
           $(form 8+p.form, leaf-number leaf-number)
         $(form 8+q.form, leaf-number (sub leaf-number 8))
       ==
-    --  ::+build-lock-merkle-proof
-    ++  from-sig
-      |=  =sig
-      ^-  form
-      =/  hs=(z-set ^hash)
-        %+  roll  ~(tap z-in pubkeys.sig)
-        |=  [pk=schnorr-pubkey acc=(z-set ^hash)]
-        (~(put z-in acc) (hash:schnorr-pubkey pk))
-      [%pkh [m.sig hs]]~
+    --  ::+build-lock-merkle-proof-stub
+  ::
+  ++  build-lock-merkle-proof-full
+    |=  [=form leaf-number=@]
+    ^-  [version=%full =spend-condition axis=@ =merk-proof:merkle]
+      =/  lmp0=[=spend-condition axis=@ =merk-proof:merkle]
+        (build-lock-merkle-proof-stub form leaf-number)
+      [%full spend-condition.lmp0 axis.lmp0 merk-proof.lmp0]
+  ::
+  ++  build-lock-merkle-proof
+    |=  [=form leaf-number=@]
+    ^-  lock-merkle-proof
+    (build-lock-merkle-proof-full form leaf-number)
+  ::
+  ++  from-sig
+    |=  =sig
+    ^-  form
+    =/  hs=(z-set ^hash)
+    %+  roll  ~(tap z-in pubkeys.sig)
+    |=  [pk=schnorr-pubkey acc=(z-set ^hash)]
+    (~(put z-in acc) (hash:schnorr-pubkey pk))
+    [%pkh [m.sig hs]]~
   --
 ::
 ::  $lock-merkle-proof: merkle proof for a branch of a lock script
-++  lock-merkle-proof
+::
+::    stub: legacy / incorrect hashable that does not commit to axis and instead
+::          commits to the standard library hash (stopgap for determinism)
+::    full: corrected hashable that commits to axis as a leaf
+++  lock-merkle-proof-stub
   =<  form
   |%
   +$  form  [=spend-condition axis=@ =merk-proof:merkle]
@@ -1407,14 +1459,12 @@
     |=  =form
     %-  hash-hashable:tip5
     (hashable form)
-  ::  note that the hash comes from the nname and thus must be
-  ::  the hash of the merkle proof, paired with & (see v1-name:nname)
   ::
   ++  check
     |=  [=form parent-firstname=^hash]
     ^-  ?
     ?.  =(1 axis.form)
-      ~>  %slog.[0 'axis must be 1 until a protocol upgrade that properly commits to lmp in witness']
+      ~>  %slog.[0 'stub lmp axis must be 1']
       %.n
     =/  spend-firstname
       (hash-hashable:tip5 [leaf+& hash+root.merk-proof.form])
@@ -1422,9 +1472,155 @@
       ~>  %slog.[0 'spend first name does not match parent note first name']
       %.n
     =/  leaf-hash  (hash:spend-condition spend-condition.form)
-    =/  merk-verified
-      (verify-merk-proof:merkle leaf-hash axis.form merk-proof.form)
-    merk-verified
+    (verify-merk-proof:merkle leaf-hash axis.form merk-proof.form)
+  --
+++  lock-merkle-proof-full
+  =<  form
+  |%
+  +$  form
+    $:  version=%full
+        =spend-condition
+        axis=@
+        =merk-proof:merkle
+    ==
+  ++  based
+    |=  =form
+    ^-  ?
+    ?&  (based:spend-condition spend-condition.form)
+        (^based axis.form)
+        (based:^hash root.merk-proof.form)
+        (levy path.merk-proof.form based:^hash)
+    ==
+  ::
+  ++  hashable
+    |=  =form
+    ^-  hashable:tip5
+    |^
+    :*  leaf+version.form
+        hash+(hash:spend-condition spend-condition.form)
+        leaf+axis.form
+        (hashable-merk-proof merk-proof.form)
+    ==
+    ::
+    ++  hashable-merk-proof
+      |=  =merk-proof:merkle
+      ^-  hashable:tip5
+      :-  hash+root.merk-proof
+      |-  ^-  hashable:tip5
+      ?~  path.merk-proof
+        leaf+~
+      :-  hash+i.path.merk-proof
+      $(path.merk-proof t.path.merk-proof)
+    --
+  ::
+  ++  hash
+    |=  =form
+    %-  hash-hashable:tip5
+    (hashable form)
+  ::
+  ++  check
+    |=  [=form parent-firstname=^hash]
+    ^-  ?
+    =/  spend-firstname
+      (hash-hashable:tip5 [leaf+& hash+root.merk-proof.form])
+    ?.  =(spend-firstname parent-firstname)
+      ~>  %slog.[0 'spend first name does not match parent note first name']
+      %.n
+    =/  leaf-hash  (hash:spend-condition spend-condition.form)
+    (verify-merk-proof:merkle leaf-hash axis.form merk-proof.form)
+  --
+++  lock-merkle-proof
+  =<  form
+  |%
+  +$  form
+    $^  [=spend-condition axis=@ =merk-proof:merkle]
+    [version=%full =spend-condition axis=@ =merk-proof:merkle]
+  ::
+  ++  based
+    |=  =form
+    ^-  ?
+    ?:  ?=([%full * * *] form)
+      =+  [ver sc ax mp]=form
+      =/  =spend-condition  sc
+      =/  mp=merk-proof:merkle  mp
+      ?&  (based:^spend-condition spend-condition)
+          (^based ax)
+          (based:^hash root.mp)
+          (levy path.mp based:^hash)
+      ==
+    =+  [sc ax mp]=form
+    =/  =spend-condition  sc
+    =/  mp=merk-proof:merkle  mp
+    ?&  (based:^spend-condition spend-condition)
+        (^based ax)
+        (based:^hash root.mp)
+        (levy path.mp based:^hash)
+    ==
+  ::
+  ++  hashable
+    |=  =form
+    ^-  hashable:tip5
+    |^
+    ?:  ?=([%full * * *] form)
+      =+  [ver sc ax mp]=form
+      =/  =spend-condition  sc
+      =/  mp=merk-proof:merkle  mp
+      :*  leaf+ver
+          hash+(hash:^spend-condition spend-condition)
+          leaf+ax
+          (hashable-merk-proof mp)
+      ==
+    =+  [sc ax mp]=form
+    =/  =spend-condition  sc
+    =/  mp=merk-proof:merkle  mp
+    :+  hash+(hash:^spend-condition spend-condition)
+      hash+(from-b58:^hash '6mhCSwJQDvbkbiPAUNjetJtVoo1VLtEhmEYoU4hmdGd6ep1F6ayaV4A')
+    (hashable-merk-proof mp)
+    ::
+    ++  hashable-merk-proof
+      |=  mp=merk-proof:merkle
+      ^-  hashable:tip5
+      :-  hash+root.mp
+      |-  ^-  hashable:tip5
+      ?~  path.mp
+        leaf+~
+      :-  hash+i.path.mp
+      $(path.mp t.path.mp)
+    --
+  ::
+  ++  hash
+    |=  =form
+    ^-  ^hash
+    %-  hash-hashable:tip5
+    (hashable form)
+  ::
+  ++  check
+    |=  [=form parent-firstname=^hash]
+    ^-  ?
+    ?:  ?=([%full * * *] form)
+      =+  [ver=%full sc=* ax=@ mp=*]=form
+      =/  =spend-condition  sc
+      =/  mp=merk-proof:merkle  mp
+      =/  spend-firstname
+        (hash-hashable:tip5 [leaf+& hash+root.mp])
+      ?.  =(spend-firstname parent-firstname)
+        ~>  %slog.[0 'spend first name does not match parent note first name']
+        %.n
+      =/  leaf-hash  (hash:^spend-condition spend-condition)
+      (verify-merk-proof:merkle leaf-hash ax mp)
+    =+  [sc=* ax=@ mp=*]=form
+    =/  =spend-condition  sc
+    =/  mp=merk-proof:merkle  mp
+    ?.  =(1 ax)
+      ~>  %slog.[0 'stub lmp axis must be 1']
+      %.n
+    =/  spend-firstname
+      (hash-hashable:tip5 [leaf+& hash+root.mp])
+    ?.  =(spend-firstname parent-firstname)
+      ~>  %slog.[0 'spend first name does not match parent note first name']
+      %.n
+    =/  leaf-hash  (hash:^spend-condition spend-condition)
+    (verify-merk-proof:merkle leaf-hash ax mp)
   --
 ::
 ::  $pkh: pay to public key hash
@@ -1613,6 +1809,7 @@
 ::    .since: page height of the note
 ::    .sig-hash: signature to be hashed for a spend
 ::    .witness: witness to spend conditions
+::    .bythos-phase: height at which bythos activates (for full LMP gating)
 ++  check-context
   =<  form
   |%
@@ -1621,16 +1818,29 @@
         since=page-number
         sig-hash=hash
         =witness
+        bythos-phase=page-number
     ==
   ::
   ++  check
     |=  [=form lock=hash]
     ^-  ?
+    =/  bythos-ok=?
+      ?:  ?=([%full * * *] lmp.witness.form)
+        (gte now.form bythos-phase.form)
+      %.y
+    =/  sc=spend-condition
+      ?:  ?=([%full * * *] lmp.witness.form)
+        =+  [ver sc ax mp]=lmp.witness.form
+        sc
+      =+  [sc ax mp]=lmp.witness.form
+      sc
     ?&
+    ::  gate full proofs until bythos activation
+      bythos-ok
     ::  check the merkle proof for the lock script
       (check:lock-merkle-proof lmp.witness.form lock)
     ::  check each primitive
-      %+  levy  spend-condition.lmp.witness.form
+      %+  levy  sc
       |=  p=lock-primitive
       ^-  ?
       ?-  -.p
@@ -1720,6 +1930,7 @@
             %=  note.child
               assets  new-assets
               name    (new-v1:nname [lock-root.sed src])
+              note-data  (~(uni z-by note-data.note.child) note-data.sed)
             ==
           (~(put z-by acc) key updated-child)
         =/  single=seeds  (~(put z-in *seeds) sed)

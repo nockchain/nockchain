@@ -13,6 +13,7 @@ tracing-heap = ["tikv-jemallocator", "tracy-client"]
 [dependencies]
 
 bs58.workspace = true
+chaff.workspace = true
 clap.workspace = true
 equix.workspace = true
 futures.workspace = true

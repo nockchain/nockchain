@@ -1,0 +1,11 @@
+[package]
+name = "habit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+bytes.workspace = true
+
+[dev-dependencies]
+quickcheck.workspace = true

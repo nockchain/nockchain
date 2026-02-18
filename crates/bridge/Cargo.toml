@@ -11,8 +11,8 @@ path = "src/lib.rs"
 
 [features]
 bazel_build = []
+malloc = []
 snmalloc = ["dep:snmalloc-rs"]
-jemalloc = ["dep:tikv-jemallocator"]
 
 [dependencies]
 alloy = { workspace = true, features = ["provider-ws", "signer-local"] }
@@ -56,7 +56,7 @@ serde_bytes.workspace = true
 serde_json.workspace = true
 snmalloc-rs = { workspace = true, optional = true }
 thiserror.workspace = true
-tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemallocator.workspace = true
 tiny-keccak.workspace = true
 tokio = { workspace = true, features = ["full"] }
 toml.workspace = true

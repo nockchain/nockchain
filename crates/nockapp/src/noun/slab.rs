@@ -734,6 +734,7 @@ impl Jammer for NockJammer {
                 }
             }
         }
+
         Bytes::copy_from_slice(buffer.as_raw_slice())
     }
 

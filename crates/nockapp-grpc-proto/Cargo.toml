@@ -13,6 +13,7 @@ client = []
 anyhow = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { workspace = true }
+nockvm_macros = { workspace = true }
 
 prost = { workspace = true }
 prost-types = { workspace = true }
