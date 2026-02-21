@@ -862,7 +862,27 @@
         (~(uni z-by u.existing) note-data.sed)
       (~(put z-by acc) key merged)
     by-lock-root
-  ++  count-seed-words
+  ::  pre-bythos fee accounting charged note-data per spend, without lock-root
+  ::  aggregation across the transaction.
+  ++  count-seed-words-legacy
+    |=  sps=form
+    ^-  @
+    %+  roll  ~(tap z-by sps)
+    |=  [[nam=nname sp=spend] acc=@]
+    =/  seds=seeds:v1
+      ?-  -.sp
+        %0  seeds.+.sp
+        %1  seeds.+.sp
+      ==
+    %+  add  acc
+    %+  roll  ~(tap z-in seds)
+    |=  [sed=seed-v1 acc=@]
+    %+  add  acc
+    %-  num-of-leaves:shape
+    %-  ~(rep z-by note-data.sed)
+    |=  [[k=@tas v=*] tree=*]
+    [k v tree]
+  ++  count-seed-words-merged
     |=  sps=form
     ^-  @
     =/  merged-by-lock-root=(z-mip ^hash @tas *)
@@ -874,20 +894,33 @@
     %-  ~(rep z-by note-data)
     |=  [[k=@tas v=*] tree=*]
     [k v tree]
+  ++  count-seed-words
+    |=  [sps=form page-num=page-number]
+    ^-  @
+    ?:  (gte page-num bythos-phase)
+      (count-seed-words-merged sps)
+    (count-seed-words-legacy sps)
+  ++  count-witness-words-raw
+    |=  sps=form
+    ^-  @
+    %+  roll  ~(tap z-by sps)
+    |=  [[nam=nname sp=spend] acc=@]
+    (add acc (count-witness-words:spend-v1 sp))
+  ++  count-witness-words
+    |=  [sps=form page-num=page-number]
+    ^-  @
+    ?:  (gte page-num bythos-phase)
+      (count-witness-words-raw sps)
+    (count-witness-words-raw sps)
   ::
   ++  calculate-min-fee
     |=  [sps=form page-num=page-number]
     ^-  coins
-    =/  seed-word-count=@  (count-seed-words sps)
-    =/  witness-word-count=@
-      %+  roll  ~(tap z-by sps)
-      |=  [[nam=nname sp=spend] acc=@]
-      (add acc (count-witness-words:spend-v1 sp))
+    =/  bythos-active=?  (gte page-num bythos-phase)
+    =/  seed-word-count=@  (count-seed-words [sps page-num])
+    =/  witness-word-count=@  (count-witness-words [sps page-num])
     ::  inputs pay discounted fee only at/after bythos activation
-    =/  witness-divisor=@
-      ?:  (gte page-num bythos-phase)
-        input-fee-divisor
-      1
+    =/  witness-divisor=@  ?:(bythos-active input-fee-divisor 1)
     ::  outputs (seeds) pay full base-fee per word
     =/  seed-fee=coins  (mul seed-word-count base-fee)
     ::  inputs (witnesses) pay base-fee / input-fee-divisor per word

@@ -4,6 +4,8 @@ use nockapp::driver::{NockAppHandle, PokeResult};
 use nockapp::noun::slab::NounSlab;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
+use tonic_health::server::health_reporter;
+use tonic_reflection::server::Builder as ReflectionBuilder;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{NockAppGrpcError, Result};
@@ -26,9 +28,22 @@ impl PrivateNockAppGrpcServer {
     pub async fn serve(self, addr: SocketAddr) -> Result<()> {
         info!("Starting private gRPC server on {}", addr);
 
+        let (health_reporter, health_service) = health_reporter();
+        health_reporter
+            .set_serving::<PrivateNockAppServer<PrivateNockAppGrpcServer>>()
+            .await;
+        let reflection_service_v1 = ReflectionBuilder::configure()
+            .register_encoded_file_descriptor_set(nockapp_grpc_proto::pb::FILE_DESCRIPTOR_SET)
+            .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+            .build_v1()
+            .map_err(|e| {
+                NockAppGrpcError::Internal(format!("Failed to build v1 reflection service: {}", e))
+            })?;
         let service = PrivateNockAppServer::new(self);
 
         Server::builder()
+            .add_service(health_service)
+            .add_service(reflection_service_v1)
             .add_service(service)
             .serve(addr)
             .await
