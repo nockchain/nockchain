@@ -432,6 +432,7 @@
             save-raw-tx=?                                 ::  if %.y, saves jams of the raw-tx and its hashable into a txs-debug folder
                                                           ::  in the current working directory
             =selection-strategy
+            unsigned=?                                            ::  if %.y, skip signing (for watch-only wallets)
         ==
         [%list-active-addresses ~]
         [%list-notes ~]
@@ -446,6 +447,10 @@
         [%list-master-addresses ~]
         [%file file-cause]
         $:  %sign-multisig-tx
+            dat=transaction
+            sign-keys=(unit (list [child-index=@ud hardened=?]))
+        ==
+        $:  %sign-tx
             dat=transaction
             sign-keys=(unit (list [child-index=@ud hardened=?]))
         ==

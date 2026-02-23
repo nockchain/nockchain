@@ -215,6 +215,7 @@
         %list-notes-by-address  (do-list-notes-by-address cause)
         %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
         %create-tx             (do-create-tx cause)
+        %sign-tx               (do-sign-tx cause)
         %sign-multisig-tx      (do-sign-multisig-tx cause)
         %update-balance-grpc   (do-update-balance-grpc cause)
         %sign-message          (do-sign-message cause)
@@ -1276,7 +1277,13 @@
           """
           [%exit 0]
       ==
+    =/  master-coil=coil:wt  ~(master get:v %pub)
+    ?>  ?=(%pub -.key.master-coil)
+    =/  sender-pkh=hash:transact
+      %-  hash:schnorr-pubkey:transact
+      (from-ser:schnorr-pubkey:transact p.key.master-coil)
     =/  sign-keys=(list schnorr-seckey:transact)
+      ?:  unsigned.cause  ~
       ?~  sign-keys.cause
         ~[(sign-key:get:v ~)]
       %+  turn  u.sign-keys.cause
@@ -1288,6 +1295,7 @@
         orders
         fee.cause
         allow-low-fee.cause
+        sender-pkh
         sign-keys
         refund-pkh.cause
         get-note:v
@@ -1680,6 +1688,11 @@
         """
         [%exit 0]
     ==
+  ::
+  ++  do-sign-tx
+    |=  =cause:wt
+    ?>  ?=(%sign-tx -.cause)
+    (do-sign-multisig-tx cause(- %sign-multisig-tx))
   ::
   ++  do-sign-multisig-tx
     |=  =cause:wt

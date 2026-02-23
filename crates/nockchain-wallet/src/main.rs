@@ -115,6 +115,7 @@ async fn main() -> Result<(), NockAppError> {
         | Commands::ShowMasterZPrv
         | Commands::ShowKeyTree { .. }
         | Commands::ShowTx { .. }
+        | Commands::SignTx { .. }
         | Commands::SignMultisigTx { .. }
         | Commands::Watch { .. }
         | Commands::TxAccepted { .. } => false,
@@ -304,9 +305,14 @@ async fn main() -> Result<(), NockAppError> {
             sign_keys,
             save_raw_tx,
             note_selection_strategy,
+            unsigned,
         } => {
             let recipient_specs = recipient_tokens_to_specs(recipients.clone())?;
-            let signing_keys = Wallet::collect_signing_keys(*index, *hardened, sign_keys)?;
+            let signing_keys = if *unsigned {
+                Vec::new()
+            } else {
+                Wallet::collect_signing_keys(*index, *hardened, sign_keys)?
+            };
             Wallet::create_tx(
                 names.clone(),
                 recipient_specs,
@@ -317,8 +323,14 @@ async fn main() -> Result<(), NockAppError> {
                 *include_data,
                 *save_raw_tx,
                 *note_selection_strategy,
+                *unsigned,
             )
         }
+        Commands::SignTx {
+            transaction,
+            index,
+            hardened,
+        } => Wallet::sign_tx(transaction, *index, *hardened),
         Commands::SignMultisigTx {
             transaction,
             sign_keys,
@@ -343,7 +355,7 @@ async fn main() -> Result<(), NockAppError> {
     }?;
 
     // If this command requires sync, update the balance using a synchronous poke
-    if requires_sync {
+    if requires_sync && !cli.offline {
         info!(
             "Command requires syncing the current balance, connecting to Nockchain gRPC server..."
         );
@@ -571,7 +583,6 @@ impl Wallet {
     ///
     /// * `transaction_path` - Path to the transaction file
     /// * `index` - Optional index of the key to use for signing
-    #[allow(dead_code)]
     fn sign_tx(
         transaction_path: &str,
         index: Option<u64>,
@@ -607,14 +618,9 @@ impl Wallet {
             None => SIG,
         };
 
-        // Generate random entropy
-        let mut entropy_bytes = [0u8; 32];
-        getrandom::fill(&mut entropy_bytes).map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let entropy = from_bytes(&mut slab, &entropy_bytes).as_noun();
-
         Self::wallet(
             "sign-tx",
-            &[transaction_noun, sign_key_noun, entropy],
+            &[transaction_noun, sign_key_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -940,6 +946,7 @@ impl Wallet {
         include_data: bool,
         save_raw_tx: bool,
         note_selection: NoteSelectionStrategyCli,
+        unsigned: bool,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
@@ -956,7 +963,11 @@ impl Wallet {
 
         let fee_noun = D(fee);
         let order_noun = recipients.to_noun(&mut slab);
-        let sign_key_noun = Wallet::encode_sign_keys(&mut slab, sign_keys);
+        let sign_key_noun = if unsigned {
+            SIG
+        } else {
+            Wallet::encode_sign_keys(&mut slab, sign_keys)
+        };
 
         let refund_noun = if let Some(refund) = refund_pkh {
             let refund_hash = Hash::from_base58(&refund).map_err(|err| {
@@ -974,12 +985,13 @@ impl Wallet {
         let allow_low_fee_noun = allow_low_fee.to_noun(&mut slab);
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
         let note_selection_noun = make_tas(&mut slab, note_selection.tas_label()).as_noun();
+        let unsigned_noun = unsigned.to_noun(&mut slab);
 
         Self::wallet(
             "create-tx",
             &[
                 names_noun, order_noun, fee_noun, allow_low_fee_noun, sign_key_noun, refund_noun,
-                include_data_noun, save_raw_tx_noun, note_selection_noun,
+                include_data_noun, save_raw_tx_noun, note_selection_noun, unsigned_noun,
             ],
             Operation::Poke,
             &mut slab,

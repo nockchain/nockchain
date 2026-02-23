@@ -195,6 +195,10 @@ pub struct WalletCli {
     #[arg(long, default_value = "false")]
     pub fakenet: bool,
 
+    /// Skip the gRPC balance sync (for air-gapped / offline signing)
+    #[arg(long, default_value = "false")]
+    pub offline: bool,
+
     #[command(flatten)]
     pub connection: ConnectionCli,
 
@@ -418,6 +422,21 @@ pub enum Commands {
         /// Note selection strategy (ascending selects smallest notes first)
         #[arg(long = "note-selection", value_enum, default_value = "ascending")]
         note_selection_strategy: NoteSelectionStrategyCli,
+        /// Create an unsigned transaction (no private keys required, for watch-only wallets)
+        #[arg(long, default_value = "false")]
+        unsigned: bool,
+    },
+
+    /// Sign an unsigned or partially-signed transaction file
+    SignTx {
+        /// Path to the transaction file to sign
+        transaction: String,
+        /// Optional key index to use for signing [0, 2^31)
+        #[arg(short, long, value_parser = clap::value_parser!(u64).range(0..2 << 31))]
+        index: Option<u64>,
+        /// Hardened or unhardened child key
+        #[arg(long, default_value = "false")]
+        hardened: bool,
     },
 
     /// Sign a multisig transaction
@@ -579,6 +598,7 @@ impl Commands {
             Commands::ListNotesByAddressCsv { .. } => "list-notes-by-address-csv",
             Commands::SetActiveMasterAddress { .. } => "set-active-master-address",
             Commands::CreateTx { .. } => "create-tx",
+            Commands::SignTx { .. } => "sign-tx",
             Commands::SignMultisigTx { .. } => "sign-multisig-tx",
             Commands::SendTx { .. } => "send-tx",
             Commands::ShowTx { .. } => "show-tx",

@@ -13,6 +13,7 @@
         orders=(list order:wt)
         fee=coins:transact
         allow-low-fee=?
+        sender-pkh=hash:transact
         sign-keys=(list schnorr-seckey:transact)
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
@@ -33,10 +34,6 @@
   |=  sk=schnorr-seckey:transact
   %-  from-sk:schnorr-pubkey:transact
   (to-atom:schnorr-seckey:transact sk)
-?~  signer-pubkeys
-  ~|("At least one signing key is required" !!)
-=/  sender-pubkey=schnorr-pubkey:transact  i.signer-pubkeys
-=/  sender-pkh=hash:transact  (hash:schnorr-pubkey:transact sender-pubkey)
 =/  notes=(list nnote:transact)  (turn names get-note)
 =/  ascending=?  ?=(%asc note-selection)
 ::  If all notes are v0
@@ -44,6 +41,8 @@
   ?:  (levy notes |=(=nnote:transact ?=(^ -.nnote)))
     ?~  refund-pkh
       ~|('Need to specify a refund address if spending from v0 notes. Use the `--refund-pkh` flag in the create-tx command' !!)
+    ?~  signer-pubkeys
+      ~|("At least one signing key is required when spending v0 notes" !!)
     =/  notes-v0=(list nnote:v0:transact)
       %+  turn  notes
       |=  =nnote:transact
@@ -54,7 +53,7 @@
       |=  [a=nnote:v0:transact b=nnote:v0:transact]
       ?:(ascending (lth assets.a assets.b) (gth assets.a assets.b))
     =/  refund-lock=lock:transact  [%pkh [m=1 (z-silt:zo ~[u.refund-pkh])]]~
-    (create-spends-0 notes-v0 orders fee sender-pubkey refund-lock)
+    (create-spends-0 notes-v0 orders fee i.signer-pubkeys refund-lock)
   ::  If all notes are v1
   ?:  (levy notes |=(=nnote:transact ?=(@ -.nnote)))
     =/  notes-v1=(list nnote-1:v1:transact)
