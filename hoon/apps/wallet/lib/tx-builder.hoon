@@ -13,14 +13,18 @@
         orders=(list order:wt)
         fee=coins:transact
         allow-low-fee=?
-        sender-pkh=hash:transact
-        sign-keys=(list schnorr-seckey:transact)
+        keys=$%([%signed sign-keys=(list schnorr-seckey:transact)] [%unsigned sender-pkh=hash:transact])
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
         note-selection=selection-strategy:wt
         height=page-number:transact
     ==
+=/  sign-keys=(list schnorr-seckey:transact)
+  ?-  -.keys
+    %signed    sign-keys.keys
+    %unsigned  ~
+  ==
 |^
 ^-  $:  spends:v1:transact
         witness-data:wt
@@ -29,6 +33,20 @@
 =+  orders-valid=(orders-valid orders)
 ?:  ?=(%.n -.orders-valid)
   ~|("One or more orders are invalid. Reason: {<p.orders-valid>}" !!)
+::  for signed transactions, at least one signing key must be provided
+?:  ?&  ?=(%signed -.keys)
+        ?=(~ sign-keys)
+    ==
+  ~|("At least one signing key is required for signed transactions" !!)
+=/  sender-pkh=hash:transact
+  ?-  -.keys
+    %unsigned  sender-pkh.keys
+    %signed
+      ?~  sign-keys  !!
+      %-  hash:schnorr-pubkey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact i.sign-keys)
+  ==
 =/  signer-pubkeys=(list schnorr-pubkey:transact)
   %+  turn  sign-keys
   |=  sk=schnorr-seckey:transact
@@ -41,8 +59,6 @@
   ?:  (levy notes |=(=nnote:transact ?=(^ -.nnote)))
     ?~  refund-pkh
       ~|('Need to specify a refund address if spending from v0 notes. Use the `--refund-pkh` flag in the create-tx command' !!)
-    ?~  signer-pubkeys
-      ~|("At least one signing key is required when spending v0 notes" !!)
     =/  notes-v0=(list nnote:v0:transact)
       %+  turn  notes
       |=  =nnote:transact
@@ -52,6 +68,8 @@
       %+  sort  notes-v0
       |=  [a=nnote:v0:transact b=nnote:v0:transact]
       ?:(ascending (lth assets.a assets.b) (gth assets.a assets.b))
+    ?~  signer-pubkeys
+      ~|("At least one signing key is required when spending v0 notes" !!)
     =/  refund-lock=lock:transact  [%pkh [m=1 (z-silt:zo ~[u.refund-pkh])]]~
     (create-spends-0 notes-v0 orders fee i.signer-pubkeys refund-lock)
   ::  If all notes are v1

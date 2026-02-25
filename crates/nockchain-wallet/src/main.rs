@@ -305,10 +305,10 @@ async fn main() -> Result<(), NockAppError> {
             sign_keys,
             save_raw_tx,
             note_selection_strategy,
-            unsigned,
+            sender_pkh,
         } => {
             let recipient_specs = recipient_tokens_to_specs(recipients.clone())?;
-            let signing_keys = if *unsigned {
+            let signing_keys = if sender_pkh.is_some() {
                 Vec::new()
             } else {
                 Wallet::collect_signing_keys(*index, *hardened, sign_keys)?
@@ -323,7 +323,7 @@ async fn main() -> Result<(), NockAppError> {
                 *include_data,
                 *save_raw_tx,
                 *note_selection_strategy,
-                *unsigned,
+                sender_pkh.clone(),
             )
         }
         Commands::SignTx {
@@ -946,7 +946,7 @@ impl Wallet {
         include_data: bool,
         save_raw_tx: bool,
         note_selection: NoteSelectionStrategyCli,
-        unsigned: bool,
+        sender_pkh: Option<String>,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
@@ -963,10 +963,24 @@ impl Wallet {
 
         let fee_noun = D(fee);
         let order_noun = recipients.to_noun(&mut slab);
-        let sign_key_noun = if unsigned {
-            SIG
+
+        // Encode the tx-key-info tagged union:
+        //   [%unsigned sender-pkh] for watch-only wallets
+        //   [%signed sign-keys]    for wallets with keys
+        let tx_key_info_noun = if let Some(ref pkh) = sender_pkh {
+            let unsigned_tag = make_tas(&mut slab, "unsigned").as_noun();
+            let pkh_hash = Hash::from_base58(pkh).map_err(|err| {
+                NockAppError::from(CrownError::Unknown(format!(
+                    "Invalid sender pubkey hash '{}': {}",
+                    pkh, err
+                )))
+            })?;
+            let pkh_noun = pkh_hash.to_noun(&mut slab);
+            T(&mut slab, &[unsigned_tag, pkh_noun])
         } else {
-            Wallet::encode_sign_keys(&mut slab, sign_keys)
+            let signed_tag = make_tas(&mut slab, "signed").as_noun();
+            let sign_key_noun = Wallet::encode_sign_keys(&mut slab, sign_keys);
+            T(&mut slab, &[signed_tag, sign_key_noun])
         };
 
         let refund_noun = if let Some(refund) = refund_pkh {
@@ -985,13 +999,19 @@ impl Wallet {
         let allow_low_fee_noun = allow_low_fee.to_noun(&mut slab);
         let save_raw_tx_noun = save_raw_tx.to_noun(&mut slab);
         let note_selection_noun = make_tas(&mut slab, note_selection.tas_label()).as_noun();
-        let unsigned_noun = unsigned.to_noun(&mut slab);
 
         Self::wallet(
             "create-tx",
             &[
-                names_noun, order_noun, fee_noun, allow_low_fee_noun, sign_key_noun, refund_noun,
-                include_data_noun, save_raw_tx_noun, note_selection_noun, unsigned_noun,
+                names_noun,
+                order_noun,
+                fee_noun,
+                allow_low_fee_noun,
+                tx_key_info_noun,
+                refund_noun,
+                include_data_noun,
+                save_raw_tx_noun,
+                note_selection_noun,
             ],
             Operation::Poke,
             &mut slab,

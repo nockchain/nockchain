@@ -1268,35 +1268,37 @@
     %-  (debug "create-tx: {<names.cause>}")
     =/  names=(list nname:transact)  (parse-names names.cause)
     =/  orders=(list order:wt)  orders.cause
-    ?~  active-master.state
+    ::  for signed transactions, we need an active master key in the wallet
+    ?:  ?&  ?=(%signed -.tx-key-info.cause)
+            ?=(~ active-master.state)
+        ==
       :_  state
       :~  :-  %markdown
           %-  crip
           """
-          Cannot create a transaction without active master address set. Please import a master key / seed phrase or generate a new one.
+          Cannot create a signed transaction without active master address set. Please import a master key / seed phrase or generate a new one.
           """
           [%exit 0]
       ==
-    =/  master-coil=coil:wt  ~(master get:v %pub)
-    ?>  ?=(%pub -.key.master-coil)
-    =/  sender-pkh=hash:transact
-      %-  hash:schnorr-pubkey:transact
-      (from-ser:schnorr-pubkey:transact p.key.master-coil)
-    =/  sign-keys=(list schnorr-seckey:transact)
-      ?:  unsigned.cause  ~
-      ?~  sign-keys.cause
-        ~[(sign-key:get:v ~)]
-      %+  turn  u.sign-keys.cause
-      |=  key-info=[child-index=@ud hardened=?]
-      (sign-key:get:v [~ key-info])
+    ::  %unsigned: pass sender-pkh directly; %signed: resolve key-indices to secret keys
+    =/  builder-keys
+      ?-  -.tx-key-info.cause
+        %unsigned  tx-key-info.cause
+        %signed
+          :-  %signed
+          ?~  sign-keys.tx-key-info.cause
+            ~[(sign-key:get:v ~)]
+          %+  turn  u.sign-keys.tx-key-info.cause
+          |=  key-info=[child-index=@ud hardened=?]
+          (sign-key:get:v [~ key-info])
+      ==
     =/  [=spends:v1:transact =witness-data:wt display=transaction-display:wt]
       %:  ~(build tx-builder bc.state)
         names
         orders
         fee.cause
         allow-low-fee.cause
-        sender-pkh
-        sign-keys
+        builder-keys
         refund-pkh.cause
         get-note:v
         include-data.cause

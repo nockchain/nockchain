@@ -422,9 +422,9 @@ pub enum Commands {
         /// Note selection strategy (ascending selects smallest notes first)
         #[arg(long = "note-selection", value_enum, default_value = "ascending")]
         note_selection_strategy: NoteSelectionStrategyCli,
-        /// Create an unsigned transaction (no private keys required, for watch-only wallets)
-        #[arg(long, default_value = "false")]
-        unsigned: bool,
+        /// Create an unsigned transaction for watch-only wallets. Provide the sender's pubkey hash (base58).
+        #[arg(long = "sender-pkh", value_name = "SENDER_PKH")]
+        sender_pkh: Option<String>,
     },
 
     /// Sign an unsigned or partially-signed transaction file

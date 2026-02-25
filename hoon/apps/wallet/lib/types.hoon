@@ -397,6 +397,16 @@
   ::
   ++  key-version  ?(%0 %1)
   ::
+  ::  $tx-key-info: tagged union for signing info passed in create-tx cause
+  ::
+  ::    %signed: wallet has keys; sign-keys is the (unit list) of child-key specs
+  ::    %unsigned: watch-only wallet; sender-pkh is provided directly
+  ::
+  +$  tx-key-info
+    $%  [%signed sign-keys=(unit (list [child-index=@ud hardened=?]))]
+        [%unsigned sender-pkh=hash:transact]
+    ==
+  ::
   +$  cause
     $%  [%keygen entropy=byts salt=byts]
         [%derive-child i=@ hardened=? label=(unit @tas)]
@@ -422,7 +432,7 @@
             orders=(list order)
             fee=coins:transact                            ::  fee
             allow-low-fee=?                               ::  bypass min fee check (unsafe, testing only)
-            sign-keys=(unit (list [child-index=@ud hardened=?]))  ::  child key information to sign from
+            =tx-key-info                                  ::  either signed (child-key specs) or unsigned (sender-pkh)
             refund-pkh=(unit hash:transact)               ::  refund pkh for spends over v0 notes
             include-data=?                                ::  whether or not we should include note-data. defaults
                                                           ::  to yes in cli. not including note-data is a power-user option because
@@ -432,7 +442,6 @@
             save-raw-tx=?                                 ::  if %.y, saves jams of the raw-tx and its hashable into a txs-debug folder
                                                           ::  in the current working directory
             =selection-strategy
-            unsigned=?                                            ::  if %.y, skip signing (for watch-only wallets)
         ==
         [%list-active-addresses ~]
         [%list-notes ~]
