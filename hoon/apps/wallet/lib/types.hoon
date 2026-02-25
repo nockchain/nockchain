@@ -455,10 +455,6 @@
         [%set-active-master-address address-b58=@t]
         [%list-master-addresses ~]
         [%file file-cause]
-        $:  %sign-multisig-tx
-            dat=transaction
-            sign-keys=(unit (list [child-index=@ud hardened=?]))
-        ==
         $:  %sign-tx
             dat=transaction
             sign-keys=(unit (list [child-index=@ud hardened=?]))

@@ -216,7 +216,6 @@
         %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
         %create-tx             (do-create-tx cause)
         %sign-tx               (do-sign-tx cause)
-        %sign-multisig-tx      (do-sign-multisig-tx cause)
         %update-balance-grpc   (do-update-balance-grpc cause)
         %sign-message          (do-sign-message cause)
         %verify-message        (do-verify-message cause)
@@ -1694,13 +1693,8 @@
   ++  do-sign-tx
     |=  =cause:wt
     ?>  ?=(%sign-tx -.cause)
-    (do-sign-multisig-tx cause(- %sign-multisig-tx))
-  ::
-  ++  do-sign-multisig-tx
-    |=  =cause:wt
-    ?>  ?=(%sign-multisig-tx -.cause)
     |^
-    %-  (debug "sign-multisig-tx: {<name.dat.cause>}")
+    %-  (debug "sign-tx: {<name.dat.cause>}")
     ?~  active-master.state
       :_  state
       :~  :-  %markdown

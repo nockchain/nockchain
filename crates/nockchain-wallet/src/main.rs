@@ -1411,7 +1411,7 @@ impl Wallet {
         };
 
         Self::wallet(
-            "sign-multisig-tx",
+            "sign-tx",
             &[transaction_noun, sign_keys_noun],
             Operation::Poke,
             &mut slab,
