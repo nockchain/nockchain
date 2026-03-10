@@ -1279,10 +1279,11 @@
           """
           [%exit 0]
       ==
-    ::  %unsigned: pass sender-pkh directly; %signed: resolve key-indices to secret keys
+    ::  %unsigned-*: pass through directly; %signed: resolve key-indices to secret keys
     =/  builder-keys
       ?-  -.tx-key-info.cause
-        %unsigned  tx-key-info.cause
+        %unsigned-pkh     tx-key-info.cause
+        %unsigned-pubkey  tx-key-info.cause
         %signed
           :-  %signed
           ?~  sign-keys.tx-key-info.cause

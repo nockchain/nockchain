@@ -13,7 +13,7 @@
         orders=(list order:wt)
         fee=coins:transact
         allow-low-fee=?
-        keys=$%([%signed sign-keys=(list schnorr-seckey:transact)] [%unsigned sender-pkh=hash:transact])
+        keys=$%([%signed sign-keys=(list schnorr-seckey:transact)] [%unsigned-pubkey signer-pubkey=schnorr-pubkey:transact] [%unsigned-pkh sender-pkh=hash:transact])
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
@@ -22,8 +22,9 @@
     ==
 =/  sign-keys=(list schnorr-seckey:transact)
   ?-  -.keys
-    %signed    sign-keys.keys
-    %unsigned  ~
+    %signed          sign-keys.keys
+    %unsigned-pubkey  ~
+    %unsigned-pkh     ~
   ==
 |^
 ^-  $:  spends:v1:transact
@@ -40,7 +41,10 @@
   ~|("At least one signing key is required for signed transactions" !!)
 =/  sender-pkh=hash:transact
   ?-  -.keys
-    %unsigned  sender-pkh.keys
+    %unsigned-pkh     sender-pkh.keys
+    %unsigned-pubkey
+      %-  hash:schnorr-pubkey:transact
+      signer-pubkey.keys
     %signed
       ?~  sign-keys  !!
       %-  hash:schnorr-pubkey:transact
@@ -48,10 +52,15 @@
       (to-atom:schnorr-seckey:transact i.sign-keys)
   ==
 =/  signer-pubkeys=(list schnorr-pubkey:transact)
-  %+  turn  sign-keys
-  |=  sk=schnorr-seckey:transact
-  %-  from-sk:schnorr-pubkey:transact
-  (to-atom:schnorr-seckey:transact sk)
+  ?-  -.keys
+    %unsigned-pubkey  ~[signer-pubkey.keys]
+    %unsigned-pkh     ~
+    %signed
+      %+  turn  sign-keys
+      |=  sk=schnorr-seckey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact sk)
+  ==
 =/  notes=(list nnote:transact)  (turn names get-note)
 =/  ascending=?  ?=(%asc note-selection)
 ::  If all notes are v0
