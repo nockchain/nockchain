@@ -13,13 +13,19 @@
         orders=(list order:wt)
         fee=coins:transact
         allow-low-fee=?
-        sign-keys=(list schnorr-seckey:transact)
+        keys=$%([%signed sign-keys=(list schnorr-seckey:transact)] [%unsigned-pubkey signer-pubkey=schnorr-pubkey:transact] [%unsigned-pkh sender-pkh=hash:transact])
         refund-pkh=(unit hash:transact)
         get-note=$-(nname:transact nnote:transact)
         include-data=?
         note-selection=selection-strategy:wt
         height=page-number:transact
     ==
+=/  sign-keys=(list schnorr-seckey:transact)
+  ?-  -.keys
+    %signed          sign-keys.keys
+    %unsigned-pubkey  ~
+    %unsigned-pkh     ~
+  ==
 |^
 ^-  $:  spends:v1:transact
         witness-data:wt
@@ -28,15 +34,33 @@
 =+  orders-valid=(orders-valid orders)
 ?:  ?=(%.n -.orders-valid)
   ~|("One or more orders are invalid. Reason: {<p.orders-valid>}" !!)
+::  for signed transactions, at least one signing key must be provided
+?:  ?&  ?=(%signed -.keys)
+        ?=(~ sign-keys)
+    ==
+  ~|("At least one signing key is required for signed transactions" !!)
+=/  sender-pkh=hash:transact
+  ?-  -.keys
+    %unsigned-pkh     sender-pkh.keys
+    %unsigned-pubkey
+      %-  hash:schnorr-pubkey:transact
+      signer-pubkey.keys
+    %signed
+      ?~  sign-keys  !!
+      %-  hash:schnorr-pubkey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact i.sign-keys)
+  ==
 =/  signer-pubkeys=(list schnorr-pubkey:transact)
-  %+  turn  sign-keys
-  |=  sk=schnorr-seckey:transact
-  %-  from-sk:schnorr-pubkey:transact
-  (to-atom:schnorr-seckey:transact sk)
-?~  signer-pubkeys
-  ~|("At least one signing key is required" !!)
-=/  sender-pubkey=schnorr-pubkey:transact  i.signer-pubkeys
-=/  sender-pkh=hash:transact  (hash:schnorr-pubkey:transact sender-pubkey)
+  ?-  -.keys
+    %unsigned-pubkey  ~[signer-pubkey.keys]
+    %unsigned-pkh     ~
+    %signed
+      %+  turn  sign-keys
+      |=  sk=schnorr-seckey:transact
+      %-  from-sk:schnorr-pubkey:transact
+      (to-atom:schnorr-seckey:transact sk)
+  ==
 =/  notes=(list nnote:transact)  (turn names get-note)
 =/  ascending=?  ?=(%asc note-selection)
 ::  If all notes are v0
@@ -53,8 +77,10 @@
       %+  sort  notes-v0
       |=  [a=nnote:v0:transact b=nnote:v0:transact]
       ?:(ascending (lth assets.a assets.b) (gth assets.a assets.b))
+    ?~  signer-pubkeys
+      ~|("At least one signing key is required when spending v0 notes" !!)
     =/  refund-lock=lock:transact  [%pkh [m=1 (z-silt:zo ~[u.refund-pkh])]]~
-    (create-spends-0 notes-v0 orders fee sender-pubkey refund-lock)
+    (create-spends-0 notes-v0 orders fee i.signer-pubkeys refund-lock)
   ::  If all notes are v1
   ?:  (levy notes |=(=nnote:transact ?=(@ -.nnote)))
     =/  notes-v1=(list nnote-1:v1:transact)

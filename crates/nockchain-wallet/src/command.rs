@@ -12,6 +12,32 @@ use nockchain_types::tx_engine::v0;
 use crate::connection::ConnectionCli;
 use crate::recipient::{parse_recipient_arg, RecipientSpecToken};
 
+/// Unsigned refund recipient for watch-only wallets.
+///
+/// - `Pubkey`: base58-encoded schnorr public key (works for both v0 and v1 notes)
+/// - `Pkh`: base58-encoded pubkey hash (works for v1 notes only; v0 notes will error)
+#[derive(Clone, Debug)]
+pub enum UnsignedRefundRecipient {
+    Pubkey(String),
+    Pkh(String),
+}
+
+fn parse_unsigned_refund_recipient(s: &str) -> Result<UnsignedRefundRecipient, String> {
+    if let Some(pk) = s.strip_prefix("pubkey:") {
+        if pk.is_empty() {
+            return Err("pubkey value cannot be empty".into());
+        }
+        Ok(UnsignedRefundRecipient::Pubkey(pk.to_string()))
+    } else if let Some(pkh) = s.strip_prefix("pkh:") {
+        if pkh.is_empty() {
+            return Err("pkh value cannot be empty".into());
+        }
+        Ok(UnsignedRefundRecipient::Pkh(pkh.to_string()))
+    } else {
+        Err("Expected format: 'pubkey:<base58>' (v0+v1 notes) or 'pkh:<base58>' (v1 notes only)".into())
+    }
+}
+
 /// CLI helper that captures optional lower and upper bounds for timelocks.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -194,6 +220,10 @@ pub struct WalletCli {
 
     #[arg(long, default_value = "false")]
     pub fakenet: bool,
+
+    /// Skip the gRPC balance sync (for air-gapped / offline signing)
+    #[arg(long, default_value = "false")]
+    pub offline: bool,
 
     #[command(flatten)]
     pub connection: ConnectionCli,
@@ -418,6 +448,26 @@ pub enum Commands {
         /// Note selection strategy (ascending selects smallest notes first)
         #[arg(long = "note-selection", value_enum, default_value = "ascending")]
         note_selection_strategy: NoteSelectionStrategyCli,
+        /// Create an unsigned transaction (watch-only wallet). Provide the refund
+        /// recipient as 'pubkey:<base58>' (v0+v1 notes) or 'pkh:<base58>' (v1 only).
+        #[arg(
+            long = "unsigned-refund-recipient",
+            value_name = "pubkey:BASE58|pkh:BASE58",
+            value_parser = parse_unsigned_refund_recipient
+        )]
+        unsigned_refund_recipient: Option<UnsignedRefundRecipient>,
+    },
+
+    /// Sign an unsigned or partially-signed transaction file
+    SignTx {
+        /// Path to the transaction file to sign
+        transaction: String,
+        /// Optional key index to use for signing [0, 2^31)
+        #[arg(short, long, value_parser = clap::value_parser!(u64).range(0..2 << 31))]
+        index: Option<u64>,
+        /// Hardened or unhardened child key
+        #[arg(long, default_value = "false")]
+        hardened: bool,
     },
 
     /// Sign a multisig transaction
@@ -579,6 +629,7 @@ impl Commands {
             Commands::ListNotesByAddressCsv { .. } => "list-notes-by-address-csv",
             Commands::SetActiveMasterAddress { .. } => "set-active-master-address",
             Commands::CreateTx { .. } => "create-tx",
+            Commands::SignTx { .. } => "sign-tx",
             Commands::SignMultisigTx { .. } => "sign-multisig-tx",
             Commands::SendTx { .. } => "send-tx",
             Commands::ShowTx { .. } => "show-tx",

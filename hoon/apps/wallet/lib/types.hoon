@@ -406,6 +406,18 @@
   ::
   ++  key-version  ?(%0 %1)
   ::
+  ::  $tx-key-info: tagged union for signing info passed in create-tx cause
+  ::
+  ::    %signed: wallet has keys; sign-keys is the (unit list) of child-key specs
+  ::    %unsigned-pubkey: watch-only wallet; signer-pubkey provided (v0+v1 notes)
+  ::    %unsigned-pkh: watch-only wallet; sender-pkh provided directly (v1 only)
+  ::
+  +$  tx-key-info
+    $%  [%signed sign-keys=(unit (list [child-index=@ud hardened=?]))]
+        [%unsigned-pubkey signer-pubkey=schnorr-pubkey:transact]
+        [%unsigned-pkh sender-pkh=hash:transact]
+    ==
+  ::
   +$  cause
     $%  [%keygen entropy=byts salt=byts]
         [%derive-child i=@ hardened=? label=(unit @tas)]
@@ -431,7 +443,7 @@
             orders=(list order)
             fee=coins:transact                            ::  fee
             allow-low-fee=?                               ::  bypass min fee check (unsafe, testing only)
-            sign-keys=(unit (list [child-index=@ud hardened=?]))  ::  child key information to sign from
+            =tx-key-info                                  ::  signed (child-key specs), unsigned-pubkey, or unsigned-pkh
             refund-pkh=(unit hash:transact)               ::  refund pkh for spends over v0 notes
             include-data=?                                ::  whether or not we should include note-data. defaults
                                                           ::  to yes in cli. not including note-data is a power-user option because
@@ -454,7 +466,7 @@
         [%set-active-master-address address-b58=@t]
         [%list-master-addresses ~]
         [%file file-cause]
-        $:  %sign-multisig-tx
+        $:  %sign-tx
             dat=transaction
             sign-keys=(unit (list [child-index=@ud hardened=?]))
         ==

@@ -227,7 +227,7 @@
         %list-notes-by-address  (do-list-notes-by-address cause)
         %list-notes-by-address-csv  (do-list-notes-by-address-csv cause)
         %create-tx             (do-create-tx cause)
-        %sign-multisig-tx      (do-sign-multisig-tx cause)
+        %sign-tx               (do-sign-tx cause)
         %update-balance-grpc   (do-update-balance-grpc cause)
         %sign-message          (do-sign-message cause)
         %verify-message        (do-verify-message cause)
@@ -1279,28 +1279,38 @@
     %-  (debug "create-tx: {<names.cause>}")
     =/  names=(list nname:transact)  (parse-names names.cause)
     =/  orders=(list order:wt)  orders.cause
-    ?~  active-master.state
+    ::  for signed transactions, we need an active master key in the wallet
+    ?:  ?&  ?=(%signed -.tx-key-info.cause)
+            ?=(~ active-master.state)
+        ==
       :_  state
       :~  :-  %markdown
           %-  crip
           """
-          Cannot create a transaction without active master address set. Please import a master key / seed phrase or generate a new one.
+          Cannot create a signed transaction without active master address set. Please import a master key / seed phrase or generate a new one.
           """
           [%exit 0]
       ==
-    =/  sign-keys=(list schnorr-seckey:transact)
-      ?~  sign-keys.cause
-        ~[(sign-key:get:v ~)]
-      %+  turn  u.sign-keys.cause
-      |=  key-info=[child-index=@ud hardened=?]
-      (sign-key:get:v [~ key-info])
+    ::  %unsigned-*: pass through directly; %signed: resolve key-indices to secret keys
+    =/  builder-keys
+      ?-  -.tx-key-info.cause
+        %unsigned-pkh     tx-key-info.cause
+        %unsigned-pubkey  tx-key-info.cause
+        %signed
+          :-  %signed
+          ?~  sign-keys.tx-key-info.cause
+            ~[(sign-key:get:v ~)]
+          %+  turn  u.sign-keys.tx-key-info.cause
+          |=  key-info=[child-index=@ud hardened=?]
+          (sign-key:get:v [~ key-info])
+      ==
     =/  [=spends:v1:transact =witness-data:wt display=transaction-display:wt]
       %:  ~(build tx-builder bc.state)
         names
         orders
         fee.cause
         allow-low-fee.cause
-        sign-keys
+        builder-keys
         refund-pkh.cause
         get-note:v
         include-data.cause
@@ -1693,11 +1703,11 @@
         [%exit 0]
     ==
   ::
-  ++  do-sign-multisig-tx
+  ++  do-sign-tx
     |=  =cause:wt
-    ?>  ?=(%sign-multisig-tx -.cause)
+    ?>  ?=(%sign-tx -.cause)
     |^
-    %-  (debug "sign-multisig-tx: {<name.dat.cause>}")
+    %-  (debug "sign-tx: {<name.dat.cause>}")
     ?~  active-master.state
       :_  state
       :~  :-  %markdown

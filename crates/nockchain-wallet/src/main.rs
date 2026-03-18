@@ -26,7 +26,8 @@ use command::TimelockRangeCli;
 #[cfg(test)]
 use command::WalletWire;
 use command::{
-    ClientType, CommandNoun, Commands, NoteSelectionStrategyCli, WalletCli, WatchSubcommand,
+    ClientType, CommandNoun, Commands, NoteSelectionStrategyCli, UnsignedRefundRecipient,
+    WalletCli, WatchSubcommand,
 };
 use kernels_open_wallet::KERNEL;
 use nockapp::driver::*;
@@ -115,6 +116,7 @@ async fn main() -> Result<(), NockAppError> {
         | Commands::ShowMasterZPrv
         | Commands::ShowKeyTree { .. }
         | Commands::ShowTx { .. }
+        | Commands::SignTx { .. }
         | Commands::SignMultisigTx { .. }
         | Commands::Watch { .. }
         | Commands::TxAccepted { .. } => false,
@@ -304,9 +306,25 @@ async fn main() -> Result<(), NockAppError> {
             sign_keys,
             save_raw_tx,
             note_selection_strategy,
+            unsigned_refund_recipient,
         } => {
             let recipient_specs = recipient_tokens_to_specs(recipients.clone())?;
-            let signing_keys = Wallet::collect_signing_keys(*index, *hardened, sign_keys)?;
+            // Unsigned mode conflicts with signing key args
+            if unsigned_refund_recipient.is_some()
+                && (index.is_some() || !sign_keys.is_empty())
+            {
+                return Err(CrownError::Unknown(
+                    "Cannot specify signing keys (--index, --sign-key) with \
+                     --unsigned-refund-recipient"
+                        .into(),
+                )
+                .into());
+            }
+            let signing_keys = if unsigned_refund_recipient.is_some() {
+                Vec::new()
+            } else {
+                Wallet::collect_signing_keys(*index, *hardened, sign_keys)?
+            };
             Wallet::create_tx(
                 names.clone(),
                 recipient_specs,
@@ -317,8 +335,14 @@ async fn main() -> Result<(), NockAppError> {
                 *include_data,
                 *save_raw_tx,
                 *note_selection_strategy,
+                unsigned_refund_recipient.clone(),
             )
         }
+        Commands::SignTx {
+            transaction,
+            index,
+            hardened,
+        } => Wallet::sign_tx(transaction, *index, *hardened),
         Commands::SignMultisigTx {
             transaction,
             sign_keys,
@@ -343,7 +367,7 @@ async fn main() -> Result<(), NockAppError> {
     }?;
 
     // If this command requires sync, update the balance using a synchronous poke
-    if requires_sync {
+    if requires_sync && !cli.offline {
         info!(
             "Command requires syncing the current balance, connecting to Nockchain gRPC server..."
         );
@@ -571,7 +595,6 @@ impl Wallet {
     ///
     /// * `transaction_path` - Path to the transaction file
     /// * `index` - Optional index of the key to use for signing
-    #[allow(dead_code)]
     fn sign_tx(
         transaction_path: &str,
         index: Option<u64>,
@@ -607,14 +630,9 @@ impl Wallet {
             None => SIG,
         };
 
-        // Generate random entropy
-        let mut entropy_bytes = [0u8; 32];
-        getrandom::fill(&mut entropy_bytes).map_err(|e| CrownError::Unknown(e.to_string()))?;
-        let entropy = from_bytes(&mut slab, &entropy_bytes).as_noun();
-
         Self::wallet(
             "sign-tx",
-            &[transaction_noun, sign_key_noun, entropy],
+            &[transaction_noun, sign_key_noun],
             Operation::Poke,
             &mut slab,
         )
@@ -940,6 +958,7 @@ impl Wallet {
         include_data: bool,
         save_raw_tx: bool,
         note_selection: NoteSelectionStrategyCli,
+        unsigned_refund_recipient: Option<UnsignedRefundRecipient>,
     ) -> CommandNoun<NounSlab> {
         let mut slab = NounSlab::new();
 
@@ -956,7 +975,40 @@ impl Wallet {
 
         let fee_noun = D(fee);
         let order_noun = recipients.to_noun(&mut slab);
-        let sign_key_noun = Wallet::encode_sign_keys(&mut slab, sign_keys);
+
+        // Encode the tx-key-info tagged union:
+        //   [%unsigned-pubkey pubkey]  for watch-only wallets (v0+v1)
+        //   [%unsigned-pkh sender-pkh] for watch-only wallets (v1 only)
+        //   [%signed sign-keys]        for wallets with keys
+        let tx_key_info_noun = match unsigned_refund_recipient {
+            Some(UnsignedRefundRecipient::Pubkey(ref pk)) => {
+                let tag = make_tas(&mut slab, "unsigned-pubkey").as_noun();
+                let pubkey = SchnorrPubkey::from_base58(pk).map_err(|err| {
+                    NockAppError::from(CrownError::Unknown(format!(
+                        "Invalid public key '{}': {}",
+                        pk, err
+                    )))
+                })?;
+                let pubkey_noun = pubkey.to_noun(&mut slab);
+                T(&mut slab, &[tag, pubkey_noun])
+            }
+            Some(UnsignedRefundRecipient::Pkh(ref pkh)) => {
+                let tag = make_tas(&mut slab, "unsigned-pkh").as_noun();
+                let pkh_hash = Hash::from_base58(pkh).map_err(|err| {
+                    NockAppError::from(CrownError::Unknown(format!(
+                        "Invalid sender pubkey hash '{}': {}",
+                        pkh, err
+                    )))
+                })?;
+                let pkh_noun = pkh_hash.to_noun(&mut slab);
+                T(&mut slab, &[tag, pkh_noun])
+            }
+            None => {
+                let signed_tag = make_tas(&mut slab, "signed").as_noun();
+                let sign_key_noun = Wallet::encode_sign_keys(&mut slab, sign_keys);
+                T(&mut slab, &[signed_tag, sign_key_noun])
+            }
+        };
 
         let refund_noun = if let Some(refund) = refund_pkh {
             let refund_hash = Hash::from_base58(&refund).map_err(|err| {
@@ -978,8 +1030,15 @@ impl Wallet {
         Self::wallet(
             "create-tx",
             &[
-                names_noun, order_noun, fee_noun, allow_low_fee_noun, sign_key_noun, refund_noun,
-                include_data_noun, save_raw_tx_noun, note_selection_noun,
+                names_noun,
+                order_noun,
+                fee_noun,
+                allow_low_fee_noun,
+                tx_key_info_noun,
+                refund_noun,
+                include_data_noun,
+                save_raw_tx_noun,
+                note_selection_noun,
             ],
             Operation::Poke,
             &mut slab,
@@ -1379,7 +1438,7 @@ impl Wallet {
         };
 
         Self::wallet(
-            "sign-multisig-tx",
+            "sign-tx",
             &[transaction_noun, sign_keys_noun],
             Operation::Poke,
             &mut slab,
