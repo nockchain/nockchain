@@ -283,6 +283,7 @@
     ^-  (unit (unit *))
     ~>  %slog.[0 (cat 3 'peek: %' -.arg)]
     =/  =(pole)  arg
+    |^
     ?+  pole  ~
     ::
         [%mainnet ~]
@@ -382,38 +383,10 @@
       ``heaviest-chain.d.k
     ::
         [%heaviest-chain-blocks-range start=@ end=@ ~]
-      ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])))
-      =/  start-height  ((soft page-number:t) start.pole)
-      =/  end-height  ((soft page-number:t) end.pole)
-      ?~  start-height  ~
-      ?~  end-height  ~
-      ::  ensure start <= end
-      ?:  (gth u.start-height u.end-height)
-        ``~
-      ::  build list of blocks in range from heaviest chain
-      =/  result=(list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
-        =/  height  u.start-height
-        |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
-        ?:  (gth height u.end-height)
-          ~
-        ::  get block-id from heaviest chain
-        =/  block-id=(unit block-id:t)
-          (~(get z-by heaviest-chain.d.k) height)
-        ?~  block-id
-          $(height +(height))
-        ::  get block data
-        =/  local-block=(unit local-page:t)
-          (~(get z-by blocks.c.k) u.block-id)
-        ?~  local-block
-          $(height +(height))
-        ::  get transactions for this block
-        =/  block-txs=(unit (z-map tx-id:t tx:t))
-          (~(get z-by txs.c.k) u.block-id)
-        =/  txs-map  ?~(block-txs ~ u.block-txs)
-        ::  add to result list
-        :-  [height u.block-id (to-page:local-page:t u.local-block) txs-map]
-        $(height +(height))
-      ``result
+      (heaviest-chain-blocks-range start.pole end.pole %.y)
+    ::
+        [%heaviest-chain-blocks-range-no-pow start=@ end=@ ~]
+      (heaviest-chain-blocks-range start.pole end.pole %.n)
     ::
         [%desk-hash ~]
       ^-  (unit (unit (unit @uvI)))
@@ -532,6 +505,45 @@
       =+  tid=(from-b58:hash:t tid-b58:pole)
       ``(~(has z-by raw-txs.c.k) tid)
     ==
+    ++  heaviest-chain-blocks-range
+      |=  [start=@ end=@ include-pow=?]
+      ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])))
+      =/  start-height  ((soft page-number:t) start)
+      =/  end-height  ((soft page-number:t) end)
+      ?~  start-height  ~
+      ?~  end-height  ~
+      ::  ensure start <= end
+      ?:  (gth u.start-height u.end-height)
+        ``~
+      =/  to-page
+        ?:  include-pow
+          to-page:local-page:t
+        to-page-no-pow:local-page:t
+      ::  build list of blocks in range from heaviest chain
+      =/  result=(list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
+        =/  height  u.start-height
+        |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
+        ?:  (gth height u.end-height)
+          ~
+        ::  get block-id from heaviest chain
+        =/  block-id=(unit block-id:t)
+          (~(get z-by heaviest-chain.d.k) height)
+        ?~  block-id
+          $(height +(height))
+        ::  get block data
+        =/  local-block=(unit local-page:t)
+          (~(get z-by blocks.c.k) u.block-id)
+        ?~  local-block
+          $(height +(height))
+        ::  get transactions for this block
+        =/  block-txs=(unit (z-map tx-id:t tx:t))
+          (~(get z-by txs.c.k) u.block-id)
+        =/  txs-map  ?~(block-txs ~ u.block-txs)
+        ::  add to result list
+        :-  [height u.block-id (to-page u.local-block) txs-map]
+        $(height +(height))
+      ``result
+    --
   ::
   ++  poke
     |=  [wir=wire eny=@ our=@ux now=@da dat=*]

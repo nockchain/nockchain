@@ -77,6 +77,12 @@
     ?^  -.lp  (to-page:local-page:v0 lp)
     (to-page:local-page:v1 lp)
   ::
+  ++  to-page-no-pow
+    |=  lp=form
+    ^-  page
+    ?^  -.lp  (to-page-no-pow:local-page:v0 lp)
+    (to-page-no-pow:local-page:v1 lp)
+  ::
   ++  get
     |_  =form
     ::

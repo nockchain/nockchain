@@ -767,6 +767,11 @@
     |=  lp=form
     ^-  page
     lp(pow (biff pow.lp |=(j=@ ((soft proof) (cue j)))))
+  ::
+  ++  to-page-no-pow
+    |=  lp=form
+    ^-  page
+    lp(pow ~)
   --
 ::
 ::  +page-msg: (list belt) that enforces that each elt is a belt

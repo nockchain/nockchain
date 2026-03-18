@@ -154,6 +154,11 @@
     |=  lp=form
     ^-  page
     lp(pow (biff pow.lp |=(j=@ ((soft proof) (cue j)))))
+  ::
+  ++  to-page-no-pow
+    |=  lp=form
+    ^-  page
+    lp(pow ~)
   --
 ++  timelock-range  timelock-range:v0
 ++  size  size:v0
