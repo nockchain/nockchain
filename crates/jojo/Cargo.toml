@@ -1,0 +1,43 @@
+[package]
+name = "jojo"
+build = "build.rs"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hoonc.workspace = true
+kernels-open-jojo.workspace = true
+nockapp.workspace = true
+nockvm.workspace = true
+nockvm_macros.workspace = true
+nockapp-grpc = { workspace = true, features = ["client"] }
+nockapp-grpc-proto = { workspace = true, features = ["client"] }
+bitvec.workspace = true
+either.workspace = true
+
+clap.workspace = true
+equix.workspace = true
+futures.workspace = true
+tempfile = { workspace = true }
+termcolor.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+tracing-test.workspace = true
+tokio-stream.workspace = true
+reedline.workspace = true
+anyhow.workspace = true
+flume.workspace = true
+rayon.workspace = true
+
+zkvm-jetpack.workspace = true
+
+[build-dependencies]
+vergen = { workspace = true, features = [
+    "build",
+    "cargo",
+    "git",
+    "gitcl",
+    "rustc",
+    "si",
+] }

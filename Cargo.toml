@@ -1,7 +1,7 @@
 resolver = "2"
 
 [workspace]
-members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack", "crates/jojo", "crates/kernels/jojo"]
 
 [workspace.package]
 version = "0.1.0"
@@ -48,6 +48,7 @@ ed25519-dalek = { version = "2.1.0", default-features = false }
 either = "1.9.0"
 equix = "0.2.2"
 flate2 = "1.1.5"
+flume = "0.11"
 fs_extra = "1.3"
 futures = "0.3.31"
 gdt-cpus = "25.5.0"
@@ -103,6 +104,7 @@ rand = { version = "0.9.2", features = ["std"] }
 ratatui = "0.29.0"
 rayon = "1.8.0"
 rcgen = "0.14.3"
+reedline = "0.40"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "http2",
@@ -202,6 +204,9 @@ path = "crates/kernels/bridge"
 
 [workspace.dependencies.kernels-open-dumb]
 path = "crates/kernels/dumb"
+
+[workspace.dependencies.kernels-open-jojo]
+path = "crates/kernels/jojo"
 
 [workspace.dependencies.kernels-open-miner]
 path = "crates/kernels/miner"
