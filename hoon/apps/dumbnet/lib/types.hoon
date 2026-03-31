@@ -1,4 +1,4 @@
-/=  *   /common/zoon
+/=  *   /common/h-zoon
 /=  zeke  /common/zeke
 /=  w   /common/wrapper
 /=  dt  /common/tx-engine
@@ -15,6 +15,7 @@
       kernel-state-4
       kernel-state-5
       kernel-state-6
+      kernel-state-7
   ==
 ::
 +$  kernel-state-0
@@ -90,7 +91,17 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-6
++$  kernel-state-7
+  $:  %7
+      c=consensus-state-7
+      a=admin-state-7
+      m=mining-state-7
+    ::
+      d=derived-state-7
+      constants=blockchain-constants:v1:dt
+  ==
+::
++$  kernel-state  kernel-state-7
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -231,7 +242,51 @@
     ==
   ==
 ::
-+$  consensus-state  consensus-state-6
++$  consensus-state-7
+  $+  consensus-state-7
+  ::
+  ::  indexes and not-fully-validated state
+  $:
+    $:
+    :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        blocks-needed-by=(h-jug tx-id:dt block-id:dt) :: dependencies
+        excluded-txs=(h-set tx-id:dt) :: transactions unneeded by any block
+    ::
+    ::  every tx-id in spent-by must be in raw-txs and vice-versa
+        spent-by=(h-jug nname:dt tx-id:dt)
+    ::
+        pending-blocks=(h-map block-id:dt [=page:dt heard-at=@])  :: pending blocks
+    ==
+  ::
+  ::  core consensus state
+    $:  balance=(h-mip block-id:dt nname:dt nnote:dt)
+        txs=(h-mip block-id:dt tx-id:dt tx:dt) ::  fully validated transactions
+      ::
+      :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        raw-txs=(h-map tx-id:dt [=raw-tx:dt heard-at=@]) :: raw transactions
+      ::
+        blocks=(h-map block-id:dt local-page:dt)  ::  fully validated blocks
+      ::
+        heaviest-block=(unit block-id:dt) ::  most recent heaviest block
+      ::
+      ::  min timestamp of block that is a child of this block
+        min-timestamps=(h-map block-id:dt @)
+      ::  this map is used to calculate epoch duration. it is a map of each
+      ::  block-id to the first block-id in that epoch.
+        epoch-start=(h-map block-id:dt block-id:dt)
+      ::  this map contains the expected target for the child
+      ::  of a given block-id.
+        targets=(h-map block-id:dt bignum:bignum:dt)
+      ::
+      ::  Bitcoin block hash for genesis block
+      ::>)  TODO: change face to btc-hash?
+        btc-data=(unit (unit btc-hash:dt))
+        =genesis-seal:dt  ::  desired seal for genesis block
+    ==
+  ==
+
+::
++$  consensus-state  consensus-state-7
 ::
 ::  you will not have lost any chain state if you lost pending state, you'd just have to
 ::  request data again from peers and reset your mining state
@@ -277,7 +332,9 @@
 ::
 +$  admin-state-6  $+(admin-state-6 admin-state-5)
 ::
-+$  admin-state  admin-state-6
++$  admin-state-7  $+(admin-state-7 admin-state-6)
+::
++$  admin-state  admin-state-7
 ::
 +$  derived-state-0
   $+  derived-state-0
@@ -304,7 +361,9 @@
       heaviest-chain=(z-map page-number:dt block-id:dt)
   ==
 ::
-+$  derived-state  derived-state-6
++$  derived-state-7  $+(derived-state-7 derived-state-6)
+::
++$  derived-state  derived-state-7
 ::
 +$  mining-state-0
   $+  mining-state-0
@@ -336,7 +395,9 @@
       next-nonce=noun-digest:tip5:zeke  :: nonce being mined
   ==
 ::
-+$  mining-state  mining-state-6
++$  mining-state-7  $+(mining-state-7 mining-state-6)
+::
++$  mining-state  mining-state-7
 ::
 +$  init-phase  $~(%.y ?)
 ::

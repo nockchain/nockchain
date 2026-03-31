@@ -1,6 +1,6 @@
 /=  v0  /common/tx-engine-0
 /=  *  /common/zeke
-/=  *  /common/zoon
+/=  *  /common/h-zoon
 |%
 ::  import
 ++  hash  hash:v0
@@ -837,7 +837,7 @@
     (gth data-size max)
   ::
   ++  validate-with-context
-    |=  $:  balance=(z-map nname nnote)
+    |=  $:  balance=(h-map nname nnote)
             sps=form
             page-num=page-number
             max-size=@
@@ -849,7 +849,7 @@
     %+  roll  ~(tap z-by sps)
     |=  [[nam=nname sp=spend] acc=(reason ~)]
     ?.  ?=(%.y -.acc)  acc
-    =/  mnote=(unit nnote)  (~(get z-by balance) nam)
+    =/  mnote=(unit nnote)  (~(get h-by balance) nam)
     ?~  mnote  [%.n %v1-input-missing]
     =/  note=nnote  u.mnote
     ?-    -.sp

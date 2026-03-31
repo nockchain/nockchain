@@ -1,5 +1,5 @@
 ::  /lib/zoon: vendored types from hoon.hoon
-/=  z  /common/zeke
+/=  *  /common/zoon
 ~%  %h-zoon  ..stark-engine-jet-hook:z  ~
 |%
 ::
@@ -17,7 +17,7 @@
 +|  %map
 ++  h-map
   |$  [key value]                                       ::  table
-  $|  (tree (pair hashed value))
+  $|  (tree (pair key value))
   |=(a=(tree (pair hashed *)) ?:(=(~ a) & ~(apt h-by a)))
 ::
 ++  h-by                                                  ::  h-map engine
@@ -464,7 +464,7 @@
   ::
   ++  put                                               ::  puts b h-in a, sorted
     ~/  %put
-    |*  b=*
+    |*  b=hashed
     |-  ^+  a
     ?~  a
       [b ~ ~]
@@ -537,7 +537,7 @@
   (h-map kex (h-map key value))
 ::
 ++  h-bi                                                  ::  mip engine
-  =|  a=(h-map * (h-map))
+  =|  a=(h-map hashed (h-map hashed *))
   |@
   ++  del
     |*  [b=* c=*]
@@ -593,7 +593,7 @@
   (h-map key (h-set value))
 ::
 ++  h-ju                                                ::  h-jug engine
-  =|  a=(tree (pair * (tree)))                          ::  (h-jug)
+  =|  a=(tree (pair hashed (tree hashed *)))            ::  (h-jug)
   |@
   ++  del                                               ::  del key-set pair
     |*  [b=* c=*]
@@ -699,4 +699,36 @@
   ++  h-malt                                              ::  h-map from list
   |*  a=(list)
   (h-molt `(list [p=_-<.a q=_->.a])`a)
+  ::
+  ++  zh-molt
+  |*  a=(z-map hashed *)
+  (h-molt ~(tap z-by a))
+  ::
+  ++  zh-jult
+  |*  a=(z-jug hashed hashed)
+  (zh-molt (~(run z-by a) zh-silt))
+  ::
+  ++  zh-milt
+  |*  a=(z-mip hashed hashed hashed)
+  (zh-molt (~(run z-by a) zh-molt))
+  ::
+  ++  hz-molt
+  |*  a=(h-map hashed *)
+  (z-molt ~(tap h-by a))
+  ::
+  ++  zh-silt
+  |*  a=(z-set hashed)
+  (h-silt ~(tap z-in a))
+  ::
+  ++  hz-silt
+  |*  a=(h-set hashed)
+  (z-silt ~(tap h-in a))
+  ::
+  ++  hz-jult
+  |*  a=(h-jug hashed hashed)
+  (hz-molt (~(run h-by a) hz-silt))
+  ::
+  ++  hz-milt
+  |*  a=(h-mip hashed hashed hashed)
+  (hz-molt (~(run h-by a) hz-molt))
 --

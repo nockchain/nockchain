@@ -1,5 +1,5 @@
 ::  /lib/zoon: vendored types from hoon.hoon
-/=  *  /common/h-zoon
+/=  z  /common/zeke
 ~%  %zoon  ..stark-engine-jet-hook:z  ~
 |%
 ::
