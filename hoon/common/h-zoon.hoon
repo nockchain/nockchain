@@ -9,10 +9,7 @@
 ++  ju  %do-not-use
 ++  ja  %do-not-use
 ++  bi  %do-not-use
-+$  hashed
-  $?  noun-digest:tip5:z
-      noun-digests:z
-  ==
++$  hashed  $^(noun-digests:z noun-digest:tip5:z)
 ::
 +|  %map
 ++  h-map
@@ -652,9 +649,7 @@
 ++  hashed-to-digests
   |=  a=hashed
   ^-  noun-digests:z
-  ?:  ?=(@ a)
-    ~
-  ?:  ?=(@ -.a)
+  ?:  ?=([@ @ @ @ @] a)
     [a ~]
   a
 ::
