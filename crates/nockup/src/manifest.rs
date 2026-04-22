@@ -10,6 +10,8 @@ pub struct HoonPackage {
     pub package: PackageMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<BTreeMap<String, DependencySpec>>,
+    #[serde(default, rename = "patches", skip_serializing_if = "Vec::is_empty")]
+    pub patches: Vec<PackagePatch>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -86,6 +88,44 @@ pub enum DependencySpec {
     },
 }
 
+/// A post-install patch a package asks nockup to apply to the consumer
+/// project after symlinking. See `crate::patches` for the engine.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct PackagePatch {
+    pub file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(flatten)]
+    pub op: PatchOp,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchOp {
+    Overwrite {
+        content: String,
+    },
+    ReplacePattern {
+        pattern: String,
+        replacement: String,
+        #[serde(default = "default_true")]
+        once: bool,
+    },
+    EnsureDependency {
+        table: String,
+        name: String,
+        value: toml::Value,
+    },
+    EnsurePatch {
+        registry: String,
+        entries: BTreeMap<String, toml::Value>,
+    },
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // nockapp.lock format – always exact commit hashes
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NockAppLock {
@@ -98,6 +138,18 @@ pub struct LockedPackage {
     // k414", "commit:abc123", "^1.0", etc.
     pub version: String,
     pub source: LockSource,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applied_patches: Vec<AppliedPatch>,
+}
+
+/// One entry per patch the install engine actually wrote (or re-confirmed
+/// as already in shape). The hash lets a later install detect that the
+/// user has since hand-edited the file.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AppliedPatch {
+    pub index: usize,
+    pub file: String,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
