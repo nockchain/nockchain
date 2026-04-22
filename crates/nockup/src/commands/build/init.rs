@@ -76,9 +76,11 @@ pub async fn run() -> Result<()> {
 
     println!("Running dependency installation…");
     // Package install will automatically detect the project directory based on manifest name
-    crate::commands::package::install::run()
-        .await
-        .context("Failed to install dependencies")?;
+    crate::commands::package::install::run(
+        crate::commands::package::install::InstallOptions::default(),
+    )
+    .await
+    .context("Failed to install dependencies")?;
 
     println!("\nAll done! Project is ready.");
     println!("   cd {}", project_name.cyan());

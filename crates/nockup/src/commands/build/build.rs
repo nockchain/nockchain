@@ -44,7 +44,10 @@ pub async fn run(project: &str) -> Result<()> {
             std::env::set_current_dir(project_dir)?;
 
             // Run package install
-            let install_result = crate::commands::package::install::run().await;
+            let install_result = crate::commands::package::install::run(
+                crate::commands::package::install::InstallOptions::default(),
+            )
+            .await;
 
             // Change back to original directory
             std::env::set_current_dir(original_dir)?;

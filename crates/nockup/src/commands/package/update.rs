@@ -185,7 +185,10 @@ pub async fn run() -> Result<()> {
     println!();
 
     // Run package install to actually install the updates
-    crate::commands::package::install::run().await?;
+    crate::commands::package::install::run(
+        crate::commands::package::install::InstallOptions::default(),
+    )
+    .await?;
 
     println!();
     println!("{} Updates applied successfully!", "✓".green());

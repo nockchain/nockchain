@@ -37,6 +37,7 @@ pub async fn run(name: Option<String>) -> Result<()> {
             template_commit: None,
         },
         dependencies: Some(Default::default()),
+        patches: Vec::new(),
     };
 
     pkg.save(&manifest_path)?;
