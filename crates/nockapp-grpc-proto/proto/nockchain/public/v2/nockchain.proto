@@ -167,6 +167,7 @@ message TransactionOutput {
     common.v1.Nicks amount = 2;
   }
   string lock_summary = 3;
+  optional common.v2.NoteData note_data = 4;
 }
 
 // ===================================================================

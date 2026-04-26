@@ -15,6 +15,7 @@ use nockchain_math::noun_ext::NounMathExt;
 use nockchain_math::structs::HoonMapIter;
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Page};
 use nockchain_types::tx_engine::v0::{Lock, NoteV0, RawTx};
+use nockchain_types::tx_engine::v1::NoteData;
 use nockvm::noun::{Noun, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tokio::sync::{RwLock, Semaphore};
@@ -22,6 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{NockAppGrpcError, Result as GrpcResult};
 use crate::pb::common::v1 as pb_common;
+use crate::pb::common::v2 as pb_common_v2;
 use crate::public_nockchain::v2::metrics::NockchainGrpcApiMetrics;
 use crate::public_nockchain::v2::server::BalanceHandle;
 
@@ -1528,7 +1530,7 @@ struct TxV1Data {
     total_fee: u64,
     /// Simplified input info: (name_hash, assets)
     inputs: Vec<TxV1Input>,
-    /// Simplified output info: (lock_hash, assets)
+    /// Simplified output info: (lock_hash, assets, note_data)
     outputs: Vec<TxV1Output>,
 }
 
@@ -1543,6 +1545,7 @@ struct TxV1Input {
 struct TxV1Output {
     lock_root: Hash,
     assets: u64,
+    note_data: NoteData,
 }
 
 #[derive(Debug, Clone)]
@@ -1798,7 +1801,13 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
                 idx
             ))
         })?;
-        let _note_data = note_tail.head(); // z-map @tas * - skip
+        let note_data_noun = note_tail.head();
+        let note_data = NoteData::from_noun(&note_data_noun).map_err(|e| {
+            NounDecodeError::Custom(format!(
+                "decode_outputs_v1: output {} note-data parse failed: {e:?}",
+                idx
+            ))
+        })?;
         let assets = u64::from_noun(&note_tail.tail()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} assets not atom: {e:?}",
@@ -1809,6 +1818,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
         outputs.push(TxV1Output {
             lock_root: name.first, // For v1, name.first is the lock root hash
             assets,
+            note_data,
         });
     }
 
@@ -1898,6 +1908,7 @@ fn build_transaction_details_v0(
                 pb_common::Nicks { value: amount },
             )),
             lock_summary: lock_summary(&output.lock),
+            note_data: None,
         });
     }
 
@@ -1959,6 +1970,7 @@ fn build_transaction_details_v1(
                 },
             )),
             lock_summary: format!("lock:{}", &output.lock_root.to_base58()[..8]),
+            note_data: Some(pb_common_v2::NoteData::from(output.note_data.clone())),
         });
     }
 
@@ -2562,8 +2574,10 @@ impl FullPageDetails {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use nockchain_math::belt::Belt;
     use nockchain_types::tx_engine::common::{BlockHeight, Hash};
+    use nockchain_types::tx_engine::v1::{NoteData, NoteDataEntry};
     use noun_serde::{NounDecode, NounEncode};
 
     use super::*;
@@ -2668,5 +2682,48 @@ mod tests {
         assert_eq!(entry.parent_id, parent);
         assert_eq!(entry.timestamp, 1234567890);
         assert_eq!(entry.tx_ids.len(), 0);
+    }
+
+    #[test]
+    fn build_transaction_details_v1_includes_note_data_on_outputs() {
+        let metadata = BlockMetadata {
+            height: 100,
+            block_id: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
+            parent_id: Hash([Belt(10), Belt(11), Belt(12), Belt(13), Belt(14)]),
+            timestamp: 1_700_000_000,
+            tx_ids: vec![],
+        };
+        let tx_hash = Hash([Belt(20), Belt(21), Belt(22), Belt(23), Belt(24)]);
+        let lock_root = Hash([Belt(30), Belt(31), Belt(32), Belt(33), Belt(34)]);
+        let lock_root_b58 = lock_root.to_base58();
+
+        let note_data = NoteData::new(vec![NoteDataEntry::new(
+            "foo".to_string(),
+            Bytes::from_static(b"bar"),
+        )]);
+
+        let tx = TxV1Data {
+            total_size: 256,
+            total_fee: 10,
+            inputs: vec![],
+            outputs: vec![TxV1Output {
+                lock_root,
+                assets: 99,
+                note_data: note_data.clone(),
+            }],
+        };
+
+        let details = build_transaction_details(&metadata, &tx_hash, DecodedTx::V1(tx));
+        assert_eq!(details.version, 1);
+        assert_eq!(details.outputs.len(), 1);
+        let out = &details.outputs[0];
+        assert_eq!(out.note_name_b58, lock_root_b58);
+        let nd = out
+            .note_data
+            .as_ref()
+            .expect("v1 transaction output should carry note_data");
+        assert_eq!(nd.entries.len(), 1);
+        assert_eq!(nd.entries[0].key, "foo");
+        assert_eq!(nd.entries[0].blob.as_slice(), b"bar");
     }
 }
