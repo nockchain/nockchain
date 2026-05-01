@@ -1,6 +1,6 @@
 /=  v0  /common/tx-engine-0
 /=  *  /common/zeke
-/=  *  /common/zoon
+/=  *  /common/h-zoon
 |%
 ::  import
 ++  hash  hash:v0
@@ -91,7 +91,7 @@
   ++  hashable-tx-ids
     |=  tx-ids=(z-set tx-id)
     ^-  hashable:tip5
-    ?~  tx-ids  leaf+tx-ids
+    ?@  tx-ids  leaf+tx-ids
     :+  hash+n.tx-ids
       $(tx-ids l.tx-ids)
     $(tx-ids r.tx-ids)
@@ -279,7 +279,7 @@
     |=  =form
     |^
       ^-  ?
-      %-  ~(rep by form)
+      %-  ~(rep z-by form)
       |=  [[k=@tas v=*] a=?]
       ?&(a (^based k) (based-noun v))
     ++  based-noun
@@ -291,7 +291,7 @@
     |=  =form
     ^-  hashable:tip5
     |^
-      ?~  form  leaf+~
+      ?@  form  leaf+~
       :+  [leaf+p.n.form (hashable-noun q.n.form)]
         $(form l.form)
       $(form r.form)
@@ -394,7 +394,7 @@
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+~
+    ?@  form  leaf+~
     :+  (hashable:seed n.form)
       $(form l.form)
     $(form r.form)
@@ -402,7 +402,7 @@
   ++  sig-hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  (sig-hashable:seed n.form)
       $(form l.form)
     $(form r.form)
@@ -553,7 +553,7 @@
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [hash+p.n.form leaf+q.n.form]
       $(form l.form)
     $(form r.form)
@@ -789,7 +789,7 @@
     |=  =form
     ^-  hashable:tip5
     |-
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [(hashable:nname p.n.form) (hashable:spend q.n.form)]
       $(form l.form)
     $(form r.form)
@@ -837,7 +837,7 @@
     (gth data-size max)
   ::
   ++  validate-with-context
-    |=  $:  balance=(z-map nname nnote)
+    |=  $:  balance=(h-map nname nnote)
             sps=form
             page-num=page-number
             max-size=@
@@ -849,7 +849,7 @@
     %+  roll  ~(tap z-by sps)
     |=  [[nam=nname sp=spend] acc=(reason ~)]
     ?.  ?=(%.y -.acc)  acc
-    =/  mnote=(unit nnote)  (~(get z-by balance) nam)
+    =/  mnote=(unit nnote)  (~(get h-by balance) nam)
     ?~  mnote  [%.n %v1-input-missing]
     =/  note=nnote  u.mnote
     ?-    -.sp
@@ -993,7 +993,7 @@
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [(hashable:nname p.n.form) (hashable:input q.n.form)]
       $(form l.form)
     $(form r.form)
@@ -1227,7 +1227,7 @@
   ++  hashable-hax
     |=  m=(z-map ^hash *)
     ^-  hashable:tip5
-    ?~  m  leaf+m
+    ?@  m  leaf+m
     :+  [hash+p.n.m (hashable-noun q.n.m)]
         $(m l.m)
     $(m r.m)
@@ -1649,7 +1649,7 @@
     ++  hashable-hashes
       |=  hs=(z-set ^hash)
       ^-  hashable:tip5
-      ?~  hs  leaf+hs
+      ?@  hs  leaf+hs
       :+  hash+n.hs
         $(hs l.hs)
       $(hs r.hs)
@@ -1690,7 +1690,7 @@
     based:^hash
   ++  hashable
     |=  =form
-    ?~  form  leaf+~
+    ?@  form  leaf+~
     :*  hash+n.form
         $(form l.form)
         $(form r.form)
@@ -1780,7 +1780,7 @@
     |=  =form
     ^-  hashable:tip5
     |^
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [hash+p.n.form (hashable-val q.n.form)]
       $(form l.form)
     $(form r.form)
