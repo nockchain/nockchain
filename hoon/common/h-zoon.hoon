@@ -3,29 +3,35 @@
 ~%  %h-zoon  ..stark-engine-jet-hook:z  ~
 |%
 ::
-+|  %no-by-in
-++  by  %do-not-use
-++  in  %do-not-use
-++  ju  %do-not-use
-++  ja  %do-not-use
-++  bi  %do-not-use
++|  %types
 +$  hashed  $^(noun-digests:z noun-digest:tip5:z)
+:: NOTE: empty-checking with ?~ does not work due to %htree. Use ?@.
+++  htree
+  |$  [item]
+  $~  ~
+  $|  $@(?(%~ %htree) [n=item l=(htree item) r=(htree item)])
+  |=  a=$@(?(%~ %htree) [n=* l=(htree) r=(htree)])
+  |-  ^-  ?
+  ?@  a  =(~ a)
+  ?&  $(a l.a)
+      $(a r.a)
+  ==
 ::
 +|  %map
 ++  h-map
   |$  [key value]                                       ::  table
-  $|  (tree (pair key value))
-  |=(a=(tree (pair hashed *)) ?:(=(~ a) & ~(apt h-by a)))
+  $|  (htree (pair key value))
+  |=(a=(htree (pair hashed *)) ?@(a =(~ a) ~(apt h-by a)))
 ::
 ++  h-by                                                  ::  h-map engine
   ~/  %h-by
-  =|  a=(tree (pair hashed *))  ::  (h-map)
+  =|  a=(htree (pair hashed *))  ::  (h-map)
   |@
   ++  all                                               ::  logical AND
     ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       &
     ?&((b q.n.a) $(a l.a) $(a r.a))
   ::
@@ -33,7 +39,7 @@
     ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?|((b q.n.a) $(a l.a) $(a r.a))
   ::
@@ -41,7 +47,7 @@
     ~/  %bif
     |*  b=*
     |-  ^+  [l=a r=a]
-    ?~  a
+    ?@  a
       [~ ~]
     ?:  =(b p.n.a)
       +.a
@@ -57,15 +63,15 @@
     ~/  %del
     |*  b=*
     |-  ^+  a
-    ?~  a
+    ?@  a
       ~
     ?.  =(b p.n.a)
       ?:  (gor-hip b p.n.a)
         a(l $(a l.a))
       a(r $(a r.a))
-    |-  ^-  [$?(~ _a)]
-    ?~  l.a  r.a
-    ?~  r.a  l.a
+    |-  ^-  [$?(?(%~ %htree) _a)]
+    ?@  l.a  r.a
+    ?@  r.a  l.a
     ?:  (mor-hip p.n.l.a p.n.r.a)
       l.a(r $(l.a r.l.a))
     r.a(l $(r.a l.r.a))
@@ -74,15 +80,15 @@
     ~/  %dif
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     =+  c=(bif p.n.b)
     ?>  ?=(^ c)
     =+  d=$(a l.c, b l.b)
     =+  e=$(a r.c, b r.b)
-    |-  ^-  [$?(~ _a)]
-    ?~  d  e
-    ?~  e  d
+    |-  ^-  [$?(?(%~ %htree) _a)]
+    ?@  d  e
+    ?@  e  d
     ?:  (mor-hip p.n.d p.n.e)
       d(r $(d r.d))
     e(l $(e l.e))
@@ -92,7 +98,7 @@
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
-    ?~  a  ~
+    ?@  a  ~
     ?:  =(b p.n.a)  [~ u=(peg c 2)]
     ?:  (gor-hip b p.n.a)
       $(a l.a, c (peg c 6))
@@ -102,12 +108,12 @@
     =<  $
     =|  [l=(unit hashed) r=(unit hashed)]
     |.  ^-  ?
-    ?~  a   &
+    ?@  a   =(~ a)
     ?&  ?~(l & &((gor-hip p.n.a u.l) !=(p.n.a u.l)))
         ?~(r & &((gor-hip u.r p.n.a) !=(u.r p.n.a)))
-        ?~  l.a   &
+        ?@  l.a   &
         &((mor-hip p.n.a p.n.l.a) !=(p.n.a p.n.l.a) $(a l.a, l `p.n.a))
-        ?~  r.a   &
+        ?@  r.a   &
         &((mor-hip p.n.a p.n.r.a) !=(p.n.a p.n.r.a) $(a r.a, r `p.n.a))
     ==
   ::
@@ -116,7 +122,7 @@
     |*  b=(list [p=* q=*])
     =>  .(b `(list _?>(?=(^ a) n.a))`b)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put p.i.b q.i.b))
   ::
@@ -125,7 +131,7 @@
     |*  b=*
     =>  .(b `_?>(?=(^ a) p.n.a)`b)
     |-  ^-  (unit _?>(?=(^ a) q.n.a))
-    ?~  a
+    ?@  a
       ~
     ?:  =(b p.n.a)
       (some q.n.a)
@@ -152,9 +158,9 @@
     ~/  %int
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       ~
-    ?~  a
+    ?@  a
       ~
     ?:  (mor-hip p.n.a p.n.b)
       ?:  =(p.n.b p.n.a)
@@ -173,7 +179,7 @@
     |*  [key=_?>(?=(^ a) p.n.a) fun=$-(_?>(?=(^ a) q.n.a) _?>(?=(^ a) q.n.a))]
     ^+  a
     ::
-    ?~  a  !!
+    ?@  a  !!
     ::
     ?:  =(key p.n.a)
       a(q.n (fun q.n.a))
@@ -194,7 +200,7 @@
     ~/  %put
     |*  [b=* c=*]
     |-  ^+  a
-    ?~  a
+    ?@  a
       [[b c] ~ ~]
     ?:  =(b p.n.a)
       ?:  =(c q.n.a)
@@ -216,14 +222,14 @@
     ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
-    ?~  a  +<+.b
+    ?@  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  rib                                               ::  transform + product
     ~/  %rib
     |*  [b=* c=gate]
     |-  ^+  [b a]
-    ?~  a  [b ~]
+    ?@  a  [b ~]
     =+  d=(c n.a b)
     =.  n.a  +.d
     =+  e=$(a l.a, b -.d)
@@ -234,14 +240,14 @@
     ~/  %run
     |*  b=gate
     |-
-    ?~  a  a
+    ?@  a  a
     [n=[p=p.n.a q=(b q.n.a)] l=$(a l.a) r=$(a r.a)]
   ::
   ++  tap                                               ::  listify pairs
     =<  $
     =+  b=`(list _?>(?=(^ a) n.a))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b [n.a $(a l.a)])
   ::
@@ -249,9 +255,9 @@
     ~/  %uni
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(p.n.b p.n.a)
       b(l $(a l.a, b l.b), r $(a r.a, b r.b))
@@ -268,9 +274,9 @@
     |*  b=_a
     |*  meg=$-([* * *] *)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(p.n.b p.n.a)
       :+  [p.n.a `_?>(?=(^ a) q.n.a)`(meg p.n.a q.n.a q.n.b)]
@@ -288,40 +294,40 @@
     ~/  %urn
     |*  b=$-([* *] *)
     |-
-    ?~  a  ~
+    ?@  a  ~
     a(n n.a(q (b p.n.a q.n.a)), l $(a l.a), r $(a r.a))
   ::
   ++  wyt                                               ::  depth of h-map
     =<  $
     |.  ^-  @
-    ?~(a 0 +((add $(a l.a) $(a r.a))))
+    ?@(a 0 +((add $(a l.a) $(a r.a))))
   ::
   ++  key                                               ::  h-set of keys
     |-  ^-  (h-set _?>(?=(^ a) p.n.a))
-    ?~  a  ~
+    ?@  a  ~
     [p.n.a $(a l.a) $(a r.a)]
   ::
   ++  val                                               ::  list of vals
     =+  b=`(list _?>(?=(^ a) q.n.a))`~
     |-  ^+  b
-    ?~  a   b
+    ?@  a   b
     $(a r.a, b [q.n.a $(a l.a)])
   --
 +|  %set
 ++  h-set
   |$  [item]                                            ::  h-set
-  $|  (tree item)
-  |=(a=(tree item) ?:(=(~ a) & ~(apt h-in a)))
+  $|  (htree item)
+  |=(a=(htree item) ?@(a =(~ a) ~(apt h-in a)))
 ::
 ++  h-in                                                  ::  h-set engine
   ~/  %h-in
-  =|  a=(tree hashed)  :: (h-set)
+  =|  a=(htree hashed)  :: (h-set)
   |@
   ++  all                                               ::  logical AND
     ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       &
     ?&((b n.a) $(a l.a) $(a r.a))
   ::
@@ -329,7 +335,7 @@
     ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?|((b n.a) $(a l.a) $(a r.a))
   ::
@@ -337,11 +343,11 @@
     =<  $
     =|  [l=(unit hashed) r=(unit hashed)]
     |.  ^-  ?
-    ?~  a   &
+    ?@  a   =(~ a)
     ?&  ?~(l & &((gor-hip n.a u.l) !=(n.a u.l)))
         ?~(r & &((gor-hip u.r n.a) !=(u.r n.a)))
-        ?~(l.a & ?&((mor-hip n.a n.l.a) !=(n.a n.l.a) $(a l.a, l `n.a)))
-        ?~(r.a & ?&((mor-hip n.a n.r.a) !=(n.a n.r.a) $(a r.a, r `n.a)))
+        ?@(l.a & ?&((mor-hip n.a n.l.a) !=(n.a n.l.a) $(a l.a, l `n.a)))
+        ?@(r.a & ?&((mor-hip n.a n.r.a) !=(n.a n.r.a) $(a r.a, r `n.a)))
     ==
   ::
   ++  bif                                               ::  splits a by b
@@ -350,7 +356,7 @@
     ^+  [l=a r=a]
     =<  +
     |-  ^+  a
-    ?~  a
+    ?@  a
       [b ~ ~]
     ?:  =(b n.a)
       a
@@ -366,15 +372,15 @@
     ~/  %del
     |*  b=*
     |-  ^+  a
-    ?~  a
+    ?@  a
       ~
     ?.  =(b n.a)
       ?:  (gor-hip b n.a)
         a(l $(a l.a))
       a(r $(a r.a))
-    |-  ^-  [$?(~ _a)]
-    ?~  l.a  r.a
-    ?~  r.a  l.a
+    |-  ^-  [$?(?(%~ %htree) _a)]
+    ?@  l.a  r.a
+    ?@  r.a  l.a
     ?:  (mor-hip n.l.a n.r.a)
       l.a(r $(l.a r.l.a))
     r.a(l $(r.a l.r.a))
@@ -383,15 +389,15 @@
     ~/  %dif
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     =+  c=(bif n.b)
     ?>  ?=(^ c)
     =+  d=$(a l.c, b l.b)
     =+  e=$(a r.c, b r.b)
-    |-  ^-  [$?(~ _a)]
-    ?~  d  e
-    ?~  e  d
+    |-  ^-  [$?(?(%~ %htree) _a)]
+    ?@  d  e
+    ?@  e  d
     ?:  (mor-hip n.d n.e)
       d(r $(d r.d))
     e(l $(e l.e))
@@ -401,7 +407,7 @@
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
-    ?~  a  ~
+    ?@  a  ~
     ?:  =(b n.a)  [~ u=(peg c 2)]
     ?:  (gor-hip b n.a)
       $(a l.a, c (peg c 6))
@@ -411,7 +417,7 @@
     ~/  %gas
     |=  b=(list _?>(?=(^ a) n.a))
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put i.b))
   ::  +has: does :b exist h-in :a?
@@ -435,7 +441,7 @@
     |=  b=(unit _?>(?=(^ a) n.a))
     =>  .(b ?>(?=(^ b) u.b))
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?:  =(b n.a)
       &
@@ -447,9 +453,9 @@
     ~/  %int
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       ~
-    ?~  a
+    ?@  a
       ~
     ?.  (mor-hip n.a n.b)
       $(a b, b a)
@@ -463,7 +469,7 @@
     ~/  %put
     |*  b=hashed
     |-  ^+  a
-    ?~  a
+    ?@  a
       [b ~ ~]
     ?:  =(b n.a)
       a
@@ -483,14 +489,14 @@
     ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
-    ?~  a  +<+.b
+    ?@  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  run                                               ::  apply gate to values
     ~/  %run
     |*  b=gate
     =+  c=`(h-set _?>(?=(^ a) (b n.a)))`~
-    |-  ?~  a  c
+    |-  ?@  a  c
     =.  c  (~(put h-in c) (b n.a))
     =.  c  $(a l.a, c c)
     $(a r.a, c c)
@@ -499,7 +505,7 @@
     =<  $
     =+  b=`(list _?>(?=(^ a) n.a))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b [n.a $(a l.a)])
   ::
@@ -508,9 +514,9 @@
     |*  b=_a
     ?:  =(a b)  a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(n.b n.a)
       b(l $(a l.a, b l.b), r $(a r.a, b r.b))
@@ -525,7 +531,7 @@
   ++  wyt                                               ::  size of h-set
     =<  $
     |.  ^-  @
-    ?~(a 0 +((add $(a l.a) $(a r.a))))
+    ?@(a 0 +((add $(a l.a) $(a r.a))))
   --
 +|  %mip
 ::
@@ -540,7 +546,7 @@
     |*  [b=* c=*]
     =+  d=(~(gut h-by a) b ~)
     =+  e=(~(del h-by d) c)
-    ?~  e
+    ?@  e
       (~(del h-by a) b)
     (~(put h-by a) b e)
   ::
@@ -578,7 +584,7 @@
     =<  $
     =+  b=`_?>(?=(^ a) *(list [x=_p.n.a _?>(?=(^ q.n.a) [y=p v=q]:n.q.n.a)]))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b (welp (turn ~(tap h-by q.n.a) (lead p.n.a)) $(a l.a)))
   --
@@ -590,14 +596,14 @@
   (h-map key (h-set value))
 ::
 ++  h-ju                                                ::  h-jug engine
-  =|  a=(tree (pair hashed (tree hashed *)))            ::  (h-jug)
+  =|  a=(htree (pair hashed (htree hashed *)))            ::  (h-jug)
   |@
   ++  del                                               ::  del key-set pair
     |*  [b=* c=*]
     ^+  a
     =+  d=(get b)
     =+  e=(~(del h-in d) c)
-    ?~  e
+    ?@  e
       (~(del h-by a) b)
     (~(put h-by a) b e)
   ::
@@ -605,7 +611,7 @@
     |*  b=(list [p=* q=*])
     =>  .(b `(list _?>(?=([[* ^] ^] a) [p=p q=n.q]:n.a))`b)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put p.i.b q.i.b))
   ::
@@ -684,12 +690,12 @@
 +|   %h-container-from-container
   ++  h-silt                                              :: h-set from list
     |*  a=(list)
-    =+  b=*(tree _?>(?=(^ a) i.a))
+    =+  b=*(htree _?>(?=(^ a) i.a))
     (~(gas h-in b) a)
   ::
   ++  h-molt                                              :: h-map from pair
       |*  a=(list (pair))
-      (~(gas h-by `(tree [p=_p.i.-.a q=_q.i.-.a])`~) a)
+      (~(gas h-by `(htree [p=_p.i.-.a q=_q.i.-.a])`~) a)
   ::
   ++  h-malt                                              ::  h-map from list
   |*  a=(list)

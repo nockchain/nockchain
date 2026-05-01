@@ -163,9 +163,9 @@
             ~
         (~(put z-ju bnb) tx-id block-id)
       ~>  %slog.[0 'load: Indexed blocks by transaction id']
-      =/  rtx=(map tx-id:v0:t *)  raw-txs.c.arg
-      =/  bnb=(map tx-id:v0:t *)  blocks-needed-by
-      =/  excluded-map=(map tx-id:v0:t *)  (~(dif z-by rtx) bnb)
+      =/  rtx=(z-map tx-id:v0:t *)  raw-txs.c.arg
+      =/  bnb=(z-map tx-id:v0:t *)  blocks-needed-by
+      =/  excluded-map=(z-map tx-id:v0:t *)  (~(dif z-by rtx) bnb)
       =/  excluded-txs=(z-set tx-id:v0:t)  ~(key z-by excluded-map)
       =+
         ?:  =(*(z-set tx-id:v0:t) excluded-txs)
@@ -1394,7 +1394,7 @@
           ~>  %slog.[1 'do-pow: Mined for wrong (old) block commitment']
           [~ k]
         ?:  %+  check-target:mine  dig.command
-            (~(got z-by targets.c.k) ~(parent get:page:t candidate-block.m.k))
+            (~(got h-by targets.c.k) ~(parent get:page:t candidate-block.m.k))
           =.  m.k  (set-pow:min prf.command)
           =.  m.k  set-digest:min
           =^  heard-block-effs  k  (heard-block /poke/miner now candidate-block.m.k eny)

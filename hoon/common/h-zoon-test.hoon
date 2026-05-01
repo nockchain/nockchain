@@ -84,4 +84,13 @@
 ::   ^-  (h-map noun-digests:z @)
 ::   =/  b=(h-map noun-digests:z @)  ~
 ::   (~(put h-by b) [(atom-to-digest:tip5:z 0x1) 0x5])
+:: ++  h-test22
+::   |=  [a=(h-set noun-digest:tip5:z)]
+::   ^-  ?
+::   (~(has z-in a) (atom-to-digest:tip5:z `@ux`5))
+::  This won't compile: z-set uses ztree, h-in expects htree
+:: ++  h-test23
+::   |=  [a=(z-set noun-digest:tip5:z)]
+::   ^-  ?
+::   (~(has h-in a) (atom-to-digest:tip5:z `@ux`5))
 --

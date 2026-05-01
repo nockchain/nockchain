@@ -1173,9 +1173,9 @@
       [%.y f(balance (~(put h-by balance.f) name.note.op note.op))]
     ::
     ++  consume-inputs
-      |=  [ips=(h-map nname input:v0) page-num=page-number]
+      |=  [ips=(z-map nname input:v0) page-num=page-number]
       ^-  (reason [timelock-range ^form])
-      %+  roll  ~(val h-by ips)
+      %+  roll  ~(val z-by ips)
       |:  :*  ip=*input:v0
               acc=`(reason [timelock-range ^form])`[%.y *timelock-range form]
           ==

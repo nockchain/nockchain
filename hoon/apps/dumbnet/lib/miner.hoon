@@ -67,7 +67,7 @@
   ++  candidate-tx-ids
     %-  %~  dif  h-in
         (~(uni h-in excluded-txs.c) pending-block-tx-ids)
-    ~(tx-ids get:page:t candidate-block.m)
+    (zh-silt ~(tx-ids get:page:t candidate-block.m))
   ::
   ::  set of available raw-txs from pending blocks
   ++  pending-block-tx-ids
@@ -75,7 +75,7 @@
     %-  ~(rep h-by pending-blocks.c)
     |=  [[block-id:t pag=page:t *] all=(h-set tx-id:t)]
     ^-  (h-set tx-id:t)
-    %-  ~(rep h-in ~(tx-ids get:page:t pag))
+    %-  ~(rep h-in (zh-silt ~(tx-ids get:page:t pag)))
     |=  [=tx-id:t all=_all]
     ?:  (~(has h-by raw-txs.c) tx-id)
       (~(put h-in all) tx-id)
@@ -143,7 +143,7 @@
   ?:  no-keys-set  m
   ::
   ::  if the transaction is already in the candidate block, do nothing
-  ?:  (~(has h-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
+  ?:  (~(has z-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
     m
   :: ::  check to see if block is valid with tx - this checks whether the inputs
   :: ::  exist, whether the new size will exceed block size, and whether timelocks
@@ -168,7 +168,7 @@
     m
   =/  old-mining-state  m
   ::  we can add tx to candidate-block
-  =/  new-tx-ids  (~(put h-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
+  =/  new-tx-ids  (~(put z-in ~(tx-ids get:page:t candidate-block.m)) tx-id)
   =.  candidate-block.m
     ?^  -.candidate-block.m
       candidate-block.m(tx-ids new-tx-ids)

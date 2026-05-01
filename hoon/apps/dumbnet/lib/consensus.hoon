@@ -126,7 +126,7 @@
   ^-  ?
   ::  set of inputs required by tx that are not in balance
   =/  in-balance=(h-set nname:t)
-    (~(dif h-in ~(input-names get:raw-tx:t raw)) balance)
+    (~(dif h-in (zh-silt ~(input-names get:raw-tx:t raw))) balance)
   ::  %.y: all inputs in .raw are in balance
   ::  %.n: input(s) in .raw not in balance
   =(*(h-set nname:t) in-balance)
@@ -250,9 +250,9 @@
         ::  v1 coinbase only allowed at or after v1-phase
         ?:  (lth height v1-phase.blockchain-constants)
           ~|  %v1-coinbase-before-activation  !!
-        %+  turn  ~(tap h-in ~(key z-by +.cb))
+        %+  turn  ~(tap z-in ~(key z-by +.cb))
         |=  h=hash:t
-        (new:coinbase:t pag (~(put h-in *(h-set hash:t)) h))
+        (new:coinbase:t pag (~(put z-in *(z-set hash:t)) h))
     ==
   =.  balance.c
     %+  roll  coinbases
@@ -419,7 +419,7 @@
     ~>  %slog.[1 (cat 3 'validate-page-with-txs: Block too large: ' digest-b58)]
     [%.n %block-too-large]
   =/  tx-id-list=(list tx-id:t)
-    ~(tap h-in ~(tx-ids get:page:t pag))
+    ~(tap z-in ~(tx-ids get:page:t pag))
   =/  raw-tx-list=(list (unit raw-tx:t))
     (turn tx-id-list |=(=tx-id:t (get-raw-tx tx-id)))
   :: initialize balance transfer accumulator with parent block's balance
@@ -576,7 +576,7 @@
   ?<  (~(has h-by blocks.c) ~(digest get:page:t pag))
   ?<  (~(has h-by pending-blocks.c) ~(digest get:page:t pag))
   =.  blocks.c  (~(put h-by blocks.c) ~(digest get:page:t pag) (to-local-page:page:t pag))
-  %-  ~(rep h-in ~(tx-ids get:page:t pag))
+  %-  ~(rep z-in ~(tx-ids get:page:t pag))
   |=  [=tx-id:t c=_c]
   =.  blocks-needed-by.c  (~(put h-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
   =.  excluded-txs.c  (~(del h-in excluded-txs.c) tx-id)
@@ -591,7 +591,7 @@
   ?<  (~(has h-by blocks.c) ~(digest get:page:t pag))
   ?<  (~(has h-by pending-blocks.c) ~(digest get:page:t pag))
   =/  needed=(h-set tx-id:t)
-    %-  ~(rep h-in ~(tx-ids get:page:t pag))
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t needed=(h-set tx-id:t)]
     ?.  (~(has h-by raw-txs.c) tx-id)
       (~(put h-in needed) tx-id)
@@ -600,7 +600,7 @@
     [~ c] :: not missing any transactions
   =.  pending-blocks.c  (~(put h-by pending-blocks.c) ~(digest get:page:t pag) [pag get-cur-height])
   =.  c
-    %-  ~(rep h-in ~(tx-ids get:page:t pag))
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t c=_c]
     =.  blocks-needed-by.c  (~(put h-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
     =.  excluded-txs.c  (~(del h-in excluded-txs.c) tx-id)
@@ -615,7 +615,7 @@
   ?<  (~(has h-by blocks.c) block-id)
   =/  pag  page:(~(got h-by pending-blocks.c) block-id)
   =.  c
-    %-  ~(rep h-by ~(tx-ids get:page:t pag))
+    %-  ~(rep z-by ~(tx-ids get:page:t pag))
     |=  [=tx-id:t c=_c]
     =.  blocks-needed-by.c  (~(del h-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))
     =?  excluded-txs.c
@@ -635,7 +635,7 @@
   %-  ~(rep h-by pending-blocks.c)
   |=  [[block-id:t pag=page:t *] all=(h-set tx-id:t)]
   ^-  (h-set tx-id:t)
-  %-  ~(rep h-in ~(tx-ids get:page:t pag))
+  %-  ~(rep z-in ~(tx-ids get:page:t pag))
   |=  [=tx-id:t all=_all]
   ?.  (~(has h-by raw-txs.c) tx-id)
     (~(put h-in all) tx-id)
@@ -683,7 +683,7 @@
   |=  =raw-tx:t
   ^-  ?
   =/  input-names=(h-set nname:t)
-    ~(input-names get:raw-tx:t raw-tx)
+    (zh-silt ~(input-names get:raw-tx:t raw-tx))
   %-  ~(any h-in input-names)
   ~(has h-by spent-by.c)
 ::
@@ -700,9 +700,9 @@
   =/  =tx-id:t  ~(id get:raw-tx:t raw-tx)
   ?<  (~(has h-by raw-txs.c) tx-id)
   =.  raw-txs.c  (~(put h-by raw-txs.c) tx-id [raw-tx get-cur-height])
-  =/  input-names=(h-set nname:t)  ~(input-names get:raw-tx:t raw-tx)
+  =/  input-names=(z-set nname:t)  ~(input-names get:raw-tx:t raw-tx)
   =.  spent-by.c
-    %-  ~(rep h-in input-names)
+    %-  ~(rep z-in input-names)
     |=  [=nname:t sb=_spent-by.c]
     (~(put h-ju sb) nname tx-id)
   =/  bnb  (~(get h-ju blocks-needed-by.c) tx-id)
@@ -716,7 +716,7 @@
     ?~  pending  ready
     =/  pag  page.u.pending
     =/  needed
-      %-  ~(rep h-in ~(tx-ids get:page:t pag))
+      %-  ~(rep z-in ~(tx-ids get:page:t pag))
       |=  [=tx-id:t needed=(h-set tx-id:t)]
       ^-  (h-set tx-id:t)
       ?.  (~(has h-by raw-txs.c) tx-id)
@@ -738,7 +738,7 @@
   =.  raw-txs.c  (~(del h-by raw-txs.c) tx-id)
   =.  excluded-txs.c  (~(del h-in excluded-txs.c) tx-id)
   =.  spent-by.c
-    %-  ~(rep h-in ~(input-names get:raw-tx:t raw-tx))
+    %-  ~(rep z-in ~(input-names get:raw-tx:t raw-tx))
     |=  [=nname:t sb=_spent-by.c]
     (~(del h-ju sb) nname ~(id get:raw-tx:t raw-tx))
   c
