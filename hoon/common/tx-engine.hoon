@@ -7,13 +7,30 @@
     ++  blockchain-constants  blockchain-constants:v1
     --
 |_  blockchain-constants
-+*  v0  ~(. ^v0 +63:+<)
++*  v0  ~(. ^v0 +126:+<)
 ::  constants
 ++  quarter-ted  ^~((div target-epoch-duration 4))
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
 ++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bignum max-target-atom))
 ++  nicks-per-nock  ^~((bex 16))
+::
+::  +post-asert-activation / +pre-asert-activation: 1-arg activation
+::    predicates, bound to the kernel's blockchain-constants. The
+::    boundary semantics also live in the 2-arg
+::    +post-asert-activation:v1 (used by +new-candidate); the inline
+::    `gte` here is the canonical definition for callers that read
+::    asert-phase from blockchain-constants. See
+::    014-aletheia-emissions-audit.md finding #3.
+++  post-asert-activation
+  |=  height=@
+  ^-  ?
+  (gte height asert-phase)
+::
+++  pre-asert-activation
+  |=  height=@
+  ^-  ?
+  (lth height asert-phase)
 ::
 ++  bignum  bignum:v0
 ++  block-commitment  block-commitment:v0
@@ -41,6 +58,7 @@
     |%
     +$  form  $|(^form |=(* %&))
     ++  new  ^new
+    ++  new-with-fund-share  ^new-with-fund-share
     --
   ++  based
     |=  =form
@@ -64,6 +82,9 @@
 ++  genesis-seal  genesis-seal:v0
 ++  genesis-template  genesis-template:v0
 ++  hash  hash:v0
+::  $fund-address: lock-script hash receiving the 20% protocol-fund
+::  share of every post-asert-activation coinbase. See tx-engine-1.hoon.
+++  fund-address  fund-address:v1
 ++  local-page
   =<  form
   |%
@@ -329,11 +350,13 @@
   ::
   ::  +new-candidate: build candidate page for mining with v1 shares
   ::
-  ::    creates a v1 page with hash-based coinbase-split.
+  ::    creates a v1 page with hash-based coinbase-split. `asert-phase`
+  ::    threads through so post-asert-activation candidates carry the 80/20
+  ::    miner/fund split (014-aletheia).
   ++  new-candidate
-    |=  [par=form now=@da target-bn=bignum:bn =shares]
+    |=  [par=form now=@da target-bn=bignum:bn =shares asert-phase=@]
     ^-  form
-    (new-candidate:page:v1 par now target-bn shares)
+    (new-candidate:page:v1 par now target-bn shares asert-phase)
   ::
   ++  get
     |_  =form

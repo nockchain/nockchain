@@ -40,6 +40,10 @@ pub enum CrownError<T = ExternalError> {
     BootError,
     #[error("Serf load error")]
     SerfLoadError,
+    #[error(
+        "checkpoint ker_hash != current ker_hash: checkpoint={checkpoint} current={current}. Rebuild with matching kernel assets or resync checkpoints."
+    )]
+    CheckpointKernelHashMismatch { checkpoint: String, current: String },
     #[error("work bail")]
     WorkBail,
     #[error("peek bail")]

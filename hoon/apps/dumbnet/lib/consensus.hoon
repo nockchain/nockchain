@@ -2,6 +2,7 @@
 /=  sp  /common/stark/prover
 /=  mine  /common/pow
 /=  dumb-transact  /common/tx-engine
+/=  asert  /apps/dumbnet/lib/asert
 /=  *  /common/zoon
 ::
 ::  this library is where _every_ update to the consensus state
@@ -193,6 +194,39 @@
   ~>  %slog.[0 (cat 3 'compute-target: New target: ' (rsh [3 2] (scot %ui next-target-atom)))]
   next-target-bn
 ::
+::  +compute-target-asert: aserti3-2d target for a post-asert-activation block
+::
+::    .child-height is the height the block is (or will be) at;
+::    .parent-digest identifies its parent so we can read the parent's
+::    median-of-11 from .min-timestamps (written during parent acceptance).
+::    callers must guarantee .child-height >= .asert-phase, which implies
+::    the min-timestamps lookup succeeds and the height >= anchor invariant
+::    holds. used both to validate an accepted page and to compute the
+::    target for a candidate block still being constructed.
+++  compute-target-asert
+  |=  [child-height=@ parent-digest=block-id:t]
+  ^-  bignum:bignum:t
+  =/  parent-min-ts=@
+    (~(got z-by min-timestamps.c) parent-digest)
+  ::  anchor-min-ts is derived by walking parent-digest through .blocks
+  ::  back to the ancestor at asert-anchor-height and reading its
+  ::  median-of-11 from .min-timestamps. fork-correct by construction
+  ::  — every caller walks its own ancestry, with no shared mutable
+  ::  cache that competing forks could diverge. replaced by a hardcoded
+  ::  protocol constant post-65500 (phase 2 of 014-aletheia).
+  =/  anchor-min-ts=@  (find-anchor-min-ts parent-digest)
+  %-  chunk:bignum:t
+  %-  compute-target:asert
+  :*  asert-anchor-target-atom.blockchain-constants
+      anchor-min-ts
+      asert-anchor-height.blockchain-constants
+      parent-min-ts
+      child-height
+      asert-ideal-block-time.blockchain-constants
+      asert-half-life.blockchain-constants
+      max-target-atom:t
+  ==
+::
 ::  +compute-epoch-duration: computes the duration of an epoch in seconds
 ::
 ::    to mitigate certain types of "time warp" attacks, the timestamp we mark
@@ -281,6 +315,14 @@
   =.  min-timestamps.c  (update-min-timestamps now pag)
   ::
   =.  targets.c
+    ?:  (post-asert-activation:t ~(height get:page:t pag))
+      ::  post-asert-activation: store pag's own aserti3-2d target. validation and
+      ::  the miner compute ASERT fresh via +compute-target-asert rather
+      ::  than reading this map, so we only populate it for debugging and to
+      ::  keep the map shape consistent across the activation boundary.
+      %-  ~(put z-by targets.c)
+      :-  ~(digest get:page:t pag)
+      (compute-target-asert ~(height get:page:t pag) ~(parent get:page:t pag))
     ?:  =(+(~(epoch-counter get:page:t pag)) blocks-per-epoch:t)
       ::  last block of an epoch means update to target
       %-  ~(put z-by targets.c)
@@ -361,13 +403,17 @@
   ?.  check-timestamp
     [%.n %page-timestamp-invalid]
   ::
-  ::  check target
-  ?.  =(~(target get:page:t pag) (~(got z-by targets.c) ~(parent get:page:t pag)))
-    [%.n %page-target-invalid]
-  ::
   ::  check height
   ?.  =(~(height get:page:t pag) +(~(height get:page:t par)))
     [%.n %page-height-invalid]
+  ::
+  ::  check target
+  =/  expected-target
+    ?:  (post-asert-activation:t ~(height get:page:t pag))
+      (compute-target-asert ~(height get:page:t pag) ~(parent get:page:t pag))
+    (~(got z-by targets.c) ~(parent get:page:t pag))
+  ?.  =(~(target get:page:t pag) expected-target)
+    [%.n %page-target-invalid]
   ::
   ::  check if digest matches checkpointed history, skip check if fakenet
   ?~  genesis-seal.c
@@ -463,10 +509,35 @@
       %1  %+  roll  ~(val z-by +.cb)
           |=([c=coins:t s=coins:t] (add c s))
     ==
-  =/  emission-and-fees=coins:t
-    (add (emission-calc:coinbase:t ~(height get:page:t pag)) fees.u.balance-transfer)
+  =/  emission=coins:t
+    (emission-calc:coinbase:t ~(height get:page:t pag))
+  =/  emission-and-fees=coins:t  (add emission fees.u.balance-transfer)
   ?.  =(emission-and-fees total-split)
     [%.n %improper-split]
+  ::
+  ::  Phase-gated v1 coinbase entry count. The +based:coinbase-split:v1
+  ::  parser allows up to `max-coinbase-split + 1` entries to admit the
+  ::  fund slot post-asert-activation, but pre-activation v1 blocks
+  ::  (v1-phase <= height < asert-phase) carry no fund slot and must
+  ::  continue to cap at `max-coinbase-split` entries — matching the
+  ::  legacy v0 rule. Without this gate, a miner could pre-activation
+  ::  emit a 3-entry v1 coinbase that this branch accepts and stricter
+  ::  implementations reject (consensus split). See
+  ::  docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #1.
+  =/  height=page-number:t  ~(height get:page:t pag)
+  ?:  ?&  ?=([%1 *] cb)
+          (pre-asert-activation:t height)
+          (gth ~(wyt z-by +.cb) max-coinbase-split.blockchain-constants)
+      ==
+    [%.n %coinbase-split-pre-activation-too-many]
+  ::
+  ::  Post-activation (014-aletheia): coinbase must split 80/20 between
+  ::  the miner and the consensus-known fund address.
+  ?:  (post-asert-activation:t height)
+    ?.  (check-fund-split cb emission)
+      [%.n %improper-fund-split]
+    ~>  %slog.[0 (cat 3 'validate-page-with-txs: Block validated: ' digest-b58)]
+    [%.y u.balance-transfer]
   ~>  %slog.[0 (cat 3 'validate-page-with-txs: Block validated: ' digest-b58)]
   [%.y u.balance-transfer]
 ::
@@ -509,6 +580,57 @@
     ==
   ~>  %slog.[0 log-message]
   c
+::
+::  +find-anchor-min-ts: walk parent chain from .bid back to the block at
+::    asert-anchor-height, return that block's median-of-11 timestamp
+::    from .min-timestamps.
+::
+::    callers must guarantee that .bid's block is in .blocks and has height
+::    >= asert-anchor-height. fork-correct because .blocks and
+::    .min-timestamps are keyed by digest, so each caller walks its own
+::    ancestry with no shared mutable state that competing forks could
+::    diverge. replaced by a hardcoded protocol constant post-65500
+::    (phase 2 of 014-aletheia).
+++  find-anchor-min-ts
+  |=  bid=block-id:t
+  ^-  @
+  =/  anchor-height=@  asert-anchor-height.blockchain-constants
+  =/  cur=page:t  (to-page:local-page:t (~(got z-by blocks.c) bid))
+  |-
+  ?:  =(~(height get:page:t cur) anchor-height)
+    (~(got z-by min-timestamps.c) ~(digest get:page:t cur))
+  $(cur (to-page:local-page:t (~(got z-by blocks.c) ~(parent get:page:t cur))))
+::
+::  +check-fund-split: validate that a post-asert-activation coinbase pays
+::  the consensus-known fund address exactly floor(emission/5) atoms.
+::
+::    The total-split-equals-(emission+fees) check has already passed
+::    by the time this is called (see line ~515 above), and ++based on
+::    the v1 coinbase-split caps total entries at max-coinbase-split+1.
+::    So we only need to verify that:
+::      (a) the split is v1 (post-asert-activation = post-v1-phase),
+::      (b) the fund-address slot exists,
+::      (c) that slot's coins equal exactly floor(emission/5).
+::    The miner side is then `emission - fund-coins + fees`,
+::    distributed across however many miner outputs the miner chose
+::    (1 or 2; partner mode supported per 014-aletheia).
+::
+::    Post-cap special case (height > tail-end): when emission == 0 the
+::    expected fund share is 0, but +based:coinbase-split:v1 rejects
+::    zero-coin entries — so the only valid representation is fund-slot
+::    *absent*, with all fees flowing to miner-side outputs. See
+::    docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #2.
+++  check-fund-split
+  |=  [cb=coinbase-split:t emission=coins:t]
+  ^-  ?
+  ?.  ?=([%1 *] cb)  %.n
+  =/  expected-fund-coins=coins:t  (div emission 5)
+  =/  fund-coins=(unit coins:t)
+    (~(get z-by +.cb) fund-address:t)
+  ?:  =(0 expected-fund-coins)
+    =(~ fund-coins)
+  ?~  fund-coins  %.n
+  =(u.fund-coins expected-fund-coins)
 ::
 ::  +get-elders: get list of ancestor block IDs up to 24 deep
 ::  (ordered newest->oldest)

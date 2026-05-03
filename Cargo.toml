@@ -1,7 +1,6 @@
-resolver = "2"
-
 [workspace]
-members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
@@ -10,10 +9,11 @@ edition = "2021"
 [workspace.dependencies]
 aes = { version = "0.8.3", default-features = false }
 aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
-alloy = "1.1.2"
+alloy = "=1.8.2"
 anyhow = "1.0"
 argon2 = "0.5.3"
 arrayref = "0.3.7"
+askama = "0.12.1"
 assert_cmd = "2.0"
 async-trait = "0.1"
 axum = "0.8.1"
@@ -22,7 +22,7 @@ backon = { version = "1.6", features = ["tokio-sleep"] }
 bardecoder = "0.5.0"
 bincode = "2.0.0-rc.3"
 bitcoincore-rpc = "0.19.0"
-bitvec = "1.0.1"
+bitvec = { version = "1.0.1", default-features = true }
 blake3 = { version = "1.5.1", features = ["serde"] }
 bs58 = "0.5.1"
 byteorder = "1.5.0"
@@ -70,10 +70,10 @@ memmap2 = "^0.9.5"
 nu-ansi-term = "0.50"
 num-bigint = "0.4.6"
 num-derive = "0.4.2"
-num-traits = "0.2"
+num-traits = { version = "0.2", default-features = true }
 num_cpus = "1.16.0"
 once_cell = "1.21.3"
-op-alloy = "0.23.1"
+op-alloy = "=0.23.1"
 openssl-sys = "0.9"
 opentelemetry = { version = "0.30.0", features = [
     "trace",
@@ -99,7 +99,7 @@ qrcode = "0.14.1"
 quickcheck = "1.0.3"
 quickcheck_macros = "1.0"
 quote = "1.0.37"
-rand = { version = "0.9.2", features = ["std"] }
+rand = { version = "0.9.2", default-features = true, features = ["std"] }
 ratatui = "0.29.0"
 rayon = "1.8.0"
 rcgen = "0.14.3"
@@ -111,8 +111,9 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "blocking",
 ] }
-rkyv = "0.8.10"
+rkyv = "0.8.13"
 rustls = "0.23.0"
+rustls-pemfile = "2.0.0"
 rustls-pki-types = "1.13.1"
 serde = "1.0.217"
 serde_bytes = { version = "0.11.15", features = ["alloc"] }
@@ -199,6 +200,9 @@ path = "crates/hoonc"
 [workspace.dependencies.ibig]
 path = "crates/nockvm/rust/ibig"
 
+[workspace.dependencies.kernels]
+path = "crates/kernels"
+
 [workspace.dependencies.kernels-open-bridge]
 path = "crates/kernels/bridge"
 
@@ -222,6 +226,7 @@ path = "crates/nockapp"
 
 [workspace.dependencies.nockapp-grpc]
 path = "crates/nockapp-grpc"
+default-features = true
 
 [workspace.dependencies.nockapp-grpc-proto]
 path = "crates/nockapp-grpc-proto"
@@ -258,6 +263,13 @@ path = "crates/noun-serde-derive"
 
 [workspace.dependencies.zkvm-jetpack]
 path = "crates/zkvm-jetpack"
+
+[patch]
+
+[patch.crates-io]
+op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-consensus" }
+op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-network" }
+op-alloy-rpc-types = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-rpc-types" }
 
 # Comment out this block if gdb is lacking info
 [profile.dev]

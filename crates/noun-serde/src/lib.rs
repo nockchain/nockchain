@@ -84,6 +84,9 @@ pub enum NounDecodeError {
 
     #[error("Failed to decode Constraints")]
     ConstraintsDecodeError,
+
+    #[error("Failed to decode noun")]
+    DecodeError,
 }
 
 impl From<NounDecodeError> for JetErr {

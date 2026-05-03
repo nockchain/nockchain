@@ -28,6 +28,7 @@ Legend:
 
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| 014 | Aletheia                                 | 0.1.14  | draft      | 65500             | -                 | [`014-aletheia.md`](./changelog/protocol/014-aletheia.md)                                             |
 | 012 | Bythos                                   | 0.1.11  | final      | 54000             | 2026-03-01        | [`012-bythos.md`](./changelog/protocol/012-bythos.md)                                                 |
 | 011 | Legacy 011 - LMP Axis Hotfix             | 0.1.10  | activated  | 0                 | -                 | [`011-legacy-lmp-axis-hotfix.md`](./changelog/protocol/011-legacy-lmp-axis-hotfix.md)                 |
 | 010 | Legacy 010 - V1 Phase 39000              | 0.1.9   | activated  | 39000             | -                 | [`010-legacy-v1-phase-39000.md`](./changelog/protocol/010-legacy-v1-phase-39000.md)                   |

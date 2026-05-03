@@ -78,6 +78,13 @@ impl<'a> WordCountEstimator<'a> {
         )
     }
 
+    pub fn estimate_v0_witness_words(&self, signatures_required: u64) -> u64 {
+        // Legacy spend-0 witnesses only carry the signature map.
+        // 13 words for the schnorr pubkey,
+        // 16 words for the schnorr signature consisting of 2 8-tuples
+        Self::map_words(signatures_required, 13, 16)
+    }
+
     fn witness_words_for_lock(
         spend_condition: &SpendCondition,
         bythos_active: bool,
@@ -607,5 +614,21 @@ mod tests {
             &context,
         );
         assert_eq!(three, four);
+    }
+
+    #[test]
+    fn v0_witness_estimate_matches_legacy_signature_map_shape() {
+        let context = ChainContext {
+            height: BlockHeight(Belt(1)),
+            bythos_phase: BlockHeight(Belt(1)),
+            base_fee: 128,
+            input_fee_divisor: 4,
+            min_fee: 256,
+        };
+        let estimator = WordCountEstimator::new(&context);
+
+        assert_eq!(estimator.estimate_v0_witness_words(1), 31);
+        assert_eq!(estimator.estimate_v0_witness_words(2), 61);
+        assert_eq!(estimator.estimate_v0_witness_words(3), 91);
     }
 }

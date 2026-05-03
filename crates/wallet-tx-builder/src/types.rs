@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Nicks, Version};
+use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Nicks, SchnorrPubkey, Version};
+use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
 use nockchain_types::tx_engine::v1::note::Note;
 use nockchain_types::tx_engine::v1::tx::SpendCondition;
 
@@ -71,6 +72,10 @@ pub struct CandidateV0Note {
     pub identity: CandidateIdentity,
     /// Spendable asset amount carried by this note.
     pub assets: Nicks,
+    /// Legacy v0 signing lock used for migration spendability checks.
+    pub lock: V0Lock,
+    /// Legacy v0 timelock constraints applied to this note.
+    pub timelock: Option<V0TimelockIntent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,6 +111,8 @@ impl CandidateNote {
                     origin_page: note_v0.head.origin_page.clone(),
                 },
                 assets: note_v0.tail.assets.clone(),
+                lock: note_v0.tail.lock.clone(),
+                timelock: note_v0.head.timelock.0.clone(),
             }),
             Note::V1(note_v1) => {
                 let raw_note_data = note_v1
@@ -199,6 +206,18 @@ pub struct PlannedOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Planner mode selects between fixed-recipient create-tx and legacy v0 sweep migration.
+pub enum PlanningMode {
+    /// Standard create-tx planner behavior with fixed recipient outputs and optional refund.
+    Standard,
+    /// Full-sweep migration mode that spends all admissible v0 notes into one destination output.
+    V0MigrationSweep {
+        /// Destination output template used for fee accounting and final emission.
+        destination_output: PlannedOutput,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// Assembled transaction input pairing selected note identity and spend lock.
 pub struct AssembledInput {
     pub note: CandidateIdentity,
@@ -223,6 +242,8 @@ pub struct AssembledTransaction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Full planner input bundle for deterministic create-tx planning.
 pub struct PlanRequest {
+    /// Planner mode controls output/funding semantics.
+    pub planning_mode: PlanningMode,
     /// Selection mode: caller-specified manual candidate set (by note names) or automatic candidate search.
     pub selection_mode: SelectionMode,
     /// Order used when sorting candidate notes by their `assets` value.
@@ -243,6 +264,8 @@ pub struct PlanRequest {
     pub refund_output: PlannedOutput,
     /// Relative timelock minimum used to classify coinbase-style locks.
     pub coinbase_relative_min: Option<u64>,
+    /// Signer pubkeys used by v0 migration admission checks.
+    pub v0_migration_signer_pubkeys: Vec<SchnorrPubkey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

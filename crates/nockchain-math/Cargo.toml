@@ -18,7 +18,7 @@ num-traits.workspace = true
 once_cell.workspace = true
 quickcheck.workspace = true
 rkyv.workspace = true
-serde = { version = "1.0.217", features = ["derive"], default-features = false }
+serde = { workspace = true, features = ["derive"], default-features = false }
 thiserror.workspace = true
 tracing.workspace = true
 

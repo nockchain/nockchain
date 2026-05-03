@@ -21,6 +21,42 @@
   |$  object
   (each object term)
 ::
+::  $fund-address: lock-script hash that receives the 20% protocol-fund
+::  share of every post-activation coinbase (014-aletheia, asert-phase
+::  onward). The lock-root of a 3-of-4 multisig over the four pkhs in
+::  /asert-protocol-lock-fund.txt at the repo root; spending the fund
+::  therefore requires three of four signatures.
+::
+::  Computed once by /scripts/generate-fund-address.hoon and pasted in
+::  here as a base58 literal. Re-run that script after any change to
+::  the participant set, the threshold, or the lock-script structure
+::  to regenerate the value below. The pin is enforced by
+::  test-fund-address-is-3-of-4-multisig in
+::  /tests/dumb/mod/unit/coinbase-split.
+++  fund-address
+  ^-  hash
+  (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
+::
+::  +post-asert-activation: 014-aletheia activation predicate, 2-arg form.
+::    Returns %.y when `height` is at or past the asert-phase boundary.
+::    The 1-arg wrappers in /common/tx-engine close over the kernel's
+::    blockchain-constants; this 2-arg form is for callers (like
+::    +new-candidate below) that already have asert-phase as a separate
+::    parameter rather than via blockchain-constants. SINGLE source of
+::    truth for the boundary semantics — see
+::    014-aletheia-emissions-audit.md finding #3.
+++  post-asert-activation
+  |=  [height=@ asert-phase=@]
+  ^-  ?
+  (gte height asert-phase)
+::
+::  +pre-asert-activation: inverse of +post-asert-activation, for readability at
+::  call sites that branch on the legacy / activated split.
+++  pre-asert-activation
+  |=  [height=@ asert-phase=@]
+  ^-  ?
+  (lth height asert-phase)
+::
 ::  $page: page with v1 coinbase-split
 ++  page
   =<  form
@@ -41,7 +77,7 @@
     ==
   ::
   ++  new-candidate
-    |=  [par=$^(page:v0 form) now=@da target-bn=bignum:bn =shares]
+    |=  [par=$^(page:v0 form) now=@da target-bn=bignum:bn =shares asert-phase=@]
     ^-  form
     ::  extract common fields from either v0 or v1 parent
     =/  [par-accumulated-work=bignum:bn par-digest=hash par-epoch-counter=@ par-height=@]
@@ -57,6 +93,15 @@
       ?:  =(+(par-epoch-counter) blocks-per-epoch:v0)  0
       +(par-epoch-counter)
     =/  height=@  +(par-height)
+    =/  emission=coins  (emission-calc:coinbase:v0 height)
+    ::  Pre-activation: 100% of emission to the miner per ++new:coinbase-split.
+    ::  Post-activation: 80% miner / 20% fund (014-aletheia). Fees are zero
+    ::  at candidate construction; the miner module re-runs the builder
+    ::  with the live fee total each time the mempool changes.
+    =/  cb=coinbase-split
+      ?:  (pre-asert-activation height asert-phase)
+        (new:coinbase-split emission shares)
+      (new-with-fund-share:coinbase-split emission 0 shares)
     %*  .  *form
       height            height
       parent            par-digest
@@ -64,9 +109,7 @@
       epoch-counter     epoch-counter
       target            target-bn
       accumulated-work  accumulated-work
-      coinbase          %+  new:coinbase-split
-                          (emission-calc:coinbase:v0 height)
-                        shares
+      coinbase          cb
     ==
   ::
   ++  to-local-page
@@ -177,6 +220,34 @@
           ::  divisor for input fees (inputs cost 1/divisor of outputs)
           input-fee-divisor=4
           *blockchain-constants:v0
+          ::  aserti3-2d difficulty adjustment.
+          ::    .asert-phase: activation height. at or after, target is
+          ::       computed per-block via aserti3-2d instead of epoch retarget.
+          ::    .asert-anchor-height / -target-atom: the fixed anchor (height,
+          ::       target-atom) used as the aserti3-2d reference. the anchor's
+          ::       median-of-11 timestamp is not a constant here: it is
+          ::       derived at compute-target time by walking .blocks back
+          ::       from the parent-digest to the ancestor at
+          ::       asert-anchor-height and reading .min-timestamps. post-
+          ::       65500 the min-of-11 becomes a hardcoded constant (phase 2
+          ::       of 014-aletheia). anchor-target is 2^291: at constant hashrate H, expected
+          ::       blocks/sec is H*target/max, so to cut block time 600s →
+          ::       150s (4x more blocks per sec) we increase target by ~4x,
+          ::       which reduces per-block difficulty (max/target) by the
+          ::       same factor. 2^291 is the closest power of 2 to 4 * pre-
+          ::       activation mainnet target (~2^291.38); it yields ~3.2x
+          ::       faster blocks (expected ~187s) under the same hashrate,
+          ::       slightly conservative vs the ideal 150s.
+          ::    .asert-ideal-block-time: post-asert-activation block time in seconds.
+          ::    .asert-half-life: real-time seconds of drift to halve or double.
+          ::    rbits is hardcoded to 16 in lib/asert.hoon (the polynomial
+          ::       coefficients are tied to that precision and cannot be varied
+          ::       per-constants without a hard fork of the polynomial itself).
+          asert-phase=65.500
+          asert-anchor-height=65.499
+          asert-anchor-target-atom=^~((bex 291))
+          asert-ideal-block-time=150
+          asert-half-life=^~((mul 12 ^~((mul 60 60))))
       ==
   $:  v1-phase=@
       bythos-phase=@
@@ -184,6 +255,11 @@
       base-fee=@
       input-fee-divisor=@
       blockchain-constants:v0
+      asert-phase=@
+      asert-anchor-height=@
+      asert-anchor-target-atom=@
+      asert-ideal-block-time=@
+      asert-half-life=@
   ==
 :: $nname
 ++  nname
@@ -539,9 +615,21 @@
       recursion-depth  +(recursion-depth)
     ==
   ::
+  ::  +based: parser-level shape check for v1 coinbase-split.
+  ::    Allows up to `max-coinbase-split:v0 + 1` entries — the +1 is
+  ::    the post-asert-activation fund slot (014-aletheia). Pre-activation v1
+  ::    builders only emit one entry per `shares` key (capped at
+  ::    `max-coinbase-split` by ++validate:shares), so honest
+  ::    pre-asert-activation blocks never reach the relaxed bound.
+  ::
+  ::    NOTE: this parser is height-blind by design. The consensus-layer
+  ::    rule that pre-activation v1 blocks cap at `max-coinbase-split`
+  ::    (no fund slot before activation) is enforced in
+  ::    +validate-page-with-txs in apps/dumbnet/lib/consensus.hoon
+  ::    via the %coinbase-split-pre-activation-too-many reason.
   ++  based
     |=  =form
-    ?.  (lte ~(wyt z-by form) max-coinbase-split:v0)
+    ?.  (lte ~(wyt z-by form) +(max-coinbase-split:v0))
       %|
     %+  levy  ~(tap z-by form)
     |=  [h=^hash =coins]
@@ -549,6 +637,28 @@
         (^based coins)
         (based:^hash h)
     ==
+  ::
+  ::  +new-with-fund-share: post-asert-activation 80/20 coinbase-split builder.
+  ::    Splits a block's coinbase between the protocol fund and the
+  ::    miner-side recipients:
+  ::      fund        = floor(emission / 5)               :: 20% of subsidy
+  ::      miner-pool  = (emission - fund) + fees          :: 80% + all fees
+  ::    The miner-pool is distributed across `shares` via the same
+  ::    proportional-allocation arm as ++new (per-block atom remainders
+  ::    accrue to the first share key in z-map order, preserving the
+  ::    legacy single-miner behaviour and supporting up-to-2 partner
+  ::    splits). The fund is added as one additional output.
+  ::    `shares` must NOT include `fund-address`.
+  ::    Fees are computed from the subsidy alone — folding fees into the
+  ::    fund slot would be rejected by +check-fund-split.
+  ++  new-with-fund-share
+    |=  [emission=coins fees=coins =shares]
+    ^-  form
+    ?<  (~(has z-by shares) fund-address)
+    =/  fund-coins=coins   (div emission 5)
+    =/  miner-pool=coins   (add fees (sub emission fund-coins))
+    =/  miner-split=form   (new miner-pool shares)
+    (~(put z-by miner-split) fund-address fund-coins)
   ::
   ++  hashable
     |=  =form

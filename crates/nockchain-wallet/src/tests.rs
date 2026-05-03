@@ -2,28 +2,38 @@
 // TODO: all these tests need to also validate the results and not
 // just ensure that the wallet can be poked with the expected noun.
 
+use std::collections::BTreeMap;
 use std::sync::Once;
 
 use nockapp::kernel::boot::{self, Cli as BootCli};
 use nockapp::wire::SystemWire;
 use nockapp::{exit_driver, AtomExt, Bytes};
 use nockchain_math::belt::Belt;
+use nockchain_math::zoon::zmap::ZMap;
 use nockchain_types::default_fakenet_blockchain_constants;
-use nockchain_types::tx_engine::common::{BlockHeight, BlockHeightDelta, Nicks};
-use nockchain_types::tx_engine::v0;
+use nockchain_types::tx_engine::common::{BlockHeight, BlockHeightDelta, Nicks, Signature};
 use nockchain_types::tx_engine::v1::note::{NoteData, NoteDataEntry};
 use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, Pkh, SpendCondition};
-use nockvm::noun::Slots;
-use noun_serde::NounEncode;
+use nockchain_types::tx_engine::{v0, v1};
+use nockvm::noun::{Slots, T};
+use noun_serde::{NounDecode, NounEncode};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
-use wallet_tx_builder::types::RawNoteDataEntry;
+use wallet_tx_builder::adapter::normalize_balance_pages;
+use wallet_tx_builder::fee::{compute_minimum_fee, FeeInputs};
+use wallet_tx_builder::planner::plan_create_tx;
+use wallet_tx_builder::types::{
+    CandidateVersionPolicy, ChainContext, PlanRequest, PlanningMode, RawNoteDataEntry,
+    SelectionMode, SelectionOrder,
+};
 
 use super::*;
 use crate::create_tx::{
-    ensure_manual_planner_parity, PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun,
+    ensure_manual_planner_parity, ActiveSignerEntryNoun, MigrateV0NotesSummary,
+    MigrateV0SignerSummary, PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun,
     SigningKeyLockMatcher,
 };
+use crate::recipient::{planner_recipient_outputs, RecipientSpec};
 
 static INIT: Once = Once::new();
 
@@ -70,6 +80,13 @@ fn simple_pkh_lock(pkh: Hash) -> Lock {
     ))]))
 }
 
+fn simple_v0_lock(pubkey: SchnorrPubkey) -> v0::Lock {
+    v0::Lock {
+        keys_required: 1,
+        pubkeys: vec![pubkey],
+    }
+}
+
 fn note_data_from_raw_entries(entries: Vec<RawNoteDataEntry>) -> NoteData {
     NoteData::new(
         entries
@@ -89,6 +106,246 @@ fn note_v1_with_lock(name: Name, origin_page: u64, assets: u64, lock: Lock) -> v
     ))
 }
 
+fn note_v0_with_lock(name: Name, origin_page: u64, assets: u64, lock: v0::Lock) -> v1::Note {
+    v1::Note::V0(v0::NoteV0 {
+        head: v0::NoteHead {
+            version: nockchain_types::tx_engine::common::Version::V0,
+            origin_page: BlockHeight(Belt(origin_page)),
+            timelock: v0::Timelock(None),
+        },
+        tail: v0::NoteTail {
+            name,
+            lock,
+            source: nockchain_types::tx_engine::common::Source {
+                hash: hash(origin_page + assets),
+                is_coinbase: false,
+            },
+            assets: Nicks(assets as usize),
+        },
+    })
+}
+
+fn noun_leaf_count(noun: nockapp::Noun) -> u64 {
+    if noun.is_atom() {
+        return 1;
+    }
+    let cell = noun.as_cell().expect("noun should decode as cell");
+    noun_leaf_count(cell.head()).saturating_add(noun_leaf_count(cell.tail()))
+}
+
+fn word_count_from_noun_encode<T: NounEncode>(value: &T) -> u64 {
+    let mut slab: NounSlab = NounSlab::new();
+    let noun = value.to_noun(&mut slab);
+    noun_leaf_count(noun)
+}
+
+fn merged_seed_word_count(spends: &v1::Spends) -> u64 {
+    let mut merged_by_lock_root = BTreeMap::<[u64; 5], BTreeMap<String, Bytes>>::new();
+
+    for (_, spend) in &spends.0 {
+        let seeds = match spend {
+            v1::Spend::Legacy(spend0) => &spend0.seeds.0,
+            v1::Spend::Witness(spend1) => &spend1.seeds.0,
+        };
+
+        for seed in seeds {
+            let merged = merged_by_lock_root
+                .entry(seed.lock_root.to_array())
+                .or_default();
+            for note_data_entry in seed.note_data.iter() {
+                merged.insert(note_data_entry.key.clone(), note_data_entry.blob.clone());
+            }
+        }
+    }
+
+    merged_by_lock_root
+        .into_values()
+        .map(|merged| {
+            let entries = merged
+                .into_iter()
+                .map(|(key, blob)| NoteDataEntry::new(key, blob))
+                .collect::<Vec<_>>();
+            word_count_from_noun_encode(&NoteData::new(entries))
+        })
+        .sum()
+}
+
+fn witness_word_count(spends: &v1::Spends) -> u64 {
+    spends
+        .0
+        .iter()
+        .map(|(_, spend)| match spend {
+            v1::Spend::Legacy(spend0) => word_count_from_noun_encode(&spend0.signature),
+            v1::Spend::Witness(spend1) => word_count_from_noun_encode(&spend1.witness),
+        })
+        .sum()
+}
+
+fn total_paid_fee(spends: &v1::Spends) -> u64 {
+    spends
+        .0
+        .iter()
+        .map(|(_, spend)| match spend {
+            v1::Spend::Legacy(spend0) => spend0.fee.0 as u64,
+            v1::Spend::Witness(spend1) => spend1.fee.0 as u64,
+        })
+        .sum()
+}
+
+fn total_seed_gift(spends: &v1::Spends) -> u64 {
+    spends
+        .0
+        .iter()
+        .flat_map(|(_, spend)| match spend {
+            v1::Spend::Legacy(spend0) => spend0.seeds.0.iter(),
+            v1::Spend::Witness(spend1) => spend1.seeds.0.iter(),
+        })
+        .map(|seed| seed.gift.0 as u64)
+        .sum()
+}
+
+fn decode_saved_transaction_spends(effects: &[NounSlab]) -> Result<v1::Spends, NockAppError> {
+    let tx_bytes = effects
+        .iter()
+        .find_map(|effect| {
+            let noun = unsafe { effect.root() };
+            let cell = noun.as_cell().ok()?;
+            let tag = cell.head().as_atom().ok()?.into_string().ok()?;
+            if tag != "file" {
+                return None;
+            }
+            let op_cell = cell.tail().as_cell().ok()?;
+            let op_tag = op_cell.head().as_atom().ok()?.into_string().ok()?;
+            if op_tag != "write" {
+                return None;
+            }
+            let write_cell = op_cell.tail().as_cell().ok()?;
+            let path = write_cell.head().as_atom().ok()?.into_string().ok()?;
+            if !path.ends_with(".tx") {
+                return None;
+            }
+            Some(Bytes::copy_from_slice(
+                write_cell.tail().as_atom().ok()?.as_ne_bytes(),
+            ))
+        })
+        .ok_or_else(|| NockAppError::OtherError("missing saved transaction file effect".into()))?;
+
+    decode_transaction_spends_from_bytes(&tx_bytes)
+}
+
+fn decode_saved_transaction_spends_from_path(
+    transaction_path: &str,
+) -> Result<v1::Spends, NockAppError> {
+    let tx_bytes = fs::read(transaction_path).map_err(|err| {
+        NockAppError::OtherError(format!("failed to read transaction file: {err}"))
+    })?;
+    decode_transaction_spends_from_bytes(&tx_bytes)
+}
+
+fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, NockAppError> {
+    let mut slab: NounSlab = NounSlab::new();
+    let transaction_noun = slab.cue_into(Bytes::copy_from_slice(tx_bytes))?;
+    let transaction_cell = transaction_noun.as_cell().map_err(|err| {
+        NockAppError::OtherError(format!("transaction jam root not a cell: {err}"))
+    })?;
+    let version = <u64 as NounDecode>::from_noun(&transaction_cell.head()).map_err(|err| {
+        NockAppError::OtherError(format!("transaction version did not decode: {err}"))
+    })?;
+    if version != 1 {
+        return Err(NockAppError::OtherError(format!(
+            "expected saved transaction version 1, got {version}"
+        )));
+    }
+    let name_and_rest = transaction_cell.tail().as_cell().map_err(|err| {
+        NockAppError::OtherError(format!("transaction jam missing name/rest cell: {err}"))
+    })?;
+    let spends_and_rest = name_and_rest.tail().as_cell().map_err(|err| {
+        NockAppError::OtherError(format!("transaction jam missing spends/rest cell: {err}"))
+    })?;
+    let mut spends = v1::Spends::from_noun(&spends_and_rest.head()).map_err(|err| {
+        NockAppError::OtherError(format!("saved transaction spends did not decode: {err}"))
+    })?;
+    let display_and_witness = spends_and_rest.tail().as_cell().map_err(|err| {
+        NockAppError::OtherError(format!(
+            "transaction jam missing display/witness-data cell: {err}"
+        ))
+    })?;
+    let witness_data = display_and_witness.tail();
+    let witness_cell = witness_data.as_cell().map_err(|err| {
+        NockAppError::OtherError(format!("transaction jam witness-data not a cell: {err}"))
+    })?;
+    let witness_tag = <u64 as NounDecode>::from_noun(&witness_cell.head()).map_err(|err| {
+        NockAppError::OtherError(format!("witness-data tag did not decode: {err}"))
+    })?;
+    match witness_tag {
+        0 => {
+            let signatures =
+                ZMap::<Name, Signature>::from_noun(&witness_cell.tail()).map_err(|err| {
+                    NockAppError::OtherError(format!(
+                        "legacy witness-data signature map did not decode: {err}"
+                    ))
+                })?;
+            for (name, signature) in signatures.into_entries() {
+                let Some((_, v1::Spend::Legacy(spend0))) = spends
+                    .0
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == name)
+                else {
+                    return Err(NockAppError::OtherError(format!(
+                        "legacy witness-data referenced unknown spend {} / {}",
+                        name.first.to_base58(),
+                        name.last.to_base58()
+                    )));
+                };
+                spend0.signature = signature;
+            }
+        }
+        1 => {
+            let witnesses =
+                ZMap::<Name, v1::Witness>::from_noun(&witness_cell.tail()).map_err(|err| {
+                    NockAppError::OtherError(format!("v1 witness-data map did not decode: {err}"))
+                })?;
+            for (name, witness) in witnesses.into_entries() {
+                let Some((_, v1::Spend::Witness(spend1))) = spends
+                    .0
+                    .iter_mut()
+                    .find(|(candidate, _)| *candidate == name)
+                else {
+                    return Err(NockAppError::OtherError(format!(
+                        "witness-data referenced unknown spend {} / {}",
+                        name.first.to_base58(),
+                        name.last.to_base58()
+                    )));
+                };
+                spend1.witness = witness;
+            }
+        }
+        other => {
+            return Err(NockAppError::OtherError(format!(
+                "unsupported witness-data tag {other}"
+            )));
+        }
+    }
+    Ok(spends)
+}
+
+fn effect_tag(effect: &NounSlab) -> Option<String> {
+    let noun = unsafe { effect.root() };
+    let cell = noun.as_cell().ok()?;
+    cell.head().as_atom().ok()?.into_string().ok()
+}
+
+fn effect_exit_code(effects: &[NounSlab]) -> Option<u64> {
+    effects.iter().find_map(|effect| {
+        if effect_tag(effect).as_deref() != Some("exit") {
+            return None;
+        }
+        let noun = unsafe { effect.root() };
+        let cell = noun.as_cell().ok()?;
+        <u64 as NounDecode>::from_noun(&cell.tail()).ok()
+    })
+}
+
 fn format_note_names(names: &[Name]) -> String {
     names
         .iter()
@@ -97,14 +354,57 @@ fn format_note_names(names: &[Name]) -> String {
         .join(",")
 }
 
-async fn peek_signing_keys(wallet: &mut Wallet) -> Result<Vec<Hash>, NockAppError> {
+async fn peek_master_signing_key(wallet: &mut Wallet) -> Result<Hash, NockAppError> {
     let mut slab = NounSlab::new();
-    let tag = make_tas(&mut slab, "signing-keys").as_noun();
+    let tag = make_tas(&mut slab, "master-signing-key").as_noun();
     slab.modify(|_| vec![tag, SIG]);
 
     let result = wallet.app.peek(slab).await?;
-    let decoded: Option<Option<Vec<Hash>>> = unsafe { Option::from_noun(result.root())? };
-    Ok(decoded.flatten().unwrap_or_default())
+    let decoded: Option<Option<Hash>> = unsafe { Option::from_noun(result.root())? };
+    decoded.flatten().ok_or_else(|| {
+        NockAppError::OtherError("wallet master-signing-key peek returned no payload".to_string())
+    })
+}
+
+async fn peek_master_signing_pubkey(wallet: &mut Wallet) -> Result<SchnorrPubkey, NockAppError> {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "master-signing-pubkey").as_noun();
+    slab.modify(|_| vec![tag, SIG]);
+
+    let result = wallet.app.peek(slab).await?;
+    let decoded: Option<Option<SchnorrPubkey>> = unsafe { Option::from_noun(result.root())? };
+    decoded.flatten().ok_or_else(|| {
+        NockAppError::OtherError(
+            "wallet master-signing-pubkey peek returned no payload".to_string(),
+        )
+    })
+}
+
+async fn peek_active_signers(
+    wallet: &mut Wallet,
+) -> Result<Vec<ActiveSignerEntryNoun>, NockAppError> {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "active-signers").as_noun();
+    slab.modify(|_| vec![tag, SIG]);
+
+    let result = wallet.app.peek(slab).await?;
+    let decoded: Option<Option<Vec<ActiveSignerEntryNoun>>> =
+        unsafe { Option::from_noun(result.root())? };
+    let mut signers = decoded.flatten().unwrap_or_default();
+    signers.sort_by_key(|signer| {
+        (
+            if signer.child_index.is_none() { 0 } else { 1 },
+            signer.absolute_index.unwrap_or(0),
+            signer.address_b58.clone(),
+        )
+    });
+    signers.dedup_by(|left, right| {
+        left.child_index == right.child_index
+            && left.hardened == right.hardened
+            && left.absolute_index == right.absolute_index
+            && left.address_b58 == right.address_b58
+    });
+    Ok(signers)
 }
 
 async fn import_seed_phrase(
@@ -124,6 +424,23 @@ async fn import_seed_phrase(
     Ok(())
 }
 
+async fn derive_child_key(
+    wallet: &mut Wallet,
+    index: u64,
+    hardened: bool,
+) -> Result<(), NockAppError> {
+    let label = None;
+    let (noun, _) = Wallet::derive_child(index, hardened, &label)?;
+    let wire = WalletWire::Command(Commands::DeriveChild {
+        index,
+        hardened,
+        label,
+    })
+    .to_wire();
+    let _ = wallet.app.poke(wire, noun).await?;
+    Ok(())
+}
+
 async fn apply_balance_update(
     wallet: &mut Wallet,
     balance_update: v1::BalanceUpdate,
@@ -136,10 +453,11 @@ async fn apply_balance_update(
 async fn boot_test_wallet() -> Result<(Wallet, TempDir), NockAppError> {
     let cli = BootCli::parse_from(["wallet", "--new"]);
     let data_dir = tempfile::tempdir().map_err(NockAppError::IoError)?;
+    let prover_hot_state = produce_prover_hot_state();
     let nockapp = boot::setup(
         KERNEL,
         cli.clone(),
-        &[],
+        prover_hot_state.as_slice(),
         "wallet",
         Some(data_dir.path().to_path_buf()),
     )
@@ -164,6 +482,23 @@ async fn peek_wallet_blockchain_constants(
         NockAppError::OtherError(format!("wallet state missing blockchain constants: {err}"))
     })?)
     .map_err(|err| NockAppError::OtherError(format!("decode blockchain constants failed: {err}")))
+}
+
+async fn peek_balance_state(wallet: &mut Wallet) -> Result<v1::BalanceUpdate, NockAppError> {
+    let mut slab = NounSlab::new();
+    let balance_tag = make_tas(&mut slab, "balance").as_noun();
+    let path = T(&mut slab, &[balance_tag, SIG]);
+    slab.set_root(path);
+
+    let result = wallet.app.peek(slab).await?;
+    let maybe_balance: Option<Option<v1::BalanceUpdate>> =
+        unsafe { <Option<Option<v1::BalanceUpdate>>>::from_noun(result.root())? };
+    match maybe_balance {
+        Some(Some(balance)) => Ok(balance),
+        _ => Err(NockAppError::OtherError(
+            "wallet balance peek returned no balance payload".to_string(),
+        )),
+    }
 }
 
 #[test]
@@ -631,11 +966,7 @@ async fn fakenet_create_tx_accepts_discounted_fee_schedule() -> Result<(), NockA
     import_seed_phrase(&mut wallet, seedphrase, 1).await?;
     wallet.set_fakenet().await?;
 
-    let signer_pkh = peek_signing_keys(&mut wallet)
-        .await?
-        .into_iter()
-        .next()
-        .expect("wallet should expose master signer key");
+    let signer_pkh = peek_master_signing_key(&mut wallet).await?;
     let simple = SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(
         1,
         vec![signer_pkh.clone()],
@@ -710,53 +1041,661 @@ async fn signing_keys_support_rust_first_name_reconstruction_in_fakenet() -> Res
 
     let constants = peek_wallet_blockchain_constants(&mut wallet).await?;
     let relative_min = constants.coinbase_timelock_min()?;
-    let signer_keys = peek_signing_keys(&mut wallet).await?;
-    assert!(
-        !signer_keys.is_empty(),
-        "wallet should expose at least one signer"
+    let signer_pkh = peek_master_signing_key(&mut wallet).await?;
+    let simple = SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(
+        1,
+        vec![signer_pkh.clone()],
+    ))]);
+    let coinbase = SpendCondition::new(vec![
+        LockPrimitive::Pkh(Pkh::new(1, vec![signer_pkh.clone()])),
+        LockPrimitive::Tim(nockchain_types::tx_engine::v1::tx::LockTim {
+            rel: TimelockRangeRelative::new(Some(BlockHeightDelta(Belt(relative_min))), None),
+            abs: TimelockRangeAbsolute::none(),
+        }),
+    ]);
+    let rust_simple = simple
+        .first_name()
+        .expect("simple first-name should compute");
+    let rust_coinbase = coinbase
+        .first_name()
+        .expect("coinbase first-name should compute");
+
+    assert_ne!(
+        rust_simple,
+        rust_coinbase,
+        "simple and coinbase first-name should differ for signer {}",
+        signer_pkh.to_base58()
     );
 
-    for signer_pkh in signer_keys {
-        let simple = SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(
-            1,
-            vec![signer_pkh.clone()],
-        ))]);
-        let coinbase = SpendCondition::new(vec![
-            LockPrimitive::Pkh(Pkh::new(1, vec![signer_pkh.clone()])),
-            LockPrimitive::Tim(nockchain_types::tx_engine::v1::tx::LockTim {
-                rel: TimelockRangeRelative::new(Some(BlockHeightDelta(Belt(relative_min))), None),
-                abs: TimelockRangeAbsolute::none(),
-            }),
-        ]);
-        let rust_simple = simple
-            .first_name()
-            .expect("simple first-name should compute");
-        let rust_coinbase = coinbase
-            .first_name()
-            .expect("coinbase first-name should compute");
+    Ok(())
+}
 
-        assert_ne!(
-            rust_simple,
-            rust_coinbase,
-            "simple and coinbase first-name should differ for signer {}",
-            signer_pkh.to_base58()
+#[tokio::test]
+async fn migrate_v0_notes_per_signer_writes_tx_for_v0_master_bucket() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
+    wallet.set_fakenet().await?;
+
+    let destination = peek_master_signing_key(&mut wallet).await?.to_base58();
+    let signer_pubkey = peek_master_signing_pubkey(&mut wallet).await?;
+
+    let v0_note_name = name(51, 5_151);
+    let v0_note = note_v0_with_lock(
+        v0_note_name.clone(),
+        1,
+        25_000,
+        simple_v0_lock(signer_pubkey.clone()),
+    );
+    apply_balance_update(
+        &mut wallet,
+        balance_page(1, 888, vec![(v0_note_name, v0_note)]),
+    )
+    .await?;
+
+    let summary = wallet
+        .migrate_v0_notes_per_signer_for_tests(None, destination, data_dir.path())
+        .await?;
+    assert_eq!(summary.examined_signers, 1);
+    assert_eq!(summary.created_count, 1);
+    assert_eq!(summary.skipped_count, 0);
+
+    let signer_summary = summary
+        .signers
+        .iter()
+        .find(|signer| signer.tx_path.is_some())
+        .expect("master signer migration should create a tx");
+    assert!(signer_summary.signer.child_index.is_none());
+    assert!(std::path::Path::new(
+        signer_summary
+            .tx_path
+            .as_ref()
+            .expect("created migration should emit a tx path")
+    )
+    .exists());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_signers_peek_lists_master_and_children() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    derive_child_key(&mut wallet, 0, false).await?;
+    derive_child_key(&mut wallet, 1, true).await?;
+
+    let signers = peek_active_signers(&mut wallet).await?;
+
+    assert_eq!(signers.len(), 3, "expected master plus two child signers");
+    assert!(signers[0].child_index.is_none(), "master should sort first");
+    assert_eq!(signers[1].child_index, Some(0));
+    assert!(!signers[1].hardened);
+    assert_eq!(signers[1].absolute_index, Some(0));
+    assert_eq!(signers[2].child_index, Some(1));
+    assert!(signers[2].hardened);
+    assert_eq!(signers[2].absolute_index, Some((1u64 << 31) + 1));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_signers_peek_lists_v0_hardened_and_unhardened_children_for_v0_master(
+) -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
+    derive_child_key(&mut wallet, 0, false).await?;
+    derive_child_key(&mut wallet, 1, true).await?;
+
+    let signers = peek_active_signers(&mut wallet).await?;
+
+    assert_eq!(signers.len(), 3, "expected master plus two child signers");
+    assert!(signers.iter().all(|signer| signer.version == 0));
+
+    let unhardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(0))
+        .expect("unhardened v0 child signer should exist");
+    assert!(!unhardened_child.hardened);
+    assert_eq!(unhardened_child.absolute_index, Some(0));
+
+    let hardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(1))
+        .expect("hardened v0 child signer should exist");
+    assert!(hardened_child.hardened);
+    assert_eq!(hardened_child.absolute_index, Some((1u64 << 31) + 1));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn migrate_v0_notes_per_signer_creates_txs_for_v0_child_buckets() -> Result<(), NockAppError>
+{
+    init_tracing();
+    let (mut wallet, data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    wallet.set_fakenet().await?;
+    derive_child_key(&mut wallet, 1, true).await?;
+    derive_child_key(&mut wallet, 2, true).await?;
+
+    let destination = peek_master_signing_key(&mut wallet).await?.to_base58();
+    let signers = peek_active_signers(&mut wallet).await?;
+    let child_signer_1 = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(1) && signer.hardened && signer.version == 0)
+        .expect("first v0 child signer should exist")
+        .clone();
+    let child_signer_2 = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(2) && signer.hardened && signer.version == 0)
+        .expect("second v0 child signer should exist")
+        .clone();
+
+    let child_note_name_1 = name(71, 7_171);
+    let child_note_name_2 = name(72, 7_272);
+    let child_note_1 = note_v0_with_lock(
+        child_note_name_1.clone(),
+        1,
+        25_000,
+        simple_v0_lock(child_signer_1.pubkey.clone()),
+    );
+    let child_note_2 = note_v0_with_lock(
+        child_note_name_2.clone(),
+        1,
+        25_000,
+        simple_v0_lock(child_signer_2.pubkey.clone()),
+    );
+    apply_balance_update(
+        &mut wallet,
+        balance_page(
+            1,
+            1_717,
+            vec![(child_note_name_1, child_note_1), (child_note_name_2, child_note_2)],
+        ),
+    )
+    .await?;
+
+    let summary = wallet
+        .migrate_v0_notes_per_signer_for_tests(None, destination, data_dir.path())
+        .await?;
+
+    assert_eq!(summary.examined_signers, 2);
+    assert_eq!(summary.created_count, 2);
+    assert_eq!(summary.skipped_count, 0);
+    assert_eq!(summary.signers.len(), 2);
+    for signer in &summary.signers {
+        assert_eq!(signer.signer.version, 0);
+        assert_eq!(signer.note_count, 1);
+        let tx_path = signer
+            .tx_path
+            .as_ref()
+            .expect("created migration should emit a tx path");
+        assert!(
+            std::path::Path::new(tx_path).exists(),
+            "expected tx file to be written at {tx_path}"
         );
     }
 
     Ok(())
 }
 
+#[tokio::test]
+async fn migrate_v0_notes_per_signer_creates_txs_for_mixed_hardened_v0_child_buckets(
+) -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
+    wallet.set_fakenet().await?;
+    derive_child_key(&mut wallet, 0, false).await?;
+    derive_child_key(&mut wallet, 1, true).await?;
+
+    let destination = hash(8_808).to_base58();
+    let signers = peek_active_signers(&mut wallet).await?;
+    let unhardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(0) && !signer.hardened && signer.version == 0)
+        .expect("unhardened v0 child signer should exist")
+        .clone();
+    let hardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(1) && signer.hardened && signer.version == 0)
+        .expect("hardened v0 child signer should exist")
+        .clone();
+
+    let unhardened_note_name = name(73, 7_373);
+    let hardened_note_name = name(74, 7_474);
+    let unhardened_note = note_v0_with_lock(
+        unhardened_note_name.clone(),
+        1,
+        25_000,
+        simple_v0_lock(unhardened_child.pubkey.clone()),
+    );
+    let hardened_note = note_v0_with_lock(
+        hardened_note_name.clone(),
+        1,
+        25_000,
+        simple_v0_lock(hardened_child.pubkey.clone()),
+    );
+    apply_balance_update(
+        &mut wallet,
+        balance_page(
+            1,
+            1_818,
+            vec![(unhardened_note_name, unhardened_note), (hardened_note_name, hardened_note)],
+        ),
+    )
+    .await?;
+
+    let summary = wallet
+        .migrate_v0_notes_per_signer_for_tests(None, destination, data_dir.path())
+        .await?;
+
+    assert_eq!(summary.examined_signers, 3);
+    assert_eq!(summary.created_count, 2);
+    assert_eq!(summary.skipped_count, 1);
+
+    let created = summary
+        .signers
+        .iter()
+        .filter(|signer| signer.tx_path.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 2, "expected one tx per child bucket");
+
+    let created_unhardened = created
+        .iter()
+        .find(|signer| signer.signer.child_index == Some(0))
+        .expect("unhardened child summary should exist");
+    assert!(!created_unhardened.signer.hardened);
+    assert_eq!(created_unhardened.signer.version, 0);
+    assert_eq!(created_unhardened.note_count, 1);
+
+    let created_hardened = created
+        .iter()
+        .find(|signer| signer.signer.child_index == Some(1))
+        .expect("hardened child summary should exist");
+    assert!(created_hardened.signer.hardened);
+    assert_eq!(created_hardened.signer.version, 0);
+    assert_eq!(created_hardened.note_count, 1);
+
+    for signer in created {
+        let tx_path = signer
+            .tx_path
+            .as_ref()
+            .expect("created migration should emit a tx path");
+        assert!(
+            std::path::Path::new(tx_path).exists(),
+            "expected tx file to be written at {tx_path}"
+        );
+    }
+
+    let skipped_master = summary
+        .signers
+        .iter()
+        .find(|signer| signer.signer.child_index.is_none())
+        .expect("master signer summary should exist");
+    assert_eq!(
+        skipped_master.skip_reason.as_deref(),
+        Some("no_eligible_v0_notes")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn migrate_v0_notes_per_signer_generated_txs_validate_via_send_tx_for_mixed_v0_children(
+) -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
+    wallet.set_fakenet().await?;
+    derive_child_key(&mut wallet, 0, false).await?;
+    derive_child_key(&mut wallet, 1, true).await?;
+
+    let destination = hash(9_909).to_base58();
+    let signers = peek_active_signers(&mut wallet).await?;
+    let unhardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(0) && !signer.hardened && signer.version == 0)
+        .expect("unhardened v0 child signer should exist")
+        .clone();
+    let hardened_child = signers
+        .iter()
+        .find(|signer| signer.child_index == Some(1) && signer.hardened && signer.version == 0)
+        .expect("hardened v0 child signer should exist")
+        .clone();
+
+    apply_balance_update(
+        &mut wallet,
+        balance_page(
+            1,
+            1_919,
+            vec![
+                (
+                    name(75, 7_575),
+                    note_v0_with_lock(
+                        name(75, 7_575),
+                        1,
+                        25_000,
+                        simple_v0_lock(unhardened_child.pubkey.clone()),
+                    ),
+                ),
+                (
+                    name(76, 7_676),
+                    note_v0_with_lock(
+                        name(76, 7_676),
+                        1,
+                        25_000,
+                        simple_v0_lock(hardened_child.pubkey.clone()),
+                    ),
+                ),
+            ],
+        ),
+    )
+    .await?;
+
+    let summary = wallet
+        .migrate_v0_notes_per_signer_for_tests(None, destination, data_dir.path())
+        .await?;
+
+    let tx_paths = summary
+        .signers
+        .iter()
+        .filter_map(|signer| signer.tx_path.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(tx_paths.len(), 2, "expected one tx per child bucket");
+
+    for tx_path in tx_paths {
+        let (noun, _) = Wallet::send_tx(tx_path)?;
+        let wire = WalletWire::Command(Commands::SendTx {
+            transaction: tx_path.to_string(),
+        })
+        .to_wire();
+        let effects = wallet.app.poke(wire, noun).await?;
+
+        assert_eq!(
+            effect_exit_code(&effects),
+            Some(0),
+            "send-tx should validate and exit successfully for {tx_path}"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| effect_tag(effect).as_deref() == Some("nockchain-grpc")),
+            "send-tx should emit a nockchain-grpc send effect for {tx_path}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_tx_with_planner_accepts_manual_all_v0_notes() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    wallet.set_fakenet().await?;
+
+    let destination = peek_master_signing_key(&mut wallet).await?;
+    let signer_pubkey = peek_master_signing_pubkey(&mut wallet).await?;
+
+    let v0_note_name = name(52, 5_252);
+    let v0_note = note_v0_with_lock(
+        v0_note_name.clone(),
+        1,
+        25_000,
+        simple_v0_lock(signer_pubkey.clone()),
+    );
+    apply_balance_update(
+        &mut wallet,
+        balance_page(1, 889, vec![(v0_note_name.clone(), v0_note)]),
+    )
+    .await?;
+
+    let (noun, _) = wallet
+        .create_tx_with_planner(
+            None,
+            Some(format_note_names(std::slice::from_ref(&v0_note_name))),
+            None,
+            vec![RecipientSpec::P2pkh {
+                address: destination.clone(),
+                amount: 20_000,
+            }],
+            false,
+            Some(destination.to_base58()),
+            Vec::new(),
+            true,
+            false,
+            NoteSelectionStrategyCli::Ascending,
+        )
+        .await?;
+    let result = wallet.app.poke(OnePunchWire::Poke.to_wire(), noun).await?;
+    assert!(
+        result.len() > 1,
+        "manual all-v0 create-tx should emit transaction effects, got {result:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn migrate_v0_notes_wallet_tx_matches_planner_word_and_fee_counts() -> Result<(), NockAppError>
+{
+    init_tracing();
+    let (mut wallet, data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
+    wallet.set_fakenet().await?;
+
+    let destination = peek_master_signing_key(&mut wallet).await?.to_base58();
+    let destination_hash = Hash::from_base58(&destination).expect("destination should parse");
+    let signer_key = peek_master_signing_key(&mut wallet).await?;
+    let signer_pubkey = peek_master_signing_pubkey(&mut wallet).await?;
+
+    let v0_note_name = name(61, 6_161);
+    let v0_note = note_v0_with_lock(
+        v0_note_name.clone(),
+        1,
+        25_000,
+        simple_v0_lock(signer_pubkey.clone()),
+    );
+    apply_balance_update(
+        &mut wallet,
+        balance_page(1, 999, vec![(v0_note_name, v0_note)]),
+    )
+    .await?;
+
+    let balance = peek_balance_state(&mut wallet).await?;
+    let snapshot = normalize_balance_pages(&[balance])
+        .map_err(|err| NockAppError::OtherError(format!("snapshot normalization failed: {err}")))?;
+    let mut destination_outputs = planner_recipient_outputs(
+        &[RecipientSpec::P2pkh {
+            address: destination_hash,
+            amount: 0,
+        }],
+        true,
+    )?;
+    let destination_output = destination_outputs
+        .pop()
+        .expect("single migration destination should yield one output");
+    let planner_constants = peek_wallet_blockchain_constants(&mut wallet).await?;
+    let coinbase_relative_min = planner_constants.coinbase_timelock_min()?;
+    let request = PlanRequest {
+        planning_mode: PlanningMode::V0MigrationSweep {
+            destination_output: destination_output.clone(),
+        },
+        selection_mode: SelectionMode::Auto,
+        order_direction: SelectionOrder::Ascending,
+        include_data: true,
+        chain_context: ChainContext {
+            height: snapshot.metadata.height.clone(),
+            bythos_phase: BlockHeight(Belt(planner_constants.bythos_phase)),
+            base_fee: planner_constants.base_fee,
+            input_fee_divisor: planner_constants.input_fee_divisor,
+            min_fee: planner_constants.data.min_fee,
+        },
+        signer_pkh: None,
+        candidate_version_policy: CandidateVersionPolicy::V0Only,
+        candidates: snapshot.candidates.clone(),
+        recipient_outputs: Vec::new(),
+        refund_output: destination_output,
+        coinbase_relative_min: Some(coinbase_relative_min),
+        v0_migration_signer_pubkeys: vec![signer_pubkey.clone()],
+    };
+    let matcher = SigningKeyLockMatcher::from_signer_keys(&[signer_key]);
+    let plan = plan_create_tx(&request, &matcher)
+        .map_err(|err| NockAppError::OtherError(format!("planner failed: {err}")))?;
+
+    let summary = wallet
+        .migrate_v0_notes_per_signer_for_tests(None, destination.clone(), data_dir.path())
+        .await?;
+    assert_eq!(summary.created_count, 1);
+    assert_eq!(summary.skipped_count, 0);
+    let tx_path = summary
+        .signers
+        .iter()
+        .find_map(|signer| signer.tx_path.as_deref())
+        .expect("migration should create one tx");
+    let spends = decode_saved_transaction_spends_from_path(tx_path)?;
+
+    assert_eq!(spends.0.len(), 1, "migration should build one spend");
+    assert!(
+        matches!(spends.0.first(), Some((_, v1::Spend::Legacy(_)))),
+        "migration should build a legacy v0 spend"
+    );
+
+    let hoon_seed_words = merged_seed_word_count(&spends);
+    let hoon_witness_words = witness_word_count(&spends);
+    let hoon_fee = total_paid_fee(&spends);
+    let hoon_gift = total_seed_gift(&spends);
+    let computed_fee = compute_minimum_fee(FeeInputs {
+        seed_words: hoon_seed_words,
+        witness_words: hoon_witness_words,
+        base_fee: request.chain_context.base_fee,
+        input_fee_divisor: request.chain_context.input_fee_divisor,
+        min_fee: request.chain_context.min_fee,
+        height: request.chain_context.height,
+        bythos_phase: request.chain_context.bythos_phase,
+    });
+
+    // A one-input v0 migration on fakenet should emit one merged destination seed
+    // note-data payload and one legacy signature map witness.
+    assert_eq!(hoon_seed_words, 14);
+    assert_eq!(hoon_witness_words, 31);
+    assert_eq!(computed_fee.minimum_fee, 2_784);
+    assert_eq!(hoon_fee, computed_fee.minimum_fee);
+    assert_eq!(hoon_gift, 22_216);
+
+    assert_eq!(plan.word_counts.seed_words, hoon_seed_words);
+    assert_eq!(plan.word_counts.witness_words, hoon_witness_words);
+    assert_eq!(plan.final_fee, computed_fee.minimum_fee);
+    assert_eq!(plan.outputs.len(), 1);
+    assert_eq!(plan.outputs[0].amount, hoon_gift);
+    assert_eq!(plan.selected_total, hoon_fee + hoon_gift);
+
+    Ok(())
+}
+
 #[test]
-fn signing_keys_decode_from_hash_list_payload_shape() {
-    let wrapped = Some(Some(vec![hash(3), hash(2)]));
+fn master_signing_key_decodes_from_hash_payload_shape() {
+    let wrapped = Some(Some(hash(3)));
 
     let mut slab: NounSlab<NockJammer> = NounSlab::new();
     let noun = wrapped.to_noun(&mut slab);
-    let decoded: Option<Option<Vec<Hash>>> =
-        Option::from_noun(&noun).expect("signing keys payload should decode");
+    let decoded: Option<Option<Hash>> =
+        Option::from_noun(&noun).expect("master signing key payload should decode");
     let parsed = decoded.flatten().expect("payload should be present");
 
-    assert_eq!(parsed, vec![hash(3), hash(2)]);
+    assert_eq!(parsed, hash(3));
+}
+
+#[test]
+fn migrate_v0_notes_summary_includes_send_tx_command_for_saved_transactions() {
+    let v0_address =
+        "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ";
+    let summary = MigrateV0NotesSummary {
+        destination: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt".to_string(),
+        block_id: "block-id".to_string(),
+        height: 33,
+        examined_signers: 1,
+        created_count: 1,
+        skipped_count: 0,
+        signers: vec![MigrateV0SignerSummary {
+            signer: ActiveSignerEntryNoun {
+                child_index: Some(0),
+                hardened: false,
+                absolute_index: Some(0),
+                version: 0,
+                pubkey: SchnorrPubkey::from_base58(v0_address)
+                    .expect("sample v0 signer pubkey should parse"),
+                address_b58: v0_address.to_string(),
+            },
+            note_count: 1,
+            selected_total: 25_000,
+            fee: Some(2_784),
+            migrated_amount: Some(22_216),
+            tx_path: Some("./txs/example.tx".to_string()),
+            skip_reason: None,
+        }],
+    };
+
+    let rendered = Wallet::format_migrate_v0_notes_summary(&summary);
+
+    assert!(rendered.contains("- tx path: `./txs/example.tx`"));
+    assert!(rendered.contains("- submit with: `nockchain-wallet send-tx \"./txs/example.tx\"`"));
+}
+
+#[test]
+fn migrate_v0_notes_summary_mentions_when_no_batch_poke_was_emitted() {
+    let summary = MigrateV0NotesSummary {
+        destination: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt".to_string(),
+        block_id: "block-id".to_string(),
+        height: 33,
+        examined_signers: 1,
+        created_count: 0,
+        skipped_count: 1,
+        signers: vec![MigrateV0SignerSummary {
+            signer: ActiveSignerEntryNoun {
+                child_index: None,
+                hardened: false,
+                absolute_index: None,
+                version: 0,
+                pubkey: SchnorrPubkey::from_base58(
+                    "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ",
+                )
+                .expect("sample v0 signer pubkey should parse"),
+                address_b58: "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ"
+                    .to_string(),
+            },
+            note_count: 0,
+            selected_total: 0,
+            fee: Some(2_784),
+            migrated_amount: None,
+            tx_path: None,
+            skip_reason: Some("no_eligible_v0_notes".to_string()),
+        }],
+    };
+
+    let rendered = Wallet::format_migrate_v0_notes_summary(&summary);
+
+    assert!(rendered
+        .contains("- batch create poke: not emitted because every signer bucket was skipped"));
 }
 
 #[test]

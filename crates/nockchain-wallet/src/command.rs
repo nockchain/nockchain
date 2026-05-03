@@ -378,7 +378,7 @@ pub enum Commands {
     /// Create a transaction (use --refund-pkh when spending legacy v0 notes)
     #[command(
         name = "create-tx",
-        override_usage = "nockchain-wallet create-tx [--names <NAMES>] --recipient <RECIPIENT>... [--fee <FEE>] [--refund-pkh <REFUND_PKH>] [--include-data <BOOL>]\n\n# NOTE: --refund-pkh is required when spending from v0 notes. For v1 notes, the refund defaults to the note owner. --include-data defaults to true (pass 'false' to exclude note data).\n# NOTE: if --names is omitted, the planner auto-selects spendable notes. If provided, names are treated as a manual selection set.\n# NOTE: --fee is optional. If omitted, the planner computes a fee. If provided, it overrides the planner fee (subject to --allow-low-fee).\n# NOTE: planner selection is currently v1-only and does not select legacy v0 notes.\n# RECIPIENT accepts either legacy '<p2pkh>:<amount>' strings or JSON objects like '{\"kind\":\"multisig\",\"threshold\":2,\"addresses\":[\"pkh-a\",\"pkh-b\"],\"amount\":9000}'.\n\nExamples:\n  # Auto-select spendable notes and compute fee\n  nockchain-wallet create-tx \\\n    --recipient '{\"kind\":\"p2pkh\",\"address\":\"<p2pkh-b58>\",\"amount\":10000}'\n\n  # Manually pin notes and optionally override fee\n  nockchain-wallet create-tx \\\n    --names \"[first1 last1],[first2 last2]\" \\\n    --recipient '{\"kind\":\"p2pkh\",\"address\":\"<p2pkh-b58>\",\"amount\":10000}' \\\n    --fee 10"
+        override_usage = "nockchain-wallet create-tx [--names <NAMES>] --recipient <RECIPIENT>... [--fee <FEE>] [--refund-pkh <REFUND_PKH>] [--include-data <BOOL>]\n\n# NOTE: --refund-pkh is required when spending from legacy v0 notes. For v1 notes, the refund defaults to the note owner. --include-data defaults to true (pass 'false' to exclude note data).\n# NOTE: if --names is omitted, the planner auto-selects spendable v1 notes. If provided, names are treated as a manual selection set.\n# NOTE: manual selection may spend either an all-v1 set or an all-v0 set; mixed-version manual sets are rejected.\n# NOTE: --fee is optional. If omitted, the planner computes a fee. If provided, it overrides the planner fee (subject to --allow-low-fee).\n# RECIPIENT accepts either legacy '<p2pkh>:<amount>' strings or JSON objects like '{\"kind\":\"multisig\",\"threshold\":2,\"addresses\":[\"pkh-a\",\"pkh-b\"],\"amount\":9000}'.\n\nExamples:\n  # Auto-select spendable v1 notes and compute fee\n  nockchain-wallet create-tx \\\n    --recipient '{\"kind\":\"p2pkh\",\"address\":\"<p2pkh-b58>\",\"amount\":10000}'\n\n  # Manually pin notes and optionally override fee\n  nockchain-wallet create-tx \\\n    --names \"[first1 last1],[first2 last2]\" \\\n    --recipient '{\"kind\":\"p2pkh\",\"address\":\"<p2pkh-b58>\",\"amount\":10000}' \\\n    --fee 10"
     )]
     CreateTx {
         /// Optional names of notes to spend (comma-separated) for manual selection.
@@ -425,6 +425,14 @@ pub enum Commands {
         /// Note selection strategy (ascending selects smallest notes first)
         #[arg(long = "note-selection", value_enum, default_value = "ascending")]
         note_selection_strategy: NoteSelectionStrategyCli,
+    },
+
+    /// Sweep all spendable legacy v0 notes into one v1 destination address.
+    #[command(name = "migrate-v0-notes")]
+    MigrateV0Notes {
+        /// Base58-encoded v1 pay-to-pubkey-hash address that receives the migrated funds.
+        #[arg(long = "destination", value_name = "DESTINATION")]
+        destination: String,
     },
 
     /// Sign a multisig transaction
@@ -586,6 +594,7 @@ impl Commands {
             Commands::ListNotesByAddressCsv { .. } => "list-notes-by-address-csv",
             Commands::SetActiveMasterAddress { .. } => "set-active-master-address",
             Commands::CreateTx { .. } => "create-tx",
+            Commands::MigrateV0Notes { .. } => "migrate-v0-notes",
             Commands::SignMultisigTx { .. } => "sign-multisig-tx",
             Commands::SendTx { .. } => "send-tx",
             Commands::ShowTx { .. } => "show-tx",
@@ -667,5 +676,19 @@ mod tests {
             note_selection_strategy,
             NoteSelectionStrategyCli::Descending
         ));
+    }
+
+    #[test]
+    fn migrate_v0_notes_requires_destination() {
+        let cli = WalletCli::try_parse_from([
+            "nockchain-wallet", "migrate-v0-notes", "--destination", SAMPLE_P2PKH,
+        ])
+        .expect("migrate-v0-notes CLI should parse");
+
+        let Commands::MigrateV0Notes { destination } = cli.command else {
+            panic!("expected migrate-v0-notes command");
+        };
+
+        assert_eq!(destination, SAMPLE_P2PKH);
     }
 }

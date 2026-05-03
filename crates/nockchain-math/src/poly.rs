@@ -145,12 +145,35 @@ pub struct PolyVec<T>(pub Vec<T>);
 
 impl<T> PolyVec<T> {
     #[inline(always)]
+    pub fn new() -> Self {
+        Self(Vec::new())
+    }
+    #[inline(always)]
     pub fn as_slice(&self) -> &[T] {
         self.0.as_slice()
     }
     #[inline(always)]
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         self.0.as_mut_slice()
+    }
+
+    #[inline]
+    pub fn as_poly_slice(&self) -> PolySlice<'_, T> {
+        PolySlice(self.0.as_slice())
+    }
+    #[inline(always)]
+    pub fn as_poly_slice_mut(&mut self) -> PolySliceMut<'_, T> {
+        PolySliceMut(self.0.as_mut_slice())
+    }
+    #[inline(always)]
+    pub fn iter(&self) -> Iter<'_, T> {
+        self.0.iter()
+    }
+}
+
+impl<T> Default for PolyVec<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -69,8 +69,15 @@ pub fn init_tracing() -> Result<impl tracing::Subscriber, opentelemetry_sdk::tra
         // .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_ansi(use_ansi);
 
+    // Suppress noisy opentelemetry_sdk export errors (e.g. "tcp connect error")
+    // unless the user explicitly enables them via RUST_LOG.
+    let base_directives = "opentelemetry_sdk=off";
+    let env_filter = match std::env::var("RUST_LOG") {
+        Ok(user) => tracing_subscriber::EnvFilter::new(format!("{},{}", base_directives, user)),
+        Err(_) => tracing_subscriber::EnvFilter::new(base_directives),
+    };
     let subscriber = tracing_subscriber::Registry::default()
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(env_filter)
         .with(fmt_layer)
         .with(telemetry);
     Ok(subscriber)

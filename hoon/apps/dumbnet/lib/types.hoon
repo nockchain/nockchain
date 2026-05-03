@@ -15,6 +15,7 @@
       kernel-state-4
       kernel-state-5
       kernel-state-6
+      kernel-state-7
   ==
 ::
 +$  kernel-state-0
@@ -80,8 +81,37 @@
       constants=blockchain-constants:v0:dt
   ==
 ::
+::  frozen pre-ASERT snapshot of blockchain-constants:v1 (without the five
+::  asert-* fields appended in this PR). used to decode old %6 states that
+::  were serialized before the schema change.
++$  blockchain-constants-v1-pre-asert
+  $:  v1-phase=@
+      bythos-phase=@
+      data=[max-size=@ min-fee=@]
+      base-fee=@
+      input-fee-divisor=@
+      blockchain-constants:v0:dt
+  ==
+::
 +$  kernel-state-6
   $:  %6
+      c=consensus-state-6
+      a=admin-state-6
+      m=mining-state-6
+    ::
+      d=derived-state-6
+      constants=blockchain-constants-v1-pre-asert
+  ==
+::
+::  kernel-state-7 has the same shape as kernel-state-6 but tracks the
+::  schema change in blockchain-constants:v1 itself: five ASERT fields
+::  (asert-phase, anchor-height, anchor-target-atom, ideal-block-time,
+::  half-life) were appended to the v1 wrapper in tx-engine-1.hoon.
+::  rbits is hardcoded in lib/asert.hoon and is not a constants field.
+::  The state-6-to-7 upgrade fills those five fields from defaults while
+::  preserving the existing v1/v0 constants from a saved v6 state.
++$  kernel-state-7
+  $:  %7
       c=consensus-state-6
       a=admin-state-6
       m=mining-state-6
@@ -90,7 +120,7 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-6
++$  kernel-state  kernel-state-7
 ::
 +$  consensus-state-0
   $+  consensus-state-0

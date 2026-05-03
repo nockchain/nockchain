@@ -110,8 +110,8 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
         trace: TraceOpts,
     ) -> Result<Self> {
         let (action_sender, action_receiver) = mpsc::channel(1);
-        let (event_number_sender, event_number_receiver) = oneshot::channel();
-        let (cancel_token_sender, cancel_token_receiver) = oneshot::channel();
+        let (init_sender, init_receiver) =
+            oneshot::channel::<Result<(Arc<AtomicU64>, NockCancelToken)>>();
         let inhibit = Arc::new(AtomicBool::new(false));
         let inhibit_clone = inhibit.clone();
         let handle = std::thread::Builder::new()
@@ -119,20 +119,24 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
             .stack_size(SERF_THREAD_STACK_SIZE)
             .spawn(move || {
                 let stack = NockStack::new(nock_stack_size, 0);
-                let serf = Serf::new(
+                let serf = match Serf::new(
                     stack, checkpoint, &kernel_bytes, &constant_hot_state, test_jets, trace,
-                );
-                event_number_sender
-                    .send(serf.event_num.clone())
-                    .expect("Could not send event number out of serf thread");
-                cancel_token_sender
-                    .send(serf.context.cancel_token())
-                    .expect("Could not send cancel token out of serf thread");
+                ) {
+                    Ok(serf) => serf,
+                    Err(err) => {
+                        let _ = init_sender.send(Err(err));
+                        return;
+                    }
+                };
+                let event_number = serf.event_num.clone();
+                let cancel_token = serf.context.cancel_token();
+                if init_sender.send(Ok((event_number, cancel_token))).is_err() {
+                    return;
+                }
                 serf_loop(serf, action_receiver, inhibit_clone);
             })?;
 
-        let event_number = event_number_receiver.await?;
-        let cancel_token = cancel_token_receiver.await?;
+        let (event_number, cancel_token) = init_receiver.await??;
         Ok(SerfThread {
             inhibit,
             handle: Some(handle),
@@ -760,7 +764,7 @@ impl Serf {
         constant_hot_state: &[HotEntry],
         test_jets: Vec<NounSlab>,
         trace: TraceOpts,
-    ) -> Self {
+    ) -> Result<Self> {
         let hot_state = [URBIT_HOT_STATE, constant_hot_state].concat();
 
         let mut hasher = Hasher::new();
@@ -776,9 +780,10 @@ impl Serf {
                 .expect("Could not load cold state from snapshot");
             let cold = Cold::from_vecs(&mut stack, cold_vecs.0, cold_vecs.1, cold_vecs.2);
             if saveable.ker_hash != ker_hash {
-                debug!(
-                    "Loading snapshot from kernel {} into kernel {}",
-                    saveable.ker_hash, ker_hash
+                warn!(
+                    checkpoint = %saveable.ker_hash.to_hex(),
+                    current = %ker_hash.to_hex(),
+                    "checkpoint kernel hash mismatch; loading checkpoint state into current kernel"
                 );
             }
             (Some(ker_state), cold, saveable.event_num)
@@ -837,7 +842,7 @@ impl Serf {
             serf.event_update(event_num_raw, arvo);
             serf.preserve_event_update_leftovers();
         }
-        serf
+        Ok(serf)
     }
 
     /// Performs a peek operation on the Arvo state.

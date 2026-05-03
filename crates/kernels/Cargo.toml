@@ -1,0 +1,16 @@
+[package]
+name = "kernels"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+bazel_build = []
+
+# Specific kernels
+dumb = []
+wallet = []
+miner = []
+
+[dependencies]

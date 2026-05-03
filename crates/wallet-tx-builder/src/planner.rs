@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
-use nockchain_types::tx_engine::common::{BlockHeight, Version};
+use nockchain_types::tx_engine::common::{BlockHeight, SchnorrPubkey, Version};
+use nockchain_types::tx_engine::v0::TimelockIntent as V0TimelockIntent;
 use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, SpendCondition};
 use thiserror::Error;
 
@@ -8,8 +9,8 @@ use crate::determinism::sort_candidates;
 use crate::fee::{compute_minimum_fee, FeeInputs};
 use crate::lock_resolver::{LockMatcher, LockResolutionSource, ResolveLockRequest};
 use crate::types::{
-    CandidateNote, CandidateVersionPolicy, PlanRequest, PlanResult, PlannedOutput, SelectionMode,
-    WordCountBreakdown,
+    CandidateNote, CandidateV0Note, CandidateVersionPolicy, PlanRequest, PlanResult, PlannedOutput,
+    PlanningMode, SelectionMode, WordCountBreakdown,
 };
 use crate::word_count::{WitnessWordInput, WordCountEstimator};
 
@@ -37,6 +38,10 @@ pub enum PlanError {
     #[error("conservation failed for selected transaction")]
     ConservationFailed,
     #[error(
+        "v0 migration sweep leaves no spendable output after fees: selected_total={selected_total} fee={fee}"
+    )]
+    V0MigrationProducesZeroValue { selected_total: u64, fee: u64 },
+    #[error(
         "candidate note {first}/{last} has version {version:?}, but selector policy is {policy:?}"
     )]
     CandidateVersionDisabled {
@@ -55,8 +60,8 @@ struct SelectedInput {
 }
 
 #[derive(Debug, Clone)]
-/// Recomputed fee/output state for the current selected input set.
-struct RecomputeState {
+/// Recomputed fee/output state for standard planner output selection.
+struct StandardRecomputeState {
     /// Fee chosen for the current selected-input set.
     final_fee: u64,
     /// Minimum fee implied by current seed/witness words.
@@ -67,6 +72,65 @@ struct RecomputeState {
     witness_words: u64,
     /// Output set corresponding to `final_fee` (refund included when present).
     outputs: Vec<PlannedOutput>,
+}
+
+#[derive(Debug, Clone)]
+/// Recomputed state for a finalizable v0 migration sweep.
+struct V0MigrationReadyState {
+    /// Fee chosen for the current selected-input set.
+    final_fee: u64,
+    /// Minimum fee implied by current seed/witness words.
+    minimum_fee: u64,
+    /// Seed words recomputed from the destination output.
+    seed_words: u64,
+    /// Witness words recomputed from selected input locks.
+    witness_words: u64,
+    /// Single migration destination output.
+    destination_output: PlannedOutput,
+}
+
+#[derive(Debug, Clone)]
+/// Explicit migration recompute state used while accumulating legacy inputs.
+enum V0MigrationRecomputeState {
+    /// Current selection still cannot fund a positive migration output after fees.
+    NeedsMoreInputs {
+        final_fee: u64,
+        minimum_fee: u64,
+        seed_words: u64,
+        witness_words: u64,
+    },
+    /// Current selection can fund a positive migration destination output.
+    Ready(V0MigrationReadyState),
+}
+
+impl V0MigrationRecomputeState {
+    fn final_fee(&self) -> u64 {
+        match self {
+            Self::NeedsMoreInputs { final_fee, .. } => *final_fee,
+            Self::Ready(state) => state.final_fee,
+        }
+    }
+
+    fn minimum_fee(&self) -> u64 {
+        match self {
+            Self::NeedsMoreInputs { minimum_fee, .. } => *minimum_fee,
+            Self::Ready(state) => state.minimum_fee,
+        }
+    }
+
+    fn seed_words(&self) -> u64 {
+        match self {
+            Self::NeedsMoreInputs { seed_words, .. } => *seed_words,
+            Self::Ready(state) => state.seed_words,
+        }
+    }
+
+    fn witness_words(&self) -> u64 {
+        match self {
+            Self::NeedsMoreInputs { witness_words, .. } => *witness_words,
+            Self::Ready(state) => state.witness_words,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -96,12 +160,21 @@ impl<'a> PlanSession<'a> {
     /// precomputed recipient-side seed word baseline.
     fn new(request: &'a PlanRequest) -> Self {
         let word_count_estimator = WordCountEstimator::new(&request.chain_context);
-        let gift_total = request
-            .recipient_outputs
-            .iter()
-            .fold(0u64, |acc, output| acc.saturating_add(output.amount));
-        let seed_words_without_refund =
-            word_count_estimator.estimate_seed_words(&request.recipient_outputs);
+        let (gift_total, seed_words_without_refund) = match &request.planning_mode {
+            PlanningMode::Standard => {
+                let gift_total = request
+                    .recipient_outputs
+                    .iter()
+                    .fold(0u64, |acc, output| acc.saturating_add(output.amount));
+                let seed_words_without_refund =
+                    word_count_estimator.estimate_seed_words(&request.recipient_outputs);
+                (gift_total, seed_words_without_refund)
+            }
+            PlanningMode::V0MigrationSweep { destination_output } => (
+                0,
+                word_count_estimator.estimate_seed_words(std::slice::from_ref(destination_output)),
+            ),
+        };
         Self {
             request,
             word_count_estimator,
@@ -119,13 +192,9 @@ impl<'a> PlanSession<'a> {
         self.gift_total.saturating_add(fee)
     }
 
-    /// Attempts to add one candidate note, resolving spendability and updating
-    /// running witness/asset totals when accepted.
-    fn try_select_candidate<M: LockMatcher>(
-        &mut self,
-        candidate: CandidateNote,
-        matcher: &M,
-    ) -> Result<Option<RecomputeState>, PlanError> {
+    /// Applies the request's candidate-version policy and emits the usual
+    /// manual/auto-mode version mismatch diagnostics.
+    fn candidate_version_allowed(&mut self, candidate: &CandidateNote) -> Result<bool, PlanError> {
         let candidate_version = candidate.version();
         let allowed_version = match self.request.candidate_version_policy {
             CandidateVersionPolicy::V1Only => Version::V1,
@@ -145,7 +214,25 @@ impl<'a> PlanSession<'a> {
                 "skipped note {first}/{last}: version {candidate_version:?} disabled by selector policy {policy:?}",
                 policy = self.request.candidate_version_policy
             ));
+            return Ok(false);
+        }
+
+        Ok(true)
+    }
+
+    /// Attempts to add one standard candidate note, resolving spendability and
+    /// updating running witness/asset totals when accepted.
+    fn try_select_standard_candidate<M: LockMatcher>(
+        &mut self,
+        candidate: CandidateNote,
+        matcher: &M,
+    ) -> Result<Option<StandardRecomputeState>, PlanError> {
+        if !self.candidate_version_allowed(&candidate)? {
             return Ok(None);
+        }
+
+        if let CandidateNote::V0(note) = candidate {
+            return self.try_select_standard_v0_candidate(note);
         }
 
         let resolution = matcher.resolve_lock(ResolveLockRequest {
@@ -197,7 +284,7 @@ impl<'a> PlanSession<'a> {
             .saturating_add(witness_words_for_input);
         self.selected.push(SelectedInput { candidate });
 
-        let recompute = self.recompute_fee()?;
+        let recompute = self.recompute_standard_fee();
         let required = self.required_total(recompute.final_fee);
         self.debug_trace.push(format!(
             "selected note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={} required={}",
@@ -213,11 +300,124 @@ impl<'a> PlanSession<'a> {
         Ok(Some(recompute))
     }
 
-    /// Recomputes fee and output shape from the current selected-input state.
-    /// This always performs planner-owned fee computation (no fee override path).
-    fn recompute_fee(&self) -> Result<RecomputeState, PlanError> {
-        let witness_words = self.witness_words_total;
+    /// Attempts to admit one legacy v0 note under the standard create-tx flow.
+    fn try_select_standard_v0_candidate(
+        &mut self,
+        note: CandidateV0Note,
+    ) -> Result<Option<StandardRecomputeState>, PlanError> {
+        let (first, last) = (
+            note.identity.name.first.to_base58(),
+            note.identity.name.last.to_base58(),
+        );
+        if !v0_note_spendable_by_signers(&note, &self.request.v0_migration_signer_pubkeys) {
+            self.debug_trace.push(format!(
+                "skipped note {first}/{last}: legacy lock is not spendable by planner signer pubkeys",
+            ));
+            return Ok(None);
+        }
+        if !v0_timelock_satisfied(
+            note.timelock.as_ref(),
+            &note.identity.origin_page,
+            &self.request.chain_context.height,
+        ) {
+            self.debug_trace.push(format!(
+                "skipped note {first}/{last}: v0 timelock not satisfied at height={}",
+                height_value(&self.request.chain_context.height)
+            ));
+            return Ok(None);
+        }
 
+        let candidate_assets = note.assets.0 as u64;
+        let witness_words_for_input = self
+            .word_count_estimator
+            .estimate_v0_witness_words(note.lock.keys_required);
+        self.selected_total = self.selected_total.saturating_add(candidate_assets);
+        self.witness_words_total = self
+            .witness_words_total
+            .saturating_add(witness_words_for_input);
+        self.selected.push(SelectedInput {
+            candidate: CandidateNote::V0(note),
+        });
+
+        let recompute = self.recompute_standard_fee();
+        let required = self.required_total(recompute.final_fee);
+        self.debug_trace.push(format!(
+            "selected note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={} required={}",
+            candidate_assets,
+            self.selected_total,
+            recompute.seed_words,
+            recompute.witness_words,
+            recompute.minimum_fee,
+            recompute.final_fee,
+            required
+        ));
+
+        Ok(Some(recompute))
+    }
+
+    /// Attempts to admit one legacy v0 note under the v0 migration sweep rules.
+    fn try_select_v0_migration_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<Option<V0MigrationRecomputeState>, PlanError> {
+        if !self.candidate_version_allowed(&candidate)? {
+            return Ok(None);
+        }
+
+        let CandidateNote::V0(note) = candidate else {
+            return Ok(None);
+        };
+        let (first, last) = (
+            note.identity.name.first.to_base58(),
+            note.identity.name.last.to_base58(),
+        );
+        if !v0_note_spendable_by_signers(&note, &self.request.v0_migration_signer_pubkeys) {
+            self.debug_trace.push(format!(
+                "skipped note {first}/{last}: legacy lock is not spendable by migration signer pubkeys",
+            ));
+            return Ok(None);
+        }
+        if !v0_timelock_satisfied(
+            note.timelock.as_ref(),
+            &note.identity.origin_page,
+            &self.request.chain_context.height,
+        ) {
+            self.debug_trace.push(format!(
+                "skipped note {first}/{last}: v0 timelock not satisfied at height={}",
+                height_value(&self.request.chain_context.height)
+            ));
+            return Ok(None);
+        }
+
+        let candidate_assets = note.assets.0 as u64;
+        let witness_words_for_input = self
+            .word_count_estimator
+            .estimate_v0_witness_words(note.lock.keys_required);
+        self.selected_total = self.selected_total.saturating_add(candidate_assets);
+        self.witness_words_total = self
+            .witness_words_total
+            .saturating_add(witness_words_for_input);
+        self.selected.push(SelectedInput {
+            candidate: CandidateNote::V0(note),
+        });
+
+        let recompute = self.recompute_v0_migration();
+        self.debug_trace.push(format!(
+            "selected migration note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={}",
+            candidate_assets,
+            self.selected_total,
+            recompute.seed_words(),
+            recompute.witness_words(),
+            recompute.minimum_fee(),
+            recompute.final_fee(),
+        ));
+
+        Ok(Some(recompute))
+    }
+
+    /// Recomputes fee and output shape from the current standard selected-input state.
+    fn recompute_standard_fee(&self) -> StandardRecomputeState {
+        let witness_words = self.witness_words_total;
         let fee_capacity = self.selected_total.saturating_sub(self.gift_total);
         let minimum_without_refund =
             self.minimum_fee(self.seed_words_without_refund, witness_words);
@@ -245,12 +445,54 @@ impl<'a> PlanSession<'a> {
         let outputs = outputs_with_refund(self.request, refund);
         let seed_words = self.word_count_estimator.estimate_seed_words(&outputs);
         let minimum_fee = self.minimum_fee(seed_words, witness_words);
-        Ok(RecomputeState {
+        StandardRecomputeState {
             final_fee,
             minimum_fee,
             seed_words,
             witness_words,
             outputs,
+        }
+    }
+
+    /// Recomputes fee and destination output shape for the current v0 migration selection.
+    fn recompute_v0_migration(&self) -> V0MigrationRecomputeState {
+        let PlanningMode::V0MigrationSweep { destination_output } = &self.request.planning_mode
+        else {
+            unreachable!("v0 migration recompute should only run in V0MigrationSweep mode");
+        };
+        let witness_words = self.witness_words_total;
+        let seed_words = self
+            .word_count_estimator
+            .estimate_seed_words(std::slice::from_ref(destination_output));
+        let minimum_fee = self.minimum_fee(seed_words, witness_words);
+        let final_fee = minimum_fee;
+        let Some(sweep_amount) = self.selected_total.checked_sub(final_fee) else {
+            return V0MigrationRecomputeState::NeedsMoreInputs {
+                final_fee,
+                minimum_fee,
+                seed_words,
+                witness_words,
+            };
+        };
+        if sweep_amount == 0 {
+            return V0MigrationRecomputeState::NeedsMoreInputs {
+                final_fee,
+                minimum_fee,
+                seed_words,
+                witness_words,
+            };
+        }
+
+        V0MigrationRecomputeState::Ready(V0MigrationReadyState {
+            final_fee,
+            minimum_fee,
+            seed_words,
+            witness_words,
+            destination_output: PlannedOutput {
+                lock_root: destination_output.lock_root.clone(),
+                amount: sweep_amount,
+                note_data: destination_output.note_data.clone(),
+            },
         })
     }
 
@@ -281,62 +523,110 @@ pub fn plan_create_tx<M: LockMatcher>(
     request: &PlanRequest,
     matcher: &M,
 ) -> Result<PlanResult, PlanError> {
-    if request.recipient_outputs.is_empty() {
+    if matches!(&request.planning_mode, PlanningMode::Standard)
+        && request.recipient_outputs.is_empty()
+    {
         return Err(PlanError::NoRecipients);
     }
 
     let candidates = request.ordered_candidates()?;
     let mut session = PlanSession::new(request);
 
-    for candidate in candidates {
-        let Some(recompute) = session.try_select_candidate(candidate, matcher)? else {
-            continue;
-        };
-        if matches!(&request.selection_mode, SelectionMode::Auto)
-            && session.selected_total >= session.required_total(recompute.final_fee)
-        {
-            break;
+    match &request.planning_mode {
+        PlanningMode::Standard => {
+            for candidate in candidates {
+                let Some(recompute) = session.try_select_standard_candidate(candidate, matcher)?
+                else {
+                    continue;
+                };
+                if matches!(&request.selection_mode, SelectionMode::Auto)
+                    && session.selected_total >= session.required_total(recompute.final_fee)
+                {
+                    break;
+                }
+            }
+
+            let recompute = session.recompute_standard_fee();
+            let required = session.required_total(recompute.final_fee);
+            if session.selected_total < required {
+                return Err(PlanError::InsufficientFunds {
+                    selected_total: session.selected_total,
+                    required,
+                });
+            }
+
+            let allocation = allocate_inputs(
+                session.selected_total, session.gift_total, recompute.final_fee,
+            )
+            .expect("required <= selected_total should always allocate");
+            let conservation = ConservationCheck {
+                input_total: session.selected_total,
+                gift_total: allocation.gift_total,
+                refund_total: allocation.refund,
+                fee: allocation.fee,
+            };
+            if !conservation.is_balanced() {
+                return Err(PlanError::ConservationFailed);
+            }
+
+            Ok(PlanResult {
+                selected: session
+                    .selected
+                    .iter()
+                    .map(|input| input.candidate.identity().clone())
+                    .collect(),
+                selected_total: session.selected_total,
+                outputs: recompute.outputs,
+                final_fee: recompute.final_fee,
+                word_counts: WordCountBreakdown {
+                    seed_words: recompute.seed_words,
+                    witness_words: recompute.witness_words,
+                },
+                debug_trace: session.debug_trace,
+            })
+        }
+        PlanningMode::V0MigrationSweep { .. } => {
+            for candidate in candidates {
+                let _ = session.try_select_v0_migration_candidate(candidate)?;
+            }
+
+            let recompute = session.recompute_v0_migration();
+            let ready = match recompute {
+                V0MigrationRecomputeState::NeedsMoreInputs { final_fee, .. } => {
+                    return Err(PlanError::V0MigrationProducesZeroValue {
+                        selected_total: session.selected_total,
+                        fee: final_fee,
+                    });
+                }
+                V0MigrationRecomputeState::Ready(ready) => ready,
+            };
+
+            if session.selected_total
+                != ready
+                    .destination_output
+                    .amount
+                    .saturating_add(ready.final_fee)
+            {
+                return Err(PlanError::ConservationFailed);
+            }
+
+            Ok(PlanResult {
+                selected: session
+                    .selected
+                    .iter()
+                    .map(|input| input.candidate.identity().clone())
+                    .collect(),
+                selected_total: session.selected_total,
+                outputs: vec![ready.destination_output],
+                final_fee: ready.final_fee,
+                word_counts: WordCountBreakdown {
+                    seed_words: ready.seed_words,
+                    witness_words: ready.witness_words,
+                },
+                debug_trace: session.debug_trace,
+            })
         }
     }
-
-    let recompute = session.recompute_fee()?;
-    let required = session.required_total(recompute.final_fee);
-    if session.selected_total < required {
-        return Err(PlanError::InsufficientFunds {
-            selected_total: session.selected_total,
-            required,
-        });
-    }
-
-    let allocation = allocate_inputs(
-        session.selected_total, session.gift_total, recompute.final_fee,
-    )
-    .expect("required <= selected_total should always allocate");
-    let conservation = ConservationCheck {
-        input_total: session.selected_total,
-        gift_total: allocation.gift_total,
-        refund_total: allocation.refund,
-        fee: allocation.fee,
-    };
-    if !conservation.is_balanced() {
-        return Err(PlanError::ConservationFailed);
-    }
-
-    Ok(PlanResult {
-        selected: session
-            .selected
-            .iter()
-            .map(|input| input.candidate.identity().clone())
-            .collect(),
-        selected_total: session.selected_total,
-        outputs: recompute.outputs,
-        final_fee: recompute.final_fee,
-        word_counts: WordCountBreakdown {
-            seed_words: recompute.seed_words,
-            witness_words: recompute.witness_words,
-        },
-        debug_trace: session.debug_trace,
-    })
 }
 
 impl PlanRequest {
@@ -395,6 +685,52 @@ fn outputs_with_refund(request: &PlanRequest, refund: u64) -> Vec<PlannedOutput>
         });
     }
     outputs
+}
+
+fn v0_note_spendable_by_signers(note: &CandidateV0Note, signer_pubkeys: &[SchnorrPubkey]) -> bool {
+    signer_pubkeys
+        .iter()
+        .any(|signer| v0_note_spendable_by_signer(note, signer))
+}
+
+fn v0_note_spendable_by_signer(note: &CandidateV0Note, signer_pubkey: &SchnorrPubkey) -> bool {
+    (note.lock.pubkeys.len() == 1 && note.lock.pubkeys.first() == Some(signer_pubkey))
+        || (note.lock.keys_required == 1 && note.lock.pubkeys.iter().any(|pk| pk == signer_pubkey))
+}
+
+fn v0_timelock_satisfied(
+    timelock: Option<&V0TimelockIntent>,
+    note_origin_page: &BlockHeight,
+    current_height: &BlockHeight,
+) -> bool {
+    let Some(timelock) = timelock else {
+        return true;
+    };
+
+    let now = height_value(current_height);
+    let since = height_value(note_origin_page);
+    let rel_min_ok = timelock.relative.min.as_ref().is_none_or(|min| {
+        since
+            .checked_add((min.0).0)
+            .is_some_and(|required| now >= required)
+    });
+    let rel_max_ok = timelock.relative.max.as_ref().is_none_or(|max| {
+        since
+            .checked_add((max.0).0)
+            .is_some_and(|required| now <= required)
+    });
+    let abs_min_ok = timelock
+        .absolute
+        .min
+        .as_ref()
+        .is_none_or(|min| now >= height_value(min));
+    let abs_max_ok = timelock
+        .absolute
+        .max
+        .as_ref()
+        .is_none_or(|max| now <= height_value(max));
+
+    rel_min_ok && rel_max_ok && abs_min_ok && abs_max_ok
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,11 +830,13 @@ mod tests {
     use bytes::Bytes;
     use nockapp::noun::slab::{NockJammer, NounSlab};
     use nockchain_math::belt::Belt;
+    use nockchain_math::crypto::cheetah::{ch_scal, A_GEN};
     use nockchain_types::tx_engine::common::{
-        BlockHeight, BlockHeightDelta, Hash, Name, Nicks, TimelockRangeAbsolute,
+        BlockHeight, BlockHeightDelta, Hash, Name, Nicks, SchnorrPubkey, TimelockRangeAbsolute,
         TimelockRangeRelative, Version,
     };
-    use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, Pkh, SpendCondition};
+    use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
+    use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, LockTim, Pkh, SpendCondition};
     use noun_serde::NounEncode;
 
     use super::*;
@@ -509,7 +847,7 @@ mod tests {
     };
     use crate::types::{
         CandidateIdentity, CandidateNote, CandidateV0Note, CandidateV1Note, CandidateVersionPolicy,
-        ChainContext, RawNoteDataEntry, SelectionOrder,
+        ChainContext, PlanningMode, RawNoteDataEntry, SelectionOrder,
     };
 
     /// Constructs a deterministic hash value from a single test limb.
@@ -569,6 +907,28 @@ mod tests {
                 origin_page: BlockHeight(Belt(10)),
             },
             assets: Nicks(assets as usize),
+            lock: V0Lock {
+                keys_required: 1,
+                pubkeys: vec![signer_pubkey(1)],
+            },
+            timelock: None,
+        })
+    }
+
+    fn candidate_v0_with_lock(
+        v: u64,
+        assets: u64,
+        lock: V0Lock,
+        timelock: Option<V0TimelockIntent>,
+    ) -> CandidateNote {
+        CandidateNote::V0(CandidateV0Note {
+            identity: CandidateIdentity {
+                name: name(v),
+                origin_page: BlockHeight(Belt(10)),
+            },
+            assets: Nicks(assets as usize),
+            lock,
+            timelock,
         })
     }
 
@@ -591,6 +951,31 @@ mod tests {
             amount,
             note_data: Vec::new(),
         }
+    }
+
+    fn p2pkh_output(lock_root: u64, amount: u64) -> PlannedOutput {
+        PlannedOutput {
+            lock_root: hash(lock_root),
+            amount,
+            note_data: vec![RawNoteDataEntry::from_lock(Lock::SpendCondition(simple_pkh_lock(
+                hash(lock_root),
+            )))],
+        }
+    }
+
+    fn signer_pubkey(multiplier: u64) -> SchnorrPubkey {
+        if multiplier == 1 {
+            SchnorrPubkey(A_GEN)
+        } else {
+            SchnorrPubkey(ch_scal(multiplier, &A_GEN).expect("scaled test pubkey"))
+        }
+    }
+
+    fn v0_timelock_relative_min(min: u64) -> Option<V0TimelockIntent> {
+        Some(V0TimelockIntent {
+            absolute: TimelockRangeAbsolute::none(),
+            relative: TimelockRangeRelative::new(Some(BlockHeightDelta(Belt(min))), None),
+        })
     }
 
     /// Creates a simple single-signer PKH spend condition.
@@ -620,6 +1005,7 @@ mod tests {
     /// Creates a baseline plan request used by planner unit tests.
     fn base_request() -> PlanRequest {
         PlanRequest {
+            planning_mode: PlanningMode::Standard,
             selection_mode: SelectionMode::Auto,
             order_direction: SelectionOrder::Ascending,
             include_data: true,
@@ -636,6 +1022,7 @@ mod tests {
             recipient_outputs: vec![output(42, 10)],
             refund_output: output(43, 0),
             coinbase_relative_min: Some(5),
+            v0_migration_signer_pubkeys: Vec::new(),
         }
     }
 
@@ -682,6 +1069,136 @@ mod tests {
         request.recipient_outputs = Vec::new();
         let error = plan_create_tx(&request, &AlwaysMatches).expect_err("expected no recipients");
         assert!(matches!(error, PlanError::NoRecipients));
+    }
+
+    #[test]
+    /// Verifies v0 migration sweep consumes all admissible legacy notes and ignores v1 notes.
+    fn v0_migration_sweep_selects_all_admissible_v0_candidates() {
+        let mut request = base_request();
+        request.planning_mode = PlanningMode::V0MigrationSweep {
+            destination_output: output_without_note_data(42, 0),
+        };
+        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
+        request.candidates = vec![candidate_v0(1, 8), candidate_v0(2, 3), candidate(3, 99)];
+        request.recipient_outputs = Vec::new();
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
+
+        let result = plan_create_tx(&request, &AlwaysMatches).expect("migration plan");
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected_total, 11);
+        assert_eq!(result.outputs.len(), 1);
+        assert_eq!(result.outputs[0].amount, 11);
+        assert_eq!(result.final_fee, 0);
+    }
+
+    #[test]
+    /// Verifies v0 migration sweep skips legacy notes whose lock is not spendable by the migration signer.
+    fn v0_migration_sweep_skips_unspendable_v0_candidates() {
+        let mut request = base_request();
+        request.planning_mode = PlanningMode::V0MigrationSweep {
+            destination_output: output_without_note_data(42, 0),
+        };
+        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
+        request.candidates = vec![
+            candidate_v0(1, 8),
+            candidate_v0_with_lock(
+                2,
+                13,
+                V0Lock {
+                    keys_required: 1,
+                    pubkeys: vec![signer_pubkey(2)],
+                },
+                None,
+            ),
+        ];
+        request.recipient_outputs = Vec::new();
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
+
+        let result = plan_create_tx(&request, &AlwaysMatches).expect("migration plan");
+        assert_eq!(result.selected.len(), 1);
+        assert_eq!(result.selected[0].name, name(1));
+        assert_eq!(result.outputs[0].amount, 8);
+    }
+
+    #[test]
+    /// Verifies v0 migration sweep skips legacy notes whose v0 timelock is not yet spendable.
+    fn v0_migration_sweep_skips_unmatured_v0_timelocked_candidates() {
+        let mut request = base_request();
+        request.planning_mode = PlanningMode::V0MigrationSweep {
+            destination_output: output_without_note_data(42, 0),
+        };
+        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
+        request.candidates = vec![
+            candidate_v0(1, 8),
+            candidate_v0_with_lock(
+                2,
+                13,
+                V0Lock {
+                    keys_required: 1,
+                    pubkeys: vec![signer_pubkey(1)],
+                },
+                v0_timelock_relative_min(5),
+            ),
+        ];
+        request.recipient_outputs = Vec::new();
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
+
+        let result = plan_create_tx(&request, &AlwaysMatches).expect("migration plan");
+        assert_eq!(result.selected.len(), 1);
+        assert_eq!(result.selected[0].name, name(1));
+        assert_eq!(result.outputs[0].amount, 8);
+    }
+
+    #[test]
+    /// Verifies v0 migration sweep errors when fees consume the full selected value.
+    fn v0_migration_sweep_errors_when_fee_consumes_all_selected_value() {
+        let mut request = base_request();
+        request.planning_mode = PlanningMode::V0MigrationSweep {
+            destination_output: output_without_note_data(42, 0),
+        };
+        request.chain_context.min_fee = 10;
+        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
+        request.candidates = vec![candidate_v0(1, 10)];
+        request.recipient_outputs = Vec::new();
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
+
+        let error =
+            plan_create_tx(&request, &AlwaysMatches).expect_err("expected zero-value sweep error");
+        assert!(matches!(
+            error,
+            PlanError::V0MigrationProducesZeroValue {
+                selected_total: 10,
+                fee: 10,
+            }
+        ));
+    }
+
+    #[test]
+    /// Verifies v0 migration uses the expected legacy witness words and fee under fakenet-style constants.
+    fn v0_migration_sweep_matches_expected_word_and_fee_counts() {
+        let mut request = base_request();
+        request.planning_mode = PlanningMode::V0MigrationSweep {
+            destination_output: p2pkh_output(42, 0),
+        };
+        request.chain_context = ChainContext {
+            height: BlockHeight(Belt(1)),
+            bythos_phase: BlockHeight(Belt(1)),
+            base_fee: 128,
+            input_fee_divisor: 4,
+            min_fee: 256,
+        };
+        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
+        request.candidates = vec![candidate_v0(1, 25_000)];
+        request.recipient_outputs = Vec::new();
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
+
+        let result = plan_create_tx(&request, &AlwaysMatches).expect("migration plan");
+        assert_eq!(result.selected_total, 25_000);
+        assert_eq!(result.word_counts.seed_words, 14);
+        assert_eq!(result.word_counts.witness_words, 31);
+        assert_eq!(result.final_fee, 2_784);
+        assert_eq!(result.outputs.len(), 1);
+        assert_eq!(result.outputs[0].amount, 22_216);
     }
 
     #[test]
@@ -880,12 +1397,20 @@ mod tests {
     #[test]
     /// Verifies v0-only selector policy can select v0 candidates.
     fn auto_mode_v0_only_policy_selects_v0_candidates() {
+        struct NeverMatches;
+        impl LockMatcher for NeverMatches {
+            fn matches(&self, _note_first_name: &Hash, _spend_condition: &SpendCondition) -> bool {
+                false
+            }
+        }
+
         let mut request = base_request();
         request.candidate_version_policy = CandidateVersionPolicy::V0Only;
         request.candidates = vec![candidate(1, 8), candidate_v0(2, 12)];
         request.recipient_outputs = vec![output(42, 10)];
+        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
 
-        let result = plan_create_tx(&request, &AlwaysMatches).expect("plan");
+        let result = plan_create_tx(&request, &NeverMatches).expect("plan");
         assert_eq!(result.selected.len(), 1);
         assert_eq!(result.selected[0].name, name(2));
     }

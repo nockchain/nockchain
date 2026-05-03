@@ -26,7 +26,7 @@ use crate::{default_data_dir, AtomExt, NockApp};
 
 pub const DEFAULT_SAVE_INTERVAL: u64 = 120000;
 const DEFAULT_SAVE_INTERVAL_STR: &str = "120000";
-const DEFAULT_LOG_FILTER: &str = "info";
+const DEFAULT_LOG_FILTER: &str = "info,opentelemetry_sdk=off";
 
 #[derive(Debug, Clone, ValueEnum)]
 pub enum NockStackSize {
@@ -101,15 +101,26 @@ pub struct Cli {
         value_parser = parse_save_interval
     )]
     pub save_interval: Option<u64>,
+    #[arg(
+        long,
+        help = "Disable checkpoint saving entirely (disables periodic saves and the forced save on exit)."
+    )]
+    pub no_save: bool,
 
     #[arg(long, help = "Control colored output", value_enum, default_value_t = ColorChoice::Auto)]
     pub color: ColorChoice,
 
     #[arg(
         long,
-        help = "Path to a jam file containing existing kernel state. Supports both JammedCheckpoint and ExportedState formats."
+        help = "Path to a jam file containing existing kernel state (ExportedState format)."
     )]
     pub state_jam: Option<String>,
+    #[arg(
+        long,
+        help = "Path to a jammed checkpoint (.chkjam) to bootstrap from. Copies into the checkpoints dir as 0.chkjam before boot. Conflicts with --state-jam and --export-state-jam.",
+        conflicts_with_all = &["state_jam", "export_state_jam"]
+    )]
+    pub bootstrap_from_chkjam: Option<String>,
 
     #[arg(
         long,
@@ -128,6 +139,9 @@ pub struct Cli {
 
 impl Cli {
     fn normalized_save_interval(&self) -> Option<u64> {
+        if self.no_save {
+            return None;
+        }
         self.save_interval
             .and_then(|value| if value == 0 { None } else { Some(value) })
     }
@@ -181,6 +195,14 @@ mod tests {
         cli.save_interval = Some(5000);
         assert_eq!(cli.normalized_save_interval(), Some(5000));
     }
+
+    #[test]
+    fn normalized_save_interval_disabled_when_no_save() {
+        let mut cli = super::default_boot_cli(false);
+        cli.no_save = true;
+        cli.save_interval = Some(5000);
+        assert_eq!(cli.normalized_save_interval(), None);
+    }
 }
 
 /// Result of setting up a NockApp
@@ -195,10 +217,12 @@ pub enum SetupResult<J> {
 pub fn default_boot_cli(new: bool) -> Cli {
     Cli {
         save_interval: Some(DEFAULT_SAVE_INTERVAL),
+        no_save: false,
         new,
         trace_opts: Default::default(),
         color: ColorChoice::Auto,
         state_jam: None,
+        bootstrap_from_chkjam: None,
         export_state_jam: None,
         stack_size: NockStackSize::Normal,
     }
@@ -385,11 +409,6 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     let pma_dir = data_dir.join("pma");
     let jams_dir = data_dir.join("checkpoints");
 
-    if !jams_dir.exists() {
-        std::fs::create_dir_all(&jams_dir)?;
-        debug!("Created jams directory: {:?}", jams_dir);
-    }
-
     if pma_dir.exists() {
         std::fs::remove_dir_all(&pma_dir)?;
         debug!("Deleted existing pma directory: {:?}", pma_dir);
@@ -398,6 +417,28 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     if cli.new && jams_dir.exists() {
         std::fs::remove_dir_all(&jams_dir)?;
         debug!("Deleted existing checkpoint directory: {:?}", jams_dir);
+    }
+    if !jams_dir.exists() {
+        std::fs::create_dir_all(&jams_dir)?;
+        debug!("Created jams directory: {:?}", jams_dir);
+    }
+
+    if let Some(chkjam_path) = cli.bootstrap_from_chkjam.as_deref() {
+        let src = PathBuf::from(chkjam_path);
+        if !src.exists() {
+            return Err(format!("bootstrap chkjam not found: {}", src.display()).into());
+        }
+        let dst = jams_dir.join("0.chkjam");
+        std::fs::copy(&src, &dst)?;
+        let dst_alt = jams_dir.join("1.chkjam");
+        if dst_alt.exists() {
+            std::fs::remove_file(&dst_alt)?;
+        }
+        info!(
+            "Bootstrapping from checkpoint: {} -> {}",
+            src.display(),
+            dst.display()
+        );
     }
 
     info!("kernel: starting");
@@ -449,7 +490,7 @@ pub async fn setup_<J: Jammer + Send + 'static>(
         res
     };
 
-    let app: NockApp<J> = NockApp::new(kernel_f, &jams_dir, save_interval).await?;
+    let app: NockApp<J> = NockApp::new(kernel_f, &jams_dir, save_interval, !cli.no_save).await?;
 
     if let Some(export_path) = cli.export_state_jam.clone() {
         export_kernel_state(&app.kernel, &export_path).await?;

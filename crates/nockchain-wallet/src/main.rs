@@ -22,7 +22,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 #[cfg(test)]
@@ -34,6 +34,7 @@ use command::{
 };
 use kernels_open_wallet::KERNEL;
 use nockapp::driver::*;
+use nockapp::drivers::one_punch::OnePunchWire;
 use nockapp::kernel::boot::{self, NockStackSize};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::utils::bytes::Byts;
@@ -69,7 +70,7 @@ use wallet_tx_builder::adapter::{
 use wallet_tx_builder::lock_resolver::LockMatcher;
 use wallet_tx_builder::planner::{plan_create_tx, PlanError};
 use wallet_tx_builder::types::{
-    CandidateVersionPolicy, ChainContext, PlanRequest, SelectionMode, SelectionOrder,
+    CandidateVersionPolicy, ChainContext, PlanRequest, PlanningMode, SelectionMode, SelectionOrder,
 };
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
@@ -316,6 +317,10 @@ async fn main() -> Result<(), NockAppError> {
             // Planner-backed create-tx runs after sync once we have a fresh snapshot.
             Wallet::show_balance()
         }
+        Commands::MigrateV0Notes { .. } => {
+            // Planner-backed v0 migration runs after sync once we have a fresh snapshot.
+            Wallet::show_balance()
+        }
         Commands::SignMultisigTx {
             transaction,
             sign_keys,
@@ -394,6 +399,56 @@ async fn main() -> Result<(), NockAppError> {
                 .await
                 .expect("poke should succeed");
         }
+    }
+
+    if let Commands::MigrateV0Notes { destination } = &cli.command {
+        let mut prepared = wallet
+            .prepare_migrate_v0_notes_per_signer(
+                synced_snapshot_for_planner.take(),
+                destination.clone(),
+            )
+            .await?;
+        if prepared.summary.created_count == 0 {
+            let markdown = Wallet::format_migrate_v0_notes_summary(&prepared.summary);
+            let skin = MadSkin::default_dark();
+            println!("{}", skin.term_text(&markdown));
+            return Err(NockAppError::OtherError(
+                "No v0 migration transactions were created".to_string(),
+            ));
+        }
+
+        let tx_dir = Path::new("txs");
+        let before = Wallet::snapshot_written_txs(tx_dir).await?;
+        let (noun, operation) = prepared.take_poke().ok_or_else(|| {
+            NockAppError::from(CrownError::Unknown(
+                "migrate-v0-notes prepared migration transactions but did not produce a batch create poke"
+                    .to_string(),
+            ))
+        })?;
+        wallet
+            .app
+            .add_io_driver(one_punch_driver(noun, operation))
+            .await;
+        wallet.app.add_io_driver(file_driver()).await;
+        wallet.app.add_io_driver(markdown_driver()).await;
+        wallet.app.add_io_driver(exit_driver()).await;
+
+        match wallet.app.run().await {
+            Ok(_) => {
+                let after = Wallet::snapshot_written_txs(tx_dir).await?;
+                let tx_paths = Wallet::detect_written_tx_paths(&before, &after)?;
+                let summary = prepared.finalize(tx_paths)?;
+                let markdown = Wallet::format_migrate_v0_notes_summary(&summary);
+                let skin = MadSkin::default_dark();
+                println!("{}", skin.term_text(&markdown));
+                info!("Command executed successfully");
+            }
+            Err(e) => {
+                error!("Command failed: {}", e);
+                return Err(e);
+            }
+        }
+        return Ok(());
     }
 
     if let Commands::CreateTx {
@@ -477,7 +532,7 @@ impl Wallet {
         let constants = default_fakenet_blockchain_constants();
         let constants_noun = constants.to_noun(&mut slab);
         let (poke, _) = Self::wallet("fakenet", &[constants_noun], Operation::Poke, &mut slab)?;
-        let wire = SystemWire.to_wire();
+        let wire = OnePunchWire::Poke.to_wire();
         let _ = self.app.poke(wire, poke).await?;
         Ok(())
     }

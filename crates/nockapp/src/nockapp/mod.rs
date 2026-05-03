@@ -71,6 +71,8 @@ pub struct NockApp<J = NockJammer> {
     effect_broadcast: Arc<broadcast::Sender<NounSlab>>,
     /// Save interval
     save_interval: Option<Interval>,
+    /// Enable checkpoint writes (periodic and on exit)
+    save_enabled: bool,
     /// Mutex to ensure only one save at a time
     pub(crate) save_mutex: Arc<Mutex<Saver<J>>>,
     metrics: Arc<NockAppMetrics>,
@@ -143,6 +145,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         kernel_from_checkpoint: F,
         snapshot_path: &PathBuf,
         save_interval_duration: Option<Duration>,
+        save_enabled: bool,
     ) -> Result<Self, NockAppError>
     where
         F: FnOnce(Option<SaveableCheckpoint>) -> U,
@@ -170,14 +173,20 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         // let tasks = TaskJoinSet::new();
         // let tasks = Arc::new(TaskJoinSet::new());
         let tasks = TaskTracker::new();
-        let save_interval = save_interval_duration.map(|duration| {
-            info!("Nockapp save interval duration: {:?}", duration);
-            let first_tick_at = Instant::now() + duration;
-            let mut interval = interval_at(first_tick_at, duration);
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // important so we don't stack ticks when lagging
-            interval
-        });
-        if save_interval.is_none() {
+        let save_interval = if save_enabled {
+            save_interval_duration.map(|duration| {
+                info!("Nockapp save interval duration: {:?}", duration);
+                let first_tick_at = Instant::now() + duration;
+                let mut interval = interval_at(first_tick_at, duration);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip); // important so we don't stack ticks when lagging
+                interval
+            })
+        } else {
+            None
+        };
+        if !save_enabled {
+            info!("Nockapp checkpoint saving disabled (--no-save)");
+        } else if save_interval.is_none() {
             info!("Nockapp save interval disabled; periodic saves off");
         }
         let exit_status = AtomicBool::new(false);
@@ -203,6 +212,7 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
             action_channel_sender,
             effect_broadcast,
             save_interval,
+            save_enabled,
             save_mutex,
             // cancel_token,
             metrics,
@@ -333,9 +343,13 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
     #[tracing::instrument(skip(self, path))]
     pub async fn peek(&mut self, path: NounSlab) -> Result<NounSlab, NockAppError> {
         trace!("Peeking at noun: {:?}", path);
-        let res = self.kernel.peek(path).await?;
+        let res = self
+            .kernel
+            .peek(path.clone())
+            .await
+            .map_err(NockAppError::CrownError);
         trace!("Peeked noun: {:?}", res);
-        Ok(res)
+        res
     }
 
     // Peek at a noun in the kernel with result munging. A `~`, which denotes an invalid
@@ -658,6 +672,26 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
             {
                 break;
             }
+        }
+
+        if !self.save_enabled {
+            debug!(
+                "Exit signal received with code {}, checkpoint saving disabled; skipping final save",
+                code
+            );
+            let shutdown_result = if code == EXIT_OK {
+                Ok(())
+            } else {
+                Err(NockAppError::Exit(code))
+            };
+            let exit = self.exit.clone();
+            self.tasks.spawn(async move {
+                debug!("Checkpoint saving disabled; sending shutdown result");
+                if let Err(e) = exit.shutdown(shutdown_result).await {
+                    error!("Error sending shutdown: {e}");
+                }
+            });
+            return Ok(NockAppRun::Pending);
         }
 
         let exit_event_num = self.kernel.serf.event_number.load(Ordering::SeqCst);

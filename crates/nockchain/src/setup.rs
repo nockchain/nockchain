@@ -24,7 +24,7 @@ pub const FAKENET_GENESIS_MESSAGE: &str = "3WNP3WtcQJYtP5PCvFHDQVEeiZEznsULEY5Lc
 pub const REALNET_GENESIS_MESSAGE: &str = "2c8Ltbg44dPkEGcNPupcVAtDgD87753M9pG2fg8yC2mTEqg5qAFvvbT";
 
 pub enum SetupCommand {
-    PokeFakenetConstants(BlockchainConstants),
+    PokeFakenetConstants(Box<BlockchainConstants>),
     PokeSetGenesisSeal(String),
     PokeSetBtcData,
 }

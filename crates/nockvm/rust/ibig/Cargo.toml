@@ -31,17 +31,14 @@ std = []
 workspace = true
 
 [dependencies.num-traits]
-default-features = false
 optional = true
 version = "0.2"
 
 [dependencies.rand]
-default-features = false
 optional = true
 version = "0.9.2"
 
 [dependencies.serde]
-default-features = false
 features = ["derive"]
 optional = true
 version = "1.0.217"

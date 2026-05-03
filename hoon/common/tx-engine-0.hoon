@@ -719,7 +719,8 @@
     |=  target-bn=bignum:bn
     ^-  bignum:bn
     =/  target-atom=@  (merge:bn target-bn)
-    (chunk:bn (div max-target-atom +(target-atom)))
+    =/  raw=@  (div max-target-atom +(target-atom))
+    (chunk:bn ?:(=(0 raw) 1 raw))
   ::
   ++  to-page-summary
     |=  pag=form

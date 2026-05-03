@@ -11,6 +11,7 @@
 pub mod config;
 pub mod mining;
 pub mod setup;
+pub mod traces;
 
 use std::error::Error;
 use std::fs;
@@ -408,9 +409,15 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
+        if let Some(asert) = cli.fakenet_asert.into_config()? {
+            fakenet_constants = fakenet_constants
+                .with_asert_phase(asert.phase)
+                .with_asert_anchor_height(asert.anchor_height)
+                .with_asert_anchor_target_bex(asert.anchor_target_bex);
+        }
         setup::poke(
             &mut nockapp,
-            setup::SetupCommand::PokeFakenetConstants(fakenet_constants),
+            setup::SetupCommand::PokeFakenetConstants(Box::new(fakenet_constants)),
         )
         .await?;
         if let Some(true) = is_kernel_mainnet {
@@ -529,6 +536,7 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         ))
         .await;
 
+    nockapp.add_io_driver(crate::traces::traces_driver()).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
 
     Ok(nockapp)

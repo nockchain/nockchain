@@ -31,6 +31,7 @@ pub async fn setup_nockapp(jam: &str) -> (TempDir, NockApp) {
             kernel_f,
             &temp_dir_path,
             Some(std::time::Duration::from_secs(1)),
+            true,
         )
         .await
         .expect("Could not create NockApp"),

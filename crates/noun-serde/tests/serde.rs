@@ -4,6 +4,8 @@
 mod tests {
     use std::collections::HashSet;
 
+    use nockvm::ext::make_tas;
+    use nockvm::noun::Noun;
     use noun_serde::{decode_bool, encode_bool, NounDecode, NounEncode};
 
     // Helper struct for testing
@@ -168,6 +170,42 @@ mod tests {
         let encoded_empty = empty_set.to_noun(&mut stack);
         let decoded_empty = HashSet::<u64>::from_noun(&encoded_empty).unwrap();
         assert_eq!(empty_set, decoded_empty);
+    }
+
+    #[test]
+    fn test_nested_option_representation() {
+        let mut stack = nockvm::mem::NockStack::new(8 << 10 << 10, 0);
+        let proof_atom = make_tas(&mut stack, "dummy-proof");
+        let proof_noun: Noun = proof_atom.as_noun();
+
+        let nested = Some(Some(proof_noun));
+        let encoded = nested.to_noun(&mut stack);
+
+        let outer_cell = encoded.as_cell().expect("outer option should be cell");
+        assert_eq!(
+            outer_cell
+                .head()
+                .as_atom()
+                .expect("outer head should be atom")
+                .as_u64()
+                .expect("outer head should be 0"),
+            0
+        );
+
+        let inner_cell = outer_cell
+            .tail()
+            .as_cell()
+            .expect("inner option should be cell");
+        assert_eq!(
+            inner_cell
+                .head()
+                .as_atom()
+                .expect("inner head should be atom")
+                .as_u64()
+                .expect("inner head should be 0"),
+            0
+        );
+        assert!(unsafe { inner_cell.tail().raw_equals(&proof_noun) });
     }
 }
 

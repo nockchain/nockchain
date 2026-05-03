@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-19
+Last Reviewed: 2026-04-01
 Canonical/Legacy: Canonical (Tier 1 scoped authority for wallet CLI behavior and operational usage; protocol authority remains in [`PROTOCOL.md`](../../PROTOCOL.md))
 
 ## Canonical Scope
@@ -240,11 +240,87 @@ Gifts and fees are denominated in nicks (65536 nicks = 1 nock).
 #### Common Parameters
 
 - The optional `names` argument is a list of `[first-name last-name]` pairs for manual note selection; omit it to auto-select spendable notes
+- Auto-selection remains v1-only
+- Manual `--names` selection may spend either an all-v1 set or an all-v0 set; mixed-version manual sets are rejected
 - The optional `fee` argument overrides the planner-computed fee (in nicks, 65536 nicks to 1 nock)
 - Provide multiple `--recipient` flags to fan out to several outputs
 - Each `--recipient` is either a JSON object (preferred) or a legacy `<p2pkh>:<amount>` string
 - `address`/`addresses` fields expect base58-encoded pay-to-pubkey-hash values
 - Provide `--sign-key <index[:hardened]>` multiple times to explicitly choose signing keys. If omitted, the wallet uses the master key or the `--index/--hardened` pair.
+- `--refund-pkh` is required when manually spending legacy v0 notes. For v1 notes, refund defaults to the note owner.
+
+### Migrating Legacy V0 Notes
+
+Use `migrate-v0-notes` when you want to sweep spendable legacy v0 notes into a v1 pay-to-pubkey-hash address.
+
+```bash
+nockchain-wallet migrate-v0-notes --destination <v1-p2pkh-b58>
+```
+
+What the command does:
+
+- Syncs the wallet and finds spendable v0 notes for the active v0 master and any active v0 child signers under that master
+- Ignores v1 notes
+- Computes the required fee for each signer bucket
+- Builds one migration transaction per spend-capable signer bucket
+- Writes each saved transaction to `./txs` in the current working directory
+- Uses the destination as the refund target, so any leftover value also comes back as v1
+- Prints a signer-by-signer summary with the saved tx path, selected inputs, fee, expected migrated amount, and the exact `send-tx` command for each created transaction
+
+Typical migration flow:
+
+```bash
+# 1. Pull the latest wallet code
+git pull origin master
+
+# 2. Rebuild the wallet jams and binary
+make install-nockchain-wallet
+
+# 3. Import the legacy seed if you have not already done so
+nockchain-wallet import-keys \
+  --seedphrase "your legacy seed phrase here" \
+  --version 0
+
+# 4. Confirm the legacy master address is present
+nockchain-wallet list-master-addresses
+
+# 5. Switch the active master to the legacy v0 master key that owns the signer tree
+nockchain-wallet set-active-master-address <legacy-v0-master-address>
+
+# 6. Run the migration sweep into your v1 P2PKH destination
+nockchain-wallet migrate-v0-notes --destination <v1-p2pkh-b58>
+
+# 7. Submit each saved transaction shown in the migration summary
+nockchain-wallet send-tx <path-to-tx-file>
+```
+
+Notes:
+
+- The destination must be a v1 pay-to-pubkey-hash address
+- The command is full-sweep only in the current release
+- The command may create multiple transactions, not just one: it creates up to one migration tx per active local v0 signer under the active master
+- Inspect the migration summary before submitting anything. It tells you which signer each tx belongs to, how many notes were selected, the fee, the expected migrated amount, where the tx was saved, and how to submit it
+- Watch-only imports are not enough; the wallet must hold the matching v0 signing key
+- If you are using the bridge helper scripts, `open/crates/bridge/scripts/wallet.sh --new` imports both the default v1 fakenet key and the legacy v0 fakenet key
+
+### Manual V0 Fan-In With `create-tx`
+
+If you need to pin the exact legacy inputs instead of sweeping every spendable v0 note, you can still use `create-tx` with a manual `--names` set, as long as every selected note is v0 and you provide `--refund-pkh`.
+
+```bash
+nockchain-wallet create-tx \
+  --names "[first1 last1],[first2 last2]" \
+  --recipient '{"kind":"p2pkh","address":"<v1-p2pkh-b58>","amount":10000}' \
+  --refund-pkh <v1-p2pkh-b58>
+```
+
+Rules for manual legacy spends:
+
+- Every selected note must be v0
+- Mixed v0/v1 manual sets are rejected
+- `--refund-pkh` is required
+- Fee may be planner-computed or overridden with `--fee`
+- Omit `--names` if you want normal auto-selection; auto-selection does not pick v0 notes
 
 #### Recipient JSON Format
 

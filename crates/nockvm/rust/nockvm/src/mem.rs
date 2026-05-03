@@ -1,6 +1,7 @@
 // TODO: fix stack push in PC
 use std::alloc::Layout;
 use std::ops::{Deref, DerefMut};
+#[cfg(not(feature = "no_check_oom"))]
 use std::panic::panic_any;
 use std::ptr::copy_nonoverlapping;
 use std::vec::Vec;
@@ -422,166 +423,164 @@ impl NockStack {
     // Directionality parameters: (East/West), (Stack/Alloc), (pc: true/false)
     // Types of size: word (words: usize)
     /// Check if an allocation or pointer retrieval indicates an invalid request or an invalid state
-    pub(crate) fn alloc_would_oom_(&self, alloc: Allocation, words: usize) {
-        // When the fast path is enabled, make the parameters count as used to avoid
-        // unused-variable warnings while still short-circuiting.
+    pub(crate) fn alloc_would_oom_(&self, _alloc: Allocation, _words: usize) {
         #[cfg(feature = "no_check_oom")]
+        return;
+        #[cfg(not(feature = "no_check_oom"))]
         {
-            let _ = (&alloc, words);
-        }
+            let alloc = _alloc;
+            let words = _words;
+            let _memory_state = self.memory_state(Some(words));
+            if self.pc && !alloc.alloc_type.allowed_when_pc() {
+                panic_any(self.cannot_alloc_in_pc(Some(words)));
+            }
 
-        if cfg!(feature = "no_check_oom") {
-            return;
-        }
-        let _memory_state = self.memory_state(Some(words));
-        if self.pc && !alloc.alloc_type.allowed_when_pc() {
-            panic_any(self.cannot_alloc_in_pc(Some(words)));
-        }
+            // Convert words to byte count (for compatibility with old code)
+            let _bytes = words * 8;
 
-        // Convert words to byte count (for compatibility with old code)
-        let _bytes = words * 8;
-
-        // Check space availability based on offsets
-        let (target_offset, limit_offset, direction) = match (alloc.alloc_type, alloc.orientation) {
-            // West + Alloc, alloc is decreasing
-            (AllocationType::Alloc, ArenaOrientation::West) => {
-                let start_offset = self.alloc_offset;
-                let limit_offset = self.stack_offset;
-                let target_offset = if start_offset >= words {
-                    start_offset - words
-                } else {
-                    panic!("Alloc would underflow in West+Alloc");
+            // Check space availability based on offsets
+            let (target_offset, limit_offset, direction) =
+                match (alloc.alloc_type, alloc.orientation) {
+                    // West + Alloc, alloc is decreasing
+                    (AllocationType::Alloc, ArenaOrientation::West) => {
+                        let start_offset = self.alloc_offset;
+                        let limit_offset = self.stack_offset;
+                        let target_offset = if start_offset >= words {
+                            start_offset - words
+                        } else {
+                            panic!("Alloc would underflow in West+Alloc");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    // East + Alloc, alloc is increasing
+                    (AllocationType::Alloc, ArenaOrientation::East) => {
+                        let start_offset = self.alloc_offset;
+                        let limit_offset = self.stack_offset;
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::Increasing)
+                    }
+                    // West + Push, stack is increasing
+                    (AllocationType::Push, ArenaOrientation::West) => {
+                        let start_offset = self.stack_offset;
+                        let limit_offset = if self.pc {
+                            unsafe { self.prev_alloc_offset() }
+                        } else {
+                            self.alloc_offset
+                        };
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::Increasing)
+                    }
+                    // East + Push, stack is decreasing
+                    (AllocationType::Push, ArenaOrientation::East) => {
+                        let start_offset = self.stack_offset;
+                        let limit_offset = if self.pc {
+                            unsafe { self.prev_alloc_offset() }
+                        } else {
+                            self.alloc_offset
+                        };
+                        let target_offset = if start_offset >= words {
+                            start_offset - words
+                        } else {
+                            panic!("Push would underflow in East+Push");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    // West + FramePush, alloc is decreasing
+                    (AllocationType::FramePush, ArenaOrientation::West) => {
+                        let start_offset = self.alloc_offset;
+                        let limit_offset = self.stack_offset;
+                        let target_offset = if start_offset >= words {
+                            start_offset - words
+                        } else {
+                            panic!("FramePush would underflow in West+FramePush");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    // East + FramePush, alloc is increasing
+                    (AllocationType::FramePush, ArenaOrientation::East) => {
+                        let start_offset = self.alloc_offset;
+                        let limit_offset = self.stack_offset;
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::Increasing)
+                    }
+                    // West + SlotPointer, polarity is reversed because we're getting the prev pointer
+                    (AllocationType::SlotPointer, ArenaOrientation::West) => {
+                        let _slots_available = unsafe {
+                            self.slots_available()
+                                .expect("No slots available on slot_pointer alloc check")
+                        };
+                        let start_offset = self.frame_offset;
+                        let limit_offset = unsafe { self.prev_alloc_offset() };
+                        let target_offset = if start_offset > words + 1 {
+                            start_offset - words - 1
+                        } else {
+                            panic!("SlotPointer would underflow in West+SlotPointer");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    // East + SlotPointer, polarity is reversed because we're getting the prev pointer
+                    (AllocationType::SlotPointer, ArenaOrientation::East) => {
+                        let _slots_available = unsafe {
+                            self.slots_available()
+                                .expect("No slots available on slot_pointer alloc check")
+                        };
+                        let start_offset = self.frame_offset;
+                        let limit_offset = unsafe { self.prev_alloc_offset() };
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::IncreasingDeref)
+                    }
+                    // The alloc previous frame stuff is like doing a normal alloc but start offset is prev alloc and limit offset is stack offset
+                    // polarity is reversed because we're getting the prev pointer
+                    (AllocationType::AllocPreviousFrame, ArenaOrientation::West) => {
+                        let start_offset = unsafe { self.prev_alloc_offset() };
+                        let limit_offset = self.stack_offset;
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::Increasing)
+                    }
+                    // polarity is reversed because we're getting the prev pointer
+                    (AllocationType::AllocPreviousFrame, ArenaOrientation::East) => {
+                        let start_offset = unsafe { self.prev_alloc_offset() };
+                        let limit_offset = self.stack_offset;
+                        let target_offset = if start_offset >= words {
+                            start_offset - words
+                        } else {
+                            panic!("AllocPreviousFrame would underflow in East+AllocPreviousFrame");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    (AllocationType::FlipTopFrame, ArenaOrientation::West) => {
+                        let start_offset = self.size; // End of the memory region
+                        let limit_offset = unsafe { self.prev_alloc_offset() };
+                        let target_offset = if start_offset >= words {
+                            start_offset - words
+                        } else {
+                            panic!("FlipTopFrame would underflow in West+FlipTopFrame");
+                        };
+                        (target_offset, limit_offset, Direction::Decreasing)
+                    }
+                    (AllocationType::FlipTopFrame, ArenaOrientation::East) => {
+                        let start_offset = 0; // Beginning of the memory region
+                        let limit_offset = unsafe { self.prev_alloc_offset() };
+                        let target_offset = start_offset + words;
+                        (target_offset, limit_offset, Direction::Increasing)
+                    }
                 };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            // East + Alloc, alloc is increasing
-            (AllocationType::Alloc, ArenaOrientation::East) => {
-                let start_offset = self.alloc_offset;
-                let limit_offset = self.stack_offset;
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::Increasing)
-            }
-            // West + Push, stack is increasing
-            (AllocationType::Push, ArenaOrientation::West) => {
-                let start_offset = self.stack_offset;
-                let limit_offset = if self.pc {
-                    unsafe { self.prev_alloc_offset() }
-                } else {
-                    self.alloc_offset
-                };
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::Increasing)
-            }
-            // East + Push, stack is decreasing
-            (AllocationType::Push, ArenaOrientation::East) => {
-                let start_offset = self.stack_offset;
-                let limit_offset = if self.pc {
-                    unsafe { self.prev_alloc_offset() }
-                } else {
-                    self.alloc_offset
-                };
-                let target_offset = if start_offset >= words {
-                    start_offset - words
-                } else {
-                    panic!("Push would underflow in East+Push");
-                };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            // West + FramePush, alloc is decreasing
-            (AllocationType::FramePush, ArenaOrientation::West) => {
-                let start_offset = self.alloc_offset;
-                let limit_offset = self.stack_offset;
-                let target_offset = if start_offset >= words {
-                    start_offset - words
-                } else {
-                    panic!("FramePush would underflow in West+FramePush");
-                };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            // East + FramePush, alloc is increasing
-            (AllocationType::FramePush, ArenaOrientation::East) => {
-                let start_offset = self.alloc_offset;
-                let limit_offset = self.stack_offset;
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::Increasing)
-            }
-            // West + SlotPointer, polarity is reversed because we're getting the prev pointer
-            (AllocationType::SlotPointer, ArenaOrientation::West) => {
-                let _slots_available = unsafe {
-                    self.slots_available()
-                        .expect("No slots available on slot_pointer alloc check")
-                };
-                let start_offset = self.frame_offset;
-                let limit_offset = unsafe { self.prev_alloc_offset() };
-                let target_offset = if start_offset > words + 1 {
-                    start_offset - words - 1
-                } else {
-                    panic!("SlotPointer would underflow in West+SlotPointer");
-                };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            // East + SlotPointer, polarity is reversed because we're getting the prev pointer
-            (AllocationType::SlotPointer, ArenaOrientation::East) => {
-                let _slots_available = unsafe {
-                    self.slots_available()
-                        .expect("No slots available on slot_pointer alloc check")
-                };
-                let start_offset = self.frame_offset;
-                let limit_offset = unsafe { self.prev_alloc_offset() };
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::IncreasingDeref)
-            }
-            // The alloc previous frame stuff is like doing a normal alloc but start offset is prev alloc and limit offset is stack offset
-            // polarity is reversed because we're getting the prev pointer
-            (AllocationType::AllocPreviousFrame, ArenaOrientation::West) => {
-                let start_offset = unsafe { self.prev_alloc_offset() };
-                let limit_offset = self.stack_offset;
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::Increasing)
-            }
-            // polarity is reversed because we're getting the prev pointer
-            (AllocationType::AllocPreviousFrame, ArenaOrientation::East) => {
-                let start_offset = unsafe { self.prev_alloc_offset() };
-                let limit_offset = self.stack_offset;
-                let target_offset = if start_offset >= words {
-                    start_offset - words
-                } else {
-                    panic!("AllocPreviousFrame would underflow in East+AllocPreviousFrame");
-                };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            (AllocationType::FlipTopFrame, ArenaOrientation::West) => {
-                let start_offset = self.size; // End of the memory region
-                let limit_offset = unsafe { self.prev_alloc_offset() };
-                let target_offset = if start_offset >= words {
-                    start_offset - words
-                } else {
-                    panic!("FlipTopFrame would underflow in West+FlipTopFrame");
-                };
-                (target_offset, limit_offset, Direction::Decreasing)
-            }
-            (AllocationType::FlipTopFrame, ArenaOrientation::East) => {
-                let start_offset = 0; // Beginning of the memory region
-                let limit_offset = unsafe { self.prev_alloc_offset() };
-                let target_offset = start_offset + words;
-                (target_offset, limit_offset, Direction::Increasing)
-            }
-        };
-        match direction {
-            Direction::Increasing => {
-                if target_offset > limit_offset {
-                    panic_any(self.out_of_memory(alloc, Some(words)))
+            match direction {
+                Direction::Increasing => {
+                    if target_offset > limit_offset {
+                        panic_any(self.out_of_memory(alloc, Some(words)))
+                    }
                 }
-            }
-            Direction::Decreasing => {
-                if target_offset < limit_offset {
-                    panic_any(self.out_of_memory(alloc, Some(words)))
+                Direction::Decreasing => {
+                    if target_offset < limit_offset {
+                        panic_any(self.out_of_memory(alloc, Some(words)))
+                    }
                 }
-            }
-            // TODO this check is imprecise and should take into account the size of the pointer!
-            Direction::IncreasingDeref => {
-                if target_offset >= limit_offset {
-                    panic_any(self.out_of_memory(alloc, Some(words)))
+                // TODO this check is imprecise and should take into account the size of the pointer!
+                Direction::IncreasingDeref => {
+                    if target_offset >= limit_offset {
+                        panic_any(self.out_of_memory(alloc, Some(words)))
+                    }
                 }
             }
         }

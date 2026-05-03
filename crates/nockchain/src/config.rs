@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{value_parser, ArgAction, Parser};
+use clap::{value_parser, ArgAction, Args, Parser};
 use nockchain_types::tx_engine::common::Hash;
 
 use crate::mining::MiningPkhConfig;
@@ -34,6 +34,74 @@ pub const CHAIN_INTERVAL: Duration = Duration::from_secs(20);
 /// Currently, this is the height of an existing block for testing. It will be
 /// switched to a future block for launch.
 pub const GENESIS_HEIGHT: u64 = 897767;
+
+/// Validated ASERT fakenet trio. Only constructible via [`FakenetAsertArgs::into_config`].
+#[derive(Debug, Clone, Copy)]
+pub struct FakenetAsertConfig {
+    pub phase: u64,
+    pub anchor_height: u64,
+    pub anchor_target_bex: u64,
+}
+
+/// CLI surface for the three ASERT fakenet overrides. All three must be supplied together or not
+/// at all; call [`into_config`][FakenetAsertArgs::into_config] to enforce the invariant and obtain
+/// a [`FakenetAsertConfig`].
+#[derive(Args, Debug, Clone, Default)]
+pub struct FakenetAsertArgs {
+    #[arg(
+        long = "fakenet-asert-phase",
+        help = "Override the asert-phase (aserti3-2d activation height) when running on fakenet. Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub phase: Option<u64>,
+    #[arg(
+        long = "fakenet-asert-anchor-height",
+        help = "Override the asert-anchor-height when running on fakenet. Must equal asert-phase - 1. Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub anchor_height: Option<u64>,
+    #[arg(
+        long = "fakenet-asert-anchor-target-bex",
+        help = "Override asert-anchor-target-atom by bex exponent when running on fakenet (target = 2^bex). Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub anchor_target_bex: Option<u64>,
+}
+
+impl FakenetAsertArgs {
+    /// Validates the trio invariant and converts to [`FakenetAsertConfig`].
+    ///
+    /// Returns `Ok(None)` when none of the three flags are set.
+    /// Returns `Err` when only some are set, when `anchor_height + 1 != phase`, or when
+    /// `anchor_target_bex` exceeds the cap.
+    pub fn into_config(self) -> Result<Option<FakenetAsertConfig>, String> {
+        match (self.phase, self.anchor_height, self.anchor_target_bex) {
+            (None, None, None) => Ok(None),
+            (Some(phase), Some(anchor_height), Some(bex)) => {
+                if phase == 0 || Some(phase) != anchor_height.checked_add(1) {
+                    return Err(format!(
+                        "--fakenet-asert-anchor-height ({anchor_height}) must equal \
+                         --fakenet-asert-phase ({phase}) minus 1"
+                    ));
+                }
+                const MAX_BEX: u64 = 512;
+                if bex > MAX_BEX {
+                    return Err(format!(
+                        "--fakenet-asert-anchor-target-bex ({bex}) must be <= {MAX_BEX}"
+                    ));
+                }
+                Ok(Some(FakenetAsertConfig {
+                    phase,
+                    anchor_height,
+                    anchor_target_bex: bex,
+                }))
+            }
+            _ => Err("--fakenet-asert-phase, --fakenet-asert-anchor-height, and \
+                 --fakenet-asert-anchor-target-bex must all be specified together or not at all"
+                .to_string()),
+        }
+    }
+}
 
 /// Command line arguments
 #[derive(Parser, Debug, Clone)]
@@ -124,6 +192,8 @@ pub struct NockchainCli {
         requires = "fakenet"
     )]
     pub fakenet_bythos_phase: Option<u64>,
+    #[command(flatten)]
+    pub fakenet_asert: FakenetAsertArgs,
     #[arg(long, help = "Path to fake genesis block jam file")]
     pub fakenet_genesis_jam_path: Option<PathBuf>,
     #[arg(long, help = "Public gRPC binding address (off by default), recommended value = \"127.0.0.1:5555\"", value_parser = clap::value_parser!(std::net::SocketAddr))]
@@ -159,6 +229,8 @@ impl NockchainCli {
                 })?;
             }
         }
+
+        self.fakenet_asert.clone().into_config().map(|_| ())?;
 
         Ok(())
     }
@@ -200,6 +272,7 @@ mod tests {
             fakenet_log_difficulty: 1,
             fakenet_v1_phase: None,
             fakenet_bythos_phase: None,
+            fakenet_asert: FakenetAsertArgs::default(),
             fakenet_genesis_jam_path: None,
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
             bind_private_grpc_port: 5555,
@@ -216,6 +289,76 @@ mod tests {
         }]);
 
         assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_all_three_asert_overrides() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            phase: Some(10),
+            anchor_height: Some(9),
+            anchor_target_bex: Some(4),
+        };
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_no_asert_overrides() {
+        let cli = base_cli();
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_partial_asert_overrides() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            phase: Some(10),
+            anchor_height: None,
+            anchor_target_bex: None,
+        };
+        let err = cli.validate().expect_err("expected partial ASERT error");
+        assert!(err.contains("must all be specified together"));
+    }
+
+    #[test]
+    fn validate_rejects_anchor_height_not_phase_minus_one() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            phase: Some(10),
+            anchor_height: Some(8), // should be 9
+            anchor_target_bex: Some(4),
+        };
+        let err = cli.validate().expect_err("expected anchor invariant error");
+        assert!(err.contains("must equal"));
+    }
+
+    #[test]
+    fn validate_rejects_asert_phase_zero() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            phase: Some(0),
+            anchor_height: Some(0),
+            anchor_target_bex: Some(4),
+        };
+        let err = cli.validate().expect_err("expected phase=0 error");
+        assert!(err.contains("must equal"));
+    }
+
+    #[test]
+    fn validate_rejects_bex_above_cap() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            phase: Some(10),
+            anchor_height: Some(9),
+            anchor_target_bex: Some(513),
+        };
+        let err = cli.validate().expect_err("expected bex cap error");
+        assert!(err.contains("must be <="));
     }
 
     #[test]
