@@ -10,7 +10,7 @@ pub struct HoonPackage {
     pub package: PackageMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<BTreeMap<String, DependencySpec>>,
-    #[serde(default, rename = "patches", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub patches: Vec<PackagePatch>,
 }
 

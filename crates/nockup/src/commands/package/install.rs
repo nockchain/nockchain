@@ -233,7 +233,7 @@ pub async fn run(opts: InstallOptions) -> Result<()> {
         #[derive(PartialEq)]
         enum Decision {
             Apply,
-            Skip,      // dry-run / user declined / nothing to do
+            Skip,      // user declined, or every patch is already in shape
             PlanOnly,  // dry-run
         }
         let decision = if opts.dry_run {
