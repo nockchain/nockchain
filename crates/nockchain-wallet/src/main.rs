@@ -84,7 +84,7 @@ async fn main() -> Result<(), NockAppError> {
 
     let mut cli = WalletCli::parse();
     // Use a smaller stack size for the wallet
-    cli.boot.stack_size = NockStackSize::Tiny;
+    cli.boot.stack_size = Some(NockStackSize::Tiny);
     boot::init_default_tracing(&cli.boot.clone()); // Init tracing early
 
     if let Commands::TxAccepted { tx_id } = &cli.command {

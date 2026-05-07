@@ -130,11 +130,10 @@ pub struct Cli {
 
     #[arg(
         long,
-        help = "Nock stack size to use",
-        value_enum,
-        default_value_t = NockStackSize::Normal
+        help = "Nock stack size to use (default: normal; nockchain defaults to medium)",
+        value_enum
     )]
-    pub stack_size: NockStackSize,
+    pub stack_size: Option<NockStackSize>,
 }
 
 impl Cli {
@@ -224,7 +223,7 @@ pub fn default_boot_cli(new: bool) -> Cli {
         state_jam: None,
         bootstrap_from_chkjam: None,
         export_state_jam: None,
-        stack_size: NockStackSize::Normal,
+        stack_size: None,
     }
 }
 
@@ -450,7 +449,7 @@ pub async fn setup_<J: Jammer + Send + 'static>(
         .map(std::time::Duration::from_millis);
 
     let kernel_f = async |checkpoint| {
-        let kernel: Kernel<SaveableCheckpoint> = match cli.stack_size {
+        let kernel: Kernel<SaveableCheckpoint> = match cli.stack_size.unwrap_or(NockStackSize::Normal) {
             NockStackSize::Tiny => {
                 Kernel::load_with_hot_state_tiny(
                     jam, checkpoint, hot_state, test_jets, cli.trace_opts,

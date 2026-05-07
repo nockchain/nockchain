@@ -222,7 +222,9 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     cli.validate()?;
 
     let mut nockapp_cli = cli.nockapp_cli.clone();
-    nockapp_cli.stack_size = nockapp::kernel::boot::NockStackSize::Medium;
+    nockapp_cli.stack_size = nockapp_cli
+        .stack_size
+        .or(Some(nockapp::kernel::boot::NockStackSize::Medium));
 
     let mut nockapp =
         boot::setup::<J>(kernel_jam, nockapp_cli, hot_state, "nockchain", None).await?;
