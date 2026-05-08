@@ -745,19 +745,21 @@ impl Jammer for NockJammer {
                     *cursor += 1;
                     Ok(0)
                 } else {
-                    *cursor += idx + 1;
+                    *cursor = cursor.checked_add(idx + 1).ok_or(CueError::TruncatedBuffer)?;
                     let mut sz = 0usize;
                     let sz_slice = BitSlice::<_, Lsb0>::from_element_mut(&mut sz);
-                    if buffer.len() < *cursor + idx - 1 {
+                    let sz_end = cursor.checked_add(idx - 1).ok_or(CueError::TruncatedBuffer)?;
+                    if buffer.len() < sz_end {
                         Err(CueError::TruncatedBuffer)?;
                     };
-                    sz_slice[0..idx - 1].clone_from_bitslice(&buffer[*cursor..*cursor + idx - 1]);
+                    sz_slice[0..idx - 1].clone_from_bitslice(&buffer[*cursor..sz_end]);
                     sz_slice.set(idx - 1, true);
-                    *cursor += idx - 1;
+                    *cursor = sz_end;
                     if sz > size_of::<usize>() << 3 {
                         Err(CueError::BackrefTooBig)?;
                     }
-                    if buffer.len() < *cursor + sz {
+                    let end_pos = cursor.checked_add(sz).ok_or(CueError::TruncatedBuffer)?;
+                    if buffer.len() < end_pos {
                         Err(CueError::TruncatedBuffer)?;
                     }
                     let mut backref = 0usize;
@@ -781,16 +783,18 @@ impl Jammer for NockJammer {
                     *cursor += 1;
                     unsafe { Ok(DirectAtom::new_unchecked(0).as_atom()) }
                 } else {
-                    *cursor += idx + 1;
+                    *cursor = cursor.checked_add(idx + 1).ok_or(CueError::TruncatedBuffer)?;
                     let mut sz = 0usize;
                     let sz_slice = BitSlice::<_, Lsb0>::from_element_mut(&mut sz);
-                    if buffer.len() < *cursor + idx - 1 {
+                    let sz_end = cursor.checked_add(idx - 1).ok_or(CueError::TruncatedBuffer)?;
+                    if buffer.len() < sz_end {
                         Err(CueError::TruncatedBuffer)?;
                     }
-                    sz_slice[0..idx - 1].clone_from_bitslice(&buffer[*cursor..*cursor + idx - 1]);
+                    sz_slice[0..idx - 1].clone_from_bitslice(&buffer[*cursor..sz_end]);
                     sz_slice.set(idx - 1, true);
-                    *cursor += idx - 1;
-                    if buffer.len() < *cursor + sz {
+                    *cursor = sz_end;
+                    let end_pos = cursor.checked_add(sz).ok_or(CueError::TruncatedBuffer)?;
+                    if buffer.len() < end_pos {
                         Err(CueError::TruncatedBuffer)?;
                     }
                     if sz < 64 {
@@ -802,7 +806,11 @@ impl Jammer for NockJammer {
                         Ok(unsafe { DirectAtom::new_unchecked(data).as_atom() })
                     } else {
                         // Indirect atom
-                        let indirect_words = (sz + 63) >> 6; // fast round to 64-bit words
+                        let indirect_words = sz.checked_add(63)
+                            .ok_or(CueError::TruncatedBuffer)? >> 6;
+                        if indirect_words == 0 {
+                            Err(CueError::TruncatedBuffer)?;
+                        }
                         let (mut indirect, slice) =
                             unsafe { IndirectAtom::new_raw_mut_bitslice(slab, indirect_words) };
                         slice[0..sz].clone_from_bitslice(&buffer[*cursor..*cursor + sz]);
