@@ -11,6 +11,11 @@ use crate::tip5_util::{tip5_hash_to_base58, tip5_hash_to_base58_stack};
 
 const POKE_VERSION: u64 = 0;
 
+/// Maximum number of elder IDs allowed in a heard-elders message.
+/// This matches the Hoon layer limit in consensus.hoon:534.
+/// Enforced here to prevent CPU exhaustion from processing unbounded lists.
+const MAX_ELDER_IDS: usize = 24;
+
 #[derive(Debug, Clone)]
 pub enum NockchainFact {
     // [%heard-block p=page:dt] with poke slab
@@ -45,9 +50,13 @@ impl NockchainFact {
             let elders_dat = noun.as_cell()?.tail();
             let oldest = elders_dat.as_cell()?.head().as_atom()?.as_u64()?;
             let elder_ids = elders_dat.as_cell()?.tail();
-            // Need to handle the closure capturing mutable reference
             let mut elder_id_strings = Vec::new();
             for id_noun in elder_ids.list_iter() {
+                if elder_id_strings.len() >= MAX_ELDER_IDS {
+                    return Err(NockAppError::OtherError(
+                        format!("Too many elder IDs: exceeds limit of {}", MAX_ELDER_IDS)
+                    ));
+                }
                 elder_id_strings.push(tip5_hash_to_base58_stack(slab, id_noun)?);
             }
             Ok(NockchainFact::HeardElders(
