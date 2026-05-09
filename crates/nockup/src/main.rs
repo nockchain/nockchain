@@ -44,6 +44,7 @@ async fn main() {
             .await
         }
         Some(Commands::TestPhase1) => commands::test_phase1::run().await,
+        Some(Commands::External(args)) => commands::external::run(args).await,
 
         None => version::show_version_info().await,
     };
