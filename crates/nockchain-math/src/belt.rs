@@ -118,6 +118,13 @@ impl NounDecode for Belt {
     }
 }
 
+/// Bytes ↔ belts: each [`Belt`] holds up to four bytes as a little-endian `u32` (fits in the base field).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BeltBytesError {
+    #[error("belt value does not fit in u32: {0}")]
+    BeltTooLarge(u64),
+}
+
 const ROOTS: &[u64] = &[
     0x0000000000000001, 0xffffffff00000000, 0x0001000000000000, 0xfffffffeff000001,
     0xefffffff00000001, 0x00003fffffffc000, 0x0000008000000000, 0xf80007ff08000001,
@@ -174,6 +181,30 @@ impl Belt {
     #[inline(always)]
     pub fn inv(&self) -> Self {
         Belt(binv(self.0))
+    }
+
+    /// Pack arbitrary bytes into belts (four little-endian bytes per belt).
+    #[inline]
+    pub fn from_le_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytes
+            .chunks(4)
+            .map(|chunk| {
+                let mut arr = [0u8; 4];
+                arr[..chunk.len()].copy_from_slice(chunk);
+                Self::from(u32::from_le_bytes(arr))
+            })
+            .collect()
+    }
+
+    /// Expand belts to bytes (inverse of [`Self::from_le_bytes`]): emits four bytes per belt.
+    #[inline]
+    pub fn to_le_bytes(belts: &[Self]) -> Result<Vec<u8>, BeltBytesError> {
+        let mut out = Vec::with_capacity(belts.len().saturating_mul(4));
+        for b in belts {
+            let w = u32::try_from(b.0).map_err(|_| BeltBytesError::BeltTooLarge(b.0))?;
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        Ok(out)
     }
 }
 
@@ -485,4 +516,18 @@ pub fn bpow(mut a: u64, mut b: u64) -> u64 {
         }
     }
     reduce((c as u128) * (a as u128))
+}
+
+#[cfg(test)]
+mod le_bytes_tests {
+    use super::Belt;
+
+    #[test]
+    fn vec_from_to_le_bytes_roundtrips_for_multiple_of_four_len() {
+        // `to_le_bytes` expands each belt to four bytes (no implicit trim).
+        let s: Vec<u8> = (0..64).collect();
+        let b = Belt::from_le_bytes(&s);
+        let out = Belt::to_le_bytes(&b).expect("fits u32");
+        assert_eq!(out, s);
+    }
 }
