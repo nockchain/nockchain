@@ -198,6 +198,12 @@ impl<'a> WordCountEstimator<'a> {
                     Self::estimate_list_words_len(bridge_w.base_event_id.len() as u64, 1);
                 1 + beid_words + 5 + 5 + 1
             }
+            DecodedNoteDataPayload::Memo(memo) | DecodedNoteDataPayload::Blob(memo) => {
+                // Packed belt list: 1 + ceil(n/4) list elements, one leaf per belt.
+                let n = memo.bytes.len() as u64;
+                let belt_count = 1 + n.saturating_add(3) / 4;
+                Self::estimate_list_words_len(belt_count, 1)
+            }
             DecodedNoteDataPayload::Raw => Self::estimate_raw_blob_words(&entry.blob),
         }
     }

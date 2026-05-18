@@ -400,6 +400,22 @@
       %-  ~(put z-by:zo nd)
       [%bridge [%0 %base (evm-address-to-based:bridge addr.metadata)]]
     ==
+  =/  memo=(unit blob-data:wt)
+    ?-    -.spec
+      %pkh           memo.spec
+      %multisig      memo.spec
+      %lock-root     ~
+      %bridge-deposit  ~
+    ==
+  =/  blob=(unit blob-data:wt)
+    ?-    -.spec
+      %pkh           blob.spec
+      %multisig      blob.spec
+      %lock-root     ~
+      %bridge-deposit  ~
+    ==
+  =.  nd  ?~(memo nd (~(put z-by:zo nd) %memo u.memo))
+  =.  nd  ?~(blob nd (~(put z-by:zo nd) %blob u.blob))
   =/  seed=seed:v1:transact
     :*  output-source=~
         lock-root=lock-root
@@ -491,7 +507,7 @@
   ::
       %pkh
     [%lock [%pkh [m=1 (z-silt:zo ~[recipient.ord])]]~ include-data]
-    ::
+  ::
       %multisig
     =/  participants=(list hash:transact)  participants.ord
     =/  allowed=(z-set:zo hash:transact)  (z-silt:zo participants)
@@ -511,8 +527,8 @@
   ?~  participants
     ~|('Invalid lock, no participants specified.' !!)
   ?:  &(=(threshold 1) =(1 (lent participants)))
-    (some [%pkh recipient=i.participants gift=gift])
-  (some [%multisig threshold=threshold participants=participants gift=gift])
+    (some [%pkh recipient=i.participants gift=gift memo=~ blob=~])
+  (some [%multisig threshold=threshold participants=participants gift=gift memo=~ blob=~])
 ::
 ++  build-refund-order
   |=  [refund=@ refund-lock=lock:transact]

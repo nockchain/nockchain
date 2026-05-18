@@ -13,3 +13,6 @@ nockvm.workspace = true
 noun-serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+base64 = "0.22"

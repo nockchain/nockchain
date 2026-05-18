@@ -1207,6 +1207,8 @@ impl Wallet {
             &[RecipientSpec::P2pkh {
                 address: destination_hash.clone(),
                 amount: 0,
+                memo: None,
+                blob: None,
             }],
             true,
         )
@@ -1304,6 +1306,8 @@ impl Wallet {
                             recipients: vec![RecipientSpec::P2pkh {
                                 address: destination_hash.clone(),
                                 amount: migrated_amount,
+                                memo: None,
+                                blob: None,
                             }],
                             fee: plan.final_fee,
                             allow_low_fee: false,
