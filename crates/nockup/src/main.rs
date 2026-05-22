@@ -15,6 +15,7 @@ async fn main() {
         Some(Commands::Package(cmd)) => commands::package::run(cmd).await,
         Some(Commands::Cache(cmd)) => commands::cache::run(cmd).await,
         Some(Commands::Channel(cmd)) => commands::channel::run(cmd).await,
+        Some(Commands::Patches(cmd)) => commands::patches::run(cmd).await,
 
         // Legacy flat commands (backward compatible)
         Some(Commands::Build { project }) => {
@@ -34,7 +35,12 @@ async fn main() {
                 "{}",
                 "warning: `nockup install` is now `nockup update`".yellow()
             );
-            commands::package::run(PackageCommand::Install).await
+            commands::package::run(PackageCommand::Install {
+                accept_patches: false,
+                dry_run: false,
+                show_patches: false,
+            })
+            .await
         }
         Some(Commands::Run { project, args }) => {
             commands::build::run(ProjectCommand::Run {

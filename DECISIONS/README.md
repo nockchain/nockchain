@@ -34,6 +34,7 @@ Canonical/Legacy: Canonical (ADR index for durable technical decisions)
 | ---- | ------------------------------- | -------- | ---------- | ---------- | -------------------------------------------------------------------------------------- |
 | 0001 | Doc Spine And Authority         | accepted | 2026-02-18 | none       | [`0001-doc-spine-and-authority.md`](./0001-doc-spine-and-authority.md)                 |
 | 0002 | Protocol-First Canonicalization | accepted | 2026-02-18 | none       | [`0002-protocol-first-canonicalization.md`](./0002-protocol-first-canonicalization.md) |
+| 0003 | Merge Master Into Long-Running Branches | accepted | 2026-05-03 | none       | [`0003-merge-master-into-long-running-branches.md`](./0003-merge-master-into-long-running-branches.md) |
 
 ## Add A New ADR
 

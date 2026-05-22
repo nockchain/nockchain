@@ -16,7 +16,18 @@ pub async fn run(cmd: PackageCommand) -> Result<()> {
         PackageCommand::Add { name, version } => add::run(name, version).await,
         PackageCommand::Remove { name } => remove::run(name).await,
         PackageCommand::List => list::run().await,
-        PackageCommand::Install => install::run().await,
+        PackageCommand::Install {
+            accept_patches,
+            dry_run,
+            show_patches,
+        } => {
+            install::run(install::InstallOptions {
+                accept_patches,
+                dry_run,
+                show_patches,
+            })
+            .await
+        }
         PackageCommand::Update => update::run().await,
         PackageCommand::Purge { dry_run } => purge::purge(dry_run).await,
         PackageCommand::Grab { .. } => {

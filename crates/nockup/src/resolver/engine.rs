@@ -6,9 +6,19 @@ use colored::Colorize;
 
 use crate::cache::PackageCache;
 use crate::git_fetcher::{GitFetcher, GitSpec};
-use crate::manifest::{DependencySpec, HoonPackage};
+use crate::manifest::{DependencySpec, HoonPackage, PackagePatch};
 use crate::resolver::types::{ResolvedGraph, ResolvedPackage};
 use crate::resolver::{registry, VersionSpec};
+
+fn load_patches_from_dir(dir: &Path) -> Result<Vec<PackagePatch>> {
+    let manifest_path = dir.join("hoon.toml");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(HoonPackage::load(&manifest_path)?
+        .map(|p| p.patches)
+        .unwrap_or_default())
+}
 
 /// Main dependency resolver
 pub struct Resolver {
@@ -148,9 +158,8 @@ impl Resolver {
         // Validate all requested source files exist
         let source_files = self.validate_source_files(&source_dir, spec)?;
 
-        // Check for transitive dependencies (look for hoon.toml in fetched repo)
-        let transitive_deps = self
-            .load_transitive_deps(repo_path.as_path(), &git_spec)
+        let (transitive_deps, patches) = self
+            .load_package_metadata(repo_path.as_path(), &git_spec)
             .await?;
 
         if !transitive_deps.is_empty() {
@@ -158,6 +167,14 @@ impl Resolver {
                 "    {} Found {} transitive dependencies",
                 "→".cyan(),
                 transitive_deps.len()
+            );
+        }
+
+        if !patches.is_empty() {
+            println!(
+                "    {} Package declares {} post-install patch(es)",
+                "→".cyan(),
+                patches.len()
             );
         }
 
@@ -194,6 +211,7 @@ impl Resolver {
                 Some(source_files)
             },
             dependencies: transitive_deps,
+            patches,
         })
     }
 
@@ -218,6 +236,11 @@ impl Resolver {
                 _ => None,
             };
 
+            // The cache stores the *contents of the source path*, so the
+            // package's own hoon.toml (if any) lives at the cache root.
+            let cached_path = self.cache.package_path(name, &version_str);
+            let patches = load_patches_from_dir(&cached_path).unwrap_or_default();
+
             return Ok(Some(ResolvedPackage {
                 name: name.to_string(),
                 version_spec,
@@ -227,6 +250,7 @@ impl Resolver {
                 install_path: git_spec.install_path,
                 source_files,
                 dependencies: HashMap::new(), // TODO: Store in cache metadata
+                patches,
             }));
         }
 
@@ -337,13 +361,13 @@ impl Resolver {
         }
     }
 
-    /// Load transitive dependencies from a fetched package
-    async fn load_transitive_deps(
+    /// Read the package's `hoon.toml` to pick up transitive deps and any
+    /// `[[patches]]` block in one pass.
+    async fn load_package_metadata(
         &self,
         repo_path: &Path,
         git_spec: &GitSpec,
-    ) -> Result<HashMap<String, DependencySpec>> {
-        // Check for hoon.toml in the fetched repo
+    ) -> Result<(HashMap<String, DependencySpec>, Vec<PackagePatch>)> {
         let manifest_path = if let Some(ref subdir) = git_spec.path {
             repo_path.join(subdir).join("hoon.toml")
         } else {
@@ -351,14 +375,15 @@ impl Resolver {
         };
 
         if !manifest_path.exists() {
-            // No transitive dependencies
-            return Ok(HashMap::new());
+            return Ok((HashMap::new(), Vec::new()));
         }
 
-        // Load and parse manifest
         match HoonPackage::load(&manifest_path)? {
-            Some(pkg) => Ok(pkg.dependencies.unwrap_or_default().into_iter().collect()),
-            None => Ok(HashMap::new()),
+            Some(pkg) => Ok((
+                pkg.dependencies.unwrap_or_default().into_iter().collect(),
+                pkg.patches,
+            )),
+            None => Ok((HashMap::new(), Vec::new())),
         }
     }
 

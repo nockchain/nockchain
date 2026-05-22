@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::manifest::DependencySpec;
+use crate::manifest::{DependencySpec, PackagePatch};
 use crate::resolver::VersionSpec;
 
 /// A resolved package with exact commit and dependencies
@@ -14,6 +14,10 @@ pub struct ResolvedPackage {
     pub install_path: Option<String>, // Subdir to install to (e.g., "sys")
     pub source_files: Option<Vec<String>>, // Specific files to extract (if any)
     pub dependencies: HashMap<String, DependencySpec>, // Transitive deps
+    /// Post-install patches the package wants applied to the consumer
+    /// project. Populated from the package's own `hoon.toml` / `nockapp.toml`
+    /// at resolve time; the install step hands these to the patch engine.
+    pub patches: Vec<PackagePatch>,
 }
 
 /// A resolved dependency graph

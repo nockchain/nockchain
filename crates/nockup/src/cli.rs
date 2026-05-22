@@ -28,6 +28,10 @@ pub enum Commands {
     #[command(subcommand)]
     Channel(ChannelCommand),
 
+    /// Manage post-install patches declared by installed packages.
+    #[command(subcommand)]
+    Patches(PatchesCommand),
+
     // Legacy flat commands (backward compatible)
     /// Build a NockApp project
     #[command(hide = true)]
@@ -100,7 +104,17 @@ pub enum PackageCommand {
     List,
 
     /// Install dependencies from nockapp.toml
-    Install,
+    Install {
+        /// Apply declared post-install patches without prompting (for CI).
+        #[arg(long)]
+        accept_patches: bool,
+        /// Plan patches but don't touch the filesystem.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the planned patch set.
+        #[arg(long)]
+        show_patches: bool,
+    },
 
     /// Update dependencies to latest versions
     Update,
@@ -143,4 +157,13 @@ pub enum CacheCommand {
 pub enum ChannelCommand {
     Show,
     Set { channel: String },
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum PatchesCommand {
+    /// Drop a package's applied-patches ledger entries. Files on disk
+    /// stay as-they-are; a later install re-prompts.
+    Eject { package: String },
+    /// Print the applied-patches ledger for the current project.
+    List,
 }

@@ -7,9 +7,18 @@ use colored::Colorize;
 
 use crate::cache::PackageCache;
 use crate::manifest::{HoonPackage, LockSource, LockedPackage, NockAppLock};
+use crate::patches::{self, PatchOptions};
 use crate::resolver::Resolver;
 
-pub async fn run() -> Result<()> {
+/// Install-time flags surfaced from the CLI.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct InstallOptions {
+    pub accept_patches: bool,
+    pub dry_run: bool,
+    pub show_patches: bool,
+}
+
+pub async fn run(opts: InstallOptions) -> Result<()> {
     let cwd = env::current_dir()?;
     let manifest_path = cwd.join("nockapp.toml");
 
@@ -73,7 +82,10 @@ pub async fn run() -> Result<()> {
     fs::create_dir_all(&lib_dir).context("Failed to create hoon/lib directory")?;
     fs::create_dir_all(&sur_dir).context("Failed to create hoon/sur directory")?;
 
-    // Install packages in topological order
+    // Install packages in topological order. Seed `applied_patches`
+    // from the existing lockfile so re-installs don't lose the ledger.
+    let lock_path = project_dir.join("nockapp.lock");
+    let existing_lock = NockAppLock::load(&lock_path).unwrap_or(NockAppLock { package: vec![] });
     let mut locked_packages = Vec::new();
 
     for pkg_name in &graph.install_order {
@@ -156,7 +168,15 @@ pub async fn run() -> Result<()> {
             )?;
         }
 
-        // Add to lockfile
+        // Add to lockfile. `applied_patches` is seeded from the prior
+        // ledger so re-installs don't lose entries; the patch engine
+        // overwrites it below if it actually applies anything.
+        let prior_applied = existing_lock
+            .package
+            .iter()
+            .find(|p| p.name == pkg.name)
+            .map(|p| p.applied_patches.clone())
+            .unwrap_or_default();
         locked_packages.push(LockedPackage {
             name: pkg.name.clone(),
             version: display_version.clone(),
@@ -165,6 +185,7 @@ pub async fn run() -> Result<()> {
                 commit: pkg.commit.clone(),
                 path: pkg.source_path.clone(),
             },
+            applied_patches: prior_applied,
         });
     }
 
@@ -175,14 +196,133 @@ pub async fn run() -> Result<()> {
         graph.packages.len()
     );
 
+    // --- Post-install patches --------------------------------------------
+    let prior_ledger = |name: &str| -> Vec<crate::manifest::AppliedPatch> {
+        existing_lock
+            .package
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.applied_patches.clone())
+            .unwrap_or_default()
+    };
+
+    let patch_plan: Vec<(usize, &crate::resolver::types::ResolvedPackage)> = locked_packages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, locked)| {
+            graph
+                .packages
+                .get(&locked.name)
+                .filter(|pkg| !pkg.patches.is_empty())
+                .map(|pkg| (i, pkg))
+        })
+        .collect();
+
+    if !patch_plan.is_empty() {
+        let summary: String = patch_plan
+            .iter()
+            .map(|(_, pkg)| patches::summarize(&project_dir, &pkg.name, &pkg.patches))
+            .collect();
+
+        if opts.show_patches {
+            println!();
+            println!("{}", "Planned patches:".bold());
+            print!("{}", summary);
+        }
+
+        #[derive(PartialEq)]
+        enum Decision {
+            Apply,
+            Skip,      // user declined, or every patch is already in shape
+            PlanOnly,  // dry-run
+        }
+        let decision = if opts.dry_run {
+            Decision::PlanOnly
+        } else if opts.accept_patches {
+            Decision::Apply
+        } else {
+            // Pre-plan via dry-run: if nothing would change, skip the prompt.
+            let needs_work = patch_plan.iter().try_fold(false, |acc, (_, pkg)| {
+                if acc {
+                    return Ok::<bool, anyhow::Error>(true);
+                }
+                let report = patches::apply_patches(
+                    &project_dir,
+                    &pkg.patches,
+                    &prior_ledger(&pkg.name),
+                    PatchOptions { dry_run: true },
+                )?;
+                Ok(!report.nothing_to_do())
+            })?;
+            if !needs_work {
+                println!("  {} Patches already applied; nothing to do", "✓".green());
+                Decision::Skip
+            } else {
+                let names: Vec<_> = patch_plan.iter().map(|(_, p)| p.name.as_str()).collect();
+                if patches::prompt_user(&names.join(", "), &summary)? {
+                    Decision::Apply
+                } else {
+                    println!(
+                        "{} Declined; re-run with `--accept-patches` to apply.",
+                        "·".dimmed()
+                    );
+                    Decision::Skip
+                }
+            }
+        };
+
+        match decision {
+            Decision::Apply => {
+                for (i, pkg) in &patch_plan {
+                    let report = patches::apply_patches(
+                        &project_dir,
+                        &pkg.patches,
+                        &prior_ledger(&pkg.name),
+                        PatchOptions { dry_run: false },
+                    )?;
+                    if !report.refused.is_empty() {
+                        println!();
+                        println!(
+                            "{} {} patch(es) refused:",
+                            "⚠".yellow(),
+                            report.refused.len()
+                        );
+                        for r in &report.refused {
+                            println!("    {} {}: {}", "·".dimmed(), r.file.yellow(), r.reason);
+                        }
+                    }
+                    if !report.applied.is_empty() {
+                        println!(
+                            "  {} Recorded {} patch ledger entry(ies) for {}",
+                            "✓".green(),
+                            report.applied.len(),
+                            pkg.name.yellow()
+                        );
+                    }
+                    locked_packages[*i].applied_patches = report.applied;
+                }
+            }
+            Decision::PlanOnly => {
+                println!();
+                println!(
+                    "{} Dry run — no files modified ({} patches would be applied)",
+                    "·".dimmed(),
+                    patch_plan.iter().map(|(_, p)| p.patches.len()).sum::<usize>()
+                );
+            }
+            Decision::Skip => { /* already printed its own reason above */ }
+        }
+    }
+
     // Generate/update lockfile
-    let lock_path = project_dir.join("nockapp.lock");
     let lockfile = NockAppLock {
         package: locked_packages,
     };
 
-    lockfile.save(&lock_path)?;
-    println!("  Updated nockapp.lock");
+    if !opts.dry_run {
+        lockfile.save(&lock_path)?;
+        println!("  Updated nockapp.lock");
+    }
 
     Ok(())
 }
