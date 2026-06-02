@@ -1,0 +1,12 @@
+{
+  "schema_version": "trusted-orchestrate-run/v1",
+  "run_id": "run-0",
+  "success": true,
+  "error": null,
+  "steps_per_second": 2.0,
+  "pokes_per_second": 1.5,
+  "raw_tx_pokes_per_second": 4.0,
+  "peak_process_rss_bytes": 67108864,
+  "minor_faults_total": null,
+  "major_faults_total": null
+}

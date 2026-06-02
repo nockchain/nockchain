@@ -1,0 +1,6 @@
+{
+  "Id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "Config": {
+    "Image": "nockchain-bench:local"
+  }
+}

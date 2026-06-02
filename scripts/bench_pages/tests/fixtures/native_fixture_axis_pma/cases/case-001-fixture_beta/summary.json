@@ -1,0 +1,74 @@
+{
+  "measured_runs_requested": 3,
+  "measured_runs_succeeded": 3,
+  "failed_runs": [],
+  "throughput_blocks_per_second": {
+    "median": 22.0,
+    "min": 21.0,
+    "max": 23.0,
+    "mad": 1.0,
+    "stddev": 0.816496580927726,
+    "cv": 0.03711348186035118,
+    "values": [
+      21.0,
+      22.0,
+      23.0
+    ]
+  },
+  "init_time_secs": {
+    "median": 1.8,
+    "min": 1.7,
+    "max": 1.9,
+    "mad": 0.1,
+    "stddev": 0.08164965809277262,
+    "cv": 0.04536092116265146,
+    "values": [
+      1.7,
+      1.8,
+      1.9
+    ]
+  },
+  "total_replay_time_secs": {
+    "median": 3.9,
+    "min": 3.7,
+    "max": 4.1,
+    "mad": 0.2,
+    "stddev": 0.16329931618554522,
+    "cv": 0.04187161953475518,
+    "values": [
+      3.7,
+      3.9,
+      4.1
+    ]
+  },
+  "average_block_time_ms": {
+    "median": 39.0,
+    "min": 37.0,
+    "max": 41.0,
+    "mad": 2.0,
+    "stddev": 1.6329931618554523,
+    "cv": 0.04187161953475518,
+    "values": [
+      37.0,
+      39.0,
+      41.0
+    ]
+  },
+  "failed_pokes": {
+    "median": 0.0,
+    "min": 0.0,
+    "max": 0.0,
+    "mad": 0.0,
+    "stddev": 0.0,
+    "cv": 0.0,
+    "values": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "new_metric_total": 702,
+  "peak_process_rss_bytes": null,
+  "minor_faults_total": null,
+  "major_faults_total": null
+}

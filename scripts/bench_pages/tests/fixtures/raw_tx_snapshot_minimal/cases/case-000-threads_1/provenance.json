@@ -1,0 +1,34 @@
+{
+  "schema_version": "1",
+  "capture_timestamp_ms": 1773251558000,
+  "host": {
+    "hostname": "native-host",
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "6.8.0",
+    "cpu_count": 16,
+    "total_memory_bytes": 68719476736,
+    "cpu_model": "Synthetic Native CPU"
+  },
+  "git": {
+    "commit": "2222222222222222222222222222222222222222",
+    "branch": "bench-pages-fixture",
+    "commit_date": "2026-05-29T00:00:00Z",
+    "dirty": false
+  },
+  "backend": {
+    "Native": {
+      "build_profile": "release"
+    }
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "2222222222222222222222222222222222222222"
+  },
+  "runtime_flavor": "pma",
+  "boot_source": "snapshot",
+  "boot_event_num": 10013,
+  "fixture_path": "scripts/bench_pages/tests/fixtures/raw_tx_snapshot_minimal/raw-tx-snapshot.soltest",
+  "fixture_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+}

@@ -1,0 +1,136 @@
+{
+  "axis_names": [
+    "threads"
+  ],
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "case-000-threads_1",
+      "axis_assignments": {
+        "threads": 1
+      },
+      "output_root": "/shared/nockchain/scripts/bench_pages/tests/fixtures/native_minimal/cases/case-000-threads_1",
+      "resolved_case": {
+        "schema_version": "1",
+        "requested": {
+          "benchmark": "sol-replay",
+          "label": "native-minimal",
+          "fixture_path": "fixtures/native-minimal.soltest",
+          "blocks": 100,
+          "skip_genesis": false,
+          "profile_memory": false,
+          "profile_interval_ms": 500,
+          "execution": {
+            "Native": {}
+          },
+          "threads": 1,
+          "warmup_runs": 0,
+          "measured_runs": 3,
+          "cooldown_secs": 0
+        },
+        "absolute_fixture_path": "/shared/nockchain/scripts/bench_pages/tests/fixtures/native_minimal/native-minimal.soltest",
+        "fixture_sha256_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "fixture_manifest": {
+          "source_archive_path": "/shared/nockchain/solarch/native-minimal.solarch",
+          "source_archive_event_num": 1,
+          "derived_checkpoint_height": 0,
+          "derived_checkpoint_event_num": 1,
+          "archive_start_height": 1,
+          "archive_end_height": 100,
+          "include_mempool": false,
+          "chunk_size": 8,
+          "kernel_hash_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "checkpoint_hash_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "archive_hash_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        },
+        "execution_config": {
+          "gc_drop_threshold_mib": 64,
+          "page_fault_minor_burst_threshold": 50000,
+          "page_fault_major_burst_threshold": 1
+        },
+        "binary": {
+          "version": "0.1.0",
+          "build_profile": "release",
+          "git_commit": "1111111111111111111111111111111111111111"
+        }
+      },
+      "summary": {
+        "measured_runs_requested": 3,
+        "measured_runs_succeeded": 3,
+        "failed_runs": [],
+        "throughput_blocks_per_second": {
+          "median": 21.0,
+          "min": 20.0,
+          "max": 22.0,
+          "mad": 1.0,
+          "stddev": 0.816496580927726,
+          "cv": 0.03888078956703457,
+          "values": [
+            20.0,
+            21.0,
+            22.0
+          ]
+        },
+        "init_time_secs": {
+          "median": 2.0,
+          "min": 1.9,
+          "max": 2.1,
+          "mad": 0.1,
+          "stddev": 0.08164965809277258,
+          "cv": 0.04082482904638629,
+          "values": [
+            1.9,
+            2.0,
+            2.1
+          ]
+        },
+        "total_replay_time_secs": {
+          "median": 4.0,
+          "min": 3.8,
+          "max": 4.2,
+          "mad": 0.2,
+          "stddev": 0.16329931618554516,
+          "cv": 0.04082482904638629,
+          "values": [
+            3.8,
+            4.0,
+            4.2
+          ]
+        },
+        "average_block_time_ms": {
+          "median": 40.0,
+          "min": 38.0,
+          "max": 42.0,
+          "mad": 2.0,
+          "stddev": 1.6329931618554523,
+          "cv": 0.04082482904638629,
+          "values": [
+            38.0,
+            40.0,
+            42.0
+          ]
+        },
+        "failed_pokes": {
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mad": 0.0,
+          "stddev": 0.0,
+          "cv": 0.0,
+          "values": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "peak_process_rss_bytes": null,
+        "minor_faults_total": null,
+        "major_faults_total": null
+      },
+      "verdict": {
+        "validity": "Valid"
+      }
+    }
+  ],
+  "invariant_violations": []
+}

@@ -2,13 +2,13 @@
 #![allow(clippy::items_after_test_module)]
 #![allow(clippy::missing_safety_doc)]
 use std::any::Any;
-use std::fs;
 use std::future::Future;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{fs, io};
 
 use bincode::{config, Decode, Encode};
 use blake3::{Hash, Hasher};
@@ -25,6 +25,7 @@ use nockvm::offset::PmaOffsetWords;
 use nockvm::pma::{Pma, PmaCopy, PmaCopyFrom};
 use nockvm::trace::{path_to_cord, write_serf_trace_safe};
 use nockvm_macros::tas;
+use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -37,7 +38,9 @@ use crate::noun::slab::{Jammer, NockJammer, NounSlab};
 use crate::noun::slam;
 use crate::save::SaveableCheckpoint;
 use crate::snapshot::{
-    maybe_create_epoch_snapshot, maybe_create_rotating_snapshot, SnapshotManifest,
+    maybe_create_epoch_snapshot, maybe_create_rotating_snapshot,
+    restore_verified_snapshot_from_paths, verify_snapshot, SnapshotManifest, SnapshotManifestError,
+    SnapshotRestoreError, SnapshotVerifyError, SnapshotVerifyMode,
 };
 use crate::utils::{
     create_context, current_da, durability, NOCK_STACK_SIZE, NOCK_STACK_SIZE_HUGE,
@@ -238,6 +241,119 @@ pub struct LoadState {
     pub kernel_state: NounSlab,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotReplayInfo {
+    pub event_num: u64,
+    pub pma_words: u64,
+    pub alloc_words: u64,
+}
+
+#[derive(Debug, Error)]
+pub enum SnapshotReplayConfigError {
+    #[error("snapshot manifest error for {manifest_path}: {message}")]
+    Manifest {
+        manifest_path: PathBuf,
+        message: String,
+    },
+    #[error(
+        "snapshot verification failed for manifest {manifest_path} and PMA {pma_path}: {message}"
+    )]
+    Verify {
+        manifest_path: PathBuf,
+        pma_path: PathBuf,
+        message: String,
+    },
+    #[error("failed to copy snapshot PMA from {source_path} to {destination}: {source_error}")]
+    Copy {
+        source_path: PathBuf,
+        destination: PathBuf,
+        #[source]
+        source_error: io::Error,
+    },
+    #[error("failed to remove stale replay PMA artifact {path}: {source_error}")]
+    RemoveStale {
+        path: PathBuf,
+        source_error: io::Error,
+    },
+}
+
+pub fn inspect_snapshot_replay_source(
+    snapshot_pma_path: &Path,
+    snapshot_manifest_path: &Path,
+) -> std::result::Result<SnapshotReplayInfo, SnapshotReplayConfigError> {
+    SnapshotManifest::read_from_path(snapshot_manifest_path)
+        .map_err(|err| snapshot_manifest_error(snapshot_manifest_path, err))?;
+    let verification = verify_snapshot(
+        snapshot_manifest_path,
+        snapshot_pma_path,
+        SnapshotVerifyMode::Fast,
+    )
+    .map_err(|err| snapshot_verify_error(snapshot_manifest_path, snapshot_pma_path, err))?;
+    Ok(snapshot_replay_info(&verification.manifest))
+}
+
+fn snapshot_replay_info(manifest: &SnapshotManifest) -> SnapshotReplayInfo {
+    SnapshotReplayInfo {
+        event_num: manifest.event_num,
+        pma_words: manifest.pma_words,
+        alloc_words: manifest.alloc_words,
+    }
+}
+
+fn snapshot_manifest_error(
+    manifest_path: &Path,
+    err: SnapshotManifestError,
+) -> SnapshotReplayConfigError {
+    SnapshotReplayConfigError::Manifest {
+        manifest_path: manifest_path.to_path_buf(),
+        message: err.to_string(),
+    }
+}
+
+fn snapshot_verify_error(
+    manifest_path: &Path,
+    pma_path: &Path,
+    err: SnapshotVerifyError,
+) -> SnapshotReplayConfigError {
+    match err {
+        SnapshotVerifyError::Manifest(err) => snapshot_manifest_error(manifest_path, err),
+        err => SnapshotReplayConfigError::Verify {
+            manifest_path: manifest_path.to_path_buf(),
+            pma_path: pma_path.to_path_buf(),
+            message: err.to_string(),
+        },
+    }
+}
+
+fn snapshot_restore_error(
+    manifest_path: &Path,
+    pma_path: &Path,
+    replay_pma_0: &Path,
+    err: SnapshotRestoreError,
+) -> SnapshotReplayConfigError {
+    match err {
+        SnapshotRestoreError::Verify(err) => snapshot_verify_error(manifest_path, pma_path, err),
+        SnapshotRestoreError::Io(source_error) => SnapshotReplayConfigError::Copy {
+            source_path: pma_path.to_path_buf(),
+            destination: replay_pma_0.to_path_buf(),
+            source_error,
+        },
+    }
+}
+
+fn remove_stale_snapshot_replay_artifact(
+    path: &Path,
+) -> std::result::Result<(), SnapshotReplayConfigError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source_error) => Err(SnapshotReplayConfigError::RemoveStale {
+            path: path.to_path_buf(),
+            source_error,
+        }),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PmaConfig {
     pub path_0: PathBuf,
@@ -249,6 +365,71 @@ pub struct PmaConfig {
     pub rotating_snapshot_interval_event_time: Option<Duration>,
     pub(crate) restore_manifest: Option<SnapshotManifest>,
     pub gc_interval: Option<Duration>,
+}
+
+impl PmaConfig {
+    pub fn for_replay(
+        path_0: PathBuf,
+        path_1: PathBuf,
+        words: usize,
+        gc_interval: Option<Duration>,
+        fsync_enabled: bool,
+    ) -> Self {
+        durability::set_fsync_disabled(!fsync_enabled);
+        Self {
+            path_0,
+            path_1,
+            words,
+            reserved_words: None,
+            open_existing: false,
+            create_snapshots: false,
+            rotating_snapshot_interval_event_time: None,
+            restore_manifest: None,
+            gc_interval,
+        }
+    }
+
+    pub fn for_snapshot_replay(
+        snapshot_pma_path: &Path,
+        snapshot_manifest_path: &Path,
+        replay_pma_0: PathBuf,
+        replay_pma_1: PathBuf,
+        words: usize,
+        gc_interval: Option<Duration>,
+        fsync_enabled: bool,
+    ) -> std::result::Result<(Self, SnapshotReplayInfo), SnapshotReplayConfigError> {
+        // This matches `for_replay`: fsync mode is a process-global durability
+        // setting, so the snapshot replay constructor must thread it explicitly.
+        durability::set_fsync_disabled(!fsync_enabled);
+        for stale in
+            [replay_pma_1.clone(), pma_meta_path(&replay_pma_0), pma_meta_path(&replay_pma_1)]
+        {
+            remove_stale_snapshot_replay_artifact(&stale)?;
+        }
+        let manifest = restore_verified_snapshot_from_paths(
+            snapshot_manifest_path, snapshot_pma_path, &replay_pma_0,
+        )
+        .map_err(|err| {
+            snapshot_restore_error(
+                snapshot_manifest_path, snapshot_pma_path, &replay_pma_0, err,
+            )
+        })?;
+        let info = snapshot_replay_info(&manifest);
+        Ok((
+            Self {
+                path_0: replay_pma_0,
+                path_1: replay_pma_1,
+                words,
+                reserved_words: None,
+                open_existing: true,
+                create_snapshots: false,
+                rotating_snapshot_interval_event_time: None,
+                restore_manifest: Some(manifest),
+                gc_interval,
+            },
+            info,
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -3427,7 +3608,9 @@ impl Serf {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
+    use std::io::Read;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     use blake3::hash;
     use bytes::Bytes;
@@ -3437,8 +3620,306 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::snapshot::SnapshotKind;
 
     const DUMB_KERNEL_JAM: &[u8] = include_bytes!(env!("DUMB_JAM_PATH"));
+    static FSYNC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct FsyncDisabledReset(bool);
+
+    impl Drop for FsyncDisabledReset {
+        fn drop(&mut self) {
+            durability::set_fsync_disabled(self.0);
+        }
+    }
+
+    #[test]
+    fn for_replay_builds_replay_config_and_threads_fsync_mode() {
+        let _lock = FSYNC_TEST_LOCK.lock().expect("fsync test lock");
+        let _reset = FsyncDisabledReset(durability::fsync_disabled());
+
+        let path_0 = PathBuf::from("replay-pma/0.pma");
+        let path_1 = PathBuf::from("replay-pma/1.pma");
+
+        let enabled = PmaConfig::for_replay(path_0.clone(), path_1.clone(), 1234, None, true);
+        assert_eq!(enabled.path_0, path_0);
+        assert_eq!(enabled.path_1, path_1);
+        assert_eq!(enabled.words, 1234);
+        assert_eq!(enabled.reserved_words, None);
+        assert!(!enabled.open_existing);
+        assert!(!enabled.create_snapshots);
+        assert!(enabled.rotating_snapshot_interval_event_time.is_none());
+        assert!(enabled.restore_manifest.is_none());
+        assert!(enabled.gc_interval.is_none());
+        assert!(!durability::fsync_disabled());
+
+        let disabled = PmaConfig::for_replay(
+            PathBuf::from("a"),
+            PathBuf::from("b"),
+            1,
+            Some(Duration::from_secs(7)),
+            false,
+        );
+        assert_eq!(disabled.reserved_words, None);
+        assert_eq!(disabled.gc_interval, Some(Duration::from_secs(7)));
+        assert!(durability::fsync_disabled());
+    }
+
+    struct TestSnapshot {
+        _dir: TempDir,
+        pma_path: PathBuf,
+        manifest_path: PathBuf,
+        manifest: SnapshotManifest,
+    }
+
+    fn hash_file_prefix_for_test(path: &Path, len: u64) -> [u8; blake3::OUT_LEN] {
+        let mut file = fs::File::open(path).expect("open pma");
+        let mut remaining = len;
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 8192];
+        while remaining > 0 {
+            let limit = usize::try_from(remaining.min(buffer.len() as u64)).expect("chunk fits");
+            let read = file.read(&mut buffer[..limit]).expect("read pma");
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+            remaining -= u64::try_from(read).expect("read len fits");
+        }
+        hasher.finalize().into()
+    }
+
+    fn build_snapshot_replay_test_source() -> TestSnapshot {
+        let dir = TempDir::new().expect("temp dir");
+        let pma_path = dir.path().join("snapshot.pma");
+        let manifest_path = dir.path().join("snapshot.manifest");
+        let mut stack = NockStack::new(1 << 20, 0);
+        let mut pma = Pma::new(1 << 10, pma_path.clone()).expect("create test PMA");
+        let pma_words = u64::try_from(pma.size_words()).expect("pma size fits");
+
+        let mut cold = Cold::new(&mut stack);
+        let mut root: Noun = T(&mut stack, &[D(42), D(0)]);
+        unsafe {
+            cold.copy_to_pma(&stack, &mut pma);
+            root.copy_to_pma(&stack, &mut pma);
+        }
+        let cold_offset = cold.pma_offset(&pma).expect("cold offset");
+        let root_raw = unsafe { root.as_raw() };
+        pma.sync_used_data().expect("sync used");
+        pma.sync_trailer().expect("sync trailer");
+        durability::sync_path_data(pma.path(), "snapshot_replay_test_source_fdatasync")
+            .expect("sync PMA");
+        let alloc_words = pma.alloc_offset_words();
+        drop(pma);
+
+        let manifest = SnapshotManifest::new(
+            SnapshotKind::Epoch,
+            "epoch".to_string(),
+            hash(b"kernel"),
+            7,
+            pma_words,
+            alloc_words.into(),
+            root_raw,
+            cold_offset,
+            Hash::from_bytes(hash_file_prefix_for_test(
+                &pma_path,
+                alloc_words
+                    .checked_bytes()
+                    .expect("pma alloc fits in bytes"),
+            )),
+            None,
+            1234,
+        )
+        .expect("manifest");
+        manifest
+            .write_to_path(&manifest_path)
+            .expect("write manifest");
+
+        TestSnapshot {
+            _dir: dir,
+            pma_path,
+            manifest_path,
+            manifest,
+        }
+    }
+
+    fn rewrite_manifest_for_test(manifest_path: &Path, manifest: &SnapshotManifest) {
+        manifest
+            .write_to_path(manifest_path)
+            .expect("write test manifest");
+    }
+
+    fn rebuild_manifest_for_test(
+        source: &SnapshotManifest,
+        pma_words: u64,
+        alloc_words: u64,
+        used_blake3: [u8; blake3::OUT_LEN],
+    ) -> SnapshotManifest {
+        SnapshotManifest::new(
+            source.kind,
+            source.timestamp_tag.clone(),
+            Hash::from_bytes(source.ker_hash),
+            source.event_num,
+            pma_words,
+            alloc_words,
+            source.kernel_root_raw,
+            source.cold_offset,
+            Hash::from_bytes(used_blake3),
+            source.structure_blake3.map(Hash::from_bytes),
+            source.created_at_ms,
+        )
+        .expect("rebuild manifest")
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_returns_event_num() {
+        let source = build_snapshot_replay_test_source();
+
+        let info = inspect_snapshot_replay_source(&source.pma_path, &source.manifest_path)
+            .expect("inspect snapshot replay source");
+
+        assert_eq!(info.event_num, source.manifest.event_num);
+        assert_eq!(info.pma_words, source.manifest.pma_words);
+        assert_eq!(info.alloc_words, source.manifest.alloc_words);
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_missing_manifest() {
+        let source = build_snapshot_replay_test_source();
+        let missing_manifest = source.manifest_path.with_file_name("missing.manifest");
+
+        let err = inspect_snapshot_replay_source(&source.pma_path, &missing_manifest)
+            .expect_err("missing manifest should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Manifest { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_missing_pma() {
+        let source = build_snapshot_replay_test_source();
+        let missing_pma = source.pma_path.with_file_name("missing.pma");
+
+        let err = inspect_snapshot_replay_source(&missing_pma, &source.manifest_path)
+            .expect_err("missing PMA should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Verify { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_manifest_checksum_failure() {
+        let source = build_snapshot_replay_test_source();
+        let mut manifest_bytes = fs::read(&source.manifest_path).expect("read manifest");
+        let first = manifest_bytes.first_mut().expect("manifest not empty");
+        *first ^= 0xff;
+        fs::write(&source.manifest_path, manifest_bytes).expect("corrupt manifest");
+
+        let err = inspect_snapshot_replay_source(&source.pma_path, &source.manifest_path)
+            .expect_err("corrupt manifest should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Manifest { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_pma_words_mismatch() {
+        let source = build_snapshot_replay_test_source();
+        let manifest = rebuild_manifest_for_test(
+            &source.manifest,
+            source.manifest.pma_words + 1,
+            source.manifest.alloc_words,
+            source.manifest.used_blake3,
+        );
+        rewrite_manifest_for_test(&source.manifest_path, &manifest);
+
+        let err = inspect_snapshot_replay_source(&source.pma_path, &source.manifest_path)
+            .expect_err("pma words mismatch should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Verify { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_alloc_words_mismatch() {
+        let source = build_snapshot_replay_test_source();
+        let manifest = rebuild_manifest_for_test(
+            &source.manifest,
+            source.manifest.pma_words,
+            source.manifest.alloc_words + 1,
+            source.manifest.used_blake3,
+        );
+        rewrite_manifest_for_test(&source.manifest_path, &manifest);
+
+        let err = inspect_snapshot_replay_source(&source.pma_path, &source.manifest_path)
+            .expect_err("alloc words mismatch should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Verify { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_inspect_rejects_used_prefix_hash_mismatch() {
+        let source = build_snapshot_replay_test_source();
+        let manifest = rebuild_manifest_for_test(
+            &source.manifest,
+            source.manifest.pma_words,
+            source.manifest.alloc_words,
+            [7; blake3::OUT_LEN],
+        );
+        rewrite_manifest_for_test(&source.manifest_path, &manifest);
+
+        let err = inspect_snapshot_replay_source(&source.pma_path, &source.manifest_path)
+            .expect_err("used prefix hash mismatch should fail");
+
+        assert!(matches!(err, SnapshotReplayConfigError::Verify { .. }));
+    }
+
+    #[test]
+    fn snapshot_replay_config_copies_source_and_prepares_existing_pma_restore() {
+        let _lock = FSYNC_TEST_LOCK.lock().expect("fsync test lock");
+        let _reset = FsyncDisabledReset(durability::fsync_disabled());
+        let source = build_snapshot_replay_test_source();
+        let replay_dir = TempDir::new().expect("replay dir");
+        let replay_pma_0 = replay_dir.path().join("0.pma");
+        let replay_pma_1 = replay_dir.path().join("1.pma");
+        let replay_meta_0 = replay_pma_0.with_extension("meta");
+        let replay_meta_1 = replay_pma_1.with_extension("meta");
+        fs::write(&replay_pma_0, b"old 0").expect("write stale 0");
+        fs::write(&replay_pma_1, b"old 1").expect("write stale 1");
+        fs::write(&replay_meta_0, b"old meta 0").expect("write stale meta 0");
+        fs::write(&replay_meta_1, b"old meta 1").expect("write stale meta 1");
+
+        let (config, info) = PmaConfig::for_snapshot_replay(
+            &source.pma_path,
+            &source.manifest_path,
+            replay_pma_0.clone(),
+            replay_pma_1.clone(),
+            1234,
+            Some(Duration::from_secs(9)),
+            false,
+        )
+        .expect("snapshot replay config");
+
+        assert_eq!(info.event_num, source.manifest.event_num);
+        assert_eq!(
+            fs::read(&replay_pma_0).expect("read replay pma"),
+            fs::read(&source.pma_path).expect("read source pma")
+        );
+        assert!(!replay_pma_1.exists(), "stale 1.pma should be removed");
+        assert!(!replay_meta_0.exists(), "stale 0.meta should be removed");
+        assert!(!replay_meta_1.exists(), "stale 1.meta should be removed");
+        assert_eq!(config.path_0, replay_pma_0);
+        assert_eq!(config.path_1, replay_pma_1);
+        assert_eq!(config.words, 1234);
+        assert!(config.open_existing);
+        assert!(!config.create_snapshots);
+        assert!(config.rotating_snapshot_interval_event_time.is_none());
+        assert_eq!(config.gc_interval, Some(Duration::from_secs(9)));
+        assert_eq!(
+            config
+                .restore_manifest
+                .as_ref()
+                .map(|manifest| manifest.event_num),
+            Some(source.manifest.event_num)
+        );
+        assert!(durability::fsync_disabled());
+    }
 
     fn dummy_serf() -> Serf {
         let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);

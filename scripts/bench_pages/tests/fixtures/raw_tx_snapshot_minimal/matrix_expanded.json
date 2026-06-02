@@ -1,0 +1,24 @@
+[
+  {
+    "case_id": "case-000-threads_1",
+    "axis_assignments": {
+      "threads": 1
+    },
+    "requested_case": {
+      "benchmark": "sol-orchestrate",
+      "label": "raw-tx-snapshot",
+      "fixture_path": "fixtures/raw-tx-snapshot.soltest",
+      "blocks": 3,
+      "skip_genesis": false,
+      "profile_memory": false,
+      "profile_interval_ms": 500,
+      "execution": {
+        "Native": {}
+      },
+      "threads": 1,
+      "warmup_runs": 0,
+      "measured_runs": 1,
+      "cooldown_secs": 0
+    }
+  }
+]

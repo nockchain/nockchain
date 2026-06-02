@@ -486,13 +486,21 @@ pub(crate) fn restore_verified_snapshot(
     record: &ReadySnapshotRecord,
     operative_pma_path: &Path,
 ) -> Result<SnapshotManifest, SnapshotRestoreError> {
-    let verification = verify_snapshot(
+    restore_verified_snapshot_from_paths(
         Path::new(&record.manifest_path),
         Path::new(&record.pma_path),
-        SnapshotVerifyMode::Full,
-    )?;
+        operative_pma_path,
+    )
+}
+
+pub(crate) fn restore_verified_snapshot_from_paths(
+    manifest_path: &Path,
+    pma_path: &Path,
+    operative_pma_path: &Path,
+) -> Result<SnapshotManifest, SnapshotRestoreError> {
+    let verification = verify_snapshot(manifest_path, pma_path, SnapshotVerifyMode::Full)?;
     let tmp_path = operative_pma_path.with_extension("restore.tmp");
-    copy_snapshot_file(Path::new(&record.pma_path), &tmp_path)?;
+    copy_snapshot_file(pma_path, &tmp_path)?;
     replace_file(&tmp_path, operative_pma_path)?;
     Ok(verification.manifest)
 }

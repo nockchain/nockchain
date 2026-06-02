@@ -1,0 +1,13 @@
+{
+  "status": "Valid",
+  "checks": [
+    {
+      "name": "docker-image-present",
+      "ok": true
+    },
+    {
+      "name": "memory-limit-realized",
+      "ok": true
+    }
+  ]
+}

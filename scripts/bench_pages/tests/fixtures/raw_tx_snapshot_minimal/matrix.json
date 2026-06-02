@@ -1,0 +1,22 @@
+{
+  "benchmark": "sol-orchestrate",
+  "base": {
+    "fixture": "fixtures/raw-tx-snapshot.soltest",
+    "blocks": 3,
+    "skip_genesis": false,
+    "profile_memory": false,
+    "profile_interval_ms": 500,
+    "warmup_runs": 0,
+    "measured_runs": 1,
+    "cooldown_secs": 0,
+    "label": "raw-tx-snapshot",
+    "mode": {
+      "native": {}
+    }
+  },
+  "axes": {
+    "threads": [
+      1
+    ]
+  }
+}

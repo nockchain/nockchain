@@ -1,0 +1,67 @@
+{
+  "schema_version": "1",
+  "requested": {
+    "benchmark": "sol-orchestrate",
+    "label": "raw-tx-snapshot",
+    "fixture_path": "fixtures/raw-tx-snapshot.soltest",
+    "blocks": 3,
+    "skip_genesis": false,
+    "profile_memory": false,
+    "profile_interval_ms": 500,
+    "execution": {
+      "Native": {}
+    },
+    "threads": 1,
+    "warmup_runs": 0,
+    "measured_runs": 1,
+    "cooldown_secs": 0
+  },
+  "absolute_fixture_path": "scripts/bench_pages/tests/fixtures/raw_tx_snapshot_minimal/raw-tx-snapshot.soltest",
+  "fixture_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "input_identity": {
+    "fixture_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+    "derived_checkpoint_height": 10013,
+    "archive_start_height": 10014,
+    "archive_end_height": 10016,
+    "kernel_hash_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "trusted_plan": {
+    "schema_version": "orchestrate-plan/v2",
+    "normalized_plan_sha256_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "step_signature_sha256_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "boot": {
+      "source": {
+        "type": "snapshot",
+        "pma_input_id": "snapshot-pma-0",
+        "manifest_input_id": "snapshot-manifest-0",
+        "event_num": 10013
+      },
+      "kernel_input_id": "kernel-0",
+      "fsync": "on"
+    },
+    "steps": [
+      {
+        "type": "poke_archive_block",
+        "height": 10014
+      },
+      {
+        "type": "poke_archive_block",
+        "height": 10015
+      },
+      {
+        "type": "poke_archive_block",
+        "height": 10016
+      }
+    ]
+  },
+  "execution_config": {
+    "gc_drop_threshold_mib": 64,
+    "page_fault_minor_burst_threshold": 50000,
+    "page_fault_major_burst_threshold": 1
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "2222222222222222222222222222222222222222"
+  }
+}

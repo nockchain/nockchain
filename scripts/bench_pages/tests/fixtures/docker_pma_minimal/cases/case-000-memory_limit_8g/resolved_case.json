@@ -1,0 +1,61 @@
+{
+  "schema_version": "1",
+  "requested": {
+    "benchmark": "sol-replay",
+    "label": "docker-minimal",
+    "fixture_path": "fixtures/docker-minimal.soltest",
+    "blocks": 100,
+    "skip_genesis": false,
+    "profile_memory": false,
+    "profile_interval_ms": 500,
+    "execution": {
+      "Docker": {
+        "image_tag": "nockchain-bench:local",
+        "memory_limit": "8g",
+        "cpuset": null,
+        "cpu_quota": null,
+        "cpu_period": null,
+        "work_dir_mode": "DockerTmpfs",
+        "allow_version_skew": false
+      }
+    },
+    "threads": 1,
+    "warmup_runs": 0,
+    "measured_runs": 3,
+    "cooldown_secs": 0
+  },
+  "absolute_fixture_path": "/shared/nockchain/scripts/bench_pages/tests/fixtures/docker_pma_minimal/docker-minimal.soltest",
+  "fixture_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "fixture_manifest": {
+    "source_archive_path": "/shared/nockchain/solarch/docker-minimal.solarch",
+    "source_archive_event_num": 2,
+    "derived_checkpoint_height": 0,
+    "derived_checkpoint_event_num": 2,
+    "archive_start_height": 1,
+    "archive_end_height": 100,
+    "include_mempool": false,
+    "chunk_size": 8,
+    "kernel_hash_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "checkpoint_hash_hex": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "archive_hash_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "execution_config": {
+    "gc_drop_threshold_mib": 64,
+    "page_fault_minor_burst_threshold": 50000,
+    "page_fault_major_burst_threshold": 1
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "2222222222222222222222222222222222222222"
+  },
+  "docker": {
+    "image_tag": "nockchain-bench:local",
+    "requested_memory_limit_bytes": 8589934592,
+    "cpuset": null,
+    "cpu_quota": null,
+    "cpu_period": null,
+    "work_dir_mode": "DockerTmpfs",
+    "allow_version_skew": false
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "schema_version": "1",
+  "requested": {
+    "benchmark": "sol-replay",
+    "label": "native-fixture-axis-pma",
+    "fixture_path": "fixtures/fixture-beta.soltest",
+    "blocks": 100,
+    "skip_genesis": false,
+    "profile_memory": false,
+    "profile_interval_ms": 500,
+    "execution": {
+      "Native": {}
+    },
+    "threads": 1,
+    "warmup_runs": 0,
+    "measured_runs": 3,
+    "cooldown_secs": 0
+  },
+  "absolute_fixture_path": "/shared/nockchain/scripts/bench_pages/tests/fixtures/native_fixture_axis_pma/fixture-beta.soltest",
+  "fixture_sha256_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+  "fixture_manifest": {
+    "source_archive_path": "/shared/nockchain/solarch/fixture-beta.solarch",
+    "source_archive_event_num": 84,
+    "derived_checkpoint_height": 0,
+    "derived_checkpoint_event_num": 84,
+    "archive_start_height": 1,
+    "archive_end_height": 100,
+    "include_mempool": false,
+    "chunk_size": 8,
+    "kernel_hash_hex": "abababababababababababababababababababababababababababababababab",
+    "checkpoint_hash_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "archive_hash_hex": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+  },
+  "execution_config": {
+    "gc_drop_threshold_mib": 64,
+    "page_fault_minor_burst_threshold": 50000,
+    "page_fault_major_burst_threshold": 1
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "1111111111111111111111111111111111111111"
+  }
+}

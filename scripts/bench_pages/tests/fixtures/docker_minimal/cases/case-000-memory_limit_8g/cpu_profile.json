@@ -1,0 +1,19 @@
+{
+  "profiler_kind": "samply",
+  "sample_rate_hz": 1000,
+  "execution_kind": "docker_in_container",
+  "profiled_command": [
+    "nockchain-bench",
+    "sol",
+    "run-once",
+    "--resolved-case",
+    "/bench/input/resolved_case.json",
+    "--run-dir",
+    "/bench/output/profile-run",
+    "--run-id",
+    "profile"
+  ],
+  "output_relative_path": "profiles/samply-profile.json.gz",
+  "symbol_dir_relative_path": "symbols",
+  "symbol_binary_relative_path": "symbols/nockchain-bench"
+}

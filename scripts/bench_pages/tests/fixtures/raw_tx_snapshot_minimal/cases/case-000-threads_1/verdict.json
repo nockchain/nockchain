@@ -1,0 +1,9 @@
+{
+  "validity": {
+    "Partial": {
+      "reasons": [
+        "synthetic raw tx replay includes failure progress rows"
+      ]
+    }
+  }
+}

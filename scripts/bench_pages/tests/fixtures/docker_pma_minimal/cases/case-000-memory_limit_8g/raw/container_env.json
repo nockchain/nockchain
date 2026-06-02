@@ -1,0 +1,4 @@
+{
+  "NOCKCHAIN_BENCH_IMAGE": "nockchain-bench:local",
+  "NOCKCHAIN_BENCH_MEMORY_LIMIT": "8g"
+}

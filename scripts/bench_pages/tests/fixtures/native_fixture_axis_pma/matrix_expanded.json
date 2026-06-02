@@ -1,0 +1,46 @@
+[
+  {
+    "case_id": "case-000-fixture_alpha",
+    "axis_assignments": {
+      "fixture": "alpha"
+    },
+    "requested_case": {
+      "benchmark": "sol-replay",
+      "label": "native-fixture-axis-pma",
+      "fixture_path": "fixtures/fixture-alpha.soltest",
+      "blocks": 100,
+      "skip_genesis": false,
+      "profile_memory": false,
+      "profile_interval_ms": 500,
+      "execution": {
+        "Native": {}
+      },
+      "threads": 1,
+      "warmup_runs": 0,
+      "measured_runs": 3,
+      "cooldown_secs": 0
+    }
+  },
+  {
+    "case_id": "case-001-fixture_beta",
+    "axis_assignments": {
+      "fixture": "beta"
+    },
+    "requested_case": {
+      "benchmark": "sol-replay",
+      "label": "native-fixture-axis-pma",
+      "fixture_path": "fixtures/fixture-beta.soltest",
+      "blocks": 100,
+      "skip_genesis": false,
+      "profile_memory": false,
+      "profile_interval_ms": 500,
+      "execution": {
+        "Native": {}
+      },
+      "threads": 1,
+      "warmup_runs": 0,
+      "measured_runs": 3,
+      "cooldown_secs": 0
+    }
+  }
+]

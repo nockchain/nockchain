@@ -1,0 +1,32 @@
+[
+  {
+    "case_id": "case-000-memory_limit_8g",
+    "axis_assignments": {
+      "memory_limit": "8g"
+    },
+    "requested_case": {
+      "benchmark": "sol-replay",
+      "label": "docker-minimal",
+      "fixture_path": "fixtures/docker-minimal.soltest",
+      "blocks": 100,
+      "skip_genesis": false,
+      "profile_memory": false,
+      "profile_interval_ms": 500,
+      "execution": {
+        "Docker": {
+          "image_tag": "nockchain-bench:local",
+          "memory_limit": "8g",
+          "cpuset": null,
+          "cpu_quota": null,
+          "cpu_period": null,
+          "work_dir_mode": "DockerTmpfs",
+          "allow_version_skew": false
+        }
+      },
+      "threads": 1,
+      "warmup_runs": 0,
+      "measured_runs": 3,
+      "cooldown_secs": 0
+    }
+  }
+]

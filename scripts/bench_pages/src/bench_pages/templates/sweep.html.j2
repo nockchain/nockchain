@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ sweep.id }}</title>
+    <link rel="stylesheet" href="../../assets/site.css">
+  </head>
+  <body data-workload-profile="{{ command_summary.workload_profile }}">
+    <header class="header-strip">
+      <div class="header-id">
+        <span class="header-label">SWEEP</span>
+        <h1 class="header-title">{{ sweep.id }}</h1>
+      </div>
+      <div class="header-meta">
+        <span><em>Mode</em> {{ sweep.execution_mode }}</span>
+        {% for item in header_context_items %}
+        <span{% if item.tooltip %} title="{{ item.tooltip }}"{% endif %}><em>{{ item.label }}</em> {{ item.value }}</span>
+        {% endfor %}
+        <span><em>Commit</em> {{ (sweep.git_commit or 'n/a')[:12] }}</span>
+        <span><em>Status</em> <strong class="completion-{{ sweep.completion_state | lower }}">{{ sweep_completion_label }}</strong></span>
+        <span><em>Verdict</em> <strong class="verdict-{{ sweep_verdict_label | lower }}">{{ sweep_verdict_label }}</strong></span>
+        {% if sweep.axis_names %}
+        <span><em>Axes</em> {{ sweep.axis_names | join(', ') }}</span>
+        {% endif %}
+        {% if sweep.build_profile %}
+        <span><em>Profile</em> {{ sweep.build_profile }}</span>
+        {% endif %}
+        {% if top_level_artifacts %}
+        <span><em>Artifacts</em> {{ artifact_inventory | length }} files</span>
+        {% endif %}
+      </div>
+    </header>
+
+    <main class="command-shell" data-workload-profile="{{ command_summary.workload_profile }}">
+      <nav class="command-nav" aria-label="Sweep page sections">
+        <a href="#summary-section">Summary</a>
+        <a href="#comparison-section">Compare</a>
+        <a href="#case-workspace-section">Cases</a>
+        <a href="#evidence-section">Evidence</a>
+        <a href="#artifacts-section">Artifacts</a>
+      </nav>
+
+      <section class="command-section" id="summary-section">
+        <div class="command-section-head">
+          <div>
+            <h2 class="panel-title">Sweep Status</h2>
+            <p class="command-section-kicker">{{ command_summary.profile_label }} workload / {{ sweep.execution_mode }} execution</p>
+          </div>
+          <span class="workload-pill workload-{{ command_summary.workload_profile }}">{{ command_summary.profile_label }}</span>
+        </div>
+        <div class="summary-overview-grid">
+          <div class="summary-status-panel">
+            <div class="status-callout completion-{{ sweep.completion_state | lower }}">
+              <strong>{{ sweep_completion_label }}</strong>
+              <span>{{ sweep.complete_case_count }} complete, {{ sweep.partial_case_count }} partial, {{ sweep.missing_case_count }} missing out of {{ sweep.scheduled_case_count }} scheduled cases.</span>
+            </div>
+            <div class="command-kpi-grid">
+              {% for kpi in command_summary.kpis %}
+              <div class="command-kpi">
+                <span class="command-kpi-label">{{ kpi.label }}</span>
+                <strong>{{ kpi.value }}</strong>
+                <span>{{ kpi.detail }}</span>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="operation-health-panel">
+            <h3 class="section-label">Operation Health</h3>
+            <table class="mini-table operation-health-table">
+              <thead>
+                <tr>
+                  <th>Operation</th>
+                  <th>Outcome</th>
+                  <th>Rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in command_summary.operation_health_rows %}
+                <tr class="operation-health-row operation-health-{{ row.health_class }}">
+                  <td class="cell-mono">{{ row.step_type }}</td>
+                  <td>{{ row.outcome }}</td>
+                  <td class="cell-metric">{{ row.throughput }}</td>
+                </tr>
+                {% else %}
+                <tr><td colspan="3"><span class="na">No operation health data.</span></td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% for row in command_summary.operation_health_rows %}
+            <p class="operation-health-note operation-health-{{ row.health_class }}">{{ row.notes }}</p>
+            {% endfor %}
+          </div>
+          <div class="readable-plan-panel">
+            <h3 class="section-label">Plan Quick Summary</h3>
+            <p class="readable-plan-headline">{{ command_summary.readable_plan.headline }}</p>
+            <ul class="readable-plan-lines">
+              {% for line in command_summary.readable_plan.lines %}
+              <li>{{ line }}</li>
+              {% endfor %}
+            </ul>
+            {% if command_summary.readable_plan.operations %}
+            <table class="mini-table readable-plan-table">
+              <thead>
+                <tr>
+                  <th>Operation</th>
+                  <th>Cache</th>
+                  <th>Count</th>
+                  <th>Heights</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for op in command_summary.readable_plan.operations %}
+                <tr>
+                  <td class="cell-mono">{{ op.type }}</td>
+                  <td>{{ op.cache_expectation }}</td>
+                  <td class="cell-metric">{{ op.count }}</td>
+                  <td class="cell-mono">{{ op.range }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% endif %}
+          </div>
+        </div>
+        {% if sweep.missing_top_level_artifacts %}
+        <h3 class="section-label">Missing top-level artifacts</h3>
+        <ul class="status-list">
+          {% for path in sweep.missing_top_level_artifacts %}
+          <li><code>{{ path }}</code></li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+      </section>
+
+      <section class="command-section" id="comparison-section">
+        <div class="command-section-head">
+          <div>
+            <h2 class="panel-title">Cross-Case Comparison</h2>
+            <p class="command-section-kicker">Comparable case metrics, verdicts, run spread, and failure counts.</p>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table comparison-table">
+            <thead>
+              <tr>
+                <th title="Benchmark case identifier">Case</th>
+                <th title="Variable parameters for this case">Axes</th>
+                <th title="Validity assessment of benchmark results">Verdict</th>
+                <th title="Whether the case artifacts were fully written">Status</th>
+                {% for col in comparison.columns %}
+                <th{% if col.tooltip %} title="{{ col.tooltip }}"{% endif %}>{{ col.label }}</th>
+                {% endfor %}
+                <th title="Number of runs that failed">Failed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in comparison.rows %}
+              <tr>
+                <td class="cell-id"><a class="case-jump" data-case-index="{{ row.case_index }}" href="#case-{{ row.case_id }}">{{ row.case_id }}</a></td>
+                <td class="cell-mono">{{ row.axis_summary }}</td>
+                <td class="cell-verdict verdict-{{ row.verdict_label | lower }}" title="{{ row.verdict_tooltip }}">{{ row.verdict_label }}</td>
+                <td class="cell-verdict completion-{{ row.completion_class }}"{% if row.completion_tooltip %} title="{{ row.completion_tooltip }}"{% endif %}>{{ row.completion_label }}</td>
+                {% for cell in row.cells %}
+                <td class="cell-metric"{% if cell.tooltip %} title="{{ cell.tooltip }}"{% endif %}>{{ cell.markup }}</td>
+                {% endfor %}
+                <td class="cell-metric">{{ row.failed_count }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if strip_charts %}
+        <h3 class="section-label">Run Spread</h3>
+        {% for chart in strip_charts %}
+        <details class="strip-chart-wrapper">
+          <summary class="strip-chart-toggle">{{ chart.label }}</summary>
+          {{ chart.svg }}
+        </details>
+        {% endfor %}
+        {% endif %}
+      </section>
+
+      <section class="command-section" id="case-workspace-section">
+        <details class="case-workspace-details">
+          <summary>
+            <span>
+              <span class="panel-title">Case Workspace</span>
+              <span class="command-section-kicker">Per-case context, profile links, run tables, and completion detail.</span>
+            </span>
+          </summary>
+          <div class="case-workspace-controls">
+            <label class="browser-rail-meta" for="workspace-case-select">
+              <span class="browser-rail-label">Case</span>
+              <span class="browser-rail-count">{{ case_sections | length }} loaded</span>
+            </label>
+            <select class="browser-case-select" id="workspace-case-select" aria-label="Select case workspace">
+              {% for section in case_sections %}
+              <option value="{{ loop.index0 }}"{% if loop.first %} selected{% endif %}>{{ section.case.case_id }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="case-workspace-panels">
+      {% for section in case_sections %}
+      <article class="panel case-panel completion-{{ section.completion_class }}" id="case-{{ section.case.case_id }}" data-workspace-case="{{ loop.index0 }}">
+        <h2 class="panel-title">{{ section.case.case_id }}</h2>
+        <div class="case-meta">
+          {% for key, value in section.case.axis_assignments.items() %}
+          <span><em>{{ key }}</em> {{ value }}</span>
+          {% endfor %}
+          {% for item in section.context_items %}
+          <span{% if item.tooltip %} title="{{ item.tooltip }}"{% endif %}><em>{{ item.label }}</em> {{ item.value }}</span>
+          {% endfor %}
+          <span><em>Status</em> <strong class="completion-{{ section.completion_class }}">{{ section.completion_label }}</strong></span>
+          <span><em>Verdict</em> <strong class="verdict-{{ section.verdict_label | lower }}">{{ section.verdict_label }}</strong></span>
+          <span><em>Mode</em> {{ section.case.execution_mode }}</span>
+          <span><em>Workload</em> {{ section.workload_profile }}</span>
+        </div>
+
+        {% if section.plan_identity.plan_hash != 'n/a' or section.input_identity %}
+        <div class="case-command-grid">
+          <div>
+            <h3 class="section-label">Plan Identity</h3>
+            <dl class="identity-list">
+              <dt>Plan Hash</dt><dd title="{{ section.plan_identity.plan_hash_full }}">{{ section.plan_identity.plan_hash }}</dd>
+              <dt>Step Signature</dt><dd title="{{ section.plan_identity.step_signature_full }}">{{ section.plan_identity.step_signature }}</dd>
+            </dl>
+          </div>
+          <div>
+            <h3 class="section-label">Input Identity</h3>
+            {% if section.input_identity %}
+            <dl class="identity-list">
+              {% for item in section.input_identity %}
+              <dt>{{ item.label }}</dt><dd title="{{ item.key }}">{{ item.value }}</dd>
+              {% endfor %}
+            </dl>
+            {% else %}
+            <span class="na">n/a</span>
+            {% endif %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if section.raw_tx_replay.active %}
+        <div class="raw-tx-replay-panel">
+          <h3 class="section-label">Raw Transaction Replay</h3>
+          <div class="raw-tx-grid">
+            {% for group in section.raw_tx_replay.sections %}
+            <table class="mini-table">
+              <thead>
+                <tr><th>{{ group.title }}</th><th>Value</th></tr>
+              </thead>
+              <tbody>
+                {% for item in group.rows %}
+                <tr>
+                  <td{% if item.tooltip %} title="{{ item.tooltip }}"{% endif %}>{{ item.label }}</td>
+                  <td class="cell-metric">{{ item.value }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            {% endfor %}
+          </div>
+          {% if section.raw_tx_replay.errors %}
+          <h4 class="section-label">Failure Progress</h4>
+          <div class="table-scroll">
+            <table class="mini-table">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Step</th>
+                  <th>Outcome</th>
+                  <th>Raw tx pokes</th>
+                  <th>Raw tx slabs</th>
+                  <th>Prebuild</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for row in section.raw_tx_replay.errors %}
+                <tr>
+                  <td class="cell-mono">{{ row.run_id }}</td>
+                  <td class="cell-mono">{{ row.label }}</td>
+                  <td>{{ row.outcome }}</td>
+                  <td class="cell-metric">{{ row.raw_tx_pokes_completed }}</td>
+                  <td class="cell-metric">{{ row.raw_tx_slabs_prebuilt }}</td>
+                  <td class="cell-metric">{{ row.slab_prebuild_duration }}</td>
+                  <td>{{ row.error }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          {% if section.raw_tx_replay.error_rows_omitted %}
+          <p class="raw-tx-note">{{ section.raw_tx_replay.error_rows_omitted }} additional failure rows omitted; inspect the published <code>steps.ndjson</code> artifacts for full evidence.</p>
+          {% endif %}
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if not section.materialized or section.missing_artifacts or section.failure_reasons %}
+        <div class="status-callout completion-{{ section.completion_class }}">
+          {% if not section.materialized %}
+          <p>No case directory was written for this scheduled case.</p>
+          {% endif %}
+          {% if section.missing_artifacts %}
+          <p>Missing case artifacts: {% for artifact in section.missing_artifacts %}<code>{{ artifact }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+          {% endif %}
+          {% if section.failure_reasons %}
+          <ul class="status-list">
+            {% for reason in section.failure_reasons %}
+            <li>{{ reason }}</li>
+            {% endfor %}
+          </ul>
+          {% endif %}
+        </div>
+        {% endif %}
+
+        {% if section.samply_profile %}
+        <div class="profile-bar">
+          <span class="profile-badge">CPU PROFILE</span>
+          <a href="../../{{ section.samply_profile.href }}" class="btn-small" title="Download samply profile (.json.gz)" download>Download</a>
+          <button class="btn-small profile-open-btn" data-profile-href="../../{{ section.samply_profile.href }}" title="Load profile and open in Firefox Profiler">Open in Firefox Profiler</button>
+        </div>
+        {% if section.cpu_profile %}
+        <div class="panel panel-inset">
+          <h3 class="section-label">Symbol-Aware Samply Load</h3>
+          <p>Quick open sends the raw profile to Firefox Profiler. For symbols, use the matching nockchain-bench binary with <code>samply load</code> after downloading this sweep and <code>cd</code>-ing into its root.</p>
+          <p><a href="../../{{ section.cpu_profile.symbol_binary.href }}" download>Download matching nockchain-bench binary</a></p>
+          <pre><code>{{ section.cpu_profile.load_command }}</code></pre>
+        </div>
+        {% endif %}
+        {% endif %}
+
+        {% for run_table in section.run_tables %}
+        <h3 class="section-label">Runs</h3>
+        <div class="table-scroll">
+          <table class="data-table run-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                {% for col in run_table.columns %}
+                <th{% if col.tooltip %} title="{{ col.tooltip }}"{% endif %}>{{ col.label }}</th>
+                {% endfor %}
+                <th>Files</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in run_table.rows %}
+              <tr>
+                <td class="cell-mono">{{ row.run_id }}</td>
+                {% for cell in row.cells %}
+                <td class="cell-metric"{% if cell.tooltip %} title="{{ cell.tooltip }}"{% endif %}>{{ cell.markup }}</td>
+                {% endfor %}
+                <td class="cell-artifacts">
+                  {% if row.artifacts %}
+                  <details class="inline-details">
+                    <summary>{{ row.artifacts | length }}</summary>
+                    <ul class="artifact-links">
+                      {% for artifact in row.artifacts %}
+                      <li><a href="../../{{ artifact.href }}">{{ artifact.relative_path }}</a></li>
+                      {% endfor %}
+                    </ul>
+                  </details>
+                  {% else %}
+                  <span class="na">&mdash;</span>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% endfor %}
+      </article>
+      {% endfor %}
+          </div>
+        </details>
+      </section>
+
+      <section class="command-section" id="evidence-section">
+        <h2 class="panel-title">Case Evidence Browser</h2>
+        <div class="browser-layout" id="evidence-browser">
+          <div class="browser-case-select-row">
+            <label class="browser-rail-meta" for="browser-case-select">
+              <span class="browser-rail-label">Case</span>
+              <span class="browser-rail-count">{{ case_sections | length }} loaded</span>
+            </label>
+            <div class="browser-case-select-wrap">
+              <select class="browser-case-select" id="browser-case-select" aria-label="Select sweep case">
+              {% for section in case_sections %}
+                <option value="{{ loop.index0 }}"{% if loop.first %} selected{% endif %}>{{ section.case.case_id }}</option>
+              {% endfor %}
+              </select>
+            </div>
+          </div>
+          <nav class="browser-nav" aria-label="Evidence items">
+            <div class="browser-nav-meta">
+              <span class="browser-rail-label">Evidence</span>
+              <span class="browser-rail-count">One panel at a time</span>
+            </div>
+            {% for section in case_sections %}
+            <ul class="browser-items{% if loop.first %} active{% endif %}" data-case="{{ loop.index0 }}">
+              <li><button class="browser-item" data-panel="prov-{{ loop.index0 }}">Provenance</button></li>
+              <li><button class="browser-item" data-panel="req-{{ loop.index0 }}">Requested Case</button></li>
+              <li><button class="browser-item" data-panel="res-{{ loop.index0 }}">Resolved Case</button></li>
+              <li><button class="browser-item" data-panel="verd-{{ loop.index0 }}">Verdict Detail</button></li>
+              {% if section.validation_markup %}
+              <li><button class="browser-item" data-panel="val-{{ loop.index0 }}">Validation</button></li>
+              {% endif %}
+              <li><button class="browser-item" data-panel="sum-{{ loop.index0 }}">Summary (full)</button></li>
+              <li><button class="browser-item" data-panel="raw-{{ loop.index0 }}">Raw JSON</button></li>
+            </ul>
+            {% endfor %}
+          </nav>
+          <div class="browser-content" id="browser-content">
+            {% for section in case_sections %}
+            <div class="browser-panel" id="prov-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Provenance &mdash; {{ section.case.case_id }}</h3>
+              {{ section.provenance_markup }}
+            </div>
+            <div class="browser-panel" id="req-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Requested Case &mdash; {{ section.case.case_id }}</h3>
+              {{ section.requested_case_markup }}
+            </div>
+            <div class="browser-panel" id="res-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Resolved Case &mdash; {{ section.case.case_id }}</h3>
+              {{ section.resolved_case_markup }}
+            </div>
+            <div class="browser-panel" id="verd-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Verdict &mdash; {{ section.case.case_id }}</h3>
+              {% if section.verdict_missing %}
+              <p class="status-note">Verdict unavailable. The case did not produce <code>verdict.json</code>.</p>
+              {% endif %}
+              {{ section.verdict_markup }}
+            </div>
+            {% if section.validation_markup %}
+            <div class="browser-panel" id="val-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Validation &mdash; {{ section.case.case_id }}</h3>
+              {{ section.validation_markup }}
+            </div>
+            {% endif %}
+            <div class="browser-panel" id="sum-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Summary (full) &mdash; {{ section.case.case_id }}</h3>
+              {% if section.summary_missing %}
+              <p class="status-note">Summary unavailable. The case did not produce <code>summary.json</code>.</p>
+              {% endif %}
+              {{ section.summary_markup }}
+            </div>
+            <div class="browser-panel" id="raw-{{ loop.index0 }}" data-case="{{ loop.index0 }}">
+              <h3 class="browser-panel-title">Raw JSON &mdash; {{ section.case.case_id }}</h3>
+              <pre>{{ pretty_json(section.case) }}</pre>
+            </div>
+            {% endfor %}
+            <div class="browser-empty" id="browser-empty">Select an evidence item from the list.</div>
+          </div>
+        </div>
+      </section>
+
+      {% if docker_images %}
+      <section class="command-section">
+        <h2 class="panel-title">Docker Images</h2>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Identity</th>
+                <th>Local Ref</th>
+                <th>Provenance Digest</th>
+                <th>GHCR Tag</th>
+                <th>GHCR Digest</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for image in docker_images %}
+              <tr>
+                <td class="cell-mono">{{ image.canonical_identity }}</td>
+                <td>{{ image.local_image_ref or 'n/a' }}</td>
+                <td class="cell-mono">{{ image.provenance_image_digest or 'n/a' }}</td>
+                <td class="cell-mono">
+                  {% if image.ghcr_ref %}
+                  <div>{{ image.ghcr_tag or 'n/a' }}</div>
+                  <div class="docker-image-detail">
+                    <code>docker pull {{ image.ghcr_ref }}</code>
+                  </div>
+                  {% if image.ghcr_package_url %}
+                  <div class="docker-image-detail">
+                    <a href="{{ image.ghcr_package_url }}">Open GHCR package</a>
+                  </div>
+                  {% endif %}
+                  {% else %}
+                  n/a
+                  {% endif %}
+                </td>
+                <td class="cell-mono">{{ image.ghcr_digest or 'n/a' }}</td>
+                <td>{{ image.publish_status or 'planned' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="command-section" id="artifacts-section">
+        <h2 class="panel-title">Artifact Browser</h2>
+        {% if publish_limits and (publish_limits.omitted_artifact_count or publish_limits.artifact_bundle_omitted) %}
+        <div class="artifact-omission-callout">
+          Hosted Pages omits
+          {% if publish_limits.omitted_artifact_count %}
+          {{ publish_limits.omitted_artifact_count }} oversized artifact{% if publish_limits.omitted_artifact_count != 1 %}s{% endif %}
+          {% endif %}
+          {% if publish_limits.omitted_artifact_count and publish_limits.artifact_bundle_omitted %} and {% endif %}
+          {% if publish_limits.artifact_bundle_omitted %}the full artifact tarball{% endif %}
+          because GitHub rejects files over {{ publish_limits.max_artifact_size_label }}.
+        </div>
+        {% endif %}
+        {% if artifact_bundle %}
+        <div class="artifact-bundle-callout">
+          <span class="artifact-bundle-label">Published Bundle</span>
+          <a class="artifact-bundle-link" href="../../{{ artifact_bundle.href }}" download>
+            Download all sweep artifacts (.tar.gz)
+          </a>
+          <span class="artifact-bundle-meta">{{ artifact_bundle.filename }}</span>
+        </div>
+        {% endif %}
+        <div class="table-scroll">
+          <table class="data-table artifact-table">
+            <thead>
+              <tr>
+                <th>Path</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for artifact in artifact_inventory %}
+              <tr>
+                <td><a href="../../{{ artifact.href }}">{{ artifact.relative_path }}</a></td>
+                <td class="cell-mono cell-right">{{ artifact.size_bytes }} B</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+    (function() {
+      var workspaceDetails = document.querySelector('.case-workspace-details');
+      var workspaceSelect = document.getElementById('workspace-case-select');
+      var workspacePanels = document.querySelectorAll('[data-workspace-case]');
+      var caseJumps = document.querySelectorAll('.case-jump');
+
+      function showWorkspaceCase(idx) {
+        workspacePanels.forEach(function(panel) {
+          panel.style.display = panel.dataset.workspaceCase === idx ? '' : 'none';
+        });
+      }
+
+      if (workspaceSelect) {
+        workspaceSelect.addEventListener('change', function() {
+          showWorkspaceCase(this.value);
+        });
+        showWorkspaceCase(workspaceSelect.value);
+      }
+
+      caseJumps.forEach(function(link) {
+        link.addEventListener('click', function(event) {
+          var idx = this.dataset.caseIndex;
+          if (!idx || !workspaceDetails || !workspaceSelect) return;
+          event.preventDefault();
+          workspaceDetails.open = true;
+          workspaceSelect.value = idx;
+          showWorkspaceCase(idx);
+          workspaceDetails.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        });
+      });
+    })();
+
+    (function() {
+      var caseSelect = document.getElementById('browser-case-select');
+      var itemLists = document.querySelectorAll('.browser-items');
+      var allItems = document.querySelectorAll('.browser-item');
+      var panels = document.querySelectorAll('.browser-panel');
+      var emptyMsg = document.getElementById('browser-empty');
+
+      // Hide all panels initially.
+      panels.forEach(function(p) { p.style.display = 'none'; });
+
+      function updateEmpty() {
+        var anyVisible = false;
+        panels.forEach(function(p) {
+          if (p.style.display !== 'none') anyVisible = true;
+        });
+        if (emptyMsg) emptyMsg.style.display = anyVisible ? 'none' : '';
+      }
+
+      function clearSelection() {
+        allItems.forEach(function(i) { i.classList.remove('active'); });
+        panels.forEach(function(p) { p.style.display = 'none'; });
+      }
+
+      function activateCase(idx) {
+        itemLists.forEach(function(list) {
+          if (list.dataset['case'] === idx) {
+            list.classList.add('active');
+          } else {
+            list.classList.remove('active');
+          }
+        });
+        clearSelection();
+        updateEmpty();
+      }
+
+      // Case switching.
+      if (caseSelect) {
+        caseSelect.addEventListener('change', function() {
+          activateCase(this.value);
+        });
+      }
+
+      // Single-select: one card at a time.
+      allItems.forEach(function(item) {
+        item.addEventListener('click', function() {
+          var panelId = this.dataset.panel;
+          var panel = document.getElementById(panelId);
+          if (!panel) return;
+          var wasActive = this.classList.contains('active');
+          clearSelection();
+          if (!wasActive) {
+            this.classList.add('active');
+            panel.style.display = '';
+          }
+          updateEmpty();
+        });
+      });
+
+      if (caseSelect) {
+        activateCase(caseSelect.value);
+      }
+    })();
+
+    // Open samply profiles in Firefox Profiler.
+    // Fetches the .json.gz locally, decompresses, then injects into a new
+    // Profiler tab via postMessage — works on file://, localhost, and Pages.
+    document.querySelectorAll('.profile-open-btn').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        var href = this.dataset.profileHref;
+        var self = this;
+        self.textContent = 'Loading\u2026';
+        self.disabled = true;
+        fetch(href)
+          .then(function(r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.arrayBuffer();
+          })
+          .then(function(compressed) {
+            var ds = new DecompressionStream('gzip');
+            var reader = new Blob([compressed]).stream().pipeThrough(ds).getReader();
+            var chunks = [];
+            function pump() {
+              return reader.read().then(function(result) {
+                if (result.done) return new Blob(chunks);
+                chunks.push(result.value);
+                return pump();
+              });
+            }
+            return pump();
+          })
+          .then(function(blob) { return blob.text(); })
+          .then(function(jsonText) {
+            var profile = JSON.parse(jsonText);
+            var profilerOrigin = 'https://profiler.firefox.com';
+            var profilerWindow = window.open(profilerOrigin + '/from-post-message/');
+            if (!profilerWindow) {
+              alert('Pop-up blocked. Please allow pop-ups for this site.');
+              return;
+            }
+            // The Profiler listens for this message once the page loads.
+            function trySend() {
+              profilerWindow.postMessage({type: 'PROFILE_AND_THREADS_FROM_OPENER', profile: profile}, profilerOrigin);
+            }
+            // Retry a few times since the Profiler page needs to load first.
+            var attempts = 0;
+            var timer = setInterval(function() {
+              trySend();
+              attempts++;
+              if (attempts > 20) clearInterval(timer);
+            }, 250);
+          })
+          .catch(function(err) {
+            alert('Failed to load profile: ' + err.message);
+          })
+          .finally(function() {
+            self.textContent = 'Open in Firefox Profiler';
+            self.disabled = false;
+          });
+      });
+    });
+    </script>
+  </body>
+</html>

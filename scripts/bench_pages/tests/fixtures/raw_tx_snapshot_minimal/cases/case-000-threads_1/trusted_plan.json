@@ -1,0 +1,29 @@
+{
+  "schema_version": "orchestrate-plan/v2",
+  "normalized_plan_sha256_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "step_signature_sha256_hex": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "boot": {
+    "source": {
+      "type": "snapshot",
+      "pma_input_id": "snapshot-pma-0",
+      "manifest_input_id": "snapshot-manifest-0",
+      "event_num": 10013
+    },
+    "kernel_input_id": "kernel-0",
+    "fsync": "on"
+  },
+  "steps": [
+    {
+      "type": "poke_archive_block",
+      "height": 10014
+    },
+    {
+      "type": "poke_archive_block",
+      "height": 10015
+    },
+    {
+      "type": "poke_archive_block",
+      "height": 10016
+    }
+  ]
+}

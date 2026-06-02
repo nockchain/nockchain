@@ -1,0 +1,15 @@
+{
+  "run_id": "run-0",
+  "success": true,
+  "error": null,
+  "throughput_blocks_per_second": 22.0,
+  "init_time_secs": 1.8,
+  "total_replay_time_secs": 3.9,
+  "average_block_time_ms": 39.0,
+  "failed_pokes": 0.0,
+  "new_metric_total": 702,
+  "peak_process_rss_bytes": null,
+  "minor_faults_total": null,
+  "major_faults_total": null,
+  "blocks_poked": 100
+}

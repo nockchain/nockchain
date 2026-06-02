@@ -1,0 +1,48 @@
+{
+  "schema_version": "1",
+  "capture_timestamp_ms": 1773251558000,
+  "host": {
+    "hostname": "native-host",
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "6.8.0",
+    "cpu_count": 16,
+    "total_memory_bytes": 68719476736,
+    "cpu_model": "Synthetic Native CPU"
+  },
+  "git": {
+    "commit": "1111111111111111111111111111111111111111",
+    "branch": "bench-pages-fixture",
+    "commit_date": "2026-03-19T00:00:00Z",
+    "dirty": false
+  },
+  "backend": {
+    "Native": {
+      "build_profile": "release"
+    }
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "1111111111111111111111111111111111111111"
+  },
+  "runtime_flavor": "pma",
+  "boot_source": "checkpoint",
+  "boot_event_num": 84,
+  "future_probe_status": "warming",
+  "fixture_path": "/shared/nockchain/scripts/bench_pages/tests/fixtures/native_fixture_axis_pma/fixture-beta.soltest",
+  "fixture_sha256_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+  "fixture_manifest": {
+    "source_archive_path": "/shared/nockchain/solarch/fixture-beta.solarch",
+    "source_archive_event_num": 84,
+    "derived_checkpoint_height": 0,
+    "derived_checkpoint_event_num": 84,
+    "archive_start_height": 1,
+    "archive_end_height": 100,
+    "include_mempool": false,
+    "chunk_size": 8,
+    "kernel_hash_hex": "abababababababababababababababababababababababababababababababab",
+    "checkpoint_hash_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+    "archive_hash_hex": "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+  }
+}

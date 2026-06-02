@@ -1,0 +1,37 @@
+[package]
+name = "nockchain-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Benchmarking and memory profiling harness for Nockchain"
+build = "build.rs"
+
+[[bin]]
+name = "nockchain-bench"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bollard = "0.18"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+bytes = "1.4"
+blake3 = "1"
+bincode = "1.3"
+sha2 = "0.10"
+libc = "0.2"
+tempfile = "3.10"
+
+# Speed-of-light dependencies
+nockapp = { path = "../nockapp" }
+nockchain = { path = "../nockchain" }
+nockvm = { path = "../nockvm/rust/nockvm" }
+nockchain-types = { path = "../nockchain-types" }
+nockchain-math = { path = "../nockchain-math" }
+noun-serde = { path = "../noun-serde" }
+zkvm-jetpack = { path = "../zkvm-jetpack" }
+
+[dev-dependencies]

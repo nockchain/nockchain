@@ -1,0 +1,101 @@
+{
+  "benchmark": "sol-orchestrate",
+  "measured_runs_requested": 1,
+  "measured_runs_succeeded": 1,
+  "failed_runs": [],
+  "steps_per_second": {
+    "median": 2.0,
+    "min": 2.0,
+    "max": 2.0,
+    "mad": 0.0,
+    "stddev": 0.0,
+    "cv": 0.0,
+    "values": [
+      2.0
+    ]
+  },
+  "pokes_per_second": {
+    "median": 1.5,
+    "min": 1.5,
+    "max": 1.5,
+    "mad": 0.0,
+    "stddev": 0.0,
+    "cv": 0.0,
+    "values": [
+      1.5
+    ]
+  },
+  "raw_tx_pokes_per_second": {
+    "median": 4.0,
+    "min": 4.0,
+    "max": 4.0,
+    "mad": 0.0,
+    "stddev": 0.0,
+    "cv": 0.0,
+    "values": [
+      4.0
+    ]
+  },
+  "peak_process_rss_bytes": {
+    "median": 67108864,
+    "min": 67108864,
+    "max": 67108864,
+    "mad": 0.0,
+    "stddev": 0.0,
+    "cv": 0.0,
+    "values": [
+      67108864
+    ]
+  },
+  "minor_faults_total": null,
+  "major_faults_total": null,
+  "by_step_type": {
+    "poke_archive_block": {
+      "count_per_run": 3,
+      "duration_ms": {
+        "median": 120.0,
+        "min": 120.0,
+        "max": 120.0,
+        "mad": 0.0,
+        "stddev": 0.0,
+        "cv": 0.0,
+        "values": [
+          120.0
+        ]
+      },
+      "throughput_per_second": {
+        "median": 1.5,
+        "min": 1.5,
+        "max": 1.5,
+        "mad": 0.0,
+        "stddev": 0.0,
+        "cv": 0.0,
+        "values": [
+          1.5
+        ]
+      },
+      "success_count": {
+        "median": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "mad": 0.0,
+        "stddev": 0.0,
+        "cv": 0.0,
+        "values": [
+          1.0
+        ]
+      },
+      "error_count": {
+        "median": 2.0,
+        "min": 2.0,
+        "max": 2.0,
+        "mad": 0.0,
+        "stddev": 0.0,
+        "cv": 0.0,
+        "values": [
+          2.0
+        ]
+      }
+    }
+  }
+}

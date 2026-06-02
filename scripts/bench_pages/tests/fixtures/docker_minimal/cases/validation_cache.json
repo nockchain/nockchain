@@ -1,0 +1,6 @@
+{
+  "engine_version": "29.1.3",
+  "image_tag": "nockchain-bench:local",
+  "memory_limit": "8g",
+  "result": "cached"
+}

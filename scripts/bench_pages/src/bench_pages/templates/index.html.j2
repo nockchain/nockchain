@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SOL Sweep Registry</title>
+    <link rel="stylesheet" href="assets/site.css">
+  </head>
+  <body>
+    <header class="header-strip">
+      <div class="header-id">
+        <span class="header-label">REGISTRY</span>
+        <h1 class="header-title">SOL Sweep History</h1>
+      </div>
+    </header>
+
+    <main class="page-shell">
+      <section class="panel">
+        <h2 class="panel-title">Published Sweeps</h2>
+        <div class="compare-controls">
+          <button id="compare-btn" disabled>Compare Selected (0/2)</button>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th class="col-check"></th>
+                <th>Sweep</th>
+                <th>Mode</th>
+                <th>Runtime</th>
+                <th>Fixture</th>
+                <th>Work Dir</th>
+                <th>Verdict</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for entry in entries %}
+              <tr>
+                <td class="col-check"><input type="checkbox" class="sweep-check" data-id="{{ entry.id }}" data-path="{{ entry.path }}"></td>
+                <td><a href="{{ entry.path }}">{{ entry.id }}</a></td>
+                <td>{{ entry.execution_mode }}</td>
+                <td>{{ entry.runtime_display }}</td>
+                <td class="cell-mono">{{ entry.fixture_display }}</td>
+                <td>{% if entry.work_dir_display %}{{ entry.work_dir_display }}{% else %}&mdash;{% endif %}</td>
+                <td class="cell-verdict verdict-{{ entry.verdict | lower }}">{{ entry.verdict }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" id="comparison-results" style="display:none"></section>
+    </main>
+
+    <script>
+    (function() {
+      var selected = [];
+      var checkboxes = document.querySelectorAll('.sweep-check');
+      var compareBtn = document.getElementById('compare-btn');
+      var resultsEl = document.getElementById('comparison-results');
+
+      var METRICS = [
+        {key: 'throughput_blocks_per_second', label: 'Throughput (blk/s)', higher: true},
+        {key: 'total_replay_time_secs',      label: 'Replay (s)',         higher: false},
+        {key: 'init_time_secs',              label: 'Init (s)',           higher: false},
+        {key: 'average_block_time_ms',       label: 'Avg Block (ms)',     higher: false},
+        {key: 'peak_process_rss_bytes',      label: 'Peak RSS',          higher: false, bytes: true},
+        {key: 'minor_faults_total',          label: 'Minor Fault',       higher: false},
+        {key: 'major_faults_total',          label: 'Major Fault',       higher: false}
+      ];
+
+      /* -- Selection -- */
+
+      checkboxes.forEach(function(cb) {
+        cb.addEventListener('change', function() {
+          if (this.checked) {
+            if (selected.length >= 2) {
+              var old = selected.shift();
+              var oldCb = document.querySelector('.sweep-check[data-id="' + old.id + '"]');
+              if (oldCb) oldCb.checked = false;
+            }
+            selected.push({id: this.dataset.id, path: this.dataset.path});
+          } else {
+            var self = this;
+            selected = selected.filter(function(s) { return s.id !== self.dataset.id; });
+          }
+          refreshBtn();
+        });
+      });
+
+      function refreshBtn() {
+        compareBtn.disabled = selected.length !== 2;
+        compareBtn.textContent = 'Compare Selected (' + selected.length + '/2)';
+      }
+
+      /* -- Compare action -- */
+
+      compareBtn.addEventListener('click', function() {
+        if (selected.length !== 2) return;
+        compareBtn.disabled = true;
+        compareBtn.textContent = 'Loading\u2026';
+
+        Promise.all([
+          fetchJson(selected[0].path.replace('index.html', 'manifest.json')),
+          fetchJson(selected[1].path.replace('index.html', 'manifest.json'))
+        ]).then(function(pair) {
+          showComparison(pair[0], pair[1], selected[0].id, selected[1].id);
+          refreshBtn();
+        }).catch(function(err) {
+          resultsEl.innerHTML = '<p class="delta-error">Failed to load manifests: ' + esc(String(err)) + '</p>';
+          resultsEl.style.display = '';
+          refreshBtn();
+        });
+      });
+
+      function fetchJson(url) {
+        return fetch(url).then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status + ' for ' + url);
+          return r.json();
+        });
+      }
+
+      /* -- Render comparison -- */
+
+      function showComparison(mA, mB, idA, idB) {
+        var casesA = indexBy(mA.cases, 'case_id');
+        var casesB = indexBy(mB.cases, 'case_id');
+        var ids = mergeKeys(casesA, casesB);
+
+        var h = '';
+        h += '<div class="delta-bar">';
+        h += '<h2 class="panel-title">Cross-Sweep Delta</h2>';
+        h += '<div class="delta-actions">';
+        h += '<button id="swap-btn" class="btn-small">Swap A/B</button> ';
+        h += '<button id="clear-btn" class="btn-small">Clear</button>';
+        h += '</div>';
+        h += '</div>';
+
+        h += '<div class="delta-labels">';
+        h += '<span class="delta-label"><em>A (baseline)</em> ' + esc(idA) + '</span>';
+        h += '<span class="delta-label"><em>B (compare)</em> ' + esc(idB) + '</span>';
+        h += '</div>';
+
+        h += '<div class="table-scroll"><table class="data-table delta-table"><thead><tr>';
+        h += '<th>Case</th>';
+        METRICS.forEach(function(m) { h += '<th title="' + esc(m.label) + '">' + esc(m.label) + '</th>'; });
+        h += '</tr></thead><tbody>';
+
+        ids.forEach(function(cid) {
+          var cA = casesA[cid], cB = casesB[cid];
+          h += '<tr><td class="cell-id">' + esc(cid) + '</td>';
+          METRICS.forEach(function(m) {
+            var a = cA ? val(cA.summary[m.key]) : null;
+            var b = cB ? val(cB.summary[m.key]) : null;
+            h += deltaCell(a, b, m);
+          });
+          h += '</tr>';
+        });
+
+        h += '</tbody></table></div>';
+        resultsEl.innerHTML = h;
+        resultsEl.style.display = '';
+        resultsEl.scrollIntoView({behavior: 'smooth'});
+
+        document.getElementById('swap-btn').addEventListener('click', function() {
+          showComparison(mB, mA, idB, idA);
+        });
+        document.getElementById('clear-btn').addEventListener('click', function() {
+          resultsEl.style.display = 'none';
+          resultsEl.innerHTML = '';
+        });
+      }
+
+      /* -- Delta cell rendering -- */
+
+      function deltaCell(a, b, m) {
+        if (a === null && b === null) return '<td class="cell-metric"><span class="na">n/a</span></td>';
+        if (a === null) return '<td class="cell-metric"><span class="vs-primary">' + fv(b, m) + '</span><span class="vs-detail delta-new">new</span></td>';
+        if (b === null) return '<td class="cell-metric"><span class="vs-primary na">n/a</span><span class="vs-detail">was ' + fv(a, m) + '</span></td>';
+
+        var d = b - a;
+        var pct = a !== 0 ? (d / a) * 100 : null;
+        var cls = '';
+        if (pct !== null && Math.abs(pct) > 0.05) {
+          var good = m.higher ? d > 0 : d < 0;
+          cls = good ? ' delta-good' : ' delta-bad';
+        }
+        var sign = pct !== null ? (pct >= 0 ? '+' : '') + pct.toFixed(1) + '%' : '';
+        var arrow = '';
+        if (pct !== null && Math.abs(pct) > 0.05) arrow = d > 0 ? ' \u2191' : ' \u2193';
+
+        return '<td class="cell-metric' + cls + '">' +
+          '<span class="vs-primary">' + fv(b, m) + '</span>' +
+          '<span class="vs-detail">' + esc(sign + arrow) + ' from ' + fv(a, m) + '</span>' +
+          '</td>';
+      }
+
+      /* -- Value extraction & formatting -- */
+
+      function val(v) {
+        if (v === null || v === undefined) return null;
+        if (typeof v === 'object' && v !== null && 'median' in v) return v.median;
+        if (typeof v === 'number') return v;
+        return null;
+      }
+
+      function fv(v, m) {
+        if (v === null || v === undefined) return '<span class="na">n/a</span>';
+        if (m && m.bytes && Math.abs(v) >= 1024) return esc(humB(v));
+        return esc(fmt(v));
+      }
+
+      function fmt(v) {
+        if (v === 0) return '0';
+        if (Number.isInteger(v)) return v.toString();
+        if (v === Math.floor(v)) return Math.floor(v).toString();
+        var a = Math.abs(v);
+        if (a >= 1000) return v.toFixed(0);
+        if (a >= 100) return v.toFixed(1);
+        if (a >= 1) return v.toFixed(2);
+        return v.toPrecision(3);
+      }
+
+      function humB(v) {
+        var a = Math.abs(v); var s = v < 0 ? -1 : 1;
+        var u = ['B','KiB','MiB','GiB','TiB'];
+        for (var i = 0; i < u.length; i++) {
+          if (a < 1024) return (a === Math.floor(a) ? Math.floor(a)*s : (a*s).toFixed(1)) + ' ' + u[i];
+          a /= 1024;
+        }
+        return (a*s).toFixed(1) + ' PiB';
+      }
+
+      function indexBy(arr, key) {
+        var m = {};
+        arr.forEach(function(o) { m[o[key]] = o; });
+        return m;
+      }
+
+      function mergeKeys(a, b) {
+        var s = {};
+        Object.keys(a).forEach(function(k) { s[k] = true; });
+        Object.keys(b).forEach(function(k) { s[k] = true; });
+        return Object.keys(s).sort();
+      }
+
+      function esc(s) {
+        var d = document.createElement('span');
+        d.textContent = s;
+        return d.innerHTML;
+      }
+    })();
+    </script>
+  </body>
+</html>

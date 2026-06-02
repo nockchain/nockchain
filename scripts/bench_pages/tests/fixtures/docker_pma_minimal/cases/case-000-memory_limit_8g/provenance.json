@@ -1,0 +1,69 @@
+{
+  "schema_version": "1",
+  "capture_timestamp_ms": 1773263154342,
+  "host": {
+    "hostname": "docker-host",
+    "os": "linux",
+    "arch": "x86_64",
+    "kernel": "6.8.0",
+    "cpu_count": 32,
+    "total_memory_bytes": 68719476736,
+    "cpu_model": "Synthetic Docker Host CPU"
+  },
+  "git": {
+    "commit": "2222222222222222222222222222222222222222",
+    "branch": "bench-pages-fixture",
+    "commit_date": "2026-03-19T00:00:00Z",
+    "dirty": false
+  },
+  "backend": {
+    "Docker": {
+      "host_binary": {
+        "version": "0.1.0",
+        "build_profile": "release",
+        "git_commit": "2222222222222222222222222222222222222222"
+      },
+      "container_binary": {
+        "version": "0.1.0",
+        "build_profile": "release",
+        "git_commit": "2222222222222222222222222222222222222222"
+      },
+      "image_tag": "nockchain-bench:local",
+      "image_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "container_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "docker_engine_version": "29.1.3",
+      "docker_context": "desktop-linux",
+      "cgroup_version": "2",
+      "storage_driver": "overlayfs",
+      "realized_memory_max": 8589934592,
+      "realized_memory_current": 3776512,
+      "realized_cpuset": "0-31",
+      "realized_cpu_max": "max 100000"
+    }
+  },
+  "binary": {
+    "version": "0.1.0",
+    "build_profile": "release",
+    "git_commit": "2222222222222222222222222222222222222222"
+  },
+  "runtime_flavor": "pma",
+  "boot_source": "checkpoint",
+  "boot_event_num": 42,
+  "pma_work_dir_mode": "docker_tmpfs",
+  "future_probe_status": "ready",
+  "fixture_path": "/shared/nockchain/scripts/bench_pages/tests/fixtures/docker_pma_minimal/docker-minimal.soltest",
+  "fixture_sha256_hex": "2222222222222222222222222222222222222222222222222222222222222222",
+  "fixture_manifest": {
+    "source_archive_path": "/shared/nockchain/solarch/docker-minimal.solarch",
+    "source_archive_event_num": 2,
+    "derived_checkpoint_height": 0,
+    "derived_checkpoint_event_num": 2,
+    "archive_start_height": 1,
+    "archive_end_height": 100,
+    "include_mempool": false,
+    "chunk_size": 8,
+    "kernel_hash_hex": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "checkpoint_hash_hex": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "archive_hash_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

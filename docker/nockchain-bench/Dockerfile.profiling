@@ -1,0 +1,4 @@
+FROM ubuntu:24.04
+COPY nockchain-bench /usr/local/bin/nockchain-bench
+COPY samply /usr/local/bin/samply
+ENTRYPOINT ["/usr/local/bin/nockchain-bench"]

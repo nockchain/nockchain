@@ -1,0 +1,14 @@
+{
+  "axis_names": [
+    "threads"
+  ],
+  "case_count": 1,
+  "cases": [
+    {
+      "case_id": "case-000-threads_1",
+      "axis_assignments": {
+        "threads": 1
+      }
+    }
+  ]
+}
