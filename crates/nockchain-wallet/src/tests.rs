@@ -1857,6 +1857,8 @@ async fn create_tx_planner_accepts_child_sign_key_for_lock_reconstruction(
     let recipient = RecipientSpec::P2pkh {
         address: master_signer,
         amount: 4_000,
+        memo: None,
+        blob: None,
     };
 
     let _ = wallet
@@ -1921,6 +1923,8 @@ async fn keygen_create_tx_uses_tracked_signing_keys() -> Result<(), NockAppError
             vec![RecipientSpec::P2pkh {
                 address: signer_pkh,
                 amount: 4_000,
+                memo: None,
+                blob: None,
             }],
             false,
             None,

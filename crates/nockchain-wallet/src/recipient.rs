@@ -428,8 +428,6 @@ mod tests {
         PackedBlob, NOTE_DATA_KEY_BLOB, NOTE_DATA_KEY_LOCK, NOTE_DATA_KEY_MEMO,
     };
 
-    use wallet_tx_builder::note_data::NOTE_DATA_KEY_BLOB;
-
     use super::*;
 
     const SAMPLE_P2PKH: &str = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV";
