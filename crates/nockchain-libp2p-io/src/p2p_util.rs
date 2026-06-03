@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
+use libp2p::multiaddr::Protocol;
 use libp2p::{Multiaddr, PeerId};
 use nockapp::NockAppError;
 use nockvm::noun::{Noun, NounSpace};
@@ -13,6 +14,12 @@ pub fn log_fail2ban_ipv4(peer_id: &PeerId, ip: &Ipv4Addr) {
 }
 pub fn log_fail2ban_ipv6(peer_id: &PeerId, ip: &Ipv6Addr) {
     warn!("fail2ban: Blocked peer {peer_id} with IPv6 address: {ip}");
+}
+
+pub(crate) fn multiaddr_without_p2p(addr: &Multiaddr) -> Multiaddr {
+    addr.iter()
+        .filter(|protocol| !matches!(protocol, Protocol::P2p(_)))
+        .collect()
 }
 
 pub trait PeerIdExt {

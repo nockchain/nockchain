@@ -1,0 +1,288 @@
+#!/bin/bash
+set -e
+
+# Simple script to start a nockchain node and bridge together
+# Usage: ./run-node-and-bridge.sh [--clean] [--base-start-height N] [--nockchain-start-height N]
+#
+# Options:
+#   --clean                    Remove existing test data before starting
+#   --base-start-height N      Override Base chain start height (default: 33387036)
+#   --nockchain-start-height N Override Nockchain start height (default: 1)
+#
+# Environment setup:
+#   source environments/virtual-testnet.env  # For Virtual Testnet (50 block limit)
+#   source environments/base-sepolia.env     # For real Base Sepolia (unlimited)
+#
+# Before you start, run `make install` and `make deps` in the bridge contracts
+# directory. Also make sure your wallet, bridge, and nockchain binaries are up to date.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/layout.sh
+source "$SCRIPT_DIR/lib/layout.sh"
+bridge_resolve_layout
+
+BIN_DIR="$BRIDGE_BIN_DIR"
+TEST_DATA_DIR="${BRIDGE_DIR}/test_run_data"
+
+NODE_DIR="${TEST_DATA_DIR}/node"
+BRIDGE_DATA_DIR="${TEST_DATA_DIR}/bridge"
+WALLET_DIR="${TEST_DATA_DIR}/wallet"
+
+GENESIS_JAM="${GENESIS_JAM_PATH:-${BRIDGE_SOURCE_ROOT}/crates/nockchain/jams/fakenet-genesis-pow-64-bex-2.jam}"
+
+# Node config
+NODE_BIND="/ip4/0.0.0.0/udp/3005/quic-v1"
+NODE_PUBLIC_GRPC="127.0.0.1:5001"
+NODE_PRIVATE_GRPC_PORT="5002"
+
+# Bridge config
+BRIDGE_INGRESS="127.0.0.1:8002"
+
+# Environment configuration (set via environment variables or defaults to virtual testnet)
+BRIDGE_ENV="${BRIDGE_ENV:-virtual-testnet}"
+AUTO_LOADED_ENV_FILE=""
+if [ "$BRIDGE_ENV" = "virtual-testnet" ] && [ -z "${BASE_WS_URL:-}" ]; then
+    GENERATED_ENV_FILE="${SCRIPT_DIR}/environments/virtual-testnet.generated.env"
+    if [ -f "$GENERATED_ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$GENERATED_ENV_FILE"
+        AUTO_LOADED_ENV_FILE="$GENERATED_ENV_FILE"
+    fi
+fi
+: "${BASE_WS_URL:?BASE_WS_URL must be set; source scripts/environments/virtual-testnet.generated.env or an environment profile.}"
+: "${INBOX_CONTRACT_ADDRESS:?INBOX_CONTRACT_ADDRESS must be set.}"
+: "${NOCK_CONTRACT_ADDRESS:?NOCK_CONTRACT_ADDRESS must be set.}"
+BRIDGE_ETH_KEY="${BRIDGE_ETH_KEY:-0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318}"
+BRIDGE_NOCK_KEY="${BRIDGE_NOCK_KEY:-5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8T}"
+
+echo "============================================"
+echo "Environment: $BRIDGE_ENV"
+if [ -n "$AUTO_LOADED_ENV_FILE" ]; then
+    echo "Loaded env:  $AUTO_LOADED_ENV_FILE"
+fi
+echo "Base WS URL: ${BASE_WS_URL:0:60}..."
+echo "Inbox:       $INBOX_CONTRACT_ADDRESS"
+echo "Nock:        $NOCK_CONTRACT_ADDRESS"
+echo "Base Start:  $BASE_START_HEIGHT"
+echo "Nock Start:  $NOCKCHAIN_START_HEIGHT"
+echo "============================================"
+echo ""
+
+# Cleanup function
+cleanup() {
+    echo "Cleaning up..."
+    [ -n "$NODE_PID" ] && kill $NODE_PID 2>/dev/null || true
+    [ -n "$BRIDGE_PID" ] && kill $BRIDGE_PID 2>/dev/null || true
+    wait 2>/dev/null || true
+    echo "Done."
+}
+
+trap cleanup EXIT INT TERM
+
+# Configurable start heights (can be overridden via CLI)
+BASE_START_HEIGHT="${BASE_START_HEIGHT:-33387036}"
+NOCKCHAIN_START_HEIGHT="${NOCKCHAIN_START_HEIGHT:-1}"
+
+# Driver-side finality configuration (confirmation depths)
+BASE_CONFIRMATION_DEPTH="${BASE_CONFIRMATION_DEPTH:-300}"
+NOCKCHAIN_CONFIRMATION_DEPTH="${NOCKCHAIN_CONFIRMATION_DEPTH:-100}"
+
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --clean)
+            echo "Cleaning test data directories..."
+            rm -rf "$TEST_DATA_DIR"
+            shift
+            ;;
+        --base-start-height)
+            BASE_START_HEIGHT="$2"
+            shift 2
+            ;;
+        --nockchain-start-height)
+            NOCKCHAIN_START_HEIGHT="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: ./run-node-and-bridge.sh [--clean] [--base-start-height N] [--nockchain-start-height N]"
+            exit 1
+            ;;
+    esac
+done
+
+# Create directories
+mkdir -p "$NODE_DIR" "$BRIDGE_DATA_DIR" "$WALLET_DIR"
+
+# Check binaries exist
+if [ ! -f "$BIN_DIR/nockchain" ]; then
+    echo "Error: nockchain not found at $BIN_DIR/nockchain"
+    echo "Run: cargo build --release -p nockchain"
+    exit 1
+fi
+
+if [ ! -f "$BIN_DIR/bridge" ]; then
+    echo "Error: bridge not found at $BIN_DIR/bridge"
+    echo "Run: cargo build --release -p bridge"
+    exit 1
+fi
+
+if [ ! -f "$GENESIS_JAM" ]; then
+    echo "Error: genesis jam not found at $GENESIS_JAM"
+    echo "Set GENESIS_JAM_PATH to override the default."
+    exit 1
+fi
+
+# Initialize wallet to get mining address
+echo "Initializing wallet..."
+FAKENET_SEED="route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm"
+
+NOCK_DATA_DIR="$WALLET_DIR" "$BIN_DIR/nockchain-wallet" import-keys \
+    --seedphrase "$FAKENET_SEED" \
+    --version 1 2>/dev/null || true
+
+MINING_ADDR=$( NOCK_DATA_DIR="$WALLET_DIR" "$BIN_DIR/nockchain-wallet" list-active-addresses 2>/dev/null | LC_ALL=C sed -n 's/.*- Address: //p' | head -1 )
+
+if [ -z "$MINING_ADDR" ]; then
+    echo "Warning: Could not get mining address, using placeholder"
+    MINING_ADDR="placeholder"
+fi
+
+echo "Mining address: $MINING_ADDR"
+
+# Start node
+echo "Starting nockchain node..."
+cd "$NODE_DIR"
+
+echo "Running command:"
+echo "$BIN_DIR/nockchain \\"
+echo "    --new \\"
+echo "    --fakenet \\"
+echo "    --fakenet-genesis-jam-path $GENESIS_JAM \\"
+echo "    --fakenet-pow-len 64 \\"
+echo "    --fakenet-log-difficulty 2 \\"
+echo "    --mine \\"
+echo "    --mining-pkh $MINING_ADDR \\"
+echo "    --bind $NODE_BIND \\"
+echo "    --bind-public-grpc-addr $NODE_PUBLIC_GRPC \\"
+echo "    --bind-private-grpc-port $NODE_PRIVATE_GRPC_PORT"
+echo ""
+
+"$BIN_DIR/nockchain" \
+    --new \
+    --fakenet \
+    --fakenet-genesis-jam-path "$GENESIS_JAM" \
+    --fakenet-pow-len 64 \
+    --fakenet-log-difficulty 2 \
+    --mine \
+    --mining-pkh "$MINING_ADDR" \
+    --bind "$NODE_BIND" \
+    --bind-public-grpc-addr "$NODE_PUBLIC_GRPC" \
+    --bind-private-grpc-port "$NODE_PRIVATE_GRPC_PORT" \
+    2>&1 | sed 's/^/[NODE] /' &
+NODE_PID=$!
+
+echo "Node started with PID $NODE_PID"
+echo "Waiting for node to initialize..."
+sleep 3
+
+# Check node is running
+if ! kill -0 $NODE_PID 2>/dev/null; then
+    echo "Error: Node failed to start"
+    exit 1
+fi
+
+# Generate bridge config
+BRIDGE_CONFIG="${BRIDGE_DATA_DIR}/bridge-conf.toml"
+cat > "$BRIDGE_CONFIG" << EOF
+node_id = 1
+# Environment: ${BRIDGE_ENV}
+base_ws_url = "${BASE_WS_URL}"
+inbox_contract_address = "${INBOX_CONTRACT_ADDRESS}"
+nock_contract_address = "${NOCK_CONTRACT_ADDRESS}"
+my_eth_key = "${BRIDGE_ETH_KEY}"
+my_nock_key = "${BRIDGE_NOCK_KEY}"
+grpc_address = "http://127.0.0.1:${NODE_PRIVATE_GRPC_PORT}"
+base_confirmation_depth = ${BASE_CONFIRMATION_DEPTH}
+nockchain_confirmation_depth = ${NOCKCHAIN_CONFIRMATION_DEPTH}
+ingress_listen_address = "127.0.0.1:8002"
+
+# Fake test data (valid format placeholders for local testing)
+[[nodes]]
+ip = "localhost:8001"
+eth_pubkey = "0x1111111111111111111111111111111111111111"
+nock_pkh = "2222222222222222222222222222222222222222222222222222"
+
+[[nodes]]
+ip = "127.0.0.1:8002"
+eth_pubkey = "0x2222222222222222222222222222222222222222"
+nock_pkh = "3333333333333333333333333333333333333333333333333333"
+
+[[nodes]]
+ip = "localhost:8003"
+eth_pubkey = "0x3333333333333333333333333333333333333333"
+nock_pkh = "4444444444444444444444444444444444444444444444444444"
+
+[[nodes]]
+ip = "localhost:8004"
+eth_pubkey = "0x4444444444444444444444444444444444444444"
+nock_pkh = "5555555555555555555555555555555555555555555555555555"
+
+[[nodes]]
+ip = "localhost:8005"
+eth_pubkey = "0x5555555555555555555555555555555555555555"
+nock_pkh = "6666666666666666666666666666666666666666666666666666"
+
+# Bridge constants for local testing
+[constants]
+min_signers = 3
+total_signers = 5
+minimum_event_nocks = 1000       # Lower for testing (prod: 1_000_000)
+nicks_fee_per_nock = 195
+base_blocks_chunk = 100
+base_start_height = ${BASE_START_HEIGHT}
+nockchain_start_height = ${NOCKCHAIN_START_HEIGHT}
+EOF
+
+echo "Bridge config written to $BRIDGE_CONFIG"
+
+# Start bridge
+echo "Starting bridge..."
+RUST_LOG=debug,connect=warn \
+"$BIN_DIR/bridge" \
+    --new \
+    --config-path "$BRIDGE_CONFIG" \
+    --data-dir "$BRIDGE_DATA_DIR" \
+    2>&1 | sed 's/^/[BRIDGE] /' &
+BRIDGE_PID=$!
+
+echo "Bridge started with PID $BRIDGE_PID"
+
+echo ""
+echo "============================================"
+echo "Node and Bridge running! [$BRIDGE_ENV]"
+echo "============================================"
+echo "Node:   PID=$NODE_PID"
+echo "        Public gRPC:  http://$NODE_PUBLIC_GRPC"
+echo "        Private gRPC: http://127.0.0.1:$NODE_PRIVATE_GRPC_PORT"
+echo ""
+echo "Bridge: PID=$BRIDGE_PID"
+echo "        Ingress:      http://$BRIDGE_INGRESS"
+echo "        Config:       $BRIDGE_CONFIG"
+echo "        Base WS:      ${BASE_WS_URL:0:50}..."
+echo ""
+echo "TUI (separate terminal):"
+echo "  $BIN_DIR/nockchain-bridge-tui --server \"http://$BRIDGE_INGRESS\""
+echo ""
+echo "Data directories:"
+echo "  Node:   $NODE_DIR"
+echo "  Bridge: $BRIDGE_DATA_DIR"
+echo "  Wallet: $WALLET_DIR"
+echo ""
+echo "Press Ctrl+C to stop both processes"
+echo "============================================"
+
+# Wait for either process to exit
+wait -n $NODE_PID $BRIDGE_PID 2>/dev/null || true
+
+echo "A process exited, shutting down..."

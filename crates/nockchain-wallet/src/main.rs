@@ -27,8 +27,6 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 #[cfg(test)]
 use command::TimelockRangeCli;
-#[cfg(test)]
-use command::WalletWire;
 use command::{
     ClientType, CommandNoun, Commands, NoteSelectionStrategyCli, WalletCli, WatchSubcommand,
 };
@@ -67,7 +65,9 @@ use tracing::{error, info, warn};
 use wallet_tx_builder::adapter::{
     normalize_balance_pages, NormalizeSnapshotError, NormalizedSnapshot, SnapshotConsistencyError,
 };
-use wallet_tx_builder::lock_resolver::LockMatcher;
+use wallet_tx_builder::lock_resolver::{
+    LockMatcher, LockResolution, LockResolutionSource, ResolveLockRequest,
+};
 use wallet_tx_builder::planner::{plan_create_tx, PlanError};
 use wallet_tx_builder::types::{
     CandidateVersionPolicy, ChainContext, PlanRequest, PlanningMode, SelectionMode, SelectionOrder,
@@ -75,6 +75,23 @@ use wallet_tx_builder::types::{
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
 use crate::public_nockchain::v2::client::BalanceRequest;
+
+fn multisig_batch_driver(pokes: Vec<NounSlab>) -> IODriverFn {
+    make_driver(|handle| async move {
+        for poke in pokes {
+            match handle.poke(OnePunchWire::Poke.to_wire(), poke).await? {
+                PokeResult::Ack => {}
+                PokeResult::Nack => {
+                    let _ = handle.exit.exit(1).await;
+                    return Err(NockAppError::PokeFailed);
+                }
+            }
+        }
+
+        handle.exit.exit(0).await?;
+        Ok(())
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<(), NockAppError> {
@@ -108,11 +125,80 @@ async fn main() -> Result<(), NockAppError> {
     let mut synced_snapshot_for_planner: Option<NormalizedSnapshot> = None;
 
     if cli.fakenet {
-        wallet.set_fakenet().await?;
+        wallet
+            .set_fakenet_with_overrides(cli.fakenet_v1_phase, cli.fakenet_bythos_phase)
+            .await?;
     } else if wallet.is_fakenet().await? {
         return Err(NockAppError::OtherError(
             "Attempted to boot the wallet in mainnet mode, but the loaded state is in fakenet mode. Please use the --fakenet flag to boot the wallet or boot the wallet with the --new flag to create a new mainnet wallet".to_string(),
         ));
+    }
+
+    if let Commands::Watch {
+        subcommand:
+            WatchSubcommand::MultisigBatch {
+                threshold,
+                manifest,
+            },
+    } = &cli.command
+    {
+        let pokes = Wallet::load_multisig_watch_manifest_pokes(*threshold, manifest)?;
+        let imported_count = pokes.len();
+        wallet.app.add_io_driver(multisig_batch_driver(pokes)).await;
+
+        match wallet.app.run().await {
+            Ok(_) => {
+                println!(
+                    "Imported {} multisig watch entries from {}",
+                    imported_count, manifest
+                );
+                info!("Command executed successfully");
+                return Ok(());
+            }
+            Err(e) => {
+                error!("Command failed: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    if let Commands::DeriveChildBatch {
+        start_index,
+        count,
+        hardened,
+        label_prefix,
+        out,
+    } = &cli.command
+    {
+        let derived = wallet
+            .derive_child_batch(*start_index, *count, *hardened, label_prefix)
+            .await?;
+        let csv = derived
+            .iter()
+            .map(|(index, address)| format!("{index},{address}\n"))
+            .collect::<String>();
+
+        if let Some(out_path) = out {
+            fs::write(out_path, &csv).map_err(|e| {
+                CrownError::Unknown(format!(
+                    "Failed to write derived child address CSV to {}: {}",
+                    out_path, e
+                ))
+            })?;
+            println!(
+                "Derived {} child addresses into {}",
+                derived.len(),
+                out_path
+            );
+        } else {
+            print!("{csv}");
+            io::stdout()
+                .flush()
+                .map_err(|e| CrownError::Unknown(format!("Failed to flush stdout: {}", e)))?;
+        }
+
+        info!("Command executed successfully");
+        return Ok(());
     }
 
     let requires_sync = match &cli.command {
@@ -120,6 +206,7 @@ async fn main() -> Result<(), NockAppError> {
         // or they don't interact with the chain
         Commands::Keygen
         | Commands::DeriveChild { .. }
+        | Commands::DeriveChildBatch { .. }
         | Commands::ImportKeys { .. }
         | Commands::ExportKeys
         | Commands::SignMessage { .. }
@@ -157,6 +244,9 @@ async fn main() -> Result<(), NockAppError> {
             hardened,
             label,
         } => Wallet::derive_child(*index, *hardened, label),
+        Commands::DeriveChildBatch { .. } => {
+            unreachable!("derive-child-batch handled earlier")
+        }
         Commands::SignMessage {
             message,
             message_file,
@@ -302,6 +392,9 @@ async fn main() -> Result<(), NockAppError> {
                 threshold,
                 participants,
             } => Wallet::watch_multisig(*threshold, participants),
+            WatchSubcommand::MultisigBatch { .. } => {
+                unreachable!("multisig batch watch handled earlier")
+            }
         },
         Commands::ExportKeys => Wallet::export_keys(),
         Commands::ListNotes => Wallet::list_notes(),
@@ -531,9 +624,25 @@ impl Wallet {
     }
 
     /// Applies the shared Rust fakenet constants so wallet state matches node fakenet defaults.
+    #[cfg(test)]
     async fn set_fakenet(&mut self) -> Result<(), NockAppError> {
+        self.set_fakenet_with_overrides(None, None).await
+    }
+
+    /// Applies shared fakenet constants with optional phase overrides for custom local chains.
+    async fn set_fakenet_with_overrides(
+        &mut self,
+        v1_phase: Option<u64>,
+        bythos_phase: Option<u64>,
+    ) -> Result<(), NockAppError> {
         let mut slab = NounSlab::new();
-        let constants = default_fakenet_blockchain_constants();
+        let mut constants = default_fakenet_blockchain_constants();
+        if let Some(v1_phase) = v1_phase {
+            constants = constants.with_v1_phase(v1_phase);
+        }
+        if let Some(bythos_phase) = bythos_phase {
+            constants = constants.with_bythos_phase(bythos_phase);
+        }
         let constants_noun = constants.to_noun(&mut slab);
         let (poke, _) = Self::wallet("fakenet", &[constants_noun], Operation::Poke, &mut slab)?;
         let wire = OnePunchWire::Poke.to_wire();
@@ -646,6 +755,143 @@ impl Wallet {
             Operation::Poke,
             &mut slab,
         )
+    }
+
+    fn markdown_text_from_effect(effect: &NounSlab) -> Result<Option<String>, NockAppError> {
+        let space = effect.noun_space();
+        let Ok(effect_cell) = unsafe { effect.root() }.in_space(&space).as_cell() else {
+            return Ok(None);
+        };
+        if effect_cell.head().eq_bytes(b"markdown") {
+            let markdown_text = effect_cell.tail();
+            let atom = markdown_text
+                .as_atom()
+                .map_err(|_| CrownError::Unknown("Malformed markdown effect".to_string()))?;
+            return Ok(Some(
+                String::from_utf8_lossy(&atom.to_bytes_until_nul()?).to_string(),
+            ));
+        }
+        Ok(None)
+    }
+
+    fn is_exit_effect(effect: &NounSlab) -> bool {
+        let space = effect.noun_space();
+        let Ok(effect_cell) = unsafe { effect.root() }.in_space(&space).as_cell() else {
+            return false;
+        };
+        effect_cell.head().eq_bytes(b"exit")
+    }
+
+    fn derived_address_from_effects(effects: &[NounSlab]) -> Result<String, NockAppError> {
+        let mut derived_address: Option<String> = None;
+        let mut markdown_blocks = Vec::new();
+
+        for effect in effects {
+            if let Some(markdown) = Self::markdown_text_from_effect(effect)? {
+                for line in markdown.lines() {
+                    let trimmed = line.trim();
+                    if let Some(address) = trimmed.strip_prefix("- Address: ") {
+                        let candidate = address.trim();
+                        if !candidate.is_empty() && candidate != "N/A (private key)" {
+                            derived_address = Some(candidate.to_string());
+                        }
+                    }
+                }
+                markdown_blocks.push(markdown);
+            }
+        }
+
+        derived_address.ok_or_else(|| {
+            CrownError::Unknown(format!(
+                "derive-child batch could not extract a derived address from wallet output: {:?}",
+                markdown_blocks
+            ))
+            .into()
+        })
+    }
+
+    async fn derive_child_batch(
+        &mut self,
+        start_index: u64,
+        count: u64,
+        hardened: bool,
+        label_prefix: &Option<String>,
+    ) -> Result<Vec<(u64, String)>, NockAppError> {
+        let end_exclusive = start_index.checked_add(count).ok_or_else(|| {
+            CrownError::Unknown("derive-child-batch index range overflowed".to_string())
+        })?;
+        if end_exclusive > (1u64 << 31) {
+            return Err(CrownError::Unknown(
+                "derive-child-batch index must stay below 2^31".to_string(),
+            )
+            .into());
+        }
+
+        let mut derive_requests = Vec::with_capacity(count as usize);
+        for offset in 0..count {
+            let index = start_index + offset;
+            let label = label_prefix
+                .as_ref()
+                .map(|prefix| format!("{prefix}-{index}"));
+            let (noun, _) = Self::derive_child(index, hardened, &label)?;
+            derive_requests.push((index, noun));
+        }
+
+        let (derived_sender, mut derived_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<Result<(u64, String), NockAppError>>();
+
+        self.app
+            .add_io_driver(make_driver(move |handle| async move {
+                for (index, poke) in derive_requests {
+                    match handle.poke(OnePunchWire::Poke.to_wire(), poke).await? {
+                        PokeResult::Ack => {}
+                        PokeResult::Nack => {
+                            let _ = handle.exit.exit(1).await;
+                            return Err(NockAppError::PokeFailed);
+                        }
+                    }
+
+                    let mut effects = Vec::new();
+                    loop {
+                        let effect = handle.next_effect().await?;
+                        let is_exit = Self::is_exit_effect(&effect);
+                        effects.push(effect);
+                        if is_exit {
+                            break;
+                        }
+                    }
+
+                    let address = Self::derived_address_from_effects(&effects)?;
+                    if derived_sender.send(Ok((index, address))).is_err() {
+                        return Err(CrownError::Unknown(
+                            "derive-child-batch receiver dropped unexpectedly".to_string(),
+                        )
+                        .into());
+                    }
+                }
+
+                handle.exit.exit(0).await?;
+                Ok(())
+            }))
+            .await;
+
+        self.app.run().await?;
+
+        let mut derived = Vec::with_capacity(count as usize);
+        while let Some(derive_result) = derived_receiver.recv().await {
+            derived.push(derive_result?);
+        }
+
+        if derived.len() != count as usize {
+            return Err(CrownError::Unknown(format!(
+                "derive-child-batch expected {} derived addresses, got {}",
+                count,
+                derived.len()
+            ))
+            .into());
+        }
+
+        Ok(derived)
     }
 
     /// Signs a transaction.
@@ -920,6 +1166,38 @@ impl Wallet {
             Operation::Poke,
             &mut slab,
         )
+    }
+
+    fn load_multisig_watch_manifest_pokes(
+        threshold: u64,
+        manifest_path: &str,
+    ) -> Result<Vec<NounSlab>, NockAppError> {
+        let manifest = fs::read_to_string(manifest_path).map_err(|err| {
+            CrownError::Unknown(format!(
+                "Failed to read multisig watch manifest '{}': {}",
+                manifest_path, err
+            ))
+        })?;
+
+        let mut pokes = Vec::new();
+        for entry in manifest.lines().map(str::trim) {
+            if entry.is_empty() || entry.starts_with('#') {
+                continue;
+            }
+
+            let (noun, _) = Self::watch_multisig(threshold, entry)?;
+            pokes.push(noun);
+        }
+
+        if pokes.is_empty() {
+            return Err(CrownError::Unknown(format!(
+                "Multisig watch manifest '{}' contained no entries",
+                manifest_path
+            ))
+            .into());
+        }
+
+        Ok(pokes)
     }
 
     /// Exports keys to a file.

@@ -1,0 +1,31 @@
+name: "wallet_smoke"
+seed: 5
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6601"
+    grpc_private_port: 7601
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 2
+    bind:
+      - "/ip4/127.0.0.1/udp/4601/quic-v1"
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: wallet
+    wallet: "alice"
+    node: "node-a"
+    command: "keygen"
+  - action: wallet
+    wallet: "alice"
+    node: "node-a"
+    command: "list-active-addresses"
+    expect: "Address:"
+asserts:
+  - assert: grpc_ready
+    node: "node-a"

@@ -51,6 +51,13 @@ docs-check:
 
 build-kernels:
   stage: kernels
+  # Kernel build + cargo-test gate the merge request into `open` (the
+  # required pre-merge check). Re-running them on the post-merge `open`
+  # push only delays sync-to-staging by ~2h, so skip them there.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "open"'
+      when: never
+    - when: on_success
   script:
     - |
       nix develop -c bash -c '
@@ -73,6 +80,11 @@ cargo-test:
   needs:
     - job: build-kernels
       artifacts: true
+  # See build-kernels: validated on the MR into `open`, skipped on push.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "open"'
+      when: never
+    - when: on_success
   script:
     - |
       nix develop -c bash -c '
@@ -84,10 +96,33 @@ cargo-test:
         cargo test --release
       '
 
+cargo-clippy:
+  stage: test
+  needs:
+    - job: build-kernels
+      artifacts: true
+  # See build-kernels: validated on the MR into `open`, skipped on push.
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "open"'
+      when: never
+    - when: on_success
+  script:
+    - |
+      nix develop -c bash -c '
+        set -euo pipefail
+        export PATH="$HOME/.local/bin:$PATH"
+        # Install Solidity dependencies for the bridge build script
+        make -C crates/bridge/contracts deps
+        # Same clippy flags as the upstream repo (see `make lint-local`).
+        cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Dwarnings
+      '
+
 sync-to-staging:
   stage: sync
-  needs:
-    - job: cargo-test
+  # Build/test validation already ran as a required check on the MR into
+  # `open`; the post-merge `open` pipeline only publishes, so don't gate on
+  # (or wait ~2h for) the build/test jobs.
+  needs: []
   rules:
     - if: '$CI_COMMIT_BRANCH == "open" && $CI_PIPELINE_SOURCE == "push"'
     - if: '$CI_COMMIT_BRANCH == "open" && $FORCE_SYNC_TO_STAGING == "1"'

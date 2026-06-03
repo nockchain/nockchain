@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 #![allow(clippy::items_after_test_module)]
+#![allow(clippy::missing_safety_doc)]
 use std::any::Any;
 use std::fs;
 use std::future::Future;
@@ -54,6 +55,8 @@ const SERF_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024; // 8MB
 const REPLAY_PRESERVE_BATCH: usize = 64;
 const PMA_GC_DROP_ALLOCATED_PREFIX_NUMERATOR: usize = 1;
 const PMA_GC_DROP_ALLOCATED_PREFIX_DENOMINATOR: usize = 1;
+const PMA_EVENT_PREFLIGHT_MIN_FREE_WORDS: usize = 4096;
+const PMA_EVENT_PREFLIGHT_FREE_WORDS_ENV: &str = "NOCK_PMA_EVENT_PREFLIGHT_FREE_WORDS";
 const NOCK_STACK_FREE_GAP_TRIM_ENV: &str = "NOCK_STACK_FREE_GAP_TRIM";
 const NOCK_STACK_FREE_GAP_TRIM_THRESHOLD_BYTES: usize = 512 * 1024 * 1024;
 const NOCK_STACK_FREE_GAP_TRIM_THRESHOLD_WORDS: usize =
@@ -71,6 +74,15 @@ fn bytes_to_mib(bytes: usize) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
+fn pma_event_preflight_free_words(pma: &Pma) -> usize {
+    if let Ok(value) = std::env::var(PMA_EVENT_PREFLIGHT_FREE_WORDS_ENV) {
+        if let Ok(words) = value.parse::<usize>() {
+            return words;
+        }
+    }
+    PMA_EVENT_PREFLIGHT_MIN_FREE_WORDS.max(pma.size_words() / 100)
+}
+
 fn stack_free_gap_trim_enabled() -> bool {
     match std::env::var(NOCK_STACK_FREE_GAP_TRIM_ENV) {
         Ok(value) => !matches!(
@@ -83,7 +95,7 @@ fn stack_free_gap_trim_enabled() -> bool {
 }
 
 fn log_preserve_component(event_num: u64, component: &'static str, elapsed: Duration) {
-    info!(
+    debug!(
         event_num,
         component,
         elapsed_ms = duration_ms(elapsed),
@@ -92,7 +104,7 @@ fn log_preserve_component(event_num: u64, component: &'static str, elapsed: Dura
 }
 
 fn log_pma_preserve_component(event_num: u64, component: &'static str, segment: PmaCopySegment) {
-    info!(
+    debug!(
         event_num,
         component,
         elapsed_ms = duration_ms(segment.elapsed),
@@ -231,6 +243,7 @@ pub struct PmaConfig {
     pub path_0: PathBuf,
     pub path_1: PathBuf,
     pub words: usize,
+    pub reserved_words: Option<usize>,
     pub open_existing: bool,
     pub create_snapshots: bool,
     pub rotating_snapshot_interval_event_time: Option<Duration>,
@@ -269,11 +282,25 @@ impl PmaSlabPaths {
 }
 
 const PMA_PERSIST_MAGIC: u64 = u64::from_le_bytes(*b"PMAPERS1");
-const PMA_PERSIST_VERSION: u32 = 4;
+const PMA_PERSIST_VERSION: u32 = 5;
+const PMA_PERSIST_VERSION_V4: u32 = 4;
 const SNAPSHOT_UNUSED_COLD_OFFSET: PmaOffsetWords = PmaOffsetWords::from_words(0);
 
 #[derive(Clone, Encode, Decode, Debug)]
 struct PmaPersistMetadata {
+    magic: u64,
+    version: u32,
+    #[bincode(with_serde)]
+    ker_hash: Hash,
+    event_num: u64,
+    kernel_state_raw: u64,
+    pma_reserved_words: u64,
+    #[bincode(with_serde)]
+    checksum: Hash,
+}
+
+#[derive(Clone, Encode, Decode, Debug)]
+struct PmaPersistMetadataV4 {
     magic: u64,
     version: u32,
     #[bincode(with_serde)]
@@ -285,23 +312,30 @@ struct PmaPersistMetadata {
 }
 
 impl PmaPersistMetadata {
-    fn new(ker_hash: Hash, event_num: u64, kernel_state_raw: u64) -> Self {
-        let checksum = Self::checksum(ker_hash, event_num, kernel_state_raw);
+    fn new(ker_hash: Hash, event_num: u64, kernel_state_raw: u64, pma_reserved_words: u64) -> Self {
+        let checksum = Self::checksum(ker_hash, event_num, kernel_state_raw, pma_reserved_words);
         Self {
             magic: PMA_PERSIST_MAGIC,
             version: PMA_PERSIST_VERSION,
             ker_hash,
             event_num,
             kernel_state_raw,
+            pma_reserved_words,
             checksum,
         }
     }
 
-    fn checksum(ker_hash: Hash, event_num: u64, kernel_state_raw: u64) -> Hash {
+    fn checksum(
+        ker_hash: Hash,
+        event_num: u64,
+        kernel_state_raw: u64,
+        pma_reserved_words: u64,
+    ) -> Hash {
         let mut hasher = Hasher::new();
         hasher.update(ker_hash.as_bytes());
         hasher.update(&event_num.to_le_bytes());
         hasher.update(&kernel_state_raw.to_le_bytes());
+        hasher.update(&pma_reserved_words.to_le_bytes());
         hasher.finalize()
     }
 
@@ -309,15 +343,28 @@ impl PmaPersistMetadata {
         if self.magic != PMA_PERSIST_MAGIC || self.version != PMA_PERSIST_VERSION {
             return false;
         }
-        self.checksum == Self::checksum(self.ker_hash, self.event_num, self.kernel_state_raw)
+        self.checksum
+            == Self::checksum(
+                self.ker_hash, self.event_num, self.kernel_state_raw, self.pma_reserved_words,
+            )
     }
 
     fn load_from_path(path: &Path) -> Option<Self> {
         let bytes = fs::read(path).ok()?;
-        let (meta, _) =
+        if let Ok((meta, _)) =
             bincode::decode_from_slice::<Self, config::Configuration>(&bytes, config::standard())
-                .ok()?;
-        meta.validate().then_some(meta)
+        {
+            if meta.validate() {
+                return Some(meta);
+            }
+        }
+        let (legacy, _) =
+            bincode::decode_from_slice::<PmaPersistMetadataV4, config::Configuration>(
+                &bytes,
+                config::standard(),
+            )
+            .ok()?;
+        legacy.validate().then(|| legacy.into_current())
     }
 
     fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
@@ -328,25 +375,53 @@ impl PmaPersistMetadata {
     }
 }
 
+impl PmaPersistMetadataV4 {
+    fn checksum(ker_hash: Hash, event_num: u64, kernel_state_raw: u64) -> Hash {
+        let mut hasher = Hasher::new();
+        hasher.update(ker_hash.as_bytes());
+        hasher.update(&event_num.to_le_bytes());
+        hasher.update(&kernel_state_raw.to_le_bytes());
+        hasher.finalize()
+    }
+
+    fn validate(&self) -> bool {
+        if self.magic != PMA_PERSIST_MAGIC || self.version != PMA_PERSIST_VERSION_V4 {
+            return false;
+        }
+        self.checksum == Self::checksum(self.ker_hash, self.event_num, self.kernel_state_raw)
+    }
+
+    fn into_current(self) -> PmaPersistMetadata {
+        PmaPersistMetadata::new(self.ker_hash, self.event_num, self.kernel_state_raw, 0)
+    }
+}
+
 fn pma_meta_path(path: &Path) -> PathBuf {
     path.with_extension("meta")
 }
 
-fn pma_meta_status(path: &Path, ker_hash: Hash) -> Option<(u64, SystemTime)> {
+// Slab selection is intentionally kernel-hash-agnostic: a kernel upgrade
+// (new bytecode -> new BLAKE3 hash) must not hide the genuinely-current slab.
+// Gating this on `ker_hash` caused both slabs to report `None` after an
+// upgrade, so selection fell through to its `Slab0` default and then reported
+// the (possibly stale) slab-0 metadata as "missing or invalid" even when the
+// live state lived in slab 1. Structural integrity is still guarded by the
+// metadata checksum (`PmaPersistMetadata::validate`) and the PMA trailer
+// (`Pma::open`); cross-kernel state compatibility is the kernel's own
+// Hoon-level `+load` responsibility, consistent with the checkpoint and
+// snapshot restore paths.
+fn pma_meta_status(path: &Path) -> Option<(u64, SystemTime)> {
     let meta_path = pma_meta_path(path);
     let meta = PmaPersistMetadata::load_from_path(&meta_path)?;
-    if meta.ker_hash != ker_hash {
-        return None;
-    }
     let modified = std::fs::metadata(&meta_path)
         .and_then(|meta| meta.modified())
         .unwrap_or(SystemTime::UNIX_EPOCH);
     Some((meta.event_num, modified))
 }
 
-fn select_active_pma_slab(paths: &PmaSlabPaths, ker_hash: Hash) -> PmaSlab {
-    let status_0 = pma_meta_status(&paths.path_0, ker_hash);
-    let status_1 = pma_meta_status(&paths.path_1, ker_hash);
+fn select_active_pma_slab(paths: &PmaSlabPaths) -> PmaSlab {
+    let status_0 = pma_meta_status(&paths.path_0);
+    let status_1 = pma_meta_status(&paths.path_1);
     match (status_0, status_1) {
         (Some((event_0, mod_0)), Some((event_1, mod_1))) => {
             if event_0 > event_1 {
@@ -382,7 +457,7 @@ pub(crate) fn inspect_existing_pma(
         path_0: path_0.to_path_buf(),
         path_1: path_1.to_path_buf(),
     };
-    let active = select_active_pma_slab(&paths, ker_hash);
+    let active = select_active_pma_slab(&paths);
     let active_path = paths.path(active).clone();
     let inactive_path = paths.path(active.next()).clone();
     let active_meta_path = pma_meta_path(&active_path);
@@ -413,17 +488,22 @@ pub(crate) fn inspect_existing_pma(
         };
     };
 
+    // A kernel-hash mismatch does NOT invalidate the PMA. The persisted kernel
+    // state is a kernel-agnostic noun and is loaded into the freshly-cued
+    // current kernel, which performs its own Hoon-level state migration. This
+    // mirrors the checkpoint (`form.rs` "loading checkpoint state into current
+    // kernel") and snapshot (`boot.rs` "loading snapshot state into current
+    // kernel") restore paths. Forcing a full event-log replay on every kernel
+    // upgrade is the operational cost we are eliminating here.
     if meta.ker_hash != ker_hash {
-        return ExistingPmaStatus::Invalid {
-            path: active_path,
-            reason: format!(
-                "kernel hash mismatch (metadata: {}, kernel: {})",
-                meta.ker_hash, ker_hash
-            ),
-        };
+        warn!(
+            metadata = %meta.ker_hash,
+            kernel = %ker_hash,
+            "PMA kernel hash mismatch; loading existing PMA state into current kernel"
+        );
     }
 
-    match Pma::open(active_path.clone()) {
+    match Pma::read_file_metadata(&active_path) {
         Ok(_) => ExistingPmaStatus::Valid {
             path: active_path,
             event_num: meta.event_num,
@@ -441,16 +521,24 @@ struct PmaGcState {
     interval: Duration,
     last_gc: Instant,
     words: usize,
+    reserved_words: Option<usize>,
 }
 
 impl PmaGcState {
-    fn new(paths: PmaSlabPaths, active: PmaSlab, interval: Duration, words: usize) -> Self {
+    fn new(
+        paths: PmaSlabPaths,
+        active: PmaSlab,
+        interval: Duration,
+        words: usize,
+        reserved_words: Option<usize>,
+    ) -> Self {
         Self {
             paths,
             active,
             interval,
             last_gc: Instant::now(),
             words,
+            reserved_words,
         }
     }
 
@@ -655,6 +743,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                             path_0,
                             path_1,
                             words,
+                            reserved_words,
                             open_existing,
                             create_snapshots,
                             rotating_snapshot_interval_event_time,
@@ -663,7 +752,7 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                         } = config;
                         let paths = PmaSlabPaths { path_0, path_1 };
                         let active = if open_existing {
-                            select_active_pma_slab(&paths, ker_hash)
+                            select_active_pma_slab(&paths)
                         } else {
                             PmaSlab::Slab0
                         };
@@ -671,17 +760,31 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                         let pma_meta_path = pma_meta_path(&active_path);
                         let pma_result = if open_existing && active_path.exists() {
                             pma_meta_load = true;
-                            Pma::open(active_path.clone())
+                            match reserved_words {
+                                Some(reserved_words) => Pma::open_with_min_and_reserved(
+                                    active_path.clone(),
+                                    words,
+                                    reserved_words,
+                                ),
+                                None => Pma::open_with_min(active_path.clone(), words),
+                            }
                         } else {
                             pma_meta_load = false;
-                            Pma::new(words, active_path.clone())
+                            match reserved_words {
+                                Some(reserved_words) => Pma::new_with_reserved(
+                                    words,
+                                    reserved_words,
+                                    active_path.clone(),
+                                ),
+                                None => Pma::new(words, active_path.clone()),
+                            }
                         };
                         match pma_result {
                             Ok(pma) => (
                                 Some(pma),
                                 Some(pma_meta_path),
                                 gc_interval.map(|interval| {
-                                    PmaGcState::new(paths, active, interval, words)
+                                    PmaGcState::new(paths, active, interval, words, reserved_words)
                                 }),
                                 create_snapshots,
                                 rotating_snapshot_interval_event_time,
@@ -709,13 +812,23 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
                 } else {
                     None
                 };
-                if let (Some(_pma), Some(meta_path), Some(manifest)) = (
+                if let (Some(pma), Some(meta_path), Some(manifest)) = (
                     pma.as_ref(),
                     pma_meta_path.as_ref(),
                     restore_manifest.as_ref(),
                 ) {
+                    let pma_reserved_words = match u64::try_from(pma.reserved_words()) {
+                        Ok(words) => words,
+                        Err(_) => {
+                            let _ = init_sender.send(Err(CrownError::Unknown(
+                                "PMA reservation exceeds u64 while synthesizing metadata"
+                                    .to_string(),
+                            )));
+                            return;
+                        }
+                    };
                     let synthesized = PmaPersistMetadata::new(
-                        ker_hash, manifest.event_num, manifest.kernel_root_raw,
+                        ker_hash, manifest.event_num, manifest.kernel_root_raw, pma_reserved_words,
                     );
                     if let Err(err) = synthesized.save_to_path(meta_path) {
                         let _ = init_sender.send(Err(CrownError::Unknown(format!(
@@ -866,25 +979,45 @@ impl<C> SerfThread<C> {
         let (result_ack_sender, result_ack) = oneshot::channel();
         let action_sender = self.action_sender.clone();
         let cancel = self.cancel_token.clone();
-        let timer = tokio::time::sleep(timeout);
-        let cancel_task = tokio::spawn(async move {
-            timer.await;
-            cancel.cancel();
-        });
         async move {
-            action_sender
-                .send(SerfAction::Poke {
+            let deadline = tokio::time::Instant::now() + timeout;
+            tokio::time::timeout_at(
+                deadline,
+                action_sender.send(SerfAction::Poke {
                     wire,
                     cause,
                     result,
                     result_ack,
-                })
-                .await?;
-            let res = result_fut.await?;
+                }),
+            )
+            .await
+            .map_err(|_| CrownError::Timeout)??;
+
+            let cancel_for_task = cancel.clone();
+            let cancel_task = tokio::spawn(async move {
+                tokio::time::sleep_until(deadline).await;
+                cancel_for_task.cancel();
+            });
+
+            let result = tokio::time::timeout_at(deadline, result_fut).await;
             cancel_task.abort();
             let _ = cancel_task.await;
-            let _ = result_ack_sender.send(());
-            res
+
+            match result {
+                Ok(Ok(res)) => {
+                    let _ = result_ack_sender.send(());
+                    res
+                }
+                Ok(Err(err)) => {
+                    let _ = result_ack_sender.send(());
+                    Err(err.into())
+                }
+                Err(_) => {
+                    cancel.cancel();
+                    let _ = result_ack_sender.send(());
+                    Err(CrownError::Timeout)
+                }
+            }
         }
     }
 
@@ -1142,9 +1275,18 @@ fn serf_loop<C: SerfCheckpoint>(
                             debug!("Failed to send inihibited poke result from serf thread");
                         });
                 } else {
+                    if let Err(err) = serf.ensure_pma_capacity_before_event() {
+                        let _ = result.send(Err(err)).inspect_err(|_e| {
+                            debug!("Failed to send PMA preflight failure from serf thread");
+                        });
+                        let _ = result_ack.blocking_recv().inspect_err(|_e| {
+                            debug!("Failed to receive result ack after PMA preflight failure");
+                        });
+                        continue;
+                    }
                     let cause_noun = cause.copy_to_stack(serf.stack());
                     let event_num_before = serf.event_num.load(Ordering::SeqCst) + 1;
-                    info!(
+                    debug!(
                         event_num = event_num_before,
                         source = %wire.source,
                         "poke action start"
@@ -1168,20 +1310,25 @@ fn serf_loop<C: SerfCheckpoint>(
                     let mut pma_detail = None;
                     let mut durable_append_elapsed = None;
                     let cleanup_start = did_update.then(Instant::now);
-                    if let Some(durable_event) = durable_event.as_ref() {
-                        durable_append_elapsed = Some(serf.append_durable_event(durable_event));
-                        serf.cumulative_event_processing_time_since_snapshot = serf
-                            .cumulative_event_processing_time_since_snapshot
-                            .saturating_add(durable_event.event_processing_duration);
-                    }
                     if did_update {
-                        info!(event_num = event_num_before, "poke cleanup start");
+                        debug!(event_num = event_num_before, "poke cleanup start");
                         let pma_start = Instant::now();
                         unsafe {
-                            pma_detail = serf.preserve_event_update_leftovers();
+                            pma_detail =
+                                serf.preserve_event_update_leftovers_with_pre_persist(|serf| {
+                                    if let Some(durable_event) = durable_event.as_ref() {
+                                        durable_append_elapsed =
+                                            Some(serf.append_durable_event(durable_event));
+                                        serf.cumulative_event_processing_time_since_snapshot = serf
+                                            .cumulative_event_processing_time_since_snapshot
+                                            .saturating_add(
+                                                durable_event.event_processing_duration,
+                                            );
+                                    }
+                                });
                         }
                         pma_elapsed = Some(pma_start.elapsed());
-                        info!(
+                        debug!(
                             event_num = event_num_before,
                             elapsed_ms = duration_ms(pma_start.elapsed()),
                             "poke cleanup stage done: preserve_event_update_leftovers"
@@ -1228,7 +1375,7 @@ fn serf_loop<C: SerfCheckpoint>(
                         let snapshot_start = Instant::now();
                         serf.maybe_create_rotating_snapshot();
                         snapshot_stage_elapsed = Some(snapshot_start.elapsed());
-                        info!(
+                        debug!(
                             event_num = event_num_before,
                             elapsed_ms = duration_ms(snapshot_start.elapsed()),
                             "poke cleanup stage done: rotating_snapshot"
@@ -1237,7 +1384,7 @@ fn serf_loop<C: SerfCheckpoint>(
                     let cleanup_elapsed = cleanup_start.map(|start| start.elapsed());
                     let poke_total_ms = duration_ms(event_elapsed)
                         + cleanup_elapsed.map(duration_ms).unwrap_or(0.0);
-                    info!(
+                    debug!(
                         event_num = event_num_before,
                         did_update,
                         poke_total_ms,
@@ -1728,17 +1875,23 @@ impl Serf {
         let pma_state = if pma_meta_load && checkpoint.is_none() {
             if let (Some(_pma), Some(meta_path)) = (pma.as_ref(), pma_meta_path.as_ref()) {
                 if let Some(meta) = PmaPersistMetadata::load_from_path(meta_path) {
-                    if meta.ker_hash == ker_hash {
-                        let kernel_state = unsafe { Noun::from_raw(meta.kernel_state_raw) };
-                        Some((kernel_state, meta.event_num))
-                    } else {
+                    // A kernel-hash mismatch does not discard the PMA: the
+                    // persisted state noun is loaded into the freshly-cued
+                    // current kernel, which runs its own Hoon-level `+load`
+                    // state migration. This matches the checkpoint restore
+                    // path below ("loading checkpoint state into current
+                    // kernel"). The metadata checksum (already validated by
+                    // `load_from_path`) and the PMA trailer guard structural
+                    // integrity; kernel-hash equality is not required for
+                    // memory safety.
+                    if meta.ker_hash != ker_hash {
                         warn!(
-                            "PMA metadata kernel hash mismatch (metadata: {}, kernel: {}); ignoring",
+                            "PMA metadata kernel hash mismatch (metadata: {}, kernel: {}); loading existing PMA state into current kernel",
                             meta.ker_hash, ker_hash
                         );
-                        reset_pma = true;
-                        None
                     }
+                    let kernel_state = unsafe { Noun::from_raw(meta.kernel_state_raw) };
+                    Some((kernel_state, meta.event_num))
                 } else {
                     if meta_path.exists() {
                         warn!(
@@ -2343,13 +2496,13 @@ impl Serf {
 
     fn append_durable_event(&mut self, event: &EventLogEntry) -> Duration {
         let Some(event_log) = self.event_log.as_mut() else {
-            info!(
+            debug!(
                 event_num = event.event_num,
                 "event-log append skipped: event log disabled"
             );
             return Duration::from_millis(0);
         };
-        info!(
+        debug!(
             event_num = event.event_num,
             path = %event_log.path().display(),
             sqlite_sync_mode = if durability::fsync_disabled() { "OFF" } else { "FULL" },
@@ -2371,7 +2524,7 @@ impl Serf {
             std::process::abort();
         }
         let elapsed = start.elapsed();
-        info!(
+        debug!(
             event_num = event.event_num,
             path = %event_log.path().display(),
             elapsed_ms = duration_ms(elapsed),
@@ -2383,9 +2536,44 @@ impl Serf {
         elapsed
     }
 
+    fn ensure_pma_capacity_before_event(&mut self) -> Result<()> {
+        let Some(pma) = self.pma.as_mut() else {
+            return Ok(());
+        };
+        let reserve_words = pma_event_preflight_free_words(pma);
+        if pma.free_words() >= reserve_words {
+            return Ok(());
+        }
+        let event_num = self.event_num.load(Ordering::SeqCst).saturating_add(1);
+        info!(
+            event_num,
+            path = %pma.path().display(),
+            capacity_words = pma.size_words(),
+            alloc_words = pma.alloc_offset(),
+            free_words = pma.free_words(),
+            reserve_words,
+            "event PMA preflight growth start"
+        );
+        pma.ensure_free_words(reserve_words).map_err(|err| {
+            CrownError::SaveError(format!(
+                "PMA preflight growth failed before event {event_num}: {err}"
+            ))
+        })?;
+        info!(
+            event_num,
+            path = %pma.path().display(),
+            capacity_words = pma.size_words(),
+            alloc_words = pma.alloc_offset(),
+            free_words = pma.free_words(),
+            reserve_words,
+            "event PMA preflight growth done"
+        );
+        Ok(())
+    }
+
     fn ensure_epoch_snapshot(&mut self) {
         if !self.snapshot_creation_enabled {
-            info!("epoch snapshot skipped: creation disabled");
+            debug!("epoch snapshot skipped: creation disabled");
             return;
         }
         let kernel_root_raw = {
@@ -2466,7 +2654,7 @@ impl Serf {
                 unsafe {
                     let _ = self.preserve_event_update_leftovers();
                 }
-                info!(
+                debug!(
                     replay_batch_end = idx + 1,
                     elapsed_ms = duration_ms(preserve_start.elapsed()),
                     "event replay preserve batch done"
@@ -2479,7 +2667,7 @@ impl Serf {
             unsafe {
                 let _ = self.preserve_event_update_leftovers();
             }
-            info!(
+            debug!(
                 elapsed_ms = duration_ms(preserve_start.elapsed()),
                 "event replay final preserve done"
             );
@@ -2532,7 +2720,7 @@ impl Serf {
 
     fn maybe_create_rotating_snapshot(&mut self) {
         if !self.snapshot_creation_enabled {
-            info!("rotating snapshot skipped: creation disabled");
+            debug!("rotating snapshot skipped: creation disabled");
             return;
         }
         let Some(interval) = self.rotating_snapshot_interval_event_time else {
@@ -2645,7 +2833,7 @@ impl Serf {
         segment: Option<&mut PmaCopySegment>,
     ) -> PmaCopySegment {
         if trace_pma {
-            info!("pma-copy: {label}");
+            debug!("pma-copy: {label}");
         }
         let before = pma.alloc_offset();
         let start = Instant::now();
@@ -2823,7 +3011,7 @@ impl Serf {
         self.persist_pma_metadata(pma);
     }
 
-    fn persist_pma_metadata_strict(&self, _pma: &Pma) -> Result<()> {
+    fn persist_pma_metadata_strict(&self, pma: &Pma) -> Result<()> {
         let Some(meta_path) = self.pma_meta_path.as_ref() else {
             return Ok(());
         };
@@ -2841,7 +3029,14 @@ impl Serf {
             })?;
         let kernel_state_raw = unsafe { kernel_state.as_raw() };
         let event_num = self.event_num.load(Ordering::SeqCst);
-        let meta = PmaPersistMetadata::new(self.ker_hash, event_num, kernel_state_raw);
+        let pma_reserved_words = u64::try_from(pma.reserved_words()).map_err(|_| {
+            CrownError::SaveError(
+                "PMA reservation exceeds u64 while persisting metadata".to_string(),
+            )
+        })?;
+        let meta = PmaPersistMetadata::new(
+            self.ker_hash, event_num, kernel_state_raw, pma_reserved_words,
+        );
         meta.save_to_path(meta_path)?;
         Ok(())
     }
@@ -2855,6 +3050,11 @@ impl Serf {
         let Some(pma) = self.pma.as_ref() else {
             return Ok(());
         };
+        if pma.is_growth_poisoned() {
+            return Err(CrownError::SaveError(
+                "PMA growth failed after partial file growth; restart the node so PMA growth journal recovery can complete before publishing metadata".to_string(),
+            ));
+        }
         let event_num = self.event_num.load(Ordering::SeqCst);
         info!(
             event_num,
@@ -2886,6 +3086,7 @@ impl Serf {
         let from_meta_path = pma_meta_path(&from_path);
         let to_meta_path = pma_meta_path(&to_path);
         let gc_words = gc_state.words;
+        let gc_reserved_words = gc_state.reserved_words;
         let event_num = self.event_num.load(Ordering::SeqCst);
         if !self.has_pma_gc_recovery_anchor() {
             warn!(
@@ -2919,7 +3120,13 @@ impl Serf {
         }
 
         let create_start = Instant::now();
-        let mut to_pma = match Pma::new(gc_words, to_path.clone()) {
+        let to_pma_result = match gc_reserved_words {
+            Some(reserved_words) => {
+                Pma::new_with_reserved(gc_words, reserved_words, to_path.clone())
+            }
+            None => Pma::new(gc_words, to_path.clone()),
+        };
+        let mut to_pma = match to_pma_result {
             Ok(pma) => pma,
             Err(err) => {
                 warn!(
@@ -2955,7 +3162,7 @@ impl Serf {
         let mut runtime_segments = unsafe { self.copy_runtime_state_from_pma(&pma, &mut to_pma) };
         runtime_segments.arvo = arvo_segment;
 
-        info!(
+        debug!(
             "pma-gc: copy timings: arvo_ms={} warm_ms={} test_jets_ms={} hot_ms={} cache_ms={} cold_ms={} arvo_alloc_words={} warm_alloc_words={} test_jets_alloc_words={} hot_alloc_words={} cache_alloc_words={} cold_alloc_words={}",
             runtime_segments.arvo.elapsed.as_millis(),
             runtime_segments.warm.elapsed.as_millis(),
@@ -2983,7 +3190,7 @@ impl Serf {
             PMA_GC_DROP_ALLOCATED_PREFIX_NUMERATOR, PMA_GC_DROP_ALLOCATED_PREFIX_DENOMINATOR,
         ) {
             Ok(advised_bytes) => {
-                info!(
+                debug!(
                     event_num,
                     path = %to_pma.path().display(),
                     advised_bytes,
@@ -3061,7 +3268,7 @@ impl Serf {
             .advise_free_gap(NOCK_STACK_FREE_GAP_TRIM_THRESHOLD_WORDS)
         {
             Ok(advice) if advice.advised_bytes > 0 => {
-                info!(
+                debug!(
                     event_num,
                     free_gap_words = advice.free_gap_words,
                     free_gap_mib = words_to_mib(advice.free_gap_words),
@@ -3091,6 +3298,23 @@ impl Serf {
     /// This function is unsafe because it modifies the Serf's state directly.
     #[tracing::instrument(level = "info", skip_all)]
     pub unsafe fn preserve_event_update_leftovers(&mut self) -> Option<PmaCopyDetail> {
+        self.preserve_event_update_leftovers_with_pre_persist(|_| {})
+    }
+
+    /// Preserves leftovers after an event update, with a hook after durable PMA copy succeeds
+    /// but before durable PMA metadata is published.
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because it modifies the Serf's state directly.
+    #[tracing::instrument(level = "info", skip_all)]
+    pub unsafe fn preserve_event_update_leftovers_with_pre_persist<F>(
+        &mut self,
+        pre_persist: F,
+    ) -> Option<PmaCopyDetail>
+    where
+        F: FnOnce(&mut Self),
+    {
         let event_num = self.event_num.load(Ordering::SeqCst);
         assert!(
             self.context.scry_stack.is_direct(),
@@ -3123,6 +3347,8 @@ impl Serf {
                 self.assert_durable_state_in_pma(&pma);
             }
 
+            pre_persist(self);
+
             let persist_start = Instant::now();
             self.persist_pma_state(&pma);
             log_preserve_component(event_num, "pma_persist_state", persist_start.elapsed());
@@ -3149,6 +3375,7 @@ impl Serf {
             self.pma = Some(pma);
             detail
         } else {
+            pre_persist(self);
             self.preserve_persistent_state_in_stack(event_num);
             self.flip_top_frame_and_trim_free_gap(event_num);
             None
@@ -3236,13 +3463,23 @@ mod tests {
         }
     }
 
+    fn load_jam_bytes(jam: &str) -> Vec<u8> {
+        let possible_paths = [
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("test-jams")
+                .join(jam),
+            Path::new("open/crates/nockapp/test-jams").join(jam),
+        ];
+        for path in &possible_paths {
+            if let Ok(bytes) = fs::read(path) {
+                return bytes;
+            }
+        }
+        panic!("Failed to read {} file from any known path", jam)
+    }
+
     async fn setup_kernel(jam: &str) -> Kernel<SaveableCheckpoint> {
-        let jam_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("assets")
-            .join(jam);
-        let jam_bytes =
-            fs::read(jam_path).unwrap_or_else(|_| panic!("Failed to read {} file", jam));
+        let jam_bytes = load_jam_bytes(jam);
         Kernel::load(&jam_bytes, None, vec![], TraceOpts::default(), None)
             .await
             .expect("Could not load kernel")
@@ -3413,6 +3650,29 @@ mod tests {
         report.print();
     }
 
+    #[tokio::test]
+    async fn load_allows_checkpoint_kernel_hash_mismatch() {
+        let jam_bytes = load_jam_bytes("test-ker.jam");
+        let kernel = setup_kernel("test-ker.jam").await;
+        let mut checkpoint = kernel
+            .checkpoint()
+            .await
+            .expect("Could not checkpoint kernel");
+        let mut hasher = Hasher::new();
+        hasher.update(b"mismatched-checkpoint-kernel");
+        checkpoint.ker_hash = hasher.finalize();
+
+        Kernel::load(
+            &jam_bytes,
+            Some(checkpoint),
+            vec![],
+            TraceOpts::default(),
+            None,
+        )
+        .await
+        .expect("checkpoint load should tolerate kernel hash drift");
+    }
+
     // Convert this to an integration test and feed it the kernel.jam from Choo in CI/CD
     // https://www.youtube.com/watch?v=4m1EFMoRFvY
     // #[test]
@@ -3483,6 +3743,66 @@ mod tests {
             err.contains("--stack-size") && err.contains("checkpoint event_num="),
             "expected operator guidance and checkpoint context, got {err:?}"
         );
+    }
+
+    /// Create a structurally-valid PMA slab plus its `.meta` sidecar recording
+    /// `ker_hash`/`event_num`, as if written by some prior kernel.
+    fn write_valid_pma(path: &Path, ker_hash: Hash, event_num: u64) {
+        let pma_reserved_words = {
+            let pma = Pma::new(1 << 10, path.to_path_buf()).expect("create test PMA");
+            let pma_reserved_words =
+                u64::try_from(pma.reserved_words()).expect("test PMA reservation fits in u64");
+            pma.sync_all().expect("sync test PMA");
+            pma_reserved_words
+        };
+        PmaPersistMetadata::new(ker_hash, event_num, 0, pma_reserved_words)
+            .save_to_path(&pma_meta_path(path))
+            .expect("write test PMA metadata");
+    }
+
+    // Regression for the reported symptom: after a kernel upgrade the hash gate
+    // made *both* slabs report `None`, so selection fell through to its
+    // `Slab0` default and then reported slab 0's metadata as "missing or
+    // invalid" even though the live state was in slab 1.
+    #[test]
+    fn select_active_pma_slab_is_kernel_hash_agnostic_and_picks_latest_event() {
+        let dir = TempDir::new().expect("temp dir");
+        let path_0 = dir.path().join("0.pma");
+        let path_1 = dir.path().join("1.pma");
+        // The two slabs were written by *different* kernels.
+        write_valid_pma(&path_0, hash(b"kernel-a"), 1);
+        write_valid_pma(&path_1, hash(b"kernel-b"), 5);
+        let paths = PmaSlabPaths {
+            path_0: path_0.clone(),
+            path_1: path_1.clone(),
+        };
+        assert!(
+            matches!(select_active_pma_slab(&paths), PmaSlab::Slab1),
+            "slab selection must pick the most-recent slab regardless of kernel hash"
+        );
+    }
+
+    // A kernel-hash mismatch must not invalidate the PMA; the state is reused
+    // and migrated by the current kernel, mirroring checkpoint/snapshot restore.
+    #[test]
+    fn inspect_existing_pma_is_valid_on_kernel_hash_mismatch() {
+        let dir = TempDir::new().expect("temp dir");
+        let path_0 = dir.path().join("0.pma");
+        let path_1 = dir.path().join("1.pma");
+        write_valid_pma(&path_0, hash(b"old-kernel-bytes"), 7);
+        // Current kernel bytes hash to something different from the stored meta.
+        let status = inspect_existing_pma(path_0.as_path(), path_1.as_path(), b"new-kernel-bytes");
+        match status {
+            ExistingPmaStatus::Valid { event_num, .. } => {
+                assert_eq!(
+                    event_num, 7,
+                    "must reuse PMA state at its recorded event_num"
+                );
+            }
+            other => {
+                panic!("kernel-hash mismatch must NOT invalidate the PMA, got {other:?}")
+            }
+        }
     }
 }
 

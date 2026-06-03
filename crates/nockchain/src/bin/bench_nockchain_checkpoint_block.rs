@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -6,7 +8,7 @@ use chaff::Chaff;
 use clap::{ColorChoice, Parser};
 use kernels_open_dumb::KERNEL as NOCKCHAIN_KERNEL;
 use libp2p::PeerId;
-use nockapp::kernel::boot::{self, NockStackSize, TraceOpts};
+use nockapp::kernel::boot::{self, NockStackSize, PmaSize, TraceOpts};
 use nockapp::kernel::form::{Kernel, PmaCopyDetail, PmaTimingSample};
 use nockapp::noun::slab::NounSlab;
 use nockapp::save::{CheckpointBootstrapReader, SaveableCheckpoint};
@@ -83,7 +85,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_jam: None,
         bootstrap_from_chkjam: None,
         export_state_jam: None,
-        stack_size: args.stack_size.clone(),
+        stack_size: args.stack_size,
+        pma_initial_size: Some(PmaSize::from_words(args.stack_size.stack_words())),
+        pma_reserved_size: None,
         data_dir: None,
         event_log_path: None,
         disable_fsync: false,
@@ -116,7 +120,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("bench: loading source checkpoint into in-memory helper kernel");
     let mut source = load_source_peer_from_checkpoint(
         source_scratch.path().join("checkpoints"),
-        args.stack_size.clone(),
+        args.stack_size,
     )
     .await?;
     let source_boot = source_boot_start.elapsed();
@@ -151,7 +155,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut target = boot_peer(
         "bench-target",
         target_scratch.path().to_path_buf(),
-        args.stack_size.clone(),
+        args.stack_size,
     )
     .await?;
     let target_boot = target_boot_start.elapsed();
@@ -332,6 +336,8 @@ async fn boot_peer(
         bootstrap_from_chkjam: None,
         export_state_jam: None,
         stack_size,
+        pma_initial_size: Some(PmaSize::from_words(stack_size.stack_words())),
+        pma_reserved_size: None,
         data_dir: Some(data_dir),
         event_log_path: None,
         disable_fsync: false,

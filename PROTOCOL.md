@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-19
+Last Reviewed: 2026-03-25
 Canonical/Legacy: Canonical (protocol authority entrypoint for the nockchain repository)
 
 This is the canonical protocol index for the nockchain repository.
@@ -16,7 +16,8 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
-- Next scheduled activation: [`012-bythos.md`](./changelog/protocol/012-bythos.md), version `0.1.11`, target date `2026-03-01`, activation height `54000`.
+- Next scheduled activation: [`013-nous.md`](./changelog/protocol/013-nous.md), version `1.0.0`, target `2026-Q2`, rollout-gated (non-consensus, `activation_height = 0`).
+- Previous: [`012-bythos.md`](./changelog/protocol/012-bythos.md), version `0.1.11`, target date `2026-03-01`, activation height `54000`.
 
 ## Upgrade Index
 
@@ -29,6 +30,7 @@ Legend:
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
 | 014 | Aletheia                                 | 0.1.14  | draft      | 65500             | -                 | [`014-aletheia.md`](./changelog/protocol/014-aletheia.md)                                             |
+| 013 | Nous                                     | 1.0.0   | final      | 0                 | 2026-Q2           | [`013-nous.md`](./changelog/protocol/013-nous.md)                                                     |
 | 012 | Bythos                                   | 0.1.11  | final      | 54000             | 2026-03-01        | [`012-bythos.md`](./changelog/protocol/012-bythos.md)                                                 |
 | 011 | Legacy 011 - LMP Axis Hotfix             | 0.1.10  | activated  | 0                 | -                 | [`011-legacy-lmp-axis-hotfix.md`](./changelog/protocol/011-legacy-lmp-axis-hotfix.md)                 |
 | 010 | Legacy 010 - V1 Phase 39000              | 0.1.9   | activated  | 39000             | -                 | [`010-legacy-v1-phase-39000.md`](./changelog/protocol/010-legacy-v1-phase-39000.md)                   |

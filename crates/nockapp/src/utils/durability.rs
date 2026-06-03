@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use tokio::fs::File as TokioFile;
-use tracing::{info, warn};
+use tracing::{debug, warn};
 
 static FSYNC_DISABLED: AtomicBool = AtomicBool::new(false);
 
@@ -233,13 +233,13 @@ fn full_fsync_fd(fd: std::os::fd::RawFd) -> io::Result<()> {
 
 fn log_sync_start(op: &str, context: &str, path: Option<&Path>) {
     match path {
-        Some(path) => info!(
+        Some(path) => debug!(
             sync_op = op,
             sync_context = context,
             path = %path.display(),
             "durability sync start"
         ),
-        None => info!(
+        None => debug!(
             sync_op = op,
             sync_context = context,
             "durability sync start"
@@ -249,13 +249,13 @@ fn log_sync_start(op: &str, context: &str, path: Option<&Path>) {
 
 fn log_sync_skipped(op: &str, context: &str, path: Option<&Path>) {
     match path {
-        Some(path) => info!(
+        Some(path) => debug!(
             sync_op = op,
             sync_context = context,
             path = %path.display(),
             "durability sync skipped (fsync disabled)"
         ),
-        None => info!(
+        None => debug!(
             sync_op = op,
             sync_context = context,
             "durability sync skipped (fsync disabled)"
@@ -272,14 +272,14 @@ fn log_sync_result(
 ) {
     let elapsed_ms = duration_ms(elapsed);
     match (path, result) {
-        (Some(path), Ok(())) => info!(
+        (Some(path), Ok(())) => debug!(
             sync_op = op,
             sync_context = context,
             path = %path.display(),
             elapsed_ms,
             "durability sync done"
         ),
-        (None, Ok(())) => info!(
+        (None, Ok(())) => debug!(
             sync_op = op,
             sync_context = context,
             elapsed_ms,

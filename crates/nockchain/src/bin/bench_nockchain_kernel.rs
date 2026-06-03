@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::path::PathBuf;
@@ -7,7 +9,7 @@ use clap::{ColorChoice, Parser};
 use kernels_open_dumb::KERNEL as NOCKCHAIN_KERNEL;
 use kernels_open_miner::KERNEL as MINER_KERNEL;
 use libp2p::PeerId;
-use nockapp::kernel::boot::{self, NockStackSize, TraceOpts};
+use nockapp::kernel::boot::{self, NockStackSize, PmaSize, TraceOpts};
 use nockapp::kernel::form::{PmaCopyDetail, PmaTimingSample, SerfThread};
 use nockapp::noun::slab::NounSlab;
 use nockapp::save::SaveableCheckpoint;
@@ -189,7 +191,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         state_jam: None,
         bootstrap_from_chkjam: None,
         export_state_jam: None,
-        stack_size: args.stack_size.clone(),
+        stack_size: args.stack_size,
+        pma_initial_size: Some(PmaSize::from_words(args.stack_size.stack_words())),
+        pma_reserved_size: None,
         data_dir: None,
         event_log_path: None,
         disable_fsync: false,
@@ -999,9 +1003,9 @@ fn summarize_timed_samples(label: &str, samples: &[TimedSample]) {
         info!("bench: {}: no samples", label);
         return;
     }
-    let p50 = percentile_sample(samples, 50.0).unwrap();
-    let p95 = percentile_sample(samples, 95.0).unwrap();
-    let p99 = percentile_sample(samples, 99.0).unwrap();
+    let p50 = percentile_sample(samples, 50.0).expect("non-empty samples should have p50");
+    let p95 = percentile_sample(samples, 95.0).expect("non-empty samples should have p95");
+    let p99 = percentile_sample(samples, 99.0).expect("non-empty samples should have p99");
     let max = top_n_samples(samples, 1)[0];
     info!(
         "bench: {}: p50={} p95={} p99={} max={}",
@@ -1026,9 +1030,12 @@ fn summarize_value_samples(label: &str, samples: &[ValueSample]) {
         info!("bench: {}: no samples", label);
         return;
     }
-    let p50 = percentile_value_sample(samples, 50.0).unwrap();
-    let p95 = percentile_value_sample(samples, 95.0).unwrap();
-    let p99 = percentile_value_sample(samples, 99.0).unwrap();
+    let p50 =
+        percentile_value_sample(samples, 50.0).expect("non-empty value samples should have p50");
+    let p95 =
+        percentile_value_sample(samples, 95.0).expect("non-empty value samples should have p95");
+    let p99 =
+        percentile_value_sample(samples, 99.0).expect("non-empty value samples should have p99");
     let max = top_n_value_samples(samples, 1)[0];
     info!(
         "bench: {}: p50={} p95={} p99={} max={}",

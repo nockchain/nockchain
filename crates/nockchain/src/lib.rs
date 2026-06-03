@@ -15,6 +15,7 @@ pub mod traces;
 
 use std::error::Error;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 pub use config::NockchainCli;
@@ -29,7 +30,7 @@ pub mod colors;
 
 use colors::*;
 use nockapp::noun::slab::{Jammer, NounSlab};
-use nockchain_types::fakenet_blockchain_constants;
+use nockchain_types::{fakenet_blockchain_constants, Seconds};
 use nockvm::jets::hot::HotEntry;
 use nockvm::noun::{D, T, YES};
 use nockvm_macros::tas;
@@ -415,6 +416,10 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
                 .with_asert_anchor_height(asert.anchor_height)
                 .with_asert_anchor_target_bex(asert.anchor_target_bex);
         }
+        if let Some(interval_secs) = cli.fakenet_update_candidate_interval_secs {
+            fakenet_constants =
+                fakenet_constants.with_update_candidate_timestamp_interval(Seconds(interval_secs));
+        }
         setup::poke(
             &mut nockapp,
             setup::SetupCommand::PokeFakenetConstants(Box::new(fakenet_constants)),
@@ -502,7 +507,6 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         &initial_peer_multiaddrs,
         &force_peers,
         prune_inbound,
-        cli.fast_sync,
         equix_builder,
         config::CHAIN_INTERVAL,
         Some(libp2p_init_tx),
@@ -530,9 +534,12 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             .add_io_driver(nockapp_grpc::public_nockchain::grpc_server_driver(addr))
             .await;
     }
+    let private_grpc_addr = cli.bind_private_grpc_addr.unwrap_or_else(|| {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cli.bind_private_grpc_port)
+    });
     nockapp
         .add_io_driver(nockapp_grpc::private_nockapp::grpc_server_driver(
-            cli.bind_private_grpc_port,
+            private_grpc_addr,
         ))
         .await;
 

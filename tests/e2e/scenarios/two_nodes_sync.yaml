@@ -1,0 +1,55 @@
+name: "two_nodes_sync"
+seed: 1
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6101"
+    grpc_private_port: 7101
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 1
+    bind:
+      - "/ip4/127.0.0.1/udp/4101/quic-v1"
+  - id: "node-b"
+    grpc_public_addr: "127.0.0.1:6102"
+    grpc_private_port: 7102
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 1
+    no_default_peers: true
+    extra_args:
+      - "--num-threads"
+      - "4"
+    peers:
+      - "/ip4/127.0.0.1/udp/4101/quic-v1"
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: peek_constants
+    node: "node-a"
+  - action: start_nodes
+    ids: ["node-b"]
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 30000
+  - action: peek_constants
+    node: "node-b"
+  - action: wait_for_height
+    node: "node-a"
+    height: 3
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 3
+    timeout_ms: 120000
+asserts:
+  - assert: heads_equal
+    nodes: ["node-a", "node-b"]

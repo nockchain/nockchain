@@ -1,7 +1,7 @@
 use std::ptr::{copy_nonoverlapping, null_mut};
 use std::time::Instant;
 
-use tracing::info;
+use tracing::debug;
 
 use crate::hamt::Hamt;
 use crate::jets::cold::{Batteries, Cold};
@@ -37,7 +37,7 @@ impl PmaCopy for Warm {
     unsafe fn copy_to_pma(&mut self, stack: &NockStack, pma: &mut Pma) {
         let trace = std::env::var_os("NOCK_PMA_TRACE").is_some();
         if trace {
-            info!("pma-copy: warm stats start");
+            debug!("pma-copy: warm stats start");
             let stats_start = Instant::now();
             let mut last_progress = Instant::now();
             let mut key_count = 0usize;
@@ -80,7 +80,7 @@ impl PmaCopy for Warm {
                         if total_nodes & 0x3fff == 0 {
                             let now = Instant::now();
                             if now.duration_since(last_progress).as_millis() >= 2000 {
-                                info!(
+                                debug!(
                                     "pma-copy: warm stats progress: lists={}, nodes={}, stack_nodes={}, pma_nodes={}, elapsed_ms={}",
                                     list_count,
                                     total_nodes,
@@ -107,7 +107,7 @@ impl PmaCopy for Warm {
             }
 
             let stats_ms = stats_start.elapsed().as_millis();
-            info!(
+            debug!(
                 "pma-copy: warm stats done: keys={}, lists={}, nodes={}, stack_nodes={}, pma_nodes={}, prefix_nodes={}, lists_all_stack={}, lists_all_pma={}, lists_mixed={}, lists_mixed_after_pma={}, stats_ms={}",
                 key_count,
                 list_count,
@@ -122,14 +122,14 @@ impl PmaCopy for Warm {
                 stats_ms
             );
             let alloc_before = pma.alloc_offset();
-            info!("pma-copy: warm copy start");
+            debug!("pma-copy: warm copy start");
             let copy_start = Instant::now();
             self.0.copy_to_pma(stack, pma);
             let copy_ms = copy_start.elapsed().as_millis();
             let alloc_after = pma.alloc_offset();
             let alloc_words = alloc_after.saturating_sub(alloc_before);
 
-            info!(
+            debug!(
                 "pma-copy: warm copy done: alloc_words={}, copy_ms={}",
                 alloc_words, copy_ms
             );
@@ -232,7 +232,7 @@ impl PmaCopy for WarmEntry {
         let mut ptr: *mut WarmEntry = self;
         loop {
             if trace {
-                info!("pma-copy: warm entry start: node_ptr={:p}", (*ptr).0);
+                debug!("pma-copy: warm entry start: node_ptr={:p}", (*ptr).0);
             }
             if pma.contains_ptr((*ptr).0 as *const u8) {
                 break;
@@ -240,11 +240,11 @@ impl PmaCopy for WarmEntry {
             // Copy batteries and path to PMA
             (*(*ptr).0).batteries.copy_to_pma(stack, pma);
             if trace {
-                info!("pma-copy: warm entry batteries done");
+                debug!("pma-copy: warm entry batteries done");
             }
             (*(*ptr).0).path.copy_to_pma(stack, pma);
             if trace {
-                info!("pma-copy: warm entry path done");
+                debug!("pma-copy: warm entry path done");
             }
             // Allocate new WarmEntryMem in PMA and copy
             let dest_mem: *mut WarmEntryMem = pma.alloc_struct(1);
@@ -252,7 +252,7 @@ impl PmaCopy for WarmEntry {
             // Update pointer to point to PMA copy
             *ptr = WarmEntry(dest_mem);
             if trace {
-                info!("pma-copy: warm entry done: dest_ptr={:p}", dest_mem);
+                debug!("pma-copy: warm entry done: dest_ptr={:p}", dest_mem);
             }
             // Move to next node
             ptr = &mut (*dest_mem).next;
@@ -547,7 +547,10 @@ mod test {
                 "Battery value should match"
             );
             assert_eq!(
-                parent_axis.in_space(&space).as_u64().unwrap(),
+                parent_axis
+                    .in_space(&space)
+                    .as_u64()
+                    .expect("parent axis should fit in u64"),
                 0,
                 "Parent axis should be 0"
             );

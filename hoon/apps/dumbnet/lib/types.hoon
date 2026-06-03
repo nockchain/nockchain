@@ -1,4 +1,4 @@
-/=  *   /common/zoon
+/=  *   /common/h-zoon
 /=  zeke  /common/zeke
 /=  w   /common/wrapper
 /=  dt  /common/tx-engine
@@ -17,6 +17,7 @@
       kernel-state-6
       kernel-state-7
       kernel-state-8
+      kernel-state-9
   ==
 ::
 +$  kernel-state-0
@@ -131,11 +132,11 @@
 ::  snapshot so old %7 states still decode.
 +$  kernel-state-7
   $:  %7
-      c=consensus-state-6
-      a=admin-state-6
-      m=mining-state-6
+      c=consensus-state-7
+      a=admin-state-7
+      m=mining-state-7
     ::
-      d=derived-state-6
+      d=derived-state-7
       constants=blockchain-constants-v1-phase-1
   ==
 ::
@@ -145,15 +146,27 @@
 ::  +update-constants reseed from *blockchain-constants:t on mainnet.
 +$  kernel-state-8
   $:  %8
-      c=consensus-state-6
-      a=admin-state-6
-      m=mining-state-6
+      c=consensus-state-8
+      a=admin-state-8
+      m=mining-state-8
     ::
-      d=derived-state-6
+      d=derived-state-8
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-8
+::  kernel-state-9 moves consensus core maps and sets to h-zoon
+::  containers while preserving the post-phase-2 constants shape.
++$  kernel-state-9
+  $:  %9
+      c=consensus-state-9
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-9
+      constants=blockchain-constants:v1:dt
+  ==
+::
++$  kernel-state  kernel-state-9
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -294,7 +307,55 @@
     ==
   ==
 ::
-+$  consensus-state  consensus-state-6
++$  consensus-state-7  $+(consensus-state-7 consensus-state-6)
+::
++$  consensus-state-8  $+(consensus-state-8 consensus-state-7)
+::
++$  consensus-state-9
+  $+  consensus-state-9
+  ::
+  ::  indexes and not-fully-validated state
+  $:
+    $:
+    :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        blocks-needed-by=(h-jug tx-id:dt block-id:dt) :: dependencies
+        excluded-txs=(h-set tx-id:dt) :: transactions unneeded by any block
+    ::
+    ::  every tx-id in spent-by must be in raw-txs and vice-versa
+        spent-by=(h-jug nname:dt tx-id:dt)
+    ::
+        pending-blocks=(h-map block-id:dt [=page:dt heard-at=@])  :: pending blocks
+    ==
+  ::
+  ::  core consensus state
+    $:  balance=(h-mip block-id:dt nname:dt nnote:dt)
+        txs=(h-mip block-id:dt tx-id:dt tx:dt) ::  fully validated transactions
+      ::
+      :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        raw-txs=(h-map tx-id:dt [=raw-tx:dt heard-at=@]) :: raw transactions
+      ::
+        blocks=(h-map block-id:dt local-page:dt)  ::  fully validated blocks
+      ::
+        heaviest-block=(unit block-id:dt) ::  most recent heaviest block
+      ::
+      ::  min timestamp of block that is a child of this block
+        min-timestamps=(h-map block-id:dt @)
+      ::  this map is used to calculate epoch duration. it is a map of each
+      ::  block-id to the first block-id in that epoch.
+        epoch-start=(h-map block-id:dt block-id:dt)
+      ::  this map contains the expected target for the child
+      ::  of a given block-id.
+        targets=(h-map block-id:dt bignum:bignum:dt)
+      ::
+      ::  Bitcoin block hash for genesis block
+      ::>)  TODO: change face to btc-hash?
+        btc-data=(unit (unit btc-hash:dt))
+        =genesis-seal:dt  ::  desired seal for genesis block
+    ==
+  ==
+
+::
++$  consensus-state  consensus-state-9
 ::
 ::  you will not have lost any chain state if you lost pending state, you'd just have to
 ::  request data again from peers and reset your mining state
@@ -340,7 +401,13 @@
 ::
 +$  admin-state-6  $+(admin-state-6 admin-state-5)
 ::
-+$  admin-state  admin-state-6
++$  admin-state-7  $+(admin-state-7 admin-state-6)
+::
++$  admin-state-8  $+(admin-state-8 admin-state-7)
+::
++$  admin-state-9  $+(admin-state-9 admin-state-8)
+::
++$  admin-state  admin-state-9
 ::
 +$  derived-state-0
   $+  derived-state-0
@@ -367,7 +434,13 @@
       heaviest-chain=(z-map page-number:dt block-id:dt)
   ==
 ::
-+$  derived-state  derived-state-6
++$  derived-state-7  $+(derived-state-7 derived-state-6)
+::
++$  derived-state-8  $+(derived-state-8 derived-state-7)
+::
++$  derived-state-9  $+(derived-state-9 derived-state-8)
+::
++$  derived-state  derived-state-9
 ::
 +$  mining-state-0
   $+  mining-state-0
@@ -395,11 +468,25 @@
       shares=(z-map hash:dt @)              ::  shares of coinbase+fees among sighashes (v1)
       v0-shares=(z-map sig:v0:dt @)         ::  shares of coinbase+fees among sigs (v0)
       candidate-block=page:dt            ::  the next block we will attempt to mine.
+      candidate-acc=*                   ::  old candidates are discarded by upgrades
+      next-nonce=noun-digest:tip5:zeke  :: nonce being mined
+  ==
+::
++$  mining-state-7  $+(mining-state-7 mining-state-6)
+::
++$  mining-state-8  $+(mining-state-8 mining-state-7)
+::
++$  mining-state-9
+  $+  mining-state-9
+  $:  mining=?                        ::  build candidate blocks?
+      shares=(z-map hash:dt @)              ::  shares of coinbase+fees among sighashes (v1)
+      v0-shares=(z-map sig:v0:dt @)         ::  shares of coinbase+fees among sigs (v0)
+      candidate-block=page:dt            ::  the next block we will attempt to mine.
       candidate-acc=tx-acc:dt           ::  accumulator for txs in candidate block
       next-nonce=noun-digest:tip5:zeke  :: nonce being mined
   ==
 ::
-+$  mining-state  mining-state-6
++$  mining-state  mining-state-9
 ::
 +$  init-phase  $~(%.y ?)
 ::

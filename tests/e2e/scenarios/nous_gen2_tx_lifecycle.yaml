@@ -1,0 +1,279 @@
+# Nous rollout scenario: full UTXO transaction lifecycle under gen2 transport
+#
+# Exercises wallet create-tx, send-tx, and spend-received-output with all
+# nodes running gen2 send+accept.  This covers the gap where existing nous
+# scenarios test block sync and protocol negotiation but not the complete
+# transaction path that operators and users will exercise on mainnet.
+#
+# 1. Start 2-miner + 1-full network, all gen2 enabled
+# 2. Wallet keygen, mine to accumulate balance
+# 3. Send transaction from miner to recipient
+# 4. Wait for tx acceptance across all nodes
+# 5. Recipient spends received output (second tx)
+# 6. Assert: all nodes at same head, both txs accepted
+
+name: "nous_gen2_tx_lifecycle"
+seed: 30
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  # Phase 1: start miner-a, set up wallets
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_pkh"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_pkh}"]
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "recipient_pkh"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${recipient_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${recipient_pkh}"]
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  # Phase 2: bring up remaining nodes, mine initial blocks
+  - action: start_nodes
+    ids: ["miner-b", "full-a"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 3
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 3
+    timeout_ms: 180000
+
+  # Phase 3: send transaction from miner to recipient over gen2
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "tx_path"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "send-tx"
+    args: ["${tx_path}"]
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "tx1_id"
+
+  - action: wait_for_tx_accepted
+    node: "miner-a"
+    tx: "${tx1_id}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "miner-b"
+    tx: "${tx1_id}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-a"
+    tx: "${tx1_id}"
+    timeout_ms: 60000
+
+  # Phase 4: recipient spends received output (second tx proves full cycle)
+  - action: wait_for_height
+    node: "miner-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "list-notes-by-address"
+    args: ["${recipient_pkh}"]
+    expect: "Wallet Notes for Address"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "recipient_note"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${recipient_note}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${miner_pkh}","amount":5000}'
+      - "--fee"
+      - "5000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${recipient_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "tx2_path"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "send-tx"
+    args: ["${tx2_path}"]
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "tx2_id"
+
+  - action: wait_for_tx_accepted
+    node: "miner-a"
+    tx: "${tx2_id}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-a"
+    tx: "${tx2_id}"
+    timeout_ms: 60000
+
+  # Phase 5: final convergence
+  - action: wait_for_height
+    node: "miner-a"
+    height: 8
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 8
+    timeout_ms: 180000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a"]
+    timeout_ms: 180000
+  - assert: tx_accepted
+    node: "miner-a"
+    tx: "${tx1_id}"
+  - assert: tx_accepted
+    node: "full-a"
+    tx: "${tx1_id}"
+  - assert: tx_accepted
+    node: "miner-a"
+    tx: "${tx2_id}"
+  - assert: tx_accepted
+    node: "full-a"
+    tx: "${tx2_id}"

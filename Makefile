@@ -140,10 +140,24 @@ run-genesis-sync-fsync-off:
 fmt:
 	cargo fmt
 
+.PHONY: check-cargo-fmt
+check-cargo-fmt:
+	@cargo fmt --check || (echo "Hint: run 'make fmt' to format Rust code." >&2; exit 1)
+
+.PHONY: clippy
+clippy: contracts-deps ## Run clippy with the same flags as the upstream repo
+	@echo "Running clippy..."
+	@cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc
+
+.PHONY: lint-local
+lint-local: contracts-deps ## Run local cargo clippy with warnings denied
+	cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Dwarnings
+
 .PHONY: docs-check
 docs-check:
 	./scripts/docs/check_docs_metadata.sh
 	./scripts/docs/check_canonical_links.sh
+	./scripts/docs/check_nous_validation_entrypoints.sh
 
 .PHONY: build-hoonc
 build-hoonc: nuke-hoonc-data ## Build hoonc from this repo

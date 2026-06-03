@@ -5,12 +5,20 @@ use nockvm::noun::{Noun, NounSpace};
 use noun_serde::prelude::*;
 use num_bigint::BigUint;
 
-//TODO all this stuff would be useful as jets, which mostly just requires
-//using the Atom::as_ubig with the NockStack instead of ibig's heap version
-// which we use to avoid having a NockStack sitting around.
+// TODO: These helpers would be useful as jets. That mostly requires
+// Atom::as_ubig with the NockStack; this path uses ibig's heap allocation to
+// keep NockStack out of the caller surface.
 
 // Goldilocks prime
 const P: u64 = 0xffffffff00000001;
+
+/// Maximum ASCII width of a base58-encoded TIP5 hash.
+///
+/// A TIP5 hash is five limbs modulo the Goldilocks prime, so its value is
+/// strictly less than 2^320. Base58 therefore needs at most 55 characters.
+/// Gen2 responder-fit projection uses this bound when the future block id is
+/// not yet known.
+pub const TIP5_BASE58_MAX_CHARS: usize = 55;
 
 // noun -> tip5 -> ubig -> base58
 
@@ -223,6 +231,14 @@ mod tests {
             )
         });
         assert_eq!(result2, expected2);
+    }
+
+    #[test]
+    fn test_tip5_base58_max_chars_matches_upper_bound() {
+        let max_tip5 = [P - 1; 5];
+        let encoded =
+            ubig_to_base58(base_p_to_decimal(max_tip5).expect("tip5 upper bound encodes"));
+        assert_eq!(encoded.len(), TIP5_BASE58_MAX_CHARS);
     }
 
     // Wrapper struct for implementing Arbitrary

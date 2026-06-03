@@ -62,6 +62,7 @@ vergen = { workspace = true, features = [
 ] }
 
 [dev-dependencies]
+blake3.workspace = true
 libc.workspace = true
 memmap2.workspace = true
 nockchain-math.workspace = true

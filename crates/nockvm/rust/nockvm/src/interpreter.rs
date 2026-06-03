@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::ops::{DerefMut, Neg};
 use std::pin::Pin;
 use std::result;

@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::slice::{from_raw_parts, from_raw_parts_mut};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -206,9 +208,22 @@ impl NounSpace {
         }
     }
 
+    #[inline]
+    fn pma_arena_cache(arena: Option<&Arena>) -> (Option<usize>, Option<usize>, Option<usize>) {
+        if let Some(arena) = arena {
+            let base = arena.base_ptr() as usize;
+            let end = base
+                .checked_add(arena.reserved_len_bytes())
+                .expect("PMA reserved bounds exceed usize address space");
+            (Some(base), Some(end), Some(arena.words()))
+        } else {
+            (None, None, None)
+        }
+    }
+
     pub fn from_arenas(stack: Option<Arc<Arena>>, pma: Option<Arc<Arena>>) -> Self {
         let (stack_base, stack_end, _) = Self::arena_cache(stack.as_deref());
-        let (pma_base, pma_end, pma_words) = Self::arena_cache(pma.as_deref());
+        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(pma.as_deref());
         Self {
             stack,
             pma,
@@ -228,7 +243,7 @@ impl NounSpace {
         let stack_arena = Arc::clone(stack.arena());
         let stack_epoch = stack.stack_epoch();
         let (stack_base, stack_end, _) = Self::arena_cache(Some(stack.arena_ref()));
-        let (pma_base, pma_end, pma_words) = Self::arena_cache(pma.as_deref());
+        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(pma.as_deref());
         Self {
             stack: Some(stack_arena),
             pma,
@@ -246,7 +261,7 @@ impl NounSpace {
 
     pub(crate) fn from_stack_ephemeral(stack: &NockStack) -> Self {
         let (stack_base, stack_end, _) = Self::arena_cache(Some(stack.arena_ref()));
-        let (pma_base, pma_end, pma_words) = Self::arena_cache(stack.pma_ref());
+        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(stack.pma_ref());
         Self {
             stack: None,
             pma: None,
@@ -434,7 +449,10 @@ impl NounSpace {
             .try_into_usize()
             .expect("PMA offset exceeds addressable range");
         let arena_words = self
-            .pma_words
+            .pma
+            .as_ref()
+            .map(|arena| arena.words())
+            .or(self.pma_words)
             .expect("PMA arena is required to resolve offset nouns");
         assert!(
             offset < arena_words,
@@ -3058,13 +3076,25 @@ mod tests {
         let cell = Cell::new(&mut context.stack, D(1), D(2));
 
         // axis 1 returns the whole cell
-        assert!(unsafe { cell.slot(1, &space).unwrap().raw_equals(&cell.as_noun()) });
+        assert!(unsafe {
+            cell.slot(1, &space)
+                .expect("axis 1 should resolve to the whole cell")
+                .raw_equals(&cell.as_noun())
+        });
 
         // axis 2 returns head
-        assert!(unsafe { cell.slot(2, &space).unwrap().raw_equals(&D(1)) });
+        assert!(unsafe {
+            cell.slot(2, &space)
+                .expect("axis 2 should resolve to the head")
+                .raw_equals(&D(1))
+        });
 
         // axis 3 returns tail
-        assert!(unsafe { cell.slot(3, &space).unwrap().raw_equals(&D(2)) });
+        assert!(unsafe {
+            cell.slot(3, &space)
+                .expect("axis 3 should resolve to the tail")
+                .raw_equals(&D(2))
+        });
     }
 
     #[test]
@@ -3077,10 +3107,18 @@ mod tests {
         let cell = Cell::new(&mut context.stack, D(1), inner.as_noun());
 
         // axis 6 = 110 binary = tail then head = head of tail = 3
-        assert!(unsafe { cell.slot(6, &space).unwrap().raw_equals(&D(3)) });
+        assert!(unsafe {
+            cell.slot(6, &space)
+                .expect("axis 6 should resolve to tail/head")
+                .raw_equals(&D(3))
+        });
 
         // axis 7 = 111 binary = tail then tail = tail of tail = 4
-        assert!(unsafe { cell.slot(7, &space).unwrap().raw_equals(&D(4)) });
+        assert!(unsafe {
+            cell.slot(7, &space)
+                .expect("axis 7 should resolve to tail/tail")
+                .raw_equals(&D(4))
+        });
 
         // axis 4 = 100 binary = head then stop = should fail (head is atom)
         assert!(cell.slot(4, &space).is_err());
@@ -3088,7 +3126,12 @@ mod tests {
         // cell2 = [[3 4] 2]
         let cell2 = Cell::new(&mut context.stack, inner.as_noun(), D(2));
         // axis 5 = 101 binary = head then tail = tail of head = 4
-        assert!(unsafe { cell2.slot(5, &space).unwrap().raw_equals(&D(4)) });
+        assert!(unsafe {
+            cell2
+                .slot(5, &space)
+                .expect("axis 5 should resolve to head/tail")
+                .raw_equals(&D(4))
+        });
     }
 
     #[test]
@@ -3112,11 +3155,19 @@ mod tests {
         space.with_brand(|space| {
             let cell = space.handle(cell).as_cell().expect("cell");
             assert_eq!(
-                cell.head().as_atom().expect("head atom").as_u64().unwrap(),
+                cell.head()
+                    .as_atom()
+                    .expect("head atom")
+                    .as_u64()
+                    .expect("head atom should fit in u64"),
                 10
             );
             assert_eq!(
-                cell.tail().as_atom().expect("tail atom").as_u64().unwrap(),
+                cell.tail()
+                    .as_atom()
+                    .expect("tail atom")
+                    .as_u64()
+                    .expect("tail atom should fit in u64"),
                 20
             );
             assert!(matches!(

@@ -74,6 +74,8 @@ pub enum CrownError<T = ExternalError> {
     EncodeError(#[from] bincode::error::EncodeError),
     #[error("state jam format error: the state jam file format is not recognized")]
     StateJamFormatError,
+    #[error("timeout")]
+    Timeout,
     #[error("unknown error: {0}")]
     Unknown(String),
     #[error("conversion error: {0}")]

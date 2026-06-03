@@ -330,13 +330,14 @@ impl LockMatcher for SigningKeyLockMatcher {
         let Some(pkh) = signer_pkh_primitive else {
             return false;
         };
-        if pkh.m != 1 || pkh.hashes.len() != 1 {
+        if pkh.m != 1 || pkh.hashes.is_empty() {
             return false;
         }
-        let Some(hash) = pkh.hashes.first() else {
-            return false;
-        };
-        if !self.signer_pkhs.contains(&hash.to_array()) {
+        if !pkh
+            .hashes
+            .iter()
+            .any(|hash| self.signer_pkhs.contains(&hash.to_array()))
+        {
             return false;
         }
         let is_simple_shape = tim_primitive_count == 0 && primitive_count == 1;
@@ -348,6 +349,47 @@ impl LockMatcher for SigningKeyLockMatcher {
             return false;
         };
         note_first_name.to_array() == reconstructed_first_name.as_hash().to_array()
+    }
+
+    fn resolve_lock(&self, request: ResolveLockRequest<'_>) -> LockResolution {
+        if let Some(lock_data) = request.decoded_note_data.first_decoded_lock() {
+            if lock_data.spend_conditions.len() == 1 {
+                let spend_condition = &lock_data.spend_conditions[0];
+                if self.matches(request.note_first_name, spend_condition) {
+                    return LockResolution {
+                        source: LockResolutionSource::NoteData,
+                        spend_condition: Some(spend_condition.clone()),
+                        spend_condition_count: None,
+                    };
+                }
+            }
+        }
+
+        for signer_pkh in self.signer_pkhs.iter().map(|hash| Hash::from_limbs(hash)) {
+            let simple = SpendCondition::simple_pkh(signer_pkh.clone());
+            if self.matches(request.note_first_name, &simple) {
+                return LockResolution {
+                    source: LockResolutionSource::ReconstructedSimplePkh,
+                    spend_condition: Some(simple),
+                    spend_condition_count: None,
+                };
+            }
+        }
+
+        if let Some(relative_min) = request.coinbase_relative_min {
+            for signer_pkh in self.signer_pkhs.iter().map(|hash| Hash::from_limbs(hash)) {
+                let coinbase = SpendCondition::coinbase_pkh(signer_pkh.clone(), relative_min);
+                if self.matches(request.note_first_name, &coinbase) {
+                    return LockResolution {
+                        source: LockResolutionSource::ReconstructedCoinbasePkh,
+                        spend_condition: Some(coinbase),
+                        spend_condition_count: None,
+                    };
+                }
+            }
+        }
+
+        LockResolution::unknown()
     }
 }
 
@@ -473,7 +515,14 @@ impl Wallet {
         Ok(constants)
     }
 
-    /// Reads the master signer pubkey-hash from wallet tracked state for lock matching.
+    /// Normalizes signer key ordering and removes duplicates.
+    fn planner_signer_keys(mut signer_keys: Vec<Hash>) -> Vec<Hash> {
+        signer_keys.sort_by_key(Hash::to_array);
+        signer_keys.dedup_by(|left, right| left.to_array() == right.to_array());
+        signer_keys
+    }
+
+    /// Reads the master signer pubkey-hash from wallet tracked state.
     async fn peek_master_signing_key(&mut self) -> Result<Hash, NockAppError> {
         let mut slab = NounSlab::new();
         let tracked_tag = make_tas(&mut slab, "master-signing-key").as_noun();
@@ -488,6 +537,162 @@ impl Wallet {
             NockAppError::OtherError(
                 "wallet master-signing-key peek returned no payload".to_string(),
             )
+        })
+    }
+
+    /// Reads signer pubkey-hashes from wallet tracked state for lock matching.
+    async fn peek_signing_keys(&mut self) -> Result<Vec<Hash>, NockAppError> {
+        let signer_keys = self.peek_signing_keys_at_path("signing-keys").await?;
+        Ok(Self::planner_signer_keys(signer_keys))
+    }
+
+    async fn peek_signing_keys_at_path(
+        &mut self,
+        path_tag: &str,
+    ) -> Result<Vec<Hash>, NockAppError> {
+        let mut slab = NounSlab::new();
+        let tracked_tag = make_tas(&mut slab, path_tag).as_noun();
+        let path = T(&mut slab, &[tracked_tag, SIG]);
+        slab.set_root(path);
+
+        let result = self.app.peek(slab).await?;
+        let space = result.noun_space();
+        let maybe_signing_keys: Option<Option<Vec<Hash>>> =
+            unsafe { <Option<Option<Vec<Hash>>>>::from_noun(result.root(), &space)? };
+        Ok(maybe_signing_keys.flatten().unwrap_or_default())
+    }
+
+    fn signer_pkh_from_active_signer(signer: &ActiveSignerEntryNoun) -> Result<Hash, NockAppError> {
+        Hash::from_base58(&signer.address_b58).map_err(|err| {
+            NockAppError::OtherError(format!(
+                "active signer address '{}' is not a pubkey hash: {}",
+                signer.address_b58, err
+            ))
+        })
+    }
+
+    async fn peek_active_signer_keys(&mut self) -> Result<Vec<Hash>, NockAppError> {
+        let mut signer_keys = Vec::new();
+        for signer in self.peek_active_signers().await? {
+            match Self::signer_pkh_from_active_signer(&signer) {
+                Ok(signer_pkh) => signer_keys.push(signer_pkh),
+                Err(err) => {
+                    warn!(
+                        "create-tx planner skipped active signer {} while resolving PKH signer keys: {}",
+                        signer.label(),
+                        err
+                    );
+                }
+            }
+        }
+        Ok(Self::planner_signer_keys(signer_keys))
+    }
+
+    /// Resolves the planner's effective signer key set.
+    async fn resolve_planner_signer_keys(
+        &mut self,
+        sign_keys: &[(u64, bool)],
+    ) -> Result<Vec<Hash>, NockAppError> {
+        let mut signer_keys = match self.peek_signing_keys().await {
+            Ok(keys) => keys,
+            Err(err) => {
+                warn!(
+                    "create-tx planner could not read signing keys from wallet state: {}",
+                    err
+                );
+                Vec::new()
+            }
+        };
+
+        if signer_keys.is_empty() {
+            match self.peek_active_signer_keys().await {
+                Ok(keys) => signer_keys = keys,
+                Err(err) => {
+                    warn!(
+                        "create-tx planner could not read active signer entries from wallet state: {}",
+                        err
+                    );
+                }
+            }
+        }
+
+        if signer_keys.is_empty() {
+            match self.peek_master_signing_key().await {
+                Ok(master_signer_pkh) => signer_keys.push(master_signer_pkh),
+                Err(err) => {
+                    warn!(
+                        "create-tx planner could not read master signing key from wallet state: {}",
+                        err
+                    );
+                }
+            }
+        }
+
+        for &(index, hardened) in sign_keys {
+            let (poke, _) = Self::derive_child(index, hardened, &None)?;
+            let effects = self.app.poke(OnePunchWire::Poke.to_wire(), poke).await?;
+            let address = Self::derived_address_from_effects(&effects)?;
+            match Hash::from_base58(&address) {
+                Ok(signer_pkh) => signer_keys.push(signer_pkh),
+                Err(hash_err) => {
+                    if SchnorrPubkey::from_base58(&address).is_ok() {
+                        warn!(
+                            "create-tx planner derived legacy v0 sign-key address '{}' for child {}:{} while resolving v1 signer PKHs",
+                            address, index, hardened
+                        );
+                    } else {
+                        return Err(CrownError::Unknown(format!(
+                            "derived sign-key address '{}' for child {}:{} is neither a base58 pubkey hash nor a Schnorr pubkey: {}",
+                            address, index, hardened, hash_err
+                        ))
+                        .into());
+                    }
+                }
+            }
+        }
+
+        Ok(Self::planner_signer_keys(signer_keys))
+    }
+
+    async fn resolve_master_signer_pkh(
+        &mut self,
+        signer_keys: &[Hash],
+    ) -> Result<Hash, NockAppError> {
+        match self.peek_master_signing_key().await {
+            Ok(master_signer_pkh) => return Ok(master_signer_pkh),
+            Err(err) => {
+                warn!(
+                    "create-tx planner could not read master signing key from wallet state: {}",
+                    err
+                );
+            }
+        }
+
+        match self.peek_active_signers().await {
+            Ok(active_signers) => {
+                if let Some(master_signer) = active_signers.iter().find(|signer| signer.is_master())
+                {
+                    match Self::signer_pkh_from_active_signer(master_signer) {
+                        Ok(master_signer_pkh) => return Ok(master_signer_pkh),
+                        Err(err) => {
+                            warn!(
+                                "create-tx planner could not parse active master signer address: {}",
+                                err
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "create-tx planner could not read active signer entries while resolving master signer: {}",
+                    err
+                );
+            }
+        }
+
+        signer_keys.first().cloned().ok_or_else(|| {
+            NockAppError::OtherError("wallet has no signer keys for create-tx planner".to_string())
         })
     }
 
@@ -506,6 +711,68 @@ impl Wallet {
                 "wallet master-signing-pubkey peek returned no payload".to_string(),
             )
         })
+    }
+
+    fn push_unique_signer_pubkey(pubkeys: &mut Vec<SchnorrPubkey>, pubkey: SchnorrPubkey) {
+        if !pubkeys.contains(&pubkey) {
+            pubkeys.push(pubkey);
+        }
+    }
+
+    async fn resolve_legacy_signer_pubkeys(
+        &mut self,
+        sign_keys: &[(u64, bool)],
+    ) -> Result<Vec<SchnorrPubkey>, NockAppError> {
+        let mut signer_pubkeys = Vec::new();
+
+        match self.peek_master_signing_pubkey().await {
+            Ok(master_signer_pubkey) => {
+                Self::push_unique_signer_pubkey(&mut signer_pubkeys, master_signer_pubkey);
+            }
+            Err(err) => {
+                warn!(
+                    "create-tx planner could not read master signing pubkey from wallet state: {}",
+                    err
+                );
+            }
+        }
+
+        match self.peek_active_signers().await {
+            Ok(active_signers) => {
+                for signer in active_signers
+                    .into_iter()
+                    .filter(|signer| signer.version == 0)
+                {
+                    Self::push_unique_signer_pubkey(&mut signer_pubkeys, signer.pubkey);
+                }
+            }
+            Err(err) => {
+                warn!(
+                    "create-tx planner could not read active signer entries while resolving legacy signer pubkeys: {}",
+                    err
+                );
+            }
+        }
+
+        for &(index, hardened) in sign_keys {
+            let (poke, _) = Self::derive_child(index, hardened, &None)?;
+            let effects = self.app.poke(OnePunchWire::Poke.to_wire(), poke).await?;
+            let derived_address = Self::derived_address_from_effects(&effects)?;
+            let signer_pubkey = SchnorrPubkey::from_base58(&derived_address).map_err(|err| {
+                NockAppError::OtherError(format!(
+                    "derived sign-key address '{}' for child {}:{} is not a base58 Schnorr pubkey: {}",
+                    derived_address, index, hardened, err
+                ))
+            })?;
+            Self::push_unique_signer_pubkey(&mut signer_pubkeys, signer_pubkey);
+        }
+
+        if signer_pubkeys.is_empty() {
+            return Err(NockAppError::OtherError(
+                "wallet has no legacy v0 signer pubkeys for create-tx planner".to_string(),
+            ));
+        }
+        Ok(signer_pubkeys)
     }
 
     async fn peek_active_signers(&mut self) -> Result<Vec<ActiveSignerEntryNoun>, NockAppError> {
@@ -905,16 +1172,11 @@ impl Wallet {
                 "manual create-tx spending legacy v0 notes requires --refund-pkh".to_string(),
             );
         }
-        if !sign_keys.is_empty() {
-            info!(
-                "create-tx planner spendability matching currently uses only the wallet master key"
-            );
-        }
-        let master_signer_pkh = match self.peek_master_signing_key().await {
-            Ok(key) => key,
+        let signer_keys = match self.resolve_planner_signer_keys(&sign_keys).await {
+            Ok(keys) => keys,
             Err(err) => {
                 warn!(
-                    "create-tx planner could not read master signing key from wallet state: {}",
+                    "create-tx planner could not resolve signing keys from wallet state/CLI: {}",
                     err
                 );
                 return planner_error(
@@ -922,26 +1184,42 @@ impl Wallet {
                 );
             }
         };
-        info!(
-            "create-tx planner master-signer-pkh={}",
-            master_signer_pkh.to_base58()
-        );
-        let legacy_signer_pubkeys = if candidate_version_policy == CandidateVersionPolicy::V0Only {
-            let master_signer_pubkey = match self.peek_master_signing_pubkey().await {
+        if signer_keys.is_empty() && candidate_version_policy != CandidateVersionPolicy::V0Only {
+            return planner_error("wallet has no signer keys for create-tx planner".to_string());
+        }
+        let signer_pkh_for_planner = if candidate_version_policy == CandidateVersionPolicy::V0Only {
+            None
+        } else {
+            let master_signer_pkh = match self.resolve_master_signer_pkh(&signer_keys).await {
                 Ok(key) => key,
                 Err(err) => {
-                    return planner_error(format!(
-                        "unable to read master signing pubkey from wallet state: {err}"
-                    ));
+                    return planner_error(err.to_string());
                 }
             };
-            vec![master_signer_pubkey]
+            info!(
+                "create-tx planner master-signer-pkh={}",
+                master_signer_pkh.to_base58()
+            );
+            Some(master_signer_pkh)
+        };
+        info!(
+            "create-tx planner signer-keys entries={} signer-pkhs={:?}",
+            signer_keys.len(),
+            signer_keys.iter().map(Hash::to_base58).collect::<Vec<_>>()
+        );
+        let legacy_signer_pubkeys = if candidate_version_policy == CandidateVersionPolicy::V0Only {
+            match self.resolve_legacy_signer_pubkeys(&sign_keys).await {
+                Ok(keys) => keys,
+                Err(err) => {
+                    return planner_error(format!(
+                        "unable to resolve legacy v0 signer pubkeys from wallet state: {err}"
+                    ));
+                }
+            }
         } else {
             Vec::new()
         };
-        // Today lock matching is constrained to the master signer key only.
-        // We can expand this matcher input to include additional signing keys later.
-        let matcher_signer_keys = vec![master_signer_pkh.clone()];
+        let matcher_signer_keys = signer_keys.clone();
         let recipient_outputs = match planner_recipient_outputs(&recipients, include_data) {
             Ok(outputs) => outputs,
             Err(err) => {
@@ -950,9 +1228,21 @@ impl Wallet {
                 ));
             }
         };
+        let refund_default_pkh = match signer_pkh_for_planner
+            .as_ref()
+            .or(parsed_refund_pkh.as_ref())
+        {
+            Some(pkh) => pkh,
+            None => {
+                return planner_error(
+                    "create-tx planner has no signer or refund pubkey hash for refund output"
+                        .to_string(),
+                );
+            }
+        };
         let refund_output_template = match planner_refund_output_template(
             parsed_refund_pkh.as_ref(),
-            &master_signer_pkh,
+            refund_default_pkh,
             include_data,
         ) {
             Ok(output) => output,
@@ -1002,7 +1292,7 @@ impl Wallet {
                 input_fee_divisor: planner_constants.input_fee_divisor,
                 min_fee: planner_constants.data.min_fee,
             },
-            signer_pkh: Some(master_signer_pkh.clone()),
+            signer_pkh: signer_pkh_for_planner,
             candidate_version_policy,
             candidates: snapshot.candidates,
             recipient_outputs,
@@ -1015,8 +1305,8 @@ impl Wallet {
         let plan = match plan_create_tx(&request, &matcher) {
             Ok(found_plan) => {
                 info!(
-                    "create-tx planner using master signer {} for lock spendability checks",
-                    master_signer_pkh.to_base58()
+                    "create-tx planner using {} tracked signer keys for lock spendability checks",
+                    matcher_signer_keys.len()
                 );
                 found_plan
             }
@@ -1586,18 +1876,6 @@ impl Wallet {
         balance_update
     }
 
-    /// Builds one `update-balance-grpc` poke from a private-api peek payload.
-    fn update_balance_grpc_poke_from_payload(
-        payload: Option<Option<v1::BalanceUpdate>>,
-    ) -> NounSlab {
-        let mut slab = NounSlab::new();
-        let payload_noun = payload.to_noun(&mut slab);
-        let head = make_tas(&mut slab, "update-balance-grpc").as_noun();
-        let full = T(&mut slab, &[head, payload_noun]);
-        slab.set_root(full);
-        slab
-    }
-
     #[cfg(test)]
     /// Test helper for filtering one balance update against tracked first names.
     pub(crate) fn filter_untracked_v1_notes_for_tests(
@@ -1617,44 +1895,55 @@ impl Wallet {
         pubkeys: &[String],
         first_names: &[String],
     ) -> Result<Vec<v1::BalanceUpdate>, NockAppError> {
-        let mut pages = Vec::<v1::BalanceUpdate>::new();
+        let mut jobs = tokio::task::JoinSet::new();
 
         for first_name in first_names {
-            let response = client
-                .wallet_get_balance(&BalanceRequest::FirstName(first_name.clone()))
-                .await
-                .map_err(|e| {
+            let first_name = first_name.clone();
+            let mut client = client.clone();
+            jobs.spawn(async move {
+                let response = client
+                    .wallet_get_balance(&BalanceRequest::FirstName(first_name.clone()))
+                    .await
+                    .map_err(|e| {
+                        NockAppError::OtherError(format!(
+                            "Failed to request current balance for first name {}: {}",
+                            first_name, e
+                        ))
+                    })?;
+                v1::BalanceUpdate::try_from(response).map_err(|e| {
                     NockAppError::OtherError(format!(
-                        "Failed to request current balance for first name {}: {}",
+                        "Failed to parse balance update for first name {}: {}",
                         first_name, e
                     ))
-                })?;
-            let balance_update = v1::BalanceUpdate::try_from(response).map_err(|e| {
-                NockAppError::OtherError(format!(
-                    "Failed to parse balance update for first name {}: {}",
-                    first_name, e
-                ))
-            })?;
-            pages.push(balance_update);
+                })
+            });
         }
 
         for key in pubkeys {
-            let response = client
-                .wallet_get_balance(&BalanceRequest::Address(key.clone()))
-                .await
-                .map_err(|e| {
+            let key = key.clone();
+            let mut client = client.clone();
+            jobs.spawn(async move {
+                let response = client
+                    .wallet_get_balance(&BalanceRequest::Address(key.clone()))
+                    .await
+                    .map_err(|e| {
+                        NockAppError::OtherError(format!(
+                            "Failed to request current balance for pubkey {}: {}",
+                            key, e
+                        ))
+                    })?;
+                v1::BalanceUpdate::try_from(response).map_err(|e| {
                     NockAppError::OtherError(format!(
-                        "Failed to request current balance for pubkey {}: {}",
+                        "Failed to parse balance update for pubkey {}: {}",
                         key, e
                     ))
-                })?;
-            let balance_update = v1::BalanceUpdate::try_from(response).map_err(|e| {
-                NockAppError::OtherError(format!(
-                    "Failed to parse balance update for pubkey {}: {}",
-                    key, e
-                ))
-            })?;
-            pages.push(balance_update);
+                })
+            });
+        }
+
+        let mut pages = Vec::<v1::BalanceUpdate>::with_capacity(first_names.len() + pubkeys.len());
+        while let Some(job) = jobs.join_next().await {
+            pages.push(job.map_err(NockAppError::JoinError)??);
         }
 
         Ok(pages)
@@ -1671,7 +1960,7 @@ impl Wallet {
         pubkeys.sort();
         pubkeys.dedup();
 
-        const SNAPSHOT_DRIFT_MAX_RETRIES: usize = 2;
+        const SNAPSHOT_DRIFT_MAX_RETRIES: usize = 8;
         let mut attempt = 0usize;
         let (merged_balance, normalized_snapshot) = loop {
             attempt = attempt.saturating_add(1);
@@ -1709,7 +1998,77 @@ impl Wallet {
         })
     }
 
-    /// Fetches balances via private gRPC peek paths and wraps updates as wallet pokes.
+    /// Fetches individual balance pages via private gRPC peek paths.
+    async fn fetch_balance_pages_grpc_private(
+        client: &mut private_nockapp::PrivateNockAppGrpcClient,
+        pubkeys: &[String],
+        first_names: &[String],
+    ) -> Result<Vec<v1::BalanceUpdate>, NockAppError> {
+        let mut jobs = tokio::task::JoinSet::new();
+
+        for (request_index, first_name) in first_names.iter().cloned().enumerate() {
+            let mut client = client.clone();
+            jobs.spawn(async move {
+                let mut slab: NounSlab<NockJammer> = NounSlab::new();
+                let mut path_slab = NounSlab::<NockJammer>::new();
+                let path_noun = vec!["balance-by-first-name".to_string(), first_name.clone()]
+                    .to_noun(&mut path_slab);
+                path_slab.set_root(path_noun);
+                let path_bytes = path_slab.jam().to_vec();
+
+                let response = client
+                    .peek(request_index as i32, path_bytes)
+                    .await
+                    .map_err(|e| {
+                        NockAppError::OtherError(format!(
+                            "Failed to peek balance for first name {first_name}: {e}"
+                        ))
+                    })?;
+
+                let balance = slab.cue_into(response.as_bytes()?)?;
+                let space = slab.noun_space();
+                let payload: Option<Option<v1::BalanceUpdate>> =
+                    <Option<Option<v1::BalanceUpdate>>>::from_noun(&balance, &space)?;
+                Ok::<Option<v1::BalanceUpdate>, NockAppError>(payload.flatten())
+            });
+        }
+
+        for (offset, key) in pubkeys.iter().cloned().enumerate() {
+            let mut client = client.clone();
+            let request_index = first_names.len().saturating_add(offset) as i32;
+            jobs.spawn(async move {
+                let mut slab: NounSlab<NockJammer> = NounSlab::new();
+                let mut path_slab = NounSlab::<NockJammer>::new();
+                let path_noun =
+                    vec!["balance-by-pubkey".to_string(), key.clone()].to_noun(&mut path_slab);
+                path_slab.set_root(path_noun);
+                let path_bytes = path_slab.jam().to_vec();
+
+                let response = client.peek(request_index, path_bytes).await.map_err(|e| {
+                    NockAppError::OtherError(format!(
+                        "Failed to peek balance for pubkey {key}: {e}"
+                    ))
+                })?;
+
+                let balance = slab.cue_into(response.as_bytes()?)?;
+                let space = slab.noun_space();
+                let payload: Option<Option<v1::BalanceUpdate>> =
+                    <Option<Option<v1::BalanceUpdate>>>::from_noun(&balance, &space)?;
+                Ok::<Option<v1::BalanceUpdate>, NockAppError>(payload.flatten())
+            });
+        }
+
+        let mut pages = Vec::<v1::BalanceUpdate>::with_capacity(first_names.len() + pubkeys.len());
+        while let Some(job) = jobs.join_next().await {
+            if let Some(balance_update) = job.map_err(NockAppError::JoinError)?? {
+                pages.push(balance_update);
+            }
+        }
+
+        Ok(pages)
+    }
+
+    /// Fetches balances via private gRPC peek paths and emits one merged wallet update snapshot.
     pub(crate) async fn update_balance_grpc_private(
         client: &mut private_nockapp::PrivateNockAppGrpcClient,
         mut pubkeys: Vec<String>,
@@ -1720,55 +2079,41 @@ impl Wallet {
         pubkeys.sort();
         pubkeys.dedup();
 
-        let mut request_index: i32 = 0;
-        let mut results = Vec::new();
+        const SNAPSHOT_DRIFT_MAX_RETRIES: usize = 8;
+        let mut attempt = 0usize;
+        let (merged_balance, normalized_snapshot) = loop {
+            attempt = attempt.saturating_add(1);
+            let pages =
+                Self::fetch_balance_pages_grpc_private(client, &pubkeys, &first_names).await?;
 
-        for first_name in first_names {
-            let mut slab: NounSlab<NockJammer> = NounSlab::new();
-
-            let mut path_slab = NounSlab::<NockJammer>::new();
-            let path_noun = vec!["balance-by-first-name".to_string(), first_name.clone()]
-                .to_noun(&mut path_slab);
-            path_slab.set_root(path_noun);
-            let path_bytes = path_slab.jam().to_vec();
-
-            let response = client.peek(request_index, path_bytes).await.map_err(|e| {
-                NockAppError::OtherError(format!(
-                    "Failed to peek balance for first name {first_name}: {e}"
-                ))
-            })?;
-            request_index = request_index.wrapping_add(1);
-
-            let balance = slab.cue_into(response.as_bytes()?)?;
-            let space = slab.noun_space();
-            let payload: Option<Option<v1::BalanceUpdate>> =
-                <Option<Option<v1::BalanceUpdate>>>::from_noun(&balance, &space)?;
-            results.push(Self::update_balance_grpc_poke_from_payload(payload));
-        }
-
-        for key in pubkeys {
-            let mut slab: NounSlab<NockJammer> = NounSlab::new();
-            let mut path_slab = NounSlab::<NockJammer>::new();
-            let path_noun =
-                vec!["balance-by-pubkey".to_string(), key.clone()].to_noun(&mut path_slab);
-            path_slab.set_root(path_noun);
-            let path_bytes = path_slab.jam().to_vec();
-
-            let response = client.peek(request_index, path_bytes).await.map_err(|e| {
-                NockAppError::OtherError(format!("Failed to peek balance for pubkey {key}: {e}"))
-            })?;
-            request_index = request_index.wrapping_add(1);
-
-            let balance = slab.cue_into(response.as_bytes()?)?;
-            let space = slab.noun_space();
-            let payload: Option<Option<v1::BalanceUpdate>> =
-                <Option<Option<v1::BalanceUpdate>>>::from_noun(&balance, &space)?;
-            results.push(Self::update_balance_grpc_poke_from_payload(payload));
-        }
+            match Self::union_balance_pages(pages) {
+                Ok(Some((merged_balance, normalized_snapshot))) => {
+                    break (merged_balance, normalized_snapshot);
+                }
+                Ok(None) => {
+                    return Ok(connection::BalanceSyncResult {
+                        pokes: Vec::new(),
+                        normalized_snapshot: None,
+                    });
+                }
+                Err(
+                    NormalizeSnapshotError::Snapshot(SnapshotConsistencyError::HeightDrift)
+                    | NormalizeSnapshotError::Snapshot(SnapshotConsistencyError::BlockIdDrift),
+                ) if attempt <= SNAPSHOT_DRIFT_MAX_RETRIES => {
+                    continue;
+                }
+                Err(err) => {
+                    return Err(NockAppError::OtherError(format!(
+                        "Failed to normalize fetched wallet balance pages into one snapshot: {}",
+                        err
+                    )));
+                }
+            }
+        };
 
         Ok(connection::BalanceSyncResult {
-            pokes: results,
-            normalized_snapshot: None,
+            pokes: vec![Self::update_balance_grpc_poke(merged_balance)],
+            normalized_snapshot: Some(normalized_snapshot),
         })
     }
 }

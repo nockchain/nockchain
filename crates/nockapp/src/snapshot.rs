@@ -15,7 +15,7 @@ use nockvm::pma::{
 };
 use nockvm::serialization::met0_u64_to_usize;
 use thiserror::Error;
-use tracing::info;
+use tracing::debug;
 
 use crate::event_log::{EventLog, EventLogError, ReadySnapshotRecord};
 use crate::utils::durability;
@@ -294,7 +294,7 @@ pub(crate) fn verify_snapshot(
     mode: SnapshotVerifyMode,
 ) -> Result<SnapshotVerification, SnapshotVerifyError> {
     let verify_start = Instant::now();
-    info!(
+    debug!(
         mode = ?mode,
         manifest_path = ?manifest_path,
         pma_path = ?pma_path,
@@ -302,7 +302,7 @@ pub(crate) fn verify_snapshot(
     );
     let stage_start = Instant::now();
     let manifest = SnapshotManifest::read_from_path(manifest_path)?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -310,7 +310,7 @@ pub(crate) fn verify_snapshot(
     );
     let stage_start = Instant::now();
     let file_metadata = Pma::read_file_metadata(pma_path)?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -329,7 +329,7 @@ pub(crate) fn verify_snapshot(
             file: file_metadata.alloc_words,
         });
     }
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -338,7 +338,7 @@ pub(crate) fn verify_snapshot(
 
     let stage_start = Instant::now();
     let used_blake3 = hash_file_prefix(pma_path, file_metadata.alloc_words.saturating_mul(8))?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -361,7 +361,7 @@ pub(crate) fn verify_snapshot(
             ..PmaDirectJamConfig::default()
         },
     )?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -369,7 +369,7 @@ pub(crate) fn verify_snapshot(
     );
     let stage_start = Instant::now();
     validate_root_raw(&mut reader, manifest.kernel_root_raw)?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -377,7 +377,7 @@ pub(crate) fn verify_snapshot(
     );
     let stage_start = Instant::now();
     validate_cold_offset(&mut reader, manifest.cold_offset)?;
-    info!(
+    debug!(
         mode = ?mode,
         event_num = manifest.event_num,
         elapsed_ms = duration_ms(stage_start.elapsed()),
@@ -389,7 +389,7 @@ pub(crate) fn verify_snapshot(
         SnapshotVerifyMode::Full => {
             let stage_start = Instant::now();
             let stats = verify_structure(&mut reader, &manifest)?;
-            info!(
+            debug!(
                 mode = ?mode,
                 event_num = manifest.event_num,
                 bit_len = stats.bit_len,
@@ -407,7 +407,7 @@ pub(crate) fn verify_snapshot(
         used_blake3,
         structure_stats,
     };
-    info!(
+    debug!(
         mode = ?mode,
         event_num = verification.manifest.event_num,
         elapsed_ms = duration_ms(verify_start.elapsed()),
@@ -567,7 +567,7 @@ fn create_ready_snapshot(
 
     let copy_start = Instant::now();
     copy_snapshot_file(pma.path(), &tmp_snapshot_pma_path)?;
-    info!(
+    debug!(
         event_num,
         src = ?pma.path(),
         dst = ?tmp_snapshot_pma_path,
@@ -582,7 +582,7 @@ fn create_ready_snapshot(
             .checked_bytes()
             .expect("PMA alloc offset exceeds u64 byte range"),
     )?);
-    info!(
+    debug!(
         event_num,
         path = ?snapshot_pma_path,
         len_bytes = pma.alloc_offset_words()
@@ -616,7 +616,7 @@ fn create_ready_snapshot(
         let _ = fs::remove_file(&snapshot_pma_path);
         return Err(err.into());
     }
-    info!(
+    debug!(
         event_num,
         manifest_path = ?snapshot_manifest_path,
         pma_path = ?snapshot_pma_path,
@@ -659,7 +659,7 @@ fn retire_old_rotating_snapshots(event_log: &mut EventLog) -> Result<(), Snapsho
         event_log.retire_snapshot(snapshot.snapshot_id)?;
         retired_count += 1;
     }
-    info!(
+    debug!(
         retired_count,
         elapsed_ms = duration_ms(retire_start.elapsed()),
         "retire old rotating snapshots done"

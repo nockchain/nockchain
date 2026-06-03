@@ -5,6 +5,7 @@
 /=  transact  /common/tx-engine
 /=  z   /common/zeke
 /=  zo  /common/zoon
+/=  hz  /common/h-zoon
 /=  dumb  /apps/dumbnet/lib/types
 /=  bridge  /apps/bridge/types
 /=  *   /common/zose
@@ -221,6 +222,20 @@
     ?:  ?=(%1 -.coil)
       ~
     `~(address to-b58:coil:wt coil)
+    ::
+    ::  returns local v1 signer pubkey hashes
+      [%signing-keys ~]
+    :+  ~
+      ~
+    %+  murn
+      ~(coils get:v %pub)
+    |=  =coil:wt
+    ?.  ?=(%1 -.coil)
+      ~
+    =/  signer-pkh=hash:transact
+      %-  hash:schnorr-pubkey:transact
+      (from-ser:schnorr-pubkey:transact p.key.coil)
+    `signer-pkh
     ::
     ::  returns tracked first-name lock cache entries in machine-readable form
       [%tracked-locks ~]
@@ -858,7 +873,7 @@
     =+  data=data:*blockchain-constants:transact
     =/  valid=(reason:dumb ~)
       %-  validate-with-context:spends:transact
-      [notes.balance.state signed-spends height.balance.state max-size.data bythos-phase.bc.state]
+      [(zh-molt:hz notes.balance.state) signed-spends height.balance.state max-size.data bythos-phase.bc.state]
     ?-    -.valid
         %.y
       =/  nock-cause=$>(%fact cause:dumb)

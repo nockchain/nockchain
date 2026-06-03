@@ -1,3 +1,7 @@
+#![allow(clippy::missing_safety_doc)]
+
+use std::str;
+
 use bincode::{Decode, Encode};
 use bytes::Bytes;
 use either::Either::{Left, Right};

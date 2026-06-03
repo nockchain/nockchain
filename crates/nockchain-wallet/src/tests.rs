@@ -29,6 +29,7 @@ use wallet_tx_builder::types::{
 };
 
 use super::*;
+use crate::command::WalletWire;
 use crate::create_tx::{
     ensure_manual_planner_parity, ActiveSignerEntryNoun, MigrateV0NotesSummary,
     MigrateV0SignerSummary, PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun,
@@ -407,30 +408,86 @@ fn decode_option_handle<'a>(
 async fn peek_master_signing_key(wallet: &mut Wallet) -> Result<Hash, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "master-signing-key").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
     let space = result.noun_space();
     let decoded: Option<Option<Hash>> = unsafe { Option::from_noun(result.root(), &space)? };
-    decoded.flatten().ok_or_else(|| {
-        NockAppError::OtherError("wallet master-signing-key peek returned no payload".to_string())
-    })
+    if let Some(master_signing_key) = decoded.flatten() {
+        return Ok(master_signing_key);
+    }
+
+    let signing_keys = peek_signing_keys(wallet).await?;
+    if let Some(signing_key) = signing_keys.first() {
+        return Ok(signing_key.clone());
+    }
+
+    let active_signers = peek_active_signers(wallet).await?;
+    if let Some(master_signer) = active_signers
+        .iter()
+        .find(|signer| signer.child_index.is_none())
+    {
+        return Hash::from_base58(&master_signer.address_b58).map_err(|err| {
+            NockAppError::OtherError(format!(
+                "wallet active master signer address did not decode as a pubkey hash: {err}"
+            ))
+        });
+    }
+    active_signers
+        .first()
+        .map(|signer| {
+            Hash::from_base58(&signer.address_b58).map_err(|err| {
+                NockAppError::OtherError(format!(
+                    "wallet active signer address did not decode as a pubkey hash: {err}"
+                ))
+            })
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            NockAppError::OtherError("wallet signer key peek returned no payload".to_string())
+        })
+}
+
+async fn peek_signing_keys(wallet: &mut Wallet) -> Result<Vec<Hash>, NockAppError> {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "signing-keys").as_noun();
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
+
+    let result = wallet.app.peek(slab).await?;
+    let space = result.noun_space();
+    let decoded: Option<Option<Vec<Hash>>> = unsafe { Option::from_noun(result.root(), &space)? };
+    Ok(decoded.flatten().unwrap_or_default())
 }
 
 async fn peek_master_signing_pubkey(wallet: &mut Wallet) -> Result<SchnorrPubkey, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "master-signing-pubkey").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
     let space = result.noun_space();
     let decoded: Option<Option<SchnorrPubkey>> =
         unsafe { Option::from_noun(result.root(), &space)? };
-    decoded.flatten().ok_or_else(|| {
-        NockAppError::OtherError(
-            "wallet master-signing-pubkey peek returned no payload".to_string(),
-        )
-    })
+    if let Some(master_signing_pubkey) = decoded.flatten() {
+        return Ok(master_signing_pubkey);
+    }
+
+    let active_signers = peek_active_signers(wallet).await?;
+    if let Some(master_signer) = active_signers
+        .iter()
+        .find(|signer| signer.child_index.is_none())
+    {
+        return Ok(master_signer.pubkey.clone());
+    }
+    active_signers
+        .first()
+        .map(|signer| signer.pubkey.clone())
+        .ok_or_else(|| {
+            NockAppError::OtherError("wallet signer pubkey peek returned no payload".to_string())
+        })
 }
 
 async fn peek_active_signers(
@@ -438,7 +495,8 @@ async fn peek_active_signers(
 ) -> Result<Vec<ActiveSignerEntryNoun>, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "active-signers").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
     let space = result.noun_space();
@@ -502,6 +560,23 @@ async fn apply_balance_update(
     let poke = Wallet::update_balance_grpc_poke_for_tests(balance_update);
     let _ = wallet.app.poke(SystemWire.to_wire(), poke).await?;
     Ok(())
+}
+
+async fn derive_child_address(
+    wallet: &mut Wallet,
+    index: u64,
+    hardened: bool,
+) -> Result<String, NockAppError> {
+    let label = None;
+    let (noun, _) = Wallet::derive_child(index, hardened, &label)?;
+    let wire = WalletWire::Command(Commands::DeriveChild {
+        index,
+        hardened,
+        label,
+    })
+    .to_wire();
+    let effects = wallet.app.poke(wire, noun).await?;
+    Wallet::derived_address_from_effects(&effects)
 }
 
 async fn boot_wallet_with(
@@ -784,13 +859,18 @@ fn signing_key_lock_matcher_rejects_threshold_lock_when_single_signer_cannot_mee
 }
 
 #[test]
-fn signing_key_lock_matcher_rejects_multisig_lock_even_when_single_sig_threshold_is_one() {
+fn signing_key_lock_matcher_accepts_single_sig_multisig_when_signer_is_present() {
     let signer = hash(5);
     let matcher = SigningKeyLockMatcher::from_signer_keys(&[signer_key(5)]);
     let spend_condition = SpendCondition::new(vec![LockPrimitive::Pkh(
         nockchain_types::tx_engine::v1::tx::Pkh::new(1, vec![hash(9), signer]),
     )]);
+    let first_name = spend_condition
+        .first_name()
+        .expect("multisig first-name should compute")
+        .into_hash();
 
+    assert!(matcher.matches(&first_name, &spend_condition));
     assert!(!matcher.matches(&hash(1234), &spend_condition));
 }
 
@@ -825,6 +905,34 @@ fn signing_key_lock_matcher_accepts_coinbase_shape_for_matching_signer() {
 
     assert!(matcher.matches(&first_name, &spend_condition));
     assert!(!matcher.matches(&hash(82), &spend_condition));
+}
+
+#[test]
+fn signing_key_lock_matcher_resolves_simple_lock_for_non_master_signer_reconstruction() {
+    let master = signer_key(1);
+    let child = signer_key(8);
+    let matcher = SigningKeyLockMatcher::from_signer_keys(&[master.clone(), child.clone()]);
+    let spend_condition = SpendCondition::new(vec![LockPrimitive::Pkh(
+        nockchain_types::tx_engine::v1::tx::Pkh::new(1, vec![child.clone()]),
+    )]);
+    let first_name = spend_condition
+        .first_name()
+        .expect("simple first-name should compute")
+        .into_hash();
+    let decoded = wallet_tx_builder::note_data::DecodedNoteData(Vec::new());
+
+    let resolution = matcher.resolve_lock(ResolveLockRequest {
+        note_first_name: &first_name,
+        decoded_note_data: &decoded,
+        signer_pkh: Some(&master),
+        coinbase_relative_min: Some(1),
+    });
+
+    assert_eq!(
+        resolution.source,
+        LockResolutionSource::ReconstructedSimplePkh
+    );
+    assert_eq!(resolution.spend_condition, Some(spend_condition));
 }
 
 #[test]
@@ -1543,11 +1651,13 @@ async fn create_tx_with_planner_accepts_manual_all_v0_notes() -> Result<(), Nock
     let (mut wallet, _data_dir) = boot_test_wallet().await?;
     let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
 
-    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
     wallet.set_fakenet().await?;
 
     let destination = peek_master_signing_key(&mut wallet).await?;
-    let signer_pubkey = peek_master_signing_pubkey(&mut wallet).await?;
+    let child_address = derive_child_address(&mut wallet, 0, false).await?;
+    let signer_pubkey = SchnorrPubkey::from_base58(&child_address)
+        .expect("derived v0 child address should decode as a Schnorr pubkey");
 
     let v0_note_name = name(52, 5_252);
     let v0_note = note_v0_with_lock(
@@ -1575,7 +1685,7 @@ async fn create_tx_with_planner_accepts_manual_all_v0_notes() -> Result<(), Nock
             }],
             false,
             Some(destination.to_base58()),
-            Vec::new(),
+            vec![(0, false)],
             true,
             false,
             NoteSelectionStrategyCli::Ascending,
@@ -1707,6 +1817,119 @@ async fn migrate_v0_notes_wallet_tx_matches_planner_word_and_fee_counts() -> Res
     assert_eq!(plan.outputs.len(), 1);
     assert_eq!(plan.outputs[0].amount, hoon_gift);
     assert_eq!(plan.selected_total, hoon_fee + hoon_gift);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_tx_planner_accepts_child_sign_key_for_lock_reconstruction(
+) -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    wallet.set_fakenet().await?;
+
+    let master_signer = peek_master_signing_key(&mut wallet).await?;
+    let child_address = derive_child_address(&mut wallet, 0, false).await?;
+    let child_pkh = Hash::from_base58(&child_address)
+        .expect("derived child address should decode as pubkey hash");
+    let note_name = Name::new(
+        SpendCondition::simple_pkh(child_pkh.clone())
+            .first_name()
+            .expect("simple child lock should compute first-name")
+            .into_hash(),
+        hash(4_242),
+    );
+    let child_note = v1::Note::V1(v1::NoteV1::new(
+        BlockHeight(Belt(1)),
+        note_name.clone(),
+        NoteData::new(Vec::new()),
+        Nicks(10_000),
+    ));
+    apply_balance_update(
+        &mut wallet,
+        balance_page(7, 888, vec![(note_name.clone(), child_note)]),
+    )
+    .await?;
+
+    let recipient = RecipientSpec::P2pkh {
+        address: master_signer,
+        amount: 4_000,
+    };
+
+    let _ = wallet
+        .create_tx_with_planner(
+            None,
+            Some(format_note_names(std::slice::from_ref(&note_name))),
+            None,
+            vec![recipient],
+            false,
+            None,
+            vec![(0, false)],
+            true,
+            false,
+            NoteSelectionStrategyCli::Ascending,
+        )
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn keygen_create_tx_uses_tracked_signing_keys() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let entropy = [7u8; 32];
+    let salt = [9u8; 16];
+
+    let (noun, _) = Wallet::keygen(&entropy, &salt)?;
+    let wire = WalletWire::Command(Commands::Keygen).to_wire();
+    let _ = wallet.app.poke(wire, noun).await?;
+    wallet.set_fakenet().await?;
+
+    let signing_keys = peek_signing_keys(&mut wallet).await?;
+    let signer_pkh = signing_keys
+        .first()
+        .cloned()
+        .expect("keygen should expose a tracked signing key");
+    let note_name = Name::new(
+        SpendCondition::simple_pkh(signer_pkh.clone())
+            .first_name()
+            .expect("simple signer lock should compute first-name")
+            .into_hash(),
+        hash(7_777),
+    );
+    let note = v1::Note::V1(v1::NoteV1::new(
+        BlockHeight(Belt(1)),
+        note_name.clone(),
+        NoteData::new(Vec::new()),
+        Nicks(10_000),
+    ));
+    apply_balance_update(
+        &mut wallet,
+        balance_page(9, 999, vec![(note_name.clone(), note)]),
+    )
+    .await?;
+
+    let _ = wallet
+        .create_tx_with_planner(
+            None,
+            Some(format_note_names(std::slice::from_ref(&note_name))),
+            None,
+            vec![RecipientSpec::P2pkh {
+                address: signer_pkh,
+                amount: 4_000,
+            }],
+            false,
+            None,
+            Vec::new(),
+            true,
+            false,
+            NoteSelectionStrategyCli::Ascending,
+        )
+        .await?;
 
     Ok(())
 }

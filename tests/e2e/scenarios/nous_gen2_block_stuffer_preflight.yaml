@@ -1,0 +1,143 @@
+# Nous block stuffer preflight: fast fail-fast smoke run before long soak
+#
+# Exercises the same wallet compat + block stuffer path used by the full
+# nous_gen2_soak scenario, but with a minimal 2-node network and only 3
+# block stuffer iterations.  This catches note-discovery, spent-note
+# tracking, and wallet compat shim regressions in under a minute instead
+# of waiting for the full 48-iteration soak to fail.
+#
+# Run this scenario immediately before nous_gen2_soak in the validation
+# suite.  If the preflight fails, skip the soak — the same path will fail
+# there too, saving significant operator time.
+#
+# Related: block stuffer confidence and gen2 staged rollout coverage
+
+name: "nous_gen2_block_stuffer_preflight"
+seed: 32
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  # Wallet setup: keygen, watch, configure mining address
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  # Bring up full node
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  # Wait for enough blocks so the stuffer has notes to spend
+  - action: wait_for_height
+    node: "miner-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 5
+    timeout_ms: 180000
+
+  # Block stuffer preflight: 3 iterations, minimal note targets.
+  # This exercises the same wallet compat shim, note discovery (list-notes
+  # or CSV fallback), spent-note tracking, and create-tx/send-tx path as
+  # the full soak, but fails fast on any regression.
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-preflight"
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${NOCKCHAIN_WALLET_BIN}"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "${BASE_PRIVATE_GRPC_PORT}"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "4"
+      STEADY_STATE_TXS: "4"
+      MAX_ITERATIONS: "6"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  # Verify at least 2 successful transactions — enough to prove the
+  # note-discovery and spend cycle works without requiring full soak depth.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - "count=$(grep -c 'TRANSACTION(SUCCESS)' ./logs/transaction_log.txt || true); echo \"success_count=$count\"; test \"$count\" -ge 2"
+    cwd: "${RUN_DIR}/stuffer-preflight"
+    expect: "success_count="
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "full-a"]
+    timeout_ms: 120000

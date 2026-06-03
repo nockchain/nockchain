@@ -1,7 +1,7 @@
 use std::ptr::{copy_nonoverlapping, null_mut};
 
 use intmap::IntMap;
-use tracing::info;
+use tracing::debug;
 
 use crate::hamt::Hamt;
 use crate::mem::{self, NockStack, Preserve};
@@ -113,7 +113,7 @@ impl PmaCopy for Batteries {
         let mut last_progress = start;
         let mut steps = 0usize;
         if trace {
-            info!("pma-copy: batteries start: head_ptr={:p}", self.0);
+            debug!("pma-copy: batteries start: head_ptr={:p}", self.0);
         }
         let mut ptr: *mut Batteries = self;
         loop {
@@ -125,7 +125,7 @@ impl PmaCopy for Batteries {
                 let battery = (*(*ptr).0).battery;
                 let axis = (*(*ptr).0).parent_axis;
                 let axis_noun = axis.as_noun();
-                info!(
+                debug!(
                     "pma-copy: batteries node: node_ptr={:p} battery_raw=0x{:x} battery_repr={:?} axis_raw=0x{:x} axis_repr={:?}",
                     (*ptr).0,
                     unsafe { battery.as_raw() },
@@ -133,17 +133,17 @@ impl PmaCopy for Batteries {
                     unsafe { axis_noun.as_raw() },
                     axis_noun.repr(&space)
                 );
-                info!("pma-copy: batteries battery copy start");
+                debug!("pma-copy: batteries battery copy start");
             }
             // Copy the battery noun and parent_axis to PMA
             (*(*ptr).0).battery.copy_to_pma(stack, pma);
             if trace {
-                info!("pma-copy: batteries battery copy done");
-                info!("pma-copy: batteries axis copy start");
+                debug!("pma-copy: batteries battery copy done");
+                debug!("pma-copy: batteries axis copy start");
             }
             (*(*ptr).0).parent_axis.copy_to_pma(stack, pma);
             if trace {
-                info!("pma-copy: batteries axis copy done");
+                debug!("pma-copy: batteries axis copy done");
             }
             // Allocate new BatteriesMem in PMA and copy
             let dest_mem: *mut BatteriesMem = pma.alloc_struct(1);
@@ -159,7 +159,7 @@ impl PmaCopy for Batteries {
             if trace && (steps & 0x3ff == 0) {
                 let now = std::time::Instant::now();
                 if now.duration_since(last_progress).as_millis() >= 2000 {
-                    info!(
+                    debug!(
                         "pma-copy: batteries progress: steps={}, elapsed_ms={}",
                         steps,
                         start.elapsed().as_millis()
@@ -169,7 +169,7 @@ impl PmaCopy for Batteries {
             }
         }
         if trace {
-            info!(
+            debug!(
                 "pma-copy: batteries done: steps={}, elapsed_ms={}",
                 steps,
                 start.elapsed().as_millis()
@@ -2364,7 +2364,10 @@ pub(crate) mod test {
                 "Battery value should match"
             );
             assert_eq!(
-                parent_axis.in_space(&space).as_u64().unwrap(),
+                parent_axis
+                    .in_space(&space)
+                    .as_u64()
+                    .expect("parent axis should fit in u64"),
                 *expected_axis,
                 "Parent axis should match"
             );
@@ -2436,7 +2439,10 @@ pub(crate) mod test {
                 "Battery value should match"
             );
             assert_eq!(
-                parent_axis.in_space(&space).as_u64().unwrap(),
+                parent_axis
+                    .in_space(&space)
+                    .as_u64()
+                    .expect("parent axis should fit in u64"),
                 0,
                 "Parent axis should be 0"
             );

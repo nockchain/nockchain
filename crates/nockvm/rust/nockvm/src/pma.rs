@@ -3,11 +3,14 @@
 //! The PMA is a file-backed memory region for storing long-lived Nouns.
 //! It uses bump allocation and stores nouns in offset form.
 
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fs;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::ptr::copy_nonoverlapping;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use either::Either::{Left, Right};
 #[cfg(feature = "pma-assert")]
@@ -16,7 +19,7 @@ use intmap::IntMap;
 use libc;
 use smallvec::SmallVec;
 use thiserror::Error;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::ext::noun_equality;
 use crate::mem::{word_size_of, Arena, NewStackError, NockStack};
@@ -31,20 +34,39 @@ pub use stream::{
 };
 
 const PMA_MAGIC: u64 = u64::from_le_bytes(*b"NOCKPMA1");
-const PMA_VERSION: u64 = 1;
+const PMA_VERSION_V1: u64 = 1;
+const PMA_VERSION: u64 = 2;
+const PMA_V2_TRAILER_MAGIC: u64 = u64::from_le_bytes(*b"NOCKPM2!");
+const PMA_GROWTH_JOURNAL_MAGIC: u64 = u64::from_le_bytes(*b"PMAGROW1");
+const PMA_MIGRATION_JOURNAL_MAGIC: u64 = u64::from_le_bytes(*b"PMAMIGR2");
+const DEFAULT_PMA_RESERVED_BYTES: usize = 1 << 40; // 1 TiB virtual reservation.
+const NOCK_PMA_RESERVED_WORDS_ENV: &str = "NOCK_PMA_RESERVED_WORDS";
+const NOCK_PMA_GROWTH_EVENTS_PATH_ENV: &str = "NOCK_PMA_GROWTH_EVENTS_PATH";
+const NOCK_PMA_RESIZE_FAIL_AT_ENV: &str = "NOCK_PMA_RESIZE_FAIL_AT";
+const NOCK_PMA_MIGRATION_FAIL_AT_ENV: &str = "NOCK_PMA_MIGRATION_FAIL_AT";
+const NOCK_PMA_DISABLE_RESIZE_ENV: &str = "NOCK_PMA_DISABLE_RESIZE_FOR_REGRESSION";
+
+#[cfg(test)]
+thread_local! {
+    static TEST_GROWTH_FAILURE_POINT: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+    static TEST_MIGRATION_FAILURE_POINT: std::cell::RefCell<Option<&'static str>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// The metadata for the PMA is a trailer or footer because otherwise the base + offset pointer derivations would need
 /// to account for the footer size. With this design it's just base pointer + offset.
 #[repr(C)]
-#[derive(Clone, Copy)]
-struct PmaTrailer {
+#[derive(Clone, Copy, Debug)]
+struct PmaLegacyTrailer {
     magic: u64,
     version: u64,
     data_words: u64,
     alloc_offset: u64,
 }
 
-const PMA_TRAILER_BYTES: usize = std::mem::size_of::<PmaTrailer>();
+const PMA_LEGACY_TRAILER_BYTES: usize = std::mem::size_of::<PmaLegacyTrailer>();
+const PMA_TRAILER_BYTES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PmaFileMetadata {
@@ -52,11 +74,17 @@ pub struct PmaFileMetadata {
     pub version: u64,
     pub data_words: u64,
     pub alloc_words: u64,
+    pub capacity_words: u64,
+    pub free_words: u64,
+    pub reserved_words: u64,
+    pub file_bytes: u64,
+    pub apparent_file_bytes: u64,
+    pub physical_file_bytes: Option<u64>,
 }
 
-impl PmaTrailer {
-    fn to_bytes(self) -> [u8; PMA_TRAILER_BYTES] {
-        let mut buf = [0u8; PMA_TRAILER_BYTES];
+impl PmaLegacyTrailer {
+    fn to_bytes(self) -> [u8; PMA_LEGACY_TRAILER_BYTES] {
+        let mut buf = [0u8; PMA_LEGACY_TRAILER_BYTES];
         buf[0..8].copy_from_slice(&self.magic.to_le_bytes());
         buf[8..16].copy_from_slice(&self.version.to_le_bytes());
         buf[16..24].copy_from_slice(&self.data_words.to_le_bytes());
@@ -64,7 +92,7 @@ impl PmaTrailer {
         buf
     }
 
-    fn from_bytes(buf: [u8; PMA_TRAILER_BYTES]) -> Self {
+    fn from_bytes(buf: [u8; PMA_LEGACY_TRAILER_BYTES]) -> Self {
         let magic = u64::from_le_bytes(buf[0..8].try_into().expect("magic slice"));
         let version = u64::from_le_bytes(buf[8..16].try_into().expect("version slice"));
         let data_words = u64::from_le_bytes(buf[16..24].try_into().expect("data_words slice"));
@@ -75,6 +103,257 @@ impl PmaTrailer {
             data_words,
             alloc_offset,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PmaTrailerV2 {
+    reserved_words: u64,
+    footer: PmaLegacyTrailer,
+}
+
+impl PmaTrailerV2 {
+    fn new(capacity_words: u64, alloc_words: u64, reserved_words: u64) -> Self {
+        Self {
+            reserved_words,
+            footer: PmaLegacyTrailer {
+                magic: PMA_MAGIC,
+                version: PMA_VERSION,
+                data_words: capacity_words,
+                alloc_offset: alloc_words,
+            },
+        }
+    }
+
+    fn checksum(version: u64, reserved_words: u64, capacity_words: u64, alloc_words: u64) -> u64 {
+        PMA_V2_TRAILER_MAGIC
+            ^ version.rotate_left(5)
+            ^ reserved_words.rotate_left(13)
+            ^ capacity_words.rotate_left(29)
+            ^ alloc_words.rotate_left(43)
+    }
+
+    fn to_bytes(self) -> [u8; PMA_TRAILER_BYTES] {
+        let mut buf = [0u8; PMA_TRAILER_BYTES];
+        let checksum = Self::checksum(
+            PMA_VERSION, self.reserved_words, self.footer.data_words, self.footer.alloc_offset,
+        );
+        buf[0..8].copy_from_slice(&PMA_V2_TRAILER_MAGIC.to_le_bytes());
+        buf[8..16].copy_from_slice(&PMA_VERSION.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.reserved_words.to_le_bytes());
+        buf[24..32].copy_from_slice(&checksum.to_le_bytes());
+        buf[32..64].copy_from_slice(&self.footer.to_bytes());
+        buf
+    }
+
+    fn from_bytes(buf: [u8; PMA_TRAILER_BYTES]) -> Option<Self> {
+        let extension_magic = u64::from_le_bytes(buf[0..8].try_into().ok()?);
+        let version = u64::from_le_bytes(buf[8..16].try_into().ok()?);
+        let reserved_words = u64::from_le_bytes(buf[16..24].try_into().ok()?);
+        let checksum = u64::from_le_bytes(buf[24..32].try_into().ok()?);
+        let mut footer_buf = [0u8; PMA_LEGACY_TRAILER_BYTES];
+        footer_buf.copy_from_slice(&buf[32..64]);
+        let footer = PmaLegacyTrailer::from_bytes(footer_buf);
+        let expected_checksum = Self::checksum(
+            version, reserved_words, footer.data_words, footer.alloc_offset,
+        );
+        (extension_magic == PMA_V2_TRAILER_MAGIC
+            && version == PMA_VERSION
+            && footer.magic == PMA_MAGIC
+            && footer.version == PMA_VERSION
+            && footer.alloc_offset <= footer.data_words
+            && footer.data_words <= reserved_words
+            && checksum == expected_checksum)
+            .then_some(Self {
+                reserved_words,
+                footer,
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PmaGrowthJournal {
+    magic: u64,
+    old_data_words: u64,
+    old_alloc_words: u64,
+    new_data_words: u64,
+    reserved_words: u64,
+    checksum: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PmaGrowthEvent {
+    old_words: usize,
+    new_words: usize,
+    alloc_words: usize,
+    required_words: usize,
+    request_words: usize,
+    context: &'static str,
+    elapsed: Duration,
+}
+
+impl PmaGrowthJournal {
+    const BYTES: usize = 48;
+    const LEGACY_BYTES: usize = 40;
+
+    fn new(
+        old_data_words: u64,
+        old_alloc_words: u64,
+        new_data_words: u64,
+        reserved_words: u64,
+    ) -> Self {
+        let checksum = Self::checksum(
+            old_data_words, old_alloc_words, new_data_words, reserved_words,
+        );
+        Self {
+            magic: PMA_GROWTH_JOURNAL_MAGIC,
+            old_data_words,
+            old_alloc_words,
+            new_data_words,
+            reserved_words,
+            checksum,
+        }
+    }
+
+    fn checksum(
+        old_data_words: u64,
+        old_alloc_words: u64,
+        new_data_words: u64,
+        reserved_words: u64,
+    ) -> u64 {
+        PMA_GROWTH_JOURNAL_MAGIC
+            ^ old_data_words.rotate_left(7)
+            ^ old_alloc_words.rotate_left(17)
+            ^ new_data_words.rotate_left(31)
+            ^ reserved_words.rotate_left(47)
+    }
+
+    fn to_bytes(self) -> [u8; Self::BYTES] {
+        let mut buf = [0u8; Self::BYTES];
+        buf[0..8].copy_from_slice(&self.magic.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.old_data_words.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.old_alloc_words.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.new_data_words.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.reserved_words.to_le_bytes());
+        buf[40..48].copy_from_slice(&self.checksum.to_le_bytes());
+        buf
+    }
+
+    fn from_bytes(buf: [u8; Self::BYTES]) -> Option<Self> {
+        let magic = u64::from_le_bytes(buf[0..8].try_into().ok()?);
+        let old_data_words = u64::from_le_bytes(buf[8..16].try_into().ok()?);
+        let old_alloc_words = u64::from_le_bytes(buf[16..24].try_into().ok()?);
+        let new_data_words = u64::from_le_bytes(buf[24..32].try_into().ok()?);
+        let reserved_words = u64::from_le_bytes(buf[32..40].try_into().ok()?);
+        let checksum = u64::from_le_bytes(buf[40..48].try_into().ok()?);
+        let journal = Self {
+            magic,
+            old_data_words,
+            old_alloc_words,
+            new_data_words,
+            reserved_words,
+            checksum,
+        };
+        journal.validate().then_some(journal)
+    }
+
+    fn from_legacy_bytes(buf: [u8; Self::LEGACY_BYTES]) -> Option<Self> {
+        let magic = u64::from_le_bytes(buf[0..8].try_into().ok()?);
+        let old_data_words = u64::from_le_bytes(buf[8..16].try_into().ok()?);
+        let old_alloc_words = u64::from_le_bytes(buf[16..24].try_into().ok()?);
+        let new_data_words = u64::from_le_bytes(buf[24..32].try_into().ok()?);
+        let legacy_checksum = u64::from_le_bytes(buf[32..40].try_into().ok()?);
+        let expected_legacy_checksum = PMA_GROWTH_JOURNAL_MAGIC
+            ^ old_data_words.rotate_left(7)
+            ^ old_alloc_words.rotate_left(17)
+            ^ new_data_words.rotate_left(31);
+        if magic != PMA_GROWTH_JOURNAL_MAGIC
+            || old_alloc_words > old_data_words
+            || old_data_words > new_data_words
+            || legacy_checksum != expected_legacy_checksum
+        {
+            return None;
+        }
+        Some(Self::new(
+            old_data_words, old_alloc_words, new_data_words, new_data_words,
+        ))
+    }
+
+    fn validate(self) -> bool {
+        self.magic == PMA_GROWTH_JOURNAL_MAGIC
+            && self.old_alloc_words <= self.old_data_words
+            && self.old_data_words <= self.new_data_words
+            && self.new_data_words <= self.reserved_words
+            && self.checksum
+                == Self::checksum(
+                    self.old_data_words, self.old_alloc_words, self.new_data_words,
+                    self.reserved_words,
+                )
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PmaMigrationJournal {
+    magic: u64,
+    capacity_words: u64,
+    alloc_words: u64,
+    reserved_words: u64,
+    checksum: u64,
+}
+
+impl PmaMigrationJournal {
+    const BYTES: usize = 40;
+
+    fn new(capacity_words: u64, alloc_words: u64, reserved_words: u64) -> Self {
+        let checksum = Self::checksum(capacity_words, alloc_words, reserved_words);
+        Self {
+            magic: PMA_MIGRATION_JOURNAL_MAGIC,
+            capacity_words,
+            alloc_words,
+            reserved_words,
+            checksum,
+        }
+    }
+
+    fn checksum(capacity_words: u64, alloc_words: u64, reserved_words: u64) -> u64 {
+        PMA_MIGRATION_JOURNAL_MAGIC
+            ^ capacity_words.rotate_left(11)
+            ^ alloc_words.rotate_left(23)
+            ^ reserved_words.rotate_left(37)
+    }
+
+    fn to_bytes(self) -> [u8; Self::BYTES] {
+        let mut buf = [0u8; Self::BYTES];
+        buf[0..8].copy_from_slice(&self.magic.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.capacity_words.to_le_bytes());
+        buf[16..24].copy_from_slice(&self.alloc_words.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.reserved_words.to_le_bytes());
+        buf[32..40].copy_from_slice(&self.checksum.to_le_bytes());
+        buf
+    }
+
+    fn from_bytes(buf: [u8; Self::BYTES]) -> Option<Self> {
+        let magic = u64::from_le_bytes(buf[0..8].try_into().ok()?);
+        let capacity_words = u64::from_le_bytes(buf[8..16].try_into().ok()?);
+        let alloc_words = u64::from_le_bytes(buf[16..24].try_into().ok()?);
+        let reserved_words = u64::from_le_bytes(buf[24..32].try_into().ok()?);
+        let checksum = u64::from_le_bytes(buf[32..40].try_into().ok()?);
+        let journal = Self {
+            magic,
+            capacity_words,
+            alloc_words,
+            reserved_words,
+            checksum,
+        };
+        journal.validate().then_some(journal)
+    }
+
+    fn validate(self) -> bool {
+        self.magic == PMA_MIGRATION_JOURNAL_MAGIC
+            && self.alloc_words <= self.capacity_words
+            && self.capacity_words <= self.reserved_words
+            && self.checksum
+                == Self::checksum(self.capacity_words, self.alloc_words, self.reserved_words)
     }
 }
 
@@ -92,6 +371,12 @@ pub enum PmaError {
 
     #[error("Invalid PMA metadata: {0}")]
     InvalidMetadata(String),
+
+    #[error("PMA growth failed: {0}")]
+    GrowthFailed(String),
+
+    #[error("PMA metadata migration failed: {0}")]
+    MigrationFailed(String),
 }
 
 /// The Persistent Memory Arena
@@ -137,41 +422,135 @@ pub struct Pma {
     alloc_offset: usize,
     /// Path to the backing file (for future file-backed persistence)
     path: PathBuf,
+    /// Set after a growth failure may have partially changed the file/mapping.
+    growth_poisoned: bool,
 }
 
 impl Pma {
     pub fn read_file_metadata(path: &Path) -> Result<PmaFileMetadata, PmaError> {
         let mut file = std::fs::File::open(path)?;
-        Self::read_file_metadata_from_reader(&mut file)
+        match Self::read_file_metadata_from_reader(&mut file) {
+            Ok(metadata) => Ok(metadata),
+            Err(err) => {
+                if let Some(metadata) = Self::recover_metadata_from_migration_journal(path)? {
+                    return Ok(metadata);
+                }
+                if let Some(metadata) = Self::recover_metadata_from_growth_journal(path)? {
+                    return Ok(metadata);
+                }
+                Err(err)
+            }
+        }
     }
 
     fn read_file_metadata_from_reader(
         file: &mut std::fs::File,
     ) -> Result<PmaFileMetadata, PmaError> {
-        let file_len = usize::try_from(file.metadata()?.len())
+        let os_metadata = file.metadata()?;
+        let file_len_u64 = os_metadata.len();
+        let file_len = usize::try_from(file_len_u64)
             .map_err(|_| PmaError::InvalidMetadata("file is too large to map".to_string()))?;
-        if file_len < PMA_TRAILER_BYTES {
+        if file_len < PMA_LEGACY_TRAILER_BYTES {
             return Err(PmaError::InvalidMetadata(format!(
                 "file too small: {file_len} bytes"
             )));
         }
-        let data_bytes = file_len - PMA_TRAILER_BYTES;
-        if !data_bytes.is_multiple_of(8) {
+
+        if file_len >= PMA_TRAILER_BYTES {
+            let data_bytes = file_len - PMA_TRAILER_BYTES;
+            if data_bytes.is_multiple_of(8) {
+                let mut trailer_bytes = [0u8; PMA_TRAILER_BYTES];
+                file.seek(SeekFrom::End(-(PMA_TRAILER_BYTES as i64)))?;
+                file.read_exact(&mut trailer_bytes)?;
+                if let Some(trailer) = PmaTrailerV2::from_bytes(trailer_bytes) {
+                    let capacity_words = data_bytes >> 3;
+                    return Self::metadata_from_v2_trailer(
+                        trailer, capacity_words, file_len_u64, &os_metadata,
+                    );
+                }
+            }
+        }
+
+        let data_bytes = file_len - PMA_LEGACY_TRAILER_BYTES;
+        if data_bytes.is_multiple_of(8) {
+            let mut trailer_bytes = [0u8; PMA_LEGACY_TRAILER_BYTES];
+            file.seek(SeekFrom::End(-(PMA_LEGACY_TRAILER_BYTES as i64)))?;
+            file.read_exact(&mut trailer_bytes)?;
+            let trailer = PmaLegacyTrailer::from_bytes(trailer_bytes);
+            if let Ok(metadata) = Self::metadata_from_legacy_trailer(
+                trailer,
+                data_bytes >> 3,
+                file_len_u64,
+                &os_metadata,
+            ) {
+                return Ok(metadata);
+            }
+        }
+
+        // If a v1-to-v2 migration extended the file but crashed before publishing a valid
+        // v2 trailer, the old v1 trailer is still at the old EOF: file_len - PMA_TRAILER_BYTES.
+        if file_len >= PMA_TRAILER_BYTES {
+            let data_bytes = file_len - PMA_TRAILER_BYTES;
+            if data_bytes.is_multiple_of(8) {
+                let mut trailer_bytes = [0u8; PMA_LEGACY_TRAILER_BYTES];
+                file.seek(SeekFrom::Start(data_bytes as u64))?;
+                file.read_exact(&mut trailer_bytes)?;
+                let trailer = PmaLegacyTrailer::from_bytes(trailer_bytes);
+                if let Ok(metadata) = Self::metadata_from_legacy_trailer(
+                    trailer,
+                    data_bytes >> 3,
+                    file_len_u64,
+                    &os_metadata,
+                ) {
+                    return Ok(metadata);
+                }
+            }
+        }
+
+        Err(PmaError::InvalidMetadata(
+            "no valid PMA v2 or legacy trailer found".to_string(),
+        ))
+    }
+
+    fn metadata_from_v2_trailer(
+        trailer: PmaTrailerV2,
+        data_words: usize,
+        file_len_u64: u64,
+        os_metadata: &fs::Metadata,
+    ) -> Result<PmaFileMetadata, PmaError> {
+        if trailer.footer.data_words as usize != data_words {
             return Err(PmaError::InvalidMetadata(format!(
-                "data region not word-aligned: {data_bytes} bytes"
+                "metadata capacity_words {} does not match file ({data_words})",
+                trailer.footer.data_words
             )));
         }
-        let data_words = data_bytes >> 3;
+        Ok(PmaFileMetadata {
+            magic: trailer.footer.magic,
+            version: trailer.footer.version,
+            data_words: trailer.footer.data_words,
+            alloc_words: trailer.footer.alloc_offset,
+            capacity_words: trailer.footer.data_words,
+            free_words: trailer
+                .footer
+                .data_words
+                .saturating_sub(trailer.footer.alloc_offset),
+            reserved_words: trailer.reserved_words,
+            file_bytes: file_len_u64,
+            apparent_file_bytes: file_len_u64,
+            physical_file_bytes: physical_file_bytes(os_metadata),
+        })
+    }
 
-        let mut trailer_bytes = [0u8; PMA_TRAILER_BYTES];
-        file.seek(SeekFrom::End(-(PMA_TRAILER_BYTES as i64)))?;
-        file.read_exact(&mut trailer_bytes)?;
-        let trailer = PmaTrailer::from_bytes(trailer_bytes);
-
+    fn metadata_from_legacy_trailer(
+        trailer: PmaLegacyTrailer,
+        data_words: usize,
+        file_len_u64: u64,
+        os_metadata: &fs::Metadata,
+    ) -> Result<PmaFileMetadata, PmaError> {
         if trailer.magic != PMA_MAGIC {
             return Err(PmaError::InvalidMetadata("bad PMA magic".to_string()));
         }
-        if trailer.version != PMA_VERSION {
+        if trailer.version != PMA_VERSION_V1 {
             return Err(PmaError::InvalidMetadata(format!(
                 "unsupported PMA version {}",
                 trailer.version
@@ -189,29 +568,83 @@ impl Pma {
                 trailer.alloc_offset, trailer.data_words
             )));
         }
-
         Ok(PmaFileMetadata {
             magic: trailer.magic,
             version: trailer.version,
             data_words: trailer.data_words,
             alloc_words: trailer.alloc_offset,
+            capacity_words: trailer.data_words,
+            free_words: trailer.data_words.saturating_sub(trailer.alloc_offset),
+            reserved_words: trailer.data_words,
+            file_bytes: file_len_u64,
+            apparent_file_bytes: file_len_u64,
+            physical_file_bytes: physical_file_bytes(os_metadata),
         })
+    }
+
+    /// Return the default virtual reservation for a PMA with `capacity_words` current capacity.
+    pub fn default_reserved_words_for_capacity(capacity_words: usize) -> usize {
+        default_reserved_words(capacity_words)
     }
 
     /// Create a new PMA with the given size in words
     pub fn new(size_words: usize, path: PathBuf) -> Result<Self, PmaError> {
-        let arena = Arena::allocate_file(&path, size_words, PMA_TRAILER_BYTES)?;
+        let reserved_words = Self::default_reserved_words_for_capacity(size_words);
+        Self::new_with_reserved(size_words, reserved_words, path)
+    }
+
+    /// Create a new PMA with explicit current capacity and virtual reservation.
+    pub fn new_with_reserved(
+        capacity_words: usize,
+        reserved_words: usize,
+        path: PathBuf,
+    ) -> Result<Self, PmaError> {
+        let reserved_words = reserved_words.max(capacity_words);
+        let arena = Arena::allocate_growable_file(
+            &path, capacity_words, reserved_words, PMA_TRAILER_BYTES,
+        )?;
         let pma = Self {
             arena,
             alloc_offset: 0,
             path,
+            growth_poisoned: false,
         };
         pma.persist_metadata();
         Ok(pma)
     }
 
-    /// Open an existing PMA file without truncating it.
+    /// Open an existing PMA file without truncating it or raising its virtual reservation.
     pub fn open(path: PathBuf) -> Result<Self, PmaError> {
+        Self::open_with_min_preserving_reservation(path, 0)
+    }
+
+    /// Open an existing PMA and ensure its current capacity is at least `min_words`, preserving
+    /// the existing virtual reservation unless `min_words` requires raising it.
+    pub fn open_with_min(path: PathBuf, min_words: usize) -> Result<Self, PmaError> {
+        Self::open_with_min_preserving_reservation(path, min_words)
+    }
+
+    /// Open an existing PMA with an explicit minimum current capacity and virtual reservation.
+    pub fn open_with_min_and_reserved(
+        path: PathBuf,
+        min_words: usize,
+        reserved_words: usize,
+    ) -> Result<Self, PmaError> {
+        Self::open_with_min_inner(path, min_words, Some(reserved_words))
+    }
+
+    fn open_with_min_preserving_reservation(
+        path: PathBuf,
+        min_words: usize,
+    ) -> Result<Self, PmaError> {
+        Self::open_with_min_inner(path, min_words, None)
+    }
+
+    fn open_with_min_inner(
+        path: PathBuf,
+        min_words: usize,
+        requested_reserved_words: Option<usize>,
+    ) -> Result<Self, PmaError> {
         let metadata = Self::read_file_metadata(&path)?;
         let data_words = usize::try_from(metadata.data_words).map_err(|_| {
             PmaError::InvalidMetadata("PMA data_words exceeds usize addressable range".to_string())
@@ -221,14 +654,225 @@ impl Pma {
                 "PMA alloc_offset exceeds usize addressable range".to_string(),
             )
         })?;
-        let arena = Arena::open_file(&path, data_words)?;
-        let pma = Self {
+        let existing_reserved_words =
+            usize::try_from(metadata.reserved_words).unwrap_or(usize::MAX);
+        let reserved_words = requested_reserved_words
+            .unwrap_or(existing_reserved_words)
+            .max(existing_reserved_words)
+            .max(data_words)
+            .max(min_words);
+        if metadata.version == PMA_VERSION_V1 {
+            Self::migrate_legacy_metadata(&path, data_words, alloc_offset, reserved_words)?;
+        }
+        let arena = Arena::open_growable_file(
+            &path,
+            data_words,
+            reserved_words.max(data_words),
+            PMA_TRAILER_BYTES,
+        )?;
+        let mut pma = Self {
             arena,
             alloc_offset,
             path,
+            growth_poisoned: false,
         };
-        pma.persist_metadata();
+        if pma.size_words() < min_words && !pma_growth_disabled_for_regression() {
+            pma.grow_to_capacity(min_words)?;
+        } else {
+            pma.persist_metadata();
+        }
+        pma.clear_growth_journal_best_effort();
+        pma.clear_migration_journal_best_effort();
         Ok(pma)
+    }
+
+    fn recover_metadata_from_growth_journal(
+        path: &Path,
+    ) -> Result<Option<PmaFileMetadata>, PmaError> {
+        let Some(journal) = read_growth_journal(path)? else {
+            return Ok(None);
+        };
+        let os_metadata = fs::metadata(path)?;
+        let file_len = os_metadata.len();
+        let new_len = file_len_for_words_u64(journal.new_data_words)?;
+        let old_len = file_len_for_words_u64(journal.old_data_words)?;
+        if file_len == new_len {
+            return Ok(Some(PmaFileMetadata {
+                magic: PMA_MAGIC,
+                version: PMA_VERSION,
+                data_words: journal.new_data_words,
+                alloc_words: journal.old_alloc_words,
+                capacity_words: journal.new_data_words,
+                free_words: journal
+                    .new_data_words
+                    .saturating_sub(journal.old_alloc_words),
+                reserved_words: journal.reserved_words,
+                file_bytes: file_len,
+                apparent_file_bytes: file_len,
+                physical_file_bytes: physical_file_bytes(&os_metadata),
+            }));
+        }
+        if file_len == old_len {
+            return Ok(Some(PmaFileMetadata {
+                magic: PMA_MAGIC,
+                version: PMA_VERSION,
+                data_words: journal.old_data_words,
+                alloc_words: journal.old_alloc_words,
+                capacity_words: journal.old_data_words,
+                free_words: journal
+                    .old_data_words
+                    .saturating_sub(journal.old_alloc_words),
+                reserved_words: journal.reserved_words,
+                file_bytes: file_len,
+                apparent_file_bytes: file_len,
+                physical_file_bytes: physical_file_bytes(&os_metadata),
+            }));
+        }
+        Ok(None)
+    }
+
+    fn recover_metadata_from_migration_journal(
+        path: &Path,
+    ) -> Result<Option<PmaFileMetadata>, PmaError> {
+        let Some(journal) = read_migration_journal(path)? else {
+            return Ok(None);
+        };
+        let os_metadata = fs::metadata(path)?;
+        let file_len = os_metadata.len();
+        let old_len =
+            file_len_for_words_u64_with_tail(journal.capacity_words, PMA_LEGACY_TRAILER_BYTES)?;
+        let new_len = file_len_for_words_u64(journal.capacity_words)?;
+        if file_len != old_len && file_len != new_len {
+            return Ok(None);
+        }
+        Ok(Some(PmaFileMetadata {
+            magic: PMA_MAGIC,
+            version: PMA_VERSION_V1,
+            data_words: journal.capacity_words,
+            alloc_words: journal.alloc_words,
+            capacity_words: journal.capacity_words,
+            free_words: journal.capacity_words.saturating_sub(journal.alloc_words),
+            reserved_words: journal.reserved_words,
+            file_bytes: file_len,
+            apparent_file_bytes: file_len,
+            physical_file_bytes: physical_file_bytes(&os_metadata),
+        }))
+    }
+
+    fn migrate_legacy_metadata(
+        path: &Path,
+        capacity_words: usize,
+        alloc_words: usize,
+        reserved_words: usize,
+    ) -> Result<(), PmaError> {
+        let capacity_words_u64 = u64::try_from(capacity_words)
+            .map_err(|_| PmaError::InvalidMetadata("PMA capacity exceeds u64".to_string()))?;
+        let alloc_words_u64 = u64::try_from(alloc_words)
+            .map_err(|_| PmaError::InvalidMetadata("PMA allocation exceeds u64".to_string()))?;
+        let reserved_words_u64 = u64::try_from(reserved_words)
+            .map_err(|_| PmaError::InvalidMetadata("PMA reservation exceeds u64".to_string()))?;
+        let journal =
+            PmaMigrationJournal::new(capacity_words_u64, alloc_words_u64, reserved_words_u64);
+        write_migration_journal(path, journal)?;
+        if should_inject_migration_failure("before_new_metadata_write") {
+            return Err(PmaError::MigrationFailed(
+                "injected PMA migration failure before new metadata write".to_string(),
+            ));
+        }
+
+        let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        file.set_len(file_len_for_words_u64(capacity_words_u64)?)?;
+        file.seek(SeekFrom::Start(capacity_words_u64 * 8))?;
+        let trailer = PmaTrailerV2::new(capacity_words_u64, alloc_words_u64, reserved_words_u64);
+        file.write_all(&trailer.to_bytes())?;
+        if should_inject_migration_failure("after_new_metadata_write_before_fsync") {
+            return Err(PmaError::MigrationFailed(
+                "injected PMA migration failure after new metadata write before fsync".to_string(),
+            ));
+        }
+        file.sync_data()?;
+        if should_inject_migration_failure("after_metadata_fsync_before_parent_directory_sync") {
+            return Err(PmaError::MigrationFailed(
+                "injected PMA migration failure after metadata fsync before parent directory sync"
+                    .to_string(),
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        if should_inject_migration_failure("after_parent_directory_sync") {
+            return Err(PmaError::MigrationFailed(
+                "injected PMA migration failure after parent directory sync".to_string(),
+            ));
+        }
+        fs::remove_file(migration_journal_path(path))?;
+        if let Some(parent) = path.parent() {
+            fs::File::open(parent)?.sync_all()?;
+        }
+        if should_inject_migration_failure("after_marker_declares_upgraded") {
+            return Err(PmaError::MigrationFailed(
+                "injected PMA migration failure after marker declares upgraded".to_string(),
+            ));
+        }
+        info!(
+            path = %path.display(),
+            capacity_words,
+            alloc_words,
+            reserved_words,
+            "PMA legacy metadata migrated to v2"
+        );
+        Ok(())
+    }
+
+    fn clear_growth_journal_best_effort(&self) {
+        let _ = fs::remove_file(growth_journal_path(&self.path));
+    }
+
+    fn clear_migration_journal_best_effort(&self) {
+        let _ = fs::remove_file(migration_journal_path(&self.path));
+    }
+
+    fn growth_poisoned_error() -> PmaError {
+        PmaError::GrowthFailed(
+            "previous PMA growth failed after possibly changing the backing file; restart the node or reopen the PMA so growth journal recovery can complete".to_string(),
+        )
+    }
+
+    fn ensure_not_growth_poisoned(&self) -> Result<(), PmaError> {
+        if self.growth_poisoned {
+            Err(Self::growth_poisoned_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn panic_if_growth_poisoned(&self) {
+        if let Err(err) = self.ensure_not_growth_poisoned() {
+            panic!("{err}");
+        }
+    }
+
+    fn poison_growth<T>(&mut self, message: String) -> Result<T, PmaError> {
+        self.growth_poisoned = true;
+        Err(PmaError::GrowthFailed(format!(
+            "{message}; PMA handle is poisoned, restart the node or reopen the PMA so growth journal recovery can complete"
+        )))
+    }
+
+    pub fn is_growth_poisoned(&self) -> bool {
+        self.growth_poisoned
+    }
+
+    pub fn file_metadata(&self) -> Result<PmaFileMetadata, PmaError> {
+        let mut metadata = Self::read_file_metadata(&self.path)?;
+        metadata.reserved_words =
+            u64::try_from(self.reserved_words()).expect("PMA reserved words exceed u64");
+        metadata.capacity_words =
+            u64::try_from(self.size_words()).expect("PMA capacity words exceed u64");
+        metadata.data_words = metadata.capacity_words;
+        metadata.alloc_words = self.alloc_offset_words().into();
+        metadata.free_words = metadata.capacity_words.saturating_sub(metadata.alloc_words);
+        Ok(metadata)
     }
 
     /// Flush the entire PMA mapping to storage.
@@ -344,6 +988,11 @@ impl Pma {
         self.arena.words()
     }
 
+    /// Get the maximum reserved PMA offset range in words.
+    pub fn reserved_words(&self) -> usize {
+        self.arena.reserved_words()
+    }
+
     /// Get the number of free words remaining
     pub fn free_words(&self) -> usize {
         self.size_words().saturating_sub(self.alloc_offset())
@@ -363,7 +1012,7 @@ impl Pma {
     pub fn contains_ptr(&self, ptr: *const u8) -> bool {
         let base = self.arena.base_ptr() as usize;
         let end = base
-            .checked_add(self.arena.len_bytes())
+            .checked_add(self.arena.reserved_len_bytes())
             .expect("PMA bounds exceed usize address space");
         let ptr_addr = ptr as usize;
         ptr_addr >= base && ptr_addr < end
@@ -371,6 +1020,7 @@ impl Pma {
 
     /// Reset the allocation pointer to zero
     pub fn reset(&mut self) {
+        self.panic_if_growth_poisoned();
         self.alloc_offset = 0;
         self.persist_metadata();
     }
@@ -380,6 +1030,7 @@ impl Pma {
     /// # Panics
     /// Panics if `offset` is greater than the PMA size.
     pub fn reset_to(&mut self, offset: PmaOffsetWords) {
+        self.panic_if_growth_poisoned();
         let offset = offset
             .try_into_usize()
             .expect("PMA reset offset exceeds usize addressable range");
@@ -409,11 +1060,34 @@ impl Pma {
         }
     }
 
+    /// Ensure at least `min_free_words` are available in the current PMA capacity.
+    pub fn ensure_free_words(&mut self, min_free_words: usize) -> Result<(), PmaError> {
+        self.ensure_not_growth_poisoned()?;
+        let required = self
+            .alloc_offset
+            .checked_add(min_free_words)
+            .ok_or_else(|| PmaError::GrowthFailed("required PMA words overflowed".to_string()))?;
+        self.grow_to_fit_with_context(required, min_free_words, "ensure_free_words")
+    }
+
     /// Allocate `words` from the PMA, returning a pointer to the allocation.
     ///
     /// # Panics
     /// Panics if there isn't enough space in the PMA.
     unsafe fn raw_alloc(&mut self, words: usize) -> *mut u64 {
+        self.panic_if_growth_poisoned();
+        let required = self
+            .alloc_offset
+            .checked_add(words)
+            .unwrap_or_else(|| panic!("PMA allocation offset overflow for {words} words"));
+        if required > self.size_words() {
+            if pma_growth_disabled_for_regression() {
+                self.alloc_would_oom(words);
+            }
+            if let Err(err) = self.grow_to_fit_with_context(required, words, "raw_alloc") {
+                panic!("{err}");
+            }
+        }
         self.alloc_would_oom(words);
         let ptr = self.arena.ptr_from_offset(self.alloc_offset_words()) as *mut u64;
         self.alloc_offset += words;
@@ -421,7 +1095,175 @@ impl Pma {
         ptr
     }
 
+    pub fn grow_to_fit(&mut self, required_words: usize) -> Result<(), PmaError> {
+        self.ensure_not_growth_poisoned()?;
+        let request_words = required_words.saturating_sub(self.alloc_offset);
+        self.grow_to_fit_with_context(required_words, request_words, "grow_to_fit")
+    }
+
+    fn grow_to_fit_with_context(
+        &mut self,
+        required_words: usize,
+        request_words: usize,
+        context: &'static str,
+    ) -> Result<(), PmaError> {
+        self.ensure_not_growth_poisoned()?;
+        if required_words <= self.size_words() {
+            return Ok(());
+        }
+        let mut new_words = self.size_words().max(1);
+        while new_words < required_words {
+            new_words = new_words.checked_mul(2).ok_or_else(|| {
+                PmaError::GrowthFailed("PMA growth capacity overflowed".to_string())
+            })?;
+        }
+        new_words = new_words.min(self.reserved_words());
+        if new_words < required_words {
+            return Err(PmaError::OutOfMemory {
+                requested: request_words,
+                available: self.free_words(),
+            });
+        }
+        self.grow_to_capacity_with_context(new_words, required_words, request_words, context)
+    }
+
+    pub fn grow_to_capacity(&mut self, new_words: usize) -> Result<(), PmaError> {
+        self.ensure_not_growth_poisoned()?;
+        self.grow_to_capacity_with_context(new_words, new_words, 0, "grow_to_capacity")
+    }
+
+    fn grow_to_capacity_with_context(
+        &mut self,
+        new_words: usize,
+        required_words: usize,
+        request_words: usize,
+        context: &'static str,
+    ) -> Result<(), PmaError> {
+        self.ensure_not_growth_poisoned()?;
+        let old_words = self.size_words();
+        if new_words <= old_words {
+            return Ok(());
+        }
+        if should_inject_growth_failure("create_destination")
+            || should_inject_growth_failure("before_file_extension")
+        {
+            return Err(PmaError::GrowthFailed(
+                "injected PMA growth failure before file extension".to_string(),
+            ));
+        }
+        if new_words > self.reserved_words() {
+            return Err(PmaError::OutOfMemory {
+                requested: request_words.max(new_words.saturating_sub(self.alloc_offset)),
+                available: self.free_words(),
+            });
+        }
+        let started = Instant::now();
+        let old_alloc = self.alloc_offset;
+        let journal = PmaGrowthJournal::new(
+            u64::try_from(old_words).expect("PMA capacity exceeds u64"),
+            u64::try_from(old_alloc).expect("PMA alloc exceeds u64"),
+            u64::try_from(new_words).expect("PMA capacity exceeds u64"),
+            u64::try_from(self.reserved_words()).expect("PMA reservation exceeds u64"),
+        );
+        write_growth_journal(&self.path, journal)?;
+        if should_inject_growth_failure("after_journal") {
+            return Err(PmaError::GrowthFailed(
+                "injected PMA growth failure after journal".to_string(),
+            ));
+        }
+        if let Err(err) = self.arena.grow_file_capacity(new_words, PMA_TRAILER_BYTES) {
+            return self.poison_growth(format!("PMA growth failed during file extension: {err}"));
+        }
+        if should_inject_growth_failure("after_file_extension") {
+            return self
+                .poison_growth("injected PMA growth failure after file extension".to_string());
+        }
+        let old_trailer = unsafe { self.arena.base_ptr().add(old_words * 8) };
+        unsafe {
+            std::ptr::write_bytes(old_trailer, 0, PMA_TRAILER_BYTES);
+        }
+        if should_inject_growth_failure("after_zero_old_trailer") {
+            return self.poison_growth(
+                "injected PMA growth failure after zeroing old trailer".to_string(),
+            );
+        }
+        self.persist_metadata();
+        if should_inject_growth_failure("after_new_trailer_write") {
+            return self
+                .poison_growth("injected PMA growth failure after new trailer write".to_string());
+        }
+        if let Err(err) = self.sync_trailer() {
+            return self.poison_growth(format!("PMA growth failed syncing metadata: {err}"));
+        }
+        if should_inject_growth_failure("after_metadata_fsync") {
+            return self
+                .poison_growth("injected PMA growth failure after metadata sync".to_string());
+        }
+        if let Err(err) = self.sync_file() {
+            return self.poison_growth(format!("PMA growth failed syncing backing file: {err}"));
+        }
+        if should_inject_growth_failure("after_file_fsync") {
+            return self.poison_growth("injected PMA growth failure after file fsync".to_string());
+        }
+        self.clear_growth_journal_best_effort();
+        if should_inject_growth_failure("after_metadata_publication") {
+            info!(
+                path = %self.path.display(),
+                "ignoring injected PMA growth failure after metadata publication because growth is already durable"
+            );
+        }
+        self.record_growth_event(PmaGrowthEvent {
+            old_words,
+            new_words,
+            alloc_words: old_alloc,
+            required_words,
+            request_words,
+            context,
+            elapsed: started.elapsed(),
+        });
+        Ok(())
+    }
+
+    fn record_growth_event(&self, event: PmaGrowthEvent) {
+        info!(
+            path = %self.path.display(),
+            old_capacity_words = event.old_words,
+            new_capacity_words = event.new_words,
+            required_words = event.required_words,
+            allocation_request_words = event.request_words,
+            alloc_words = event.alloc_words,
+            reserved_words = self.reserved_words(),
+            context = event.context,
+            elapsed_ms = event.elapsed.as_secs_f64() * 1000.0,
+            "PMA automatic growth complete"
+        );
+        let Some(events_path) = std::env::var_os(NOCK_PMA_GROWTH_EVENTS_PATH_ENV) else {
+            return;
+        };
+        let line = format!(
+            "path={} old_capacity_words={} new_capacity_words={} required_words={} allocation_request_words={} alloc_words={} reserved_words={} context={} elapsed_ms={:.3}\n",
+            self.path.display(),
+            event.old_words,
+            event.new_words,
+            event.required_words,
+            event.request_words,
+            event.alloc_words,
+            self.reserved_words(),
+            event.context,
+            event.elapsed.as_secs_f64() * 1000.0
+        );
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(events_path)
+        {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.sync_data();
+        }
+    }
+
     pub fn persist_metadata(&self) {
+        self.panic_if_growth_poisoned();
         debug_assert!(
             self.arena.mapped_len_bytes()
                 >= self
@@ -431,13 +1273,12 @@ impl Pma {
                     .expect("PMA trailer exceeds usize address space"),
             "PMA arena mapping is too small for metadata trailer"
         );
-        let trailer = PmaTrailer {
-            magic: PMA_MAGIC,
-            version: PMA_VERSION,
-            data_words: u64::try_from(self.arena.words())
+        let trailer = PmaTrailerV2::new(
+            u64::try_from(self.arena.words())
                 .expect("PMA arena size exceeds u64 addressable range"),
-            alloc_offset: self.alloc_offset_words().into(),
-        };
+            self.alloc_offset_words().into(),
+            u64::try_from(self.reserved_words()).expect("PMA reservation exceeds u64"),
+        );
         let bytes = trailer.to_bytes();
         let dst = unsafe { self.arena.base_ptr().add(self.arena.len_bytes()) };
         unsafe {
@@ -478,6 +1319,157 @@ impl Pma {
         madvise_drop_file_backed_pages(self.arena.base_ptr() as *mut libc::c_void, len_aligned)?;
         Ok(len_aligned)
     }
+}
+
+fn default_reserved_words(capacity_words: usize) -> usize {
+    if let Ok(value) = std::env::var(NOCK_PMA_RESERVED_WORDS_ENV) {
+        if let Ok(words) = value.parse::<usize>() {
+            return words.max(capacity_words);
+        }
+    }
+    let default_reserved_words = DEFAULT_PMA_RESERVED_BYTES / std::mem::size_of::<u64>();
+    default_reserved_words.max(capacity_words)
+}
+
+#[cfg(unix)]
+fn physical_file_bytes(metadata: &fs::Metadata) -> Option<u64> {
+    metadata.blocks().checked_mul(512)
+}
+
+#[cfg(not(unix))]
+fn physical_file_bytes(_metadata: &fs::Metadata) -> Option<u64> {
+    None
+}
+
+fn pma_growth_disabled_for_regression() -> bool {
+    std::env::var_os(NOCK_PMA_DISABLE_RESIZE_ENV).is_some()
+}
+
+fn should_inject_growth_failure(point: &str) -> bool {
+    #[cfg(test)]
+    if TEST_GROWTH_FAILURE_POINT.with(|configured| {
+        matches!(*configured.borrow(), Some(configured) if configured == point || configured == "any")
+    }) {
+        return true;
+    }
+    std::env::var(NOCK_PMA_RESIZE_FAIL_AT_ENV)
+        .map(|value| value == point || value == "any")
+        .unwrap_or(false)
+}
+
+fn should_inject_migration_failure(point: &str) -> bool {
+    #[cfg(test)]
+    if TEST_MIGRATION_FAILURE_POINT.with(|configured| {
+        matches!(*configured.borrow(), Some(configured) if configured == point || configured == "any")
+    }) {
+        return true;
+    }
+    std::env::var(NOCK_PMA_MIGRATION_FAIL_AT_ENV)
+        .map(|value| value == point || value == "any")
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+fn set_test_growth_failure_point(point: Option<&'static str>) {
+    TEST_GROWTH_FAILURE_POINT.with(|configured| *configured.borrow_mut() = point);
+}
+
+#[cfg(test)]
+fn set_test_migration_failure_point(point: Option<&'static str>) {
+    TEST_MIGRATION_FAILURE_POINT.with(|configured| *configured.borrow_mut() = point);
+}
+
+fn file_len_for_words_u64(words: u64) -> Result<u64, PmaError> {
+    file_len_for_words_u64_with_tail(words, PMA_TRAILER_BYTES)
+}
+
+fn file_len_for_words_u64_with_tail(words: u64, tail_bytes: usize) -> Result<u64, PmaError> {
+    words
+        .checked_mul(8)
+        .and_then(|bytes| bytes.checked_add(tail_bytes as u64))
+        .ok_or_else(|| PmaError::InvalidMetadata("PMA file length overflowed".to_string()))
+}
+
+fn growth_journal_path(path: &Path) -> PathBuf {
+    path.with_extension("grow")
+}
+
+fn migration_journal_path(path: &Path) -> PathBuf {
+    path.with_extension("migrate")
+}
+
+fn read_growth_journal(path: &Path) -> Result<Option<PmaGrowthJournal>, PmaError> {
+    let path = growth_journal_path(path);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(PmaError::MetadataIo(err)),
+    };
+    if bytes.len() == PmaGrowthJournal::BYTES {
+        let mut buf = [0u8; PmaGrowthJournal::BYTES];
+        buf.copy_from_slice(&bytes);
+        return Ok(PmaGrowthJournal::from_bytes(buf));
+    }
+    if bytes.len() == PmaGrowthJournal::LEGACY_BYTES {
+        let mut buf = [0u8; PmaGrowthJournal::LEGACY_BYTES];
+        buf.copy_from_slice(&bytes);
+        return Ok(PmaGrowthJournal::from_legacy_bytes(buf));
+    }
+    Ok(None)
+}
+
+fn write_growth_journal(path: &Path, journal: PmaGrowthJournal) -> Result<(), PmaError> {
+    let journal_path = growth_journal_path(path);
+    let tmp_path = journal_path.with_extension("grow.tmp");
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+        file.write_all(&journal.to_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &journal_path)?;
+    if let Some(parent) = journal_path.parent() {
+        let dir = fs::File::open(parent)?;
+        dir.sync_all()?;
+    }
+    Ok(())
+}
+
+fn read_migration_journal(path: &Path) -> Result<Option<PmaMigrationJournal>, PmaError> {
+    let path = migration_journal_path(path);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(PmaError::MetadataIo(err)),
+    };
+    if bytes.len() != PmaMigrationJournal::BYTES {
+        return Ok(None);
+    }
+    let mut buf = [0u8; PmaMigrationJournal::BYTES];
+    buf.copy_from_slice(&bytes);
+    Ok(PmaMigrationJournal::from_bytes(buf))
+}
+
+fn write_migration_journal(path: &Path, journal: PmaMigrationJournal) -> Result<(), PmaError> {
+    let journal_path = migration_journal_path(path);
+    let tmp_path = journal_path.with_extension("migrate.tmp");
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&tmp_path)?;
+        file.write_all(&journal.to_bytes())?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &journal_path)?;
+    if let Some(parent) = journal_path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -689,7 +1681,7 @@ impl PmaCopy for Noun {
             if trace_noun && (steps & 0x3fff == 0) {
                 let now = Instant::now();
                 if now.duration_since(last_progress).as_millis() >= 2000 {
-                    info!(
+                    debug!(
                         "pma-copy: noun progress: steps={}, elapsed_ms={}",
                         steps,
                         trace_start.elapsed().as_millis()
@@ -799,7 +1791,7 @@ impl PmaCopy for Noun {
         }
 
         if trace_noun {
-            info!(
+            debug!(
                 "pma-copy: noun done: steps={}, elapsed_ms={}",
                 steps,
                 trace_start.elapsed().as_millis()
@@ -858,7 +1850,7 @@ impl PmaCopyFrom for Noun {
         }
         let to_base = to_pma.arena().base_ptr() as usize;
         let to_end = to_base
-            .checked_add(to_pma.arena().len_bytes())
+            .checked_add(to_pma.arena().reserved_len_bytes())
             .expect("PMA bounds exceed usize address space");
         let space = NounSpace::pma_only(from_pma).with_extra_ptr_ranges(vec![(to_base, to_end)]);
         let mut work: SmallVec<[(Noun, *mut Noun); 64]> = SmallVec::new();
@@ -932,6 +1924,8 @@ pub(crate) fn test_pma_path(label: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::alloc::Layout;
+    use std::fs;
+    use std::sync::Mutex;
 
     use ibig::Stack;
 
@@ -940,6 +1934,8 @@ mod tests {
     use crate::jets::cold::NounListMem;
     use crate::mem::{word_size_of, NockStack, NOCK_STACK_SIZE_TINY};
     use crate::noun::{AllocLocation, D, DIRECT_MAX};
+
+    static PMA_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper to create a test PMA with a given size
     fn test_pma(size_words: usize) -> Pma {
@@ -1143,11 +2139,13 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_pma_contains_ptr() {
-        let mut pma = test_pma(1000);
+        let path = test_pma_path("pma_contains_ptr");
+        let mut pma = Pma::new_with_reserved(1000, 2000, path).expect("Failed to create test PMA");
 
         // Get base pointer and compute some test pointers
         let base = pma.arena().base_ptr();
         let len_bytes = pma.arena().len_bytes();
+        let reserved_len_bytes = pma.arena().reserved_len_bytes();
 
         // Base pointer should be in PMA
         assert!(pma.contains_ptr(base), "Base pointer should be in PMA");
@@ -1171,18 +2169,32 @@ mod tests {
         let last_byte = unsafe { base.add(len_bytes - 1) };
         assert!(pma.contains_ptr(last_byte), "Last byte should be in PMA");
 
-        // Pointer just past the end should NOT be in PMA
-        let past_end = unsafe { base.add(len_bytes) };
+        // Pointer just past the current file capacity should still be in the reserved PMA range
+        let past_current_capacity = unsafe { base.add(len_bytes) };
         assert!(
-            !pma.contains_ptr(past_end),
-            "Pointer past end should not be in PMA"
+            pma.contains_ptr(past_current_capacity),
+            "Pointer past current capacity should be in reserved PMA range"
         );
 
-        // Pointer well past the end should NOT be in PMA
-        let way_past_end = unsafe { base.add(len_bytes + 1000) };
+        // Last reserved byte should be in PMA
+        let last_reserved_byte = unsafe { base.add(reserved_len_bytes - 1) };
+        assert!(
+            pma.contains_ptr(last_reserved_byte),
+            "Last reserved byte should be in PMA"
+        );
+
+        // Pointer just past the reserved range should NOT be in PMA
+        let past_reserved_end = unsafe { base.add(reserved_len_bytes) };
+        assert!(
+            !pma.contains_ptr(past_reserved_end),
+            "Pointer past reserved range should not be in PMA"
+        );
+
+        // Pointer well past the reserved range should NOT be in PMA
+        let way_past_end = unsafe { base.add(reserved_len_bytes + 1000) };
         assert!(
             !pma.contains_ptr(way_past_end),
-            "Pointer way past end should not be in PMA"
+            "Pointer way past reserved range should not be in PMA"
         );
 
         // Pointer before the base should NOT be in PMA (if base > 0)
@@ -1371,6 +2383,303 @@ mod tests {
             pma.alloc_offset() > 0,
             "alloc_offset should be restored on open"
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn test_growable_pma_reports_capacity_separately_from_reservation() {
+        let path = test_pma_path("reporting");
+        let pma =
+            Pma::new_with_reserved(1024, 16 * 1024, path.clone()).expect("create growable PMA");
+        let file_len = fs::metadata(&path).expect("pma metadata").len();
+        let expected_len = 1024_u64 * 8 + PMA_TRAILER_BYTES as u64;
+        assert_eq!(
+            file_len, expected_len,
+            "apparent file size should track current capacity, not reserved words"
+        );
+
+        let metadata = pma.file_metadata().expect("runtime PMA metadata");
+        assert_eq!(metadata.capacity_words, 1024);
+        assert_eq!(metadata.data_words, 1024);
+        assert_eq!(metadata.alloc_words, 0);
+        assert_eq!(metadata.free_words, 1024);
+        assert_eq!(metadata.reserved_words, 16 * 1024);
+        assert_eq!(metadata.apparent_file_bytes, expected_len);
+        assert_eq!(metadata.file_bytes, expected_len);
+        #[cfg(unix)]
+        assert!(
+            metadata.physical_file_bytes.is_some(),
+            "unix metadata should expose physical allocated bytes"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn test_legacy_pma_migrates_to_v2_and_preserves_content() {
+        let path = test_pma_path("legacy_migration");
+        let mut stack = NockStack::new(128, 0);
+        let mut root = Cell::new(&mut stack, D(30), D(31)).as_noun();
+        let alloc_words;
+        {
+            let mut pma = Pma::new_with_reserved(32, 128, path.clone()).expect("create PMA");
+            unsafe {
+                root.copy_to_pma(&stack, &mut pma);
+            }
+            alloc_words = pma.alloc_offset();
+            pma.sync_all().expect("sync PMA");
+            pma.sync_file().expect("sync PMA file");
+        }
+        {
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .expect("open PMA file");
+            file.set_len(32 * 8 + PMA_LEGACY_TRAILER_BYTES as u64)
+                .expect("truncate to legacy trailer");
+            file.seek(SeekFrom::Start(32 * 8)).expect("seek trailer");
+            let trailer = PmaLegacyTrailer {
+                magic: PMA_MAGIC,
+                version: PMA_VERSION_V1,
+                data_words: 32,
+                alloc_offset: alloc_words as u64,
+            };
+            file.write_all(&trailer.to_bytes())
+                .expect("write legacy trailer");
+            file.sync_all().expect("sync legacy PMA file");
+        }
+
+        let legacy_metadata = Pma::read_file_metadata(&path).expect("read legacy metadata");
+        assert_eq!(legacy_metadata.version, PMA_VERSION_V1);
+        assert_eq!(legacy_metadata.capacity_words, 32);
+        assert_eq!(legacy_metadata.alloc_words, alloc_words as u64);
+
+        let reopened = Pma::open_with_min(path.clone(), 64).expect("migrate and grow legacy PMA");
+        assert_eq!(reopened.size_words(), 64);
+        assert!(reopened.reserved_words() >= 64);
+        assert_eq!(reopened.alloc_offset(), alloc_words);
+        let migrated_metadata = Pma::read_file_metadata(&path).expect("read migrated metadata");
+        assert_eq!(migrated_metadata.version, PMA_VERSION);
+        assert_eq!(migrated_metadata.capacity_words, 64);
+        assert!(migrated_metadata.reserved_words >= 64);
+        assert_eq!(migrated_metadata.alloc_words, alloc_words as u64);
+
+        let space = NounSpace::pma_only(&reopened);
+        let cell = root.in_space(&space).as_cell().expect("root cell");
+        assert_eq!(
+            cell.head()
+                .as_atom()
+                .expect("head atom")
+                .as_u64()
+                .expect("head atom should fit in u64"),
+            30
+        );
+        assert_eq!(
+            cell.tail()
+                .as_atom()
+                .expect("tail atom")
+                .as_u64()
+                .expect("tail atom should fit in u64"),
+            31
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn test_legacy_migration_journal_recovers_after_injected_failures() {
+        let _env_lock = PMA_ENV_LOCK.lock().expect("PMA env lock");
+        let fail_points = [
+            "before_new_metadata_write", "after_new_metadata_write_before_fsync",
+            "after_metadata_fsync_before_parent_directory_sync", "after_parent_directory_sync",
+            "after_marker_declares_upgraded",
+        ];
+        for fail_point in fail_points {
+            let path = test_pma_path(&format!("legacy_migration_{fail_point}"));
+            let mut stack = NockStack::new(128, 0);
+            let mut root = Cell::new(&mut stack, D(40), D(41)).as_noun();
+            let alloc_words;
+            {
+                let mut pma = Pma::new_with_reserved(32, 128, path.clone()).expect("create PMA");
+                unsafe {
+                    root.copy_to_pma(&stack, &mut pma);
+                }
+                alloc_words = pma.alloc_offset();
+                pma.sync_all().expect("sync PMA");
+                pma.sync_file().expect("sync PMA file");
+            }
+            {
+                let mut file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .expect("open PMA file");
+                file.set_len(32 * 8 + PMA_LEGACY_TRAILER_BYTES as u64)
+                    .expect("truncate to legacy trailer");
+                file.seek(SeekFrom::Start(32 * 8)).expect("seek trailer");
+                let trailer = PmaLegacyTrailer {
+                    magic: PMA_MAGIC,
+                    version: PMA_VERSION_V1,
+                    data_words: 32,
+                    alloc_offset: alloc_words as u64,
+                };
+                file.write_all(&trailer.to_bytes())
+                    .expect("write legacy trailer");
+                file.sync_all().expect("sync legacy PMA file");
+            }
+
+            set_test_migration_failure_point(Some(fail_point));
+            let err = match Pma::open(path.clone()) {
+                Ok(_) => panic!("injected migration failure should fail at {fail_point}"),
+                Err(err) => err,
+            };
+            set_test_migration_failure_point(None);
+            assert!(
+                err.to_string().contains("injected PMA migration failure"),
+                "unexpected injected migration error at {fail_point}: {err}"
+            );
+
+            let reopened = Pma::open(path.clone()).expect("reopen should complete migration");
+            assert_eq!(reopened.alloc_offset(), alloc_words);
+            let migrated_metadata = Pma::read_file_metadata(&path).expect("read migrated metadata");
+            assert_eq!(migrated_metadata.version, PMA_VERSION);
+            assert_eq!(migrated_metadata.capacity_words, 32);
+            assert!(
+                !migration_journal_path(&path).exists(),
+                "successful reopen should clear migration journal for {fail_point}"
+            );
+            let space = NounSpace::pma_only(&reopened);
+            let cell = root.in_space(&space).as_cell().expect("root cell");
+            assert_eq!(
+                cell.head()
+                    .as_atom()
+                    .expect("head atom")
+                    .as_u64()
+                    .expect("head atom should fit in u64"),
+                40
+            );
+            assert_eq!(
+                cell.tail()
+                    .as_atom()
+                    .expect("tail atom")
+                    .as_u64()
+                    .expect("tail atom should fit in u64"),
+                41
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn test_growth_journal_recovers_after_injected_failures() {
+        let _env_lock = PMA_ENV_LOCK.lock().expect("PMA env lock");
+        let fail_points = [
+            "after_journal", "after_file_extension", "after_zero_old_trailer",
+            "after_new_trailer_write", "after_metadata_fsync", "after_file_fsync",
+        ];
+        for fail_point in fail_points {
+            let path = test_pma_path(&format!("growth_journal_recovery_{fail_point}"));
+            let mut stack = NockStack::new(128, 0);
+            let mut root = Cell::new(&mut stack, D(10), D(11)).as_noun();
+            {
+                let mut pma = Pma::new_with_reserved(32, 1024, path.clone()).expect("create PMA");
+                unsafe {
+                    root.copy_to_pma(&stack, &mut pma);
+                }
+                assert_eq!(pma.alloc_offset(), word_size_of::<CellMemory>());
+                set_test_growth_failure_point(Some(fail_point));
+                let err = pma
+                    .grow_to_capacity(64)
+                    .expect_err("injected growth failure should fail");
+                set_test_growth_failure_point(None);
+                assert!(
+                    err.to_string().contains("injected PMA growth failure"),
+                    "unexpected injected failure error at {fail_point}: {err}"
+                );
+                let should_poison = fail_point != "after_journal";
+                assert_eq!(
+                    pma.is_growth_poisoned(),
+                    should_poison,
+                    "PMA poison state mismatch after {fail_point}"
+                );
+                if should_poison {
+                    let followup_err = pma
+                        .ensure_free_words(1)
+                        .expect_err("poisoned PMA handle should reject further mutation");
+                    assert!(
+                        followup_err
+                            .to_string()
+                            .contains("previous PMA growth failed"),
+                        "unexpected poisoned-handle error after {fail_point}: {followup_err}"
+                    );
+                }
+            }
+
+            let mut reopened = Pma::open(path.clone()).unwrap_or_else(|err| {
+                panic!("reopen should recover growth failure at {fail_point}: {err}")
+            });
+            assert!(
+                (32..=64).contains(&reopened.size_words()),
+                "recovered PMA capacity should be old or new after {fail_point}, got {}",
+                reopened.size_words()
+            );
+            assert_eq!(
+                reopened.reserved_words(),
+                1024,
+                "growth journal recovery should preserve virtual reservation after {fail_point}"
+            );
+            reopened.grow_to_capacity(512).unwrap_or_else(|err| {
+                panic!("reserved PMA should grow again after {fail_point}: {err}")
+            });
+            assert_eq!(reopened.reserved_words(), 1024);
+            assert_eq!(reopened.alloc_offset(), word_size_of::<CellMemory>());
+            assert!(
+                !growth_journal_path(&path).exists(),
+                "successful reopen should clear growth journal after {fail_point}"
+            );
+            let space = NounSpace::pma_only(&reopened);
+            let cell = root.in_space(&space).as_cell().expect("root cell");
+            assert_eq!(
+                cell.head()
+                    .as_atom()
+                    .expect("head atom")
+                    .as_u64()
+                    .expect("head atom should fit in u64"),
+                10
+            );
+            assert_eq!(
+                cell.tail()
+                    .as_atom()
+                    .expect("tail atom")
+                    .as_u64()
+                    .expect("tail atom should fit in u64"),
+                11
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn test_growth_failure_after_publication_is_committed_success() {
+        let _env_lock = PMA_ENV_LOCK.lock().expect("PMA env lock");
+        let path = test_pma_path("growth_after_publication_success");
+        let mut pma = Pma::new_with_reserved(32, 1024, path.clone()).expect("create PMA");
+
+        set_test_growth_failure_point(Some("after_metadata_publication"));
+        pma.grow_to_capacity(64)
+            .expect("post-publication injection should not report failed growth");
+        set_test_growth_failure_point(None);
+
+        assert_eq!(pma.size_words(), 64);
+        assert_eq!(pma.reserved_words(), 1024);
+        assert!(!pma.is_growth_poisoned());
+        assert!(
+            !growth_journal_path(&path).exists(),
+            "successful published growth should clear growth journal"
+        );
+
+        let reopened = Pma::open(path).expect("reopen published growth");
+        assert_eq!(reopened.size_words(), 64);
+        assert_eq!(reopened.reserved_words(), 1024);
     }
 
     /// Verifies direct atoms are unchanged by evacuation since they fit in a single word.
@@ -1832,7 +3141,12 @@ mod tests {
         let mut current = noun;
         while current.is_cell() {
             depth_before += 1;
-            current = current.in_space(&space).as_cell().unwrap().tail().noun();
+            current = current
+                .in_space(&space)
+                .as_cell()
+                .expect("depth walk should find a cell")
+                .tail()
+                .noun();
         }
         assert_eq!(
             depth_before,
@@ -2133,10 +3447,13 @@ mod tests {
                 "Lookup for key {} should succeed before evacuation",
                 i
             );
-            let value = result.unwrap();
+            let value = result.expect("lookup should return a value before evacuation");
             assert!(value.is_direct(), "Value should be direct atom");
             assert_eq!(
-                value.as_direct().unwrap().data(),
+                value
+                    .as_direct()
+                    .expect("lookup value should be a direct atom")
+                    .data(),
                 i * 100,
                 "Value for key {} should be {}",
                 i,
@@ -2239,7 +3556,9 @@ mod tests {
         );
 
         // Verify the PMA copy contains correct data
-        let pma_ia = pma_indirect.as_indirect().unwrap();
+        let pma_ia = pma_indirect
+            .as_indirect()
+            .expect("PMA copy should be an indirect atom");
         let pma_handle = pma_ia.as_atom().in_space(&space);
         let pma_size = pma_handle.size();
         assert_eq!(pma_size, 2, "PMA indirect atom should have size 2");
@@ -2272,14 +3591,25 @@ mod tests {
             ),
             "PMA cell should be in offset form"
         );
-        let cell = pma_cell.in_space(&space).as_cell().unwrap();
+        let cell = pma_cell
+            .in_space(&space)
+            .as_cell()
+            .expect("PMA noun should be a cell");
         assert_eq!(
-            cell.head().noun().as_direct().unwrap().data(),
+            cell.head()
+                .noun()
+                .as_direct()
+                .expect("cell head should be direct")
+                .data(),
             42,
             "Cell head should be 42"
         );
         assert_eq!(
-            cell.tail().noun().as_direct().unwrap().data(),
+            cell.tail()
+                .noun()
+                .as_direct()
+                .expect("cell tail should be direct")
+                .data(),
             99,
             "Cell tail should be 99"
         );
@@ -2297,20 +3627,38 @@ mod tests {
             ),
             "PMA nested should be in offset form"
         );
-        let outer = pma_nested.in_space(&space).as_cell().unwrap();
+        let outer = pma_nested
+            .in_space(&space)
+            .as_cell()
+            .expect("PMA nested noun should be an outer cell");
         assert_eq!(
-            outer.tail().noun().as_direct().unwrap().data(),
+            outer
+                .tail()
+                .noun()
+                .as_direct()
+                .expect("outer tail should be direct")
+                .data(),
             3,
             "Outer tail should be 3"
         );
-        let inner_cell = outer.head().as_cell().unwrap();
+        let inner_cell = outer.head().as_cell().expect("outer head should be a cell");
         assert_eq!(
-            inner_cell.head().noun().as_direct().unwrap().data(),
+            inner_cell
+                .head()
+                .noun()
+                .as_direct()
+                .expect("inner head should be direct")
+                .data(),
             1,
             "Inner head should be 1"
         );
         assert_eq!(
-            inner_cell.tail().noun().as_direct().unwrap().data(),
+            inner_cell
+                .tail()
+                .noun()
+                .as_direct()
+                .expect("inner tail should be direct")
+                .data(),
             2,
             "Inner tail should be 2"
         );
@@ -2525,7 +3873,7 @@ mod tests {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod paging_tests {
-    use super::{madvise_drop_file_backed_pages, test_pma_path, Pma};
+    use crate::pma::{madvise_drop_file_backed_pages, test_pma_path, Pma};
 
     const SLAB_BYTES: usize = 64 * 1024 * 1024;
     const TOUCH_PAGES: usize = 64;
@@ -2559,37 +3907,63 @@ mod paging_tests {
         drop_all_pages(base, len);
         let after_drop = mincore_bitmap(base, len);
         let post_drop_ratio = residency_ratio(&after_drop);
+        let dropped_pages = nonresident_page_indices(&after_drop);
         println!(
-            "[pma-paging] post-drop residency ratio {:.3}",
-            post_drop_ratio
+            "[pma-paging] post-drop residency ratio {:.3}; dropped {} pages",
+            post_drop_ratio,
+            dropped_pages.len()
         );
-        if post_drop_ratio > 0.9 {
+        if dropped_pages.is_empty() {
             println!(
                 "[pma-paging] paging did not drop pages; skipping remainder (ratio={post_drop_ratio:.3})"
             );
             return;
         }
-        assert!(
-            post_drop_ratio < 0.1,
-            "expected paging to drop most pages, ratio={post_drop_ratio}"
-        );
 
         let total_pages = len / page;
-        let touched_pages = fault_sparse(base, len, page, TOUCH_PAGES);
-        assert!(touched_pages > 0, "expected to fault at least one page");
+        let touched_pages = sparse_page_indices(&dropped_pages, TOUCH_PAGES);
+        assert!(
+            !touched_pages.is_empty(),
+            "expected to fault at least one dropped page"
+        );
+        fault_pages(base, page, &touched_pages);
 
         let post_fault = mincore_bitmap(base, len);
         let post_fault_ratio = residency_ratio(&post_fault);
-        let expected_ratio = touched_pages as f64 / total_pages.max(1) as f64;
+        let mut touched_page_bitmap = vec![false; total_pages];
+        for page_idx in &touched_pages {
+            touched_page_bitmap[*page_idx] = true;
+        }
+        let touched_resident = touched_pages
+            .iter()
+            .filter(|page_idx| post_fault[**page_idx] & 1 == 1)
+            .count();
+        let extra_refaulted = dropped_pages
+            .iter()
+            .filter(|page_idx| !touched_page_bitmap[**page_idx] && post_fault[**page_idx] & 1 == 1)
+            .count();
+        let untouched_dropped_pages = dropped_pages.len().saturating_sub(touched_pages.len());
+        let max_extra_refaulted = (touched_pages.len() * 16)
+            .max(8)
+            .min(untouched_dropped_pages);
         println!(
-            "[pma-paging] post-fault residency ratio {:.4} (expected {:.4}, touched {} pages)",
-            post_fault_ratio, expected_ratio, touched_pages
+            "[pma-paging] post-fault residency ratio {:.4}; touched {} dropped pages; extra refaulted {}",
+            post_fault_ratio,
+            touched_pages.len(),
+            extra_refaulted
+        );
+        assert_eq!(
+            touched_resident,
+            touched_pages.len(),
+            "all touched dropped pages should become resident after sparse faults"
         );
         assert!(
-            post_fault_ratio >= expected_ratio * 0.5 && post_fault_ratio <= expected_ratio * 2.0,
-            "faulted pages should roughly match touched subset (ratio {} expected {})",
-            post_fault_ratio,
-            expected_ratio
+            extra_refaulted <= max_extra_refaulted,
+            "dropped pages refaulted too broadly: extra={} allowed={} dropped={} touched={}",
+            extra_refaulted,
+            max_extra_refaulted,
+            dropped_pages.len(),
+            touched_pages.len()
         );
     }
 
@@ -2601,23 +3975,25 @@ mod paging_tests {
         }
     }
 
-    fn fault_sparse(ptr: *mut u8, len: usize, page: usize, desired_pages: usize) -> usize {
-        let total_pages = len / page;
-        if total_pages == 0 {
-            return 0;
+    fn sparse_page_indices(candidates: &[usize], desired_pages: usize) -> Vec<usize> {
+        if candidates.is_empty() || desired_pages == 0 {
+            return Vec::new();
         }
-        let touches = desired_pages.min(total_pages.max(1));
-        let stride = (total_pages / touches).max(1);
-        let mut touched = 0;
-        let mut page_idx = 0;
-        while touched < touches && page_idx < total_pages {
+        let touches = desired_pages.min(candidates.len());
+        let mut pages = Vec::with_capacity(touches);
+        for touch_idx in 0..touches {
+            let candidate_idx = touch_idx * candidates.len() / touches;
+            pages.push(candidates[candidate_idx]);
+        }
+        pages
+    }
+
+    fn fault_pages(ptr: *mut u8, page: usize, page_indices: &[usize]) {
+        for page_idx in page_indices {
             unsafe {
-                std::ptr::read_volatile(ptr.add(page_idx * page));
+                std::ptr::read_volatile(ptr.add(*page_idx * page));
             }
-            touched += 1;
-            page_idx = page_idx.saturating_add(stride);
         }
-        touched
     }
 
     fn drop_all_pages(ptr: *mut u8, len: usize) {
@@ -2648,6 +4024,14 @@ mod paging_tests {
         }
         let resident = bitmap.iter().filter(|b| **b & 1 == 1).count();
         resident as f64 / bitmap.len() as f64
+    }
+
+    fn nonresident_page_indices(bitmap: &[u8]) -> Vec<usize> {
+        bitmap
+            .iter()
+            .enumerate()
+            .filter_map(|(page_idx, byte)| (byte & 1 == 0).then_some(page_idx))
+            .collect()
     }
 
     fn page_size() -> usize {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
 resolver = "2"
 
 [workspace.package]
@@ -104,6 +104,7 @@ rand = { version = "0.9.2", default-features = true, features = ["std"] }
 ratatui = "0.29.0"
 rayon = "1.8.0"
 rcgen = "0.14.3"
+regex = "1.10.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "http2",
@@ -121,6 +122,7 @@ serde = "1.0.217"
 serde_bytes = { version = "0.11.15", features = ["alloc"] }
 serde_cbor = "0.11"
 serde_json = "1.0.104"
+serde_yaml = "0.9.34"
 sha1 = { version = "0.10.6", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 sha3 = "0.10.8"
@@ -161,6 +163,7 @@ tonic-health = "0.14.2"
 tonic-prost = "0.14.0"
 tonic-prost-build = "0.14.0"
 tonic-reflection = "0.14.0"
+tonic-web = "0.14.5"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.4"
@@ -207,7 +210,6 @@ path = "crates/kernels"
 
 [workspace.dependencies.kernels-open-bridge]
 path = "crates/kernels/bridge"
-
 [workspace.dependencies.kernels-open-dumb]
 path = "crates/kernels/dumb"
 
@@ -236,11 +238,17 @@ path = "crates/nockapp-grpc-proto"
 [workspace.dependencies.nockchain]
 path = "crates/nockchain"
 
+[workspace.dependencies.nockchain-e2e]
+path = "crates/nockchain-e2e"
+
 [workspace.dependencies.nockchain-libp2p-io]
 path = "crates/nockchain-libp2p-io"
 
 [workspace.dependencies.nockchain-math]
 path = "crates/nockchain-math"
+
+[workspace.dependencies.nockchain-testkit]
+path = "crates/nockchain-testkit"
 
 [workspace.dependencies.nockchain-types]
 path = "crates/nockchain-types"

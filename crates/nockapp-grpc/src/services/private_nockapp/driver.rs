@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 
 use nockapp::driver::{make_driver, IODriverFn, NockAppHandle};
 use nockapp::noun::slab::NounSlab;
@@ -18,20 +18,19 @@ use crate::wire_conversion::create_grpc_wire;
 ///
 /// This function returns an IODriverFn that can be added to a NockApp instance
 /// to start a gRPC server. Do NOT expose the server to an untrusted network, as
-/// it is intended for local or controlled environments. `grpc_server_driver`
-/// binds to `localhost:5555`. This driver is a core/admin gRPC driver for NockApp,
-/// it includes operations like `Peek` and `Poke` so you should use an ssh tunnel
-/// or VPN w/ firewalling to access it securely on a remote server. This is also
-/// intended to be a demonstration of how to extend NockApp with custom I/O drivers.
+/// it is intended for local or controlled environments. The caller provides the
+/// bind address, and this driver is a core/admin gRPC path for NockApp, so you
+/// should use an ssh tunnel or VPN w/ firewalling to access it securely on a
+/// remote server. This is also intended to be a demonstration of how to extend
+/// NockApp with custom I/O drivers.
 ///
 /// # Example
 /// ```rust,ignore
 /// use nockapp_grpc::driver::grpc_server_driver;
 /// // in an async context with a NockApp instance:
-/// // app.add_io_driver(grpc_server_driver()).await;
+/// // app.add_io_driver(grpc_server_driver("127.0.0.1:5555".parse().unwrap())).await;
 /// ```
-pub fn grpc_server_driver(port: u16) -> IODriverFn {
-    let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+pub fn grpc_server_driver(addr: SocketAddr) -> IODriverFn {
     make_driver(move |handle: NockAppHandle| async move {
         info!("Starting private gRPC server on {}", addr);
 

@@ -15,9 +15,9 @@ mmap = []
 no_check_oom = []
 # FOR DEBUGGING MEMORY ISSUES ONLY
 check_all = ["check_acyclic", "check_forwarding", "check_junior"]
-check_acyclic = []
-check_forwarding = []
-check_junior = []
+check_acyclic = ["assert_no_alloc"]
+check_forwarding = ["assert_no_alloc"]
+check_junior = ["assert_no_alloc"]
 sham_hints = []
 stop_for_debug = []
 hint_dont = []
@@ -26,6 +26,7 @@ pma-assert = []
 # Please keep these alphabetized
 [dependencies]
 
+assert_no_alloc = { path = "../assert_no_alloc", optional = true, features = ["warn_debug"] }
 bincode = { workspace = true, features = ["serde"] }
 bitvec = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
@@ -63,6 +64,10 @@ missing_safety_doc = "allow"
 
 [[bench]]
 name = "hoonc_hotspots"
+harness = false
+
+[[bench]]
+name = "pma_growth"
 harness = false
 
 [[bench]]

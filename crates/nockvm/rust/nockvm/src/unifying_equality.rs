@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use either::Either::*;
 use libc::{c_void, memcmp};
 

@@ -1,0 +1,81 @@
+# Nous rollout scenario: gen2-enabled sender with accept-only peer
+#
+# Verifies the critical mixed-configuration pairing during rollout: one node
+# has gen2 send enabled, the other is explicitly staged as accept-only.
+# Sync must still succeed while one node advertises gen2 outbound capability.
+#
+# Generation matrix cell: new(enabled) <-> new(default)
+# Expected behavior: head convergence across enabled and accept-only nodes.
+#
+# This is THE most important Nous rollout scenario: the first nodes to
+# enable gen2 send will be talking to explicitly staged accept-only peers.
+
+name: "nous_mixed_generation"
+seed: 22
+
+nodes:
+  - id: "node-enabled"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "node-default"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "node-enabled"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    # Explicit accept-only rollout stage.
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+steps:
+  - action: start_nodes
+    ids: ["node-enabled"]
+
+  - action: wait_for_grpc
+    node: "node-enabled"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "node-enabled"
+    height: 5
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["node-default"]
+
+  - action: wait_for_grpc
+    node: "node-default"
+    timeout_ms: 300000
+
+  # node-default must sync blocks from node-enabled.
+  - action: wait_for_height
+    node: "node-default"
+    height: 5
+    timeout_ms: 120000
+
+asserts:
+  - assert: req_res_generation
+    node: "node-default"
+    peer: "node-enabled"
+    generation: gen1
+    timeout_ms: 30000
+  - assert: heads_equal
+    nodes: ["node-enabled", "node-default"]
+    timeout_ms: 30000

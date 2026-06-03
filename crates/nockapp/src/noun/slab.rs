@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::alloc::Layout;
 use std::fmt::Debug;
 use std::mem::size_of;
@@ -530,14 +532,18 @@ impl<J> NounSlab<J> {
 
     /// Get the root noun
     ///
-    /// # Safety: The noun must not be used past the lifetime of the slab.
+    /// # Safety
+    ///
+    /// The noun must not be used past the lifetime of the slab.
     pub unsafe fn root(&self) -> &Noun {
         &self.root
     }
 
     /// Get the root noun
     ///
-    /// # Safety: The noun must not be used past the lifetime of the slab.
+    /// # Safety
+    ///
+    /// The noun must not be used past the lifetime of the slab.
     pub unsafe fn root_mut(&mut self) -> &mut Noun {
         &mut self.root
     }
@@ -909,9 +915,15 @@ impl Jammer for NockJammer {
             match stack.pop() {
                 Some(CueStackEntry::DestinationPointer(dest)) => {
                     let backref = cursor as u64;
+                    if cursor >= bitslice.len() {
+                        return Err(CueError::TruncatedBuffer);
+                    }
                     if bitslice[cursor] {
                         // 1
                         cursor += 1;
+                        if cursor >= bitslice.len() {
+                            return Err(CueError::TruncatedBuffer);
+                        }
                         if bitslice[cursor] {
                             // 1 - backref
                             cursor += 1;
@@ -1053,6 +1065,21 @@ mod tests {
             ),
             "Original and cued nouns should be equal"
         );
+    }
+
+    #[test]
+    fn test_cue_into_rejects_truncated_atom_without_panicking() {
+        let mut slab: NounSlab = NounSlab::new();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            slab.cue_into(Bytes::copy_from_slice(&[0; 13]))
+        }));
+
+        assert!(result.is_ok(), "truncated jam input must not panic");
+        assert!(matches!(
+            result.expect("catch_unwind result"),
+            Err(CueError::TruncatedBuffer)
+        ));
     }
 
     #[test]

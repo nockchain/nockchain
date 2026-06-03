@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::io::Error;
 use std::ptr::NonNull;
 use std::result::Result;

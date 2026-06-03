@@ -259,15 +259,47 @@ mod tests {
             .in_space(&space)
             .as_cell()
             .expect("first item should be a cell");
-        assert_eq!(first.head().as_atom().unwrap().as_u64().unwrap(), 1);
-        assert_eq!(first.tail().as_atom().unwrap().as_u64().unwrap(), 2);
+        assert_eq!(
+            first
+                .head()
+                .as_atom()
+                .expect("first head should be an atom")
+                .as_u64()
+                .expect("first head should fit in u64"),
+            1
+        );
+        assert_eq!(
+            first
+                .tail()
+                .as_atom()
+                .expect("first tail should be an atom")
+                .as_u64()
+                .expect("first tail should fit in u64"),
+            2
+        );
 
         let second = items[1]
             .in_space(&space)
             .as_cell()
             .expect("second item should be a cell");
-        assert_eq!(second.head().as_atom().unwrap().as_u64().unwrap(), 3);
-        assert_eq!(second.tail().as_atom().unwrap().as_u64().unwrap(), 4);
+        assert_eq!(
+            second
+                .head()
+                .as_atom()
+                .expect("second head should be an atom")
+                .as_u64()
+                .expect("second head should fit in u64"),
+            3
+        );
+        assert_eq!(
+            second
+                .tail()
+                .as_atom()
+                .expect("second tail should be an atom")
+                .as_u64()
+                .expect("second tail should fit in u64"),
+            4
+        );
     }
 
     #[test]
@@ -292,7 +324,12 @@ mod tests {
             .get(&mut lookup_stack, D(11))
             .expect("existing key should be found");
         assert_eq!(
-            value.in_space(&space).as_atom().unwrap().as_u64().unwrap(),
+            value
+                .in_space(&space)
+                .as_atom()
+                .expect("map lookup value should be an atom")
+                .as_u64()
+                .expect("map lookup value should fit in u64"),
             110
         );
         assert!(
@@ -306,8 +343,18 @@ mod tests {
                 let pair = entry
                     .as_cell()
                     .expect("map iterator should yield entry pairs");
-                let key = pair.head().as_atom().unwrap().as_u64().unwrap();
-                let value = pair.tail().as_atom().unwrap().as_u64().unwrap();
+                let key = pair
+                    .head()
+                    .as_atom()
+                    .expect("map iterator key should be an atom")
+                    .as_u64()
+                    .expect("map iterator key should fit in u64");
+                let value = pair
+                    .tail()
+                    .as_atom()
+                    .expect("map iterator value should be an atom")
+                    .as_u64()
+                    .expect("map iterator value should fit in u64");
                 (key, value)
             })
             .collect();

@@ -1,0 +1,361 @@
+# Nous responder-stress scenario: many requesters hammering one responder
+#
+# The 2026-04-17 LAX1 freeze parked all 40 tokio workers on `futex_wait` after
+# 12 h of accumulating OneShotRecvError warnings under multi-peer inbound
+# load. Log archeology narrowed the trigger window to minutes but could not
+# name the specific futex because no thread stacks were captured before the
+# operator restart.
+#
+# This scenario reproduces the load shape that matters: N requester full
+# nodes all force-peered to a single responder-a, concurrently pulling block
+# and tx data while miner-a drives the chain forward via block-stuffer
+# traffic. With the 2026-04-17 instrumentation (heartbeat + SIGQUIT watchdog)
+# live, the final assertions fail fast if:
+#
+#  - the heartbeat log stops ticking on any node (runtime-level deadlock),
+#  - Background req-res task OneShotRecvError warnings reappear above the
+#    fix-era noise floor (~0), or
+#  - the libp2p-watchdog emits `libp2p heartbeat has not advanced`
+#    (Linux-only; absent on macOS is expected).
+#
+# RUST_LOG is pinned per-node so the heartbeat / watchdog log targets are
+# definitely on the hot path regardless of host default. The scenario is
+# shorter than `nous_gen2_soak` because the goal here is smoke + regression
+# on the async-freeze class, not steady-state correctness.
+
+name: "nous_gen1_responder_stress"
+seed: 42
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6511"
+    grpc_private_port: 7511
+    bind:
+      - "/ip4/127.0.0.1/udp/4511/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+  - id: "responder-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6512"
+    grpc_private_port: 7512
+    bind:
+      - "/ip4/127.0.0.1/udp/4512/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4511/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+  - id: "requester-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6513"
+    grpc_private_port: 7513
+    bind:
+      - "/ip4/127.0.0.1/udp/4513/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4512/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "false"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+  - id: "requester-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6514"
+    grpc_private_port: 7514
+    bind:
+      - "/ip4/127.0.0.1/udp/4514/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4512/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "false"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+  - id: "requester-c"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6515"
+    grpc_private_port: 7515
+    bind:
+      - "/ip4/127.0.0.1/udp/4515/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4512/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "false"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+  - id: "requester-d"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6516"
+    grpc_private_port: 7516
+    bind:
+      - "/ip4/127.0.0.1/udp/4516/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4512/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "false"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 30000
+
+  - action: start_nodes
+    ids: ["responder-a"]
+
+  - action: wait_for_grpc
+    node: "responder-a"
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["requester-a", "requester-b", "requester-c", "requester-d"]
+
+  - action: wait_for_grpc
+    node: "requester-a"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "requester-d"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "responder-a"
+    height: 10
+    timeout_ms: 180000
+
+  # Drive sustained traffic — block_stuffer submits txs to miner-a which
+  # mines blocks; responder-a and all requesters sync via gen2 bundles.
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-responder-stress"
+    timeout_ms: 600000
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "7511"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "8"
+      STEADY_STATE_TXS: "8"
+      MAX_ITERATIONS: "10"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  # Keep all requesters syncing alongside the stuffer load.
+  - action: wait_for_height
+    node: "miner-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "responder-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-b"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-c"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-d"
+    height: 80
+    timeout_ms: 600000
+
+  # Let the network settle so any latent deadlock has time to surface.
+  - action: sleep
+    millis: 60000
+
+  # ---- post-run health assertions via shell grep ----
+  # Each assertion exits non-zero (fails the scenario) if the invariant is
+  # violated. We run them per-node so the failing log file is named in
+  # the error output.
+
+  # 1. Heartbeat presence: each node must have emitted at least 30 ticks
+  #    (we ran ~5+ min, heartbeat fires every 5s, so ~60 ticks expected).
+  #    Silence == runtime-level freeze. Threshold of 30 is conservative
+  #    to tolerate slow-start boot phases on constrained CI runners.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a requester-a requester-b requester-c requester-d; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          ticks=$(grep -c "nockchain::heartbeat" "$log" || true)
+          echo "heartbeat ticks for $node: $ticks"
+          if [ "$ticks" -lt 30 ]; then
+            echo "FAIL: $node emitted only $ticks heartbeat ticks (expected >= 30)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "heartbeat ticks for"
+
+  # 2. OneShotRecvError noise floor: the a1955d6c3 fix should keep this at
+  #    zero. Allow a tiny threshold (5) for a race-window of pre-fix-equivalent
+  #    timing-channel drops during node startup churn, but anything near the
+  #    pre-fix 16K/hr signals regression.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a requester-a requester-b requester-c requester-d; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          warns=$(grep -c "Background req-res task lost a oneshot" "$log" || true)
+          echo "oneshot warns for $node: $warns"
+          if [ "$warns" -gt 5 ]; then
+            echo "FAIL: $node emitted $warns OneShotRecvError warnings (expected <= 5)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "oneshot warns for"
+
+  # 3. Watchdog stall events (Linux only): absence of the "heartbeat has
+  #    not advanced" error message. On macOS the watchdog thread is a no-op
+  #    and the grep returns 0 matches — which is also what we want.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a requester-a requester-b requester-c requester-d; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          stalls=$(grep -c "libp2p heartbeat has not advanced" "$log" || true)
+          echo "watchdog stalls for $node: $stalls"
+          if [ "$stalls" -gt 0 ]; then
+            echo "FAIL: $node logged $stalls watchdog stall events (expected 0)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "watchdog stalls for"
+
+asserts:
+  - assert: heads_equal
+    nodes:
+      - "miner-a"
+      - "responder-a"
+      - "requester-a"
+      - "requester-b"
+      - "requester-c"
+      - "requester-d"
+    timeout_ms: 180000

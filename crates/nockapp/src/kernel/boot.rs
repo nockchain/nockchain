@@ -7,6 +7,7 @@ use chrono;
 use clap::{Args, ColorChoice, Parser, ValueEnum};
 use nockvm::jets::hot::HotEntry;
 use nockvm::noun::Atom;
+use nockvm::pma::Pma;
 use nockvm::trace::{IntervalFilter, KeywordFilter, TraceFilter, TraceInfo, TracingBackend};
 use tokio::fs;
 use tracing::{debug, info, warn, Level, Subscriber};
@@ -39,6 +40,10 @@ const DEFAULT_ROTATING_SNAPSHOT_INTERVAL_EVENT_TIME_SECS: u64 = 15 * 60;
 const DEFAULT_ROTATING_SNAPSHOT_INTERVAL_EVENT_TIME_SECS_STR: &str = "900";
 
 const DEFAULT_LOG_FILTER: &str = "info";
+const NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION_ENV: &str = "NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION";
+const DEFAULT_PMA_INITIAL_MIN_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_PMA_INITIAL_KERNEL_MULTIPLIER: usize = 16;
+const WORD_BYTES: usize = std::mem::size_of::<u64>();
 
 #[derive(Debug)]
 enum BootSource {
@@ -48,7 +53,103 @@ enum BootSource {
     Fresh,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PmaSize {
+    words: usize,
+}
+
+impl PmaSize {
+    pub const fn from_words(words: usize) -> Self {
+        Self { words }
+    }
+
+    pub const fn from_bytes_ceil(bytes: usize) -> Self {
+        Self::from_words(bytes.div_ceil(WORD_BYTES))
+    }
+
+    pub const fn words(self) -> usize {
+        self.words
+    }
+}
+
+fn default_pma_initial_words(kernel_jam_bytes: usize) -> usize {
+    let target_bytes = kernel_jam_bytes
+        .saturating_mul(DEFAULT_PMA_INITIAL_KERNEL_MULTIPLIER)
+        .max(DEFAULT_PMA_INITIAL_MIN_BYTES);
+    let words = PmaSize::from_bytes_ceil(target_bytes).words().max(1);
+    words.checked_next_power_of_two().unwrap_or(words)
+}
+
+fn pma_initial_words_for_boot(configured_size: Option<PmaSize>, kernel_jam_bytes: usize) -> usize {
+    let configured_words = configured_size
+        .map(PmaSize::words)
+        .unwrap_or_else(|| default_pma_initial_words(kernel_jam_bytes));
+    let Some(value) = std::env::var_os(NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION_ENV) else {
+        return configured_words;
+    };
+    match value.to_string_lossy().parse::<usize>() {
+        Ok(words) if words > 0 => {
+            warn!(
+                configured_words,
+                override_words = words,
+                env = NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION_ENV,
+                "using regression PMA initial-size override"
+            );
+            words
+        }
+        _ => {
+            warn!(
+                configured_words,
+                env = NOCK_PMA_INITIAL_WORDS_FOR_REGRESSION_ENV,
+                value = %value.to_string_lossy(),
+                "ignoring invalid regression PMA initial-size override"
+            );
+            configured_words
+        }
+    }
+}
+
+fn parse_pma_size(input: &str) -> Result<PmaSize, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("PMA size cannot be empty".to_string());
+    }
+    let normalized = trimmed.replace('_', "");
+    let split_at = normalized
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(normalized.len());
+    if split_at == 0 {
+        return Err(format!("PMA size '{trimmed}' is missing a numeric value"));
+    }
+    let value = normalized[..split_at]
+        .parse::<u128>()
+        .map_err(|err| format!("invalid PMA size '{trimmed}': {err}"))?;
+    let suffix = normalized[split_at..].trim().to_ascii_lowercase();
+    let multiplier = match suffix.as_str() {
+        "" | "b" | "byte" | "bytes" => 1u128,
+        "k" | "kb" | "kib" => 1024u128,
+        "m" | "mb" | "mib" => 1024u128.pow(2),
+        "g" | "gb" | "gib" => 1024u128.pow(3),
+        "t" | "tb" | "tib" => 1024u128.pow(4),
+        _ => {
+            return Err(format!(
+                "invalid PMA size suffix '{suffix}' in '{trimmed}'; use bytes, KiB, MiB, GiB, or TiB"
+            ));
+        }
+    };
+    let bytes = value
+        .checked_mul(multiplier)
+        .ok_or_else(|| format!("PMA size '{trimmed}' overflowed"))?;
+    let bytes = usize::try_from(bytes)
+        .map_err(|_| format!("PMA size '{trimmed}' exceeds this platform's address size"))?;
+    let size = PmaSize::from_bytes_ceil(bytes);
+    if size.words() == 0 {
+        return Err("PMA size must be at least one word".to_string());
+    }
+    Ok(size)
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum NockStackSize {
     Tiny,
     Small,
@@ -56,6 +157,19 @@ pub enum NockStackSize {
     Medium,
     Large,
     Huge,
+}
+
+impl NockStackSize {
+    pub const fn stack_words(self) -> usize {
+        match self {
+            Self::Tiny => NOCK_STACK_SIZE_TINY,
+            Self::Small => NOCK_STACK_SIZE_SMALL,
+            Self::Normal => NOCK_STACK_SIZE,
+            Self::Medium => NOCK_STACK_SIZE_MEDIUM,
+            Self::Large => NOCK_STACK_SIZE_LARGE,
+            Self::Huge => NOCK_STACK_SIZE_HUGE,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -165,6 +279,20 @@ pub struct Cli {
         default_value_t = NockStackSize::Normal
     )]
     pub stack_size: NockStackSize,
+
+    #[arg(
+        long,
+        help = "Initial file-backed PMA capacity. Accepts byte units like 256MiB or 4GiB. Defaults to auto: round_up_power_of_two(max(256MiB, kernel_jam_bytes * 16)).",
+        value_parser = parse_pma_size
+    )]
+    pub pma_initial_size: Option<PmaSize>,
+
+    #[arg(
+        long,
+        help = "Maximum virtual PMA reservation. Accepts byte units like 64GiB or 1TiB. Defaults to 1TiB, or NOCK_PMA_RESERVED_WORDS when set.",
+        value_parser = parse_pma_size
+    )]
+    pub pma_reserved_size: Option<PmaSize>,
     #[arg(
         long,
         help = "Override the full data directory for this nockapp instance (expects the directory that contains checkpoints/)"
@@ -232,8 +360,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        default_boot_cli, export_kernel_state, parse_optional_u64, select_boot_state, setup_,
-        BootSelection, SetupResult, DEFAULT_GC_INTERVAL_SECS,
+        default_boot_cli, default_pma_initial_words, export_kernel_state, parse_optional_u64,
+        parse_pma_size, select_boot_state, setup_, BootEventLogPolicy, BootSelection, SetupResult,
+        DEFAULT_GC_INTERVAL_SECS,
     };
     use crate::metrics::NockAppMetrics;
     use crate::nockapp::wire::{wire_to_noun, SystemWire, Wire};
@@ -321,6 +450,23 @@ mod tests {
         try_setup_test_app(data_dir, None)
             .await
             .expect("setup boot test app")
+    }
+
+    async fn setup_test_app_from_chkjam(
+        data_dir: &Path,
+        chkjam_path: &Path,
+    ) -> NockApp<NockJammer> {
+        let jam = load_test_jam_bytes();
+        let mut cli = durable_test_boot_cli(false);
+        cli.data_dir = Some(data_dir.to_path_buf());
+        cli.bootstrap_from_chkjam = Some(chkjam_path.to_string_lossy().into_owned());
+        match setup_::<NockJammer>(&jam, cli, &[], "boot-test", None)
+            .await
+            .expect("setup boot test app from checkpoint")
+        {
+            SetupResult::App(app) => app,
+            SetupResult::ExportedState => panic!("unexpected export"),
+        }
     }
 
     async fn try_setup_test_app(
@@ -645,6 +791,45 @@ INSERT INTO events (
     }
 
     #[test]
+    fn parse_pma_size_accepts_binary_byte_units() {
+        assert_eq!(parse_pma_size("1").unwrap().words(), 1);
+        assert_eq!(parse_pma_size("8").unwrap().words(), 1);
+        assert_eq!(parse_pma_size("256MiB").unwrap().words(), 32 * 1024 * 1024);
+        assert_eq!(parse_pma_size("1GiB").unwrap().words(), 128 * 1024 * 1024);
+        assert_eq!(
+            parse_pma_size("1_TiB").unwrap().words(),
+            128 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn default_pma_initial_size_uses_kernel_jam_size_floor_and_power_of_two() {
+        assert_eq!(
+            default_pma_initial_words(12 * 1024 * 1024),
+            32 * 1024 * 1024
+        );
+        assert_eq!(
+            default_pma_initial_words(18 * 1024 * 1024),
+            64 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn pma_size_cli_decouples_from_stack_size() {
+        let parsed = super::Cli::try_parse_from([
+            "boot-test", "--stack-size", "large", "--pma-initial-size", "512MiB",
+            "--pma-reserved-size", "2TiB",
+        ])
+        .expect("parse PMA sizing cli");
+        assert!(matches!(parsed.stack_size, super::NockStackSize::Large));
+        assert_eq!(parsed.pma_initial_size.unwrap().words(), 64 * 1024 * 1024);
+        assert_eq!(
+            parsed.pma_reserved_size.unwrap().words(),
+            256 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[test]
     fn normalized_rotating_snapshot_interval_event_time_filters_zero() {
         let mut cli = super::default_boot_cli(false);
         cli.rotating_snapshot_interval_event_time = Some(0);
@@ -867,7 +1052,7 @@ INSERT INTO events (
 
     #[tokio::test(flavor = "current_thread")]
     #[cfg_attr(miri, ignore)]
-    async fn bootstraps_checkpoint_copy_into_empty_event_log() {
+    async fn bootstraps_explicit_checkpoint_copy_into_empty_event_log() {
         let temp = TempDir::new().expect("tempdir");
         let source_data_dir = temp.path().join("checkpoint-source");
         let copied_data_dir = temp.path().join("checkpoint-copy-empty-event-log");
@@ -886,7 +1071,25 @@ INSERT INTO events (
         )
         .expect("copy checkpoint into fresh data dir");
 
-        let mut second = setup_test_app(&copied_data_dir).await;
+        let implicit_err = match try_setup_test_app(&copied_data_dir, None).await {
+            Ok(mut app) => {
+                stop_app(&mut app).await;
+                panic!("implicit checkpoint bootstrap unexpectedly succeeded")
+            }
+            Err(err) => err,
+        };
+        assert!(
+            implicit_err
+                .to_string()
+                .contains("SQLite event log is empty or missing"),
+            "unexpected implicit checkpoint bootstrap error: {implicit_err}"
+        );
+
+        let mut second = setup_test_app_from_chkjam(
+            &copied_data_dir,
+            &source_data_dir.join("checkpoints").join("0.chkjam"),
+        )
+        .await;
         assert_counter_state(&mut second, 1).await;
         assert_eq!(max_event_num_for_test(&copied_data_dir), None);
         stop_app(&mut second).await;
@@ -932,6 +1135,10 @@ INSERT INTO events (
             &data_dir.join("pma").join("0.pma"),
             &data_dir.join("pma").join("1.pma"),
             Arc::new(NockAppMetrics::default()),
+            BootEventLogPolicy {
+                preexisting: true,
+                allow_empty_bootstrap: false,
+            },
         )
         .await
         .expect("select boot state");
@@ -964,6 +1171,10 @@ INSERT INTO events (
             &data_dir.join("pma").join("0.pma"),
             &data_dir.join("pma").join("1.pma"),
             Arc::new(NockAppMetrics::default()),
+            BootEventLogPolicy {
+                preexisting: true,
+                allow_empty_bootstrap: false,
+            },
         )
         .await;
 
@@ -1593,6 +1804,10 @@ INSERT INTO events (
             &data_dir.join("pma").join("0.pma"),
             &data_dir.join("pma").join("1.pma"),
             Arc::new(NockAppMetrics::default()),
+            BootEventLogPolicy {
+                preexisting: true,
+                allow_empty_bootstrap: false,
+            },
         )
         .await
         .expect("select boot state");
@@ -1629,6 +1844,12 @@ struct BootSelection {
     replay_jobs: Vec<ReplayLogEntry>,
 }
 
+#[derive(Clone, Copy)]
+struct BootEventLogPolicy {
+    preexisting: bool,
+    allow_empty_bootstrap: bool,
+}
+
 fn order_snapshot_candidates(
     active_snapshot_id: Option<i64>,
     ready_snapshots: Vec<ReadySnapshotRecord>,
@@ -1658,6 +1879,7 @@ async fn select_boot_state<J: Jammer>(
     pma_path_0: &Path,
     pma_path_1: &Path,
     metrics: Arc<NockAppMetrics>,
+    event_log_policy: BootEventLogPolicy,
 ) -> Result<BootSelection, CrownError<ExternalError>> {
     let expected_ker_hash = {
         let mut hasher = blake3::Hasher::new();
@@ -1720,6 +1942,12 @@ async fn select_boot_state<J: Jammer>(
 
     if let Some(ExistingPmaStatus::Valid { path, event_num }) = existing_pma.as_ref() {
         if event_log_max == 0 && *event_num > 0 {
+            if !event_log_policy.preexisting && !event_log_policy.allow_empty_bootstrap {
+                return Err(CrownError::Unknown(format!(
+                    "refusing to boot PMA event_num={} because the SQLite event log was missing; restore the event log or use explicit bootstrap/discard intent",
+                    event_num
+                )));
+            }
             let boot_source = BootSource::Pma {
                 path: path.clone(),
                 event_num: *event_num,
@@ -1907,8 +2135,20 @@ async fn select_boot_state<J: Jammer>(
         })?;
 
     if let Some((checkpoint, summary)) = checkpoint_candidate {
-        let checkpoint_bootstraps_empty_event_log =
-            recovery_event_log.is_some() && event_log_max == 0;
+        let checkpoint_bootstraps_empty_event_log = recovery_event_log.is_some()
+            && event_log_max == 0
+            && event_log_policy.allow_empty_bootstrap;
+        if recovery_event_log.is_some()
+            && event_log_max == 0
+            && summary.event_num > 0
+            && !event_log_policy.allow_empty_bootstrap
+        {
+            return Err(CrownError::Unknown(format!(
+                "refusing to boot checkpoint {} event_num={} because the SQLite event log is empty or missing; use --new/--bootstrap-from-chkjam for explicit checkpoint bootstrap",
+                summary.path.display(),
+                summary.event_num
+            )));
+        }
         if summary.event_num <= event_log_max || checkpoint_bootstraps_empty_event_log {
             let replay_entries = if checkpoint_bootstraps_empty_event_log {
                 Vec::new()
@@ -2031,6 +2271,8 @@ pub fn default_boot_cli(new: bool) -> Cli {
         bootstrap_from_chkjam: None,
         export_state_jam: None,
         stack_size: NockStackSize::Normal,
+        pma_initial_size: None,
+        pma_reserved_size: None,
         data_dir: None,
         event_log_path: None,
         disable_fsync: false,
@@ -2370,9 +2612,28 @@ pub async fn setup_<J: Jammer + Send + 'static>(
     }
     let pma_path_0 = pma_dir.join("0.pma");
     let pma_path_1 = pma_dir.join("1.pma");
-    let stack_size = cli.stack_size.clone();
+    let stack_size = cli.stack_size;
+    let pma_initial_words = pma_initial_words_for_boot(cli.pma_initial_size, jam.len());
+    let pma_reserved_words = Some(
+        cli.pma_reserved_size
+            .map(PmaSize::words)
+            .unwrap_or_else(|| Pma::default_reserved_words_for_capacity(pma_initial_words))
+            .max(pma_initial_words),
+    );
     let trace_opts = cli.trace_opts.clone();
     let event_log_path_for_kernel = event_log_path.clone();
+    let event_log_preexisting = event_log_sidecar_paths(&event_log_path)
+        .iter()
+        .any(|path| path.exists());
+    let allow_empty_event_log_bootstrap = cli.new || cli.bootstrap_from_chkjam.is_some();
+    if !ephemeral {
+        info!(
+            kernel_jam_bytes = jam.len(),
+            pma_initial_words,
+            pma_reserved_words = ?pma_reserved_words,
+            "PMA sizing selected"
+        );
+    }
     let kernel_f = move |metrics: Arc<NockAppMetrics>| async move {
         let boot_selection = if ephemeral {
             BootSelection {
@@ -2389,22 +2650,26 @@ pub async fn setup_<J: Jammer + Send + 'static>(
                 &pma_path_0,
                 &pma_path_1,
                 metrics.clone(),
+                BootEventLogPolicy {
+                    preexisting: event_log_preexisting,
+                    allow_empty_bootstrap: allow_empty_event_log_bootstrap,
+                },
             )
             .await?
         };
         let mut checkpoint = boot_selection.checkpoint;
-        let stack_size = stack_size.clone();
         let pma_open_existing = boot_selection.pma_open_existing;
         let snapshot_manifest = boot_selection.snapshot_manifest.clone();
         let replay_jobs = boot_selection.replay_jobs;
-        let pma_config = |words| {
+        let pma_config = |_nock_stack_words| {
             if ephemeral {
                 None
             } else {
                 Some(PmaConfig {
                     path_0: pma_path_0.clone(),
                     path_1: pma_path_1.clone(),
-                    words,
+                    words: pma_initial_words,
+                    reserved_words: pma_reserved_words,
                     open_existing: pma_open_existing,
                     create_snapshots: true,
                     rotating_snapshot_interval_event_time,

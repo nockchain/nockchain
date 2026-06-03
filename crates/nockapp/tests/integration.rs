@@ -1,3 +1,4 @@
+use nockapp::driver::PokeResult;
 use nockapp::noun::slab::NounSlab;
 use nockapp::test::setup_nockapp;
 use nockapp::wire::{SystemWire, Wire};
@@ -143,4 +144,85 @@ fn make_inc_poke() -> NounSlab {
     let mut poke = NounSlab::new();
     poke.set_root(D(tas!(b"inc")));
     poke
+}
+
+fn state_peek_slab() -> NounSlab {
+    [D(tas!(b"state")), D(0)].into()
+}
+
+fn timer_poke_slab() -> NounSlab {
+    let mut slab = NounSlab::new();
+    let timer_noun = nockvm::noun::T(&mut slab, &[D(tas!(b"command")), D(tas!(b"timer")), D(0)]);
+    slab.set_root(timer_noun);
+    slab
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg_attr(miri, ignore)]
+async fn test_lax1_timeout_storm_does_not_starve_followup_peek_or_timer() {
+    use std::time::Duration;
+
+    use nockapp::drivers::timer::TimerWire;
+
+    // Reproduces the LAX1 failure shape at the nockapp layer: once enough
+    // timeout-driven poke tasks pile up, unrelated follow-up peek and timer
+    // work should still make progress. On current code, both stall.
+    let (_temp, mut nockapp) = setup_nockapp("test-ker.jam").await;
+    let burst = 4096usize;
+    let timeout = Duration::from_nanos(1);
+    let probe_deadline = Duration::from_secs(1);
+
+    let mut burst_handles = Vec::with_capacity(burst);
+    for _ in 0..burst {
+        burst_handles.push(nockapp.get_handle());
+    }
+    let followup_handle = nockapp.get_handle();
+    let shutdown_handle = nockapp.get_handle();
+
+    let run_task = tokio::spawn(async move { nockapp.run().await });
+
+    let mut burst_tasks = tokio::task::JoinSet::new();
+    for handle in burst_handles {
+        burst_tasks.spawn(async move {
+            handle
+                .poke_timeout(SystemWire.to_wire(), make_inc_poke(), timeout)
+                .await
+        });
+    }
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (followup_peek, followup_timer) = tokio::join!(
+        tokio::time::timeout(probe_deadline, followup_handle.peek(state_peek_slab())),
+        tokio::time::timeout(
+            probe_deadline,
+            followup_handle.poke(TimerWire::Tick.to_wire(), timer_poke_slab()),
+        )
+    );
+
+    burst_tasks.abort_all();
+    let _ = shutdown_handle.exit.exit(0).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), run_task).await;
+
+    assert!(
+        followup_peek.is_ok(),
+        "follow-up peek timed out while timeout storm was active; timer_completed={}",
+        followup_timer.is_ok(),
+    );
+    assert!(
+        followup_timer.is_ok(),
+        "follow-up timer poke timed out while timeout storm was active; peek_completed={}",
+        followup_peek.is_ok(),
+    );
+
+    let followup_peek = followup_peek.expect("peek timeout already checked");
+    let followup_timer = followup_timer.expect("timer timeout already checked");
+
+    followup_peek.expect("follow-up peek should succeed while timeout storm is active");
+    match followup_timer {
+        Ok(PokeResult::Ack) | Ok(PokeResult::Nack) => {}
+        Err(err) => {
+            panic!("follow-up timer poke should complete while timeout storm is active: {err:?}")
+        }
+    }
 }

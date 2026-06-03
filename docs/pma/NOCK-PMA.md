@@ -617,4 +617,3 @@ ordinary operation of the NockVM.
 # Milestone 4: Garbage collection
 
 # Milestone 5: Concurrent reads
-

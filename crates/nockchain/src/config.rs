@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{value_parser, ArgAction, Args, CommandFactory, FromArgMatches, Parser};
-use nockapp::kernel::boot::NockStackSize;
+use nockapp::kernel::boot::{NockStackSize, PmaSize};
 use nockchain_types::tx_engine::common::Hash;
 
 use crate::mining::MiningPkhConfig;
@@ -105,6 +105,13 @@ impl FakenetAsertArgs {
     }
 }
 
+/// Fakenet phase defaults applied by the CLI when no explicit `--fakenet-*-phase`
+/// override is passed.  Exported so the E2E harness can configure scenarios to
+/// match whatever the node will actually use, rather than duplicating magic
+/// numbers in test code.
+pub const DEFAULT_FAKENET_V1_PHASE: u64 = 1;
+pub const DEFAULT_FAKENET_BYTHOS_PHASE: u64 = 1;
+
 /// Command line arguments
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nockchain")]
@@ -201,14 +208,27 @@ pub struct NockchainCli {
     pub fakenet_bythos_phase: Option<u64>,
     #[command(flatten)]
     pub fakenet_asert: FakenetAsertArgs,
+    #[arg(
+        long,
+        help = "Override the candidate timestamp update interval in seconds when running on fakenet. Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub fakenet_update_candidate_interval_secs: Option<u64>,
     #[arg(long, help = "Path to fake genesis block jam file")]
     pub fakenet_genesis_jam_path: Option<PathBuf>,
     #[arg(long, help = "Public gRPC binding address (off by default), recommended value = \"127.0.0.1:5555\"", value_parser = clap::value_parser!(std::net::SocketAddr))]
     pub bind_public_grpc_addr: Option<std::net::SocketAddr>,
+    #[arg(
+        long,
+        help = "Private gRPC binding address (e.g. 0.0.0.0:5555). \
+                Overrides --bind-private-grpc-port when set. \
+                Needed when the node runs inside a Docker container and the \
+                test host must reach the gRPC endpoint from outside.",
+        value_parser = clap::value_parser!(std::net::SocketAddr)
+    )]
+    pub bind_private_grpc_addr: Option<std::net::SocketAddr>,
     #[arg(long, default_value = "5555")]
     pub bind_private_grpc_port: u16,
-    #[arg(long, default_value = "false")]
-    pub fast_sync: bool,
 }
 
 impl NockchainCli {
@@ -235,7 +255,13 @@ impl NockchainCli {
     {
         let mut matches = Self::command_with_default_stack_size(default_stack_size)
             .try_get_matches_from(args.into_iter().map(Into::into))?;
-        <Self as FromArgMatches>::from_arg_matches_mut(&mut matches)
+        let mut cli = <Self as FromArgMatches>::from_arg_matches_mut(&mut matches)?;
+        if cli.nockapp_cli.pma_initial_size.is_none() {
+            cli.nockapp_cli.pma_initial_size = Some(PmaSize::from_words(
+                cli.nockapp_cli.stack_size.stack_words(),
+            ));
+        }
+        Ok(cli)
     }
 
     fn command_with_default_stack_size(default_stack_size: NockStackSize) -> clap::Command {
@@ -291,6 +317,7 @@ impl NockchainCli {
 #[cfg(test)]
 mod tests {
     use nockapp::kernel::boot::{default_boot_cli, NockStackSize};
+    use nockapp::utils::{NOCK_STACK_SIZE, NOCK_STACK_SIZE_MEDIUM, NOCK_STACK_SIZE_SMALL};
 
     use super::*;
 
@@ -326,10 +353,11 @@ mod tests {
             fakenet_v1_phase: None,
             fakenet_bythos_phase: None,
             fakenet_asert: FakenetAsertArgs::default(),
+            fakenet_update_candidate_interval_secs: None,
             fakenet_genesis_jam_path: None,
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
+            bind_private_grpc_addr: None,
             bind_private_grpc_port: 5555,
-            fast_sync: false,
         }
     }
 
@@ -338,6 +366,10 @@ mod tests {
         let cli =
             NockchainCli::parse_from_with_default_stack_size(["nockchain"], NockStackSize::Medium);
         assert!(matches!(cli.nockapp_cli.stack_size, NockStackSize::Medium));
+        assert_eq!(
+            cli.nockapp_cli.pma_initial_size.unwrap().words(),
+            NOCK_STACK_SIZE_MEDIUM
+        );
     }
 
     #[test]
@@ -347,12 +379,33 @@ mod tests {
             NockStackSize::Medium,
         );
         assert!(matches!(cli.nockapp_cli.stack_size, NockStackSize::Normal));
+        assert_eq!(
+            cli.nockapp_cli.pma_initial_size.unwrap().words(),
+            NOCK_STACK_SIZE
+        );
 
         let cli = NockchainCli::parse_from_with_default_stack_size(
             ["nockchain", "--stack-size=small"],
             NockStackSize::Medium,
         );
         assert!(matches!(cli.nockapp_cli.stack_size, NockStackSize::Small));
+        assert_eq!(
+            cli.nockapp_cli.pma_initial_size.unwrap().words(),
+            NOCK_STACK_SIZE_SMALL
+        );
+    }
+
+    #[test]
+    fn explicit_pma_initial_size_overrides_nockchain_stack_default() {
+        let cli = NockchainCli::parse_from_with_default_stack_size(
+            ["nockchain", "--stack-size=small", "--pma-initial-size=512MiB"],
+            NockStackSize::Medium,
+        );
+        assert!(matches!(cli.nockapp_cli.stack_size, NockStackSize::Small));
+        assert_eq!(
+            cli.nockapp_cli.pma_initial_size.unwrap().words(),
+            64 * 1024 * 1024
+        );
     }
 
     #[test]

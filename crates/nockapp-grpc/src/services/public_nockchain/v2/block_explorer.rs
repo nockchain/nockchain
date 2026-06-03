@@ -130,6 +130,7 @@ pub struct FullPageDetails {
     /// Block content
     pub tx_ids: Vec<Hash>,
     pub coinbase: CoinbaseSplitValue,
+    pub raw_page_bytes: u64,
     pub msg: PageMsgValue,
 }
 
@@ -212,11 +213,22 @@ pub struct BlockExplorerCache {
 }
 
 impl BlockExplorerCache {
-    const RANGE_CHUNK: u64 = 1024;
+    // Keep each kernel peek small enough for block sync traffic to interleave
+    // between cache slices without waiting on ~27s 1024-block decodes.
+    const RANGE_CHUNK: u64 = 128;
     const INITIAL_SEED_RETRY_DELAY: Duration = Duration::from_secs(2);
     const INITIAL_SEED_MAX_WAIT: Duration = Duration::from_secs(120);
     const MIN_TX_PREFIX_LEN: usize = 8;
     const MAX_PREFIX_MATCHES: usize = 16;
+
+    fn range_chunk_start(upper: u64) -> u64 {
+        upper.saturating_sub(Self::RANGE_CHUNK - 1)
+    }
+
+    fn range_chunk_end(lower: u64, upper: u64) -> u64 {
+        lower.saturating_add(Self::RANGE_CHUNK - 1).min(upper)
+    }
+
     pub fn new(metrics: Arc<NockchainGrpcApiMetrics>) -> Self {
         Self {
             blocks_by_height: Arc::new(RwLock::new(BTreeMap::new())),
@@ -320,7 +332,7 @@ impl BlockExplorerCache {
             self.max_height.store(0, Ordering::Release);
         }
 
-        let first_start = max_height.saturating_sub(Self::RANGE_CHUNK - 1);
+        let first_start = Self::range_chunk_start(max_height);
         info!(
             "Attempting to fetch blocks range {}..={}",
             first_start, max_height
@@ -464,7 +476,7 @@ impl BlockExplorerCache {
         let mut inserted = 0usize;
         let mut chunk_start = last_height + 1;
         while chunk_start <= current_height {
-            let chunk_end = (chunk_start + Self::RANGE_CHUNK - 1).min(current_height);
+            let chunk_end = Self::range_chunk_end(chunk_start, current_height);
             match self.peek_blocks_range(handle, chunk_start, chunk_end).await {
                 Ok(blocks) => {
                     if !blocks.is_empty() {
@@ -1053,7 +1065,7 @@ impl BlockExplorerCache {
         let mut acc = Vec::new();
         let mut chunk_start = start;
         while chunk_start <= end {
-            let chunk_end = (chunk_start + Self::RANGE_CHUNK - 1).min(end);
+            let chunk_end = Self::range_chunk_end(chunk_start, end);
             match self.peek_blocks_range(handle, chunk_start, chunk_end).await {
                 Ok(mut chunk) => acc.append(&mut chunk),
                 Err(NockAppGrpcError::PeekReturnedNoData) => {
@@ -1094,7 +1106,7 @@ impl BlockExplorerCache {
             if upper == u64::MAX {
                 break;
             }
-            let start = upper.saturating_sub(Self::RANGE_CHUNK - 1);
+            let start = Self::range_chunk_start(upper);
             let chunk = match self.peek_blocks_range(&handle, start, upper).await {
                 Ok(blocks) => blocks,
                 Err(NockAppGrpcError::PeekReturnedNoData) => {
@@ -1427,6 +1439,27 @@ fn decode_optional_optional_vec_handles<'a>(
         return Ok(None);
     };
     Ok(Some(decode_vec_handles(list)?))
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
+struct BlockRangeEntryNoun {
+    height: BlockHeight,
+    tail: BlockRangeEntryTail,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
+struct BlockRangeEntryTail {
+    block_id: Hash,
+    tail: PageAndTxs,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
+struct PageAndTxs {
+    page: Page,
+    txs: Vec<RawTx>,
 }
 
 impl BlockRangeEntry {
@@ -2113,6 +2146,7 @@ impl FullPageDetails {
         let page_cell = page.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
         let version_or_digest = page_cell.head();
         let rest = page_cell.tail();
+        let raw_page_bytes = jammed_noun_len(page.noun(), page.space()) as u64;
 
         // Determine if v0 or v1 page:
         // - v0 page: [digest pow parent ...] where digest is a Hash (cell of 5 Belts)
@@ -2151,10 +2185,12 @@ impl FullPageDetails {
                     version
                 )));
             }
-            decode_v1_page(height, block_id, rest, txs_noun)
+            decode_v1_page(height, block_id, raw_page_bytes, rest, txs_noun)
         } else {
             // v0 page - head is the digest
-            decode_v0_page(height, block_id, version_or_digest, rest, txs_noun)
+            decode_v0_page(
+                height, block_id, raw_page_bytes, version_or_digest, rest, txs_noun,
+            )
         }
     }
 }
@@ -2162,6 +2198,7 @@ impl FullPageDetails {
 fn decode_v0_page(
     height: u64,
     block_id: Hash,
+    raw_page_bytes: u64,
     digest_noun: NounHandle,
     rest: NounHandle,
     txs_noun: NounHandle,
@@ -2259,6 +2296,7 @@ fn decode_v0_page(
         accumulated_work,
         tx_ids,
         coinbase,
+        raw_page_bytes,
         msg,
     })
 }
@@ -2266,6 +2304,7 @@ fn decode_v0_page(
 fn decode_v1_page(
     height: u64,
     block_id: Hash,
+    raw_page_bytes: u64,
     rest: NounHandle,
     txs_noun: NounHandle,
 ) -> Result<FullPageDetails, NounDecodeError> {
@@ -2367,6 +2406,7 @@ fn decode_v1_page(
         accumulated_work,
         tx_ids,
         coinbase,
+        raw_page_bytes,
         msg,
     })
 }
@@ -2514,6 +2554,12 @@ fn decode_page_msg(noun: &NounHandle) -> Result<PageMsgValue, NounDecodeError> {
     Ok(PageMsgValue { raw: bytes })
 }
 
+fn jammed_noun_len(noun: Noun, space: &NounSpace) -> usize {
+    let mut slab: NounSlab = NounSlab::new();
+    slab.copy_into(noun, space);
+    slab.jam().len()
+}
+
 // ============================================================================
 // Proto Conversion
 // ============================================================================
@@ -2552,6 +2598,7 @@ impl FullPageDetails {
             tx_count: self.tx_ids.len() as u32,
             has_pow: self.pow_present,
             version: self.version,
+            raw_page_bytes: Some(self.raw_page_bytes),
         }
     }
 
@@ -2608,8 +2655,12 @@ impl FullPageDetails {
 mod tests {
     use bytes::Bytes;
     use nockchain_math::belt::Belt;
-    use nockchain_types::tx_engine::common::{BlockHeight, Hash};
     use nockchain_types::tx_engine::v1::note::{NoteData, NoteDataEntry};
+    use nockapp::driver::PokeResult;
+    use nockapp::nockapp::error::NockAppError;
+    use nockapp::wire::WireRepr;
+    use nockchain_math::belt::Belt;
+    use nockchain_types::tx_engine::common::{BigNum, BlockHeight, CoinbaseSplit, Hash, Page};
     use nockvm::noun::NounAllocator;
     use noun_serde::{NounDecode, NounEncode};
 
@@ -2760,5 +2811,211 @@ mod tests {
         assert_eq!(nd.entries.len(), 1);
         assert_eq!(nd.entries[0].key, "foo");
         assert_eq!(nd.entries[0].blob.as_slice(), b"bar");
+    }
+
+    fn test_full_page_details_reports_jammed_page_bytes() {
+        let mut slab: NounSlab = NounSlab::new();
+
+        let height = BlockHeight(Belt(42));
+        let height_noun = height.to_noun(&mut slab);
+
+        let block_id = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
+        let block_id_noun = block_id.to_noun(&mut slab);
+
+        let digest = Hash([Belt(10), Belt(11), Belt(12), Belt(13), Belt(14)]);
+        let pow = nockvm::noun::D(0);
+        let tx_ids_set = nockvm::noun::D(0);
+        let coinbase = nockvm::noun::D(0);
+        let timestamp = Belt(1234567890);
+        let epoch_counter = Belt(0);
+        let target = Belt(100);
+        let accumulated_work = Belt(500);
+        let page_height = Belt(42);
+        let parent = Hash([Belt(20), Belt(21), Belt(22), Belt(23), Belt(24)]);
+        let msg = nockvm::noun::D(0);
+
+        let digest_noun = digest.to_noun(&mut slab);
+        let parent_noun = parent.to_noun(&mut slab);
+        let timestamp_noun = timestamp.to_noun(&mut slab);
+        let epoch_counter_noun = epoch_counter.to_noun(&mut slab);
+        let target_noun = target.to_noun(&mut slab);
+        let accumulated_work_noun = accumulated_work.to_noun(&mut slab);
+        let page_height_noun = page_height.to_noun(&mut slab);
+
+        let page_noun = nockvm::noun::T(
+            &mut slab,
+            &[
+                digest_noun, pow, parent_noun, tx_ids_set, coinbase, timestamp_noun,
+                epoch_counter_noun, target_noun, accumulated_work_noun, page_height_noun, msg,
+            ],
+        );
+        let txs_map_noun = nockvm::noun::D(0);
+        let page_txs_cell = nockvm::noun::T(&mut slab, &[page_noun, txs_map_noun]);
+        let block_page_cell = nockvm::noun::T(&mut slab, &[block_id_noun, page_txs_cell]);
+        let entry_noun = nockvm::noun::T(&mut slab, &[height_noun, block_page_cell]);
+
+        let space = slab.noun_space();
+        let expected_raw_page_bytes = jammed_noun_len(page_noun, &space) as u64;
+        let details = FullPageDetails::from_noun_handle(&entry_noun.in_space(&space))
+            .expect("convert raw entry");
+
+        assert_eq!(details.raw_page_bytes, expected_raw_page_bytes);
+        assert!(details.msg.raw.is_empty());
+    }
+
+    #[test]
+    fn test_range_chunk_helpers_bound_kernel_slice() {
+        assert_eq!(BlockExplorerCache::RANGE_CHUNK, 128);
+        assert_eq!(BlockExplorerCache::range_chunk_start(255), 128);
+        assert_eq!(BlockExplorerCache::range_chunk_end(1, 255), 128);
+        assert_eq!(BlockExplorerCache::range_chunk_end(129, 255), 255);
+    }
+
+    struct RecordingRangeHandle {
+        heaviest_height: u64,
+        requested_ranges: Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl RecordingRangeHandle {
+        fn new(heaviest_height: u64) -> Self {
+            Self {
+                heaviest_height,
+                requested_ranges: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested_ranges(&self) -> Vec<(u64, u64)> {
+            self.requested_ranges
+                .lock()
+                .expect("requested ranges lock poisoned")
+                .clone()
+        }
+
+        fn encode_heaviest_chain(&self) -> NounSlab {
+            let mut slab = NounSlab::new();
+            let noun = Some(Some((
+                BlockHeight(Belt(self.heaviest_height)),
+                test_hash(self.heaviest_height),
+            )))
+            .to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+
+        fn encode_block_range(&self, end: u64) -> NounSlab {
+            let mut slab = NounSlab::new();
+            let noun = Some(Some(vec![test_block_range_entry(end)])).to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BalanceHandle for RecordingRangeHandle {
+        async fn peek(
+            &self,
+            path: NounSlab,
+        ) -> std::result::Result<Option<NounSlab>, NockAppError> {
+            let space = path.noun_space();
+            let root = unsafe { *path.root() };
+            let items = path_items(root, &space);
+            let tag = String::from_noun(&items[0], &space).expect("path tag should decode");
+
+            match tag.as_str() {
+                "heaviest-chain" => Ok(Some(self.encode_heaviest_chain())),
+                "heaviest-chain-blocks-range" => {
+                    assert_eq!(items.len(), 3, "range path should include start and end");
+                    let start = atom_u64(items[1], &space);
+                    let end = atom_u64(items[2], &space);
+                    self.requested_ranges
+                        .lock()
+                        .expect("requested ranges lock poisoned")
+                        .push((start, end));
+                    Ok(Some(self.encode_block_range(end)))
+                }
+                other => panic!("unexpected peek path tag: {other}"),
+            }
+        }
+
+        async fn poke(
+            &self,
+            _wire: WireRepr,
+            _payload: NounSlab,
+        ) -> std::result::Result<PokeResult, NockAppError> {
+            Err(NockAppError::OtherError(
+                "poke not supported in test handle".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_inner_requests_latest_seed_window_and_queues_backfill() {
+        let metrics = crate::public_nockchain::v2::metrics::init_metrics();
+        let cache = Arc::new(BlockExplorerCache::new(metrics));
+        let handle = Arc::new(RecordingRangeHandle::new(255));
+        let balance_handle: Arc<dyn BalanceHandle> = handle.clone();
+
+        let initialized = cache
+            .clone()
+            .initialize_inner(balance_handle)
+            .await
+            .expect("cache initialization should succeed");
+
+        assert!(initialized, "cache should report a successful seed");
+        assert_eq!(handle.requested_ranges(), vec![(128, 255)]);
+        assert_eq!(cache.get_max_height(), 255);
+        assert_eq!(cache.take_backfill_resume().await, Some(127));
+    }
+
+    fn test_hash(seed: u64) -> Hash {
+        Hash([Belt(seed + 1), Belt(seed + 2), Belt(seed + 3), Belt(seed + 4), Belt(seed + 5)])
+    }
+
+    fn test_block_range_entry(height: u64) -> BlockRangeEntryNoun {
+        let digest = test_hash(height + 10);
+        BlockRangeEntryNoun {
+            height: BlockHeight(Belt(height)),
+            tail: BlockRangeEntryTail {
+                block_id: digest.clone(),
+                tail: PageAndTxs {
+                    page: Page {
+                        digest,
+                        pow: None,
+                        parent: test_hash(height + 20),
+                        tx_ids: Vec::new(),
+                        coinbase: CoinbaseSplit::V1,
+                        timestamp: height * 10,
+                        epoch_counter: 0,
+                        target: BigNum::from_u64(1),
+                        accumulated_work: BigNum::from_u64(height + 1),
+                        height,
+                        msg: Vec::new(),
+                    },
+                    txs: Vec::new(),
+                },
+            },
+        }
+    }
+
+    fn path_items(noun: Noun, space: &NounSpace) -> Vec<Noun> {
+        let mut items = Vec::new();
+        let mut noun = noun.in_space(space);
+        loop {
+            if let Ok(atom) = noun.as_atom() {
+                assert_eq!(atom.as_u64().expect("path terminator should be u64"), 0);
+                return items;
+            }
+            let cell = noun.as_cell().expect("path should decode as noun list");
+            items.push(cell.head().noun());
+            noun = cell.tail();
+        }
+    }
+
+    fn atom_u64(noun: Noun, space: &NounSpace) -> u64 {
+        noun.in_space(space)
+            .as_atom()
+            .expect("expected atom")
+            .as_u64()
+            .expect("expected u64 atom")
     }
 }

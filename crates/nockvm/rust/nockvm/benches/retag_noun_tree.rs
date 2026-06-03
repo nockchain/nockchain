@@ -225,8 +225,15 @@ fn load_kernel_dumb_stack_pointer_form(stack: &mut NockStack) -> Noun {
 /// Direct atoms are ignored since they have no allocation.
 /// Returns (is_valid, stack_pointer_count, offset_count) for debugging
 #[allow(dead_code)]
-fn check_noun_tagging_state(stack: &NockStack, root: Noun) -> (bool, usize, usize) {
-    let space = stack.noun_space();
+fn check_noun_tagging_state(
+    stack: &NockStack,
+    pma: Option<&Pma>,
+    root: Noun,
+) -> (bool, usize, usize) {
+    let space = pma.map_or_else(
+        || stack.noun_space(),
+        |pma| nockvm::noun::NounSpace::new(stack, pma),
+    );
     let mut work: Vec<Noun> = Vec::with_capacity(32);
     let mut visited: HashSet<u64> = HashSet::new();
     let mut stack_pointer_count = 0usize;
@@ -273,7 +280,7 @@ fn check_noun_tagging_state(stack: &NockStack, root: Noun) -> (bool, usize, usiz
 /// Returns true if all allocated nouns are in stack-pointer form
 #[allow(dead_code)]
 fn is_entirely_stack_pointer_form(stack: &NockStack, root: Noun) -> bool {
-    let (all_stack_pointer, _, _) = check_noun_tagging_state(stack, root);
+    let (all_stack_pointer, _, _) = check_noun_tagging_state(stack, None, root);
     all_stack_pointer
 }
 
@@ -425,7 +432,7 @@ fn bench_retag_noun_tree(c: &mut Criterion) {
 
                 // Sanity check: kernel should be entirely in stack-pointer form before retagging
                 let (all_stack, stack_count, offset_count) =
-                    check_noun_tagging_state(&stack, kernel_ptr_form);
+                    check_noun_tagging_state(&stack, Some(&pma), kernel_ptr_form);
                 assert!(
                     all_stack,
                     "Kernel should be in stack-pointer form before retag_noun_tree. \
@@ -441,7 +448,7 @@ fn bench_retag_noun_tree(c: &mut Criterion) {
 
                 // Sanity check: kernel should be entirely in offset form after retagging
                 let (_, stack_count_after, offset_count_after) =
-                    check_noun_tagging_state(&stack, kernel_ptr_form);
+                    check_noun_tagging_state(&stack, Some(&pma), kernel_ptr_form);
                 assert!(
                     stack_count_after == 0,
                     "Kernel should be in offset form after retag_noun_tree. \

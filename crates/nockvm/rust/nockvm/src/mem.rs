@@ -1,11 +1,15 @@
+#![allow(clippy::missing_safety_doc)]
+
 // TODO: fix stack push in PC
 use std::alloc::{alloc, dealloc, Layout};
 use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 #[cfg(not(feature = "no_check_oom"))]
 use std::panic::panic_any;
 use std::path::Path;
 use std::ptr::copy_nonoverlapping;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::vec::Vec;
 use std::{io, mem, ptr};
@@ -187,8 +191,10 @@ pub enum Direction {
 #[derive(Debug)]
 pub struct Arena {
     base: *mut u8,
-    words: usize,
-    mapped_bytes: usize,
+    words: AtomicUsize,
+    mapped_bytes: AtomicUsize,
+    reserved_words: usize,
+    reserved_mapped_bytes: usize,
     fd: Option<Arc<File>>,
     mapping: MappingKind,
 }
@@ -198,6 +204,8 @@ enum MappingKind {
     ReadWrite(MmapMut),
     ReadOnly(Mmap),
     Malloc(MallocMapping),
+    #[cfg(unix)]
+    GrowableFile(GrowableFileMapping),
 }
 
 #[derive(Debug)]
@@ -226,6 +234,25 @@ impl Drop for MallocMapping {
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+struct GrowableFileMapping {
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[cfg(unix)]
+impl Drop for GrowableFileMapping {
+    fn drop(&mut self) {
+        if self.len == 0 || self.ptr.is_null() {
+            return;
+        }
+        unsafe {
+            libc::munmap(self.ptr as *mut libc::c_void, self.len);
+        }
+    }
+}
+
 impl Arena {
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn allocate(words: usize) -> Result<Arc<Self>, NewStackError> {
@@ -236,8 +263,10 @@ impl Arena {
             let base = mapping.as_mut_ptr();
             return Ok(Arc::new(Self {
                 base,
-                words,
-                mapped_bytes: bytes,
+                words: AtomicUsize::new(words),
+                mapped_bytes: AtomicUsize::new(bytes),
+                reserved_words: words,
+                reserved_mapped_bytes: bytes,
                 fd: None,
                 mapping: MappingKind::ReadWrite(mapping),
             }));
@@ -248,8 +277,10 @@ impl Arena {
             let base = mapping.ptr;
             return Ok(Arc::new(Self {
                 base,
-                words,
-                mapped_bytes: bytes,
+                words: AtomicUsize::new(words),
+                mapped_bytes: AtomicUsize::new(bytes),
+                reserved_words: words,
+                reserved_mapped_bytes: bytes,
                 fd: None,
                 mapping: MappingKind::Malloc(mapping),
             }));
@@ -281,11 +312,128 @@ impl Arena {
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Arc::new(Self {
             base,
-            words,
-            mapped_bytes,
+            words: AtomicUsize::new(words),
+            mapped_bytes: AtomicUsize::new(mapped_bytes),
+            reserved_words: words,
+            reserved_mapped_bytes: mapped_bytes,
             fd: Some(file),
             mapping: MappingKind::ReadWrite(mapping),
         }))
+    }
+
+    pub fn allocate_growable_file(
+        path: &Path,
+        capacity_words: usize,
+        reserved_words: usize,
+        tail_bytes: usize,
+    ) -> Result<Arc<Self>, NewStackError> {
+        let file_bytes = file_len_for_words(capacity_words, tail_bytes)?;
+        let reserved_file_bytes = file_len_for_words(reserved_words, tail_bytes)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(NewStackError::FileOpenFailed)?;
+        file.set_len(file_bytes as u64)
+            .map_err(NewStackError::FileResizeFailed)?;
+        Self::map_growable_file(
+            file, capacity_words, reserved_words, file_bytes, reserved_file_bytes,
+        )
+    }
+
+    pub fn open_growable_file(
+        path: &Path,
+        capacity_words: usize,
+        reserved_words: usize,
+        tail_bytes: usize,
+    ) -> Result<Arc<Self>, NewStackError> {
+        let file_bytes = file_len_for_words(capacity_words, tail_bytes)?;
+        let reserved_file_bytes = file_len_for_words(reserved_words, tail_bytes)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(NewStackError::FileOpenFailed)?;
+        Self::map_growable_file(
+            file, capacity_words, reserved_words, file_bytes, reserved_file_bytes,
+        )
+    }
+
+    #[cfg(unix)]
+    fn map_growable_file(
+        file: File,
+        capacity_words: usize,
+        reserved_words: usize,
+        file_bytes: usize,
+        reserved_file_bytes: usize,
+    ) -> Result<Arc<Self>, NewStackError> {
+        if reserved_words < capacity_words || reserved_file_bytes < file_bytes {
+            return Err(NewStackError::StackTooSmall);
+        }
+        let reserved_mapping_bytes = page_align_len(reserved_file_bytes)?;
+        let file_mapping_bytes = page_align_len(file_bytes)?;
+        let file = Arc::new(file);
+        let reservation = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                reserved_mapping_bytes,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANON,
+                -1,
+                0,
+            )
+        };
+        if reservation == libc::MAP_FAILED {
+            return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
+        }
+        let mapped = unsafe {
+            libc::mmap(
+                reservation,
+                file_mapping_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_FIXED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            let err = io::Error::last_os_error();
+            unsafe {
+                libc::munmap(reservation, reserved_mapping_bytes);
+            }
+            return Err(NewStackError::MmapFailed(err));
+        }
+        debug_assert_eq!(mapped, reservation);
+        let base = reservation as *mut u8;
+        #[allow(clippy::arc_with_non_send_sync)]
+        Ok(Arc::new(Self {
+            base,
+            words: AtomicUsize::new(capacity_words),
+            mapped_bytes: AtomicUsize::new(file_bytes),
+            reserved_words,
+            reserved_mapped_bytes: reserved_file_bytes,
+            fd: Some(file),
+            mapping: MappingKind::GrowableFile(GrowableFileMapping {
+                ptr: base,
+                len: reserved_mapping_bytes,
+            }),
+        }))
+    }
+
+    #[cfg(not(unix))]
+    fn map_growable_file(
+        _file: File,
+        _capacity_words: usize,
+        _reserved_words: usize,
+        _file_bytes: usize,
+        _reserved_file_bytes: usize,
+    ) -> Result<Arc<Self>, NewStackError> {
+        Err(NewStackError::MmapFailed(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "growable PMA file mappings require Unix mmap",
+        )))
     }
 
     pub fn open_file(path: &Path, words: usize) -> Result<Arc<Self>, NewStackError> {
@@ -301,8 +449,10 @@ impl Arena {
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Arc::new(Self {
             base,
-            words,
-            mapped_bytes,
+            words: AtomicUsize::new(words),
+            mapped_bytes: AtomicUsize::new(mapped_bytes),
+            reserved_words: words,
+            reserved_mapped_bytes: mapped_bytes,
             fd: Some(file),
             mapping: MappingKind::ReadWrite(mapping),
         }))
@@ -310,19 +460,29 @@ impl Arena {
 
     #[inline]
     pub fn words(&self) -> usize {
-        self.words
+        self.words.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn reserved_words(&self) -> usize {
+        self.reserved_words
     }
 
     #[inline]
     pub fn len_bytes(&self) -> usize {
-        self.words
+        self.words()
             .checked_mul(8)
             .expect("arena length in bytes exceeds usize")
     }
 
     #[inline]
     pub fn mapped_len_bytes(&self) -> usize {
-        self.mapped_bytes
+        self.mapped_bytes.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub fn reserved_len_bytes(&self) -> usize {
+        self.reserved_mapped_bytes
     }
 
     #[inline]
@@ -368,7 +528,7 @@ impl Arena {
         };
         unsafe {
             MmapOptions::new()
-                .len(self.mapped_bytes)
+                .len(self.mapped_len_bytes())
                 .map_copy_read_only(&**fd)
         }
     }
@@ -382,19 +542,103 @@ impl Arena {
         };
         let mapping = unsafe {
             MmapOptions::new()
-                .len(self.mapped_bytes)
+                .len(self.mapped_len_bytes())
                 .map_copy_read_only(&**fd)?
         };
         let base = mapping.as_ptr() as *mut u8;
+        let words = self.words();
+        let mapped_bytes = self.mapped_len_bytes();
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Arc::new(Self {
             base,
-            words: self.words,
-            mapped_bytes: self.mapped_bytes,
+            words: AtomicUsize::new(words),
+            mapped_bytes: AtomicUsize::new(mapped_bytes),
+            reserved_words: words,
+            reserved_mapped_bytes: mapped_bytes,
             fd: Some(Arc::clone(fd)),
             mapping: MappingKind::ReadOnly(mapping),
         }))
     }
+
+    pub fn grow_file_capacity(
+        &self,
+        new_words: usize,
+        tail_bytes: usize,
+    ) -> Result<(), NewStackError> {
+        if new_words > self.reserved_words {
+            return Err(NewStackError::StackTooSmall);
+        }
+        let old_words = self.words();
+        if new_words <= old_words {
+            return Ok(());
+        }
+        let file_bytes = file_len_for_words(new_words, tail_bytes)?;
+        if file_bytes > self.reserved_mapped_bytes {
+            return Err(NewStackError::StackTooSmall);
+        }
+        let Some(fd) = &self.fd else {
+            return Err(NewStackError::FileOpenFailed(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "arena has no file backing",
+            )));
+        };
+        fd.set_len(file_bytes as u64)
+            .map_err(NewStackError::FileResizeFailed)?;
+        #[cfg(unix)]
+        if let MappingKind::GrowableFile(_) = &self.mapping {
+            let old_file_bytes = self.mapped_len_bytes();
+            let old_mapping_bytes = page_align_len(old_file_bytes)?;
+            let new_mapping_bytes = page_align_len(file_bytes)?;
+            if new_mapping_bytes > old_mapping_bytes {
+                let map_len = new_mapping_bytes
+                    .checked_sub(old_mapping_bytes)
+                    .ok_or(NewStackError::StackTooSmall)?;
+                let map_addr = unsafe { self.base.add(old_mapping_bytes) };
+                let map_offset = i64::try_from(old_mapping_bytes)
+                    .map_err(|_| NewStackError::StackTooSmall)?
+                    as libc::off_t;
+                let mapped = unsafe {
+                    libc::mmap(
+                        map_addr as *mut libc::c_void,
+                        map_len,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED | libc::MAP_FIXED,
+                        fd.as_raw_fd(),
+                        map_offset,
+                    )
+                };
+                if mapped == libc::MAP_FAILED {
+                    return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
+                }
+                debug_assert_eq!(mapped, map_addr as *mut libc::c_void);
+            }
+        }
+        self.words.store(new_words, Ordering::Release);
+        self.mapped_bytes.store(file_bytes, Ordering::Release);
+        Ok(())
+    }
+}
+
+fn file_len_for_words(words: usize, tail_bytes: usize) -> Result<usize, NewStackError> {
+    let bytes = words.checked_shl(3).ok_or(NewStackError::StackTooSmall)?;
+    bytes
+        .checked_add(tail_bytes)
+        .ok_or(NewStackError::StackTooSmall)
+}
+
+#[cfg(unix)]
+fn page_align_len(len: usize) -> Result<usize, NewStackError> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
+    }
+    let page_size = usize::try_from(page_size).map_err(|_| NewStackError::StackTooSmall)?;
+    let mask = page_size
+        .checked_sub(1)
+        .ok_or(NewStackError::StackTooSmall)?;
+    len.checked_add(mask)
+        .map(|value| value & !mask)
+        .ok_or(NewStackError::StackTooSmall)
 }
 
 /// A stack for Nock computation, which supports stack allocation and delimited copying collection

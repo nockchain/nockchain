@@ -3,7 +3,7 @@ use std::slice;
 use std::time::Instant;
 
 use either::Either::{self, *};
-use tracing::info;
+use tracing::debug;
 
 use crate::mem::{NockStack, Preserve};
 use crate::mug::mug_u32;
@@ -727,7 +727,7 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
         let trace = std::env::var_os("NOCK_PMA_TRACE").is_some();
         if pma.contains_ptr(self.0 as *const u8) {
             if trace {
-                info!("pma-copy: hamt skip: root already in PMA");
+                debug!("pma-copy: hamt skip: root already in PMA");
             }
             return;
         }
@@ -744,7 +744,7 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
             && std::any::type_name::<T>().contains("WarmEntry");
         if trace {
             let root_size = (*self.0).size();
-            info!(
+            debug!(
                 "pma-copy: hamt start: root_ptr={:p} root_size={}",
                 self.0, root_size
             );
@@ -833,7 +833,7 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
                 let new_leaf = Leaf { len, buffer: db };
                 leaf_copies += 1;
                 if trace_detail {
-                    info!(
+                    debug!(
                         "pma-copy: hamt leaf start: len={}, pair_index_start={}",
                         len, leaf_pairs
                     );
@@ -844,23 +844,23 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
                 let end = p.add(len);
                 while p != end {
                     if trace_detail {
-                        info!("pma-copy: hamt pair {} key start", leaf_pairs);
+                        debug!("pma-copy: hamt pair {} key start", leaf_pairs);
                     }
                     (*p).0.copy_to_pma(stack, pma);
                     if trace_detail {
-                        info!("pma-copy: hamt pair {} key done", leaf_pairs);
-                        info!("pma-copy: hamt pair {} val start", leaf_pairs);
+                        debug!("pma-copy: hamt pair {} key done", leaf_pairs);
+                        debug!("pma-copy: hamt pair {} val start", leaf_pairs);
                     }
                     (*p).1.copy_to_pma(stack, pma);
                     if trace_detail {
-                        info!("pma-copy: hamt pair {} val done", leaf_pairs);
+                        debug!("pma-copy: hamt pair {} val done", leaf_pairs);
                     }
                     p = p.add(1);
                     leaf_pairs += 1;
                     if trace && (leaf_pairs & 0x3fff == 0) {
                         let now = Instant::now();
                         if now.duration_since(last_progress).as_millis() >= 2000 {
-                            info!(
+                            debug!(
                                 "pma-copy: hamt progress: stems_copied={}, leaves_copied={}, leaf_pairs={}, stem_skips={}, leaf_skips={}, elapsed_ms={}",
                                 stem_copies,
                                 leaf_copies,
@@ -874,7 +874,7 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
                     }
                 }
                 if trace_detail {
-                    info!(
+                    debug!(
                         "pma-copy: hamt leaf done: len={}, pair_index_end={}",
                         len, leaf_pairs
                     );
@@ -884,7 +884,7 @@ impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
         }
 
         if trace {
-            info!(
+            debug!(
                 "pma-copy: hamt done: stems_copied={}, leaves_copied={}, leaf_pairs={}, stem_skips={}, leaf_skips={}, elapsed_ms={}",
                 stem_copies,
                 leaf_copies,
@@ -911,7 +911,7 @@ impl<T: Copy + PmaCopyFrom> PmaCopyFrom for Hamt<T> {
 
         if trace {
             let root_size = (*self.0).size();
-            info!(
+            debug!(
                 "pma-gc: hamt start: root_ptr={:p} root_size={}",
                 self.0, root_size
             );
@@ -994,7 +994,7 @@ impl<T: Copy + PmaCopyFrom> PmaCopyFrom for Hamt<T> {
                     if trace && (leaf_pairs & 0x3fff == 0) {
                         let now = Instant::now();
                         if now.duration_since(last_progress).as_millis() >= 2000 {
-                            info!(
+                            debug!(
                                 "pma-gc: hamt progress: stems_copied={}, leaves_copied={}, leaf_pairs={}, elapsed_ms={}",
                                 stem_copies,
                                 leaf_copies,
@@ -1010,7 +1010,7 @@ impl<T: Copy + PmaCopyFrom> PmaCopyFrom for Hamt<T> {
         }
 
         if trace {
-            info!(
+            debug!(
                 "pma-gc: hamt done: stems_copied={}, leaves_copied={}, leaf_pairs={}, elapsed_ms={}",
                 stem_copies,
                 leaf_copies,
