@@ -2659,7 +2659,6 @@ mod tests {
     use nockapp::driver::PokeResult;
     use nockapp::nockapp::error::NockAppError;
     use nockapp::wire::WireRepr;
-    use nockchain_math::belt::Belt;
     use nockchain_types::tx_engine::common::{BigNum, BlockHeight, CoinbaseSplit, Hash, Page};
     use nockvm::noun::NounAllocator;
     use noun_serde::{NounDecode, NounEncode};
