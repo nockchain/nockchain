@@ -14,13 +14,14 @@ use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonMapIter;
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Page};
 use nockchain_types::tx_engine::v0::{Lock, NoteV0, RawTx};
+use nockchain_types::tx_engine::v1::{NoteData, Spend, Spends};
 use nockvm::noun::{Noun, NounAllocator, NounHandle, NounSpace, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{NockAppGrpcError, Result as GrpcResult};
-use crate::pb::common::v1 as pb_common;
+use crate::pb::common::{v1 as pb_common, v2 as pb_common_v2};
 use crate::public_nockchain::v2::metrics::NockchainGrpcApiMetrics;
 use crate::public_nockchain::v2::server::BalanceHandle;
 
@@ -1625,7 +1626,7 @@ struct TxV1Data {
     total_fee: u64,
     /// Simplified input info: (name_hash, assets)
     inputs: Vec<TxV1Input>,
-    /// Simplified output info: (lock_hash, assets)
+    /// Simplified output info: (lock_hash, assets, note_data)
     outputs: Vec<TxV1Output>,
 }
 
@@ -1634,12 +1635,15 @@ struct TxV1Input {
     name_first: Hash,
     // We don't have access to input amounts in v1 spends directly
     // The amount comes from the note being spent, which we don't have here
+    /// Schnorr pubkey base58 strings extracted from this spend's signatures.
+    signer_pubkey_b58: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct TxV1Output {
     lock_root: Hash,
     assets: u64,
+    note_data: NoteData,
 }
 
 #[derive(Debug, Clone)]
@@ -1734,54 +1738,48 @@ impl NounDecode for DecodedTx {
 }
 
 /// Returns (inputs, total_fee)
-fn decode_v1_spends(noun: &NounHandle) -> Result<(Vec<TxV1Input>, u64), NounDecodeError> {
+fn decode_v1_spends(noun: &NounHandle<'_>) -> Result<(Vec<TxV1Input>, u64), NounDecodeError> {
     if let Ok(atom) = noun.as_atom() {
         if atom.as_u64()? == 0 {
             return Ok((Vec::new(), 0));
         }
     }
 
+    let space = noun.space();
+    let Spends(pairs) = Spends::from_noun(&noun.noun(), space)?;
     let mut inputs = Vec::new();
     let mut total_fee = 0u64;
-    for (idx, entry) in HoonMapIter::new(noun).enumerate() {
-        if !entry.is_cell() {
-            return Err(NounDecodeError::Custom(format!(
-                "decode_v1_spends: entry {} is not a cell (expected z-map [nname spend] pair)",
-                idx
-            )));
-        }
-        let [key, value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        // key is nname (Name type)
-        let name = Name::from_noun_handle(&key).map_err(|e| {
-            NounDecodeError::Custom(format!(
-                "decode_v1_spends: failed to decode name at entry {}: {}",
-                idx, e
-            ))
-        })?;
+    for (name, spend) in pairs {
+        total_fee += match &spend {
+            Spend::Legacy(s) => s.fee.0 as u64,
+            Spend::Witness(s) => s.fee.0 as u64,
+        };
         inputs.push(TxV1Input {
             name_first: name.first,
+            signer_pubkey_b58: signer_pubkeys_b58_from_spend(&spend),
         });
-
-        // Extract fee from spend: spend is [tag [sig/witness [seeds fee]]]
-        // Navigate: value.tail().tail().tail() to get fee
-        if let Ok(spend_cell) = value.as_cell() {
-            // spend_cell is [tag spend-data]
-            if let Ok(spend_data) = spend_cell.tail().as_cell() {
-                // spend_data is [sig/witness [seeds fee]]
-                if let Ok(seeds_fee) = spend_data.tail().as_cell() {
-                    // seeds_fee is [seeds fee]
-                    let fee_noun = seeds_fee.tail();
-                    if let Ok(fee_atom) = fee_noun.as_atom() {
-                        if let Ok(fee) = fee_atom.as_u64() {
-                            total_fee += fee;
-                        }
-                    }
-                }
-            }
-        }
     }
 
     Ok((inputs, total_fee))
+}
+
+/// Schnorr pubkey base58 for every key that provided a signature on this spend.
+fn signer_pubkeys_b58_from_spend(spend: &Spend) -> Vec<String> {
+    match spend {
+        Spend::Legacy(s) => s
+            .signature
+            .0
+            .iter()
+            .filter_map(|(pk, _)| pk.to_base58().ok())
+            .collect(),
+        Spend::Witness(s) => s
+            .witness
+            .pkh_signature
+            .0
+            .iter()
+            .filter_map(|e| e.pubkey.to_base58().ok())
+            .collect(),
+    }
 }
 
 fn decode_outputs_v1(noun: &NounHandle) -> Result<Vec<TxV1Output>, NounDecodeError> {
@@ -1895,7 +1893,12 @@ fn decode_outputs_v1(noun: &NounHandle) -> Result<Vec<TxV1Output>, NounDecodeErr
                 idx
             ))
         })?;
-        let _note_data = note_tail.head(); // z-map @tas * - skip
+        let note_data = NoteData::from_noun_handle(&note_tail.head()).map_err(|e| {
+            NounDecodeError::Custom(format!(
+                "decode_outputs_v1: output {} note-data parse failed: {e:?}",
+                idx
+            ))
+        })?;
         let assets = u64::from_noun_handle(&note_tail.tail()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} assets not atom: {e:?}",
@@ -1906,6 +1909,7 @@ fn decode_outputs_v1(noun: &NounHandle) -> Result<Vec<TxV1Output>, NounDecodeErr
         outputs.push(TxV1Output {
             lock_root: name.first, // For v1, name.first is the lock root hash
             assets,
+            note_data,
         });
     }
 
@@ -1981,6 +1985,7 @@ fn build_transaction_details_v0(
             amount: Some(pb_common::Nicks { value: amount }),
             source_tx_id: input.note.tail.source.hash.to_base58(),
             coinbase: input.note.tail.source.is_coinbase,
+            signer_pubkey_b58: vec![],
         });
     }
 
@@ -1995,6 +2000,7 @@ fn build_transaction_details_v0(
                 pb_common::Nicks { value: amount },
             )),
             lock_summary: lock_summary(&output.lock),
+            note_data: None,
         });
     }
 
@@ -2041,6 +2047,7 @@ fn build_transaction_details_v1(
             amount: None,                // Amount not available in v1 spend data
             source_tx_id: String::new(), // Not directly available
             coinbase: false,             // Would need to check the note being spent
+            signer_pubkey_b58: input.signer_pubkey_b58.clone(),
         });
     }
 
@@ -2056,6 +2063,7 @@ fn build_transaction_details_v1(
                 },
             )),
             lock_summary: format!("lock:{}", &output.lock_root.to_base58()[..8]),
+            note_data: Some(pb_common_v2::NoteData::from(output.note_data.clone())),
         });
     }
 
@@ -2645,10 +2653,12 @@ impl FullPageDetails {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use nockchain_math::belt::Belt;
+    use nockchain_types::tx_engine::v1::note::{NoteData, NoteDataEntry};
     use nockapp::driver::PokeResult;
     use nockapp::nockapp::error::NockAppError;
     use nockapp::wire::WireRepr;
-    use nockchain_math::belt::Belt;
     use nockchain_types::tx_engine::common::{BigNum, BlockHeight, CoinbaseSplit, Hash, Page};
     use nockvm::noun::NounAllocator;
     use noun_serde::{NounDecode, NounEncode};
@@ -2760,6 +2770,48 @@ mod tests {
     }
 
     #[test]
+    fn build_transaction_details_v1_includes_note_data_on_outputs() {
+        let metadata = BlockMetadata {
+            height: 100,
+            block_id: Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
+            parent_id: Hash([Belt(10), Belt(11), Belt(12), Belt(13), Belt(14)]),
+            timestamp: 1_700_000_000,
+            tx_ids: vec![],
+        };
+        let tx_hash = Hash([Belt(20), Belt(21), Belt(22), Belt(23), Belt(24)]);
+        let lock_root = Hash([Belt(30), Belt(31), Belt(32), Belt(33), Belt(34)]);
+        let lock_root_b58 = lock_root.to_base58();
+
+        let note_data = NoteData::new(vec![NoteDataEntry::new(
+            "foo".to_string(),
+            Bytes::from_static(b"bar"),
+        )]);
+
+        let tx = TxV1Data {
+            total_size: 256,
+            total_fee: 10,
+            inputs: vec![],
+            outputs: vec![TxV1Output {
+                lock_root,
+                assets: 99,
+                note_data: note_data.clone(),
+            }],
+        };
+
+        let details = build_transaction_details(&metadata, &tx_hash, DecodedTx::V1(tx));
+        assert_eq!(details.version, 1);
+        assert_eq!(details.outputs.len(), 1);
+        let out = &details.outputs[0];
+        assert_eq!(out.note_name_b58, lock_root_b58);
+        let nd = out
+            .note_data
+            .as_ref()
+            .expect("v1 transaction output should carry note_data");
+        assert_eq!(nd.entries.len(), 1);
+        assert_eq!(nd.entries[0].key, "foo");
+        assert_eq!(nd.entries[0].blob.as_slice(), b"bar");
+    }
+
     fn test_full_page_details_reports_jammed_page_bytes() {
         let mut slab: NounSlab = NounSlab::new();
 

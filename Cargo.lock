@@ -6067,10 +6067,12 @@ name = "nockchain-wallet"
 version = "0.1.0"
 dependencies = [
  "bs58",
+ "bytes",
  "clap",
  "crossterm 0.29.0",
  "either",
  "getrandom 0.3.4",
+ "hex",
  "http",
  "kernels-open-wallet",
  "nockapp",
@@ -10057,6 +10059,7 @@ dependencies = [
 name = "wallet-tx-builder"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytes",
  "nockapp",
  "nockchain-math",

@@ -3,6 +3,9 @@ use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Nicks, Schnorr
 use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
 use nockchain_types::tx_engine::v1::note::Note;
 use nockchain_types::tx_engine::v1::tx::SpendCondition;
+use nockvm::ext::{make_tas, AtomExt};
+use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, T};
+use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
 use crate::note_data::DecodedNoteData;
 
@@ -63,6 +66,31 @@ pub struct RawNoteDataEntry {
     pub key: String,
     /// Jammed payload bytes for this key.
     pub blob: Bytes,
+}
+
+impl NounEncode for RawNoteDataEntry {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        let key_noun = make_tas(allocator, &self.key).as_noun();
+        let jam_atom = Atom::from_bytes(allocator, self.blob.as_ref()).as_noun();
+        T(allocator, &[key_noun, jam_atom])
+    }
+}
+
+impl NounDecode for RawNoteDataEntry {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let key = String::from_noun(&cell.head().noun(), space)?;
+        let tail_noun = cell.tail().noun();
+        let jam_atom = tail_noun
+            .in_space(space)
+            .as_atom()
+            .map_err(|_| NounDecodeError::ExpectedAtom)?;
+        let blob = Bytes::from(jam_atom.as_ne_bytes().to_vec());
+        Ok(RawNoteDataEntry { key, blob })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -2,6 +2,7 @@
 /=  zo  /common/zoon
 /=  *  /common/zose
 /=  bridge  /apps/bridge/types
+/=  *  /common/zeke
 /=  dumb  /apps/dumbnet/lib/types
 /=  s10  /apps/wallet/lib/s10
 |_  bc=blockchain-constants:transact
@@ -235,6 +236,35 @@
 +$  lock-data
   $%  [%0 =lock:transact]
   ==
+::  Blob Data (packed blob):
+::    Flat $(list belt)$ as `[byte-len=@ belt=little-endian-u32]`
+++  blob-data
+  =<  form
+  |%
+  +$  form
+    $+  blob-data
+    (list belt)
+  ++  based
+    |=  =form
+    ^-  ?
+    |-
+    ?~  form  %&
+    ?&  (^based i.form)
+        $(form t.form)
+    ==
+  ++  hashable
+    |=  =form
+    ^-  hashable:tip5
+    |-
+    ?~  form  leaf+~
+    [leaf+i.form $(form t.form)]
+  ++  hash
+    |=  =form
+    %-  hash-hashable:tip5
+    (hashable form)
+  --
+::
+::  $transaction-tree: tree of transactions
 ::
 +$  transaction-tree
   $+  wallet-transaction-tree
@@ -430,8 +460,8 @@
   =<  form
   |%
   +$  form
-    $%  [%pkh recipient=hash:transact gift=coins:transact]
-        [%multisig threshold=@ participants=(list hash:transact) gift=coins:transact]
+    $%  [%pkh recipient=hash:transact gift=coins:transact memo=(unit blob-data) blob=(unit blob-data)]
+        [%multisig threshold=@ participants=(list hash:transact) gift=coins:transact memo=(unit blob-data) blob=(unit blob-data)]
         [%lock-root root=hash:transact gift=coins:transact]
         [%bridge-deposit address=evm-address:bridge gift=coins:transact]
     ==

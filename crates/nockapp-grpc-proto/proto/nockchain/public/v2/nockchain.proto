@@ -163,6 +163,7 @@ message TransactionInput {
   common.v1.Nicks amount = 2;
   string source_tx_id = 3;
   bool coinbase = 4;
+  repeated string signer_pubkey_b58 = 5;
 }
 
 message TransactionOutput {
@@ -171,6 +172,7 @@ message TransactionOutput {
     common.v1.Nicks amount = 2;
   }
   string lock_summary = 3;
+  optional common.v2.NoteData note_data = 4;
 }
 
 // ===================================================================
