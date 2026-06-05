@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use bytes::Bytes;
-use nockvm::noun::{Atom, IndirectAtom, Noun, D, SIG, T};
+use nockvm::noun::{Atom, IndirectAtom, Noun, NounAllocator, NounSpace, D, SIG, T};
 use nockvm_macros::tas;
 use noun_serde::{NounDecode, NounEncode};
 use tokio::fs::{self, File, OpenOptions};
@@ -12,6 +12,7 @@ use crate::nockapp::driver::{make_driver, IODriverFn};
 use crate::nockapp::error::NockAppError;
 use crate::nockapp::wire::{Wire, WireRepr};
 use crate::noun::slab::NounSlab;
+use crate::utils::durability;
 use crate::{AtomExt, IndirectAtomExt};
 
 #[derive(Clone, Debug, NounDecode)]
@@ -27,8 +28,8 @@ struct BatchWriteResultEntry {
     success: bool,
 }
 
-fn decode_from_noun<T: NounDecode>(noun: Noun) -> Result<T, NockAppError> {
-    T::from_noun(&noun).map_err(|err| NockAppError::NounDecodeError(Box::new(err)))
+fn decode_from_noun<T: NounDecode>(noun: Noun, space: &NounSpace) -> Result<T, NockAppError> {
+    T::from_noun(&noun, space).map_err(|err| NockAppError::NounDecodeError(Box::new(err)))
 }
 
 async fn ensure_parent_dirs(path: &str) -> std::io::Result<()> {
@@ -53,7 +54,7 @@ async fn prepare_file_write(path: &str, contents: &[u8]) -> std::io::Result<File
 async fn write_then_flush(path: &str, contents: &[u8]) -> std::io::Result<()> {
     debug!("file driver: writing {} bytes to: {}", contents.len(), path);
     let file = prepare_file_write(path, contents).await?;
-    file.sync_all().await
+    durability::sync_all_async(&file, "file_driver_write_fsync", Some(Path::new(path))).await
 }
 
 pub enum FileWire {
@@ -94,6 +95,12 @@ impl Wire for FileWire {
 ///  `[%file %batch-write (list [path=@t contents=@ success=?])]`
 pub fn file() -> IODriverFn {
     make_driver(|handle| async move {
+        enum FileOp {
+            Read(String),
+            Write { path: String, contents: Bytes },
+            BatchWrite(Vec<BatchWriteRequestEntry>),
+        }
+
         loop {
             let effect_res = handle.next_effect().await;
             let slab = match effect_res {
@@ -104,59 +111,71 @@ pub fn file() -> IODriverFn {
                 }
             };
 
-            let Ok(effect_cell) = unsafe { slab.root() }.as_cell() else {
-                continue;
-            };
+            let parsed = (|| {
+                let space = slab.noun_space();
+                let effect_cell = unsafe { slab.root() }.in_space(&space).as_cell().ok()?;
 
-            if !unsafe { effect_cell.head().raw_equals(&D(tas!(b"file"))) } {
-                continue;
-            }
-
-            let Ok(file_cell) = effect_cell.tail().as_cell() else {
-                continue;
-            };
-
-            let Ok(operation) = decode_from_noun::<String>(file_cell.head()) else {
-                continue;
-            };
-
-            match operation.as_str() {
-                "read" => {
-                    let Ok(path) = decode_from_noun::<String>(file_cell.tail()) else {
-                        continue;
-                    };
-                    match fs::read(&path).await {
-                        Ok(contents) => {
-                            let mut poke_slab = NounSlab::new();
-                            let contents_atom = <IndirectAtom as IndirectAtomExt>::from_bytes(
-                                &mut poke_slab,
-                                contents.as_slice(),
-                            );
-                            let poke_noun: Noun = T(
-                                &mut poke_slab,
-                                &[D(tas!(b"file")), D(tas!(b"read")), SIG, contents_atom.as_noun()],
-                            );
-                            poke_slab.set_root(poke_noun);
-                            let wire = FileWire::Read.to_wire();
-                            handle.poke(wire, poke_slab).await?;
-                        }
-                        Err(_) => {
-                            let mut poke_slab = NounSlab::new();
-                            let poke_items: Vec<Noun> =
-                                vec![D(tas!(b"file")), D(tas!(b"read")), D(0)];
-                            let poke_noun = poke_items.to_noun(&mut poke_slab);
-                            poke_slab.set_root(poke_noun);
-                            let wire = FileWire::Read.to_wire();
-                            handle.poke(wire, poke_slab).await?;
-                        }
-                    }
+                if !unsafe { effect_cell.head().noun().raw_equals(&D(tas!(b"file"))) } {
+                    return None;
                 }
-                "write" => {
-                    let Ok((path, contents)) =
-                        decode_from_noun::<(String, Bytes)>(file_cell.tail())
-                    else {
-                        continue;
-                    };
+
+                let file_cell = effect_cell.tail().as_cell().ok()?;
+                let operation = decode_from_noun::<String>(file_cell.head().noun(), &space).ok()?;
+
+                match operation.as_str() {
+                    "read" => {
+                        let path =
+                            decode_from_noun::<String>(file_cell.tail().noun(), &space).ok()?;
+                        Some(FileOp::Read(path))
+                    }
+                    "write" => {
+                        let (path, contents) =
+                            decode_from_noun::<(String, Bytes)>(file_cell.tail().noun(), &space)
+                                .ok()?;
+                        Some(FileOp::Write { path, contents })
+                    }
+                    "batch-write" => {
+                        let batch_entries = decode_from_noun::<Vec<BatchWriteRequestEntry>>(
+                            file_cell.tail().noun(),
+                            &space,
+                        )
+                        .ok()?;
+                        Some(FileOp::BatchWrite(batch_entries))
+                    }
+                    _ => None,
+                }
+            })();
+
+            let Some(operation) = parsed else {
+                continue;
+            };
+
+            match operation {
+                FileOp::Read(path) => match fs::read(&path).await {
+                    Ok(contents) => {
+                        let mut poke_slab = NounSlab::new();
+                        let contents_atom = <IndirectAtom as IndirectAtomExt>::from_bytes(
+                            &mut poke_slab,
+                            contents.as_slice(),
+                        );
+                        let poke_noun: Noun = T(
+                            &mut poke_slab,
+                            &[D(tas!(b"file")), D(tas!(b"read")), SIG, contents_atom.as_noun()],
+                        );
+                        poke_slab.set_root(poke_noun);
+                        let wire = FileWire::Read.to_wire();
+                        handle.poke(wire, poke_slab).await?;
+                    }
+                    Err(_) => {
+                        let mut poke_slab = NounSlab::new();
+                        let poke_noun: Noun =
+                            T(&mut poke_slab, &[D(tas!(b"file")), D(tas!(b"read")), D(0)]);
+                        poke_slab.set_root(poke_noun);
+                        let wire = FileWire::Read.to_wire();
+                        handle.poke(wire, poke_slab).await?;
+                    }
+                },
+                FileOp::Write { path, contents } => {
                     let success = match write_then_flush(&path, contents.as_ref()).await {
                         Ok(_) => true,
                         Err(e) => {
@@ -186,12 +205,7 @@ pub fn file() -> IODriverFn {
                     let wire = FileWire::Write.to_wire();
                     handle.poke(wire, poke_slab).await?;
                 }
-                "batch-write" => {
-                    let Ok(batch_entries) =
-                        decode_from_noun::<Vec<BatchWriteRequestEntry>>(file_cell.tail())
-                    else {
-                        continue;
-                    };
+                FileOp::BatchWrite(batch_entries) => {
                     let mut results: Vec<BatchWriteResultEntry> =
                         Vec::with_capacity(batch_entries.len());
 
@@ -214,7 +228,13 @@ pub fn file() -> IODriverFn {
                     }
 
                     for (idx, path, file) in pending_flushes {
-                        match file.sync_all().await {
+                        match durability::sync_all_async(
+                            &file,
+                            "file_driver_batch_write_fsync",
+                            Some(Path::new(&path)),
+                        )
+                        .await
+                        {
                             Ok(_) => results[idx].success = true,
                             Err(e) => error!("file driver: error flushing path {}: {}", path, e),
                         }
@@ -231,7 +251,6 @@ pub fn file() -> IODriverFn {
                     let wire = FileWire::BatchWrite.to_wire();
                     handle.poke(wire, poke_slab).await?;
                 }
-                _ => continue,
             }
         }
     })

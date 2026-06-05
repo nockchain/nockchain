@@ -4,7 +4,7 @@ pub use nockchain_types::tx_engine::common::Hash as Tip5Hash;
 use nockchain_types::tx_engine::common::Hash as NockPkh;
 use nockchain_types::v1::Name;
 pub use nockchain_types::EthAddress;
-use nockvm::noun::{Noun, NounAllocator};
+use nockvm::noun::{Noun, NounAllocator, NounSpace};
 use noun_serde::{NounDecode, NounEncode};
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
@@ -215,11 +215,13 @@ impl NounEncode for EthSignatureParts {
     fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
         let r_atom = unsafe {
             let mut ia = nockvm::noun::IndirectAtom::new_raw_bytes(allocator, 32, self.r.as_ptr());
-            ia.normalize_as_atom().as_noun()
+            let space = allocator.noun_space();
+            ia.normalize_as_atom(&space).as_noun()
         };
         let s_atom = unsafe {
             let mut ia = nockvm::noun::IndirectAtom::new_raw_bytes(allocator, 32, self.s.as_ptr());
-            ia.normalize_as_atom().as_noun()
+            let space = allocator.noun_space();
+            ia.normalize_as_atom(&space).as_noun()
         };
         let v_atom = nockvm::noun::Atom::new(allocator, self.v).as_noun();
         let inner = nockvm::noun::T(allocator, &[s_atom, v_atom]);
@@ -228,8 +230,12 @@ impl NounEncode for EthSignatureParts {
 }
 
 impl NounDecode for EthSignatureParts {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         let c0 = noun
+            .in_space(space)
             .as_cell()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
         let r_bytes = c0
@@ -293,13 +299,17 @@ impl<const N: usize> NounEncode for ByteArray<N> {
 }
 
 impl<const N: usize> NounDecode for ByteArray<N> {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         let mut bytes = Vec::new();
-        let mut current = *noun;
+        let mut current = noun.in_space(space);
 
         while let Ok(cell) = current.as_cell() {
-            let head = cell.head();
+            let head = cell.head().noun();
             let byte = head
+                .in_space(space)
                 .as_atom()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedAtom)?
                 .as_u64()
@@ -378,14 +388,19 @@ impl NounEncode for AtomBytes {
         unsafe {
             let mut ia =
                 nockvm::noun::IndirectAtom::new_raw_bytes(allocator, self.0.len(), self.0.as_ptr());
-            ia.normalize_as_atom().as_noun()
+            let space = allocator.noun_space();
+            ia.normalize_as_atom(&space).as_noun()
         }
     }
 }
 
 impl NounDecode for AtomBytes {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         let atom = noun
+            .in_space(space)
             .as_atom()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedAtom)?;
         let bytes = atom.as_ne_bytes();
@@ -420,8 +435,11 @@ impl NounEncode for SchnorrSecretKey {
 }
 
 impl NounDecode for SchnorrSecretKey {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
-        Ok(SchnorrSecretKey(decode_belt_array(noun)?))
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
+        Ok(SchnorrSecretKey(decode_belt_array(noun, space)?))
     }
 }
 
@@ -527,8 +545,9 @@ impl NounEncode for NullTag {
 }
 
 impl NounDecode for NullTag {
-    fn from_noun(noun: &Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, noun_serde::NounDecodeError> {
         let atom = noun
+            .in_space(space)
             .as_atom()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedAtom)?;
         if atom.as_u64()? == 0 {
@@ -584,24 +603,29 @@ impl NounEncode for NockchainBlockCause {
     fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
         use nockapp::noun::NounAllocatorExt;
 
-        let page_noun = allocator.copy_into(self.page_noun);
+        let page_noun = allocator.copy_into(self.page_noun, &self.page_slab.noun_space());
         let txs_noun = self.txs.to_noun(allocator);
         nockvm::noun::T(allocator, &[page_noun, txs_noun])
     }
 }
 
 impl NounDecode for NockchainBlockCause {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         use nockapp::noun::slab::{NockJammer, NounSlab};
 
         let cell = noun
+            .in_space(space)
             .as_cell()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
 
         let mut page_slab: NounSlab<NockJammer> = NounSlab::new();
-        let page_noun = page_slab.copy_into(cell.head());
+        let page_noun = page_slab.copy_into(cell.head().noun(), space);
 
-        let txs = NockchainTxsMap::from_noun(&cell.tail())?;
+        let txs_noun = cell.tail().noun();
+        let txs = NockchainTxsMap::from_noun(&txs_noun, space)?;
 
         Ok(Self {
             page_slab,
@@ -628,37 +652,44 @@ impl NounEncode for NockchainTxsMap {
 }
 
 impl NounDecode for NockchainTxsMap {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         fn traverse(
             node: &nockvm::noun::Noun,
+            space: &NounSpace,
             acc: &mut Vec<(nockchain_types::tx_engine::common::TxId, Tx)>,
         ) -> Result<(), noun_serde::NounDecodeError> {
-            if let Ok(atom) = node.as_atom() {
+            if let Ok(atom) = node.in_space(space).as_atom() {
                 if atom.as_u64()? == 0 {
                     return Ok(());
                 }
                 return Err(noun_serde::NounDecodeError::ExpectedCell);
             }
             let cell = node
+                .in_space(space)
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
             let kv = cell
                 .head()
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
-            let tx_id = nockchain_types::tx_engine::common::TxId::from_noun(&kv.head())?;
-            let tx = Tx::from_noun(&kv.tail())?;
+            let tx_id_noun = kv.head().noun();
+            let tx_noun = kv.tail().noun();
+            let tx_id = nockchain_types::tx_engine::common::TxId::from_noun(&tx_id_noun, space)?;
+            let tx = Tx::from_noun(&tx_noun, space)?;
             acc.push((tx_id, tx));
             let branches = cell
                 .tail()
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
-            traverse(&branches.head(), acc)?;
-            traverse(&branches.tail(), acc)?;
+            traverse(&branches.head().noun(), space, acc)?;
+            traverse(&branches.tail().noun(), space, acc)?;
             Ok(())
         }
         let mut acc = Vec::new();
-        traverse(noun, &mut acc)?;
+        traverse(noun, space, &mut acc)?;
         Ok(NockchainTxsMap(acc))
     }
 }
@@ -677,8 +708,12 @@ impl NounEncode for Tx {
 }
 
 impl NounDecode for Tx {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         let cell = noun
+            .in_space(space)
             .as_cell()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
         let tag = cell
@@ -688,7 +723,7 @@ impl NounDecode for Tx {
             .as_u64()
             .map_err(|_| noun_serde::NounDecodeError::Custom("tx tag too large".into()))?;
         match tag {
-            1 => Ok(Tx::V1(TxV1::from_noun(noun)?)),
+            1 => Ok(Tx::V1(TxV1::from_noun(noun, space)?)),
             _ => Err(noun_serde::NounDecodeError::Custom(format!(
                 "unsupported tx version: {}",
                 tag
@@ -721,31 +756,37 @@ impl NounEncode for OutputsV1 {
 }
 
 impl NounDecode for OutputsV1 {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         fn traverse(
             node: &nockvm::noun::Noun,
+            space: &NounSpace,
             acc: &mut Vec<OutputV1>,
         ) -> Result<(), noun_serde::NounDecodeError> {
-            if let Ok(atom) = node.as_atom() {
+            if let Ok(atom) = node.in_space(space).as_atom() {
                 if atom.as_u64()? == 0 {
                     return Ok(());
                 }
                 return Err(noun_serde::NounDecodeError::ExpectedCell);
             }
             let cell = node
+                .in_space(space)
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
-            acc.push(OutputV1::from_noun(&cell.head())?);
+            let output_noun = cell.head().noun();
+            acc.push(OutputV1::from_noun(&output_noun, space)?);
             let branches = cell
                 .tail()
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
-            traverse(&branches.head(), acc)?;
-            traverse(&branches.tail(), acc)?;
+            traverse(&branches.head().noun(), space, acc)?;
+            traverse(&branches.tail().noun(), space, acc)?;
             Ok(())
         }
         let mut acc = Vec::new();
-        traverse(noun, &mut acc)?;
+        traverse(noun, space, &mut acc)?;
         Ok(OutputsV1(acc))
     }
 }
@@ -1132,17 +1173,19 @@ fn encode_belt_array<const N: usize, A: NounAllocator>(
 
 fn decode_belt_array<const N: usize>(
     noun: &Noun,
+    space: &NounSpace,
 ) -> Result<[Belt; N], noun_serde::NounDecodeError> {
     let mut result = [Belt(0); N];
-    let mut current = *noun;
+    let mut current = noun.in_space(space);
     for (idx, item) in result.iter_mut().enumerate() {
         if idx == N - 1 {
-            *item = Belt::from_noun(&current)?;
+            *item = Belt::from_noun(&current.noun(), space)?;
         } else {
             let cell = current
                 .as_cell()
                 .map_err(|_| noun_serde::NounDecodeError::ExpectedCell)?;
-            *item = Belt::from_noun(&cell.head())?;
+            let head_noun = cell.head().noun();
+            *item = Belt::from_noun(&head_noun, space)?;
             current = cell.tail();
         }
     }
@@ -1163,6 +1206,14 @@ mod tests {
             .with_test_writer()
             .with_max_level(tracing::Level::DEBUG)
             .try_init();
+    }
+
+    fn decode_from_slab<T: NounDecode>(
+        noun: &Noun,
+        slab: &NounSlab<NockJammer>,
+    ) -> Result<T, noun_serde::NounDecodeError> {
+        let space = slab.noun_space();
+        T::from_noun(noun, &space)
     }
 
     fn sample_base_blocks_cause() -> RawBaseBlocks {
@@ -1211,7 +1262,7 @@ mod tests {
         let encoded_noun = original_cause.to_noun(&mut allocator);
         info!("Encoded cause to noun");
 
-        let decoded_cause = BridgeCause::from_noun(&encoded_noun)
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
             .expect("Failed to decode cfg-load cause from noun");
         debug!("Decoded cause successfully");
 
@@ -1279,7 +1330,7 @@ mod tests {
         let encoded_noun = original_cause.to_noun(&mut allocator);
         info!("Encoded base-blocks cause to noun");
 
-        let decoded_cause = BridgeCause::from_noun(&encoded_noun)
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
             .expect("Failed to decode base-blocks cause from noun");
         debug!("Decoded base-blocks cause successfully");
 
@@ -1328,7 +1379,7 @@ mod tests {
         let encoded_noun = original_cause.to_noun(&mut allocator);
         info!("Encoded proposed-base-call cause to noun");
 
-        let decoded_cause = BridgeCause::from_noun(&encoded_noun)
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
             .expect("Failed to decode proposed-base-call cause from noun");
         debug!("Decoded proposed-base-call cause successfully");
 
@@ -1370,7 +1421,7 @@ mod tests {
         let encoded_noun = original_cause.to_noun(&mut allocator);
         info!("Encoded base-call-sig cause to noun");
 
-        let decoded_cause = BridgeCause::from_noun(&encoded_noun)
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
             .expect("Failed to decode base-call-sig cause from noun");
         debug!("Decoded base-call-sig cause successfully");
 
@@ -1408,8 +1459,8 @@ mod tests {
         let original_cause = BridgeCause::stop(last.clone());
 
         let encoded_noun = original_cause.to_noun(&mut allocator);
-        let decoded_cause =
-            BridgeCause::from_noun(&encoded_noun).expect("Failed to decode stop cause from noun");
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
+            .expect("Failed to decode stop cause from noun");
 
         assert_eq!(decoded_cause.0, 0, "Version should be 0");
 
@@ -1434,8 +1485,8 @@ mod tests {
 
         let original_cause = BridgeCause::start();
         let encoded_noun = original_cause.to_noun(&mut allocator);
-        let decoded_cause =
-            BridgeCause::from_noun(&encoded_noun).expect("Failed to decode start cause from noun");
+        let decoded_cause = decode_from_slab::<BridgeCause>(&encoded_noun, &allocator)
+            .expect("Failed to decode start cause from noun");
 
         assert_eq!(decoded_cause.0, 0, "Version should be 0");
 
@@ -1502,7 +1553,7 @@ mod tests {
         for (name, cause) in test_cases {
             debug!("Testing version for {} variant", name);
             let encoded = cause.to_noun(&mut allocator);
-            let decoded = BridgeCause::from_noun(&encoded)
+            let decoded = decode_from_slab::<BridgeCause>(&encoded, &allocator)
                 .unwrap_or_else(|_| panic!("Failed to decode {} variant", name));
             assert_eq!(decoded.0, 0, "{} variant should have version 0", name);
         }
@@ -1521,8 +1572,8 @@ mod tests {
         let empty_blocks = BridgeCause(0, BridgeCauseVariant::BaseBlocks(empty_batch));
         debug!("Encoding empty blocks list");
         let encoded_empty = empty_blocks.to_noun(&mut allocator);
-        let decoded_empty =
-            BridgeCause::from_noun(&encoded_empty).expect("Failed to decode empty blocks");
+        let decoded_empty = decode_from_slab::<BridgeCause>(&encoded_empty, &allocator)
+            .expect("Failed to decode empty blocks");
 
         match decoded_empty.1 {
             BridgeCauseVariant::BaseBlocks(batch) => {
@@ -1538,8 +1589,8 @@ mod tests {
         );
         debug!("Encoding non-empty blocks list");
         let encoded_nonempty = nonempty_blocks.to_noun(&mut allocator);
-        let decoded_nonempty =
-            BridgeCause::from_noun(&encoded_nonempty).expect("Failed to decode non-empty blocks");
+        let decoded_nonempty = decode_from_slab::<BridgeCause>(&encoded_nonempty, &allocator)
+            .expect("Failed to decode non-empty blocks");
 
         match decoded_nonempty.1 {
             BridgeCauseVariant::BaseBlocks(batch) => {
@@ -1581,7 +1632,7 @@ mod tests {
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded base-call effect to noun");
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode base-call effect from noun");
         debug!("Decoded base-call effect successfully");
 
@@ -1633,7 +1684,7 @@ mod tests {
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded assemble-base-call effect to noun");
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode assemble-base-call effect from noun");
         debug!("Decoded assemble-base-call effect successfully");
 
@@ -1683,7 +1734,7 @@ mod tests {
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded nock-deposit-request effect to noun");
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode nock-deposit-request effect from noun");
         debug!("Decoded nock-deposit-request effect successfully");
 
@@ -1745,12 +1796,21 @@ mod tests {
 
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded commit-nock-deposits effect to noun");
+        let debug_space = allocator.noun_space();
+        let debug_cell = encoded_noun
+            .in_space(&debug_space)
+            .as_cell()
+            .expect("encoded noun cell")
+            .cell();
         eprintln!(
             "encoded_noun: {:?}",
-            nockvm::noun::FullDebugCell(&encoded_noun.as_cell().unwrap())
+            nockvm::noun::FullDebugCell {
+                cell: &debug_cell,
+                space: &debug_space,
+            }
         );
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode commit-nock-deposits effect from noun");
         debug!("Decoded commit-nock-deposits effect successfully");
 
@@ -1798,7 +1858,7 @@ mod tests {
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded nockchain-tx effect to noun");
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode nockchain-tx effect from noun");
         debug!("Decoded nockchain-tx effect successfully");
 
@@ -1846,7 +1906,7 @@ mod tests {
         let encoded_noun = original_effect.to_noun(&mut allocator);
         info!("Encoded propose-nockchain-tx effect to noun");
 
-        let decoded_effect = BridgeEffect::from_noun(&encoded_noun)
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
             .expect("Failed to decode propose-nockchain-tx effect from noun");
         debug!("Decoded propose-nockchain-tx effect successfully");
 
@@ -1889,8 +1949,8 @@ mod tests {
         };
 
         let encoded_noun = original_effect.to_noun(&mut allocator);
-        let decoded_effect =
-            BridgeEffect::from_noun(&encoded_noun).expect("Failed to decode stop effect from noun");
+        let decoded_effect = decode_from_slab::<BridgeEffect>(&encoded_noun, &allocator)
+            .expect("Failed to decode stop effect from noun");
 
         assert_eq!(decoded_effect.version, 0, "Version should be 0");
         match decoded_effect.variant {
@@ -1998,7 +2058,8 @@ mod tests {
         let cause = BridgeCause(0, BridgeCauseVariant::BaseBlocks(vec![entry]));
 
         let encoded = cause.to_noun(&mut allocator);
-        let decoded = BridgeCause::from_noun(&encoded).expect("Failed to decode large AtomBytes");
+        let decoded = decode_from_slab::<BridgeCause>(&encoded, &allocator)
+            .expect("Failed to decode large AtomBytes");
 
         match decoded.1 {
             BridgeCauseVariant::BaseBlocks(blocks) => {
@@ -2040,7 +2101,7 @@ mod tests {
         };
 
         let encoded = effect.to_noun(&mut allocator);
-        let decoded = BridgeEffect::from_noun(&encoded)
+        let decoded = decode_from_slab::<BridgeEffect>(&encoded, &allocator)
             .expect("Failed to decode effect with many signatures");
 
         match decoded.variant {
@@ -2077,8 +2138,8 @@ mod tests {
         };
 
         let encoded = effect.to_noun(&mut allocator);
-        let decoded =
-            BridgeEffect::from_noun(&encoded).expect("Failed to decode effect with empty fees");
+        let decoded = decode_from_slab::<BridgeEffect>(&encoded, &allocator)
+            .expect("Failed to decode effect with empty fees");
 
         match decoded.variant {
             BridgeEffectVariant::AssembleBaseCall(data) => {
@@ -2280,8 +2341,8 @@ mod tests {
         let cause = BridgeCause(0, BridgeCauseVariant::ConfigLoad(Some(config.clone())));
 
         let encoded = cause.to_noun(&mut allocator);
-        let decoded =
-            BridgeCause::from_noun(&encoded).expect("Failed to decode cfg-load with Some");
+        let decoded = decode_from_slab::<BridgeCause>(&encoded, &allocator)
+            .expect("Failed to decode cfg-load with Some");
 
         match decoded.1 {
             BridgeCauseVariant::ConfigLoad(Some(decoded_config)) => {
@@ -2309,8 +2370,8 @@ mod tests {
         let original = BridgeConstants::default();
 
         let encoded = original.to_noun(&mut allocator);
-        let decoded =
-            BridgeConstants::from_noun(&encoded).expect("Failed to decode BridgeConstants");
+        let decoded = decode_from_slab::<BridgeConstants>(&encoded, &allocator)
+            .expect("Failed to decode BridgeConstants");
 
         assert_eq!(decoded.version, original.version);
         assert_eq!(decoded.min_signers, original.min_signers);
@@ -2337,8 +2398,8 @@ mod tests {
         let original = BridgeCause::set_constants(constants.clone());
 
         let encoded = original.to_noun(&mut allocator);
-        let decoded =
-            BridgeCause::from_noun(&encoded).expect("Failed to decode set-constants cause");
+        let decoded = decode_from_slab::<BridgeCause>(&encoded, &allocator)
+            .expect("Failed to decode set-constants cause");
 
         assert_eq!(decoded.0, 0);
         match decoded.1 {
@@ -2377,7 +2438,7 @@ mod tests {
         let encoded = event.to_noun(&mut allocator);
         info!("Encoded BaseEvent with DepositProcessed to noun");
 
-        let decoded = BaseEvent::from_noun(&encoded)
+        let decoded = decode_from_slab::<BaseEvent>(&encoded, &allocator)
             .expect("Failed to decode BaseEvent with DepositProcessed");
         info!("Decoded BaseEvent successfully");
 
@@ -2439,7 +2500,7 @@ mod tests {
         let encoded = event.to_noun(&mut allocator);
         info!("Encoded BaseEvent with BurnForWithdrawal to noun");
 
-        let decoded = BaseEvent::from_noun(&encoded)
+        let decoded = decode_from_slab::<BaseEvent>(&encoded, &allocator)
             .expect("Failed to decode BaseEvent with BurnForWithdrawal");
         info!("Decoded BaseEvent successfully");
 
@@ -2510,8 +2571,8 @@ mod tests {
         let encoded = cause.to_noun(&mut allocator);
         info!("Encoded BridgeCause with BaseBlocks containing events");
 
-        let decoded =
-            BridgeCause::from_noun(&encoded).expect("Failed to decode BridgeCause with BaseBlocks");
+        let decoded = decode_from_slab::<BridgeCause>(&encoded, &allocator)
+            .expect("Failed to decode BridgeCause with BaseBlocks");
         info!("Decoded BridgeCause successfully");
 
         match decoded.1 {
@@ -2556,7 +2617,8 @@ mod tests {
             inner: Some(Some(42)),
         };
         let encoded = original.to_noun(&mut allocator);
-        let decoded = CountPeek::from_noun(&encoded).expect("Failed to decode CountPeek from noun");
+        let decoded = decode_from_slab::<CountPeek>(&encoded, &allocator)
+            .expect("Failed to decode CountPeek from noun");
         assert_eq!(
             decoded.inner,
             Some(Some(42)),
@@ -2567,8 +2629,8 @@ mod tests {
         let mut allocator2: NounSlab<NockJammer> = NounSlab::new();
         let original_none = CountPeek { inner: Some(None) };
         let encoded_none = original_none.to_noun(&mut allocator2);
-        let decoded_none =
-            CountPeek::from_noun(&encoded_none).expect("Failed to decode CountPeek None from noun");
+        let decoded_none = decode_from_slab::<CountPeek>(&encoded_none, &allocator2)
+            .expect("Failed to decode CountPeek None from noun");
         assert_eq!(
             decoded_none.inner,
             Some(None),
@@ -2590,8 +2652,8 @@ mod tests {
             inner: Some(Some(true)),
         };
         let encoded_true = original_true.to_noun(&mut allocator);
-        let decoded_true =
-            BoolPeek::from_noun(&encoded_true).expect("Failed to decode BoolPeek true from noun");
+        let decoded_true = decode_from_slab::<BoolPeek>(&encoded_true, &allocator)
+            .expect("Failed to decode BoolPeek true from noun");
         assert_eq!(
             decoded_true.inner,
             Some(Some(true)),
@@ -2604,8 +2666,8 @@ mod tests {
             inner: Some(Some(false)),
         };
         let encoded_false = original_false.to_noun(&mut allocator2);
-        let decoded_false =
-            BoolPeek::from_noun(&encoded_false).expect("Failed to decode BoolPeek false from noun");
+        let decoded_false = decode_from_slab::<BoolPeek>(&encoded_false, &allocator2)
+            .expect("Failed to decode BoolPeek false from noun");
         assert_eq!(
             decoded_false.inner,
             Some(Some(false)),

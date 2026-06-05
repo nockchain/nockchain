@@ -26,6 +26,7 @@ A terminal user interface for exploring the Nockchain blockchain via the gRPC Bl
 - **Block details**: inspect a block and drill into transactions.
 - **Transactions tab**: browse known transactions and open transaction details.
 - **Wallets tab**: build and sort an address summary index from cached transaction details.
+- **Nous tab**: live peer comparison view for mixed-generation review during gen2 rollout. Shows a summary bar with gen1/gen2 peer counts and aggregate throughput, a peer list sorted by protocol generation, and a side-by-side detail panel comparing two peers on request rate, throughput (KiB/s), round-trip time, average batch size, block rate, and block propagation latency. Pin a gen1 peer and select a gen2 peer (or vice-versa) to get an at-a-glance delta during rollout validation.
 - **Metrics tab**: inspect explorer metrics from the metrics gRPC service.
 - **Transaction search**: search by transaction ID prefix and inspect status.
 - **Connection resilience**: retry on disconnects by default, or use `--fail-fast` for strict startup behavior.
@@ -57,6 +58,7 @@ Common shortcuts:
 - Block details: `ESC` back to list, `PgUp/PgDn` prev/next block, `Tab` toggle tx focus, `Enter` open highlighted transaction, `n/p` next/prev transaction.
 - Transactions tab: `Enter` open details, `n/p` next/prev transaction details, `s` sync pages.
 - Wallets tab: `b/r/e/t` sort by balance/received/sent/tx-count, `o` toggles sort order, `s` sync pages.
+- Nous tab: `↑/↓` move peer selection, `PgUp/PgDn` jump by 20, `Home/End` first/last peer, `Enter` pin/unpin compare peer, `c` copy peer ID, `r` refresh peer stats.
 - Search view: `Enter` search, `Ctrl+V` paste, `Ctrl+C` clear input, `ESC` back.
 
 ## UI Notes

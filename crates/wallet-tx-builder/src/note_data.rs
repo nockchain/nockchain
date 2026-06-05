@@ -4,6 +4,7 @@ use nockapp::Noun;
 use nockchain_types::tx_engine::common::Hash;
 use nockchain_types::tx_engine::v1::note::{NoteData, NoteDataEntry};
 use nockchain_types::tx_engine::v1::tx::{Lock, SpendCondition};
+use nockvm::noun::{NounAllocator, NounSpace};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use thiserror::Error;
 
@@ -177,9 +178,9 @@ pub struct LockDataPayload {
 
 impl LockDataPayload {
     /// Parses a `%lock` payload noun with shape `[version lock]`.
-    pub fn from_noun(noun: &Noun) -> Result<Self, NoteDataDecodeError> {
+    pub fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NoteDataDecodeError> {
         let spend_conditions =
-            match LockPayloadNoun::from_noun(noun).map_err(NoteDataDecodeError::from)? {
+            match LockPayloadNoun::from_noun(noun, space).map_err(NoteDataDecodeError::from)? {
                 LockPayloadNoun::V0(lock) => lock.flatten_spend_conditions(),
             };
         Ok(Self {
@@ -194,7 +195,8 @@ impl LockDataPayload {
         let noun = slab
             .cue_into(blob.clone())
             .map_err(|error| NoteDataDecodeError::InvalidJam(error.to_string()))?;
-        Self::from_noun(&noun)
+        let space = slab.noun_space();
+        Self::from_noun(&noun, &space)
     }
 }
 
@@ -209,8 +211,8 @@ pub struct ParsedLockForm {
 
 impl ParsedLockForm {
     /// Parses a lock noun with tx-engine's canonical decoder and exposes flattened leaves.
-    pub fn from_noun(noun: &Noun) -> Result<Self, NoteDataDecodeError> {
-        let lock = Lock::from_noun(noun).map_err(NoteDataDecodeError::from)?;
+    pub fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NoteDataDecodeError> {
+        let lock = Lock::from_noun(noun, space).map_err(NoteDataDecodeError::from)?;
         Ok(Self {
             spend_conditions: lock.flatten_spend_conditions(),
             spend_condition_count: lock.spend_condition_count(),
@@ -238,13 +240,14 @@ pub struct BridgeDepositDataPayload {
 
 impl BridgeDepositDataPayload {
     /// Parses a `%bridge` payload noun with shape `[version network evm-address-based]`.
-    pub fn from_noun(noun: &Noun) -> Result<Self, NoteDataDecodeError> {
-        let (network, evm_address_based) =
-            match BridgeDepositPayloadNoun::from_noun(noun).map_err(NoteDataDecodeError::from)? {
-                BridgeDepositPayloadNoun::V0(network, evm_address_based) => {
-                    (network, evm_address_based)
-                }
-            };
+    pub fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NoteDataDecodeError> {
+        let (network, evm_address_based) = match BridgeDepositPayloadNoun::from_noun(noun, space)
+            .map_err(NoteDataDecodeError::from)?
+        {
+            BridgeDepositPayloadNoun::V0(network, evm_address_based) => {
+                (network, evm_address_based)
+            }
+        };
         if network != "base" {
             return Err(NoteDataDecodeError::UnsupportedBridgeNetwork(network));
         }
@@ -261,7 +264,8 @@ impl BridgeDepositDataPayload {
         let noun = slab
             .cue_into(blob.clone())
             .map_err(|error| NoteDataDecodeError::InvalidJam(error.to_string()))?;
-        Self::from_noun(&noun)
+        let space = slab.noun_space();
+        Self::from_noun(&noun, &space)
     }
 }
 
@@ -283,9 +287,11 @@ pub struct BridgeWithdrawalDataPayload {
 impl BridgeWithdrawalDataPayload {
     /// Parses a `%bridge-w` payload noun with shape
     /// `[version base-event-id base-hash lock-root base-batch-end]`.
-    pub fn from_noun(noun: &Noun) -> Result<Self, NoteDataDecodeError> {
+    pub fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NoteDataDecodeError> {
         let (base_event_id, base_hash, lock_root, base_batch_end) =
-            match BridgeWithdrawalPayloadNoun::from_noun(noun).map_err(NoteDataDecodeError::from)? {
+            match BridgeWithdrawalPayloadNoun::from_noun(noun, space)
+                .map_err(NoteDataDecodeError::from)?
+            {
                 BridgeWithdrawalPayloadNoun::V0(
                     base_event_id,
                     base_hash,
@@ -308,7 +314,8 @@ impl BridgeWithdrawalDataPayload {
         let noun = slab
             .cue_into(blob.clone())
             .map_err(|error| NoteDataDecodeError::InvalidJam(error.to_string()))?;
-        Self::from_noun(&noun)
+        let space = slab.noun_space();
+        Self::from_noun(&noun, &space)
     }
 }
 
@@ -459,7 +466,7 @@ mod tests {
     use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, Pkh};
     use nockvm::ext::NounExt;
     use nockvm::mem::NockStack;
-    use nockvm::noun::{Noun, D, T};
+    use nockvm::noun::{Noun, NounAllocator, D, T};
     use noun_serde::{NounDecode, NounEncode};
 
     use super::*;
@@ -489,7 +496,8 @@ mod tests {
         let fixture_bytes = include_bytes!("../tests/fixtures/note_data_fixtures.jam");
         let mut stack = NockStack::new(nockapp::utils::NOCK_STACK_SIZE, 0);
         let noun = Noun::cue_bytes_slice(&mut stack, fixture_bytes).expect("fixture jam must cue");
-        Vec::<FixtureEntry>::from_noun(&noun).expect("fixture noun must decode")
+        let space = stack.noun_space();
+        Vec::<FixtureEntry>::from_noun(&noun, &space).expect("fixture noun must decode")
     }
 
     fn normalize_case_tag(tag: &str) -> &str {
@@ -525,19 +533,22 @@ mod tests {
         let spend = SpendCondition::new(vec![LockPrimitive::Burn]);
         let mut slab: NounSlab<NockJammer> = NounSlab::new();
         let noun = LockPayloadNoun::V0(Lock::SpendCondition(spend.clone())).to_noun(&mut slab);
+        let space = slab.noun_space();
 
         let version = noun
+            .in_space(&space)
             .as_cell()
             .expect("tagged payload should be a cell")
-            .head();
+            .head()
+            .noun();
 
         assert_eq!(
-            u64::from_noun(&version).expect("tag atom should be numeric"),
+            u64::from_noun(&version, &space).expect("tag atom should be numeric"),
             0
         );
 
         assert_eq!(
-            LockPayloadNoun::from_noun(&noun).expect("tagged zero atom should decode"),
+            LockPayloadNoun::from_noun(&noun, &space).expect("tagged zero atom should decode"),
             LockPayloadNoun::V0(Lock::SpendCondition(spend))
         );
     }
@@ -734,8 +745,9 @@ mod tests {
         let v2_right_pair = T(&mut slab, &[sc3_n, sc4_n]);
         let v4_pair = T(&mut slab, &[v2_left_pair, v2_right_pair]);
         let v4_lock = T(&mut slab, &[D(4), v4_pair]);
+        let space = slab.noun_space();
 
-        let parsed = ParsedLockForm::from_noun(&v4_lock).expect("decode lock form");
+        let parsed = ParsedLockForm::from_noun(&v4_lock, &space).expect("decode lock form");
         assert_eq!(parsed.spend_condition_count, 4);
         assert_eq!(parsed.spend_conditions, vec![sc1, sc2, sc3, sc4]);
     }

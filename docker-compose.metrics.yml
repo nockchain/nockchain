@@ -1,0 +1,41 @@
+services:
+  influxdb:
+    image: influxdb:${INFLUXDB_VERSION:-2.7}
+    container_name: nockchain-influxdb
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-adminpassword}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-nockchain}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-metrics}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-nockchain-local-token}
+    networks:
+      - metrics
+
+  telegraf:
+    image: telegraf:${TELEGRAF_VERSION:-1.30}
+    container_name: nockchain-telegraf
+    ports:
+      - "8125:8125/udp"
+    volumes:
+      - ./telegraf.conf:/etc/telegraf/telegraf.conf:ro
+    environment:
+      INFLUX_TOKEN: ${INFLUXDB_ADMIN_TOKEN:-nockchain-local-token}
+      INFLUX_ORG: ${INFLUXDB_ORG:-nockchain}
+      INFLUX_BUCKET: ${INFLUXDB_BUCKET:-metrics}
+    depends_on:
+      - influxdb
+    networks:
+      - metrics
+
+volumes:
+  influxdb-data:
+
+networks:
+  metrics:
+    name: ${DOCKER_METRICS_NETWORK:-nockchain-metrics}
+    external: true

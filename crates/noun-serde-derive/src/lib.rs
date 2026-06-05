@@ -138,7 +138,7 @@ fn decode_tag_match_expr(tag: &TagValue) -> TokenStream2 {
     match tag {
         TagValue::Text(tag) => quote! { string_tag.as_deref() == Some(#tag) },
         TagValue::Numeric(tag) => quote! {
-            tag_noun
+            tag_noun_handle
                 .as_atom()
                 .ok()
                 .and_then(|atom| atom.as_u64().ok())
@@ -240,7 +240,7 @@ fn parse_axis_attr(attrs: &[Attribute]) -> Option<u64> {
 ///
 /// // When encoded: [42 43]
 /// let point = Point { x: 42, y: 43 };
-/// let mut allocator = NockStack::new(8 << 10 << 10, 0);
+/// let mut allocator = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
 /// let noun = point.to_noun(&mut allocator);
 ///
 /// #[derive(NounEncode)]
@@ -252,7 +252,7 @@ fn parse_axis_attr(attrs: &[Attribute]) -> Option<u64> {
 ///
 /// // When encoded: [[%x 42] [%y 43]]
 /// let tagged_point = TaggedPoint { x: 42, y: 43 };
-/// let mut allocator = NockStack::new(8 << 10 << 10, 0);
+/// let mut allocator = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
 /// let noun = tagged_point.to_noun(&mut allocator);
 ///
 /// #[derive(NounEncode)]
@@ -265,12 +265,12 @@ fn parse_axis_attr(attrs: &[Attribute]) -> Option<u64> {
 ///
 /// // When encoded: [%move [42 43]]
 /// let cmd = Command::Move { point: Point { x: 42, y: 43 } };
-/// let mut allocator = NockStack::new(8 << 10 << 10, 0);
+/// let mut allocator = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
 /// let noun = cmd.to_noun(&mut allocator);
 ///
 /// // When encoded: %stop
 /// let stop = Command::Stop;
-/// let mut allocator = NockStack::new(8 << 10 << 10, 0);
+/// let mut allocator = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
 /// let noun = stop.to_noun(&mut allocator);
 /// ```
 pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
@@ -641,7 +641,7 @@ pub fn derive_noun_encode(input: TokenStream) -> TokenStream {
                                             field_nouns.push(::nockvm::noun::T(allocator, &[field_tag, field_value]));
                                         )*
                                         let data = field_nouns.into_iter().rev().fold(::nockvm::noun::D(0), |acc, pair_noun| {
-                                             if acc.is_atom() && acc.as_atom().map_or(false, |a| a.as_u64() == Ok(0)) {
+                                             if unsafe { acc.raw_equals(&::nockvm::noun::D(0)) } {
                                                 ::nockvm::noun::T(allocator, &[pair_noun, ::nockvm::noun::D(0)])
                                             } else {
                                                 ::nockvm::noun::T(allocator, &[pair_noun, acc])
@@ -809,7 +809,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                         quote! {
                             ::tracing::trace!(target: "noun_serde_decode", "Decoding {} (single field struct), is_atom={}, is_cell={}", #name_str, noun.is_atom(), noun.is_cell());
                             ::tracing::trace!(target: "noun_serde_decode", "  field={} type={}", #field_name_str, stringify!(#field_type));
-                            let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)
+                            let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)
                                 .map_err(|e| {
                                     ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field {} in {}: {:?}", #field_name_str, #name_str, e);
                                     e
@@ -866,13 +866,13 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                 let field_name_str = name.to_string();
                                 quote! {
                                     ::tracing::trace!(target: "noun_serde_decode", "  field={} type={} axis={}", #field_name_str, stringify!(#ty), #axis);
-                                    let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                    let field_noun = cell.as_noun().slot(#axis)
                                         .map_err(|e| {
                                             ::tracing::trace!(target: "noun_serde_decode", "  FAILED to get slot {} for field {} in {}: {:?}", #axis, #field_name_str, #name_str, e);
                                             ::noun_serde::NounDecodeError::ExpectedCell
                                         })?;
                                     ::tracing::trace!(target: "noun_serde_decode", "  field={} is_atom={} is_cell={}", #field_name_str, field_noun.is_atom(), field_noun.is_cell());
-                                    let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)
+                                    let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)
                                         .map_err(|e| {
                                             ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field {} in {}: {:?}", #field_name_str, #name_str, e);
                                             e
@@ -902,7 +902,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                         quote! {
                             ::tracing::trace!(target: "noun_serde_decode", "Decoding {} (single field tuple), is_atom={}, is_cell={}", #name_str, noun.is_atom(), noun.is_cell());
                             ::tracing::trace!(target: "noun_serde_decode", "  field=0 type={}", stringify!(#field_type));
-                            let field_0 = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)
+                            let field_0 = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)
                                 .map_err(|e| {
                                     ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field 0 in {}: {:?}", #name_str, e);
                                     e
@@ -967,13 +967,13 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
 
                             quote! {
                                 ::tracing::trace!(target: "noun_serde_decode", "  field={} type={} axis={}", #field_num_str, stringify!(#field_type), #axis);
-                                let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                let field_noun = cell.as_noun().slot(#axis)
                                     .map_err(|e| {
                                         ::tracing::trace!(target: "noun_serde_decode", "  FAILED to get slot {} for field {} in {}: {:?}", #axis, #field_num_str, #name_str, e);
                                         ::noun_serde::NounDecodeError::FieldError(stringify!(#field_ident).to_string(), "Missing field".into())
                                     })?;
                                 ::tracing::trace!(target: "noun_serde_decode", "  field={} is_atom={} is_cell={}", #field_num_str, field_noun.is_atom(), field_noun.is_cell());
-                                let #field_ident = <#field_type as ::noun_serde::NounDecode>::from_noun(&field_noun)
+                                let #field_ident = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)
                                     .map_err(|e| {
                                         ::tracing::trace!(target: "noun_serde_decode", "  FAILED decoding field {} in {}: {:?}", #field_num_str, #name_str, e);
                                         ::noun_serde::NounDecodeError::FieldError(stringify!(#field_ident).to_string(), e.to_string())
@@ -1040,7 +1040,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                     let field_name = field_names[0];
                                     let field_type = field_types[0];
                                     quote! {
-                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)?;
+                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)?;
                                         Ok(Self::#variant_name { #field_name })
                                     }
                                 } else {
@@ -1078,9 +1078,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             };
                                             let axis = custom_axis.unwrap_or(default_axis);
                                             quote! {
-                                                let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                                let field_noun = cell.as_noun().slot(#axis)
                                                     .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                             }
                                         });
                                     quote! {
@@ -1117,7 +1117,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                 } else if field_count == 1 {
                                     let field_type = field_types[0];
                                     quote! {
-                                        let value = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)?;
+                                        let value = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)?;
                                         Ok(Self::#variant_name(value))
                                     }
                                 } else {
@@ -1145,9 +1145,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             };
                                             let axis = custom_axis.unwrap_or(default_axis);
                                             quote! {
-                                                let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                                let field_noun = cell.as_noun().slot(#axis)
                                                     .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                             }
                                         });
                                     quote! {
@@ -1244,7 +1244,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                     let field_name = field_names[0];
                                     let field_type = field_types[0];
                                     quote! {
-                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)?;
+                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)?;
                                         Ok(Self::#variant_name { #field_name })
                                     }
                                 } else {
@@ -1282,9 +1282,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             };
                                             let axis = custom_axis.unwrap_or(default_axis);
                                             quote! {
-                                                let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                                let field_noun = cell.as_noun().slot(#axis)
                                                     .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                             }
                                         });
                                     quote! {
@@ -1321,7 +1321,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                 } else if field_count == 1 {
                                     let field_type = field_types[0];
                                     quote! {
-                                        let value = <#field_type as ::noun_serde::NounDecode>::from_noun(noun)?;
+                                        let value = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&noun)?;
                                         Ok(Self::#variant_name(value))
                                     }
                                 } else {
@@ -1349,9 +1349,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             };
                                             let axis = custom_axis.unwrap_or(default_axis);
                                             quote! {
-                                                let field_noun = ::nockvm::noun::Slots::slot(&cell, #axis)
+                                                let field_noun = cell.as_noun().slot(#axis)
                                                     .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                                let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                             }
                                         });
                                     quote! {
@@ -1439,11 +1439,11 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                         };
                                         let axis = custom_axis.unwrap_or(default_axis);
                                         quote! {
-                                            let field_cell = ::nockvm::noun::Slots::slot(&data, #axis)
+                                            let field_cell = data.slot(#axis)
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?
                                                 .as_cell()
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_cell.tail())?;
+                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_cell.tail())?;
                                         }
                                     });
 
@@ -1494,9 +1494,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                         };
                                         let axis = custom_axis.unwrap_or(default_axis);
                                         quote! {
-                                            let field_noun = ::nockvm::noun::Slots::slot(&data_cell, #axis)
+                                            let field_noun = data_cell.slot(#axis)
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                         }
                                     });
 
@@ -1504,7 +1504,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                     let field_name = field_names[0];
                                     let field_type = field_types[0];
                                     quote! {
-                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun(&payload)?;
+                                        let #field_name = <#field_type as ::noun_serde::NounDecode>::from_noun_handle(&payload)?;
                                         Ok(Self::#variant_name { #field_name })
                                     }
                                 } else {
@@ -1521,7 +1521,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
                                             let payload = cell.tail();
                                             if let Ok(payload_cell) = payload.as_cell() {
-                                                let data_cell = payload_cell;
+                                                let data_cell = payload_cell.as_noun();
                                                 #(#field_decoders)*
                                                 Ok(Self::#variant_name { #(#field_names),* })
                                             } else {
@@ -1554,7 +1554,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             let cell = noun
                                                 .as_cell()
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                            let value = <#ty as ::noun_serde::NounDecode>::from_noun(&cell.tail())?;
+                                            let value = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&cell.tail())?;
                                             Ok(Self::#variant_name(value))
                                         })();
                                     }
@@ -1584,9 +1584,9 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                         };
                                         let axis = custom_axis.unwrap_or(default_axis);
                                         quote! {
-                                            let field_noun = ::nockvm::noun::Slots::slot(&data_cell, #axis)
+                                            let field_noun = data_cell.slot(#axis)
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun(&field_noun)?;
+                                            let #name = <#ty as ::noun_serde::NounDecode>::from_noun_handle(&field_noun)?;
                                         }
                                     });
 
@@ -1596,10 +1596,7 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                                             let cell = noun
                                                 .as_cell()
                                                 .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
-                                            let data_cell = cell
-                                                .tail()
-                                                .as_cell()
-                                                .map_err(|_| ::noun_serde::NounDecodeError::ExpectedCell)?;
+                                            let data_cell = cell.tail();
                                             #(#field_decoders)*
                                             Ok(Self::#variant_name(#(#field_names),*))
                                         })();
@@ -1621,14 +1618,14 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
                 quote! {
                     #(#untagged_attempts)*
 
-                    let tag_noun = if noun.is_atom() {
-                        *noun
+                    let tag_noun_handle = if noun.is_atom() {
+                        noun
                     } else if let Ok(cell) = noun.as_cell() {
                         cell.head()
                     } else {
                         return Err(::noun_serde::NounDecodeError::InvalidEnumData);
                     };
-                    let string_tag = tag_noun
+                    let string_tag = tag_noun_handle
                         .as_atom()
                         .ok()
                         .and_then(|atom| {
@@ -1650,7 +1647,11 @@ pub fn derive_noun_decode(input: TokenStream) -> TokenStream {
     // Generate the impl block
     let expanded = quote! {
         impl ::noun_serde::NounDecode for #name {
-            fn from_noun(noun: &::nockvm::noun::Noun) -> Result<Self, ::noun_serde::NounDecodeError> {
+            fn from_noun(
+                noun: &::nockvm::noun::Noun,
+                space: &::nockvm::noun::NounSpace,
+            ) -> Result<Self, ::noun_serde::NounDecodeError> {
+                let noun = noun.in_space(space);
                 #decode_impl
             }
         }

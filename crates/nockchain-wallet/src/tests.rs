@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Once;
 
-use nockapp::kernel::boot::{self, Cli as BootCli};
+use nockapp::kernel::boot::{self, ephemeral_test_boot_cli, Cli as BootCli};
 use nockapp::wire::SystemWire;
 use nockapp::{exit_driver, AtomExt, Bytes};
 use nockchain_math::belt::Belt;
@@ -15,7 +15,7 @@ use nockchain_types::tx_engine::common::{BlockHeight, BlockHeightDelta, Nicks, S
 use nockchain_types::tx_engine::v1::note::{NoteData, NoteDataEntry};
 use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, Pkh, SpendCondition};
 use nockchain_types::tx_engine::{v0, v1};
-use nockvm::noun::{Slots, T};
+use nockvm::noun::{NounAllocator, T};
 use noun_serde::{NounDecode, NounEncode};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -28,6 +28,7 @@ use wallet_tx_builder::types::{
 };
 
 use super::*;
+use crate::command::WalletWire;
 use crate::create_tx::{
     ensure_manual_planner_parity, ActiveSignerEntryNoun, MigrateV0NotesSummary,
     MigrateV0SignerSummary, PlannerBlockchainConstantsNoun, PlannerNoteDataConstantsNoun,
@@ -39,7 +40,7 @@ static INIT: Once = Once::new();
 
 fn init_tracing() {
     INIT.call_once(|| {
-        let cli = boot::default_boot_cli(true);
+        let cli = ephemeral_test_boot_cli(true);
         boot::init_default_tracing(&cli);
     });
 }
@@ -125,18 +126,23 @@ fn note_v0_with_lock(name: Name, origin_page: u64, assets: u64, lock: v0::Lock) 
     })
 }
 
-fn noun_leaf_count(noun: nockapp::Noun) -> u64 {
+fn noun_leaf_count(noun: nockapp::Noun, space: &nockvm::noun::NounSpace) -> u64 {
     if noun.is_atom() {
         return 1;
     }
-    let cell = noun.as_cell().expect("noun should decode as cell");
-    noun_leaf_count(cell.head()).saturating_add(noun_leaf_count(cell.tail()))
+    let cell = noun
+        .in_space(space)
+        .as_cell()
+        .expect("noun should decode as cell");
+    noun_leaf_count(cell.head().noun(), space)
+        .saturating_add(noun_leaf_count(cell.tail().noun(), space))
 }
 
 fn word_count_from_noun_encode<T: NounEncode>(value: &T) -> u64 {
     let mut slab: NounSlab = NounSlab::new();
     let noun = value.to_noun(&mut slab);
-    noun_leaf_count(noun)
+    let space = slab.noun_space();
+    noun_leaf_count(noun, &space)
 }
 
 fn merged_seed_word_count(spends: &v1::Spends) -> u64 {
@@ -208,8 +214,9 @@ fn decode_saved_transaction_spends(effects: &[NounSlab]) -> Result<v1::Spends, N
     let tx_bytes = effects
         .iter()
         .find_map(|effect| {
+            let space = effect.noun_space();
             let noun = unsafe { effect.root() };
-            let cell = noun.as_cell().ok()?;
+            let cell = noun.in_space(&space).as_cell().ok()?;
             let tag = cell.head().as_atom().ok()?.into_string().ok()?;
             if tag != "file" {
                 return None;
@@ -245,12 +252,14 @@ fn decode_saved_transaction_spends_from_path(
 fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, NockAppError> {
     let mut slab: NounSlab = NounSlab::new();
     let transaction_noun = slab.cue_into(Bytes::copy_from_slice(tx_bytes))?;
-    let transaction_cell = transaction_noun.as_cell().map_err(|err| {
+    let space = slab.noun_space();
+    let transaction_cell = transaction_noun.in_space(&space).as_cell().map_err(|err| {
         NockAppError::OtherError(format!("transaction jam root not a cell: {err}"))
     })?;
-    let version = <u64 as NounDecode>::from_noun(&transaction_cell.head()).map_err(|err| {
-        NockAppError::OtherError(format!("transaction version did not decode: {err}"))
-    })?;
+    let version =
+        <u64 as NounDecode>::from_noun(&transaction_cell.head().noun(), &space).map_err(|err| {
+            NockAppError::OtherError(format!("transaction version did not decode: {err}"))
+        })?;
     if version != 1 {
         return Err(NockAppError::OtherError(format!(
             "expected saved transaction version 1, got {version}"
@@ -262,9 +271,10 @@ fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, N
     let spends_and_rest = name_and_rest.tail().as_cell().map_err(|err| {
         NockAppError::OtherError(format!("transaction jam missing spends/rest cell: {err}"))
     })?;
-    let mut spends = v1::Spends::from_noun(&spends_and_rest.head()).map_err(|err| {
-        NockAppError::OtherError(format!("saved transaction spends did not decode: {err}"))
-    })?;
+    let mut spends =
+        v1::Spends::from_noun(&spends_and_rest.head().noun(), &space).map_err(|err| {
+            NockAppError::OtherError(format!("saved transaction spends did not decode: {err}"))
+        })?;
     let display_and_witness = spends_and_rest.tail().as_cell().map_err(|err| {
         NockAppError::OtherError(format!(
             "transaction jam missing display/witness-data cell: {err}"
@@ -274,17 +284,20 @@ fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, N
     let witness_cell = witness_data.as_cell().map_err(|err| {
         NockAppError::OtherError(format!("transaction jam witness-data not a cell: {err}"))
     })?;
-    let witness_tag = <u64 as NounDecode>::from_noun(&witness_cell.head()).map_err(|err| {
-        NockAppError::OtherError(format!("witness-data tag did not decode: {err}"))
-    })?;
+    let witness_tag =
+        <u64 as NounDecode>::from_noun(&witness_cell.head().noun(), &space).map_err(|err| {
+            NockAppError::OtherError(format!("witness-data tag did not decode: {err}"))
+        })?;
     match witness_tag {
         0 => {
             let signatures =
-                ZMap::<Name, Signature>::from_noun(&witness_cell.tail()).map_err(|err| {
-                    NockAppError::OtherError(format!(
-                        "legacy witness-data signature map did not decode: {err}"
-                    ))
-                })?;
+                ZMap::<Name, Signature>::from_noun(&witness_cell.tail().noun(), &space).map_err(
+                    |err| {
+                        NockAppError::OtherError(format!(
+                            "legacy witness-data signature map did not decode: {err}"
+                        ))
+                    },
+                )?;
             for (name, signature) in signatures.into_entries() {
                 let Some((_, v1::Spend::Legacy(spend0))) = spends
                     .0
@@ -301,10 +314,13 @@ fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, N
             }
         }
         1 => {
-            let witnesses =
-                ZMap::<Name, v1::Witness>::from_noun(&witness_cell.tail()).map_err(|err| {
-                    NockAppError::OtherError(format!("v1 witness-data map did not decode: {err}"))
-                })?;
+            let witnesses = ZMap::<Name, v1::Witness>::from_noun(
+                &witness_cell.tail().noun(),
+                &space,
+            )
+            .map_err(|err| {
+                NockAppError::OtherError(format!("v1 witness-data map did not decode: {err}"))
+            })?;
             for (name, witness) in witnesses.into_entries() {
                 let Some((_, v1::Spend::Witness(spend1))) = spends
                     .0
@@ -330,8 +346,9 @@ fn decode_transaction_spends_from_bytes(tx_bytes: &[u8]) -> Result<v1::Spends, N
 }
 
 fn effect_tag(effect: &NounSlab) -> Option<String> {
+    let space = effect.noun_space();
     let noun = unsafe { effect.root() };
-    let cell = noun.as_cell().ok()?;
+    let cell = noun.in_space(&space).as_cell().ok()?;
     cell.head().as_atom().ok()?.into_string().ok()
 }
 
@@ -340,9 +357,10 @@ fn effect_exit_code(effects: &[NounSlab]) -> Option<u64> {
         if effect_tag(effect).as_deref() != Some("exit") {
             return None;
         }
+        let space = effect.noun_space();
         let noun = unsafe { effect.root() };
-        let cell = noun.as_cell().ok()?;
-        <u64 as NounDecode>::from_noun(&cell.tail()).ok()
+        let cell = noun.in_space(&space).as_cell().ok()?;
+        <u64 as NounDecode>::from_noun(&cell.tail().noun(), &space).ok()
     })
 }
 
@@ -354,30 +372,121 @@ fn format_note_names(names: &[Name]) -> String {
         .join(",")
 }
 
+fn decode_option_handle<'a>(
+    noun: nockvm::noun::NounHandle<'a>,
+) -> Result<Option<nockvm::noun::NounHandle<'a>>, NockAppError> {
+    if let Ok(atom) = noun.as_atom() {
+        let tag = atom
+            .as_u64()
+            .map_err(|err| NockAppError::OtherError(format!("option tag did not decode: {err}")))?;
+        return match tag {
+            1 => Ok(None),
+            other => Err(NockAppError::OtherError(format!(
+                "unexpected option atom tag {other}"
+            ))),
+        };
+    }
+
+    let cell = noun
+        .as_cell()
+        .map_err(|err| NockAppError::OtherError(format!("option payload not a cell: {err}")))?;
+    let tag = cell
+        .head()
+        .as_atom()
+        .map_err(|err| NockAppError::OtherError(format!("option head not an atom: {err}")))?
+        .as_u64()
+        .map_err(|err| NockAppError::OtherError(format!("option head did not decode: {err}")))?;
+    if tag != 0 {
+        return Err(NockAppError::OtherError(format!(
+            "unexpected option cell tag {tag}"
+        )));
+    }
+    Ok(Some(cell.tail()))
+}
+
 async fn peek_master_signing_key(wallet: &mut Wallet) -> Result<Hash, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "master-signing-key").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
-    let decoded: Option<Option<Hash>> = unsafe { Option::from_noun(result.root())? };
-    decoded.flatten().ok_or_else(|| {
-        NockAppError::OtherError("wallet master-signing-key peek returned no payload".to_string())
-    })
+    let space = result.noun_space();
+    let decoded: Option<Option<Hash>> = unsafe { Option::from_noun(result.root(), &space)? };
+    if let Some(master_signing_key) = decoded.flatten() {
+        return Ok(master_signing_key);
+    }
+
+    let signing_keys = peek_signing_keys(wallet).await?;
+    if let Some(signing_key) = signing_keys.first() {
+        return Ok(signing_key.clone());
+    }
+
+    let active_signers = peek_active_signers(wallet).await?;
+    if let Some(master_signer) = active_signers
+        .iter()
+        .find(|signer| signer.child_index.is_none())
+    {
+        return Hash::from_base58(&master_signer.address_b58).map_err(|err| {
+            NockAppError::OtherError(format!(
+                "wallet active master signer address did not decode as a pubkey hash: {err}"
+            ))
+        });
+    }
+    active_signers
+        .first()
+        .map(|signer| {
+            Hash::from_base58(&signer.address_b58).map_err(|err| {
+                NockAppError::OtherError(format!(
+                    "wallet active signer address did not decode as a pubkey hash: {err}"
+                ))
+            })
+        })
+        .transpose()?
+        .ok_or_else(|| {
+            NockAppError::OtherError("wallet signer key peek returned no payload".to_string())
+        })
+}
+
+async fn peek_signing_keys(wallet: &mut Wallet) -> Result<Vec<Hash>, NockAppError> {
+    let mut slab = NounSlab::new();
+    let tag = make_tas(&mut slab, "signing-keys").as_noun();
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
+
+    let result = wallet.app.peek(slab).await?;
+    let space = result.noun_space();
+    let decoded: Option<Option<Vec<Hash>>> = unsafe { Option::from_noun(result.root(), &space)? };
+    Ok(decoded.flatten().unwrap_or_default())
 }
 
 async fn peek_master_signing_pubkey(wallet: &mut Wallet) -> Result<SchnorrPubkey, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "master-signing-pubkey").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
-    let decoded: Option<Option<SchnorrPubkey>> = unsafe { Option::from_noun(result.root())? };
-    decoded.flatten().ok_or_else(|| {
-        NockAppError::OtherError(
-            "wallet master-signing-pubkey peek returned no payload".to_string(),
-        )
-    })
+    let space = result.noun_space();
+    let decoded: Option<Option<SchnorrPubkey>> =
+        unsafe { Option::from_noun(result.root(), &space)? };
+    if let Some(master_signing_pubkey) = decoded.flatten() {
+        return Ok(master_signing_pubkey);
+    }
+
+    let active_signers = peek_active_signers(wallet).await?;
+    if let Some(master_signer) = active_signers
+        .iter()
+        .find(|signer| signer.child_index.is_none())
+    {
+        return Ok(master_signer.pubkey.clone());
+    }
+    active_signers
+        .first()
+        .map(|signer| signer.pubkey.clone())
+        .ok_or_else(|| {
+            NockAppError::OtherError("wallet signer pubkey peek returned no payload".to_string())
+        })
 }
 
 async fn peek_active_signers(
@@ -385,11 +494,13 @@ async fn peek_active_signers(
 ) -> Result<Vec<ActiveSignerEntryNoun>, NockAppError> {
     let mut slab = NounSlab::new();
     let tag = make_tas(&mut slab, "active-signers").as_noun();
-    slab.modify(|_| vec![tag, SIG]);
+    let path = T(&mut slab, &[tag, SIG]);
+    slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
+    let space = result.noun_space();
     let decoded: Option<Option<Vec<ActiveSignerEntryNoun>>> =
-        unsafe { Option::from_noun(result.root())? };
+        unsafe { Option::from_noun(result.root(), &space)? };
     let mut signers = decoded.flatten().unwrap_or_default();
     signers.sort_by_key(|signer| {
         (
@@ -450,20 +561,44 @@ async fn apply_balance_update(
     Ok(())
 }
 
-async fn boot_test_wallet() -> Result<(Wallet, TempDir), NockAppError> {
-    let cli = BootCli::parse_from(["wallet", "--new"]);
+async fn derive_child_address(
+    wallet: &mut Wallet,
+    index: u64,
+    hardened: bool,
+) -> Result<String, NockAppError> {
+    let label = None;
+    let (noun, _) = Wallet::derive_child(index, hardened, &label)?;
+    let wire = WalletWire::Command(Commands::DeriveChild {
+        index,
+        hardened,
+        label,
+    })
+    .to_wire();
+    let effects = wallet.app.poke(wire, noun).await?;
+    Wallet::derived_address_from_effects(&effects)
+}
+
+async fn boot_wallet_with(
+    cli: BootCli,
+    hot_state: &[nockvm::jets::hot::HotEntry],
+) -> Result<(Wallet, TempDir), NockAppError> {
     let data_dir = tempfile::tempdir().map_err(NockAppError::IoError)?;
-    let prover_hot_state = produce_prover_hot_state();
     let nockapp = boot::setup(
         KERNEL,
         cli.clone(),
-        prover_hot_state.as_slice(),
+        hot_state,
         "wallet",
         Some(data_dir.path().to_path_buf()),
     )
     .await
     .map_err(|e| CrownError::Unknown(e.to_string()))?;
     Ok((Wallet::new(nockapp), data_dir))
+}
+
+async fn boot_test_wallet() -> Result<(Wallet, TempDir), NockAppError> {
+    let cli = ephemeral_test_boot_cli(true);
+    let prover_hot_state = produce_prover_hot_state();
+    boot_wallet_with(cli, prover_hot_state.as_slice()).await
 }
 
 async fn peek_wallet_blockchain_constants(
@@ -474,14 +609,18 @@ async fn peek_wallet_blockchain_constants(
     slab.modify(|_| vec![state_tag, SIG]);
 
     let result = wallet.app.peek(slab).await?;
-    let decoded: Option<Option<Noun>> = unsafe { Option::from_noun(result.root())? };
-    let state = decoded
-        .flatten()
+    let space = result.noun_space();
+    let root = unsafe { *result.root() }.in_space(&space);
+    let state = decode_option_handle(root)?
+        .and_then(|inner| decode_option_handle(inner).transpose())
+        .transpose()?
         .ok_or_else(|| NockAppError::OtherError("missing wallet state payload".to_string()))?;
-    PlannerBlockchainConstantsNoun::from_noun(&state.slot(31).map_err(|err| {
+    let constants = state.slot(31).map_err(|err| {
         NockAppError::OtherError(format!("wallet state missing blockchain constants: {err}"))
-    })?)
-    .map_err(|err| NockAppError::OtherError(format!("decode blockchain constants failed: {err}")))
+    })?;
+    PlannerBlockchainConstantsNoun::from_noun(&constants.noun(), &space).map_err(|err| {
+        NockAppError::OtherError(format!("decode blockchain constants failed: {err}"))
+    })
 }
 
 async fn peek_balance_state(wallet: &mut Wallet) -> Result<v1::BalanceUpdate, NockAppError> {
@@ -491,8 +630,9 @@ async fn peek_balance_state(wallet: &mut Wallet) -> Result<v1::BalanceUpdate, No
     slab.set_root(path);
 
     let result = wallet.app.peek(slab).await?;
+    let space = result.noun_space();
     let maybe_balance: Option<Option<v1::BalanceUpdate>> =
-        unsafe { <Option<Option<v1::BalanceUpdate>>>::from_noun(result.root())? };
+        unsafe { <Option<Option<v1::BalanceUpdate>>>::from_noun(result.root(), &space)? };
     match maybe_balance {
         Some(Some(balance)) => Ok(balance),
         _ => Err(NockAppError::OtherError(
@@ -718,13 +858,18 @@ fn signing_key_lock_matcher_rejects_threshold_lock_when_single_signer_cannot_mee
 }
 
 #[test]
-fn signing_key_lock_matcher_rejects_multisig_lock_even_when_single_sig_threshold_is_one() {
+fn signing_key_lock_matcher_accepts_single_sig_multisig_when_signer_is_present() {
     let signer = hash(5);
     let matcher = SigningKeyLockMatcher::from_signer_keys(&[signer_key(5)]);
     let spend_condition = SpendCondition::new(vec![LockPrimitive::Pkh(
         nockchain_types::tx_engine::v1::tx::Pkh::new(1, vec![hash(9), signer]),
     )]);
+    let first_name = spend_condition
+        .first_name()
+        .expect("multisig first-name should compute")
+        .into_hash();
 
+    assert!(matcher.matches(&first_name, &spend_condition));
     assert!(!matcher.matches(&hash(1234), &spend_condition));
 }
 
@@ -759,6 +904,34 @@ fn signing_key_lock_matcher_accepts_coinbase_shape_for_matching_signer() {
 
     assert!(matcher.matches(&first_name, &spend_condition));
     assert!(!matcher.matches(&hash(82), &spend_condition));
+}
+
+#[test]
+fn signing_key_lock_matcher_resolves_simple_lock_for_non_master_signer_reconstruction() {
+    let master = signer_key(1);
+    let child = signer_key(8);
+    let matcher = SigningKeyLockMatcher::from_signer_keys(&[master.clone(), child.clone()]);
+    let spend_condition = SpendCondition::new(vec![LockPrimitive::Pkh(
+        nockchain_types::tx_engine::v1::tx::Pkh::new(1, vec![child.clone()]),
+    )]);
+    let first_name = spend_condition
+        .first_name()
+        .expect("simple first-name should compute")
+        .into_hash();
+    let decoded = wallet_tx_builder::note_data::DecodedNoteData(Vec::new());
+
+    let resolution = matcher.resolve_lock(ResolveLockRequest {
+        note_first_name: &first_name,
+        decoded_note_data: &decoded,
+        signer_pkh: Some(&master),
+        coinbase_relative_min: Some(1),
+    });
+
+    assert_eq!(
+        resolution.source,
+        LockResolutionSource::ReconstructedSimplePkh
+    );
+    assert_eq!(resolution.spend_condition, Some(spend_condition));
 }
 
 #[test]
@@ -890,19 +1063,21 @@ fn planner_constants_decode_from_dedicated_peek_shape() {
         },
         base_fee: 128,
         input_fee_divisor: 4,
-        _legacy_constants: D(0),
+        coinbase_timelock_min: 99,
     };
     let wrapped = Some(Some(constants));
 
     let mut slab: NounSlab<NockJammer> = NounSlab::new();
     let noun = wrapped.to_noun(&mut slab);
+    let space = slab.noun_space();
     let decoded: Option<Option<PlannerBlockchainConstantsNoun>> =
-        Option::from_noun(&noun).expect("peek payload should decode");
+        Option::from_noun(&noun, &space).expect("peek payload should decode");
     let parsed = decoded.flatten().expect("payload should be present");
     assert_eq!(parsed.bythos_phase, 54_000);
     assert_eq!(parsed.base_fee, 128);
     assert_eq!(parsed.input_fee_divisor, 4);
     assert_eq!(parsed.data.min_fee, 256);
+    assert_eq!(parsed.coinbase_timelock_min().unwrap(), 99);
 }
 
 #[test]
@@ -912,8 +1087,9 @@ fn planner_constants_extract_coinbase_timelock_min_from_payload() {
 
     let mut slab: NounSlab<NockJammer> = NounSlab::new();
     let noun = wrapped.to_noun(&mut slab);
+    let space = slab.noun_space();
     let decoded: Option<Option<PlannerBlockchainConstantsNoun>> =
-        Option::from_noun(&noun).expect("peek payload should decode");
+        Option::from_noun(&noun, &space).expect("peek payload should decode");
     let parsed = decoded.flatten().expect("payload should be present");
 
     assert_eq!(
@@ -1448,11 +1624,13 @@ async fn create_tx_with_planner_accepts_manual_all_v0_notes() -> Result<(), Nock
     let (mut wallet, _data_dir) = boot_test_wallet().await?;
     let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
 
-    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    import_seed_phrase(&mut wallet, seedphrase, 0).await?;
     wallet.set_fakenet().await?;
 
     let destination = peek_master_signing_key(&mut wallet).await?;
-    let signer_pubkey = peek_master_signing_pubkey(&mut wallet).await?;
+    let child_address = derive_child_address(&mut wallet, 0, false).await?;
+    let signer_pubkey = SchnorrPubkey::from_base58(&child_address)
+        .expect("derived v0 child address should decode as a Schnorr pubkey");
 
     let v0_note_name = name(52, 5_252);
     let v0_note = note_v0_with_lock(
@@ -1478,7 +1656,7 @@ async fn create_tx_with_planner_accepts_manual_all_v0_notes() -> Result<(), Nock
             }],
             false,
             Some(destination.to_base58()),
-            Vec::new(),
+            vec![(0, false)],
             true,
             false,
             NoteSelectionStrategyCli::Ascending,
@@ -1612,14 +1790,128 @@ async fn migrate_v0_notes_wallet_tx_matches_planner_word_and_fee_counts() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn create_tx_planner_accepts_child_sign_key_for_lock_reconstruction(
+) -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let seedphrase = "route run sing warrior light swamp clog flower agent ugly wasp fresh tube snow motion salt salon village raccoon chair demise neutral school confirm";
+
+    import_seed_phrase(&mut wallet, seedphrase, 1).await?;
+    wallet.set_fakenet().await?;
+
+    let master_signer = peek_master_signing_key(&mut wallet).await?;
+    let child_address = derive_child_address(&mut wallet, 0, false).await?;
+    let child_pkh = Hash::from_base58(&child_address)
+        .expect("derived child address should decode as pubkey hash");
+    let note_name = Name::new(
+        SpendCondition::simple_pkh(child_pkh.clone())
+            .first_name()
+            .expect("simple child lock should compute first-name")
+            .into_hash(),
+        hash(4_242),
+    );
+    let child_note = v1::Note::V1(v1::NoteV1::new(
+        BlockHeight(Belt(1)),
+        note_name.clone(),
+        NoteData::new(Vec::new()),
+        Nicks(10_000),
+    ));
+    apply_balance_update(
+        &mut wallet,
+        balance_page(7, 888, vec![(note_name.clone(), child_note)]),
+    )
+    .await?;
+
+    let recipient = RecipientSpec::P2pkh {
+        address: master_signer,
+        amount: 4_000,
+    };
+
+    let _ = wallet
+        .create_tx_with_planner(
+            None,
+            Some(format_note_names(std::slice::from_ref(&note_name))),
+            None,
+            vec![recipient],
+            false,
+            None,
+            vec![(0, false)],
+            true,
+            false,
+            NoteSelectionStrategyCli::Ascending,
+        )
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn keygen_create_tx_uses_tracked_signing_keys() -> Result<(), NockAppError> {
+    init_tracing();
+    let (mut wallet, _data_dir) = boot_test_wallet().await?;
+    let entropy = [7u8; 32];
+    let salt = [9u8; 16];
+
+    let (noun, _) = Wallet::keygen(&entropy, &salt)?;
+    let wire = WalletWire::Command(Commands::Keygen).to_wire();
+    let _ = wallet.app.poke(wire, noun).await?;
+    wallet.set_fakenet().await?;
+
+    let signing_keys = peek_signing_keys(&mut wallet).await?;
+    let signer_pkh = signing_keys
+        .first()
+        .cloned()
+        .expect("keygen should expose a tracked signing key");
+    let note_name = Name::new(
+        SpendCondition::simple_pkh(signer_pkh.clone())
+            .first_name()
+            .expect("simple signer lock should compute first-name")
+            .into_hash(),
+        hash(7_777),
+    );
+    let note = v1::Note::V1(v1::NoteV1::new(
+        BlockHeight(Belt(1)),
+        note_name.clone(),
+        NoteData::new(Vec::new()),
+        Nicks(10_000),
+    ));
+    apply_balance_update(
+        &mut wallet,
+        balance_page(9, 999, vec![(note_name.clone(), note)]),
+    )
+    .await?;
+
+    let _ = wallet
+        .create_tx_with_planner(
+            None,
+            Some(format_note_names(std::slice::from_ref(&note_name))),
+            None,
+            vec![RecipientSpec::P2pkh {
+                address: signer_pkh,
+                amount: 4_000,
+            }],
+            false,
+            None,
+            Vec::new(),
+            true,
+            false,
+            NoteSelectionStrategyCli::Ascending,
+        )
+        .await?;
+
+    Ok(())
+}
+
 #[test]
 fn master_signing_key_decodes_from_hash_payload_shape() {
     let wrapped = Some(Some(hash(3)));
 
     let mut slab: NounSlab<NockJammer> = NounSlab::new();
     let noun = wrapped.to_noun(&mut slab);
+    let space = slab.noun_space();
     let decoded: Option<Option<Hash>> =
-        Option::from_noun(&noun).expect("master signing key payload should decode");
+        Option::from_noun(&noun, &space).expect("master signing key payload should decode");
     let parsed = decoded.flatten().expect("payload should be present");
 
     assert_eq!(parsed, hash(3));
@@ -1721,19 +2013,9 @@ fn collect_signing_keys_defaults_to_master() {
 #[cfg_attr(miri, ignore)]
 async fn test_keygen() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&["--new"]);
-
+    let cli = ephemeral_test_boot_cli(true);
     let prover_hot_state = produce_prover_hot_state();
-    let nockapp = boot::setup(
-        KERNEL,
-        cli.clone(),
-        prover_hot_state.as_slice(),
-        "wallet",
-        None,
-    )
-    .await
-    .map_err(|e| CrownError::Unknown(e.to_string()))?;
-    let mut wallet = Wallet::new(nockapp);
+    let (mut wallet, _data_dir) = boot_wallet_with(cli, prover_hot_state.as_slice()).await?;
     let mut entropy = [0u8; 32];
     let mut salt = [0u8; 16];
     getrandom::fill(&mut entropy).map_err(|e| CrownError::Unknown(e.to_string()))?;
@@ -1749,9 +2031,10 @@ async fn test_keygen() -> Result<(), NockAppError> {
         keygen_result.len() == 2,
         "Expected keygen result to be a list of 2 noun slabs - markdown and exit"
     );
-    let exit_cause = unsafe { keygen_result[1].root() };
+    let exit_space = keygen_result[1].noun_space();
+    let exit_cause = unsafe { *keygen_result[1].root() }.in_space(&exit_space);
     let code = exit_cause.as_cell()?.tail();
-    assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+    assert_eq!(code.as_atom()?.as_u64()?, 0, "Expected exit code 0");
 
     Ok(())
 }
@@ -1760,19 +2043,9 @@ async fn test_keygen() -> Result<(), NockAppError> {
 #[cfg_attr(miri, ignore)]
 async fn test_derive_child() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&["--new"]);
-
+    let cli = ephemeral_test_boot_cli(true);
     let prover_hot_state = produce_prover_hot_state();
-    let nockapp = boot::setup(
-        KERNEL,
-        cli.clone(),
-        prover_hot_state.as_slice(),
-        "wallet",
-        None,
-    )
-    .await
-    .map_err(|e| CrownError::Unknown(e.to_string()))?;
-    let mut wallet = Wallet::new(nockapp);
+    let (mut wallet, _data_dir) = boot_wallet_with(cli, prover_hot_state.as_slice()).await?;
 
     // Generate a new key pair
     let mut entropy = [0u8; 32];
@@ -1801,9 +2074,10 @@ async fn test_derive_child() -> Result<(), NockAppError> {
         "Expected derive result to be a list of 2 noun slabs - markdown and exit"
     );
 
-    let exit_cause = unsafe { derive_result[1].root() };
+    let exit_space = derive_result[1].noun_space();
+    let exit_cause = unsafe { *derive_result[1].root() }.in_space(&exit_space);
     let code = exit_cause.as_cell()?.tail();
-    assert!(unsafe { code.raw_equals(&D(0)) }, "Expected exit code 0");
+    assert_eq!(code.as_atom()?.as_u64()?, 0, "Expected exit code 0");
 
     Ok(())
 }
@@ -1813,11 +2087,8 @@ async fn test_derive_child() -> Result<(), NockAppError> {
 #[cfg_attr(miri, ignore)]
 async fn test_gen_master_privkey() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&[""]);
-    let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
-        .await
-        .map_err(|e| CrownError::Unknown(e.to_string()))?;
-    let mut wallet = Wallet::new(nockapp);
+    let cli = ephemeral_test_boot_cli(true);
+    let (mut wallet, _data_dir) = boot_wallet_with(cli, &[]).await?;
     let seedphrase = "correct horse battery staple";
     let version = 1;
     let (noun, op) = Wallet::import_seed_phrase(seedphrase, version)?;
@@ -1840,7 +2111,7 @@ async fn test_gen_master_privkey() -> Result<(), NockAppError> {
 #[ignore]
 async fn test_import_keys() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&["--new"]);
+    let cli = ephemeral_test_boot_cli(true);
     let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
         .await
         .map_err(|e| CrownError::Unknown(e.to_string()))?;
@@ -1901,11 +2172,8 @@ async fn test_spend_single_sig_format() -> Result<(), NockAppError> {
 #[cfg_attr(miri, ignore)]
 async fn test_list_notes() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&[""]);
-    let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
-        .await
-        .map_err(|e| CrownError::Unknown(e.to_string()))?;
-    let mut wallet = Wallet::new(nockapp);
+    let cli = ephemeral_test_boot_cli(true);
+    let (mut wallet, _data_dir) = boot_wallet_with(cli, &[]).await?;
 
     // Test listing notes
     let (noun, op) = Wallet::list_notes()?;
@@ -1921,7 +2189,7 @@ async fn test_list_notes() -> Result<(), NockAppError> {
 #[ignore]
 async fn test_make_tx_from_draft() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&[""]);
+    let cli = ephemeral_test_boot_cli(true);
     let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
         .await
         .map_err(|e| CrownError::Unknown(e.to_string()))?;
@@ -1964,7 +2232,7 @@ async fn test_make_tx_from_draft() -> Result<(), NockAppError> {
 #[ignore]
 async fn test_show_tx() -> Result<(), NockAppError> {
     init_tracing();
-    let cli = BootCli::parse_from(&[""]);
+    let cli = ephemeral_test_boot_cli(true);
     let nockapp = boot::setup(KERNEL, cli.clone(), &[], "wallet", None)
         .await
         .map_err(|e| CrownError::Unknown(e.to_string()))?;

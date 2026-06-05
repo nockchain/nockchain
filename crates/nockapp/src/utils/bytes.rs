@@ -3,7 +3,7 @@ use std::any;
 use bytes::Bytes;
 use ibig::UBig;
 use nockvm::jets::cold::{Nounable, NounableResult};
-use nockvm::noun::{Atom, NounAllocator, Slots, D, T};
+use nockvm::noun::{Atom, NounAllocator, NounSpace, D, T};
 
 use crate::utils::error::ConversionError;
 use crate::{Noun, Result};
@@ -142,9 +142,13 @@ impl Nounable for Byts {
         let dat = Atom::from_ubig(stack, &big).as_noun();
         T(stack, &[wid, dat])
     }
-    fn from_noun<A: NounAllocator>(_stack: &mut A, noun: &Noun) -> NounableResult<Self::Target> {
-        let size = noun.slot(2)?;
-        let dat = noun.slot(3)?.as_atom()?;
+    fn from_noun<A: NounAllocator>(
+        _stack: &mut A,
+        noun: &Noun,
+        space: &NounSpace,
+    ) -> NounableResult<Self::Target> {
+        let size = noun.in_space(space).slot(2)?;
+        let dat = noun.in_space(space).slot(3)?.as_atom()?;
 
         let wid = size.as_atom()?.as_u64()? as usize;
         let mut res = vec![0; wid];
@@ -182,8 +186,9 @@ mod test {
     fn test_byt_direct_atom(context: &mut Context, n: u64) -> Result<(), FromNounError> {
         // Start with a byt_noun which is a direct atom and consists of zeroes
         let byt_noun = T(&mut context.stack, &[D(n), D(0x0)]);
+        let space = context.stack.noun_space();
         // Convert it to byt
-        let byt = super::Byts::from_noun(&mut context.stack, &byt_noun)?;
+        let byt = super::Byts::from_noun(&mut context.stack, &byt_noun, &space)?;
         // Check that it is equal
         assert_eq!(byt.0, vec![0x00; n as usize]);
         // Convert it back to noun
@@ -201,8 +206,9 @@ mod test {
 
         // Start with a byt_noun which is a direct atom and a trailing zero
         let byt_noun = T(&mut context.stack, &[D(3), D(0x8765)]);
+        let space = context.stack.noun_space();
         // Convert it to byt
-        let byt = super::Byts::from_noun(&mut context.stack, &byt_noun)?;
+        let byt = super::Byts::from_noun(&mut context.stack, &byt_noun, &space)?;
         // Check that it is equal
         assert_eq!(byt.0, vec![0x87, 0x65, 0x00]);
         // Convert it back to noun
@@ -243,7 +249,8 @@ mod test {
         let expected_byt_noun = T(&mut context.stack, &[D(8), expected_byt_dat]);
         assert_noun_eq(&mut context.stack, byt_noun, expected_byt_noun);
         // Convert it back to a byt and check if it matches
-        let byt_roundtrip = Byts::from_noun(&mut context.stack, &byt_noun)?;
+        let space = context.stack.noun_space();
+        let byt_roundtrip = Byts::from_noun(&mut context.stack, &byt_noun, &space)?;
         assert_eq!(byt.0, byt_roundtrip.0);
 
         // Start with a byt_noun is an indirect atom which does not fit in a u64
@@ -255,7 +262,8 @@ mod test {
         // Check that the noun is as expected
         assert_noun_eq(&mut context.stack, byt_noun, expected_byt_noun);
         // Convert it back to a byt
-        let byt_roundtrip = Byts::from_noun(&mut context.stack, &byt_noun)?;
+        let space = context.stack.noun_space();
+        let byt_roundtrip = Byts::from_noun(&mut context.stack, &byt_noun, &space)?;
         // Check that it is the same
         assert_eq!(byt.0, byt_roundtrip.0);
         Ok(())

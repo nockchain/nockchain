@@ -6,14 +6,16 @@ use nockvm::noun::Noun;
 use crate::form::shape::{dyck, leaf_sequence};
 
 pub fn leaf_sequence_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let t = slot(subject, 6)?;
-    leaf_sequence(&mut context.stack, t)
+    let space = context.stack.noun_space();
+    let t = slot(subject, 6, &space)?;
+    leaf_sequence(&mut context.stack, t, &space)
 }
 
 pub fn dyck_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let t = slot(subject, 6)?;
-    dyck(stack, t)
+    let t = slot(subject, 6, &space)?;
+    dyck(stack, t, &space)
 }
 
 #[cfg(test)]

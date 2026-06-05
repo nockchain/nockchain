@@ -19,7 +19,17 @@ fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
             "protoc from PATH exited with status {status}; set PROTOC to a valid binary path"
         )
         .into()),
-        Err(_) => Err("PROTOC is not set and protoc was not found on PATH".into()),
+        Err(_) => Err(
+            "protoc is required to build nockapp-grpc-proto but was not found.\n\n\
+             Install protoc via one of:\n\
+             \x20 nix develop             (recommended — uses the project flake)\n\
+             \x20 apt install protobuf-compiler  (Debian/Ubuntu)\n\
+             \x20 brew install protobuf          (macOS)\n\
+             \x20 PROTOC=/path/to/protoc         (manual override)\n\n\
+             The Docker build installs protobuf-compiler automatically.\n\
+             See also: flake.nix (Nix), tools/protoc (Bazel)."
+                .into(),
+        ),
     }
 }
 

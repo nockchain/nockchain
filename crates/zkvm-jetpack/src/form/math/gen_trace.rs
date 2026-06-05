@@ -1,7 +1,7 @@
 use either::{Left, Right};
 use nockvm::interpreter::Context;
 use nockvm::jets::JetErr;
-use nockvm::noun::{Noun, D};
+use nockvm::noun::{Noun, NounSpace, D};
 
 use crate::form::belt::Belt;
 use crate::form::felt::{fmul_, Felt};
@@ -37,7 +37,7 @@ enum Dyck {
     Noun(Noun),
 }
 
-pub fn build_tree_data(noun: Noun, alf: &Felt) -> Result<TreeData, JetErr> {
+pub fn build_tree_data(noun: Noun, alf: &Felt, space: &NounSpace) -> Result<TreeData, JetErr> {
     let mut stack: Vec<Dyck> = Vec::<Dyck>::new();
     stack.push(Dyck::Noun(noun));
 
@@ -62,15 +62,16 @@ pub fn build_tree_data(noun: Noun, alf: &Felt) -> Result<TreeData, JetErr> {
             }
             Dyck::Noun(noun) => match noun.as_either_atom_cell() {
                 Right(cell) => {
-                    stack.push(Dyck::Noun(cell.tail()));
+                    let cell = cell.in_space(space);
+                    stack.push(Dyck::Noun(cell.tail().noun()));
                     stack.push(Dyck::One);
-                    stack.push(Dyck::Noun(cell.head()));
+                    stack.push(Dyck::Noun(cell.head().noun()));
                     dyck = fmul_(&dyck, alf);
                 }
                 Left(atom) => {
                     size = fmul_(&size, alf);
                     leaf = fmul_(&leaf, alf);
-                    leaf.0[0] = leaf.0[0] + Belt(atom.as_u64()?);
+                    leaf.0[0] = leaf.0[0] + Belt(atom.in_space(space).as_u64()?);
                 }
             },
         }
@@ -84,19 +85,22 @@ pub fn build_tree_data(noun: Noun, alf: &Felt) -> Result<TreeData, JetErr> {
 }
 
 pub fn leaf_sequence(context: &mut Context, sample: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let mut leaf: Vec<u64> = Vec::<u64>::new();
-    do_leaf_sequence(sample, &mut leaf)?;
+    do_leaf_sequence(sample, &mut leaf, &space)?;
     Ok(vec_to_hoon_list(&mut context.stack, &leaf))
 }
 
-fn do_leaf_sequence(noun: Noun, vec: &mut Vec<u64>) -> Result<(), JetErr> {
+fn do_leaf_sequence(noun: Noun, vec: &mut Vec<u64>, space: &NounSpace) -> Result<(), JetErr> {
     if noun.is_atom() {
-        vec.push(noun.as_atom()?.as_u64()?);
+        vec.push(noun.in_space(space).as_atom()?.as_u64()?);
         Ok(())
     } else {
-        let cell = noun.as_cell()?;
-        do_leaf_sequence(cell.head(), vec)?;
-        do_leaf_sequence(cell.tail(), vec)?;
+        let cell = noun.in_space(space).as_cell()?;
+        let head = cell.head().noun();
+        let tail = cell.tail().noun();
+        do_leaf_sequence(head, vec, space)?;
+        do_leaf_sequence(tail, vec, space)?;
         Ok(())
     }
 }

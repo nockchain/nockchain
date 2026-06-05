@@ -36,7 +36,7 @@ ibig.workspace = true
 kernels-open-bridge = { workspace = true }
 libsqlite3-sys = { workspace = true }
 nockapp.workspace = true
-nockapp-grpc = { workspace = true, default-features = false, features = [
+nockapp-grpc = { path = "../nockapp-grpc", default-features = false, features = [
   "client",
 ] }
 nockchain-libp2p-io.workspace = true

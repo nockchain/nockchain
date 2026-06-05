@@ -11,6 +11,7 @@ use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::one_punch::OnePunchWire;
 use nockapp::wire::Wire;
 use nockapp::Bytes;
+use nockvm::noun::NounAllocator;
 use noun_serde::{NounDecode, NounEncode};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
@@ -536,7 +537,8 @@ impl BridgeRuntimeHandle {
 
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let peek = StopInfoPeek::from_noun(noun).map_err(|err| {
+        let space = slab.noun_space();
+        let peek = StopInfoPeek::from_noun(noun, &space).map_err(|err| {
             BridgeError::Runtime(format!("failed to decode peek stop-info: {}", err))
         })?;
         Ok(peek.inner.flatten())
@@ -644,7 +646,8 @@ impl BridgeRuntimeHandle {
         };
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let peek = CountPeek::from_noun(noun)
+        let space = slab.noun_space();
+        let peek = CountPeek::from_noun(noun, &space)
             .map_err(|err| BridgeError::Runtime(format!("failed to decode peek count: {}", err)))?;
         Ok(peek.inner.flatten().unwrap_or(0))
     }
@@ -660,7 +663,8 @@ impl BridgeRuntimeHandle {
         };
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let peek = BoolPeek::from_noun(noun)
+        let space = slab.noun_space();
+        let peek = BoolPeek::from_noun(noun, &space)
             .map_err(|err| BridgeError::Runtime(format!("failed to decode peek bool: {}", err)))?;
         Ok(peek.inner.flatten().unwrap_or(false))
     }
@@ -676,7 +680,8 @@ impl BridgeRuntimeHandle {
         };
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let peek = HeightPeek::from_noun(noun).map_err(|err| {
+        let space = slab.noun_space();
+        let peek = HeightPeek::from_noun(noun, &space).map_err(|err| {
             BridgeError::Runtime(format!("failed to decode peek height: {}", err))
         })?;
         match peek.inner {
@@ -696,7 +701,8 @@ impl BridgeRuntimeHandle {
         };
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let peek = HoldPeek::from_noun(noun)
+        let space = slab.noun_space();
+        let peek = HoldPeek::from_noun(noun, &space)
             .map_err(|err| BridgeError::Runtime(format!("failed to decode peek hold: {}", err)))?;
         Ok(peek.inner.flatten())
     }
@@ -716,7 +722,8 @@ impl BridgeRuntimeHandle {
 
         let slab = cue_bytes(bytes)?;
         let noun = unsafe { slab.root() };
-        let decoded = T::from_noun(noun).map_err(|err| {
+        let space = slab.noun_space();
+        let decoded = T::from_noun(noun, &space).map_err(|err| {
             BridgeError::Runtime(format!("failed to decode typed peek response: {}", err))
         })?;
         Ok(Some(decoded))
@@ -853,7 +860,8 @@ impl CauseBuilder for KernelCauseBuilder {
                     "building nockchain-block cause from block"
                 );
                 let mut poke_slab = NounSlab::new();
-                let page_noun = poke_slab.copy_into(nock_block.page_noun);
+                let page_noun =
+                    poke_slab.copy_into(nock_block.page_noun, &nock_block.page_slab.noun_space());
                 let tag = String::from("nockchain-block").to_noun(&mut poke_slab);
                 let txs = NockchainTxsMap(nock_block.txs.clone()).to_noun(&mut poke_slab);
                 let cause =

@@ -73,6 +73,10 @@ service NockchainBlockService {
 service NockchainMetricsService {
   rpc GetExplorerMetrics(GetExplorerMetricsRequest)
     returns (GetExplorerMetricsResponse);
+  rpc GetPeerStats(GetPeerStatsRequest)
+    returns (GetPeerStatsResponse);
+  rpc GetReqResMetrics(GetReqResMetricsRequest)
+    returns (GetReqResMetricsResponse);
 }
 
 message GetBlocksRequest {
@@ -200,6 +204,59 @@ message GetExplorerMetricsResponse {
   }
 }
 
+message GetPeerStatsRequest {}
+
+message GetPeerStatsResponse {
+  oneof result {
+    PeerStatsData stats = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message GetReqResMetricsRequest {}
+
+message GetReqResMetricsResponse {
+  oneof result {
+    ReqResMetricsData metrics = 1;
+    common.v1.ErrorStatus error = 2;
+  }
+}
+
+message ReqResMetricsData {
+  uint64 gen1_outbound_timeouts = 1;
+  uint64 gen2_outbound_timeouts = 2;
+  uint64 gen2_batch_requests_sent = 3;
+  uint64 gen2_batch_requests_received = 4;
+  uint64 req_res_fallback_total = 5;
+  uint64 req_res_block_by_height_gen1_routed = 6;
+}
+
+enum PeerReqResGeneration {
+  PEER_REQ_RES_GENERATION_UNSPECIFIED = 0;
+  PEER_REQ_RES_GENERATION_GEN1 = 1;
+  PEER_REQ_RES_GENERATION_GEN2 = 2;
+}
+
+message PeerStat {
+  string peer_id = 1;
+  PeerReqResGeneration protocol_generation = 2;
+  uint64 request_count = 3;
+  uint64 bytes_sent = 4;
+  uint64 bytes_received = 5;
+  double average_round_trip_ms = 6;
+  double average_batch_size = 7;
+  uint64 failure_count = 8;
+  uint64 timeout_count = 9;
+  uint64 blocks_received = 10;
+  double average_block_propagation_ms = 11;
+  uint64 connection_duration_seconds = 12;
+}
+
+message PeerStatsData {
+  uint64 collected_at_unix_ms = 1;
+  repeated PeerStat peers = 2;
+}
+
 message ExplorerMetrics {
   uint64 cache_height = 1;
   uint64 heaviest_height = 2;
@@ -248,6 +305,7 @@ message BlockDetails {
   uint32 tx_count = 12;
   bool has_pow = 13;
   uint32 version = 14;  // 0 for v0 pages, 1 for v1 pages
+  optional uint64 raw_page_bytes = 15;  // Jammed page payload size in bytes
 }
 
 message ProofOfWork {

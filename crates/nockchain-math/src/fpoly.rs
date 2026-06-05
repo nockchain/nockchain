@@ -1,6 +1,7 @@
 use std::cmp::max;
 use std::vec;
 
+use nockvm::noun::NounSpace;
 use noun_serde::NounDecode;
 use num_traits::MulAdd;
 
@@ -302,9 +303,9 @@ pub fn fpeval(a: &[Felt], x: Felt) -> Felt {
 }
 
 #[inline(always)]
-pub fn lift_to_fpoly(belts: HoonList, res: &mut [Felt]) {
+pub fn lift_to_fpoly(belts: HoonList<'_>, res: &mut [Felt], space: &NounSpace) {
     for (i, b) in belts.into_iter().enumerate() {
-        let belt = Belt::from_noun(&b).unwrap_or_else(|err| {
+        let belt = Belt::from_noun(&b, space).unwrap_or_else(|err| {
             panic!(
                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
                 file!(),

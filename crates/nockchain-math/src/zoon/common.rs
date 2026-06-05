@@ -1,7 +1,7 @@
 use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
-use nockvm::mem::NockStack;
-use nockvm::noun::{Noun, NounAllocator, D, T};
+use nockvm::mem::{NockStack, NOCK_STACK_SIZE_TINY};
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
 use crate::belt::Belt;
@@ -27,8 +27,10 @@ impl TipHasher for DefaultTipHasher {
         stack: &mut A,
         noun: Noun,
     ) -> Result<[u64; 5], JetErr> {
-        let noun_res = crate::tip5::hash::hash_noun_varlen(stack, noun)?;
-        let digest = <[u64; 5]>::from_noun(&noun_res)?;
+        let input_space = stack.noun_space();
+        let noun_res = crate::tip5::hash::hash_noun_varlen(stack, noun, &input_space)?;
+        let output_space = stack.noun_space();
+        let digest = <[u64; 5]>::from_noun(&noun_res, &output_space)?;
         Ok(digest)
     }
     fn hash_ten_cell(&self, ten: [u64; 10]) -> Result<[u64; 5], JetErr> {
@@ -108,34 +110,35 @@ pub fn dor_tip<A: NounAllocator>(
     a: &mut Noun,
     b: &mut Noun,
 ) -> Result<bool, JetErr> {
-    use nockvm::jets::math::util::lth_b;
+    use nockvm::jets::math::util::lth;
+    let space = stack.noun_space();
     if unsafe { stack.equals(a, b) } {
         Ok(true)
     } else if !a.is_atom() {
         if b.is_atom() {
             Ok(false)
         } else {
-            let a_cell = a.as_cell()?;
-            let b_cell = b.as_cell()?;
-
-            let mut a_head = a_cell.head();
-            let mut b_head = b_cell.head();
+            let a_cell = a.in_space(&space).as_cell()?;
+            let b_cell = b.in_space(&space).as_cell()?;
+            let mut a_head = a_cell.head().noun();
+            let mut b_head = b_cell.head().noun();
             if unsafe { stack.equals(&mut a_head, &mut b_head) } {
-                let mut a_tail = a_cell.tail();
-                let mut b_tail = b_cell.tail();
+                let mut a_tail = a_cell.tail().noun();
+                let mut b_tail = b_cell.tail().noun();
                 dor_tip(stack, &mut a_tail, &mut b_tail)
             } else {
+                let mut a_head = a_cell.head().noun();
+                let mut b_head = b_cell.head().noun();
                 dor_tip(stack, &mut a_head, &mut b_head)
             }
         }
     } else if !b.is_atom() {
         Ok(true)
     } else {
-        Ok(lth_b(stack, a.as_atom()?, b.as_atom()?))
+        let cmp = lth(stack, a.as_atom()?, b.as_atom()?, &space);
+        Ok(unsafe { cmp.raw_equals(&D(0)) })
     }
 }
-
-const SCRATCH_STACK_SIZE: usize = 8 << 10 << 10;
 
 pub type OwnedZoonError = OwnedBasedNounError;
 
@@ -156,15 +159,16 @@ pub(crate) struct OrderedNoun {
 }
 
 impl OrderedNoun {
-    pub(crate) fn from_noun(noun: Noun) -> Result<Self, OwnedZoonError> {
-        let noun = OwnedBasedNoun::from_noun(noun)?;
+    pub(crate) fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, OwnedZoonError> {
+        let noun = OwnedBasedNoun::from_noun(noun, space)?;
         Ok(Self::from_owned(noun))
     }
 
     pub(crate) fn encode<T: NounEncode>(value: &T) -> Result<Self, OwnedZoonError> {
-        let mut stack = NockStack::new(SCRATCH_STACK_SIZE, 0);
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
         let noun = value.to_noun(&mut stack);
-        Self::from_noun(noun)
+        let space = stack.noun_space();
+        Self::from_noun(noun, &space)
     }
 
     fn from_owned(noun: OwnedBasedNoun) -> Self {
@@ -235,7 +239,7 @@ pub(crate) trait ZTreeEncode {
 pub(crate) trait ZTreeDecode: Sized {
     const KIND: &'static str;
 
-    fn decode_payload(noun: &Noun) -> Result<Self, NounDecodeError>;
+    fn decode_payload(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -449,8 +453,8 @@ impl<P: ZTreeEncode> ZTree<P> {
 }
 
 impl<P: ZTreeDecode> ZTree<P> {
-    pub(crate) fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        if let Ok(atom) = noun.as_atom() {
+    pub(crate) fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        if let Ok(atom) = noun.in_space(space).as_atom() {
             if atom.as_u64()? == 0 {
                 return Ok(Self::Empty);
             }
@@ -460,8 +464,8 @@ impl<P: ZTreeDecode> ZTree<P> {
             )));
         }
 
-        let cell = noun.as_cell()?;
-        let payload = P::decode_payload(&cell.head())?;
+        let cell = noun.in_space(space).as_cell()?;
+        let payload = P::decode_payload(&cell.head().noun(), space)?;
         let branches = cell
             .tail()
             .as_cell()
@@ -469,8 +473,8 @@ impl<P: ZTreeDecode> ZTree<P> {
 
         Ok(Self::Node {
             payload,
-            left: Box::new(Self::from_noun(&branches.head())?),
-            right: Box::new(Self::from_noun(&branches.tail())?),
+            left: Box::new(Self::from_noun(&branches.head().noun(), space)?),
+            right: Box::new(Self::from_noun(&branches.tail().noun(), space)?),
         })
     }
 }
@@ -526,8 +530,8 @@ pub(crate) mod test_support {
     }
 
     impl NounDecode for BoundedTreeValue {
-        fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-            if let Ok(atom) = noun.as_atom() {
+        fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+            if let Ok(atom) = noun.in_space(space).as_atom() {
                 let atom = atom.as_u64().map_err(|_| {
                     NounDecodeError::Custom("atom too large for bounded value".into())
                 })?;
@@ -536,10 +540,10 @@ pub(crate) mod test_support {
                 })?;
                 Ok(Self::Atom(atom))
             } else {
-                let cell = noun.as_cell()?;
+                let cell = noun.in_space(space).as_cell()?;
                 Ok(Self::Cell(
-                    Box::new(Self::from_noun(&cell.head())?),
-                    Box::new(Self::from_noun(&cell.tail())?),
+                    Box::new(Self::from_noun(&cell.head().noun(), space)?),
+                    Box::new(Self::from_noun(&cell.tail().noun(), space)?),
                 ))
             }
         }
@@ -555,7 +559,7 @@ mod tests {
 
     #[test]
     fn dor_tip_matches_hoon_for_mixed_atom_cell_inputs() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let cell = T(&mut stack, &[D(1), D(2)]);
 
         let mut atom_vs_cell_left = D(7);

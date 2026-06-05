@@ -5,7 +5,7 @@ use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, IndirectAtom, Noun, D, T};
+use nockvm::noun::{Atom, IndirectAtom, Noun, NounSpace, D, T};
 use nockvm_macros::tas;
 use tracing::debug;
 
@@ -17,18 +17,19 @@ use crate::form::mary::*;
 use crate::jets::table_utils::*;
 
 pub fn memory_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let table_mary = slot(sam, 2)?;
-    let chals_rd1 = slot(sam, 6)?;
-    let fock_ret = slot(sam, 7)?;
-    let sf = slot(fock_ret, 15)?;
-    let subject = slot(sf, 2)?;
-    let formula = slot(sf, 3)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let table_mary = slot(sam, 2, &space)?;
+    let chals_rd1 = slot(sam, 6, &space)?;
+    let fock_ret = slot(sam, 7, &space)?;
+    let sf = slot(fock_ret, 15, &space)?;
+    let subject = slot(sf, 2, &space)?;
+    let formula = slot(sf, 3, &space)?;
 
-    let chals: ExtChals = init_ext_chals(chals_rd1)?;
+    let chals: ExtChals = init_ext_chals(chals_rd1, &space)?;
 
-    let table_noun = slot(table_mary, 3)?;
-    let Ok(table) = MarySlice::try_from(table_noun) else {
+    let table_noun = slot(table_mary, 3, &space)?;
+    let Ok(table) = MarySlice::try_from(table_noun, &space) else {
         debug!("cannot convert mary arg to mary");
         return Err(BAIL_FAIL);
     };
@@ -39,8 +40,9 @@ pub fn memory_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun
 
     let build_and_bft = add_ions(
         &mut context.stack,
-        &mut rna_bfta(vec![(subject, true), (formula, false)])?,
+        &mut rna_bfta(vec![(subject, true), (formula, false)], &space)?,
         &chals,
+        &space,
     )?;
 
     build_and_bft.iter().enumerate().for_each(|(i, mb)| {
@@ -127,7 +129,7 @@ pub fn memory_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun
     Ok(T(&mut context.stack, &[header, res_cell]))
 }
 
-fn rna_bfta(tres: Vec<(Noun, bool)>) -> Result<Vec<Noun>, JetErr> {
+fn rna_bfta(tres: Vec<(Noun, bool)>, space: &NounSpace) -> Result<Vec<Noun>, JetErr> {
     let mut queue: VecDeque<(Noun, Belt)> = tres
         .iter()
         .filter(|(n, _b)| n.is_cell())
@@ -145,8 +147,9 @@ fn rna_bfta(tres: Vec<(Noun, bool)>) -> Result<Vec<Noun>, JetErr> {
                 option_env!("GIT_SHA")
             )
         });
-        let head = noun.as_cell()?.head();
-        let tail = noun.as_cell()?.tail();
+        let cell = noun.in_space(space).as_cell()?;
+        let head = cell.head().noun();
+        let tail = cell.tail().noun();
 
         match (head.is_atom(), tail.is_atom()) {
             (true, true) => {}
@@ -173,17 +176,19 @@ fn add_ions(
     stack: &mut NockStack,
     lst: &mut Vec<Noun>,
     chals: &ExtChals,
+    space: &NounSpace,
 ) -> Result<Vec<MemoryBankEx>, JetErr> {
     let mut res = Vec::<MemoryBankEx>::new();
 
     let cache = MutHamt::<Ion>::new(stack);
 
     for noun in lst {
-        let mut head = noun.as_cell()?.head();
-        let mut tail = noun.as_cell()?.tail();
+        let cell = noun.in_space(space).as_cell()?;
+        let mut head = cell.head().noun();
+        let mut tail = cell.tail().noun();
 
         let left: Ion = if head.is_atom() {
-            atom_ion(head.as_atom()?, &chals.alf)?
+            atom_ion(head.as_atom()?, &chals.alf, space)?
         } else {
             cache.lookup(stack, &mut head).unwrap_or_else(|| {
                 panic!(
@@ -196,7 +201,7 @@ fn add_ions(
         };
 
         let right: Ion = if tail.is_atom() {
-            atom_ion(tail.as_atom()?, &chals.alf)?
+            atom_ion(tail.as_atom()?, &chals.alf, space)?
         } else {
             cache.lookup(stack, &mut tail).unwrap_or_else(|| {
                 panic!(
@@ -234,11 +239,11 @@ fn cons_ion(alf: &Felt, left: &Ion, right: &Ion) -> Ion {
     Ion { size, dyck, leaf }
 }
 
-fn atom_ion(atom: Atom, alf: &Felt) -> Result<Ion, JetErr> {
+fn atom_ion(atom: Atom, alf: &Felt, space: &NounSpace) -> Result<Ion, JetErr> {
     Ok(Ion {
         size: *alf,
         dyck: Felt::zero(),
-        leaf: Felt::lift(Belt(atom.as_u64()?)),
+        leaf: Felt::lift(Belt(atom.in_space(space).as_u64()?)),
     })
 }
 
@@ -249,19 +254,20 @@ struct MemoryBankEx {
 }
 
 pub fn memory_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let table_mary = slot(sam, 2)?;
-    let all_chals = slot(sam, 6)?;
-    let fock_ret = slot(sam, 7)?;
-    let sf = slot(fock_ret, 15)?;
-    let subject = slot(sf, 2)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let table_mary = slot(sam, 2, &space)?;
+    let all_chals = slot(sam, 6, &space)?;
+    let fock_ret = slot(sam, 7, &space)?;
+    let sf = slot(fock_ret, 15, &space)?;
+    let subject = slot(sf, 2, &space)?;
     let subject_is_atom: bool = subject.is_atom();
 
-    let chals: MegaExtChals = init_mega_ext_chals(all_chals)?;
+    let chals: MegaExtChals = init_mega_ext_chals(all_chals, &space)?;
     let z2: Felt = fmul_(&chals.z, &chals.z);
 
-    let table_noun = slot(table_mary, 3)?;
-    let Ok(table) = MarySlice::try_from(table_noun) else {
+    let table_noun = slot(table_mary, 3, &space)?;
+    let Ok(table) = MarySlice::try_from(table_noun, &space) else {
         debug!("cannot convert mary arg to mary");
         return Err(BAIL_FAIL);
     };
@@ -273,7 +279,7 @@ pub fn memory_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Result
     let first_row = get_row(&table, 0);
     let second_row = get_row(&table, 1);
 
-    let subj_fp_triple: TreeData = build_tree_data(subject, &chals.alf)?;
+    let subj_fp_triple: TreeData = build_tree_data(subject, &chals.alf, &space)?;
     let input: Felt = ifp_compress(
         &Ion {
             size: subj_fp_triple.size,

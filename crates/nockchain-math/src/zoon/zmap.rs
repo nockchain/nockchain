@@ -1,7 +1,7 @@
 use nockvm::interpreter::Context;
 use nockvm::jets::util::slot;
 use nockvm::jets::JetErr;
-use nockvm::noun::{Noun, NounAllocator, D, T};
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 use nockvm::site::{site_slam, Site};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
@@ -22,12 +22,13 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
     c: &mut Noun,
     hasher: &H,
 ) -> Result<Noun, JetErr> {
+    let space = stack.noun_space();
     if unsafe { a.raw_equals(&D(0)) } {
         let kv = T(stack, &[*b, *c]);
         Ok(T(stack, &[kv, D(0), D(0)]))
     } else {
-        let [mut an, al, ar] = a.uncell()?;
-        let [mut anp, mut anq] = an.uncell()?;
+        let [mut an, al, ar] = a.uncell(&space)?;
+        let [mut anp, mut anq] = an.uncell(&space)?;
         if unsafe { stack.equals(b, &mut anp) } {
             if unsafe { stack.equals(c, &mut anq) } {
                 return Ok(*a);
@@ -37,8 +38,9 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
             Ok(anbc)
         } else if gor_tip(stack, b, &mut anp, hasher)? {
             let d = z_map_put(stack, &al, b, c, hasher)?;
-            let [dn, dl, dr] = d.uncell()?;
-            let [mut dnp, _dnq] = dn.uncell()?;
+            let updated_space = stack.noun_space();
+            let [dn, dl, dr] = d.uncell(&updated_space)?;
+            let [mut dnp, _dnq] = dn.uncell(&updated_space)?;
             if mor_tip(stack, &mut anp, &mut dnp, hasher)? {
                 Ok(T(stack, &[an, d, ar]))
             } else {
@@ -47,8 +49,9 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
             }
         } else {
             let d = z_map_put(stack, &ar, b, c, hasher)?;
-            let [dn, dl, dr] = d.uncell()?;
-            let [mut dnp, _dnq] = dn.uncell()?;
+            let updated_space = stack.noun_space();
+            let [dn, dl, dr] = d.uncell(&updated_space)?;
+            let [mut dnp, _dnq] = dn.uncell(&updated_space)?;
             if mor_tip(stack, &mut anp, &mut dnp, hasher)? {
                 Ok(T(stack, &[an, al, d]))
             } else {
@@ -61,16 +64,17 @@ pub fn z_map_put<A: NounAllocator, H: TipHasher>(
 
 /// Reduce a z-map using the gate's cached `Site`, mirroring Hoon `++rep`.
 pub fn z_map_rep(context: &mut Context, map: &Noun, gate: &mut Noun) -> Result<Noun, JetErr> {
-    let prod = slot(*gate, 13)?;
+    let space = context.stack.noun_space();
+    let prod = slot(*gate, 13, &space)?;
     let site = Site::new(context, gate);
     let mut reducer = |node: Noun, acc: Noun| -> Result<Noun, JetErr> {
         let sam = T(&mut context.stack, &[node, acc]);
         site_slam(context, &site, sam)
     };
-    rep_fold(*map, prod, &mut reducer)
+    rep_fold(*map, prod, &space, &mut reducer)
 }
 
-fn rep_fold<F>(tree: Noun, acc: Noun, reducer: &mut F) -> Result<Noun, JetErr>
+fn rep_fold<F>(tree: Noun, acc: Noun, space: &NounSpace, reducer: &mut F) -> Result<Noun, JetErr>
 where
     F: FnMut(Noun, Noun) -> Result<Noun, JetErr>,
 {
@@ -78,10 +82,10 @@ where
         return Ok(acc);
     }
 
-    let [entry, left, right] = tree.uncell()?;
+    let [entry, left, right] = tree.uncell(space)?;
     let acc = reducer(entry, acc)?;
-    let acc = rep_fold(left, acc, reducer)?;
-    rep_fold(right, acc, reducer)
+    let acc = rep_fold(left, acc, space, reducer)?;
+    rep_fold(right, acc, space, reducer)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,15 +141,17 @@ impl<K: NounEncode, V: NounEncode> ZTreeEncode for ZMapEntry<K, V> {
 impl<K: NounDecode, V: NounDecode> ZTreeDecode for ZMapEntry<K, V> {
     const KIND: &'static str = "z-map";
 
-    fn decode_payload(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn decode_payload(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let entry_cell = noun
+            .in_space(space)
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("z-map entry must be a pair".into()))?;
-        let raw_key = entry_cell.head();
-        let raw_value = entry_cell.tail();
-        let key = K::from_noun(&raw_key)?;
-        let value = V::from_noun(&raw_value)?;
-        let ordered_key = OrderedNoun::from_noun(raw_key).map_err(owned_zoon_decode_error)?;
+        let raw_key = entry_cell.head().noun();
+        let raw_value = entry_cell.tail().noun();
+        let key = K::from_noun(&raw_key, space)?;
+        let value = V::from_noun(&raw_value, space)?;
+        let ordered_key =
+            OrderedNoun::from_noun(raw_key, space).map_err(owned_zoon_decode_error)?;
         Ok(Self {
             key,
             value,
@@ -227,9 +233,9 @@ impl<K: NounEncode, V: NounEncode> NounEncode for ZMap<K, V> {
 }
 
 impl<K: NounDecode, V: NounDecode> NounDecode for ZMap<K, V> {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         Ok(Self {
-            tree: ZTree::from_noun(noun)?,
+            tree: ZTree::from_noun(noun, space)?,
         })
     }
 }
@@ -239,7 +245,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nockvm::mem::NockStack;
-    use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
+    use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, T};
     use noun_serde::{NounDecode, NounEncode};
     use quickcheck::QuickCheck;
 
@@ -292,7 +298,7 @@ mod tests {
     #[test]
     fn owned_zmap_matches_raw_zmap_encoding() {
         let entries = vec![(7u64, 70u64), (3u64, 30u64), (11u64, 110u64)];
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let raw = entries.iter().fold(D(0), |acc, (key, value): &(u64, u64)| {
             let mut key = key.to_noun(&mut stack);
             let mut value = value.to_noun(&mut stack);
@@ -315,11 +321,12 @@ mod tests {
 
     #[test]
     fn owned_zmap_roundtrips_from_noun() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let original =
             ZMap::try_from_entries(vec![(9u64, 90u64), (2u64, 20u64)]).expect("build z-map");
         let noun = original.to_noun(&mut stack);
-        let decoded = ZMap::<u64, u64>::from_noun(&noun).expect("decode z-map");
+        let space = stack.noun_space();
+        let decoded = ZMap::<u64, u64>::from_noun(&noun, &space).expect("decode z-map");
         let mut roundtrip = decoded.to_noun(&mut stack);
         let mut noun = noun;
         assert!(unsafe { stack.equals(&mut noun, &mut roundtrip) });
@@ -329,7 +336,7 @@ mod tests {
     fn quickcheck_owned_zmap_matches_raw_zmap_for_bounded_nouns() {
         fn prop(entries: Vec<(BoundedTreeValue, BoundedTreeValue)>) -> bool {
             let entries = bounded_entries(entries);
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let raw = entries.iter().fold(D(0), |acc, (key, value)| {
                 let mut key = key.to_noun(&mut stack);
                 let mut value = value.to_noun(&mut stack);
@@ -356,7 +363,7 @@ mod tests {
 
             let left = ZMap::try_from_entries(unique).expect("left z-map should build");
             let right = ZMap::try_from_entries(reversed).expect("right z-map should build");
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let left_noun = left.to_noun(&mut stack);
             let right_noun = right.to_noun(&mut stack);
             nouns_equal(&mut stack, left_noun, right_noun)
@@ -377,7 +384,7 @@ mod tests {
                 ZMap::try_from_entries(entries).expect("z-map with duplicates should build");
             let canonical =
                 ZMap::try_from_entries(canonical_entries).expect("canonical z-map should build");
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let with_duplicates_noun = with_duplicates.to_noun(&mut stack);
             let canonical_noun = canonical.to_noun(&mut stack);
             nouns_equal(&mut stack, with_duplicates_noun, canonical_noun)
@@ -431,49 +438,55 @@ mod tests {
 
     #[test]
     fn zmap_decode_rejects_nonzero_atom() {
-        assert!(ZMap::<u64, u64>::from_noun(&D(7)).is_err());
+        let space = NounSpace::empty();
+        assert!(ZMap::<u64, u64>::from_noun(&D(7), &space).is_err());
     }
 
     #[test]
     fn zmap_decode_rejects_non_pair_entry() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let malformed = T(&mut stack, &[D(1), D(0), D(0)]);
-        assert!(ZMap::<u64, u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZMap::<u64, u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zmap_decode_rejects_non_cell_branches() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let entry = T(&mut stack, &[D(1), D(2)]);
         let malformed = T(&mut stack, &[entry, D(0)]);
-        assert!(ZMap::<u64, u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZMap::<u64, u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zmap_decode_rejects_invalid_key_payload() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let key = T(&mut stack, &[D(1), D(2)]);
         let entry = T(&mut stack, &[key, D(3)]);
         let malformed = T(&mut stack, &[entry, D(0), D(0)]);
-        assert!(ZMap::<u64, u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZMap::<u64, u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zmap_decode_rejects_invalid_value_payload() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let value = T(&mut stack, &[D(1), D(2)]);
         let entry = T(&mut stack, &[D(3), value]);
         let malformed = T(&mut stack, &[entry, D(0), D(0)]);
-        assert!(ZMap::<u64, u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZMap::<u64, u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zmap_decode_rejects_non_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let key = Atom::new(&mut stack, PRIME).as_noun();
         let entry = T(&mut stack, &[key, D(3)]);
         let malformed = T(&mut stack, &[entry, D(0), D(0)]);
-        assert!(ZMap::<u64, u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZMap::<u64, u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]

@@ -7,6 +7,7 @@ use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::{Bytes, ToBytes};
 use nockapp_grpc::services::private_nockapp::client::PrivateNockAppGrpcClient;
 use nockchain_types::tx_engine::common::{BlockId, Heavy, Page, TxId};
+use nockvm::noun::NounAllocator;
 use noun_serde::prelude::*;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -84,10 +85,13 @@ impl NockGrpcSource {
             .peek(CLIENT_PID, heavy_bytes)
             .await
             .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
-        let (_heavy_slab, heavy_noun) = cue_response(response)?;
-        let heavy: Heavy = heavy_noun.decode().map_err(|err| {
-            BridgeError::EventMonitoring(format!("failed to decode heavy response: {}", err))
-        })?;
+        let (heavy_slab, heavy_noun) = cue_response(response)?;
+        let heavy: Heavy = {
+            let heavy_space = heavy_slab.noun_space();
+            heavy_noun.decode(&heavy_space).map_err(|err| {
+                BridgeError::EventMonitoring(format!("failed to decode heavy response: {}", err))
+            })?
+        };
         let Some(block_id_base58) = heavy.to_base58() else {
             return Ok(None);
         };
@@ -99,9 +103,11 @@ impl NockGrpcSource {
             .peek(CLIENT_PID, block_bytes)
             .await
             .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
-        let (_page_slab, block_noun) = cue_response(response)?;
-
-        let (page, _page_noun) = decode_page_from_peek(&block_noun)?;
+        let (page_slab, block_noun) = cue_response(response)?;
+        let (page, _page_noun) = {
+            let page_space = page_slab.noun_space();
+            decode_page_from_peek(&block_noun, &page_space)?
+        };
         Ok(Some((page.height, tip_hash)))
     }
 
@@ -116,10 +122,12 @@ impl NockGrpcSource {
             .await
             .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
         let (page_slab, block_noun) = cue_response(response)?;
-
-        let (page, page_noun) = match decode_page_from_peek(&block_noun) {
-            Ok(result) => result,
-            Err(_) => return Ok(None),
+        let (page, page_noun) = {
+            let page_space = page_slab.noun_space();
+            match decode_page_from_peek(&block_noun, &page_space) {
+                Ok(result) => result,
+                Err(_) => return Ok(None),
+            }
         };
 
         let txs = Self::fetch_transactions_from_client(client, &page.digest, &page.tx_ids).await?;
@@ -151,8 +159,11 @@ impl NockGrpcSource {
                 .peek(CLIENT_PID, tx_bytes)
                 .await
                 .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
-            let (_tx_slab, tx_noun) = cue_response(response)?;
-            let tx = decode_tx_from_peek(&tx_noun)?;
+            let (tx_slab, tx_noun) = cue_response(response)?;
+            let tx = {
+                let tx_space = tx_slab.noun_space();
+                decode_tx_from_peek(&tx_noun, &tx_space)?
+            };
             txs.push((tx_id.clone(), tx));
         }
         Ok(txs)
@@ -680,7 +691,8 @@ fn jam_path(path: &[Bytes]) -> Result<Vec<u8>, BridgeError> {
                 segment.len(),
                 segment.as_ptr(),
             );
-            ia.normalize_as_atom().as_noun()
+            let space = slab.noun_space();
+            ia.normalize_as_atom(&space).as_noun()
         };
         list = nockvm::noun::T(&mut slab, &[atom, list]);
     }
@@ -696,15 +708,19 @@ fn cue_response(bytes: Vec<u8>) -> Result<(NounSlab<NockJammer>, nockapp::Noun),
     Ok((slab, noun))
 }
 
-fn decode_page_from_peek(noun: &nockapp::Noun) -> Result<(Page, nockapp::Noun), BridgeError> {
+fn decode_page_from_peek(
+    noun: &nockapp::Noun,
+    space: &nockvm::noun::NounSpace,
+) -> Result<(Page, nockapp::Noun), BridgeError> {
     let outer_cell = noun
+        .in_space(space)
         .as_cell()
         .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
 
-    let outer_head = outer_cell.head();
-    let outer_tail = outer_cell.tail();
+    let outer_head = outer_cell.head().noun();
+    let outer_tail = outer_cell.tail().noun();
 
-    let outer_tag = outer_head.as_atom().map_err(|_| {
+    let outer_tag = outer_head.in_space(space).as_atom().map_err(|_| {
         BridgeError::EventMonitoring("peek response outer unit tag expected to be atom".into())
     })?;
 
@@ -727,18 +743,18 @@ fn decode_page_from_peek(noun: &nockapp::Noun) -> Result<(Page, nockapp::Noun), 
         ));
     }
 
-    let inner_cell = inner.as_cell().map_err(|_| {
+    let inner_cell = inner.in_space(space).as_cell().map_err(|_| {
         BridgeError::EventMonitoring("peek response inner expected to be cell".into())
     })?;
 
-    let inner_head = inner_cell.head();
-    let inner_tail = inner_cell.tail();
+    let inner_head = inner_cell.head().noun();
+    let inner_tail = inner_cell.tail().noun();
 
-    if let Ok(tag_atom) = inner_head.as_atom() {
+    if let Ok(tag_atom) = inner_head.in_space(space).as_atom() {
         if let Ok(tag_val) = tag_atom.as_u64() {
             if tag_val == 0 {
                 if inner_tail.is_atom() {
-                    if let Ok(atom) = inner_tail.as_atom() {
+                    if let Ok(atom) = inner_tail.in_space(space).as_atom() {
                         if let Ok(val) = atom.as_u64() {
                             if val == 0 {
                                 return Err(BridgeError::EventMonitoring(
@@ -752,7 +768,7 @@ fn decode_page_from_peek(noun: &nockapp::Noun) -> Result<(Page, nockapp::Noun), 
                     ));
                 }
 
-                let page = Page::from_noun(&inner_tail).map_err(|err| {
+                let page = Page::from_noun(&inner_tail, space).map_err(|err| {
                     BridgeError::EventMonitoring(format!(
                         "failed to decode Page (after inner unwrap): {}",
                         err
@@ -763,14 +779,18 @@ fn decode_page_from_peek(noun: &nockapp::Noun) -> Result<(Page, nockapp::Noun), 
         }
     }
 
-    let page = Page::from_noun(&inner)
+    let page = Page::from_noun(&inner, space)
         .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Page: {}", err)))?;
     Ok((page, inner))
 }
 
-fn decode_tx_from_peek(noun: &nockapp::Noun) -> Result<Tx, BridgeError> {
+fn decode_tx_from_peek(
+    noun: &nockapp::Noun,
+    space: &nockvm::noun::NounSpace,
+) -> Result<Tx, BridgeError> {
     // peek returns (unit (unit tx:t)), need to unwrap both layers
     let outer_cell = noun
+        .in_space(space)
         .as_cell()
         .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
 
@@ -788,9 +808,14 @@ fn decode_tx_from_peek(noun: &nockapp::Noun) -> Result<Tx, BridgeError> {
         ));
     }
 
-    let inner_cell = outer_cell.tail().as_cell().map_err(|_| {
-        BridgeError::EventMonitoring("peek response inner unit expected to be cell".into())
-    })?;
+    let inner_cell = outer_cell
+        .tail()
+        .noun()
+        .in_space(space)
+        .as_cell()
+        .map_err(|_| {
+            BridgeError::EventMonitoring("peek response inner unit expected to be cell".into())
+        })?;
 
     let inner_tag = inner_cell.head().as_atom().map_err(|_| {
         BridgeError::EventMonitoring("peek response inner unit tag expected to be atom".into())
@@ -806,7 +831,8 @@ fn decode_tx_from_peek(noun: &nockapp::Noun) -> Result<Tx, BridgeError> {
         ));
     }
 
-    Tx::from_noun(&inner_cell.tail())
+    let tx_noun = inner_cell.tail().noun();
+    Tx::from_noun(&tx_noun, space)
         .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Tx: {}", err)))
 }
 
@@ -814,7 +840,7 @@ fn decode_tx_from_peek(noun: &nockapp::Noun) -> Result<Tx, BridgeError> {
 mod tests {
     use super::*;
 
-    fn atom_to_string(atom: nockvm::noun::Atom) -> String {
+    fn atom_to_string(atom: nockvm::noun::AtomHandle<'_>) -> String {
         let mut bytes = atom.to_be_bytes();
         while bytes.first() == Some(&0) {
             bytes.remove(0);
@@ -831,12 +857,13 @@ mod tests {
         let mut current = slab
             .cue_into(Bytes::from(jammed.clone()))
             .expect("cue jammed path");
+        let space = slab.noun_space();
         for segment in path {
-            let cell = current.as_cell().expect("cell");
+            let cell = current.in_space(&space).as_cell().expect("cell");
             let atom = cell.head().as_atom().expect("atom");
             let decoded = atom_to_string(atom);
             assert_eq!(decoded, segment);
-            current = cell.tail();
+            current = cell.tail().noun();
         }
     }
 
@@ -921,7 +948,8 @@ mod tests {
         let inner_unit = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), page_noun]);
         let peek_noun = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner_unit]);
 
-        let (page, _) = decode_page_from_peek(&peek_noun).expect("decode tagged-bn page");
+        let space = slab.noun_space();
+        let (page, _) = decode_page_from_peek(&peek_noun, &space).expect("decode tagged-bn page");
 
         assert_eq!(page.digest, digest, "digest should decode correctly");
         assert_eq!(page.parent, parent, "parent should decode correctly");

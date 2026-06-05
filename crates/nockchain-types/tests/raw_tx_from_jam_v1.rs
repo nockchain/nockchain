@@ -5,6 +5,7 @@ use nockapp::noun::slab::NounSlab;
 use nockchain_math::belt::Belt;
 use nockchain_types::common::{BlockHeight, Version};
 use nockchain_types::tx_engine::v1;
+use nockvm::noun::NounAllocator;
 use noun_serde::{NounDecode, NounEncode};
 
 // These constants are pinned to the checked-in raw tx fixture at:
@@ -15,18 +16,23 @@ const EXPECTED_TX_WORD_COUNT: u64 = 140;
 const EXPECTED_MINIMUM_FEE: u64 = 659_456;
 const EXPECTED_TOTAL_PAID_FEE: u64 = 1_024;
 
-fn noun_leaf_count(noun: nockapp::Noun) -> u64 {
+fn noun_leaf_count(noun: nockapp::Noun, space: &nockvm::noun::NounSpace) -> u64 {
     if noun.is_atom() {
         return 1;
     }
-    let cell = noun.as_cell().expect("noun should decode as cell");
-    noun_leaf_count(cell.head()).saturating_add(noun_leaf_count(cell.tail()))
+    let cell = noun
+        .in_space(space)
+        .as_cell()
+        .expect("noun should decode as cell");
+    noun_leaf_count(cell.head().noun(), space)
+        .saturating_add(noun_leaf_count(cell.tail().noun(), space))
 }
 
 fn word_count_from_noun_encode<T: NounEncode>(value: &T) -> u64 {
     let mut slab: NounSlab = NounSlab::new();
     let noun = value.to_noun(&mut slab);
-    noun_leaf_count(noun)
+    let space = slab.noun_space();
+    noun_leaf_count(noun, &space)
 }
 
 fn merged_seed_word_count(raw_tx: &v1::RawTx) -> u64 {
@@ -90,8 +96,9 @@ fn decode_raw_tx_from_jam_v1() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut slab: NounSlab = NounSlab::new();
     let noun = slab.cue_into(Bytes::from_static(RAW_TX_JAM))?;
+    let space = slab.noun_space();
 
-    let raw_tx = v1::RawTx::from_noun(&noun)?;
+    let raw_tx = v1::RawTx::from_noun(&noun, &space)?;
 
     // basic structural checks
     assert_eq!(raw_tx.version, Version::V1);
@@ -99,7 +106,8 @@ fn decode_raw_tx_from_jam_v1() -> Result<(), Box<dyn std::error::Error>> {
     // noun roundtrip
     let mut encode_slab: NounSlab = NounSlab::new();
     let encoded = v1::RawTx::to_noun(&raw_tx, &mut encode_slab);
-    let round_trip = v1::RawTx::from_noun(&encoded)?;
+    let encode_space = encode_slab.noun_space();
+    let round_trip = v1::RawTx::from_noun(&encoded, &encode_space)?;
     assert_eq!(round_trip, raw_tx);
 
     Ok(())
@@ -111,7 +119,8 @@ fn decode_raw_tx_word_count_oracle_v1() -> Result<(), Box<dyn std::error::Error>
 
     let mut slab: NounSlab = NounSlab::new();
     let noun = slab.cue_into(Bytes::from_static(RAW_TX_JAM))?;
-    let raw_tx = v1::RawTx::from_noun(&noun)?;
+    let space = slab.noun_space();
+    let raw_tx = v1::RawTx::from_noun(&noun, &space)?;
 
     let seed_count = merged_seed_word_count(&raw_tx);
     let witness_count = witness_word_count(&raw_tx);
@@ -141,12 +150,9 @@ fn decode_note_from_jam_v1() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut slab: NounSlab = NounSlab::new();
     let noun = slab.cue_into(Bytes::from_static(NOTE_JAM))?;
+    let space = slab.noun_space();
 
-    eprintln!("decoding note");
-    let ver = noun.as_cell().expect("not a cell").head();
-    eprintln!("version: {:?}", ver);
-    let note = v1::Note::from_noun(&noun)?;
-    eprintln!("decoded note");
+    let note = v1::Note::from_noun(&noun, &space)?;
 
     // basic structural checks
     match note {
@@ -159,7 +165,36 @@ fn decode_note_from_jam_v1() -> Result<(), Box<dyn std::error::Error>> {
     // noun roundtrip
     let mut encode_slab: NounSlab = NounSlab::new();
     let encoded = v1::Note::to_noun(&note, &mut encode_slab);
-    let round_trip = v1::Note::from_noun(&encoded)?;
+    let encode_space = encode_slab.noun_space();
+    let round_trip = v1::Note::from_noun(&encoded, &encode_space)?;
+    assert_eq!(round_trip, note);
+
+    Ok(())
+}
+
+#[test]
+fn decode_name_from_jam_v1() -> Result<(), Box<dyn std::error::Error>> {
+    const NOTE_JAM: &[u8] = include_bytes!("../jams/v1/note.jam");
+
+    let mut slab: NounSlab = NounSlab::new();
+    let noun = slab.cue_into(Bytes::from_static(NOTE_JAM))?;
+    let space = slab.noun_space();
+
+    let note = v1::Note::from_noun(&noun, &space)?;
+
+    // basic structural checks
+    match note {
+        v1::Note::V1(ref n) => {
+            assert_eq!(n.origin_page, BlockHeight(Belt(24)));
+        }
+        _ => panic!("note not V1: {:?}", note),
+    }
+
+    // noun roundtrip
+    let mut encode_slab: NounSlab = NounSlab::new();
+    let encoded = v1::Note::to_noun(&note, &mut encode_slab);
+    let encode_space = encode_slab.noun_space();
+    let round_trip = v1::Note::from_noun(&encoded, &encode_space)?;
     assert_eq!(round_trip, note);
 
     Ok(())

@@ -1,20 +1,26 @@
 use ibig::UBig;
-use nockchain_types::tx_engine::v1::hashable as hashable_helper;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, Noun, T};
+use nockvm::noun::{Atom, Noun, NounSpace, D, T};
+use nockvm_macros::tas;
 
 use crate::form::belt::{mont_reduction, montify, montiply, Belt};
 use crate::form::math::tip5;
 use crate::form::noun_ext::NounMathExt;
+use crate::form::structs::HoonList;
+use crate::jets::bp_jets::bpoly_to_list;
+use crate::jets::mary_jets::{change_step, get_mary_fields};
 use crate::utils::{
     belt_as_noun, bitslice_to_u128, fits_in_u128, hoon_list_to_vecbelt, hoon_list_to_vecnoun,
     vec_to_hoon_list, vecnoun_to_hoon_list,
 };
 
-pub fn hoon_list_to_sponge(list: Noun) -> Result<[u64; tip5::STATE_SIZE], JetErr> {
+pub fn hoon_list_to_sponge(
+    list: Noun,
+    space: &NounSpace,
+) -> Result<[u64; tip5::STATE_SIZE], JetErr> {
     if list.is_atom() {
         return Err(BAIL_FAIL);
     }
@@ -24,9 +30,9 @@ pub fn hoon_list_to_sponge(list: Noun) -> Result<[u64; tip5::STATE_SIZE], JetErr
     let mut i = 0;
 
     while current.is_cell() {
-        let cell = current.as_cell()?;
+        let cell = current.in_space(space).as_cell()?;
         sponge[i] = cell.head().as_atom()?.as_u64()?;
-        current = cell.tail();
+        current = cell.tail().noun();
         i += 1;
     }
 
@@ -38,9 +44,10 @@ pub fn hoon_list_to_sponge(list: Noun) -> Result<[u64; tip5::STATE_SIZE], JetErr
 }
 
 pub fn permutation_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let sample = slot(subject, 6)?;
-    let mut sponge = hoon_list_to_sponge(sample)?;
+    let sample = slot(subject, 6, &space)?;
+    let mut sponge = hoon_list_to_sponge(sample, &space)?;
     tip5::permute(&mut sponge);
 
     let new_sponge = vec_to_hoon_list(stack, &sponge);
@@ -49,9 +56,10 @@ pub fn permutation_jet(context: &mut Context, subject: Noun) -> Result<Noun, Jet
 }
 
 pub fn hash_varlen_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let input = slot(subject, 6)?;
-    let mut input_vec = hoon_list_to_vecbelt(input)?;
+    let input = slot(subject, 6, &space)?;
+    let mut input_vec = hoon_list_to_vecbelt(input, &space)?;
 
     let digest = tip5::hash::hash_varlen(&mut input_vec);
 
@@ -59,9 +67,10 @@ pub fn hash_varlen_jet(context: &mut Context, subject: Noun) -> Result<Noun, Jet
 }
 
 pub fn montify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let sam = slot(subject, 6)?;
-    let x = sam.as_atom()?.as_u64()?;
+    let sam = slot(subject, 6, &space)?;
+    let x = sam.in_space(&space).as_atom()?.as_u64()?;
 
     let res = montify(x);
 
@@ -69,24 +78,27 @@ pub fn montify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr>
 }
 
 pub fn montiply_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let a = sam.as_cell()?.head().as_atom()?.as_u64()?;
-    let b = sam.as_cell()?.tail().as_atom()?.as_u64()?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let sam_cell = sam.in_space(&space).as_cell()?;
+    let a = sam_cell.head().as_atom()?.as_u64()?;
+    let b = sam_cell.tail().as_atom()?.as_u64()?;
     Ok(belt_as_noun(&mut context.stack, Belt(montiply(a, b))))
 }
 
 pub fn mont_reduction_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let x_atom = sam.as_atom()?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let x_atom = sam.in_space(&space).as_atom()?;
 
     let x_u128: u128 = if x_atom.is_indirect() {
-        if x_atom.as_indirect()?.size() > 2 {
+        if x_atom.size() > 2 {
             // mont_reduction asserts that x < RP, so u128 should be sufficient anyway??!!
             let x_bitslice = x_atom.as_bitslice();
             assert!(fits_in_u128(x_bitslice));
             bitslice_to_u128(x_bitslice)
-        } else if x_atom.as_indirect()?.size() == 2 {
-            let x = unsafe { x_atom.as_u64_pair()? };
+        } else if x_atom.size() == 2 {
+            let x = x_atom.as_u64_pair()?;
             ((x[1] as u128) << 64u128) + (x[0] as u128)
         } else {
             x_atom.as_u64()? as u128
@@ -102,9 +114,10 @@ pub fn mont_reduction_jet(context: &mut Context, subject: Noun) -> Result<Noun, 
 }
 
 pub fn hash_belts_list_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let input = slot(subject, 6)?;
-    tip5::hash::hash_belts_list(stack, input)
+    let input = slot(subject, 6, &space)?;
+    tip5::hash::hash_belts_list(stack, input, &space)
 }
 
 pub fn digest_to_noundigest(stack: &mut NockStack, digest: [u64; 5]) -> Noun {
@@ -119,9 +132,10 @@ pub fn digest_to_noundigest(stack: &mut NockStack, digest: [u64; 5]) -> Noun {
 
 //hash-10: hash list of 10 belts into a list of 5 belts
 pub fn hash_10_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let input = slot(subject, 6)?;
-    let mut input_vec = hoon_list_to_vecbelt(input)?;
+    let input = slot(subject, 6, &space)?;
+    let mut input_vec = hoon_list_to_vecbelt(input, &space)?;
 
     let digest = tip5::hash::hash_10(&mut input_vec);
 
@@ -129,14 +143,19 @@ pub fn hash_10_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr>
 }
 
 pub fn hash_pairs_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let lis_noun = slot(subject, 6)?; // (list (list @))
+    let lis_noun = slot(subject, 6, &space)?; // (list (list @))
 
-    hash_pairs(stack, lis_noun)
+    hash_pairs(stack, lis_noun, &space)
 }
 
-pub fn hash_pairs(stack: &mut NockStack, lis_noun: Noun) -> Result<Noun, JetErr> {
-    let lis = hoon_list_to_vecnoun(lis_noun)?;
+pub fn hash_pairs(
+    stack: &mut NockStack,
+    lis_noun: Noun,
+    space: &NounSpace,
+) -> Result<Noun, JetErr> {
+    let lis = hoon_list_to_vecnoun(lis_noun, space)?;
     let lent_lis = lis.len();
     assert!(lent_lis > 0);
 
@@ -147,8 +166,8 @@ pub fn hash_pairs(stack: &mut NockStack, lis_noun: Noun) -> Result<Noun, JetErr>
         if (b + 1) == lent_lis {
             res.push(lis[b]);
         } else {
-            let b0 = hoon_list_to_vecbelt(lis[b])?;
-            let mut b1 = hoon_list_to_vecbelt(lis[b + 1])?;
+            let b0 = hoon_list_to_vecbelt(lis[b], space)?;
+            let mut b1 = hoon_list_to_vecbelt(lis[b + 1], space)?;
             let mut pair = b0;
             pair.append(&mut b1);
             let digest = tip5::hash::hash_10(&mut pair);
@@ -157,19 +176,20 @@ pub fn hash_pairs(stack: &mut NockStack, lis_noun: Noun) -> Result<Noun, JetErr>
         }
     }
 
-    Ok(vecnoun_to_hoon_list(stack, res.as_slice()))
+    Ok(vecnoun_to_hoon_list(stack, res.as_slice(), space))
 }
 
 pub fn hash_ten_cell_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let ten_cell = slot(subject, 6)?; // [noun-digest noun-digest]
-    hash_ten_cell(stack, ten_cell)
+    let ten_cell = slot(subject, 6, &space)?; // [noun-digest noun-digest]
+    hash_ten_cell(stack, ten_cell, &space)
 }
 
-fn hash_ten_cell(stack: &mut NockStack, ten_cell: Noun) -> Result<Noun, JetErr> {
+fn hash_ten_cell(stack: &mut NockStack, ten_cell: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
     // leaf_sequence(ten-cell)
     let mut leaf: Vec<u64> = Vec::<u64>::new();
-    crate::form::shape::do_leaf_sequence(ten_cell, &mut leaf)?;
+    crate::form::shape::do_leaf_sequence(ten_cell, &mut leaf, space)?;
     let mut leaf_belt = leaf.into_iter().map(Belt).collect();
 
     // list-to-tuple hash10
@@ -178,32 +198,101 @@ fn hash_ten_cell(stack: &mut NockStack, ten_cell: Noun) -> Result<Noun, JetErr> 
 }
 
 pub fn hash_noun_varlen_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let n = slot(subject, 6)?;
-    tip5::hash::hash_noun_varlen(stack, n)
+    let n = slot(subject, 6, &space)?;
+    tip5::hash::hash_noun_varlen(stack, n, &space)
 }
 
 pub fn hash_hashable_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let h = slot(subject, 6)?;
+    let h = slot(subject, 6, &space)?;
 
-    hash_hashable(stack, h)
+    hash_hashable(stack, h, &space)
 }
 
-pub fn hash_hashable(stack: &mut NockStack, h: Noun) -> Result<Noun, JetErr> {
-    hashable_helper::hash_hashable(stack, h)
+pub fn hash_hashable(stack: &mut NockStack, h: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+    if !h.is_cell() {
+        return Err(BAIL_FAIL);
+    }
+
+    let h_cell = h.in_space(space).as_cell()?;
+    let h_head = h_cell.head().noun();
+    let h_tail = h_cell.tail().noun();
+
+    if h_head.is_direct() {
+        let tag = h_head.as_direct()?;
+
+        match tag.data() {
+            tas!(b"hash") => hash_hashable_hash(stack, h_tail),
+            tas!(b"leaf") => hash_hashable_leaf(stack, h_tail, space),
+            tas!(b"list") => hash_hashable_list(stack, h_tail, space),
+            tas!(b"mary") => hash_hashable_mary(stack, h_tail, space),
+            _ => hash_hashable_other(stack, h_head, h_tail, space),
+        }
+    } else {
+        hash_hashable_other(stack, h_head, h_tail, space)
+    }
+}
+
+fn hash_hashable_hash(_stack: &mut NockStack, p: Noun) -> Result<Noun, JetErr> {
+    Ok(p)
+}
+fn hash_hashable_leaf(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+    tip5::hash::hash_noun_varlen(stack, p, space)
+}
+fn hash_hashable_list(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+    let turn: Vec<Noun> = HoonList::try_from(p, space)?
+        .into_iter()
+        .map(|x| {
+            hash_hashable(stack, x, space).expect("hash_hashable should succeed for list element")
+        })
+        .collect();
+    let turn_list = vecnoun_to_hoon_list(stack, &turn, space);
+    tip5::hash::hash_noun_varlen(stack, turn_list, space)
+}
+fn hash_hashable_mary(stack: &mut NockStack, p: Noun, space: &NounSpace) -> Result<Noun, JetErr> {
+    let (ma_step, ma_array_len, _ma_array_dat) = get_mary_fields(p, space)?;
+
+    let ma_changed = change_step(stack, p, D(1), space)?;
+    let [_ma_changed_step, ma_changed_array] = ma_changed.uncell(space)?; // +$  mary  [step=@ =array]
+    let bpoly_list = bpoly_to_list(stack, ma_changed_array, space)?;
+    let hash_belts_list = tip5::hash::hash_belts_list(stack, bpoly_list, space)?;
+
+    let leaf_step = T(stack, &[D(tas!(b"leaf")), ma_step.as_noun()]);
+    let leaf_len = T(stack, &[D(tas!(b"leaf")), ma_array_len.as_noun()]);
+    let hash = T(stack, &[D(tas!(b"hash")), hash_belts_list]);
+    let arg = T(stack, &[leaf_step, leaf_len, hash]);
+
+    hash_hashable(stack, arg, space)
+}
+
+fn hash_hashable_other(
+    stack: &mut NockStack,
+    p: Noun,
+    q: Noun,
+    space: &NounSpace,
+) -> Result<Noun, JetErr> {
+    let ph = hash_hashable(stack, p, space)?;
+    let qh = hash_hashable(stack, q, space)?;
+
+    let cell = T(stack, &[ph, qh]);
+
+    hash_ten_cell(stack, cell, space)
 }
 
 pub fn digest_to_atom_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
     let stack = &mut context.stack;
-    let cells = slot(subject, 6)?;
-    let [a, b, c, d, e] = cells.uncell()?;
+    let cells = slot(subject, 6, &space)?;
+    let [a, b, c, d, e] = cells.uncell(&space)?;
 
-    let a_big = a.as_atom()?.as_ubig(stack);
-    let b_big = b.as_atom()?.as_ubig(stack);
-    let c_big = c.as_atom()?.as_ubig(stack);
-    let d_big = d.as_atom()?.as_ubig(stack);
-    let e_big = e.as_atom()?.as_ubig(stack);
+    let a_big = a.in_space(&space).as_atom()?.as_ubig(stack);
+    let b_big = b.in_space(&space).as_atom()?.as_ubig(stack);
+    let c_big = c.in_space(&space).as_atom()?.as_ubig(stack);
+    let d_big = d.in_space(&space).as_atom()?.as_ubig(stack);
+    let e_big = e.in_space(&space).as_atom()?.as_ubig(stack);
 
     // Use stack-aware operations for pow and multiplication
     let p_ubig = UBig::from(crate::form::belt::PRIME);

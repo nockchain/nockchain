@@ -324,7 +324,7 @@ pub fn planner_refund_output_template(
 #[cfg(test)]
 mod tests {
     use nockapp::noun::slab::{NockJammer, NounSlab};
-    use nockvm::noun::FullDebugCell;
+    use nockvm::noun::NounAllocator;
     use noun_serde::NounDecode;
 
     use super::*;
@@ -497,9 +497,9 @@ mod tests {
         let mut slab = NounSlab::<NockJammer>::new();
         for spec in specs {
             let noun = spec.to_noun(&mut slab);
-            eprintln!("spec noun: {:?}", FullDebugCell(&noun.as_cell().unwrap()));
-            let decoded =
-                RecipientSpec::from_noun(&noun).expect("recipient spec should decode from noun");
+            let space = slab.noun_space();
+            let decoded = RecipientSpec::from_noun(&noun, &space)
+                .expect("recipient spec should decode from noun");
             assert_eq!(decoded, spec);
         }
     }

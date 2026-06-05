@@ -1,4 +1,4 @@
-use nockvm::noun::Noun;
+use nockvm::noun::{Noun, NounSpace};
 use noun_serde::NounDecodeError;
 
 use crate::belt::{based_check, Belt};
@@ -51,9 +51,10 @@ impl OwnedBasedNoun {
     ///
     /// This rejects any atom that is either larger than `u64` or not a valid
     /// base-field element.
-    pub fn from_noun(noun: Noun) -> Result<Self, OwnedBasedNounError> {
+    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, OwnedBasedNounError> {
         if noun.is_atom() {
             let atom = noun
+                .in_space(space)
                 .as_atom()
                 .map_err(|_| OwnedBasedNounError::Malformed("expected atom"))?;
             let atom = atom
@@ -66,11 +67,12 @@ impl OwnedBasedNoun {
             Ok(Self::Atom(atom))
         } else {
             let cell = noun
+                .in_space(space)
                 .as_cell()
                 .map_err(|_| OwnedBasedNounError::Malformed("expected cell"))?;
             Ok(Self::cell(
-                Self::from_noun(cell.head())?,
-                Self::from_noun(cell.tail())?,
+                Self::from_noun(cell.head().noun(), space)?,
+                Self::from_noun(cell.tail().noun(), space)?,
             ))
         }
     }
@@ -184,47 +186,51 @@ mod tests {
 
     #[test]
     fn from_noun_accepts_direct_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, 7).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Ok(OwnedBasedNoun::Atom(Belt(7)))
         );
     }
 
     #[test]
     fn from_noun_accepts_indirect_based_atoms_that_fit_u64() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, PRIME - 1).as_noun();
+        let space = stack.noun_space();
         let atom = noun.as_atom().expect("noun should be atom");
         assert!(atom.is_indirect());
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Ok(OwnedBasedNoun::Atom(Belt(PRIME - 1)))
         );
     }
 
     #[test]
     fn from_noun_rejects_non_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, PRIME).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Err(OwnedBasedNounError::AtomNotBased(PRIME))
         );
     }
 
     #[test]
     fn from_noun_rejects_atoms_larger_than_u64() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let big = ubig!(1) << 80;
         let noun = Atom::from_ubig(&mut stack, &big).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Err(OwnedBasedNounError::AtomTooLarge)
         );
     }

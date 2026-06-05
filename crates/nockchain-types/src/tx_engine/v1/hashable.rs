@@ -131,7 +131,7 @@ impl ZSetHasher<Hash> for HashableTreeHasher {
 mod tests {
     use nockapp::noun::slab::{NockJammer, NounSlab};
     use nockchain_math::belt::{Belt, PRIME};
-    use nockchain_math::noun_ext::NounMathExt;
+    use nockchain_math::noun_ext::NounMathExtHandle;
     use nockchain_math::poly::BPolyVec;
     use nockchain_math::shape::do_leaf_sequence;
     use nockchain_math::structs::HoonList;
@@ -151,26 +151,33 @@ mod tests {
 
     fn manual_hash_ten_cell<A: NounAllocator>(allocator: &mut A, ten_cell: Noun) -> Noun {
         let mut leaf = Vec::<u64>::new();
-        do_leaf_sequence(ten_cell, &mut leaf).expect("manual ten-cell leaf sequence should work");
+        let space = allocator.noun_space();
+        do_leaf_sequence(ten_cell, &mut leaf, &space)
+            .expect("manual ten-cell leaf sequence should work");
         let mut leaf_belt = leaf.into_iter().map(Belt).collect();
         tip5::hash::hash_10(&mut leaf_belt).to_noun(allocator)
     }
 
     fn manual_hash_hashable<A: NounAllocator>(allocator: &mut A, noun: Noun) -> Noun {
-        let cell = noun.as_cell().expect("hashable noun must be a cell");
+        let space = allocator.noun_space();
+        let cell = noun
+            .in_space(&space)
+            .as_cell()
+            .expect("hashable noun must be a cell");
         let head = cell.head();
         let tail = cell.tail();
 
-        if let Ok(tag) = head.as_direct() {
+        if let Ok(tag) = head.as_atom().and_then(|atom| atom.as_direct()) {
             match tag.data() {
-                tas!(b"hash") => return tail,
+                tas!(b"hash") => return tail.noun(),
                 tas!(b"leaf") => {
-                    return tip5::hash::hash_noun_varlen(allocator, tail)
+                    return tip5::hash::hash_noun_varlen(allocator, tail.noun(), &space)
                         .expect("manual leaf hashing should succeed");
                 }
                 tas!(b"list") => {
                     let mut hashed_list = D(0);
-                    let items = HoonList::try_from(tail).expect("manual list payload must decode");
+                    let items = HoonList::try_from(tail.noun(), &space)
+                        .expect("manual list payload must decode");
                     let hashed_items = items
                         .into_iter()
                         .map(|item| manual_hash_hashable(allocator, item))
@@ -178,21 +185,21 @@ mod tests {
                     for item in hashed_items.into_iter().rev() {
                         hashed_list = T(allocator, &[item, hashed_list]);
                     }
-                    return tip5::hash::hash_noun_varlen(allocator, hashed_list)
+                    return tip5::hash::hash_noun_varlen(allocator, hashed_list, &space)
                         .expect("manual list hashing should succeed");
                 }
                 _ => {}
             }
         }
 
-        let left = manual_hash_hashable(allocator, head);
-        let right = manual_hash_hashable(allocator, tail);
+        let left = manual_hash_hashable(allocator, head.noun());
+        let right = manual_hash_hashable(allocator, tail.noun());
         let pair = T(allocator, &[left, right]);
         manual_hash_ten_cell(allocator, pair)
     }
 
-    fn digest_hash(noun: Noun) -> Hash {
-        Hash::from_noun(&noun).expect("digest noun should decode")
+    fn digest_hash(noun: Noun, space: &nockvm::noun::NounSpace) -> Hash {
+        Hash::from_noun(&noun, space).expect("digest noun should decode")
     }
 
     fn tagged_hashable<A: NounAllocator>(allocator: &mut A, tag: &str, payload: Noun) -> Noun {
@@ -205,10 +212,14 @@ mod tests {
             return tagged_hashable(allocator, "leaf", D(0));
         }
 
-        let [digest, left, right] = noun.uncell().expect("z-set tree must be a node");
-        let hash_node = tagged_hashable(allocator, "hash", digest);
-        let left = zset_noun_hashable(allocator, left);
-        let right = zset_noun_hashable(allocator, right);
+        let space = allocator.noun_space();
+        let [digest, left, right] = noun
+            .in_space(&space)
+            .uncell()
+            .expect("z-set tree must be a node");
+        let hash_node = tagged_hashable(allocator, "hash", digest.noun());
+        let left = zset_noun_hashable(allocator, left.noun());
+        let right = zset_noun_hashable(allocator, right.noun());
         T(allocator, &[hash_node, left, right])
     }
 
@@ -224,18 +235,22 @@ mod tests {
 
     #[test]
     fn bpoly_to_list_encodes_large_belt_as_atom() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let len_noun = Atom::new(&mut stack, 1).as_noun();
         let belt_noun = Atom::new(&mut stack, PRIME - 1).as_noun();
         let sam = T(&mut stack, &[len_noun, belt_noun]);
 
         let list = bpoly_to_list(&mut stack, sam).expect("bpoly list conversion should succeed");
-        let cell = list.as_cell().expect("expected non-empty list");
+        let space = stack.noun_space();
+        let cell = list
+            .in_space(&space)
+            .as_cell()
+            .expect("expected non-empty list");
         let head = cell.head().as_atom().expect("expected atom head");
         let value = head.as_u64().expect("expected u64 atom");
 
         assert_eq!(value, PRIME - 1);
-        assert!(unsafe { cell.tail().raw_equals(&D(0)) });
+        assert!(unsafe { cell.tail().noun().raw_equals(&D(0)) });
     }
 
     #[test]
@@ -248,7 +263,12 @@ mod tests {
         let expected_hashable = tagged_hashable(&mut expected_slab, "leaf", D(42));
         let expected = manual_hash_hashable(&mut expected_slab, expected_hashable);
 
-        assert_eq!(digest_hash(actual), digest_hash(expected));
+        let actual_space = slab.noun_space();
+        let expected_space = expected_slab.noun_space();
+        assert_eq!(
+            digest_hash(actual, &actual_space),
+            digest_hash(expected, &expected_space)
+        );
     }
 
     #[test]
@@ -260,7 +280,8 @@ mod tests {
         let hashable = tagged_hashable(&mut slab, "hash", payload);
         let actual = hash_hashable(&mut slab, hashable).expect("hash passthrough should succeed");
 
-        assert_eq!(digest_hash(actual), expected_hash);
+        let space = slab.noun_space();
+        assert_eq!(digest_hash(actual, &space), expected_hash);
     }
 
     #[test]
@@ -277,7 +298,12 @@ mod tests {
         let expected_hashable = T(&mut expected_slab, &[left, right]);
         let expected = manual_hash_hashable(&mut expected_slab, expected_hashable);
 
-        assert_eq!(digest_hash(actual), digest_hash(expected));
+        let actual_space = slab.noun_space();
+        let expected_space = expected_slab.noun_space();
+        assert_eq!(
+            digest_hash(actual, &actual_space),
+            digest_hash(expected, &expected_space)
+        );
     }
 
     #[test]
@@ -298,7 +324,12 @@ mod tests {
         let expected_hashable = tagged_hashable(&mut expected_slab, "list", list_payload);
         let expected = manual_hash_hashable(&mut expected_slab, expected_hashable);
 
-        assert_eq!(digest_hash(actual), digest_hash(expected));
+        let actual_space = slab.noun_space();
+        let expected_space = expected_slab.noun_space();
+        assert_eq!(
+            digest_hash(actual, &actual_space),
+            digest_hash(expected, &expected_space)
+        );
     }
 
     #[test]
@@ -310,7 +341,11 @@ mod tests {
         let expected_hashable = tagged_hashable(&mut expected_slab, "leaf", D(42));
         let expected = manual_hash_hashable(&mut expected_slab, expected_hashable);
 
-        assert_eq!(Hash::from_limbs(&actual), digest_hash(expected));
+        let expected_space = expected_slab.noun_space();
+        assert_eq!(
+            Hash::from_limbs(&actual),
+            digest_hash(expected, &expected_space)
+        );
     }
 
     #[test]
@@ -329,7 +364,8 @@ mod tests {
         let hashable = zset_noun_hashable(&mut slab, zset_noun);
         let expected = hash_hashable(&mut slab, hashable).expect("noun helper should hash");
 
-        assert_eq!(actual, digest_hash(expected));
+        let space = slab.noun_space();
+        assert_eq!(actual, digest_hash(expected, &space));
     }
 
     #[test]
@@ -346,7 +382,8 @@ mod tests {
         let hashable = tagged_hashable(&mut slab, "list", list_payload);
         let expected = hash_hashable(&mut slab, hashable).expect("noun helper should hash");
 
-        assert_eq!(actual, digest_hash(expected));
+        let space = slab.noun_space();
+        assert_eq!(actual, digest_hash(expected, &space));
     }
 
     #[test]
@@ -360,7 +397,8 @@ mod tests {
         let hashable = tagged_hashable(&mut slab, "mary", payload);
         let expected = hash_hashable(&mut slab, hashable).expect("noun helper should hash");
 
-        assert_eq!(actual, digest_hash(expected));
+        let space = slab.noun_space();
+        assert_eq!(actual, digest_hash(expected, &space));
     }
 
     #[test]
@@ -375,6 +413,7 @@ mod tests {
         let pair = T(&mut slab, &[left_noun, right_noun]);
         let expected = manual_hash_ten_cell(&mut slab, pair);
 
-        assert_eq!(actual, digest_hash(expected));
+        let space = slab.noun_space();
+        assert_eq!(actual, digest_hash(expected, &space));
     }
 }

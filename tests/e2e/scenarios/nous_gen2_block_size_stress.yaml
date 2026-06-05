@@ -1,0 +1,125 @@
+# Nous block-size stress scenario.
+#
+# Bootstraps one spendable note, repeatedly splits it into exact note-count
+# batches, then merges those notes back into high-fan-in transactions. This
+# keeps >70 and extreme 400-input sizing cases practical on one local runner.
+# The harness emits an aggregate JSON summary from live explorer data. This is
+# the option-3 fallback when checkpoint-backed sizing is blocked by
+# checkpoint/kernel incompatibility.
+
+name: "nous_gen2_block_size_stress"
+seed: 33
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 30000
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 240000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 10
+    timeout_ms: 240000
+
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/gen2_block_size_stress.sh"]
+    cwd: "${RUN_DIR}/block-size-stress"
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/miner-a"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_E2E_BIN: "${REPO_ROOT}/target/release/nockchain-e2e"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "${BASE_PRIVATE_GRPC_PORT}"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      PUBLIC_GRPC_SERVER: "127.0.0.1:${BASE_GRPC_PORT}"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      FAN_IN_CASES: "${FAN_IN_CASES}"
+      FAN_IN_FEE: "${FAN_IN_FEE}"
+      FAN_IN_SPLIT_FEE: "${FAN_IN_SPLIT_FEE}"
+      FAN_IN_SPLIT_OUTPUT_BASE_AMOUNT: "${FAN_IN_SPLIT_OUTPUT_BASE_AMOUNT}"
+      FAN_IN_WAIT_SECONDS: "${FAN_IN_WAIT_SECONDS}"
+    expect: "fan_in_stress_report_ready"
+
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - "expected_cases=$(awk -F, '{print NF}' <<<\"${FAN_IN_CASES}\"); jq -e --argjson expected_cases \"$expected_cases\" '.case_count >= $expected_cases and ([.cases[].tx_size_bytes] | all(.[]; . > 0))' ./logs/fan-in-matrix-summary.json >/dev/null && jq -r '.cases[] | \"case=\\(.case_label) target_input_count=\\(.target_input_count) tx_size_bytes=\\(.tx_size_bytes) tx_size_vs_item_cap_ratio=\\(.tx_size_vs_item_cap_ratio) block_height=\\(.block_height)\"' ./logs/fan-in-matrix-summary.json"
+    cwd: "${RUN_DIR}/block-size-stress"
+    expect: "case="
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "full-a"]
+    timeout_ms: 120000

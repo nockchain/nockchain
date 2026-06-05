@@ -1,0 +1,79 @@
+# Nous rollout scenario: shipped default (accept=false, send=false)
+#
+# Verifies that two nodes running the shipped Nous defaults can sync and
+# produce blocks. Both nodes omit gen2 entirely. This is the state every node
+# enters immediately after upgrading to a Nous-capable binary.
+#
+# Generation matrix cell: new(default) <-> new(default)
+# Expected protocol: /nockchain-1-req-res (gen1 outbound preferred by both)
+
+name: "nous_shipped_default"
+seed: 20
+
+nodes:
+  - id: "node-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    # Shipped defaults: gen1 only
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+  - id: "node-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "node-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 300000
+
+  # Mine blocks before node-b joins, forcing catch-up over req-res.
+  - action: wait_for_height
+    node: "node-a"
+    height: 5
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["node-b"]
+
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 300000
+
+  # node-b should sync those blocks under the shipped gen1-only defaults.
+  - action: wait_for_height
+    node: "node-b"
+    height: 5
+    timeout_ms: 120000
+
+asserts:
+  - assert: req_res_generation
+    node: "node-b"
+    peer: "node-a"
+    generation: gen1
+    timeout_ms: 30000
+  - assert: heads_equal
+    nodes: ["node-a", "node-b"]
+    timeout_ms: 30000

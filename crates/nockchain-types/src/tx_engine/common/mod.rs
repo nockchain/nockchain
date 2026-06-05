@@ -3,8 +3,9 @@ pub mod page;
 use anyhow::Result;
 use nockchain_math::belt::{Belt, PRIME};
 use nockchain_math::crypto::cheetah::{CheetahError, CheetahPoint};
+use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::zoon::zmap::ZMap;
-use nockvm::noun::{Noun, NounAllocator, D};
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use num_bigint::BigUint;
 pub use page::{BigNum, BlockId, CoinbaseSplit, Page, PageMsg};
@@ -43,10 +44,27 @@ impl NounEncode for Signature {
 }
 
 impl NounDecode for Signature {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        Ok(Signature(
-            ZMap::<SchnorrPubkey, SchnorrSignature>::from_noun(noun)?.into_entries(),
-        ))
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        if let Ok(atom) = noun.in_space(space).as_atom() {
+            if atom.as_u64()? == 0 {
+                return Ok(Signature(Vec::new()));
+            }
+            return Err(NounDecodeError::Custom("signature node not a cell".into()));
+        }
+
+        let entries = nockchain_math::structs::HoonMapIter::new(&noun.in_space(space))
+            .filter(|entry| entry.is_cell())
+            .map(|entry| {
+                let [key, value] = entry
+                    .uncell()
+                    .map_err(|_| NounDecodeError::Custom("signature entry not a pair".into()))?;
+                let pubkey = SchnorrPubkey::from_noun_handle(&key)?;
+                let signature = SchnorrSignature::from_noun_handle(&value)?;
+                Ok((pubkey, signature))
+            })
+            .collect::<Result<Vec<_>, NounDecodeError>>()?;
+
+        Ok(Signature(entries))
     }
 }
 
@@ -98,7 +116,7 @@ impl NounEncode for Version {
 }
 
 impl NounDecode for Version {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, _space: &NounSpace) -> Result<Self, NounDecodeError> {
         match noun.as_atom()?.as_direct() {
             Ok(ver) if ver.data() == 0 => Ok(Version::V0),
             Ok(ver) if ver.data() == 1 => Ok(Version::V1),

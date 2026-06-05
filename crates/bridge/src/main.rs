@@ -686,6 +686,7 @@ mod tests {
     use nockapp::kernel::boot;
     use nockchain_math::belt::Belt;
     use nockchain_types::v1::Name;
+    use nockvm::noun::NounAllocator;
     use tempfile::TempDir;
 
     use super::*;
@@ -746,7 +747,7 @@ mod tests {
             if std::env::var("RUST_LOG").is_err() {
                 std::env::set_var("RUST_LOG", "debug");
             }
-            let cli = boot::default_boot_cli(true);
+            let cli = boot::ephemeral_test_boot_cli(true);
             let temp_log_dir = std::env::temp_dir().join("bridge-test-logs");
             let _guard = init_bridge_tracing(&cli, Some(tui::new_log_buffer()), temp_log_dir, 7)
                 .expect("failed to init tracing for tests");
@@ -847,9 +848,11 @@ mod tests {
         let noun = unsafe {
             let mut ia =
                 nockvm::noun::IndirectAtom::new_raw_bytes(&mut slab, 32, proposal_hash.as_ptr());
-            ia.normalize_as_atom()
+            let space = slab.noun_space();
+            ia.normalize_as_atom(&space)
         };
-        let signature = bridge_signer.sign_proposal(noun.as_noun()).await?;
+        let space = slab.noun_space();
+        let signature = bridge_signer.sign_proposal(noun.as_noun(), &space).await?;
 
         assert!(!signature.r().is_zero(), "Expected valid r component");
         assert!(!signature.s().is_zero(), "Expected valid s component");

@@ -12,6 +12,7 @@ use nockapp::noun::slab::{Jammer, NockJammer, NounSlab};
 
 const FALLBACK_CHECKPOINT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/test-jams/0.chkjam");
 
+const SNAPSHOT_VERSION_1: u32 = 1;
 const SNAPSHOT_VERSION_2: u32 = 2;
 
 #[derive(Decode)]
@@ -20,7 +21,6 @@ struct CheckpointEnvelope {
     version: u32,
     payload: Vec<u8>,
 }
-
 fn checkpoint_bytes() -> &'static [u8] {
     static SAMPLE: OnceLock<Vec<u8>> = OnceLock::new();
     SAMPLE
@@ -56,7 +56,7 @@ fn extract_jammed_state(bytes: &[u8]) -> Bytes {
     if let Ok((checkpoint, _)) =
         bincode::decode_from_slice::<JammedCheckpointV1, Configuration>(bytes, config)
     {
-        if checkpoint.magic_bytes == JAM_MAGIC_BYTES {
+        if checkpoint.magic_bytes == JAM_MAGIC_BYTES && checkpoint.version == SNAPSHOT_VERSION_1 {
             return checkpoint.jam.0;
         }
     }

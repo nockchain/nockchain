@@ -1,5 +1,5 @@
 use nockvm::jets::JetErr;
-use nockvm::noun::{Noun, NounAllocator, D, T};
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
 use super::common::*;
@@ -18,15 +18,17 @@ pub fn z_set_put<A: NounAllocator, H: TipHasher>(
     b: &mut Noun,
     hasher: &H,
 ) -> Result<Noun, JetErr> {
+    let space = stack.noun_space();
     if unsafe { a.raw_equals(&D(0)) } {
         Ok(T(stack, &[*b, D(0), D(0)]))
     } else {
-        let [mut an, al, ar] = a.uncell()?;
+        let [mut an, al, ar] = a.uncell(&space)?;
         if unsafe { stack.equals(b, &mut an) } {
             Ok(*a)
         } else if gor_tip(stack, b, &mut an, hasher)? {
             let c = z_set_put(stack, &al, b, hasher)?;
-            let [mut cn, cl, cr] = c.uncell()?;
+            let space = stack.noun_space();
+            let [mut cn, cl, cr] = c.uncell(&space)?;
             if mor_tip(stack, &mut an, &mut cn, hasher)? {
                 Ok(T(stack, &[an, c, ar]))
             } else {
@@ -35,7 +37,8 @@ pub fn z_set_put<A: NounAllocator, H: TipHasher>(
             }
         } else {
             let c = z_set_put(stack, &ar, b, hasher)?;
-            let [mut cn, cl, cr] = c.uncell()?;
+            let space = stack.noun_space();
+            let [mut cn, cl, cr] = c.uncell(&space)?;
             if mor_tip(stack, &mut an, &mut cn, hasher)? {
                 Ok(T(stack, &[an, al, c]))
             } else {
@@ -58,28 +61,32 @@ pub fn z_set_bif<A: NounAllocator, H: TipHasher>(
         b: &mut Noun,
         hasher: &H,
     ) -> Result<Noun, JetErr> {
+        let space = stack.noun_space();
         if unsafe { a.raw_equals(&D(0)) } {
             Ok(T(stack, &[*b, D(0), D(0)]))
         } else {
-            let [mut n, mut l, mut r] = a.uncell()?;
+            let [mut n, mut l, mut r] = a.uncell(&space)?;
             if unsafe { stack.equals(b, &mut n) } {
                 Ok(*a)
             } else if gor_tip(stack, b, &mut n, hasher)? {
                 // could also parameterize Hasher if needed
                 let c = do_bif(stack, &mut l, b, hasher)?;
-                let [cn, cl, cr] = c.uncell()?;
+                let space = stack.noun_space();
+                let [cn, cl, cr] = c.uncell(&space)?;
                 let new_a = T(stack, &[n, cr, r]);
                 Ok(T(stack, &[cn, cl, new_a]))
             } else {
                 let c = do_bif(stack, &mut r, b, hasher)?;
-                let [cn, cl, cr] = c.uncell()?;
+                let space = stack.noun_space();
+                let [cn, cl, cr] = c.uncell(&space)?;
                 let new_a = T(stack, &[n, l, cl]);
                 Ok(T(stack, &[cn, new_a, cr]))
             }
         }
     }
     let res = do_bif(stack, a, b, hasher)?;
-    Ok(res.as_cell()?.tail())
+    let space = stack.noun_space();
+    Ok(res.in_space(&space).as_cell()?.tail().noun())
 }
 
 pub fn z_set_dif<A: NounAllocator, H: TipHasher>(
@@ -94,13 +101,14 @@ pub fn z_set_dif<A: NounAllocator, H: TipHasher>(
         e: &mut Noun,
         hasher: &H,
     ) -> Result<Noun, JetErr> {
+        let space = stack.noun_space();
         if unsafe { d.raw_equals(&D(0)) } {
             Ok(*e)
         } else if unsafe { e.raw_equals(&D(0)) } {
             Ok(*d)
         } else {
-            let [mut dn, dl, mut dr] = d.uncell()?;
-            let [mut en, mut el, er] = e.uncell()?;
+            let [mut dn, dl, mut dr] = d.uncell(&space)?;
+            let [mut en, mut el, er] = e.uncell(&space)?;
             if mor_tip(stack, &mut dn, &mut en, hasher)? {
                 let df = dif_helper(stack, &mut dr, e, hasher)?;
                 Ok(T(stack, &[dn, dl, df]))
@@ -114,9 +122,11 @@ pub fn z_set_dif<A: NounAllocator, H: TipHasher>(
     if unsafe { b.raw_equals(&D(0)) } {
         Ok(*a)
     } else {
-        let [mut bn, mut bl, mut br] = b.uncell()?;
+        let space = stack.noun_space();
+        let [mut bn, mut bl, mut br] = b.uncell(&space)?;
         let c = z_set_bif(stack, a, &mut bn, hasher)?; // could also be generic if needed
-        let [mut cl, mut cr] = c.uncell()?;
+        let space = stack.noun_space();
+        let [mut cl, mut cr] = c.uncell(&space)?;
         let mut d = z_set_dif(stack, &mut cl, &mut bl, hasher)?;
         let mut e = z_set_dif(stack, &mut cr, &mut br, hasher)?;
         dif_helper(stack, &mut d, &mut e, hasher)
@@ -165,9 +175,9 @@ impl<T: NounEncode> ZTreeEncode for ZSetValue<T> {
 impl<T: NounDecode> ZTreeDecode for ZSetValue<T> {
     const KIND: &'static str = "z-set";
 
-    fn decode_payload(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let value = T::from_noun(noun)?;
-        let ordered = OrderedNoun::from_noun(*noun).map_err(owned_zoon_decode_error)?;
+    fn decode_payload(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let value = T::from_noun(noun, space)?;
+        let ordered = OrderedNoun::from_noun(*noun, space).map_err(owned_zoon_decode_error)?;
         Ok(Self { value, ordered })
     }
 }
@@ -264,9 +274,9 @@ impl<T: NounEncode> NounEncode for ZSet<T> {
 }
 
 impl<T: NounDecode> NounDecode for ZSet<T> {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         Ok(Self {
-            tree: ZTree::from_noun(noun)?,
+            tree: ZTree::from_noun(noun, space)?,
         })
     }
 }
@@ -285,7 +295,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use nockvm::mem::NockStack;
-    use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
+    use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, T};
     use noun_serde::{NounDecode, NounEncode};
     use quickcheck::QuickCheck;
 
@@ -325,7 +335,7 @@ mod tests {
     #[test]
     fn owned_zset_matches_raw_zset_encoding() {
         let items = vec![7u64, 3u64, 11u64, 5u64];
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let raw = items.iter().fold(D(0), |acc, item: &u64| {
             let mut noun = item.to_noun(&mut stack);
             z_set_put(&mut stack, &acc, &mut noun, &DefaultTipHasher).expect("raw z-set put")
@@ -339,7 +349,7 @@ mod tests {
 
     #[test]
     fn owned_zset_is_insertion_order_independent() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let left = ZSet::try_from_items(vec![1u64, 7u64, 3u64]).expect("left z-set");
         let right = ZSet::try_from_items(vec![7u64, 3u64, 1u64]).expect("right z-set");
         let mut left_noun = left.to_noun(&mut stack);
@@ -349,10 +359,11 @@ mod tests {
 
     #[test]
     fn owned_zset_roundtrips_from_noun() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let original = ZSet::try_from_items(vec![9u64, 2u64, 6u64]).expect("build z-set");
         let noun = original.to_noun(&mut stack);
-        let decoded = ZSet::<u64>::from_noun(&noun).expect("decode z-set");
+        let space = stack.noun_space();
+        let decoded = ZSet::<u64>::from_noun(&noun, &space).expect("decode z-set");
         let mut roundtrip = decoded.to_noun(&mut stack);
         let mut noun = noun;
         assert!(unsafe { stack.equals(&mut noun, &mut roundtrip) });
@@ -362,7 +373,7 @@ mod tests {
     fn quickcheck_owned_zset_matches_raw_zset_for_bounded_nouns() {
         fn prop(items: Vec<BoundedTreeValue>) -> bool {
             let items = bounded_items(items);
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let raw = items.iter().fold(D(0), |acc, item| {
                 let mut noun = item.to_noun(&mut stack);
                 z_set_put(&mut stack, &acc, &mut noun, &DefaultTipHasher).expect("raw z-set put")
@@ -391,7 +402,7 @@ mod tests {
 
             let left = ZSet::try_from_items(unique).expect("left z-set should build");
             let right = ZSet::try_from_items(reversed).expect("right z-set should build");
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let left_noun = left.to_noun(&mut stack);
             let right_noun = right.to_noun(&mut stack);
             nouns_equal(&mut stack, left_noun, right_noun)
@@ -416,7 +427,7 @@ mod tests {
             let with_duplicates =
                 ZSet::try_from_items(items).expect("z-set with duplicates should build");
             let deduped = ZSet::try_from_items(deduped).expect("deduped z-set should build");
-            let mut stack = NockStack::new(8 << 10 << 10, 0);
+            let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
             let with_duplicates_noun = with_duplicates.to_noun(&mut stack);
             let deduped_noun = deduped.to_noun(&mut stack);
             nouns_equal(&mut stack, with_duplicates_noun, deduped_noun)
@@ -450,30 +461,34 @@ mod tests {
 
     #[test]
     fn zset_decode_rejects_nonzero_atom() {
-        assert!(ZSet::<u64>::from_noun(&D(7)).is_err());
+        let space = NounSpace::empty();
+        assert!(ZSet::<u64>::from_noun(&D(7), &space).is_err());
     }
 
     #[test]
     fn zset_decode_rejects_non_cell_branches() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let malformed = T(&mut stack, &[D(1), D(2)]);
-        assert!(ZSet::<u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZSet::<u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zset_decode_rejects_invalid_item_payload() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let payload = T(&mut stack, &[D(1), D(2)]);
         let malformed = T(&mut stack, &[payload, D(0), D(0)]);
-        assert!(ZSet::<u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZSet::<u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]
     fn zset_decode_rejects_non_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let payload = Atom::new(&mut stack, PRIME).as_noun();
         let malformed = T(&mut stack, &[payload, D(0), D(0)]);
-        assert!(ZSet::<u64>::from_noun(&malformed).is_err());
+        let space = stack.noun_space();
+        assert!(ZSet::<u64>::from_noun(&malformed, &space).is_err());
     }
 
     #[test]

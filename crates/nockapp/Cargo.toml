@@ -14,6 +14,7 @@ slog-tracing = []
 trait-alias = []
 bazel_build = []
 tracing-tracy = ["dep:tracing-tracy"]
+pma-assert = ["nockvm/pma-assert"]
 
 [dependencies]
 
@@ -29,14 +30,17 @@ bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 clap = { workspace = true, features = ["derive", "cargo", "color", "env"] }
 config = { workspace = true }
+diesel = { workspace = true }
+diesel_migrations = { workspace = true }
 dirs = { workspace = true }
 either = { workspace = true }
 futures = { workspace = true }
-getrandom = { workspace = true }
 gnort = { workspace = true }
 ibig = { workspace = true }
 instant-acme = { workspace = true }
 intmap = { workspace = true }
+libc = { workspace = true }
+libsqlite3-sys = { workspace = true }
 nockvm = { workspace = true }
 nockvm_macros = { workspace = true }
 noun-serde = { workspace = true }
@@ -68,6 +72,10 @@ tracing-tracy = { workspace = true, optional = true, features = [
     "manual-lifetime",
     "ondemand",
 ] }
+uuid = { workspace = true }
 webpki-roots = { workspace = true }
 x509-parser = { workspace = true }
 yaque = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }

@@ -1,0 +1,93 @@
+name: "partition_reorg"
+seed: 3
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6401"
+    grpc_private_port: 7401
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 2
+    bind:
+      - "/ip4/127.0.0.1/udp/4401/quic-v1"
+    restart_peer_from:
+      - node: "node-b"
+        listen: "/ip4/127.0.0.1/udp/4402/quic-v1"
+    extra_args:
+      - "--num-threads"
+      - "4"
+    env:
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+  - id: "node-b"
+    grpc_public_addr: "127.0.0.1:6402"
+    grpc_private_port: 7402
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 2
+    no_default_peers: true
+    bind:
+      - "/ip4/127.0.0.1/udp/4402/quic-v1"
+    peers:
+      - "/ip4/127.0.0.1/udp/4401/quic-v1"
+    restart_peer_from:
+      - node: "node-a"
+        listen: "/ip4/127.0.0.1/udp/4401/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+steps:
+  - action: start_nodes
+    ids: ["node-a", "node-b"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 300000
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 300000
+  - action: wait_for_height
+    node: "node-a"
+    height: 3
+    timeout_ms: 120000
+  - action: partition
+    groups:
+      - ["node-a"]
+      - ["node-b"]
+  - action: wait_for_height
+    node: "node-a"
+    height: 6
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 4
+    timeout_ms: 120000
+  - action: partition
+    groups:
+      - ["node-a", "node-b"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 300000
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 300000
+  - action: disable_mining
+    node: "node-b"
+  - action: wait_for_height
+    node: "node-a"
+    height: 8
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 8
+    timeout_ms: 120000
+asserts:
+  - assert: heads_equal
+    nodes: ["node-a", "node-b"]
+    timeout_ms: 120000

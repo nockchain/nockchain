@@ -1,10 +1,10 @@
-use nockchain_math::noun_ext::NounMathExt;
+use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::poly::BPolySlice;
 use nockchain_math::structs::HoonList;
 use nockchain_math::tip5;
 use nockvm::jets::util::BAIL_FAIL;
 use nockvm::jets::JetErr;
-use nockvm::noun::{Atom, Noun, NounAllocator, D};
+use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D};
 use nockvm_macros::tas;
 use noun_serde::{NounDecode, NounEncode};
 
@@ -19,40 +19,40 @@ pub fn hash_hashable<A: NounAllocator>(stack: &mut A, h: Noun) -> Result<Noun, J
 }
 
 fn hash_hashable_digest<A: NounAllocator>(stack: &mut A, h: Noun) -> Result<Hash, JetErr> {
-    if !h.is_cell() {
-        return Err(BAIL_FAIL);
-    }
-
-    let h_head = h.as_cell()?.head();
-    let h_tail = h.as_cell()?.tail();
+    let space = stack.noun_space();
+    let h_cell = h.in_space(&space).as_cell().map_err(|_| BAIL_FAIL)?;
+    let h_head = h_cell.head();
+    let h_tail = h_cell.tail();
 
     if h_head.is_direct() {
-        let tag = h_head.as_direct()?;
+        let tag = h_head.as_atom()?.as_direct()?;
 
         match tag.data() {
-            tas!(b"hash") => decode_hash_digest_noun(h_tail),
-            tas!(b"leaf") => hash_leaf_noun(stack, h_tail),
-            tas!(b"list") => hash_hashable_list_digest(stack, h_tail),
-            tas!(b"mary") => hash_hashable_mary_digest(stack, h_tail),
-            _ => hash_hashable_other_digest(stack, h_head, h_tail),
+            tas!(b"hash") => decode_hash_digest_noun(h_tail.noun(), &space),
+            tas!(b"leaf") => hash_leaf_noun(stack, h_tail.noun()),
+            tas!(b"list") => hash_hashable_list_digest(stack, h_tail.noun()),
+            tas!(b"mary") => hash_hashable_mary_digest(stack, h_tail.noun()),
+            _ => hash_hashable_other_digest(stack, h_head.noun(), h_tail.noun()),
         }
     } else {
-        hash_hashable_other_digest(stack, h_head, h_tail)
+        hash_hashable_other_digest(stack, h_head.noun(), h_tail.noun())
     }
 }
 
-fn decode_hash_digest_noun(noun: Noun) -> Result<Hash, JetErr> {
-    Hash::from_noun(&noun).map_err(|_| BAIL_FAIL)
+fn decode_hash_digest_noun(noun: Noun, space: &NounSpace) -> Result<Hash, JetErr> {
+    Hash::from_noun(&noun, space).map_err(|_| BAIL_FAIL)
 }
 
 fn hash_leaf_noun<A: NounAllocator>(stack: &mut A, noun: Noun) -> Result<Hash, JetErr> {
-    let digest = tip5::hash::hash_noun_varlen_digest(stack, noun)?;
+    let space = stack.noun_space();
+    let digest = tip5::hash::hash_noun_varlen_digest(stack, noun, &space)?;
     Ok(Hash::from_limbs(&digest))
 }
 
 fn hash_hashable_list_digest<A: NounAllocator>(stack: &mut A, p: Noun) -> Result<Hash, JetErr> {
+    let space = stack.noun_space();
     let mut hashed_items = Vec::new();
-    for item in HoonList::try_from(p)? {
+    for item in HoonList::try_from(p, &space)? {
         hashed_items.push(hash_hashable_digest(stack, item)?);
     }
 
@@ -60,14 +60,15 @@ fn hash_hashable_list_digest<A: NounAllocator>(stack: &mut A, p: Noun) -> Result
 }
 
 fn hash_hashable_mary_digest<A: NounAllocator>(stack: &mut A, p: Noun) -> Result<Hash, JetErr> {
-    let [ma_step_noun, ma_array] = p.uncell()?;
+    let space = stack.noun_space();
+    let [ma_step_noun, ma_array] = p.in_space(&space).uncell()?;
     let [ma_array_len_noun, _ma_array_dat] = ma_array.uncell()?;
     let ma_step = ma_step_noun.as_atom()?.as_u64()?;
     let ma_array_len = ma_array_len_noun.as_atom()?.as_u64()?;
 
     let ma_changed = change_mary_step(stack, p, 1)?;
-    let [_ma_changed_step, ma_changed_array] = ma_changed.uncell()?;
-    let normalized_bpoly = BPolySlice::try_from(ma_changed_array)?;
+    let [_ma_changed_step, ma_changed_array] = ma_changed.in_space(&space).uncell()?;
+    let normalized_bpoly = BPolySlice::try_from(ma_changed_array.noun(), &space)?;
 
     hash_mary(ma_step, ma_array_len, normalized_bpoly.0).map_err(|_| BAIL_FAIL)
 }
@@ -83,7 +84,8 @@ fn hash_hashable_other_digest<A: NounAllocator>(
 }
 
 pub fn bpoly_to_list<A: NounAllocator>(stack: &mut A, sam: Noun) -> Result<Noun, JetErr> {
-    let sam_bpoly = BPolySlice::try_from(sam)?;
+    let space = stack.noun_space();
+    let sam_bpoly = BPolySlice::try_from(sam, &space)?;
     let mut res_list = D(0);
     for belt in sam_bpoly.0.iter().rev() {
         // Belt values are field elements and may exceed DIRECT_MAX, so they must
@@ -99,7 +101,8 @@ fn change_mary_step<A: NounAllocator>(
     ma_noun: Noun,
     new_step: u64,
 ) -> Result<Noun, JetErr> {
-    let [ma_step_noun, ma_array] = ma_noun.uncell()?;
+    let space = stack.noun_space();
+    let [ma_step_noun, ma_array] = ma_noun.in_space(&space).uncell()?;
     let [array_len_noun, array_dat] = ma_array.uncell()?;
 
     let ma_step = ma_step_noun.as_atom()?.as_u64()?;
@@ -118,6 +121,6 @@ fn change_mary_step<A: NounAllocator>(
 
     Ok(nockvm::noun::T(
         stack,
-        &[new_step_noun, new_array_len_noun, array_dat],
+        &[new_step_noun, new_array_len_noun, array_dat.noun()],
     ))
 }

@@ -11,10 +11,12 @@
 pub mod config;
 pub mod mining;
 pub mod setup;
+pub mod traces;
 
 use std::error::Error;
 use std::fs;
-use std::path::Path;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 
 pub use config::NockchainCli;
 use libp2p::identity::Keypair;
@@ -28,7 +30,7 @@ pub mod colors;
 
 use colors::*;
 use nockapp::noun::slab::{Jammer, NounSlab};
-use nockchain_types::fakenet_blockchain_constants;
+use nockchain_types::{fakenet_blockchain_constants, Seconds};
 use nockvm::jets::hot::HotEntry;
 use nockvm::noun::{D, T, YES};
 use nockvm_macros::tas;
@@ -220,16 +222,16 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
 
     cli.validate()?;
 
-    let mut nockapp_cli = cli.nockapp_cli.clone();
-    nockapp_cli.stack_size = nockapp::kernel::boot::NockStackSize::Medium;
+    let nockapp_cli = cli.nockapp_cli.clone();
 
     let mut nockapp =
         boot::setup::<J>(kernel_jam, nockapp_cli, hot_state, "nockchain", None).await?;
 
-    let keypair = {
-        let keypair_path = Path::new(config::IDENTITY_PATH);
-        load_keypair(keypair_path, cli.no_new_peer_id)?
-    };
+    let identity_path = cli
+        .identity_path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(config::IDENTITY_PATH));
+    let keypair = { load_keypair(identity_path.as_path(), cli.no_new_peer_id)? };
     info!("allowed_peers_path: {:?}", cli.allowed_peers_path);
     let allowed = cli.allowed_peers_path.as_ref().map(|path| {
         let contents = fs::read_to_string(path).expect("failed to read allowed peers file: {}");
@@ -408,9 +410,19 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
+        if let Some(asert) = cli.fakenet_asert.into_config()? {
+            fakenet_constants = fakenet_constants
+                .with_asert_phase(asert.phase)
+                .with_asert_anchor_height(asert.anchor_height)
+                .with_asert_anchor_target_bex(asert.anchor_target_bex);
+        }
+        if let Some(interval_secs) = cli.fakenet_update_candidate_interval_secs {
+            fakenet_constants =
+                fakenet_constants.with_update_candidate_timestamp_interval(Seconds(interval_secs));
+        }
         setup::poke(
             &mut nockapp,
-            setup::SetupCommand::PokeFakenetConstants(fakenet_constants),
+            setup::SetupCommand::PokeFakenetConstants(Box::new(fakenet_constants)),
         )
         .await?;
         if let Some(true) = is_kernel_mainnet {
@@ -495,7 +507,6 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         &initial_peer_multiaddrs,
         &force_peers,
         prune_inbound,
-        cli.fast_sync,
         equix_builder,
         config::CHAIN_INTERVAL,
         Some(libp2p_init_tx),
@@ -523,12 +534,16 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             .add_io_driver(nockapp_grpc::public_nockchain::grpc_server_driver(addr))
             .await;
     }
+    let private_grpc_addr = cli.bind_private_grpc_addr.unwrap_or_else(|| {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cli.bind_private_grpc_port)
+    });
     nockapp
         .add_io_driver(nockapp_grpc::private_nockapp::grpc_server_driver(
-            cli.bind_private_grpc_port,
+            private_grpc_addr,
         ))
         .await;
 
+    nockapp.add_io_driver(crate::traces::traces_driver()).await;
     nockapp.add_io_driver(nockapp::exit_driver()).await;
 
     Ok(nockapp)

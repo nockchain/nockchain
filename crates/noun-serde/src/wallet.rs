@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use nockvm::ext::{make_tas, AtomExt};
-use nockvm::noun::{Noun, NounAllocator, D, T};
+use nockvm::ext::make_tas;
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 
 use crate::{NounDecode, NounDecodeError, NounEncode};
 
@@ -31,8 +31,11 @@ impl NounEncode for Key {
 
 impl NounDecode for Key {
     #[allow(unused_variables)]
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let tag = cell.head().as_atom()?.into_string()?;
         let value = cell.tail().as_atom()?.as_u64()?;
 
@@ -65,15 +68,19 @@ impl NounEncode for Coil {
 }
 
 impl NounDecode for Coil {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let tag = cell.head().as_atom()?.into_string()?;
         if tag != "coil" {
             return Err(NounDecodeError::InvalidTag);
         }
 
         let data = cell.tail().as_cell()?;
-        let key = Key::from_noun(&data.head())?;
+        let key_noun = data.head().noun();
+        let key = Key::from_noun(&key_noun, space)?;
         let knot = data.tail().as_atom()?.as_u64()?;
 
         Ok(Coil { key, knot })
@@ -107,12 +114,15 @@ impl NounEncode for Meta {
 }
 
 impl NounDecode for Meta {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let tag = cell.head().as_atom()?.into_string()?;
 
         match tag.as_str() {
-            "coil" => Ok(Meta::Coil(Coil::from_noun(noun)?)),
+            "coil" => Ok(Meta::Coil(Coil::from_noun(noun, space)?)),
             "label" => {
                 let value = cell.tail().as_atom()?.into_string()?;
                 Ok(Meta::Label(value))
@@ -152,13 +162,17 @@ impl NounEncode for Transaction {
 }
 
 impl NounDecode for Transaction {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let recipient = cell.head().as_atom()?.as_u64()?;
 
         let tail = cell.tail().as_cell()?;
         let amount = tail.head().as_atom()?.as_u64()?;
-        let status = TransactionStatus::from_noun(&tail.tail())?;
+        let status_noun = tail.tail().noun();
+        let status = TransactionStatus::from_noun(&status_noun, space)?;
 
         Ok(Transaction {
             recipient,
@@ -180,8 +194,8 @@ impl NounEncode for TransactionStatus {
 }
 
 impl NounDecode for TransactionStatus {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let tag = noun.as_atom()?.into_string()?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let tag = noun.in_space(space).as_atom()?.into_string()?;
         match tag.as_str() {
             "unsigned" => Ok(TransactionStatus::Unsigned),
             "signed" => Ok(TransactionStatus::Signed),
@@ -221,8 +235,11 @@ impl NounEncode for FileEffect {
 }
 
 impl NounDecode for FileEffect {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let file_tag = cell.head().as_atom()?.into_string()?;
         if file_tag != "file" {
             return Err(NounDecodeError::InvalidTag);
@@ -273,12 +290,15 @@ impl NounEncode for Effect {
 }
 
 impl NounDecode for Effect {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let tag = cell.head().as_atom()?.into_string()?;
 
         match tag.as_str() {
-            "file" => Ok(Effect::File(FileEffect::from_noun(noun)?)),
+            "file" => Ok(Effect::File(FileEffect::from_noun(noun, space)?)),
             "markdown" => {
                 let text = cell.tail().as_atom()?.into_string()?;
                 Ok(Effect::Markdown(text))
@@ -311,8 +331,11 @@ impl NounEncode for SpendMask {
 }
 
 impl NounDecode for SpendMask {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let signature = cell.head().as_atom()?.as_u64()? != 0;
 
         let rest = cell.tail().as_cell()?;
@@ -343,10 +366,14 @@ impl NounEncode for InputMask {
 }
 
 impl NounDecode for InputMask {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let note = cell.head().as_atom()?.as_u64()? != 0;
-        let spend = SpendMask::from_noun(&cell.tail())?;
+        let spend_noun = cell.tail().noun();
+        let spend = SpendMask::from_noun(&spend_noun, space)?;
         Ok(InputMask { note, spend })
     }
 }
@@ -382,30 +409,33 @@ impl NounEncode for SeedMask {
 }
 
 impl NounDecode for SeedMask {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let mut current = noun;
         let next_cell = |n: &Noun| -> Result<(Noun, Noun), NounDecodeError> {
-            let cell = n.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-            Ok((cell.head(), cell.tail()))
+            let cell = n
+                .in_space(space)
+                .as_cell()
+                .map_err(|_| NounDecodeError::ExpectedCell)?;
+            Ok((cell.head().noun(), cell.tail().noun()))
         };
 
         let (output_source_noun, current_) = next_cell(current)?;
-        let output_source = output_source_noun.as_atom()?.as_u64()? != 0;
+        let output_source = output_source_noun.in_space(space).as_atom()?.as_u64()? != 0;
         current = &current_;
 
         let (recipient_noun, current_) = next_cell(current)?;
-        let recipient = recipient_noun.as_atom()?.as_u64()? != 0;
+        let recipient = recipient_noun.in_space(space).as_atom()?.as_u64()? != 0;
         current = &current_;
 
         let (timelock_intent_noun, current_) = next_cell(current)?;
-        let timelock_intent = timelock_intent_noun.as_atom()?.as_u64()? != 0;
+        let timelock_intent = timelock_intent_noun.in_space(space).as_atom()?.as_u64()? != 0;
         current = &current_;
 
         let (gift_noun, current_) = next_cell(current)?;
-        let gift = gift_noun.as_atom()?.as_u64()? != 0;
+        let gift = gift_noun.in_space(space).as_atom()?.as_u64()? != 0;
         current = &current_;
 
-        let parent_hash = current.as_atom()?.as_u64()? != 0;
+        let parent_hash = current.in_space(space).as_atom()?.as_u64()? != 0;
 
         Ok(SeedMask {
             output_source,
@@ -428,13 +458,17 @@ impl NounEncode for PreSeed {
 }
 
 impl NounDecode for PreSeed {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let name = cell.head().as_atom()?.into_string()?;
 
         let data = cell.tail().as_cell()?;
         let seed = data.head().as_atom()?.as_u64()?;
-        let mask = SeedMask::from_noun(&data.tail())?;
+        let mask_noun = data.tail().noun();
+        let mask = SeedMask::from_noun(&mask_noun, space)?;
 
         Ok(PreSeed { name, seed, mask })
     }
@@ -459,13 +493,17 @@ impl NounEncode for PreInput {
 }
 
 impl NounDecode for PreInput {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let name = cell.head().as_atom()?.into_string()?;
 
         let data = cell.tail().as_cell()?;
         let input = data.head().as_atom()?.as_u64()?;
-        let mask = InputMask::from_noun(&data.tail())?;
+        let mask_noun = data.tail().noun();
+        let mask = InputMask::from_noun(&mask_noun, space)?;
 
         Ok(PreInput { name, input, mask })
     }
@@ -487,8 +525,11 @@ impl NounEncode for Draft {
 }
 
 impl NounDecode for Draft {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let name = cell.head().as_atom()?.into_string()?;
         let inputs = cell.tail().as_atom()?.as_u64()?;
 
@@ -538,8 +579,11 @@ impl NounEncode for DraftEntity {
 }
 
 impl NounDecode for DraftEntity {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let tag = cell.head().as_atom()?.into_string()?;
 
         let data = cell.tail().as_cell()?;
@@ -547,15 +591,18 @@ impl NounDecode for DraftEntity {
 
         let kind = match tag.as_str() {
             "draft" => {
-                let draft = Draft::from_noun(&data.tail())?;
+                let draft_noun = data.tail().noun();
+                let draft = Draft::from_noun(&draft_noun, space)?;
                 DraftEntityKind::Draft { name, draft }
             }
             "input" => {
-                let input = PreInput::from_noun(&data.tail())?;
+                let input_noun = data.tail().noun();
+                let input = PreInput::from_noun(&input_noun, space)?;
                 DraftEntityKind::Input { name, input }
             }
             "seed" => {
-                let seed = PreSeed::from_noun(&data.tail())?;
+                let seed_noun = data.tail().noun();
+                let seed = PreSeed::from_noun(&seed_noun, space)?;
                 DraftEntityKind::Seed { name, seed }
             }
             _ => return Err(NounDecodeError::InvalidEnumVariant),
@@ -581,10 +628,15 @@ impl NounEncode for Master {
 }
 
 impl NounDecode for Master {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let pub_key = Coil::from_noun(&cell.head())?;
-        let prv_key = Coil::from_noun(&cell.tail())?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let pub_key_noun = cell.head().noun();
+        let prv_key_noun = cell.tail().noun();
+        let pub_key = Coil::from_noun(&pub_key_noun, space)?;
+        let prv_key = Coil::from_noun(&prv_key_noun, space)?;
 
         Ok(Master { pub_key, prv_key })
     }
@@ -612,8 +664,8 @@ impl NounEncode for Balance {
 }
 
 impl NounDecode for Balance {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let notes = HashMap::from_noun(noun)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let notes = HashMap::from_noun(noun, space)?;
         Ok(Balance { notes })
     }
 }
@@ -636,8 +688,8 @@ impl NounEncode for Network {
 }
 
 impl NounDecode for Network {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let tag = noun.as_atom()?.into_string()?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let tag = noun.in_space(space).as_atom()?.into_string()?;
         match tag.as_str() {
             "mainnet" => Ok(Network::Mainnet),
             "testnet" => Ok(Network::Testnet),
@@ -664,8 +716,8 @@ impl NounEncode for PeekRequest {
 }
 
 impl NounDecode for PeekRequest {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let tag = noun.as_atom()?.into_string()?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let tag = noun.in_space(space).as_atom()?.into_string()?;
         match tag.as_str() {
             "balance" => Ok(PeekRequest::Balance),
             "block" => Ok(PeekRequest::Block),
@@ -776,8 +828,8 @@ impl NounEncode for Trek {
 }
 
 impl NounDecode for Trek {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let mut current = *noun;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let mut current = noun.in_space(space);
         let mut parts = Vec::new();
         while let Ok(cell) = current.as_cell() {
             let part = cell.head().as_atom()?.into_string()?;
@@ -805,8 +857,11 @@ impl NounEncode for Source {
 }
 
 impl NounDecode for Source {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let head = cell.head().as_atom()?.as_u64()?;
         let tail = cell.tail().as_atom()?.as_u64()?;
         match (head, tail) {
@@ -844,10 +899,14 @@ impl NounEncode for Lock {
 }
 
 impl NounDecode for Lock {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let m = cell.head().as_atom()?.as_u64()?;
-        let pubkeys = HashSet::from_noun(&cell.tail())?;
+        let pubkeys_noun = cell.tail().noun();
+        let pubkeys = HashSet::from_noun(&pubkeys_noun, space)?;
         Ok(Lock { m, pubkeys })
     }
 }
@@ -878,8 +937,11 @@ impl NounEncode for Timelock {
 }
 
 impl NounDecode for Timelock {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let block = cell.head().as_atom()?.as_u64()?;
         let intent = match cell.tail().as_atom()?.as_u64()? {
             0 => TimelockIntent::None,
@@ -947,21 +1009,24 @@ impl NounEncode for Seed {
 }
 
 impl NounDecode for Seed {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         println!("\nDecoding Seed from noun: {:?}", noun);
 
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         println!(
             "Root cell - head: {:?}, tail: {:?}",
-            cell.head(),
-            cell.tail()
+            cell.head().noun(),
+            cell.tail().noun()
         );
 
         // Decode output_source
-        let source_noun = cell.head();
+        let source_noun = cell.head().noun();
         println!("Source noun: {:?}", source_noun);
 
-        let output_source = if let Ok(atom) = source_noun.as_atom() {
+        let output_source = if let Ok(atom) = source_noun.in_space(space).as_atom() {
             if atom.as_u64()? == 0 {
                 println!("Found atom 0, decoding as None");
                 None
@@ -970,11 +1035,11 @@ impl NounDecode for Seed {
                 return Err(NounDecodeError::InvalidEnumVariant);
             }
         } else {
-            let source_cell = source_noun.as_cell()?;
+            let source_cell = source_noun.in_space(space).as_cell()?;
             println!(
                 "Source cell - head: {:?}, tail: {:?}",
-                source_cell.head(),
-                source_cell.tail()
+                source_cell.head().noun(),
+                source_cell.tail().noun()
             );
 
             if source_cell.head().as_atom()?.as_u64()? != 0 {
@@ -983,25 +1048,27 @@ impl NounDecode for Seed {
             }
 
             println!("Decoding Some(Source)");
-            Some(Source::from_noun(&source_cell.tail())?)
+            let source_tail = source_cell.tail().noun();
+            Some(Source::from_noun(&source_tail, space)?)
         };
         println!("Decoded output_source: {:?}", output_source);
 
         let rest = cell.tail().as_cell()?;
         println!(
             "First rest cell - head: {:?}, tail: {:?}",
-            rest.head(),
-            rest.tail()
+            rest.head().noun(),
+            rest.tail().noun()
         );
 
-        let recipient = Lock::from_noun(&rest.head())?;
+        let recipient_noun = rest.head().noun();
+        let recipient = Lock::from_noun(&recipient_noun, space)?;
         println!("Decoded recipient: {:?}", recipient);
 
         let rest = rest.tail().as_cell()?;
         println!(
             "Second rest cell - head: {:?}, tail: {:?}",
-            rest.head(),
-            rest.tail()
+            rest.head().noun(),
+            rest.tail().noun()
         );
 
         let timelock_intent = match rest.head().as_atom()?.as_u64()? {
@@ -1018,8 +1085,8 @@ impl NounDecode for Seed {
         let rest = rest.tail().as_cell()?;
         println!(
             "Third rest cell - head: {:?}, tail: {:?}",
-            rest.head(),
-            rest.tail()
+            rest.head().noun(),
+            rest.tail().noun()
         );
 
         let gift = rest.head().as_atom()?.as_u64()?;
@@ -1081,21 +1148,24 @@ impl NounEncode for Spend {
 }
 
 impl NounDecode for Spend {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         println!("\nDecoding Spend from noun: {:?}", noun);
 
-        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         println!(
             "Root cell - head: {:?}, tail: {:?}",
-            cell.head(),
-            cell.tail()
+            cell.head().noun(),
+            cell.tail().noun()
         );
 
         // Decode signature Option
-        let sig_noun = cell.head();
+        let sig_noun = cell.head().noun();
         println!("Signature noun: {:?}", sig_noun);
 
-        let signature = if let Ok(atom) = sig_noun.as_atom() {
+        let signature = if let Ok(atom) = sig_noun.in_space(space).as_atom() {
             if atom.as_u64()? == 0 {
                 println!("Found atom 0, decoding as None");
                 None
@@ -1104,11 +1174,11 @@ impl NounDecode for Spend {
                 return Err(NounDecodeError::InvalidEnumVariant);
             }
         } else {
-            let sig_cell = sig_noun.as_cell()?;
+            let sig_cell = sig_noun.in_space(space).as_cell()?;
             println!(
                 "Signature cell - head: {:?}, tail: {:?}",
-                sig_cell.head(),
-                sig_cell.tail()
+                sig_cell.head().noun(),
+                sig_cell.tail().noun()
             );
 
             if sig_cell.head().as_atom()?.as_u64()? != 0 {
@@ -1117,18 +1187,20 @@ impl NounDecode for Spend {
             }
 
             println!("Decoding Some(HashMap)");
-            Some(HashMap::from_noun(&sig_cell.tail())?)
+            let sig_tail = sig_cell.tail().noun();
+            Some(HashMap::from_noun(&sig_tail, space)?)
         };
         println!("Decoded signature: {:?}", signature);
 
         let data = cell.tail().as_cell()?;
         println!(
             "Data cell - head: {:?}, tail: {:?}",
-            data.head(),
-            data.tail()
+            data.head().noun(),
+            data.tail().noun()
         );
 
-        let seeds = HashSet::from_noun(&data.head())?;
+        let seeds_noun = data.head().noun();
+        let seeds = HashSet::from_noun(&seeds_noun, space)?;
         println!("Decoded seeds: {:?}", seeds);
 
         let fee = data.tail().as_atom()?.as_u64()?;
@@ -1151,65 +1223,95 @@ mod tests {
 
     use super::*;
 
+    struct StackGuard {
+        stack: NockStack,
+    }
+
+    impl StackGuard {
+        fn new(words: usize) -> Self {
+            let stack = NockStack::new(words, 0);
+            Self { stack }
+        }
+    }
+
+    impl std::ops::Deref for StackGuard {
+        type Target = NockStack;
+
+        fn deref(&self) -> &Self::Target {
+            &self.stack
+        }
+    }
+
+    impl std::ops::DerefMut for StackGuard {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.stack
+        }
+    }
+
     #[test]
     fn test_trek_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let trek = Trek(vec![
             "path".to_string(),
             "to".to_string(),
             "key".to_string(),
         ]);
-        let encoded = trek.to_noun(&mut stack);
-        let decoded = Trek::from_noun(&encoded).unwrap();
+        let encoded = trek.to_noun(&mut *stack);
+        let decoded = Trek::from_noun(&encoded, &space).unwrap();
         assert_eq!(trek, decoded);
     }
 
     #[test]
     fn test_source_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let hash = Source::Hash(0x1234);
-        let encoded = hash.to_noun(&mut stack);
-        let decoded = Source::from_noun(&encoded).unwrap();
+        let encoded = hash.to_noun(&mut *stack);
+        let decoded = Source::from_noun(&encoded, &space).unwrap();
         assert_eq!(hash, decoded);
 
         let coinbase = Source::Coinbase;
-        let encoded = coinbase.to_noun(&mut stack);
-        let decoded = Source::from_noun(&encoded).unwrap();
+        let encoded = coinbase.to_noun(&mut *stack);
+        let decoded = Source::from_noun(&encoded, &space).unwrap();
         assert_eq!(coinbase, decoded);
     }
 
     #[test]
     fn test_lock_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let mut pubkeys = HashSet::new();
         pubkeys.insert(0x1234);
         pubkeys.insert(0x5678);
 
         let lock = Lock { m: 2, pubkeys };
-        let encoded = lock.to_noun(&mut stack);
-        let decoded = Lock::from_noun(&encoded).unwrap();
+        let encoded = lock.to_noun(&mut *stack);
+        let decoded = Lock::from_noun(&encoded, &space).unwrap();
         assert_eq!(lock, decoded);
     }
 
     #[test]
     fn test_timelock_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let timelock = Timelock {
             block: 0x1234,
             intent: TimelockIntent::After,
         };
-        let encoded = timelock.to_noun(&mut stack);
-        let decoded = Timelock::from_noun(&encoded).unwrap();
+        let encoded = timelock.to_noun(&mut *stack);
+        let decoded = Timelock::from_noun(&encoded, &space).unwrap();
         assert_eq!(timelock, decoded);
     }
 
     #[test]
     fn test_seed_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let mut pubkeys = HashSet::new();
         pubkeys.insert(0x1234);
@@ -1221,14 +1323,15 @@ mod tests {
             gift: 100,
             parent_hash: 0x9abc,
         };
-        let encoded = seed.to_noun(&mut stack);
-        let decoded = Seed::from_noun(&encoded).unwrap();
+        let encoded = seed.to_noun(&mut *stack);
+        let decoded = Seed::from_noun(&encoded, &space).unwrap();
         assert_eq!(seed, decoded);
     }
 
     #[test]
     fn test_preseed_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let preseed = PreSeed {
             name: "test_seed".to_string(),
@@ -1241,14 +1344,15 @@ mod tests {
                 parent_hash: true,
             },
         };
-        let encoded = preseed.to_noun(&mut stack);
-        let decoded = PreSeed::from_noun(&encoded).unwrap();
+        let encoded = preseed.to_noun(&mut *stack);
+        let decoded = PreSeed::from_noun(&encoded, &space).unwrap();
         assert_eq!(preseed, decoded);
     }
 
     #[test]
     fn test_spend_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let mut signatures = HashMap::new();
         signatures.insert(0x1234, 0x5678);
@@ -1271,14 +1375,15 @@ mod tests {
             seeds,
             fee: 10,
         };
-        let encoded = spend.to_noun(&mut stack);
-        let decoded = Spend::from_noun(&encoded).unwrap();
+        let encoded = spend.to_noun(&mut *stack);
+        let decoded = Spend::from_noun(&encoded, &space).unwrap();
         assert_eq!(spend, decoded);
     }
 
     #[test]
     fn test_preinput_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let preinput = PreInput {
             name: "test_input".to_string(),
@@ -1292,21 +1397,22 @@ mod tests {
                 },
             },
         };
-        let encoded = preinput.to_noun(&mut stack);
-        let decoded = PreInput::from_noun(&encoded).unwrap();
+        let encoded = preinput.to_noun(&mut *stack);
+        let decoded = PreInput::from_noun(&encoded, &space).unwrap();
         assert_eq!(preinput, decoded);
     }
 
     #[test]
     fn test_draft_encoding() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = StackGuard::new(8 << 10 << 10);
+        let space = stack.noun_space();
 
         let draft = Draft {
             name: "test_draft".to_string(),
             inputs: 0x1234, // Using u64 as specified in struct
         };
-        let encoded = draft.to_noun(&mut stack);
-        let decoded = Draft::from_noun(&encoded).unwrap();
+        let encoded = draft.to_noun(&mut *stack);
+        let decoded = Draft::from_noun(&encoded, &space).unwrap();
         assert_eq!(draft, decoded);
     }
 }

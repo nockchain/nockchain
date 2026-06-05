@@ -4,6 +4,7 @@ use bytes::Bytes;
 use nockapp::noun::slab::NounSlab;
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::v0;
+use nockvm::noun::NounAllocator;
 use noun_serde::{NounDecode, NounEncode};
 
 #[test]
@@ -12,9 +13,10 @@ fn decode_balance_from_peeks_and_snapshots_v1() -> Result<(), Box<dyn std::error
 
     let mut slab: NounSlab = NounSlab::new();
     let noun = slab.cue_into(Bytes::from_static(EARLY_BALANCE_JAM))?;
+    let space = slab.noun_space();
 
     let double_option: Option<Option<v0::BalanceUpdate>> =
-        Option::<Option<v0::BalanceUpdate>>::from_noun(&noun)?;
+        Option::<Option<v0::BalanceUpdate>>::from_noun(&noun, &space)?;
     assert!(
         matches!(double_option, Some(Some(_))),
         "jam should decode as Option<Option<BalanceUpdate>>"
@@ -58,14 +60,17 @@ fn decode_balance_from_peeks_and_snapshots_v1() -> Result<(), Box<dyn std::error
 
     let mut balance_slab: NounSlab = NounSlab::new();
     let notes_noun = v0::Balance::to_noun(notes, &mut balance_slab);
-    let notes_roundtrip = v0::Balance::from_noun(&notes_noun)?;
+    let balance_space = balance_slab.noun_space();
+    let notes_roundtrip = v0::Balance::from_noun(&notes_noun, &balance_space)?;
     assert_eq!(notes, &notes_roundtrip);
 
     let encoded_option = Some(Some(balance_update.clone()));
     let mut option_slab: NounSlab = NounSlab::new();
     let option_noun =
         Option::<Option<v0::BalanceUpdate>>::to_noun(&encoded_option, &mut option_slab);
-    let option_roundtrip = Option::<Option<v0::BalanceUpdate>>::from_noun(&option_noun)?;
+    let option_space = option_slab.noun_space();
+    let option_roundtrip =
+        Option::<Option<v0::BalanceUpdate>>::from_noun(&option_noun, &option_space)?;
     assert_eq!(option_roundtrip, encoded_option);
 
     Ok(())

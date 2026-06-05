@@ -9,6 +9,7 @@ use diesel::prelude::*;
 use diesel::sqlite::SqliteConnection;
 use diesel::OptionalExtension;
 use nockchain_types::v1::Name;
+use nockvm::noun::NounAllocator;
 use tracing::{info, warn};
 
 use crate::bridge_status::BridgeStatus;
@@ -864,11 +865,14 @@ pub fn create_commit_nock_deposits_driver(
                 };
 
                 let root = unsafe { effect.root() };
-                let bridge_effect = match BridgeEffect::from_noun(root) {
-                    Ok(effect) => effect,
-                    Err(err) => {
-                        warn!("Failed to decode effect: {}", err);
-                        continue;
+                let bridge_effect = {
+                    let space = effect.noun_space();
+                    match BridgeEffect::from_noun(root, &space) {
+                        Ok(effect) => effect,
+                        Err(err) => {
+                            warn!("Failed to decode effect: {}", err);
+                            continue;
+                        }
                     }
                 };
 

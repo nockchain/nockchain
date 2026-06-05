@@ -1,9 +1,8 @@
 use ibig::UBig;
-use nockvm::ext::NounExt;
 use nockvm::interpreter::Context;
-use nockvm::jets::util::BAIL_FAIL;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
-use nockvm::noun::{Noun, Slots};
+use nockvm::noun::Noun;
 use noun_serde::{NounDecode, NounEncode};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
@@ -13,11 +12,12 @@ use crate::form::tip5;
 
 #[inline(always)]
 pub fn ch_scal_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = subject.slot(6)?;
-    let n_atom = sam.slot(2)?.as_atom()?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let n_atom = slot(sam, 2, &space)?.in_space(&space).as_atom()?;
 
-    let p = sam.slot(3)?;
-    let a_pt = CheetahPoint::from_noun(&p).map_err(|_| BAIL_FAIL)?;
+    let p = slot(sam, 3, &space)?;
+    let a_pt = CheetahPoint::from_noun(&p, &space).map_err(|_| BAIL_FAIL)?;
 
     let res = if let Ok(n) = n_atom.as_u64() {
         ch_scal(n, &a_pt)?
@@ -32,16 +32,23 @@ pub fn ch_scal_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr>
 }
 
 pub fn verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = subject.slot(6)?;
-    let pubkey = sam.slot(2)?;
-    let m = sam.slot(6)?;
-    let chal = sam.slot(14)?.as_atom()?.as_ubig(&mut context.stack);
-    let sig = sam.slot(15)?.as_atom()?.as_ubig(&mut context.stack);
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let pubkey = slot(sam, 2, &space)?;
+    let m = slot(sam, 6, &space)?;
+    let chal = slot(sam, 14, &space)?
+        .in_space(&space)
+        .as_atom()?
+        .as_ubig(&mut context.stack);
+    let sig = slot(sam, 15, &space)?
+        .in_space(&space)
+        .as_atom()?
+        .as_ubig(&mut context.stack);
 
-    let pubkey: CheetahPoint = CheetahPoint::from_noun(&pubkey).map_err(|_| BAIL_FAIL)?;
-    let m = <[Belt; 5]>::from_noun(&m).map_err(|_| BAIL_FAIL)?;
+    let pubkey: CheetahPoint = CheetahPoint::from_noun(&pubkey, &space).map_err(|_| BAIL_FAIL)?;
+    let m = <[Belt; 5]>::from_noun(&m, &space).map_err(|_| BAIL_FAIL)?;
 
-    let res = verify_affine(pubkey, &m, &chal, &sig)?;
+    let res = verify_affine(&pubkey, &m, &chal, &sig)?;
     Ok(res.to_noun(&mut context.stack))
 }
 
@@ -70,12 +77,15 @@ pub(crate) struct ValidateArgs {
 //}
 
 pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let list = subject.slot(6)?;
+    let space = context.stack.noun_space();
+    let list = slot(subject, 6, &space)?;
     let args = list
+        .in_space(&space)
         .list_iter()
         .map(|arg| {
-            let pubkey = CheetahPoint::from_noun(&arg.slot(2)?).map_err(|_| BAIL_FAIL)?;
-            let m = <[Belt; 5]>::from_noun(&arg.slot(6)?).map_err(|_| BAIL_FAIL)?;
+            let pubkey =
+                CheetahPoint::from_noun(&arg.slot(2)?.noun(), &space).map_err(|_| BAIL_FAIL)?;
+            let m = <[Belt; 5]>::from_noun(&arg.slot(6)?.noun(), &space).map_err(|_| BAIL_FAIL)?;
             let chal = arg.slot(14)?.as_atom()?.as_ubig(&mut context.stack);
             let sig = arg.slot(15)?.as_atom()?.as_ubig(&mut context.stack);
             Ok(ValidateArgs {
@@ -96,7 +106,7 @@ pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<N
                 chal,
                 sig,
             } = arg;
-            verify_affine(*pubkey, m, chal, sig).expect("signature verification should succeed")
+            verify_affine(pubkey, m, chal, sig).expect("signature verification should succeed")
         })
         //  check if any result is invalid and try to short-circuit as soon as an
         //  invalid result is found
@@ -106,13 +116,13 @@ pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<N
 
 #[inline(always)]
 pub fn verify_affine(
-    pubkey: CheetahPoint,
+    pubkey: &CheetahPoint,
     m: &[Belt],
     chal: &UBig,
     sig: &UBig,
 ) -> Result<bool, JetErr> {
     let left = ch_scal_big(sig, &A_GEN)?;
-    let right = ch_neg(&ch_scal_big(chal, &pubkey)?);
+    let right = ch_neg(&ch_scal_big(chal, pubkey)?);
     let sum = ch_add(&left, &right)?;
     if sum.x == F6_ZERO {
         return Err(BAIL_FAIL);
@@ -379,7 +389,7 @@ mod tests {
         };
 
         let m = [Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)];
-        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
+        assert!(verify_affine(&pubkey, &m, &chal, &sig)?);
         Ok(())
     }
 
@@ -414,7 +424,7 @@ mod tests {
             inf: false,
         };
         let m = [Belt(8), Belt(9), Belt(10), Belt(11), Belt(12)];
-        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
+        assert!(verify_affine(&pubkey, &m, &chal, &sig)?);
         Ok(())
     }
 

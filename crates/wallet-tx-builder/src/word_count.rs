@@ -362,7 +362,8 @@ mod tests {
         let fixture_bytes = include_bytes!("../tests/fixtures/note_data_fixtures.jam");
         let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
         let noun = Noun::cue_bytes_slice(&mut stack, fixture_bytes).expect("fixture jam must cue");
-        Vec::<FixtureEntry>::from_noun(&noun).expect("fixture noun must decode")
+        let space = stack.noun_space();
+        Vec::<FixtureEntry>::from_noun(&noun, &space).expect("fixture noun must decode")
     }
 
     fn normalize_case_tag(tag: &str) -> &str {
