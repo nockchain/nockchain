@@ -1,17 +1,18 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use bincode::config::Configuration;
 use bincode::{config, encode_to_vec, Decode, Encode};
 use blake3::{Hash, Hasher};
 use bytes::Bytes;
-use nockvm::noun::{NounAllocator, D, T};
 use nockvm_macros::tas;
 use thiserror::Error;
 use tokio::fs::create_dir_all;
-use tracing::{debug, error, warn};
+use tokio::sync::oneshot;
+use tracing::{debug, error, trace, warn};
 
-use super::artifact::{ArtifactError, CheckedReader};
 use crate::metrics::NockAppMetrics;
 use crate::noun::slab::{Jammer, NockJammer, NounSlab};
 use crate::JammedNoun;
@@ -22,49 +23,188 @@ const SNAPSHOT_VERSION_1: u32 = 1;
 const SNAPSHOT_VERSION_2: u32 = 2;
 pub const LATEST_SNAPSHOT_VERSION: u32 = SNAPSHOT_VERSION_2;
 
-#[derive(Clone, Debug)]
-pub(crate) struct CheckpointSummary {
-    pub path: PathBuf,
-    pub event_num: u64,
+pub enum WhichSnapshot {
+    Snapshot0,
+    Snapshot1,
 }
 
-pub struct CheckpointBootstrapReader<J = NockJammer> {
-    path: PathBuf,
-    _phantom: std::marker::PhantomData<J>,
-}
-
-impl<J> CheckpointBootstrapReader<J> {
-    pub fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-            _phantom: std::marker::PhantomData,
+impl WhichSnapshot {
+    pub fn next(&self) -> Self {
+        match self {
+            WhichSnapshot::Snapshot0 => WhichSnapshot::Snapshot1,
+            WhichSnapshot::Snapshot1 => WhichSnapshot::Snapshot0,
         }
     }
 }
 
-impl<J: Jammer> CheckpointBootstrapReader<J> {
-    pub async fn load_latest(
-        &self,
-        metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<Option<SaveableCheckpoint>, CheckpointError> {
-        inspect_latest(&self.path)
-            .await?
-            .map(|(checkpoint, _)| checkpoint.into_saveable::<J>(metrics))
-            .transpose()
+/// State object which handles all NockApp saves and loads
+pub struct Saver<J = NockJammer> {
+    path_0: PathBuf,
+    path_1: PathBuf,
+    save_to_next: WhichSnapshot,
+    waiters: Vec<(u64, oneshot::Sender<()>)>,
+    last_event_num: u64,
+    _phantom: std::marker::PhantomData<J>,
+}
+
+impl<J> Saver<J> {
+    pub fn last_path(&self) -> PathBuf {
+        match self.save_to_next {
+            WhichSnapshot::Snapshot1 => self.path_0.clone(),
+            WhichSnapshot::Snapshot0 => self.path_1.clone(),
+        }
     }
 
-    pub(crate) async fn load_latest_state_only_with_summary(
-        &self,
+    pub fn next_path(&self) -> PathBuf {
+        match self.save_to_next {
+            WhichSnapshot::Snapshot1 => self.path_1.clone(),
+            WhichSnapshot::Snapshot0 => self.path_0.clone(),
+        }
+    }
+
+    /// The future from this function should not be awaited before any mutex
+    /// around the 'Saver' is released, or a deadlock will result.
+    #[tracing::instrument(skip(self))]
+    #[allow(clippy::async_yields_async)]
+    pub async fn wait_for_snapshot(
+        &mut self,
+        wait_for_event_num: u64,
+    ) -> impl Future<Output = Result<(), oneshot::error::RecvError>> {
+        if self.last_event_num >= wait_for_event_num {
+            return futures::future::Either::Left(std::future::ready(Ok(())));
+        }
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.waiters.push((wait_for_event_num, tx));
+        futures::future::Either::Right(rx)
+    }
+
+    /// Check if we need to save
+    pub fn save_needed(&self, event_num: u64) -> bool {
+        self.last_event_num < event_num
+    }
+}
+
+impl<J: Jammer> Saver<J> {
+    pub async fn try_load<C: Checkpoint>(
+        path: &PathBuf,
         metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<Option<(SaveableCheckpoint, CheckpointSummary)>, CheckpointError> {
-        inspect_latest(&self.path)
-            .await?
-            .map(|(checkpoint, summary)| {
-                checkpoint
-                    .into_saveable_state_only::<J>(metrics)
-                    .map(|checkpoint| (checkpoint, summary))
-            })
-            .transpose()
+    ) -> Result<(Self, Option<C>), CheckpointError> {
+        let path_0 = path.join("0.chkjam");
+        let path_1 = path.join("1.chkjam");
+        let waiters = Vec::new();
+
+        // No snapshot to load
+        if !path_0.exists() && !path_1.exists() {
+            create_dir_all(path).await?;
+            return Ok((
+                Self {
+                    path_0,
+                    path_1,
+                    save_to_next: WhichSnapshot::Snapshot0,
+                    waiters,
+                    last_event_num: 0,
+                    _phantom: std::marker::PhantomData,
+                },
+                None,
+            ));
+        }
+
+        let checkpoint_0 = load_checkpoint_file(&path_0).await;
+        let checkpoint_1 = load_checkpoint_file(&path_1).await;
+
+        let (loaded_checkpoint, save_to_next) = match (checkpoint_0, checkpoint_1) {
+            (Ok(c0), Ok(c1)) => {
+                if c0.event_num() > c1.event_num() {
+                    debug!(
+                        "Loading checkpoint at: {}, checksum: {}",
+                        path_0.display(),
+                        c0.checksum()
+                    );
+                    (c0, WhichSnapshot::Snapshot1)
+                } else {
+                    debug!(
+                        "Loading checkpoint at: {}, checksum: {}",
+                        path_1.display(),
+                        c1.checksum()
+                    );
+                    (c1, WhichSnapshot::Snapshot0)
+                }
+            }
+            (Ok(c0), Err(e1)) => {
+                warn!("checkpoint at {} failed to load: {}", path_1.display(), e1);
+                debug!(
+                    "Loading checkpoint at: {}, checksum: {}",
+                    path_0.display(),
+                    c0.checksum()
+                );
+                (c0, WhichSnapshot::Snapshot1)
+            }
+            (Err(e0), Ok(c1)) => {
+                warn!("checkpoint at {} failed to load: {}", path_0.display(), e0);
+                debug!(
+                    "Loading checkpoint at: {}, checksum: {}",
+                    path_1.display(),
+                    c1.checksum()
+                );
+                (c1, WhichSnapshot::Snapshot0)
+            }
+            (Err(e0), Err(e1)) => {
+                error!("checkpoint at {} failed to load: {}", path_0.display(), e0);
+                error!("checkpoint at {} failed to load: {}", path_1.display(), e1);
+                return Err(CheckpointError::BothCheckpointsFailed(
+                    Box::new(e0),
+                    Box::new(e1),
+                ));
+            }
+        };
+        let last_event_num = loaded_checkpoint.event_num();
+        let saveable = loaded_checkpoint.into_saveable::<J>(metrics.clone())?;
+        trace!("After from_jammed_checkpoint");
+        let c = C::from_saveable(saveable)?;
+        Ok((
+            Self {
+                path_0,
+                path_1,
+                save_to_next,
+                waiters,
+                last_event_num,
+                _phantom: std::marker::PhantomData,
+            },
+            Some(c),
+        ))
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn save<C: Checkpoint>(
+        &mut self,
+        checkpoint: C,
+        metrics: Arc<NockAppMetrics>,
+    ) -> Result<(), CheckpointError> {
+        let event_num = checkpoint.event_num();
+        trace!("Saving checkpoint at event_num {}", event_num);
+        let saveable = checkpoint.to_saveable();
+        trace!("Converted checkpoint to saveable");
+        let jammed = saveable.to_jammed_checkpoint::<J>(metrics);
+        trace!("Converted saveable to jammed");
+        let path = self.next_path();
+        jammed.save_to_file(&path).await?;
+        self.save_to_next = self.save_to_next.next();
+        std::mem::drop(jammed);
+        debug!("Saved checkpoint to file: {}", path.display());
+        let mut still_waiting = Vec::new();
+        for (waiting_event_num, waiter) in self.waiters.drain(..) {
+            if waiting_event_num <= event_num {
+                let _ = waiter.send(()); // An error means the receiver was dropped
+            } else {
+                still_waiting.push((waiting_event_num, waiter));
+            }
+        }
+
+        self.last_event_num = event_num;
+        self.waiters = still_waiting;
+
+        Ok(())
     }
 }
 
@@ -85,16 +225,9 @@ pub struct SaveableCheckpoint {
 }
 
 impl SaveableCheckpoint {
-    fn empty_cold_slab() -> NounSlab {
-        let mut slab = NounSlab::new();
-        let root = T(&mut slab, &[D(0), D(0), D(0)]);
-        slab.set_root(root);
-        slab
-    }
-
     #[allow(clippy::wrong_self_convention)]
-    #[tracing::instrument(skip(self))]
-    pub fn to_jammed_checkpoint<J: Jammer>(self) -> JammedCheckpointV2 {
+    #[tracing::instrument(skip(self, metrics))]
+    fn to_jammed_checkpoint<J: Jammer>(self, metrics: Arc<NockAppMetrics>) -> JammedCheckpointV2 {
         let SaveableCheckpoint {
             ker_hash,
             event_num,
@@ -102,8 +235,11 @@ impl SaveableCheckpoint {
             cold,
         } = self;
 
+        let jam_start = Instant::now();
         let state_jam = JammedNoun::new(state.coerce_jammer::<J>().jam());
         let cold_jam = JammedNoun::new(cold.coerce_jammer::<J>().jam());
+        metrics.save_jam_time.add_timing(&jam_start.elapsed());
+
         JammedCheckpointV2::new(ker_hash, event_num, cold_jam, state_jam)
     }
 
@@ -116,15 +252,16 @@ impl SaveableCheckpoint {
         let root = slab.cue_into(jammed.jam.0)?;
         metrics.map(|m| m.load_cue_time.add_timing(&cue_start.elapsed()));
         slab.set_root(root);
-        let space = slab.noun_space();
-        let cell = root.in_space(&space).as_cell()?;
+        let cell = root
+            .as_cell()
+            .expect("legacy checkpoint root should be a cell");
 
         let mut state_slab: NounSlab = NounSlab::new();
-        let state_copy = state_slab.copy_into(cell.head().noun(), &space);
+        let state_copy = state_slab.copy_into(cell.head());
         state_slab.set_root(state_copy);
 
         let mut cold_slab: NounSlab = NounSlab::new();
-        let cold_copy = cold_slab.copy_into(cell.tail().noun(), &space);
+        let cold_copy = cold_slab.copy_into(cell.tail());
         cold_slab.set_root(cold_copy);
 
         Ok(Self {
@@ -133,41 +270,6 @@ impl SaveableCheckpoint {
             state: state_slab,
             cold: cold_slab,
         })
-    }
-
-    fn from_legacy_jammed_checkpoint_state_only<J: Jammer>(
-        ker_hash: Hash,
-        event_num: u64,
-        jam: JammedNoun,
-        metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<Self, CheckpointError> {
-        let mut slab: NounSlab<J> = NounSlab::new();
-        let cue_start = Instant::now();
-        let root = slab.cue_into(jam.0)?;
-        metrics.map(|m| m.load_cue_time.add_timing(&cue_start.elapsed()));
-        slab.set_root(root);
-        let space = slab.noun_space();
-        let cell = root.in_space(&space).as_cell()?;
-
-        let mut state_slab: NounSlab = NounSlab::new();
-        let state_copy = state_slab.copy_into(cell.head().noun(), &space);
-        state_slab.set_root(state_copy);
-
-        Ok(Self {
-            ker_hash,
-            event_num,
-            state: state_slab,
-            cold: Self::empty_cold_slab(),
-        })
-    }
-
-    fn from_jammed_checkpoint_v1_state_only<J: Jammer>(
-        jammed: JammedCheckpointV1,
-        metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<Self, CheckpointError> {
-        Self::from_legacy_jammed_checkpoint_state_only::<J>(
-            jammed.ker_hash, jammed.event_num, jammed.jam, metrics,
-        )
     }
 
     fn from_jammed_checkpoint_v2<J: Jammer>(
@@ -201,25 +303,19 @@ impl SaveableCheckpoint {
             cold: cold_slab,
         })
     }
+}
 
-    fn from_jammed_checkpoint_v2_state_only<J: Jammer>(
-        jammed: JammedCheckpointV2,
-        metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<Self, CheckpointError> {
-        let mut state_slab: NounSlab<J> = NounSlab::new();
-        let state_start = Instant::now();
-        let state_root = state_slab.cue_into(jammed.state_jam.0.clone())?;
-        if let Some(metrics) = metrics {
-            metrics.load_cue_time.add_timing(&state_start.elapsed());
-        }
-        state_slab.set_root(state_root);
+impl Checkpoint for SaveableCheckpoint {
+    fn to_saveable(self) -> SaveableCheckpoint {
+        self
+    }
 
-        Ok(Self {
-            ker_hash: jammed.ker_hash,
-            event_num: jammed.event_num,
-            state: state_slab.coerce_jammer::<NockJammer>(),
-            cold: Self::empty_cold_slab(),
-        })
+    fn from_saveable(saveable: SaveableCheckpoint) -> Result<Self, CheckpointError> {
+        Ok(saveable)
+    }
+
+    fn event_num(&self) -> u64 {
+        self.event_num
     }
 }
 
@@ -229,17 +325,11 @@ pub enum CheckpointError {
     IOError(#[from] std::io::Error),
     #[error("Bincode decoding error: {0}")]
     DecodeError(#[from] bincode::error::DecodeError),
-    #[error("Artifact decoding error: {0}")]
-    ArtifactError(#[from] ArtifactError),
     #[error("Bincode encoding error: {0}")]
     EncodeError(#[from] bincode::error::EncodeError),
-    #[error(
-        "Invalid checksum at {0}. The checkpoint is corrupt or incomplete; restore it from a known-good peer or remove it so Nockchain can try another checkpoint."
-    )]
+    #[error("Invalid checksum at {0}")]
     InvalidChecksum(PathBuf),
-    #[error(
-        "Invalid checkpoint version at {0}. Use a compatible Nockchain binary for this checkpoint, or restore/remove the checkpoint so the peer can boot from a valid one."
-    )]
+    #[error("Invalid version at {0}")]
     InvalidVersion(PathBuf),
     #[error("Sword noun error: {0}")]
     SwordNounError(#[from] nockvm::noun::Error),
@@ -330,32 +420,19 @@ impl JammedCheckpointV1 {
     async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
         debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
-        let checkpoint = Self::decode_from_bytes(&bytes, path)?;
+        let config = bincode::config::standard();
+        let (checkpoint, _) = bincode::decode_from_slice::<Self, Configuration>(&bytes, config)?;
         checkpoint.validate(path)?;
         Ok(checkpoint)
     }
 
-    fn decode_from_bytes(bytes: &[u8], path: &Path) -> Result<Self, CheckpointError> {
-        let mut reader = CheckedReader::new(bytes, "checkpoint v1");
-        let magic_bytes = reader.read_u64("magic bytes")?;
-        let version = reader.read_u32("version")?;
-        if magic_bytes != JAM_MAGIC_BYTES || version != SNAPSHOT_VERSION_1 {
-            return Err(CheckpointError::InvalidVersion(path.to_path_buf()));
-        }
-        let ker_hash = reader.read_hash("kernel hash")?;
-        let checksum = reader.read_hash("checksum")?;
-        let event_num = reader.read_u64("event number")?;
-        let jam = JammedNoun::new(Bytes::copy_from_slice(reader.read_bytes("jam")?));
-        reader.finish()?;
-
-        Ok(Self {
-            magic_bytes,
-            version,
-            ker_hash,
-            checksum,
-            event_num,
-            jam,
-        })
+    #[allow(dead_code)]
+    #[tracing::instrument(skip(self))]
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
+        let bytes = self.encode()?;
+        trace!("Saving jammed checkpoint to file: {}", path.display());
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
     }
 }
 
@@ -434,50 +511,46 @@ impl JammedCheckpointV2 {
     async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
         debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
-        let checkpoint = Self::decode_from_bytes_with_path(&bytes, Some(path))?;
+        let config = bincode::config::standard();
+        let (envelope, _) = bincode::decode_from_slice::<JammedCheckpointV2Envelope, Configuration>(
+            &bytes, config,
+        )?;
+        let checkpoint = Self::from_envelope(envelope, Some(path))?;
         checkpoint.validate(path)?;
         Ok(checkpoint)
     }
 
-    fn from_payload(payload: &[u8]) -> Result<Self, CheckpointError> {
-        let mut reader = CheckedReader::new(payload, "checkpoint v2 payload");
-        let ker_hash = reader.read_hash("kernel hash")?;
-        let checksum = reader.read_hash("checksum")?;
-        let event_num = reader.read_u64("event number")?;
-        let cold_jam = JammedNoun::new(Bytes::copy_from_slice(reader.read_bytes("cold jam")?));
-        let state_jam = JammedNoun::new(Bytes::copy_from_slice(reader.read_bytes("state jam")?));
-        reader.finish()?;
-
-        Ok(Self {
-            ker_hash,
-            checksum,
-            event_num,
-            cold_jam,
-            state_jam,
-        })
+    #[tracing::instrument(skip(self))]
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
+        let bytes = self.encode()?;
+        trace!("Saving jammed checkpoint to file: {}", path.display());
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
     }
 
-    fn decode_from_bytes_with_path(
-        bytes: &[u8],
+    fn from_envelope(
+        envelope: JammedCheckpointV2Envelope,
         path: Option<&Path>,
     ) -> Result<Self, CheckpointError> {
-        let mut reader = CheckedReader::new(bytes, "checkpoint v2 envelope");
-        let magic_bytes = reader.read_u64("magic bytes")?;
-        let version = reader.read_u32("version")?;
-        if magic_bytes != JAM_MAGIC_BYTES {
+        if envelope.magic_bytes != JAM_MAGIC_BYTES {
             return Err(CheckpointError::InvalidVersion(path_or_memory(path)));
         }
-        if version != LATEST_SNAPSHOT_VERSION {
+        if envelope.version != LATEST_SNAPSHOT_VERSION {
             return Err(CheckpointError::InvalidVersion(path_or_memory(path)));
         }
-        let payload = reader.read_bytes("payload")?;
-        reader.finish()?;
-        let checkpoint = Self::from_payload(payload)?;
+
+        let config = bincode::config::standard();
+        let (checkpoint, _) =
+            bincode::decode_from_slice::<Self, Configuration>(&envelope.payload, config)?;
+
         Ok(checkpoint)
     }
 
     pub fn decode_from_bytes(bytes: &[u8]) -> Result<Self, CheckpointError> {
-        let checkpoint = Self::decode_from_bytes_with_path(bytes, None)?;
+        let config = bincode::config::standard();
+        let (envelope, _) =
+            bincode::decode_from_slice::<JammedCheckpointV2Envelope, Configuration>(bytes, config)?;
+        let checkpoint = Self::from_envelope(envelope, None)?;
         let fake_path = path_or_memory(None);
         checkpoint.validate(&fake_path)?;
         Ok(checkpoint)
@@ -493,7 +566,6 @@ fn path_or_memory(path: Option<&Path>) -> PathBuf {
 enum LoadedCheckpoint {
     V2(JammedCheckpointV2),
     V1(JammedCheckpointV1),
-    V0(JammedCheckpointV0),
 }
 
 impl LoadedCheckpoint {
@@ -501,7 +573,6 @@ impl LoadedCheckpoint {
         match self {
             LoadedCheckpoint::V2(cp) => cp.event_num,
             LoadedCheckpoint::V1(cp) => cp.event_num,
-            LoadedCheckpoint::V0(cp) => cp.event_num,
         }
     }
 
@@ -509,7 +580,6 @@ impl LoadedCheckpoint {
         match self {
             LoadedCheckpoint::V2(cp) => cp.checksum,
             LoadedCheckpoint::V1(cp) => cp.checksum,
-            LoadedCheckpoint::V0(cp) => cp.checksum,
         }
     }
 
@@ -524,97 +594,8 @@ impl LoadedCheckpoint {
             LoadedCheckpoint::V1(cp) => {
                 SaveableCheckpoint::from_jammed_checkpoint_v1::<J>(cp, metrics)
             }
-            LoadedCheckpoint::V0(cp) => SaveableCheckpoint::from_jammed_checkpoint_v2::<J>(
-                JammedCheckpoint::from(cp),
-                metrics,
-            ),
         }
     }
-
-    fn into_saveable_state_only<J: Jammer>(
-        self,
-        metrics: Option<Arc<NockAppMetrics>>,
-    ) -> Result<SaveableCheckpoint, CheckpointError> {
-        match self {
-            LoadedCheckpoint::V2(cp) => {
-                SaveableCheckpoint::from_jammed_checkpoint_v2_state_only::<J>(cp, metrics)
-            }
-            LoadedCheckpoint::V1(cp) => {
-                SaveableCheckpoint::from_jammed_checkpoint_v1_state_only::<J>(cp, metrics)
-            }
-            LoadedCheckpoint::V0(cp) => {
-                SaveableCheckpoint::from_legacy_jammed_checkpoint_state_only::<J>(
-                    cp.ker_hash, cp.event_num, cp.jam, metrics,
-                )
-            }
-        }
-    }
-}
-
-async fn inspect_latest(
-    path: &Path,
-) -> Result<Option<(LoadedCheckpoint, CheckpointSummary)>, CheckpointError> {
-    let path_0 = path.join("0.chkjam");
-    let path_1 = path.join("1.chkjam");
-
-    if !path_0.exists() && !path_1.exists() {
-        create_dir_all(path).await?;
-        return Ok(None);
-    }
-
-    let checkpoint_0 = load_checkpoint_file(&path_0).await;
-    let checkpoint_1 = load_checkpoint_file(&path_1).await;
-
-    let (loaded_checkpoint, selected_path) = match (checkpoint_0, checkpoint_1) {
-        (Ok(c0), Ok(c1)) => {
-            if c0.event_num() > c1.event_num() {
-                debug!(
-                    "Loading checkpoint at: {}, checksum: {}",
-                    path_0.display(),
-                    c0.checksum()
-                );
-                (c0, path_0)
-            } else {
-                debug!(
-                    "Loading checkpoint at: {}, checksum: {}",
-                    path_1.display(),
-                    c1.checksum()
-                );
-                (c1, path_1)
-            }
-        }
-        (Ok(c0), Err(e1)) => {
-            warn!("checkpoint at {} failed to load: {}", path_1.display(), e1);
-            debug!(
-                "Loading checkpoint at: {}, checksum: {}",
-                path_0.display(),
-                c0.checksum()
-            );
-            (c0, path_0)
-        }
-        (Err(e0), Ok(c1)) => {
-            warn!("checkpoint at {} failed to load: {}", path_0.display(), e0);
-            debug!(
-                "Loading checkpoint at: {}, checksum: {}",
-                path_1.display(),
-                c1.checksum()
-            );
-            (c1, path_1)
-        }
-        (Err(e0), Err(e1)) => {
-            error!("checkpoint at {} failed to load: {}", path_0.display(), e0);
-            error!("checkpoint at {} failed to load: {}", path_1.display(), e1);
-            return Err(CheckpointError::BothCheckpointsFailed(
-                Box::new(e0),
-                Box::new(e1),
-            ));
-        }
-    };
-    let summary = CheckpointSummary {
-        path: selected_path,
-        event_num: loaded_checkpoint.event_num(),
-    };
-    Ok(Some((loaded_checkpoint, summary)))
 }
 
 async fn load_checkpoint_file(path: &Path) -> Result<LoadedCheckpoint, CheckpointError> {
@@ -623,7 +604,7 @@ async fn load_checkpoint_file(path: &Path) -> Result<LoadedCheckpoint, Checkpoin
         Err(e_v2) => match JammedCheckpointV1::load_from_file(path).await {
             Ok(cp) => Ok(LoadedCheckpoint::V1(cp)),
             Err(e_v1) => match JammedCheckpointV0::load_from_file(path).await {
-                Ok(cp0) => Ok(LoadedCheckpoint::V0(cp0)),
+                Ok(cp0) => Ok(LoadedCheckpoint::V2(JammedCheckpoint::from(cp0))),
                 Err(e_v0) => Err(CheckpointError::VersionsFailedV2 {
                     v2: Box::new(e_v2),
                     v1: Box::new(e_v1),
@@ -649,20 +630,17 @@ impl From<JammedCheckpointV0> for JammedCheckpoint {
         let root = slab
             .cue_into(v1.jam.0.clone())
             .expect("legacy checkpoint jam should cue");
-        slab.set_root(root);
-        let space = slab.noun_space();
         let cell = root
-            .in_space(&space)
             .as_cell()
             .expect("legacy checkpoint root should be a cell");
 
         let mut state_slab: NounSlab = NounSlab::new();
-        let state_copy = state_slab.copy_into(cell.head().noun(), &space);
+        let state_copy = state_slab.copy_into(cell.head());
         state_slab.set_root(state_copy);
         let state_jam = JammedNoun::new(state_slab.jam());
 
         let mut cold_slab: NounSlab = NounSlab::new();
-        let cold_copy = cold_slab.copy_into(cell.tail().noun(), &space);
+        let cold_copy = cold_slab.copy_into(cell.tail());
         cold_slab.set_root(cold_copy);
         let cold_jam = JammedNoun::new(cold_slab.jam());
 
@@ -733,110 +711,48 @@ impl JammedCheckpointV0 {
     async fn load_from_file(path: &Path) -> Result<Self, CheckpointError> {
         debug!("Loading jammed checkpoint from file: {}", path.display());
         let bytes = tokio::fs::read(path).await?;
-        let checkpoint = Self::decode_from_bytes(&bytes, path)?;
+        let config = bincode::config::standard();
+        let (checkpoint, _) = bincode::decode_from_slice::<Self, Configuration>(&bytes, config)?;
         checkpoint.validate(path)?;
         Ok(checkpoint)
     }
 
-    fn decode_from_bytes(bytes: &[u8], path: &Path) -> Result<Self, CheckpointError> {
-        let mut reader = CheckedReader::new(bytes, "checkpoint v0");
-        let magic_bytes = reader.read_u64("magic bytes")?;
-        let version = reader.read_u32("version")?;
-        if magic_bytes != JAM_MAGIC_BYTES || version != SNAPSHOT_VERSION_0 {
-            return Err(CheckpointError::InvalidVersion(path.to_path_buf()));
-        }
-        let buff_index = reader.read_bool("buffer index")?;
-        let ker_hash = reader.read_hash("kernel hash")?;
-        let checksum = reader.read_hash("checksum")?;
-        let event_num = reader.read_u64("event number")?;
-        let jam = JammedNoun::new(Bytes::copy_from_slice(reader.read_bytes("jam")?));
-        reader.finish()?;
-
-        Ok(Self {
-            magic_bytes,
-            version,
-            buff_index,
-            ker_hash,
-            checksum,
-            event_num,
-            jam,
-        })
+    #[tracing::instrument(skip(self))]
+    #[allow(dead_code)] // Preserving this for posterity
+    async fn save_to_file(&self, path: &Path) -> Result<(), CheckpointError> {
+        let bytes = self.encode()?;
+        trace!("Saving jammed checkpoint to file: {}", path.display());
+        tokio::fs::write(path, bytes).await?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod version_tests {
-    use std::panic::AssertUnwindSafe;
-
     use blake3::hash;
-    use futures::FutureExt;
-    use nockvm::noun::{Noun, NounSpace, D, T};
+    use nockvm::noun::{Noun, D, T};
     use tempfile::TempDir;
 
     use super::*;
 
     fn legacy_pair_jam(state_value: u64, cold_value: u64) -> JammedNoun {
         let mut slab = NounSlab::<NockJammer>::new();
-        let space = NounSpace::empty();
-        let state = slab.copy_into(D(state_value), &space);
-        let cold = slab.copy_into(D(cold_value), &space);
+        let state = slab.copy_into(D(state_value));
+        let cold = slab.copy_into(D(cold_value));
         let root = T(&mut slab, &[state, cold]);
         slab.set_root(root);
         JammedNoun::new(slab.coerce_jammer::<NockJammer>().jam())
     }
 
-    fn atom_value(noun: Noun, space: &NounSpace) -> u64 {
-        noun.in_space(space)
-            .as_atom()
+    fn atom_value(noun: Noun) -> u64 {
+        noun.as_atom()
             .expect("expected atom")
             .as_u64()
             .expect("expected atom to fit in u64")
     }
 
-    fn v1_checkpoint_with_absurd_jam_length(event_num: u64) -> Vec<u8> {
-        let checkpoint = JammedCheckpointV1::new(
-            hash(b"corrupt-v1"),
-            event_num,
-            JammedNoun::new(Bytes::new()),
-        );
-        let mut bytes = checkpoint.encode().expect("encode v1 checkpoint");
-
-        // The final byte is the bincode varint length for the empty Bytes field.
-        assert_eq!(bytes.pop(), Some(0));
-
-        // bincode standard varint marker 253 means the next eight bytes are a u64.
-        // On 64-bit targets this decodes to usize::MAX and currently panics in Vec allocation
-        // before checkpoint fallback can try the older checkpoint.
-        bytes.push(253);
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-        bytes
-    }
-
-    fn v2_checkpoint_with_absurd_payload_length() -> Vec<u8> {
-        let checkpoint = JammedCheckpointV2::new(
-            hash(b"corrupt-v2"),
-            9,
-            JammedNoun::new(Bytes::from_static(b"cold")),
-            JammedNoun::new(Bytes::from_static(b"state")),
-        );
-        let mut bytes = checkpoint.encode().expect("encode v2 checkpoint");
-
-        // The V2 envelope is magic (u64 varint: 9 bytes for CHKJAM), version (one byte for 2),
-        // then a bincode Vec<u8> length for the payload.
-        let payload_len_offset = 10;
-        assert_eq!(
-            bytes[payload_len_offset] as usize,
-            bytes.len() - payload_len_offset - 1
-        );
-        bytes.truncate(payload_len_offset);
-        bytes.push(253);
-        bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-        bytes
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
-    async fn loads_v1_checkpoint_via_reader() {
+    #[tokio::test]
+    async fn loads_v1_checkpoint_via_saver() {
         let temp = TempDir::new().expect("create temp dir");
         let state_value = 5;
         let cold_value = 9;
@@ -846,9 +762,8 @@ mod version_tests {
         let bytes = checkpoint.encode().expect("encode v1 checkpoint");
         std::fs::write(temp.path().join("0.chkjam"), bytes).expect("write checkpoint");
 
-        let maybe_saveable =
-            CheckpointBootstrapReader::<NockJammer>::new(temp.path().to_path_buf())
-                .load_latest(None)
+        let (_, maybe_saveable) =
+            Saver::<NockJammer>::try_load::<SaveableCheckpoint>(&temp.path().to_path_buf(), None)
                 .await
                 .expect("load checkpoint");
 
@@ -856,17 +771,14 @@ mod version_tests {
         assert_eq!(saveable.ker_hash, ker_hash);
         assert_eq!(saveable.event_num, 7);
 
-        let state_space = saveable.state.noun_space();
-        let cold_space = saveable.cold.noun_space();
-        let loaded_state = atom_value(unsafe { *saveable.state.root() }, &state_space);
-        let loaded_cold = atom_value(unsafe { *saveable.cold.root() }, &cold_space);
+        let loaded_state = atom_value(unsafe { *saveable.state.root() });
+        let loaded_cold = atom_value(unsafe { *saveable.cold.root() });
         assert_eq!(loaded_state, state_value);
         assert_eq!(loaded_cold, cold_value);
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
-    async fn loads_v0_checkpoint_via_reader() {
+    #[tokio::test]
+    async fn loads_v0_checkpoint_via_saver() {
         let temp = TempDir::new().expect("create temp dir");
         let state_value = 11;
         let cold_value = 22;
@@ -876,9 +788,8 @@ mod version_tests {
         let bytes = checkpoint.encode().expect("encode v0 checkpoint");
         std::fs::write(temp.path().join("0.chkjam"), bytes).expect("write checkpoint");
 
-        let maybe_saveable =
-            CheckpointBootstrapReader::<NockJammer>::new(temp.path().to_path_buf())
-                .load_latest(None)
+        let (_, maybe_saveable) =
+            Saver::<NockJammer>::try_load::<SaveableCheckpoint>(&temp.path().to_path_buf(), None)
                 .await
                 .expect("load checkpoint");
 
@@ -886,93 +797,10 @@ mod version_tests {
         assert_eq!(saveable.ker_hash, ker_hash);
         assert_eq!(saveable.event_num, 3);
 
-        let state_space = saveable.state.noun_space();
-        let cold_space = saveable.cold.noun_space();
-        let loaded_state = atom_value(unsafe { *saveable.state.root() }, &state_space);
-        let loaded_cold = atom_value(unsafe { *saveable.cold.root() }, &cold_space);
+        let loaded_state = atom_value(unsafe { *saveable.state.root() });
+        let loaded_cold = atom_value(unsafe { *saveable.cold.root() });
         assert_eq!(loaded_state, state_value);
         assert_eq!(loaded_cold, cold_value);
-    }
-
-    #[test]
-    fn decodes_v2_checkpoint_roundtrip() {
-        let checkpoint = JammedCheckpointV2::new(
-            hash(b"valid-v2"),
-            11,
-            JammedNoun::new(Bytes::from_static(b"cold")),
-            JammedNoun::new(Bytes::from_static(b"state")),
-        );
-        let encoded = checkpoint.encode().expect("encode v2 checkpoint");
-        let decoded =
-            JammedCheckpointV2::decode_from_bytes(&encoded).expect("decode v2 checkpoint");
-
-        assert_eq!(decoded, checkpoint);
-    }
-
-    #[test]
-    fn corrupt_v2_payload_length_is_reported_without_panic() {
-        let bytes = v2_checkpoint_with_absurd_payload_length();
-        let load_result =
-            std::panic::catch_unwind(|| JammedCheckpointV2::decode_from_bytes(&bytes));
-
-        assert!(
-            load_result.is_ok(),
-            "corrupt v2 payload length must be reported as a decode error, not a panic"
-        );
-        assert!(load_result.expect("checked above").is_err());
-    }
-
-    #[tokio::test]
-    async fn corrupt_checkpoint_length_does_not_panic_and_falls_back_to_previous_checkpoint() {
-        let temp = TempDir::new().expect("create temp dir");
-        let valid_state_value = 5;
-        let valid_cold_value = 9;
-        let valid_ker_hash = hash(b"valid-v1");
-        let valid_checkpoint = JammedCheckpointV1::new(
-            valid_ker_hash,
-            7,
-            legacy_pair_jam(valid_state_value, valid_cold_value),
-        );
-
-        std::fs::write(
-            temp.path().join("0.chkjam"),
-            valid_checkpoint.encode().expect("encode valid checkpoint"),
-        )
-        .expect("write valid checkpoint");
-        std::fs::write(
-            temp.path().join("1.chkjam"),
-            v1_checkpoint_with_absurd_jam_length(8),
-        )
-        .expect("write corrupt checkpoint");
-
-        let load_result = AssertUnwindSafe(
-            CheckpointBootstrapReader::<NockJammer>::new(temp.path().to_path_buf())
-                .load_latest(None),
-        )
-        .catch_unwind()
-        .await;
-
-        assert!(
-            load_result.is_ok(),
-            "corrupt checkpoint length must be reported as a load error, not a panic"
-        );
-
-        let maybe_saveable = load_result
-            .expect("checked above")
-            .expect("valid older checkpoint should be used");
-        let saveable = maybe_saveable.expect("expected fallback checkpoint");
-        assert_eq!(saveable.ker_hash, valid_ker_hash);
-        assert_eq!(saveable.event_num, 7);
-        let state_space = saveable.state.noun_space();
-        let cold_space = saveable.cold.noun_space();
-        assert_eq!(
-            atom_value(unsafe { *saveable.state.root() }, &state_space),
-            valid_state_value
-        );
-        assert_eq!(
-            atom_value(unsafe { *saveable.cold.root() }, &cold_space),
-            valid_cold_value
-        );
     }
 }
 

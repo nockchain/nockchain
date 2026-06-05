@@ -4,7 +4,7 @@ use bytes::Bytes;
 use either::Either;
 use nockvm::ext::AtomExt as CoreAtomExt;
 pub use nockvm::ext::{IndirectAtomExt, JammedNoun, NounExt};
-use nockvm::noun::{Atom, Cell, IndirectAtom, NounAllocator, NounSpace, D};
+use nockvm::noun::{Atom, Cell, IndirectAtom, NounAllocator, D};
 
 use crate::noun::slab::NounSlab;
 use crate::{Noun, Result, ToBytes, ToBytesExt};
@@ -16,6 +16,9 @@ use crate::{Noun, Result, ToBytes, ToBytesExt};
 pub trait AtomExt: CoreAtomExt {
     fn from_bytes<A: NounAllocator>(allocator: &mut A, bytes: &Bytes) -> Atom;
     fn from_value<A: NounAllocator, T: ToBytes>(allocator: &mut A, value: T) -> Result<Atom>;
+    fn eq_bytes(self, bytes: impl AsRef<[u8]>) -> bool;
+    fn to_bytes_until_nul(self) -> Result<Vec<u8>>;
+    fn into_string(self) -> Result<String>;
 }
 
 impl AtomExt for Atom {
@@ -30,13 +33,22 @@ impl AtomExt for Atom {
         Ok(<Self as CoreAtomExt>::from_bytes(allocator, data.as_ref()))
     }
 
-    // NounSpace-dependent helpers moved to NounHandle/AtomHandle.
+    /** Test for byte equality, ignoring trailing 0s in the Atom representation
+        beyond the length of the bytes compared to
+    */
+    fn eq_bytes(self, bytes: impl AsRef<[u8]>) -> bool {
+        CoreAtomExt::eq_bytes(&self, bytes)
+    }
+
+    fn to_bytes_until_nul(self) -> Result<Vec<u8>> {
+        CoreAtomExt::to_bytes_until_nul(&self).map_err(Into::into)
+    }
+
+    fn into_string(self) -> Result<String> {
+        CoreAtomExt::into_string(self).map_err(Into::into)
+    }
 }
 
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot implement `IntoNoun` safely",
-    label = "use `IntoSlab` or allocate into a caller-owned allocator"
-)]
 pub trait IntoNoun {
     fn into_noun(self) -> Noun;
 }
@@ -53,8 +65,8 @@ impl IntoNoun for u64 {
 }
 
 impl FromAtom for u64 {
-    fn from_atom(atom: Atom, space: &NounSpace) -> Self {
-        atom.in_space(space).as_u64().unwrap_or_else(|err| {
+    fn from_atom(atom: Atom) -> Self {
+        atom.as_u64().unwrap_or_else(|err| {
             panic!(
                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
                 file!(),
@@ -70,19 +82,34 @@ impl IntoNoun for Noun {
         self
     }
 }
-impl !IntoNoun for &str {}
+impl IntoNoun for &str {
+    fn into_noun(self) -> Noun {
+        let mut slab: NounSlab = NounSlab::new();
+        let bytes = self.to_bytes().unwrap_or_else(|err| {
+            panic!(
+                "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                file!(),
+                line!(),
+                option_env!("GIT_SHA")
+            )
+        });
+        let contents_atom =
+            <IndirectAtom as IndirectAtomExt>::from_bytes(&mut slab, bytes.as_slice());
+        Noun::from_atom(contents_atom)
+    }
+}
 
 pub trait AsSlabVec {
-    fn as_slab_vec(&self, space: &NounSpace) -> Vec<NounSlab>;
+    fn as_slab_vec(&self) -> Vec<NounSlab>;
 }
 
 impl AsSlabVec for Noun {
-    fn as_slab_vec(&self, space: &NounSpace) -> Vec<NounSlab> {
+    fn as_slab_vec(&self) -> Vec<NounSlab> {
         let noun_list = *self;
         let mut slab_vec = Vec::new();
-        for noun in noun_list.in_space(space).list_iter() {
+        for noun in noun_list.list_iter() {
             let mut new_slab = NounSlab::new();
-            new_slab.copy_into(noun.noun(), space);
+            new_slab.copy_into(noun);
             slab_vec.push(new_slab);
         }
         slab_vec
@@ -90,18 +117,17 @@ impl AsSlabVec for Noun {
 }
 
 impl AsSlabVec for NounSlab {
-    fn as_slab_vec(&self, _space: &NounSpace) -> Vec<NounSlab> {
+    fn as_slab_vec(&self) -> Vec<NounSlab> {
         let noun_list = unsafe { self.root() };
-        let space = self.noun_space();
-        noun_list.as_slab_vec(&space)
+        noun_list.as_slab_vec()
     }
 }
 
 pub trait FromAtom {
-    fn from_atom(atom: Atom, space: &NounSpace) -> Self;
+    fn from_atom(atom: Atom) -> Self;
 }
 impl FromAtom for Noun {
-    fn from_atom(atom: Atom, _space: &NounSpace) -> Self {
+    fn from_atom(atom: Atom) -> Self {
         atom.as_noun()
     }
 }
@@ -113,27 +139,18 @@ pub trait IntoSlab {
 impl IntoSlab for &str {
     fn into_slab(self) -> NounSlab {
         let mut slab = NounSlab::new();
-        let bytes = self.to_bytes().unwrap_or_else(|err| {
-            panic!(
-                "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )
-        });
-        let noun =
-            <IndirectAtom as IndirectAtomExt>::from_bytes(&mut slab, bytes.as_slice()).as_noun();
+        let noun = self.into_noun();
         slab.set_root(noun);
         slab
     }
 }
 
 pub trait NounAllocatorExt {
-    fn copy_into(&mut self, noun: Noun, space: &NounSpace) -> Noun;
+    fn copy_into(&mut self, noun: Noun) -> Noun;
 }
 
 impl<A: NounAllocator> NounAllocatorExt for A {
-    fn copy_into(&mut self, noun: Noun, space: &NounSpace) -> Noun {
+    fn copy_into(&mut self, noun: Noun) -> Noun {
         let mut stack = Vec::with_capacity(32);
         let mut res = D(0);
         stack.push((noun, &mut res as *mut Noun));
@@ -144,44 +161,20 @@ impl<A: NounAllocator> NounAllocatorExt for A {
                 },
                 Either::Right(a) => match a.as_either() {
                     Either::Left(i) => unsafe {
-                        let i_handle = i.as_atom().in_space(space);
-                        let word_size = i_handle.size();
+                        let word_size = i.size();
                         let ia = self.alloc_indirect(word_size);
-                        copy_nonoverlapping(i_handle.raw_pointer(), ia, word_size + 2);
+                        copy_nonoverlapping(i.to_raw_pointer(), ia, word_size + 2);
                         *dest = IndirectAtom::from_raw_pointer(ia).as_noun();
                     },
                     Either::Right(c) => unsafe {
                         let cm = self.alloc_cell();
                         *dest = Cell::from_raw_pointer(cm).as_noun();
-                        let c_handle = c.in_space(space);
-                        stack.push((c_handle.tail().noun(), &mut (*cm).tail));
-                        stack.push((c_handle.head().noun(), &mut (*cm).head));
+                        stack.push((c.tail(), &mut (*cm).tail));
+                        stack.push((c.head(), &mut (*cm).head));
                     },
                 },
             }
         }
         res
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use nockvm::noun::NounAllocator;
-
-    use super::IntoSlab;
-
-    #[test]
-    fn str_into_slab_allocates_in_destination_slab() {
-        let slab = "hello".into_slab();
-        let root = unsafe { *slab.root() };
-        let space = slab.noun_space();
-        let atom = root
-            .in_space(&space)
-            .as_atom()
-            .expect("root should be an atom");
-        let text = atom
-            .into_string()
-            .expect("root atom should decode to utf-8");
-        assert_eq!(text, "hello");
     }
 }

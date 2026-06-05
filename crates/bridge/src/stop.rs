@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use nockvm::noun::NounAllocator;
 use tokio::sync::watch;
 
 use crate::bridge_status::BridgeStatus;
@@ -180,12 +179,9 @@ pub fn create_stop_driver(
                 };
 
                 let root = unsafe { effect.root() };
-                let bridge_effect = {
-                    let space = effect.noun_space();
-                    match BridgeEffect::from_noun(root, &space) {
-                        Ok(effect) => effect,
-                        Err(_) => continue,
-                    }
+                let bridge_effect = match BridgeEffect::from_noun(root) {
+                    Ok(effect) => effect,
+                    Err(_) => continue,
                 };
 
                 let BridgeEffectVariant::Stop(data) = bridge_effect.variant else {

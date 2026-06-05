@@ -64,20 +64,16 @@ where
 pub fn new_handle_mut_felt<'a, T: NounAllocator>(alloc: &mut T) -> (IndirectAtom, &'a mut Felt) {
     let (felt_atom, dat_ptr) = unsafe { IndirectAtom::new_raw_mut_words(alloc, 4) };
     dat_ptr[3] = 0x1;
-    let space = alloc.noun_space();
     (
         felt_atom,
-        felt_atom
-            .as_atom()
-            .as_mut_felt(&space)
-            .unwrap_or_else(|err| {
-                panic!(
-                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                    file!(),
-                    line!(),
-                    option_env!("GIT_SHA")
-                )
-            }),
+        felt_atom.as_atom().as_mut_felt().unwrap_or_else(|err| {
+            panic!(
+                "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                file!(),
+                line!(),
+                option_env!("GIT_SHA")
+            )
+        }),
     )
 }
 
@@ -111,11 +107,12 @@ pub fn finalize_mary<A: NounAllocator>(
     allocator: &mut A,
     step: usize,
     len: usize,
-    res: IndirectAtom,
+    mut res: IndirectAtom,
 ) -> Noun {
-    let space = allocator.noun_space();
-    let res_atom = unsafe { res.as_atom().in_space(&space).normalize().atom() };
-    let array = T(allocator, &[D(len as u64), res_atom.as_noun()]);
+    unsafe {
+        res.normalize();
+    }
+    let array = T(allocator, &[D(len as u64), res.as_noun()]);
 
     T(allocator, &[D(step as u64), array])
 }
@@ -123,10 +120,11 @@ pub fn finalize_mary<A: NounAllocator>(
 pub fn finalize_poly<A: NounAllocator>(
     allocator: &mut A,
     len: Option<usize>,
-    res: IndirectAtom,
+    mut res: IndirectAtom,
 ) -> Noun {
-    let space = allocator.noun_space();
-    let res_atom = unsafe { res.as_atom().in_space(&space).normalize().atom() };
+    unsafe {
+        res.normalize();
+    }
     let head = Atom::new(
         allocator,
         len.unwrap_or_else(|| {
@@ -139,6 +137,6 @@ pub fn finalize_poly<A: NounAllocator>(
         }) as u64,
     )
     .as_noun();
-    let res_cell = Cell::new(allocator, head, res_atom.as_noun());
+    let res_cell = Cell::new(allocator, head, res.as_noun());
     res_cell.as_noun()
 }

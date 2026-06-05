@@ -3,34 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 #[allow(unused)]
 use nockapp::utils::make_tas;
-use nockvm::mem::NockStack;
 use nockvm::noun::FullDebugCell;
 use noun_serde::{NounDecode, NounEncode};
-
-struct StackGuard {
-    stack: NockStack,
-}
-
-impl StackGuard {
-    fn new(words: usize) -> Self {
-        let stack = NockStack::new(words, 0);
-        Self { stack }
-    }
-}
-
-impl std::ops::Deref for StackGuard {
-    type Target = NockStack;
-
-    fn deref(&self) -> &Self::Target {
-        &self.stack
-    }
-}
-
-impl std::ops::DerefMut for StackGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.stack
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
 pub enum Key {
@@ -261,80 +235,74 @@ struct Spend {
 
 #[cfg(test)]
 mod tests {
+    use nockvm::mem::NockStack;
+
     use super::*;
 
     // Expected Atom error, shouldn't this be a cell list?
     // #[test]
     // fn test_trek_encoding() {
-    //     let mut stack = StackGuard::new(8 << 10 << 10);
+    //     let mut stack = NockStack::new(8 << 10 << 10, 0);
 
     //     let trek = Trek(vec![
     //         "path".to_string(),
     //         "to".to_string(),
     //         "key".to_string(),
     //     ]);
-    //     let encoded = trek.to_noun(&mut *stack);
+    //     let encoded = trek.to_noun(&mut stack);
     //     let decoded = Trek::from_noun(&mut stack, &encoded).unwrap();
     //     assert_eq!(trek, decoded);
     // }
 
     #[test]
     fn test_source_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let hash = Source::Hash(0x1234);
-        let encoded = hash.to_noun(&mut *stack);
-        let decoded = Source::from_noun(&encoded, &space).unwrap();
+        let encoded = hash.to_noun(&mut stack);
+        let decoded = Source::from_noun(&encoded).unwrap();
         assert_eq!(hash, decoded);
 
         let coinbase = Source::Coinbase;
-        let encoded = coinbase.to_noun(&mut *stack);
-        let decoded = Source::from_noun(&encoded, &space).unwrap();
+        let encoded = coinbase.to_noun(&mut stack);
+        let decoded = Source::from_noun(&encoded).unwrap();
         assert_eq!(coinbase, decoded);
     }
 
     #[test]
     fn test_lock_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let mut pubkeys = HashSet::new();
         pubkeys.insert(0x1234);
         pubkeys.insert(0x5678);
 
         let lock = Lock { m: 2, pubkeys };
-        let encoded = lock.to_noun(&mut *stack);
-        let decoded = Lock::from_noun(&encoded, &space).unwrap();
+        let encoded = lock.to_noun(&mut stack);
+        let decoded = Lock::from_noun(&encoded).unwrap();
         assert_eq!(lock, decoded);
     }
 
     #[test]
     fn test_timelock_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let timelock = Timelock {
             block: 0x1234,
             intent: TimelockIntent::After,
         };
-        let encoded = timelock.to_noun(&mut *stack);
-        let encoded_cell = encoded.as_cell().unwrap();
+        let encoded = timelock.to_noun(&mut stack);
         println!(
             "Encoded timelock: {:?}",
-            FullDebugCell {
-                cell: &encoded_cell,
-                space: &space
-            }
+            FullDebugCell(&encoded.as_cell().unwrap())
         );
-        let decoded = Timelock::from_noun(&encoded, &space).unwrap();
+        let decoded = Timelock::from_noun(&encoded).unwrap();
         assert_eq!(timelock, decoded);
     }
 
     #[test]
     fn test_seed_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let mut pubkeys = HashSet::new();
         pubkeys.insert(0x1234);
@@ -346,15 +314,14 @@ mod tests {
             gift: 100,
             parent_hash: 0x9abc,
         };
-        let encoded = seed.to_noun(&mut *stack);
-        let decoded = Seed::from_noun(&encoded, &space).unwrap();
+        let encoded = seed.to_noun(&mut stack);
+        let decoded = Seed::from_noun(&encoded).unwrap();
         assert_eq!(seed, decoded);
     }
 
     #[test]
     fn test_preseed_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let preseed = PreSeed {
             name: "test_seed".to_string(),
@@ -367,15 +334,14 @@ mod tests {
                 parent_hash: true,
             },
         };
-        let encoded = preseed.to_noun(&mut *stack);
-        let decoded = PreSeed::from_noun(&encoded, &space).unwrap();
+        let encoded = preseed.to_noun(&mut stack);
+        let decoded = PreSeed::from_noun(&encoded).unwrap();
         assert_eq!(preseed, decoded);
     }
 
     #[test]
     fn test_spend_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let mut signatures = HashMap::new();
         signatures.insert(0x1234, 0x5678);
@@ -398,15 +364,14 @@ mod tests {
             seeds,
             fee: 10,
         };
-        let encoded = spend.to_noun(&mut *stack);
-        let decoded = Spend::from_noun(&encoded, &space).unwrap();
+        let encoded = spend.to_noun(&mut stack);
+        let decoded = Spend::from_noun(&encoded).unwrap();
         assert_eq!(spend, decoded);
     }
 
     #[test]
     fn test_preinput_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let preinput = PreInput {
             name: "test_input".to_string(),
@@ -420,47 +385,44 @@ mod tests {
                 },
             },
         };
-        let encoded = preinput.to_noun(&mut *stack);
-        let decoded = PreInput::from_noun(&encoded, &space).unwrap();
+        let encoded = preinput.to_noun(&mut stack);
+        let decoded = PreInput::from_noun(&encoded).unwrap();
         assert_eq!(preinput, decoded);
     }
 
     #[test]
     fn test_draft_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let draft = Draft {
             name: "test_draft".to_string(),
             inputs: 0x1234,
         };
-        let encoded = draft.to_noun(&mut *stack);
-        let decoded = Draft::from_noun(&encoded, &space).unwrap();
+        let encoded = draft.to_noun(&mut stack);
+        let decoded = Draft::from_noun(&encoded).unwrap();
         assert_eq!(draft, decoded);
     }
 
     #[test]
     fn test_seed_tuple_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         // Test with Some value
         let seed_tuple = SeedTuple(42, Some("seed-phrase".to_string()));
-        let encoded = seed_tuple.to_noun(&mut *stack);
-        let decoded = SeedTuple::from_noun(&encoded, &space).unwrap();
+        let encoded = seed_tuple.to_noun(&mut stack);
+        let decoded = SeedTuple::from_noun(&encoded).unwrap();
         assert_eq!(seed_tuple, decoded);
 
         // Test with None value
         let seed_tuple = SeedTuple(42, None);
-        let encoded = seed_tuple.to_noun(&mut *stack);
-        let decoded = SeedTuple::from_noun(&encoded, &space).unwrap();
+        let encoded = seed_tuple.to_noun(&mut stack);
+        let decoded = SeedTuple::from_noun(&encoded).unwrap();
         assert_eq!(seed_tuple, decoded);
     }
 
     #[test]
     fn test_wallet_state_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         let mut hash_to_name = HashMap::new();
         hash_to_name.insert(0x1234, "note1".to_string());
@@ -531,16 +493,15 @@ mod tests {
         };
 
         println!("Encoding wallet state...");
-        let encoded = wallet_state.to_noun(&mut *stack);
+        let encoded = wallet_state.to_noun(&mut stack);
         println!("Encoded noun: {:?}", encoded);
-        let decoded = WalletState::from_noun(&encoded, &space).unwrap();
+        let decoded = WalletState::from_noun(&encoded).unwrap();
         assert_eq!(wallet_state, decoded);
     }
 
     #[test]
     fn test_draft_entity_kind_encoding() {
-        let mut stack = StackGuard::new(8 << 10 << 10);
-        let space = stack.noun_space();
+        let mut stack = NockStack::new(8 << 10 << 10, 0);
 
         // Test Draft variant
         let draft_kind = DraftEntityKind::Draft {
@@ -551,25 +512,25 @@ mod tests {
             },
         };
         println!("Encoding draft kind...");
-        let encoded = draft_kind.to_noun(&mut *stack);
+        let encoded = draft_kind.to_noun(&mut stack);
         println!("Encoded draft kind: {:?}", encoded);
         println!(
             "Encoded draft kind head: {:?}",
-            encoded.in_space(&space).as_cell().unwrap().head().noun()
+            encoded.as_cell().unwrap().head()
         );
         println!(
             "Encoded draft kind tail: {:?}",
-            encoded.in_space(&space).as_cell().unwrap().tail().noun()
+            encoded.as_cell().unwrap().tail()
         );
-        if let Ok(tail_cell) = encoded.in_space(&space).as_cell().unwrap().tail().as_cell() {
-            println!("Tail head: {:?}", tail_cell.head().noun());
-            println!("Tail tail: {:?}", tail_cell.tail().noun());
+        if let Ok(tail_cell) = encoded.as_cell().unwrap().tail().as_cell() {
+            println!("Tail head: {:?}", tail_cell.head());
+            println!("Tail tail: {:?}", tail_cell.tail());
             if let Ok(tail_tail_cell) = tail_cell.tail().as_cell() {
-                println!("Tail tail head: {:?}", tail_tail_cell.head().noun());
-                println!("Tail tail tail: {:?}", tail_tail_cell.tail().noun());
+                println!("Tail tail head: {:?}", tail_tail_cell.head());
+                println!("Tail tail tail: {:?}", tail_tail_cell.tail());
             }
         }
-        let decoded = DraftEntityKind::from_noun(&encoded, &space).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(draft_kind, decoded);
 
         // Test Input variant
@@ -582,9 +543,9 @@ mod tests {
             },
         };
         println!("Encoding input kind...");
-        let encoded = input_kind.to_noun(&mut *stack);
+        let encoded = input_kind.to_noun(&mut stack);
         println!("Encoded input kind: {:?}", encoded);
-        let decoded = DraftEntityKind::from_noun(&encoded, &space).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(input_kind, decoded);
 
         // Test Seed variant
@@ -597,9 +558,9 @@ mod tests {
             },
         };
         println!("Encoding seed kind...");
-        let encoded = seed_kind.to_noun(&mut *stack);
+        let encoded = seed_kind.to_noun(&mut stack);
         println!("Encoded seed kind: {:?}", encoded);
-        let decoded = DraftEntityKind::from_noun(&encoded, &space).unwrap();
+        let decoded = DraftEntityKind::from_noun(&encoded).unwrap();
         assert_eq!(seed_kind, decoded);
     }
 }

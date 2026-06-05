@@ -1,41 +1,21 @@
-#![allow(clippy::missing_safety_doc)]
-
 // TODO: fix stack push in PC
-use std::alloc::{alloc, dealloc, Layout};
-use std::fs::{File, OpenOptions};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
+use std::alloc::Layout;
+use std::ops::{Deref, DerefMut};
 #[cfg(not(feature = "no_check_oom"))]
 use std::panic::panic_any;
-use std::path::Path;
 use std::ptr::copy_nonoverlapping;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::vec::Vec;
-use std::{io, mem, ptr};
+use std::{mem, ptr};
 
 use either::Either::{self, Left, Right};
 use ibig::Stack;
-use memmap2::{Mmap, MmapMut, MmapOptions};
+use memmap2::MmapMut;
 use thiserror::Error;
 
-use crate::noun::{Atom, Cell, CellMemory, IndirectAtom, Noun, NounAllocator, NounSpace};
-use crate::offset::{StackOffsetWords, WordOffset};
+use crate::noun::{Atom, Cell, CellMemory, IndirectAtom, Noun, NounAllocator};
+use crate::{assert_acyclic, assert_no_forwarding_pointers, assert_no_junior_pointers};
 
 crate::gdb!();
-
-#[cfg(all(feature = "mmap", feature = "malloc"))]
-compile_error!("nockvm features \"mmap\" and \"malloc\" are mutually exclusive");
-#[cfg(not(any(feature = "mmap", feature = "malloc")))]
-compile_error!("nockvm requires either the \"mmap\" or \"malloc\" feature");
-
-pub const NOCK_STACK_1KB: usize = 1 << 7;
-pub const NOCK_STACK_SIZE_TINY: usize = (NOCK_STACK_1KB << 10 << 10) * 2; // 2GB
-pub const NOCK_STACK_SIZE_SMALL: usize = (NOCK_STACK_1KB << 10 << 10) * 4; // 4GB
-pub const NOCK_STACK_SIZE: usize = (NOCK_STACK_1KB << 10 << 10) * 8; // 8GB
-pub const NOCK_STACK_SIZE_MEDIUM: usize = (NOCK_STACK_1KB << 10 << 10) * 16; // 16GB
-pub const NOCK_STACK_SIZE_LARGE: usize = (NOCK_STACK_1KB << 10 << 10) * 32; // 32GB
-pub const NOCK_STACK_SIZE_HUGE: usize = (NOCK_STACK_1KB << 10 << 10) * 64; // 64GB
 
 /** Number of reserved slots for alloc_pointer and frame_pointer in each frame */
 pub(crate) const RESERVED: usize = 3;
@@ -52,16 +32,9 @@ pub(crate) const fn word_size_of<T>() -> usize {
 }
 
 /** Utility function to compute the raw memory usage of an [IndirectAtom] */
-fn indirect_raw_size(atom: IndirectAtom, space: &NounSpace) -> usize {
-    let atom_handle = atom.as_atom().in_space(space);
-    debug_assert!(atom_handle.size() > 0);
-    atom_handle.size() + 2
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NockStackFreeGapAdvice {
-    pub free_gap_words: usize,
-    pub advised_bytes: usize,
+fn indirect_raw_size(atom: IndirectAtom) -> usize {
+    debug_assert!(atom.size() > 0);
+    atom.size() + 2
 }
 
 #[derive(Debug, Clone)]
@@ -103,11 +76,7 @@ pub enum NewStackError {
     #[error("stack too small")]
     StackTooSmall,
     #[error("Failed to map memory for stack: {0}")]
-    MmapFailed(std::io::Error),
-    #[error("Failed to open arena file: {0}")]
-    FileOpenFailed(std::io::Error),
-    #[error("Failed to resize arena file: {0}")]
-    FileResizeFailed(std::io::Error),
+    MmapFailed(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,461 +157,80 @@ pub enum Direction {
     IncreasingDeref,
 }
 
-#[derive(Debug)]
-pub struct Arena {
-    base: *mut u8,
-    words: AtomicUsize,
-    mapped_bytes: AtomicUsize,
-    reserved_words: usize,
-    reserved_mapped_bytes: usize,
-    fd: Option<Arc<File>>,
-    mapping: MappingKind,
+pub enum AllocType {
+    Mmap,
+    Malloc,
 }
 
-#[derive(Debug)]
-enum MappingKind {
-    ReadWrite(MmapMut),
-    ReadOnly(Mmap),
-    Malloc(MallocMapping),
-    #[cfg(unix)]
-    GrowableFile(GrowableFileMapping),
+pub enum Memory {
+    Mmap(MmapMut),
+    Malloc(*mut u8, usize),
 }
 
-#[derive(Debug)]
-struct MallocMapping {
-    ptr: *mut u8,
-    layout: Layout,
-}
+impl Deref for Memory {
+    type Target = [u8];
 
-impl MallocMapping {
-    fn new(bytes: usize) -> Self {
-        let layout = Layout::from_size_align(bytes, mem::size_of::<u64>())
-            .expect("Invalid layout for stack allocation");
-        let ptr = unsafe { alloc(layout) };
-        if ptr.is_null() {
-            std::alloc::handle_alloc_error(layout);
-        }
-        Self { ptr, layout }
-    }
-}
-
-impl Drop for MallocMapping {
-    fn drop(&mut self) {
-        unsafe {
-            dealloc(self.ptr, self.layout);
+    #[inline]
+    fn deref(&self) -> &[u8] {
+        match self {
+            Memory::Mmap(mmap) => mmap.deref(),
+            Memory::Malloc(ptr, size) => unsafe { core::slice::from_raw_parts(*ptr, *size) },
         }
     }
 }
 
-#[cfg(unix)]
-#[derive(Debug)]
-struct GrowableFileMapping {
-    ptr: *mut u8,
-    len: usize,
-}
-
-#[cfg(unix)]
-impl Drop for GrowableFileMapping {
-    fn drop(&mut self) {
-        if self.len == 0 || self.ptr.is_null() {
-            return;
-        }
-        unsafe {
-            libc::munmap(self.ptr as *mut libc::c_void, self.len);
+impl DerefMut for Memory {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut [u8] {
+        match self {
+            Memory::Mmap(mmap) => mmap.deref_mut(),
+            Memory::Malloc(ptr, size) => unsafe { core::slice::from_raw_parts_mut(*ptr, *size) },
         }
     }
 }
 
-impl Arena {
-    #[allow(clippy::arc_with_non_send_sync)]
-    pub fn allocate(words: usize) -> Result<Arc<Self>, NewStackError> {
-        let bytes = words.checked_shl(3).ok_or(NewStackError::StackTooSmall)?;
-        #[cfg(feature = "mmap")]
-        {
-            let mut mapping = MmapMut::map_anon(bytes).map_err(NewStackError::MmapFailed)?;
-            let base = mapping.as_mut_ptr();
-            return Ok(Arc::new(Self {
-                base,
-                words: AtomicUsize::new(words),
-                mapped_bytes: AtomicUsize::new(bytes),
-                reserved_words: words,
-                reserved_mapped_bytes: bytes,
-                fd: None,
-                mapping: MappingKind::ReadWrite(mapping),
-            }));
-        }
-        #[cfg(feature = "malloc")]
-        {
-            let mapping = MallocMapping::new(bytes);
-            let base = mapping.ptr;
-            return Ok(Arc::new(Self {
-                base,
-                words: AtomicUsize::new(words),
-                mapped_bytes: AtomicUsize::new(bytes),
-                reserved_words: words,
-                reserved_mapped_bytes: bytes,
-                fd: None,
-                mapping: MappingKind::Malloc(mapping),
-            }));
-        }
+impl AsRef<[u8]> for Memory {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.deref()
     }
+}
 
-    pub fn allocate_file(
-        path: &Path,
-        words: usize,
-        tail_bytes: usize,
-    ) -> Result<Arc<Self>, NewStackError> {
-        let bytes = words.checked_shl(3).ok_or(NewStackError::StackTooSmall)?;
-        let file_bytes = bytes
-            .checked_add(tail_bytes)
-            .ok_or(NewStackError::StackTooSmall)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(NewStackError::FileOpenFailed)?;
-        file.set_len(file_bytes as u64)
-            .map_err(NewStackError::FileResizeFailed)?;
-        let file = Arc::new(file);
-        let mut mapping = unsafe { MmapMut::map_mut(&*file).map_err(NewStackError::MmapFailed)? };
-        let base = mapping.as_mut_ptr();
-        let mapped_bytes = mapping.len();
-        #[allow(clippy::arc_with_non_send_sync)]
-        Ok(Arc::new(Self {
-            base,
-            words: AtomicUsize::new(words),
-            mapped_bytes: AtomicUsize::new(mapped_bytes),
-            reserved_words: words,
-            reserved_mapped_bytes: mapped_bytes,
-            fd: Some(file),
-            mapping: MappingKind::ReadWrite(mapping),
-        }))
+impl AsMut<[u8]> for Memory {
+    #[inline]
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.deref_mut()
     }
+}
 
-    pub fn allocate_growable_file(
-        path: &Path,
-        capacity_words: usize,
-        reserved_words: usize,
-        tail_bytes: usize,
-    ) -> Result<Arc<Self>, NewStackError> {
-        let file_bytes = file_len_for_words(capacity_words, tail_bytes)?;
-        let reserved_file_bytes = file_len_for_words(reserved_words, tail_bytes)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(NewStackError::FileOpenFailed)?;
-        file.set_len(file_bytes as u64)
-            .map_err(NewStackError::FileResizeFailed)?;
-        Self::map_growable_file(
-            file, capacity_words, reserved_words, file_bytes, reserved_file_bytes,
-        )
-    }
-
-    pub fn open_growable_file(
-        path: &Path,
-        capacity_words: usize,
-        reserved_words: usize,
-        tail_bytes: usize,
-    ) -> Result<Arc<Self>, NewStackError> {
-        let file_bytes = file_len_for_words(capacity_words, tail_bytes)?;
-        let reserved_file_bytes = file_len_for_words(reserved_words, tail_bytes)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(NewStackError::FileOpenFailed)?;
-        Self::map_growable_file(
-            file, capacity_words, reserved_words, file_bytes, reserved_file_bytes,
-        )
-    }
-
-    #[cfg(unix)]
-    fn map_growable_file(
-        file: File,
-        capacity_words: usize,
-        reserved_words: usize,
-        file_bytes: usize,
-        reserved_file_bytes: usize,
-    ) -> Result<Arc<Self>, NewStackError> {
-        if reserved_words < capacity_words || reserved_file_bytes < file_bytes {
-            return Err(NewStackError::StackTooSmall);
-        }
-        let reserved_mapping_bytes = page_align_len(reserved_file_bytes)?;
-        let file_mapping_bytes = page_align_len(file_bytes)?;
-        let file = Arc::new(file);
-        let reservation = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                reserved_mapping_bytes,
-                libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANON,
-                -1,
-                0,
-            )
-        };
-        if reservation == libc::MAP_FAILED {
-            return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
-        }
-        let mapped = unsafe {
-            libc::mmap(
-                reservation,
-                file_mapping_bytes,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED | libc::MAP_FIXED,
-                file.as_raw_fd(),
-                0,
-            )
-        };
-        if mapped == libc::MAP_FAILED {
-            let err = io::Error::last_os_error();
-            unsafe {
-                libc::munmap(reservation, reserved_mapping_bytes);
+impl Memory {
+    /// Layout and MmapMut::map_anon take their sizes/lengths in bytes but we speak in terms
+    /// of machine words which are u64 for our purposes so we're 8x'ing them with a cutesy shift.
+    pub(crate) fn allocate(alloc_type: AllocType, size: usize) -> Result<Self, NewStackError> {
+        let memory = match alloc_type {
+            AllocType::Mmap => {
+                let mmap_mut = MmapMut::map_anon(size << 3)?;
+                Self::Mmap(mmap_mut)
             }
-            return Err(NewStackError::MmapFailed(err));
-        }
-        debug_assert_eq!(mapped, reservation);
-        let base = reservation as *mut u8;
-        #[allow(clippy::arc_with_non_send_sync)]
-        Ok(Arc::new(Self {
-            base,
-            words: AtomicUsize::new(capacity_words),
-            mapped_bytes: AtomicUsize::new(file_bytes),
-            reserved_words,
-            reserved_mapped_bytes: reserved_file_bytes,
-            fd: Some(file),
-            mapping: MappingKind::GrowableFile(GrowableFileMapping {
-                ptr: base,
-                len: reserved_mapping_bytes,
-            }),
-        }))
-    }
-
-    #[cfg(not(unix))]
-    fn map_growable_file(
-        _file: File,
-        _capacity_words: usize,
-        _reserved_words: usize,
-        _file_bytes: usize,
-        _reserved_file_bytes: usize,
-    ) -> Result<Arc<Self>, NewStackError> {
-        Err(NewStackError::MmapFailed(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "growable PMA file mappings require Unix mmap",
-        )))
-    }
-
-    pub fn open_file(path: &Path, words: usize) -> Result<Arc<Self>, NewStackError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(NewStackError::FileOpenFailed)?;
-        let file = Arc::new(file);
-        let mut mapping = unsafe { MmapMut::map_mut(&*file).map_err(NewStackError::MmapFailed)? };
-        let base = mapping.as_mut_ptr();
-        let mapped_bytes = mapping.len();
-        #[allow(clippy::arc_with_non_send_sync)]
-        Ok(Arc::new(Self {
-            base,
-            words: AtomicUsize::new(words),
-            mapped_bytes: AtomicUsize::new(mapped_bytes),
-            reserved_words: words,
-            reserved_mapped_bytes: mapped_bytes,
-            fd: Some(file),
-            mapping: MappingKind::ReadWrite(mapping),
-        }))
-    }
-
-    #[inline]
-    pub fn words(&self) -> usize {
-        self.words.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub fn reserved_words(&self) -> usize {
-        self.reserved_words
-    }
-
-    #[inline]
-    pub fn len_bytes(&self) -> usize {
-        self.words()
-            .checked_mul(8)
-            .expect("arena length in bytes exceeds usize")
-    }
-
-    #[inline]
-    pub fn mapped_len_bytes(&self) -> usize {
-        self.mapped_bytes.load(Ordering::Acquire)
-    }
-
-    #[inline]
-    pub fn reserved_len_bytes(&self) -> usize {
-        self.reserved_mapped_bytes
-    }
-
-    #[inline]
-    pub fn base_ptr(&self) -> *mut u8 {
-        self.base
-    }
-
-    #[inline]
-    pub fn ptr_from_offset<O: WordOffset>(&self, offset_words: O) -> *mut u8 {
-        let offset_bytes = offset_words
-            .checked_bytes_usize()
-            .expect("offset in words exceeds usize byte capacity");
-        unsafe { self.base.add(offset_bytes) }
-    }
-
-    #[inline]
-    pub fn offset_from_ptr<O: WordOffset>(&self, ptr: *const u8) -> O {
-        let base = self.base as usize;
-        let ptr_usize = ptr as usize;
-        debug_assert!(
-            ptr_usize >= base,
-            "pointer {ptr:p} is below arena base {:p}",
-            self.base
-        );
-        let offset_bytes = ptr_usize
-            .checked_sub(base)
-            .expect("pointer is below arena base");
-        debug_assert!(
-            offset_bytes.is_multiple_of(8),
-            "unaligned pointer passed to offset_from_ptr: {ptr:p}"
-        );
-        let offset_words = u64::try_from(offset_bytes >> 3)
-            .expect("offset in words exceeds u64 addressable range");
-        O::from_words(offset_words)
-    }
-
-    pub fn map_copy_read_only(&self) -> io::Result<Mmap> {
-        let Some(fd) = &self.fd else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "arena has no file backing",
-            ));
-        };
-        unsafe {
-            MmapOptions::new()
-                .len(self.mapped_len_bytes())
-                .map_copy_read_only(&**fd)
-        }
-    }
-
-    pub fn clone_read_only(&self) -> io::Result<Arc<Arena>> {
-        let Some(fd) = &self.fd else {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "arena has no file backing",
-            ));
-        };
-        let mapping = unsafe {
-            MmapOptions::new()
-                .len(self.mapped_len_bytes())
-                .map_copy_read_only(&**fd)?
-        };
-        let base = mapping.as_ptr() as *mut u8;
-        let words = self.words();
-        let mapped_bytes = self.mapped_len_bytes();
-        #[allow(clippy::arc_with_non_send_sync)]
-        Ok(Arc::new(Self {
-            base,
-            words: AtomicUsize::new(words),
-            mapped_bytes: AtomicUsize::new(mapped_bytes),
-            reserved_words: words,
-            reserved_mapped_bytes: mapped_bytes,
-            fd: Some(Arc::clone(fd)),
-            mapping: MappingKind::ReadOnly(mapping),
-        }))
-    }
-
-    pub fn grow_file_capacity(
-        &self,
-        new_words: usize,
-        tail_bytes: usize,
-    ) -> Result<(), NewStackError> {
-        if new_words > self.reserved_words {
-            return Err(NewStackError::StackTooSmall);
-        }
-        let old_words = self.words();
-        if new_words <= old_words {
-            return Ok(());
-        }
-        let file_bytes = file_len_for_words(new_words, tail_bytes)?;
-        if file_bytes > self.reserved_mapped_bytes {
-            return Err(NewStackError::StackTooSmall);
-        }
-        let Some(fd) = &self.fd else {
-            return Err(NewStackError::FileOpenFailed(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "arena has no file backing",
-            )));
-        };
-        fd.set_len(file_bytes as u64)
-            .map_err(NewStackError::FileResizeFailed)?;
-        #[cfg(unix)]
-        if let MappingKind::GrowableFile(_) = &self.mapping {
-            let old_file_bytes = self.mapped_len_bytes();
-            let old_mapping_bytes = page_align_len(old_file_bytes)?;
-            let new_mapping_bytes = page_align_len(file_bytes)?;
-            if new_mapping_bytes > old_mapping_bytes {
-                let map_len = new_mapping_bytes
-                    .checked_sub(old_mapping_bytes)
-                    .ok_or(NewStackError::StackTooSmall)?;
-                let map_addr = unsafe { self.base.add(old_mapping_bytes) };
-                let map_offset = i64::try_from(old_mapping_bytes)
-                    .map_err(|_| NewStackError::StackTooSmall)?
-                    as libc::off_t;
-                let mapped = unsafe {
-                    libc::mmap(
-                        map_addr as *mut libc::c_void,
-                        map_len,
-                        libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_SHARED | libc::MAP_FIXED,
-                        fd.as_raw_fd(),
-                        map_offset,
-                    )
-                };
-                if mapped == libc::MAP_FAILED {
-                    return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
+            AllocType::Malloc => {
+                // Align is in terms of bytes so I'm aligning it to 64-bits / 8 bytes, word size.
+                let layout = Layout::from_size_align(size << 3, std::mem::size_of::<u64>())
+                    .expect("Invalid layout");
+                let alloc = unsafe { std::alloc::alloc(layout) };
+                if alloc.is_null() {
+                    // std promises that std::alloc::handle_alloc_error will diverge
+                    std::alloc::handle_alloc_error(layout);
                 }
-                debug_assert_eq!(mapped, map_addr as *mut libc::c_void);
+                Self::Malloc(alloc, size)
             }
-        }
-        self.words.store(new_words, Ordering::Release);
-        self.mapped_bytes.store(file_bytes, Ordering::Release);
-        Ok(())
+        };
+        Ok(memory)
     }
-}
-
-fn file_len_for_words(words: usize, tail_bytes: usize) -> Result<usize, NewStackError> {
-    let bytes = words.checked_shl(3).ok_or(NewStackError::StackTooSmall)?;
-    bytes
-        .checked_add(tail_bytes)
-        .ok_or(NewStackError::StackTooSmall)
-}
-
-#[cfg(unix)]
-fn page_align_len(len: usize) -> Result<usize, NewStackError> {
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if page_size <= 0 {
-        return Err(NewStackError::MmapFailed(io::Error::last_os_error()));
-    }
-    let page_size = usize::try_from(page_size).map_err(|_| NewStackError::StackTooSmall)?;
-    let mask = page_size
-        .checked_sub(1)
-        .ok_or(NewStackError::StackTooSmall)?;
-    len.checked_add(mask)
-        .map(|value| value & !mask)
-        .ok_or(NewStackError::StackTooSmall)
 }
 
 /// A stack for Nock computation, which supports stack allocation and delimited copying collection
 /// for returned nouns
+#[allow(dead_code)] // We need the memory field to keep our memory from being unmapped
 pub struct NockStack {
     /// The base pointer from the original allocation
     start: *const u64,
@@ -656,12 +244,8 @@ pub struct NockStack {
     alloc_offset: usize,
     /// The least amount of space between the stack and alloc pointers since last reset
     least_space: usize,
-    /// Shared arena metadata / backing allocation
-    arena: Arc<Arena>,
-    /// Optional PMA arena for offset noun resolution
-    pma: Option<Arc<Arena>>,
-    /// Epoch that increments on reset/flip to invalidate stack-pointer nouns.
-    stack_epoch: Arc<AtomicU64>,
+    /// The underlying memory allocation which must be kept alive
+    memory: Memory,
     /// Whether or not [`Self::pre_copy()`] has been called on the current stack frame.
     pc: bool,
 }
@@ -709,66 +293,6 @@ impl NockStack {
         self.derive_ptr(self.alloc_offset)
     }
 
-    #[inline]
-    pub fn arena(&self) -> &Arc<Arena> {
-        &self.arena
-    }
-
-    #[inline]
-    pub fn arena_ref(&self) -> &Arena {
-        &self.arena
-    }
-
-    #[inline]
-    pub fn noun_space(&self) -> NounSpace {
-        NounSpace::from_stack(self, self.pma.clone())
-    }
-
-    #[inline]
-    pub(crate) fn fast_noun_space(&self) -> NounSpace {
-        NounSpace::from_stack_ephemeral(self)
-    }
-
-    #[inline]
-    pub fn stack_epoch(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.stack_epoch)
-    }
-
-    #[inline]
-    pub(crate) fn stack_epoch_ref(&self) -> &AtomicU64 {
-        self.stack_epoch.as_ref()
-    }
-
-    #[inline]
-    pub fn stack_epoch_snapshot(&self) -> u64 {
-        self.stack_epoch.load(Ordering::Relaxed)
-    }
-
-    #[inline]
-    pub(crate) fn pma_ref(&self) -> Option<&Arena> {
-        self.pma.as_deref()
-    }
-
-    #[inline]
-    pub fn install_pma_arena(&mut self, pma: Arc<Arena>) {
-        self.pma = Some(pma);
-    }
-
-    #[inline]
-    pub fn clear_pma_arena(&mut self) {
-        self.pma = None;
-    }
-
-    #[inline]
-    pub fn ptr_from_offset(&self, offset_words: StackOffsetWords) -> *mut u8 {
-        self.arena.ptr_from_offset(offset_words)
-    }
-
-    #[inline]
-    pub fn offset_from_ptr(&self, ptr: *const u8) -> StackOffsetWords {
-        self.arena.offset_from_ptr(ptr)
-    }
-
     /**  Initialization:
      * The initial frame is a west frame. When the stack is initialized, a number of slots is given.
      * We add three extra slots to store the “previous” frame, stack, and allocation pointer. For the
@@ -789,43 +313,31 @@ impl NockStack {
         if top_slots + RESERVED > size {
             return Err(NewStackError::StackTooSmall);
         }
-        let arena = Arena::allocate(size)?;
-        Self::from_arena_internal(arena, top_slots)
-    }
-
-    pub fn from_arena(
-        arena: Arc<Arena>,
-        top_slots: usize,
-    ) -> Result<(NockStack, usize), NewStackError> {
-        if top_slots + RESERVED > arena.words() {
-            return Err(NewStackError::StackTooSmall);
-        }
-        Self::from_arena_internal(arena, top_slots)
-    }
-
-    fn from_arena_internal(
-        arena: Arc<Arena>,
-        top_slots: usize,
-    ) -> Result<(NockStack, usize), NewStackError> {
-        let size = arena.words();
         let free = size - (top_slots + RESERVED);
-        let start = arena.base_ptr() as *mut u64;
+        #[cfg(feature = "mmap")]
+        let mut memory = Memory::allocate(AllocType::Mmap, size)?;
+        #[cfg(feature = "malloc")]
+        let mut memory = Memory::allocate(AllocType::Malloc, size)?;
+        let start = memory.as_mut_ptr() as *mut u64;
 
+        // Here, frame_offset < alloc_offset, so the initial frame is West
         let frame_offset = RESERVED + top_slots;
         let stack_offset = frame_offset;
+        // FIXME: This was alloc_offset = size; why?
         let alloc_offset = size;
         let least_space = alloc_offset
             .checked_sub(stack_offset)
             .expect("Stack too small to create");
 
         unsafe {
+            // Store previous frame/stack/alloc info in reserved slots
             let prev_frame_slot = frame_offset - (FRAME + 1);
             let prev_stack_slot = frame_offset - (STACK + 1);
             let prev_alloc_slot = frame_offset - (ALLOC + 1);
 
-            *(start.add(prev_frame_slot)) = ptr::null::<u64>() as u64;
-            *(start.add(prev_stack_slot)) = ptr::null::<u64>() as u64;
-            *(start.add(prev_alloc_slot)) = start as u64;
+            *(start.add(prev_frame_slot)) = ptr::null::<u64>() as u64; // "frame pointer" from "previous" frame
+            *(start.add(prev_stack_slot)) = ptr::null::<u64>() as u64; // "stack pointer" from "previous" frame
+            *(start.add(prev_alloc_slot)) = start as u64; // "alloc pointer" from "previous" frame
         };
 
         assert_eq!(alloc_offset - stack_offset, free);
@@ -837,17 +349,13 @@ impl NockStack {
                 stack_offset,
                 alloc_offset,
                 least_space,
-                arena,
-                pma: None,
-                stack_epoch: Arc::new(AtomicU64::new(0)),
+                memory,
                 pc: false,
             },
             free,
         ))
     }
 
-    #[cold]
-    #[inline(never)]
     fn memory_state(&self, words: Option<usize>) -> MemoryState {
         unsafe {
             MemoryState {
@@ -863,28 +371,12 @@ impl NockStack {
         }
     }
 
-    #[cold]
-    #[inline(never)]
     fn cannot_alloc_in_pc(&self, size: Option<usize>) -> AllocationError {
         AllocationError::CannotAllocateInPreCopy(self.memory_state(size))
     }
 
-    #[cold]
-    #[inline(never)]
     fn out_of_memory(&self, alloc: Allocation, words: Option<usize>) -> AllocationError {
         AllocationError::OutOfMemory(OutOfMemoryError(self.memory_state(words), alloc))
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn panic_cannot_alloc_in_pc(&self, words: usize) -> ! {
-        panic_any(self.cannot_alloc_in_pc(Some(words)))
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn panic_out_of_memory_for(&self, alloc_type: AllocationType, words: usize) -> ! {
-        panic_any(self.out_of_memory(self.get_alloc_config(alloc_type), Some(words)))
     }
 
     pub(crate) fn get_alloc_config(&self, alloc_type: AllocationType) -> Allocation {
@@ -896,15 +388,6 @@ impl NockStack {
             },
             alloc_type,
             pc: self.pc,
-        }
-    }
-
-    #[inline]
-    unsafe fn push_limit_offset(&self) -> usize {
-        if self.pc {
-            self.prev_alloc_offset()
-        } else {
-            self.alloc_offset
         }
     }
 
@@ -947,9 +430,13 @@ impl NockStack {
         {
             let alloc = _alloc;
             let words = _words;
+            let _memory_state = self.memory_state(Some(words));
             if self.pc && !alloc.alloc_type.allowed_when_pc() {
                 panic_any(self.cannot_alloc_in_pc(Some(words)));
             }
+
+            // Convert words to byte count (for compatibility with old code)
+            let _bytes = words * 8;
 
             // Check space availability based on offsets
             let (target_offset, limit_offset, direction) =
@@ -1196,12 +683,11 @@ impl NockStack {
 
             assert!(self.is_west());
         };
-        self.stack_epoch.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Resets the NockStack. The top frame is west as in the initial creation of the NockStack.
     // Doesn't need an OOM check, pop analogue
-    pub unsafe fn reset(&mut self, top_slots: usize) {
+    pub(crate) fn reset(&mut self, top_slots: usize) {
         // Set offsets for west frame layout
         self.frame_offset = RESERVED + top_slots;
         self.stack_offset = self.frame_offset;
@@ -1212,18 +698,19 @@ impl NockStack {
             .expect("Resetting a stack too small (should never happen)");
         self.pc = false;
 
-        // Calculate slot offsets for previous pointers
-        let prev_frame_slot = self.frame_offset - (FRAME + 1);
-        let prev_stack_slot = self.frame_offset - (STACK + 1);
-        let prev_alloc_slot = self.frame_offset - (ALLOC + 1);
+        unsafe {
+            // Calculate slot offsets for previous pointers
+            let prev_frame_slot = self.frame_offset - (FRAME + 1);
+            let prev_stack_slot = self.frame_offset - (STACK + 1);
+            let prev_alloc_slot = self.frame_offset - (ALLOC + 1);
 
-        // Store null pointers for previous frame/stack and base pointer for previous alloc
-        *(self.derive_ptr(prev_frame_slot)) = ptr::null::<u64>() as u64; // "frame pointer" from "previous" frame
-        *(self.derive_ptr(prev_stack_slot)) = ptr::null::<u64>() as u64; // "stack pointer" from "previous" frame
-        *(self.derive_ptr(prev_alloc_slot)) = self.start as u64; // "alloc pointer" from "previous" frame
+            // Store null pointers for previous frame/stack and base pointer for previous alloc
+            *(self.derive_ptr(prev_frame_slot)) = ptr::null::<u64>() as u64; // "frame pointer" from "previous" frame
+            *(self.derive_ptr(prev_stack_slot)) = ptr::null::<u64>() as u64; // "stack pointer" from "previous" frame
+            *(self.derive_ptr(prev_alloc_slot)) = self.start as u64; // "alloc pointer" from "previous" frame
 
-        assert!(self.is_west());
-        self.stack_epoch.fetch_add(1, Ordering::Relaxed);
+            assert!(self.is_west());
+        };
     }
 
     pub(crate) fn copying(&self) -> bool {
@@ -1284,53 +771,6 @@ impl NockStack {
     /** Get the low-water-mark for space in this nockstack */
     pub fn least_space(&self) -> usize {
         self.least_space
-    }
-
-    /// Advise the OS that the currently free top-frame gap does not need to remain resident.
-    ///
-    /// The advised range is page-aligned inward so live frame metadata and preserved allocations are
-    /// not included. This is intended for anonymous mmap-backed NockStacks after a top-frame flip.
-    pub fn advise_free_gap(&self, threshold_words: usize) -> io::Result<NockStackFreeGapAdvice> {
-        if self.pc {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "cannot advise NockStack free gap during pre-copy",
-            ));
-        }
-
-        let (start_words, end_words) = self.free_gap_word_range();
-        let free_gap_words = end_words.saturating_sub(start_words);
-        if free_gap_words < threshold_words || !self.arena_supports_anonymous_dontneed() {
-            return Ok(NockStackFreeGapAdvice {
-                free_gap_words,
-                advised_bytes: 0,
-            });
-        }
-
-        let start_bytes = start_words
-            .checked_mul(mem::size_of::<u64>())
-            .ok_or_else(|| io::Error::other("NockStack free-gap start offset overflow"))?;
-        let end_bytes = end_words
-            .checked_mul(mem::size_of::<u64>())
-            .ok_or_else(|| io::Error::other("NockStack free-gap end offset overflow"))?;
-        let advised_bytes =
-            madvise_dontneed_byte_range(self.start as usize, start_bytes, end_bytes)?;
-        Ok(NockStackFreeGapAdvice {
-            free_gap_words,
-            advised_bytes,
-        })
-    }
-
-    fn free_gap_word_range(&self) -> (usize, usize) {
-        if self.stack_offset <= self.alloc_offset {
-            (self.stack_offset, self.alloc_offset)
-        } else {
-            (self.alloc_offset, self.stack_offset)
-        }
-    }
-
-    fn arena_supports_anonymous_dontneed(&self) -> bool {
-        self.arena.fd.is_none() && matches!(&self.arena.mapping, MappingKind::ReadWrite(_))
     }
 
     /** Check to see if an allocation is in frame */
@@ -1512,20 +952,6 @@ impl NockStack {
         }
     }
 
-    #[inline]
-    unsafe fn reserved_slot_offset(&self, slot: usize) -> usize {
-        if self.pc {
-            self.free_slot_offset(slot)
-        } else {
-            self.slot_offset(slot)
-        }
-    }
-
-    #[inline]
-    unsafe fn reserved_slot_pointer(&self, slot: usize) -> *mut u64 {
-        self.derive_ptr(self.reserved_slot_offset(slot))
-    }
-
     /** Mutable pointer into a slot in free space east of allocation pointer */
     unsafe fn free_slot_east(&self, slot: usize) -> *mut u64 {
         self.derive_ptr(self.free_slot_east_offset(slot))
@@ -1574,19 +1000,34 @@ impl NockStack {
 
     /** Pointer to where the previous frame pointer is saved in a frame */
     unsafe fn prev_frame_pointer_pointer(&self) -> *mut *mut u64 {
-        self.reserved_slot_pointer(FRAME) as *mut *mut u64
+        let res = if !self.pc {
+            self.slot_pointer(FRAME)
+        } else {
+            self.free_slot(FRAME)
+        };
+        res as *mut *mut u64
     }
 
     /** Pointer to where the previous stack pointer is saved in a frame */
     pub(crate) unsafe fn prev_stack_pointer_pointer(&self) -> *mut *mut u64 {
-        self.reserved_slot_pointer(STACK) as *mut *mut u64
+        let res = if !self.pc {
+            self.slot_pointer(STACK)
+        } else {
+            self.free_slot(STACK)
+        };
+        res as *mut *mut u64
     }
 
     // Removed prev_alloc_offset_offset - it was using undefined functions
 
     /** Pointer to where the previous alloc pointer is saved in a frame */
     unsafe fn prev_alloc_pointer_pointer(&self) -> *mut *mut u64 {
-        self.reserved_slot_pointer(ALLOC) as *mut *mut u64
+        let res = if !self.pc {
+            self.slot_pointer(ALLOC)
+        } else {
+            self.free_slot(ALLOC)
+        };
+        res as *mut *mut u64
     }
 
     /**  Allocation
@@ -1600,45 +1041,73 @@ impl NockStack {
      * */
     // Bump the alloc pointer for a west frame to make space for an allocation
     unsafe fn raw_alloc_west(&mut self, words: usize) -> *mut u64 {
+        self.alloc_would_oom(AllocationType::Alloc, words);
         if self.pc {
-            self.panic_cannot_alloc_in_pc(words);
+            panic!("Allocation during cleanup phase is prohibited.");
         }
 
+        // Calculate new offset with safe subtraction
         let new_alloc_offset = match self.alloc_offset.checked_sub(words) {
             Some(offset) => offset,
-            None => self.panic_out_of_memory_for(AllocationType::Alloc, words),
+            None => panic!("Alloc offset underflow in West frame"),
         };
-        if new_alloc_offset < self.stack_offset {
-            self.panic_out_of_memory_for(AllocationType::Alloc, words);
-        }
 
-        let new_space = new_alloc_offset - self.stack_offset;
+        // Update the space low-water-mark
+        let new_space = match new_alloc_offset.checked_sub(self.stack_offset) {
+            Some(space) => space,
+            None => panic_any(
+                self.out_of_memory(self.get_alloc_config(AllocationType::Alloc), Some(words)),
+            ),
+        };
         self.least_space = new_space.min(self.least_space);
 
+        // Derive pointer from the new offset
         let alloc_ptr = self.derive_ptr(new_alloc_offset);
+
+        // Update the alloc offset
         self.alloc_offset = new_alloc_offset;
         debug_assert!(self.alloc_offset <= self.size, "Alloc offset out of bounds");
+
+        // Return the pointer to the allocated space
         alloc_ptr
     }
 
     /** Bump the alloc pointer for an east frame to make space for an allocation */
     unsafe fn raw_alloc_east(&mut self, words: usize) -> *mut u64 {
+        self.alloc_would_oom(AllocationType::Alloc, words);
         if self.pc {
-            self.panic_cannot_alloc_in_pc(words);
+            panic!("Allocation during cleanup phase is prohibited.");
         }
 
+        // Get the pointer for the current allocation
         let alloc_ptr = self.derive_ptr(self.alloc_offset);
+
+        // Calculate new offset with safe addition
         let new_alloc_offset = match self.alloc_offset.checked_add(words) {
             Some(offset) => offset,
-            None => self.panic_out_of_memory_for(AllocationType::Alloc, words),
+            None => panic!("Alloc offset overflow in East frame"),
         };
-        if new_alloc_offset > self.stack_offset || new_alloc_offset > self.size {
-            self.panic_out_of_memory_for(AllocationType::Alloc, words);
+
+        let new_space = match self.stack_offset.checked_sub(new_alloc_offset) {
+            Some(space) => space,
+            None => panic_any(
+                self.out_of_memory(self.get_alloc_config(AllocationType::Alloc), Some(words)),
+            ),
+        };
+        self.least_space = new_space.min(self.least_space);
+
+        // Check that the new offset is within bounds
+        if new_alloc_offset > self.size {
+            panic!(
+                "New allocation offset out of bounds: {} > {}",
+                new_alloc_offset, self.size
+            );
         }
 
-        let new_space = self.stack_offset - new_alloc_offset;
-        self.least_space = new_space.min(self.least_space);
+        // Update the alloc offset
         self.alloc_offset = new_alloc_offset;
+
+        // Return the pointer to the allocated space
         alloc_ptr
     }
 
@@ -1896,7 +1365,6 @@ impl NockStack {
     unsafe fn assert_noun_in(&self, noun: Noun) {
         let mut dbg_stack = Vec::new();
         dbg_stack.push(noun);
-        let space = self.fast_noun_space();
 
         // Get the appropriate offsets based on pre-copy status
         let alloc_offset = if self.pc {
@@ -1928,7 +1396,7 @@ impl NockStack {
             if let Some(subnoun) = dbg_stack.pop() {
                 if let Ok(a) = subnoun.as_allocated() {
                     // Get the pointer address
-                    let np = a.to_raw_pointer(&space) as usize;
+                    let np = a.to_raw_pointer() as usize;
 
                     // Check if the noun is in the free space (which would be an error)
                     if np >= low && np < hi {
@@ -1937,9 +1405,8 @@ impl NockStack {
 
                     // If it's a cell, check its head and tail too
                     if let Right(c) = a.as_either() {
-                        let c_handle = c.in_space(&space);
-                        dbg_stack.push(c_handle.tail().noun());
-                        dbg_stack.push(c_handle.head().noun());
+                        dbg_stack.push(c.tail());
+                        dbg_stack.push(c.head());
                     }
                 }
             } else {
@@ -1982,43 +1449,27 @@ impl NockStack {
     /// This computation for num_locals is done in the east/west variants, but roughly speaking it's the input n words + 3 for prev frame alloc/stack/frame pointers
     pub fn frame_push(&mut self, num_locals: usize) {
         if self.pc {
-            self.panic_cannot_alloc_in_pc(0);
+            panic!("frame_push during cleanup phase is prohibited.");
         }
-        let words = match num_locals.checked_add(RESERVED) {
-            Some(words) => words,
-            None => self.panic_out_of_memory_for(AllocationType::FramePush, num_locals),
-        };
+        let words = num_locals + RESERVED;
+        self.alloc_would_oom(AllocationType::FramePush, words);
 
         // Save current offsets
         let current_frame_offset = self.frame_offset;
         let current_stack_offset = self.stack_offset;
         let current_alloc_offset = self.alloc_offset;
-        let is_west = self.is_west();
-        let new_frame_offset = if is_west {
-            let new_frame_offset = match current_alloc_offset.checked_sub(words) {
-                Some(offset) => offset,
-                None => self.panic_out_of_memory_for(AllocationType::FramePush, words),
-            };
-            if new_frame_offset < current_stack_offset {
-                self.panic_out_of_memory_for(AllocationType::FramePush, words);
-            }
-            new_frame_offset
-        } else {
-            let new_frame_offset = match current_alloc_offset.checked_add(words) {
-                Some(offset) => offset,
-                None => self.panic_out_of_memory_for(AllocationType::FramePush, words),
-            };
-            if new_frame_offset > current_stack_offset || new_frame_offset > self.size {
-                self.panic_out_of_memory_for(AllocationType::FramePush, words);
-            }
-            new_frame_offset
-        };
 
         unsafe {
-            self.frame_offset = new_frame_offset;
+            // Calculate new offsets
+            if self.is_west() {
+                self.frame_offset = self.alloc_offset - words;
+            } else {
+                self.frame_offset = self.alloc_offset + words;
+            }
+
             // Update stack and alloc offsets
-            self.alloc_offset = current_stack_offset;
-            self.stack_offset = new_frame_offset;
+            self.alloc_offset = self.stack_offset;
+            self.stack_offset = self.frame_offset;
 
             // Store pointers to previous frame in reserved slots
             let current_frame_ptr = self.derive_ptr(current_frame_offset);
@@ -2073,7 +1524,7 @@ impl NockStack {
      * a west frame when pc == false has a west-oriented lightweight stack,
      * but when pc == true it becomes east-oriented.*/
     pub(crate) unsafe fn push<T>(&mut self) -> *mut T {
-        if self.is_west() ^ self.pc {
+        if self.is_west() && !self.pc || !self.is_west() && self.pc {
             self.push_west::<T>()
         } else {
             self.push_east::<T>()
@@ -2083,35 +1534,82 @@ impl NockStack {
     /// Push onto a west-oriented lightweight stack, moving the stack_pointer.
     unsafe fn push_west<T>(&mut self) -> *mut T {
         let words = word_size_of::<T>();
-        let limit_offset = self.push_limit_offset();
-        let new_stack_offset = match self.stack_offset.checked_add(words) {
-            Some(offset) => offset,
-            None => self.panic_out_of_memory_for(AllocationType::Push, words),
-        };
-        if new_stack_offset > limit_offset {
-            self.panic_out_of_memory_for(AllocationType::Push, words);
-        }
+        self.alloc_would_oom_(
+            Allocation {
+                orientation: ArenaOrientation::West,
+                alloc_type: AllocationType::Push,
+                pc: self.pc,
+            },
+            words,
+        );
 
+        // Get the appropriate limit offset
+        let limit_offset = if self.pc {
+            self.prev_alloc_offset()
+        } else {
+            self.alloc_offset
+        };
+
+        // Get the current pointer at stack_offset (before we move it)
         let alloc_ptr = self.derive_ptr(self.stack_offset);
-        self.stack_offset = new_stack_offset;
-        alloc_ptr as *mut T
+
+        // Calculate the new stack offset
+        let new_stack_offset = self.stack_offset + words;
+
+        // Check if we've gone past the limit
+        if new_stack_offset > limit_offset {
+            panic!(
+                "Out of memory, alloc_would_oom didn't catch it. memory_state: {:#?}",
+                self.memory_state(Some(words))
+            );
+        } else {
+            // Update stack offset and return the original pointer
+            self.stack_offset = new_stack_offset;
+            alloc_ptr as *mut T
+        }
     }
 
     /// Push onto an east-oriented ligthweight stack, moving the stack_pointer
     unsafe fn push_east<T>(&mut self) -> *mut T {
         let words = word_size_of::<T>();
-        let limit_offset = self.push_limit_offset();
-        let new_stack_offset = match self.stack_offset.checked_sub(words) {
-            Some(offset) => offset,
-            None => self.panic_out_of_memory_for(AllocationType::Push, words),
-        };
-        if new_stack_offset < limit_offset {
-            self.panic_out_of_memory_for(AllocationType::Push, words);
-        }
+        self.alloc_would_oom_(
+            Allocation {
+                orientation: ArenaOrientation::East,
+                alloc_type: AllocationType::Push,
+                pc: self.pc,
+            },
+            words,
+        );
 
-        let alloc_ptr = self.derive_ptr(new_stack_offset);
-        self.stack_offset = new_stack_offset;
-        alloc_ptr as *mut T
+        // Get the appropriate limit offset
+        let limit_offset = if self.pc {
+            self.prev_alloc_offset()
+        } else {
+            self.alloc_offset
+        };
+
+        // Calculate the new stack offset
+        if self.stack_offset < words {
+            panic!("Stack offset underflow during push_east");
+        }
+        let new_stack_offset = self.stack_offset - words;
+
+        // Check if we've gone below the limit
+        if new_stack_offset < limit_offset {
+            panic!(
+                "Out of memory, alloc_would_oom didn't catch it. memory_state: {:#?}",
+                self.memory_state(Some(words))
+            );
+        } else {
+            // Get the pointer at the new offset
+            let alloc_ptr = self.derive_ptr(new_stack_offset);
+
+            // Update stack offset
+            self.stack_offset = new_stack_offset;
+
+            // Return the pointer at the new offset
+            alloc_ptr as *mut T
+        }
     }
 
     /** Pop a west-oriented lightweight stack, moving the stack pointer. */
@@ -2139,7 +1637,7 @@ impl NockStack {
     // Re: #684: We don't need OOM checks on pop
     #[inline]
     pub(crate) unsafe fn pop<T>(&mut self) {
-        if self.is_west() ^ self.pc {
+        if self.is_west() && !self.pc || !self.is_west() && self.pc {
             self.pop_west::<T>();
         } else {
             self.pop_east::<T>();
@@ -2152,7 +1650,7 @@ impl NockStack {
      * but when pc == true it becomes east-oriented.*/
     #[inline]
     pub(crate) unsafe fn top<T>(&mut self) -> *mut T {
-        if self.is_west() ^ self.pc {
+        if self.is_west() && !self.pc || !self.is_west() && self.pc {
             self.top_west()
         } else {
             self.top_east()
@@ -2195,7 +1693,6 @@ impl NockStack {
     pub(crate) fn no_junior_pointers(&self, noun: Noun) -> bool {
         unsafe {
             if let Ok(c) = noun.as_cell() {
-                let space = self.fast_noun_space();
                 let mut dbg_stack = Vec::new();
 
                 // Start with the current frame's offsets
@@ -2221,7 +1718,7 @@ impl NockStack {
                 };
 
                 // Determine the cell pointer offset
-                let cell_ptr_offset = (c.to_raw_pointer(&space) as usize - self.start as usize) / 8;
+                let cell_ptr_offset = (c.to_raw_pointer() as usize - self.start as usize) / 8;
 
                 // Determine range for the cell's frame
                 let (range_lo_offset, range_hi_offset) = loop {
@@ -2293,12 +1790,11 @@ impl NockStack {
                 let range_hi_ptr = self.derive_ptr(range_hi_offset);
 
                 // Check all nouns in the tree
-                let c_handle = c.in_space(&space);
-                dbg_stack.push(c_handle.head().noun());
-                dbg_stack.push(c_handle.tail().noun());
+                dbg_stack.push(c.head());
+                dbg_stack.push(c.tail());
                 while let Some(n) = dbg_stack.pop() {
                     if let Ok(a) = n.as_allocated() {
-                        let ptr = a.to_raw_pointer(&space);
+                        let ptr = a.to_raw_pointer();
                         // Calculate pointer offset
                         let ptr_offset = (ptr as usize - self.start as usize) / 8;
 
@@ -2316,9 +1812,8 @@ impl NockStack {
 
                         // Continue traversing if it's a cell
                         if let Some(c) = a.cell() {
-                            let c_handle = c.in_space(&space);
-                            dbg_stack.push(c_handle.tail().noun());
-                            dbg_stack.push(c_handle.head().noun());
+                            dbg_stack.push(c.tail());
+                            dbg_stack.push(c.head());
                         }
                     }
                 }
@@ -2434,69 +1929,6 @@ impl NockStack {
     }
 }
 
-#[cfg(unix)]
-fn madvise_dontneed_byte_range(
-    base_addr: usize,
-    start_bytes: usize,
-    end_bytes: usize,
-) -> io::Result<usize> {
-    if start_bytes >= end_bytes {
-        return Ok(0);
-    }
-    let page = page_size()?;
-    let start_addr = base_addr
-        .checked_add(start_bytes)
-        .ok_or_else(|| io::Error::other("NockStack madvise start address overflow"))?;
-    let end_addr = base_addr
-        .checked_add(end_bytes)
-        .ok_or_else(|| io::Error::other("NockStack madvise end address overflow"))?;
-    let aligned_start = align_up(start_addr, page)
-        .ok_or_else(|| io::Error::other("NockStack madvise aligned start overflow"))?;
-    let aligned_end = align_down(end_addr, page);
-    if aligned_start >= aligned_end {
-        return Ok(0);
-    }
-    let len = aligned_end - aligned_start;
-    let ret =
-        unsafe { libc::madvise(aligned_start as *mut libc::c_void, len, libc::MADV_DONTNEED) };
-    if ret != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(len)
-}
-
-#[cfg(not(unix))]
-fn madvise_dontneed_byte_range(
-    _base_addr: usize,
-    _start_bytes: usize,
-    _end_bytes: usize,
-) -> io::Result<usize> {
-    Ok(0)
-}
-
-#[cfg(unix)]
-fn page_size() -> io::Result<usize> {
-    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    if page <= 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(page as usize)
-}
-
-#[cfg(unix)]
-fn align_up(value: usize, align: usize) -> Option<usize> {
-    debug_assert!(align.is_power_of_two());
-    value
-        .checked_add(align - 1)
-        .map(|value| align_down(value, align))
-}
-
-#[cfg(unix)]
-fn align_down(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
-}
-
 impl NounAllocator for NockStack {
     unsafe fn alloc_indirect(&mut self, words: usize) -> *mut u64 {
         self.indirect_alloc(words)
@@ -2512,10 +1944,6 @@ impl NounAllocator for NockStack {
 
     unsafe fn equals(&mut self, a: *mut Noun, b: *mut Noun) -> bool {
         crate::unifying_equality::unifying_equality(self, a, b)
-    }
-
-    fn noun_space(&self) -> NounSpace {
-        NockStack::noun_space(self)
     }
 }
 
@@ -2534,10 +1962,9 @@ impl Preserve for () {
 
 impl Preserve for IndirectAtom {
     unsafe fn preserve(&mut self, stack: &mut NockStack) {
-        let space = stack.fast_noun_space();
-        let size = indirect_raw_size(*self, &space);
+        let size = indirect_raw_size(*self);
         let buf = stack.struct_alloc_in_previous_frame::<u64>(size);
-        copy_nonoverlapping(self.to_raw_pointer(&space), buf, size);
+        copy_nonoverlapping(self.to_raw_pointer(), buf, size);
         *self = IndirectAtom::from_raw_pointer(buf);
     }
     unsafe fn assert_in_stack(&self, stack: &NockStack) {
@@ -2573,25 +2000,21 @@ impl Preserve for Noun {
 /// This version tries to bail earlier than the old one and we're using a Vec
 /// for the worklist.
 unsafe fn noun_preserve(stack: &mut NockStack, noun: &mut Noun) {
+    assert_acyclic!(*noun);
+    assert_no_forwarding_pointers!(*noun);
+    assert_no_junior_pointers!(stack, *noun);
+
     let root_allocated = match noun.as_either_direct_allocated() {
         Either::Left(_direct) => return,
         Either::Right(allocated) => allocated,
     };
 
-    let space = stack.fast_noun_space();
-    #[cfg(any(feature = "check_acyclic", feature = "check_forwarding"))]
-    {
-        crate::assert_acyclic!(space, *noun);
-        crate::assert_no_forwarding_pointers!(space, *noun);
-    }
-    crate::assert_no_junior_pointers!(stack, *noun);
-
-    if let Some(new_allocated) = root_allocated.forwarding_pointer(&space) {
+    if let Some(new_allocated) = root_allocated.forwarding_pointer() {
         *noun = new_allocated.as_noun();
         return;
     }
 
-    if !stack.is_in_frame(root_allocated.to_raw_pointer(&space)) {
+    if !stack.is_in_frame(root_allocated.to_raw_pointer()) {
         return;
     }
 
@@ -2605,37 +2028,35 @@ unsafe fn noun_preserve(stack: &mut NockStack, noun: &mut Noun) {
                 *dest_ptr = value;
             },
             Either::Right(allocated) => unsafe {
-                if let Some(new_allocated) = allocated.forwarding_pointer(&space) {
+                if let Some(new_allocated) = allocated.forwarding_pointer() {
                     *dest_ptr = new_allocated.as_noun();
                     continue;
                 }
 
-                if !stack.is_in_frame(allocated.to_raw_pointer(&space)) {
+                if !stack.is_in_frame(allocated.to_raw_pointer()) {
                     *dest_ptr = value;
                     continue;
                 }
 
                 match allocated.as_either() {
                     Either::Left(mut indirect) => {
-                        let indirect_handle = indirect.as_atom().in_space(&space);
-                        let alloc = stack.indirect_alloc_in_previous_frame(indirect_handle.size());
+                        let alloc = stack.indirect_alloc_in_previous_frame(indirect.size());
                         copy_nonoverlapping(
-                            indirect_handle.raw_pointer(),
+                            indirect.to_raw_pointer(),
                             alloc,
-                            indirect_raw_size(indirect, &space),
+                            indirect_raw_size(indirect),
                         );
-                        indirect.set_forwarding_pointer(alloc, &space);
+                        indirect.set_forwarding_pointer(alloc);
                         *dest_ptr = IndirectAtom::from_raw_pointer(alloc).as_noun();
                     }
                     Either::Right(mut cell) => {
                         let alloc = stack.struct_alloc_in_previous_frame::<CellMemory>(1);
-                        (*alloc).metadata = (*cell.to_raw_pointer(&space)).metadata;
+                        (*alloc).metadata = (*cell.to_raw_pointer()).metadata;
 
-                        let cell_handle = cell.in_space(&space);
-                        let tail = cell_handle.tail().noun();
-                        let head = cell_handle.head().noun();
+                        let tail = cell.tail();
+                        let head = cell.head();
 
-                        cell.set_forwarding_pointer(alloc, &space);
+                        cell.set_forwarding_pointer(alloc);
 
                         work.push((tail, &mut (*alloc).tail));
                         work.push((head, &mut (*alloc).head));
@@ -2647,12 +2068,9 @@ unsafe fn noun_preserve(stack: &mut NockStack, noun: &mut Noun) {
         }
     }
 
-    #[cfg(any(feature = "check_acyclic", feature = "check_forwarding"))]
-    {
-        crate::assert_acyclic!(space, *noun);
-        crate::assert_no_forwarding_pointers!(space, *noun);
-    }
-    crate::assert_no_junior_pointers!(stack, *noun);
+    assert_acyclic!(*noun);
+    assert_no_forwarding_pointers!(*noun);
+    assert_no_junior_pointers!(stack, *noun);
 }
 
 impl Stack for NockStack {
@@ -2704,16 +2122,13 @@ impl Preserve for AllocationError {
 #[cfg(test)]
 mod test {
     use std::iter::FromIterator;
-    #[cfg(debug_assertions)]
     use std::panic::{catch_unwind, AssertUnwindSafe};
-
-    use proptest::prelude::*;
 
     use super::*;
     use crate::jets::cold::test::{make_noun_list, make_test_stack};
     use crate::jets::cold::{NounList, Nounable};
     use crate::mem::NockStack;
-    use crate::noun::{Noun, D};
+    use crate::noun::D;
 
     fn test_noun_list_alloc_fn(
         stack_size: usize,
@@ -2723,7 +2138,6 @@ mod test {
         // const STACK_SIZE: usize = 1;
         // println!("TEST_SIZE: {}", STACK_SIZE);
         let mut stack = make_test_stack(stack_size);
-        let space = stack.fast_noun_space();
         // Stack size 1 works until 15 elements, 14 passes, 15 fails.
         // const ITEM_COUNT: u64 = 15;
         let vec = Vec::from_iter(0..item_count);
@@ -2733,7 +2147,7 @@ mod test {
         assert!(!noun_list.0.is_null());
         let noun = noun_list.into_noun(&mut stack);
         let new_noun_list: NounList =
-            <NounList as Nounable>::from_noun::<NockStack>(&mut stack, &noun, &space)?;
+            <NounList as Nounable>::from_noun::<NockStack>(&mut stack, &noun)?;
         let mut tracking_item_count = 0;
         println!("items: {:?}", items);
         for (a, b) in new_noun_list.zip(items.iter()) {
@@ -2753,7 +2167,6 @@ mod test {
     }
 
     // cargo test -p nockvm test_noun_list_alloc -- --nocapture
-    #[cfg(debug_assertions)]
     #[test]
     #[cfg_attr(miri, ignore)]
     fn test_noun_list_alloc() {
@@ -2770,9 +2183,7 @@ mod test {
     }
 
     // cargo test -p nockvm test_frame_push -- --nocapture
-    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_frame_push() {
         // fails at 100, passes at 99, top_slots default to 100?
         const PASSES: usize = 503;
@@ -2789,9 +2200,7 @@ mod test {
     }
 
     // cargo test -p nockvm test_stack_push -- --nocapture
-    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_stack_push() {
         const PASSES: usize = 506;
         const STACK_SIZE: usize = 512;
@@ -2810,9 +2219,7 @@ mod test {
     }
 
     // cargo test -p nockvm test_frame_and_stack_push -- --nocapture
-    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_frame_and_stack_push() {
         const STACK_SIZE: usize = 514; // to make sure of an odd space for the stack push
         const SUCCESS_PUSHES: usize = 101;
@@ -2848,9 +2255,7 @@ mod test {
 
     // cargo test -p nockvm test_slot_pointer -- --nocapture
     // Test the slot_pointer checking by pushing frames and slots until we run out of space
-    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_slot_pointer() {
         const STACK_SIZE: usize = 512;
         const SLOT_POINTERS: usize = 32;
@@ -2880,9 +2285,7 @@ mod test {
 
     // cargo test -p nockvm test_prev_alloc -- --nocapture
     // Test the alloc in previous frame checking by pushing a frame and then allocating in the previous frame until we run out of space
-    #[cfg(debug_assertions)]
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_prev_alloc() {
         const STACK_SIZE: usize = 512;
         const SUCCESS_ALLOCS: usize = 503;
@@ -2916,60 +2319,5 @@ mod test {
                 .expect_err("Expected alloc error"),
             "Didn't get expected alloc error",
         );
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "madvise unsupported in Miri")]
-    fn advise_free_gap_respects_threshold() {
-        let stack = NockStack::new(NOCK_STACK_1KB * 64, 0);
-        let advice = stack
-            .advise_free_gap(usize::MAX)
-            .expect("advise below threshold");
-        assert!(advice.free_gap_words > 0);
-        assert_eq!(advice.advised_bytes, 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    #[cfg_attr(miri, ignore = "madvise unsupported in Miri")]
-    fn advise_free_gap_page_aligns_and_advises_anonymous_mmap() {
-        let stack = NockStack::new(NOCK_STACK_1KB * 1024, 0);
-        let advice = stack.advise_free_gap(0).expect("advise free gap");
-        assert!(advice.free_gap_words > 0);
-        assert!(advice.advised_bytes > 0);
-        assert_eq!(advice.advised_bytes % page_size().expect("page size"), 0);
-    }
-
-    proptest! {
-        #[test]
-        #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
-        fn arena_offset_round_trip(words in 1usize..256, offset in 0usize..2048) {
-            let arena = Arena::allocate(words).expect("arena allocation failed");
-            let off = offset % words;
-            let ptr = unsafe { arena.base_ptr().add(off << 3) };
-            let round: StackOffsetWords = arena.offset_from_ptr(ptr);
-            prop_assert_eq!(round.words() as usize, off);
-            let resolved = arena.ptr_from_offset(round);
-            prop_assert_eq!(resolved, ptr);
-        }
-
-        #[test]
-        #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
-        fn stack_offset_round_trip_across_orientations(words in (RESERVED + 8)..512usize, offset in 0usize..4096) {
-            let mut stack = NockStack::new(words, 0);
-            let total_words = stack.arena().words();
-            let off = offset % total_words;
-            let ptr = unsafe { stack.arena().base_ptr().add(off << 3) };
-            let round = stack.offset_from_ptr(ptr);
-            prop_assert_eq!(round.words() as usize, off);
-            prop_assert_eq!(stack.ptr_from_offset(round), ptr);
-
-            unsafe { stack.flip_top_frame(0); }
-            let off2 = (offset + 1) % total_words;
-            let ptr2 = unsafe { stack.arena().base_ptr().add(off2 << 3) };
-            let round2 = stack.offset_from_ptr(ptr2);
-            prop_assert_eq!(round2.words() as usize, off2);
-            prop_assert_eq!(stack.ptr_from_offset(round2), ptr2);
-        }
     }
 }

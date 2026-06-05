@@ -1,5 +1,3 @@
-use nockvm::noun::NounSpace;
-
 use crate::form::belt::*;
 use crate::form::bpoly::{bp_fft, bpoly_zero_extend};
 use crate::form::felt::{fpow, Felt};
@@ -36,12 +34,11 @@ pub fn compute_deep(
     omicrons: &[Felt],
     deep_challenge: &Felt,
     comp_eval_point: &Felt,
-    space: &NounSpace,
 ) -> Vec<Felt> {
     let composition_pieces = composition_pieces
         .into_iter()
         .map(|x| {
-            FPolySlice::try_from(x, space)
+            FPolySlice::try_from(x)
                 .unwrap_or_else(|err| {
                     panic!(
                         "Panicked with {err:?} at {}:{} (git sha: {:?})",
@@ -59,7 +56,7 @@ pub fn compute_deep(
 
     let mut fps: Vec<(Vec<Vec<Felt>>, &Felt)> = vec![];
     for (trace_poly, omicron) in trace_polys.into_iter().zip(omicrons.iter()) {
-        let Ok(trace_poly) = MarySlice::try_from(trace_poly, space) else {
+        let Ok(trace_poly) = MarySlice::try_from(trace_poly) else {
             panic!("trace_poly in trace_polys is not a valid FPolySlice");
         };
 

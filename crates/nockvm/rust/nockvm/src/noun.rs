@@ -1,9 +1,5 @@
-#![allow(clippy::missing_safety_doc)]
-
 use std::slice::{from_raw_parts, from_raw_parts_mut};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::{error, fmt, ptr, str};
+use std::{error, fmt, ptr};
 
 use bitvec::prelude::{BitSlice, Lsb0};
 use either::{Either, Left, Right};
@@ -12,9 +8,7 @@ use intmap::IntMap;
 use nockvm_macros::tas;
 use static_assertions::assert_cfg;
 
-use crate::mem::{word_size_of, Arena, NockStack};
-use crate::offset::{PmaOffsetWords, WordOffset};
-use crate::pma::Pma;
+use crate::mem::{word_size_of, NockStack};
 
 crate::gdb!();
 
@@ -44,905 +38,6 @@ pub(crate) const CELL_TAG: u64 = INDIRECT_MASK;
 /** Tag mask for a cell. */
 pub(crate) const CELL_MASK: u64 = !(u64::MAX >> 3);
 
-pub(crate) const LOCATION_BIT: u64 = 1 << 60;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PtrLocation {
-    Stack,
-    Offset,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AllocLocation {
-    Stack,
-    PmaPtr,
-    PmaOffset,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NounRepr {
-    Direct,
-    Indirect(AllocLocation),
-    Cell(AllocLocation),
-    Forwarding(AllocLocation),
-}
-
-impl AllocLocation {
-    pub fn is_stack(self) -> bool {
-        matches!(self, AllocLocation::Stack)
-    }
-
-    pub fn is_pma(self) -> bool {
-        matches!(self, AllocLocation::PmaPtr | AllocLocation::PmaOffset)
-    }
-
-    pub fn is_offset(self) -> bool {
-        matches!(self, AllocLocation::PmaOffset)
-    }
-}
-
-impl NounRepr {
-    pub fn is_allocated(self) -> bool {
-        !matches!(self, NounRepr::Direct)
-    }
-
-    pub fn location(self) -> Option<AllocLocation> {
-        match self {
-            NounRepr::Direct => None,
-            NounRepr::Indirect(loc) => Some(loc),
-            NounRepr::Cell(loc) => Some(loc),
-            NounRepr::Forwarding(loc) => Some(loc),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TaggedPtr(u64);
-
-impl TaggedPtr {
-    #[inline(always)]
-    fn from_raw(raw: u64) -> Self {
-        Self(raw)
-    }
-
-    #[inline(always)]
-    unsafe fn from_stack_ptr(ptr: *const u8, tag: u64) -> Self {
-        debug_assert!(
-            (ptr as usize) & 0x7 == 0,
-            "Stack pointer {:p} not 8-byte aligned",
-            ptr
-        );
-        Self(((ptr as u64) >> 3) | tag)
-    }
-
-    #[inline(always)]
-    fn from_offset<O: WordOffset>(words: O, tag: u64) -> Self {
-        assert!(
-            words.words() < LOCATION_BIT,
-            "offset {} exceeds payload capacity",
-            words.words()
-        );
-        Self(words.words() | LOCATION_BIT | tag)
-    }
-
-    #[inline(always)]
-    fn location(self) -> PtrLocation {
-        if self.0 & LOCATION_BIT == 0 {
-            PtrLocation::Stack
-        } else {
-            PtrLocation::Offset
-        }
-    }
-
-    #[inline(always)]
-    fn payload(self, mask: u64) -> u64 {
-        self.0 & !(mask | LOCATION_BIT)
-    }
-
-    #[inline(always)]
-    fn resolve_const_trusted(self, mask: u64, space: &NounSpace) -> *const u8 {
-        let payload = self.0 & !(mask | LOCATION_BIT);
-        if self.0 & LOCATION_BIT == 0 {
-            let payload = usize::try_from(
-                payload
-                    .checked_shl(3)
-                    .expect("stack pointer payload exceeds addressable range"),
-            )
-            .expect("stack pointer payload exceeds usize addressable range");
-            payload as *const u8
-        } else {
-            let base = unsafe { space.pma_base_unchecked() };
-            let offset = PmaOffsetWords::from_words(payload)
-                .checked_bytes_usize()
-                .expect("PMA offset exceeds addressable range");
-            base.checked_add(offset)
-                .expect("PMA offset exceeds addressable range") as *const u8
-        }
-    }
-
-    fn resolve_const(self, mask: u64, space: &NounSpace) -> *const u8 {
-        match self.location() {
-            PtrLocation::Stack => space.resolve_stack_ptr(self.payload(mask)),
-            PtrLocation::Offset => {
-                space.resolve_pma_ptr(PmaOffsetWords::from_words(self.payload(mask)))
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn resolve_mut(self, mask: u64, space: &NounSpace) -> *mut u8 {
-        self.resolve_const(mask, space) as *mut u8
-    }
-
-    #[inline(always)]
-    fn raw(self) -> u64 {
-        self.0
-    }
-}
-
-pub struct NounSpace {
-    stack: Option<Arc<Arena>>,
-    pma: Option<Arc<Arena>>,
-    stack_epoch: Option<Arc<AtomicU64>>,
-    stack_epoch_ptr: Option<*const AtomicU64>,
-    stack_epoch_snapshot: Option<u64>,
-    stack_base: Option<usize>,
-    stack_end: Option<usize>,
-    pma_base: Option<usize>,
-    pma_end: Option<usize>,
-    pma_words: Option<usize>,
-    extra_ptr_ranges: Vec<(usize, usize)>,
-}
-
-impl NounSpace {
-    #[inline]
-    fn arena_cache(arena: Option<&Arena>) -> (Option<usize>, Option<usize>, Option<usize>) {
-        if let Some(arena) = arena {
-            let base = arena.base_ptr() as usize;
-            let end = base
-                .checked_add(arena.len_bytes())
-                .expect("arena bounds exceed usize address space");
-            (Some(base), Some(end), Some(arena.words()))
-        } else {
-            (None, None, None)
-        }
-    }
-
-    #[inline]
-    fn pma_arena_cache(arena: Option<&Arena>) -> (Option<usize>, Option<usize>, Option<usize>) {
-        if let Some(arena) = arena {
-            let base = arena.base_ptr() as usize;
-            let end = base
-                .checked_add(arena.reserved_len_bytes())
-                .expect("PMA reserved bounds exceed usize address space");
-            (Some(base), Some(end), Some(arena.words()))
-        } else {
-            (None, None, None)
-        }
-    }
-
-    pub fn from_arenas(stack: Option<Arc<Arena>>, pma: Option<Arc<Arena>>) -> Self {
-        let (stack_base, stack_end, _) = Self::arena_cache(stack.as_deref());
-        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(pma.as_deref());
-        Self {
-            stack,
-            pma,
-            stack_epoch: None,
-            stack_epoch_ptr: None,
-            stack_epoch_snapshot: None,
-            stack_base,
-            stack_end,
-            pma_base,
-            pma_end,
-            pma_words,
-            extra_ptr_ranges: Vec::new(),
-        }
-    }
-
-    pub fn from_stack(stack: &NockStack, pma: Option<Arc<Arena>>) -> Self {
-        let stack_arena = Arc::clone(stack.arena());
-        let stack_epoch = stack.stack_epoch();
-        let (stack_base, stack_end, _) = Self::arena_cache(Some(stack.arena_ref()));
-        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(pma.as_deref());
-        Self {
-            stack: Some(stack_arena),
-            pma,
-            stack_epoch: Some(stack_epoch),
-            stack_epoch_ptr: Some(stack.stack_epoch_ref() as *const AtomicU64),
-            stack_epoch_snapshot: Some(stack.stack_epoch_snapshot()),
-            stack_base,
-            stack_end,
-            pma_base,
-            pma_end,
-            pma_words,
-            extra_ptr_ranges: Vec::new(),
-        }
-    }
-
-    pub(crate) fn from_stack_ephemeral(stack: &NockStack) -> Self {
-        let (stack_base, stack_end, _) = Self::arena_cache(Some(stack.arena_ref()));
-        let (pma_base, pma_end, pma_words) = Self::pma_arena_cache(stack.pma_ref());
-        Self {
-            stack: None,
-            pma: None,
-            stack_epoch: None,
-            stack_epoch_ptr: Some(stack.stack_epoch_ref() as *const AtomicU64),
-            stack_epoch_snapshot: Some(stack.stack_epoch_snapshot()),
-            stack_base,
-            stack_end,
-            pma_base,
-            pma_end,
-            pma_words,
-            extra_ptr_ranges: Vec::new(),
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn pma_base_unchecked(&self) -> usize {
-        debug_assert!(
-            self.pma_base.is_some(),
-            "PMA arena is required to resolve offset nouns"
-        );
-        self.pma_base.unwrap_unchecked()
-    }
-
-    pub fn new(stack: &NockStack, pma: &Pma) -> Self {
-        Self::from_stack(stack, Some(Arc::clone(pma.arena())))
-    }
-
-    pub fn stack_only(stack: &NockStack) -> Self {
-        Self::from_stack(stack, None)
-    }
-
-    pub fn pma_only(pma: &Pma) -> Self {
-        Self::from_arenas(None, Some(Arc::clone(pma.arena())))
-    }
-
-    pub fn empty() -> Self {
-        Self::from_arenas(None, None)
-    }
-
-    pub fn with_extra_ptr_ranges(mut self, ranges: Vec<(usize, usize)>) -> Self {
-        self.extra_ptr_ranges = ranges;
-        self
-    }
-
-    pub fn handle<'a>(&'a self, noun: Noun) -> NounHandle<'a> {
-        NounHandle::new(noun, self)
-    }
-
-    /// Introduce a fresh generative brand tied to this exact `NounSpace` for the duration of `f`.
-    ///
-    /// This is an experimental proof-of-concept layer that sits alongside the existing unbranded
-    /// `Noun`/`NounHandle` APIs. Code inside the closure can only combine branded handles that came
-    /// from the same branded `NounSpace`.
-    ///
-    /// Valid code continues to type-check within one branded scope:
-    ///
-    /// ```
-    /// use nockvm::mem::{NockStack, NOCK_STACK_SIZE_TINY};
-    /// use nockvm::noun::{Cell, D, NounSpace};
-    ///
-    /// let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
-    /// let noun = Cell::new(&mut stack, D(1), D(2)).as_noun();
-    /// let space = NounSpace::stack_only(&stack);
-    ///
-    /// space.with_brand(|space| {
-    ///     let cell = space.handle(noun).as_cell().unwrap();
-    ///     assert_eq!(cell.head().as_atom().unwrap().as_u64().unwrap(), 1);
-    ///     assert_eq!(cell.tail().as_atom().unwrap().as_u64().unwrap(), 2);
-    /// });
-    /// ```
-    ///
-    /// Handles from different branded spaces do not type-check together:
-    ///
-    /// ```compile_fail
-    /// use nockvm::mem::{NockStack, NOCK_STACK_SIZE_TINY};
-    /// use nockvm::noun::{BrandedNounHandle, BrandedNounSpace, Cell, D, NounSpace};
-    ///
-    /// fn same_space<'space, 'id>(
-    ///     _space: BrandedNounSpace<'space, 'id>,
-    ///     _noun: BrandedNounHandle<'space, 'id>,
-    /// ) {
-    /// }
-    ///
-    /// let mut stack_a = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
-    /// let mut stack_b = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
-    /// let noun_a = Cell::new(&mut stack_a, D(1), D(2)).as_noun();
-    /// let space_a = NounSpace::stack_only(&stack_a);
-    /// let space_b = NounSpace::stack_only(&stack_b);
-    ///
-    /// space_a.with_brand(|space_a| {
-    ///     space_b.with_brand(|space_b| {
-    ///         same_space(space_b, space_a.handle(noun_a));
-    ///     });
-    /// });
-    /// ```
-    ///
-    /// Branded handles also cannot escape the generative scope:
-    ///
-    /// ```compile_fail
-    /// use nockvm::mem::{NockStack, NOCK_STACK_SIZE_TINY};
-    /// use nockvm::noun::{Cell, D, NounSpace};
-    ///
-    /// let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
-    /// let noun = Cell::new(&mut stack, D(1), D(2)).as_noun();
-    /// let space = NounSpace::stack_only(&stack);
-    ///
-    /// let _escaped = space.with_brand(|space| space.handle(noun));
-    /// ```
-    pub fn with_brand<R>(&self, f: impl for<'id> FnOnce(BrandedNounSpace<'_, 'id>) -> R) -> R {
-        f(BrandedNounSpace::new(self))
-    }
-
-    fn assert_stack_epoch(&self) {
-        let Some(epoch_ptr) = self.stack_epoch_ptr else {
-            return;
-        };
-        let snapshot = self
-            .stack_epoch_snapshot
-            .expect("stack epoch snapshot missing");
-        let current = unsafe { (*epoch_ptr).load(Ordering::Relaxed) };
-        assert!(
-            current == snapshot,
-            "NounSpace used after NockStack reset/flip (current epoch {current}, snapshot {snapshot})"
-        );
-    }
-
-    fn resolve_stack_ptr(&self, payload: u64) -> *const u8 {
-        let ptr = usize::try_from(
-            payload
-                .checked_shl(3)
-                .expect("stack pointer payload exceeds addressable range"),
-        )
-        .expect("stack pointer payload exceeds usize addressable range")
-            as *const u8;
-        let addr = ptr as usize;
-        if let (Some(base), Some(end)) = (self.stack_base, self.stack_end) {
-            if addr >= base && addr < end {
-                self.assert_stack_epoch();
-                return ptr;
-            }
-        }
-        if let (Some(base), Some(end)) = (self.pma_base, self.pma_end) {
-            if addr >= base && addr < end {
-                return ptr;
-            }
-        }
-        for (base, end) in &self.extra_ptr_ranges {
-            if addr >= *base && addr < *end {
-                return ptr;
-            }
-        }
-        panic!(
-            "pointer-form noun {:p} is not within stack or PMA arenas",
-            ptr
-        );
-    }
-
-    fn classify_ptr(&self, ptr: *const u8) -> AllocLocation {
-        let addr = ptr as usize;
-        if let (Some(base), Some(end)) = (self.stack_base, self.stack_end) {
-            if addr >= base && addr < end {
-                self.assert_stack_epoch();
-                return AllocLocation::Stack;
-            }
-        }
-        if let (Some(base), Some(end)) = (self.pma_base, self.pma_end) {
-            if addr >= base && addr < end {
-                return AllocLocation::PmaPtr;
-            }
-        }
-        for (base, end) in &self.extra_ptr_ranges {
-            if addr >= *base && addr < *end {
-                return AllocLocation::Stack;
-            }
-        }
-        panic!(
-            "pointer-form noun {:p} is not within stack or PMA arenas",
-            ptr
-        );
-    }
-
-    fn resolve_pma_ptr(&self, offset: PmaOffsetWords) -> *const u8 {
-        let offset = offset
-            .try_into_usize()
-            .expect("PMA offset exceeds addressable range");
-        let arena_words = self
-            .pma
-            .as_ref()
-            .map(|arena| arena.words())
-            .or(self.pma_words)
-            .expect("PMA arena is required to resolve offset nouns");
-        assert!(
-            offset < arena_words,
-            "PMA offset {} out of bounds (size words {})",
-            offset,
-            arena_words
-        );
-        let base = self
-            .pma_base
-            .expect("PMA arena is required to resolve offset nouns");
-        let offset_bytes = offset
-            .checked_mul(8)
-            .expect("PMA offset exceeds addressable range");
-        let ptr = base
-            .checked_add(offset_bytes)
-            .expect("PMA offset exceeds addressable range") as *const u8;
-        assert!(
-            {
-                let end = self
-                    .pma_end
-                    .expect("PMA arena is required to resolve offset nouns");
-                let addr = ptr as usize;
-                addr >= base && addr < end
-            },
-            "PMA offset {} resolves outside the PMA arena",
-            offset
-        );
-        ptr
-    }
-}
-
-mod generative_brand {
-    pub enum Id {}
-}
-
-type Brand<'id> =
-    std::marker::PhantomData<fn(&'id generative_brand::Id) -> &'id generative_brand::Id>;
-
-#[doc(hidden)]
-#[derive(Copy, Clone)]
-pub struct BrandedNounSpace<'space, 'id> {
-    space: &'space NounSpace,
-    _brand: Brand<'id>,
-}
-
-impl<'space, 'id> BrandedNounSpace<'space, 'id> {
-    fn new(space: &'space NounSpace) -> Self {
-        Self {
-            space,
-            _brand: std::marker::PhantomData,
-        }
-    }
-
-    pub fn handle(self, noun: Noun) -> BrandedNounHandle<'space, 'id> {
-        BrandedNounHandle::from_unbranded(NounHandle::new(noun, self.space))
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct NounHandle<'a> {
-    noun: Noun,
-    space: &'a NounSpace,
-}
-
-impl<'a> NounHandle<'a> {
-    pub fn new(noun: Noun, space: &'a NounSpace) -> Self {
-        Self { noun, space }
-    }
-
-    pub fn noun(self) -> Noun {
-        self.noun
-    }
-
-    pub fn space(self) -> &'a NounSpace {
-        self.space
-    }
-
-    pub fn repr(self) -> NounRepr {
-        self.noun.repr(self.space)
-    }
-
-    pub fn allocated_location(self) -> Option<AllocLocation> {
-        self.noun.allocated_location(self.space)
-    }
-
-    pub fn is_direct(self) -> bool {
-        self.noun.is_direct()
-    }
-
-    pub fn is_atom(self) -> bool {
-        self.noun.is_atom()
-    }
-
-    pub fn is_cell(self) -> bool {
-        self.noun.is_cell()
-    }
-
-    pub fn is_allocated(self) -> bool {
-        self.noun.is_allocated()
-    }
-
-    pub fn as_atom(self) -> Result<AtomHandle<'a>> {
-        self.noun
-            .as_atom()
-            .map(|atom| AtomHandle::new(atom, self.space))
-    }
-
-    pub fn as_cell(self) -> Result<CellHandle<'a>> {
-        self.noun
-            .as_cell()
-            .map(|cell| CellHandle::new(cell, self.space))
-    }
-
-    pub fn atom(self) -> Option<AtomHandle<'a>> {
-        self.noun
-            .atom()
-            .map(|atom| AtomHandle::new(atom, self.space))
-    }
-
-    pub fn cell(self) -> Option<CellHandle<'a>> {
-        self.noun
-            .cell()
-            .map(|cell| CellHandle::new(cell, self.space))
-    }
-
-    pub fn as_either_atom_cell(self) -> Either<AtomHandle<'a>, CellHandle<'a>> {
-        match self.noun.as_either_atom_cell() {
-            Left(atom) => Left(AtomHandle::new(atom, self.space)),
-            Right(cell) => Right(CellHandle::new(cell, self.space)),
-        }
-    }
-
-    pub fn slot(self, axis: u64) -> Result<NounHandle<'a>> {
-        self.noun
-            .slot(axis, self.space)
-            .map(|noun| NounHandle::new(noun, self.space))
-    }
-
-    pub fn slot_atom(self, atom: Atom) -> Result<NounHandle<'a>> {
-        self.noun
-            .slot_atom(atom, self.space)
-            .map(|noun| NounHandle::new(noun, self.space))
-    }
-
-    pub fn list_iter(self) -> NounHandleListIterator<'a> {
-        NounHandleListIterator { noun: self }
-    }
-
-    pub fn eq_bytes(self, bytes: impl AsRef<[u8]>) -> bool {
-        if let Ok(atom) = self.noun.as_atom() {
-            AtomHandle::new(atom, self.space).eq_bytes(bytes)
-        } else {
-            false
-        }
-    }
-
-    pub fn mass(self) -> usize {
-        self.noun.mass(self.space)
-    }
-
-    pub fn mass_frame(self, stack: &NockStack) -> usize {
-        self.noun.mass_frame(stack, self.space)
-    }
-
-    pub unsafe fn forwarding_pointer(self) -> Option<NounHandle<'a>> {
-        let allocated = self.noun.as_allocated().ok()?;
-        allocated
-            .forwarding_pointer(self.space)
-            .map(|forwarded| NounHandle::new(forwarded.as_noun(), self.space))
-    }
-}
-
-#[doc(hidden)]
-#[derive(Copy, Clone)]
-pub struct BrandedNounHandle<'space, 'id> {
-    handle: NounHandle<'space>,
-    _brand: Brand<'id>,
-}
-
-impl<'space, 'id> BrandedNounHandle<'space, 'id> {
-    fn from_unbranded(handle: NounHandle<'space>) -> Self {
-        Self {
-            handle,
-            _brand: std::marker::PhantomData,
-        }
-    }
-
-    pub fn repr(self) -> NounRepr {
-        self.handle.repr()
-    }
-
-    pub fn as_atom(self) -> Result<BrandedAtomHandle<'space, 'id>> {
-        self.handle.as_atom().map(BrandedAtomHandle::from_unbranded)
-    }
-
-    pub fn as_cell(self) -> Result<BrandedCellHandle<'space, 'id>> {
-        self.handle.as_cell().map(BrandedCellHandle::from_unbranded)
-    }
-
-    pub fn slot(self, axis: u64) -> Result<Self> {
-        self.handle.slot(axis).map(Self::from_unbranded)
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct AtomHandle<'a> {
-    atom: Atom,
-    space: &'a NounSpace,
-}
-
-impl<'a> AtomHandle<'a> {
-    pub fn new(atom: Atom, space: &'a NounSpace) -> Self {
-        Self { atom, space }
-    }
-
-    pub fn atom(self) -> Atom {
-        self.atom
-    }
-
-    pub fn space(self) -> &'a NounSpace {
-        self.space
-    }
-
-    pub fn as_noun(self) -> NounHandle<'a> {
-        NounHandle::new(self.atom.as_noun(), self.space)
-    }
-
-    pub fn is_direct(self) -> bool {
-        self.atom.is_direct()
-    }
-
-    pub fn is_indirect(self) -> bool {
-        self.atom.is_indirect()
-    }
-
-    pub fn is_normalized(&self) -> bool {
-        self.atom.is_normalized(self.space)
-    }
-
-    pub fn as_ne_bytes(&self) -> &[u8] {
-        self.atom.as_ne_bytes(self.space)
-    }
-
-    pub fn eq_bytes<B: AsRef<[u8]>>(&self, bytes: B) -> bool {
-        let bytes_ref = bytes.as_ref();
-        let atom_bytes = self.as_ne_bytes();
-        if bytes_ref.len() > atom_bytes.len() {
-            return false;
-        }
-        if bytes_ref.len() == atom_bytes.len() {
-            return atom_bytes == bytes_ref;
-        }
-        if atom_bytes[bytes_ref.len()..].iter().any(|b| *b != 0) {
-            return false;
-        }
-        &atom_bytes[0..bytes_ref.len()] == bytes_ref
-    }
-
-    pub fn to_bytes_until_nul(&self) -> std::result::Result<Vec<u8>, str::Utf8Error> {
-        str::from_utf8(self.as_ne_bytes())
-            .map(|bytes| bytes.trim_end_matches('\0').as_bytes().to_vec())
-    }
-
-    pub fn into_string(self) -> std::result::Result<String, str::Utf8Error> {
-        str::from_utf8(self.as_ne_bytes()).map(|string| string.trim_end_matches('\0').to_string())
-    }
-
-    pub fn to_ne_bytes(self) -> Vec<u8> {
-        self.atom.to_ne_bytes(self.space)
-    }
-
-    pub fn to_be_bytes(self) -> Vec<u8> {
-        self.atom.to_be_bytes(self.space)
-    }
-
-    pub fn to_le_bytes(self) -> Vec<u8> {
-        self.atom.to_le_bytes(self.space)
-    }
-
-    pub fn as_u64(self) -> Result<u64> {
-        self.atom.as_u64(self.space)
-    }
-
-    pub fn as_u64_pair(self) -> Result<[u64; 2]> {
-        unsafe { self.atom.as_u64_pair(self.space) }
-    }
-
-    pub fn as_bitslice(&self) -> &BitSlice<u64, Lsb0> {
-        self.atom.as_bitslice(self.space)
-    }
-
-    pub fn as_bitslice_mut(&mut self) -> &mut BitSlice<u64, Lsb0> {
-        self.atom.as_bitslice_mut(self.space)
-    }
-
-    pub fn as_ubig<S: Stack>(self, stack: &mut S) -> UBig {
-        self.atom.as_ubig(stack, self.space)
-    }
-
-    pub fn size(self) -> usize {
-        self.atom.size(self.space)
-    }
-
-    pub fn bit_size(self) -> usize {
-        self.atom.bit_size(self.space)
-    }
-
-    pub fn data_pointer(&self) -> *const u64 {
-        self.atom.data_pointer(self.space)
-    }
-
-    pub fn raw_size(self) -> usize {
-        match self.atom.as_either() {
-            Left(_direct) => 1,
-            Right(indirect) => indirect.raw_size(self.space),
-        }
-    }
-
-    pub unsafe fn raw_pointer(self) -> *const u64 {
-        let indirect = self
-            .atom
-            .as_indirect()
-            .expect("expected indirect atom for raw_pointer");
-        indirect.to_raw_pointer(self.space)
-    }
-
-    pub unsafe fn raw_pointer_mut(self) -> *mut u64 {
-        let mut indirect = self
-            .atom
-            .as_indirect()
-            .expect("expected indirect atom for raw_pointer_mut");
-        indirect.to_raw_pointer_mut(self.space)
-    }
-
-    pub unsafe fn set_forwarding_pointer(self, new_me: *const u64) {
-        let mut indirect = self
-            .atom
-            .as_indirect()
-            .expect("expected indirect atom for set_forwarding_pointer");
-        indirect.set_forwarding_pointer(new_me, self.space);
-    }
-
-    pub unsafe fn normalize(self) -> AtomHandle<'a> {
-        let mut atom = self.atom;
-        let normalized = atom.normalize(self.space);
-        AtomHandle::new(normalized, self.space)
-    }
-    pub fn as_direct(&self) -> Result<DirectAtom> {
-        if self.is_direct() {
-            unsafe { Ok(self.atom.direct) }
-        } else {
-            Err(Error::NotDirectAtom)
-        }
-    }
-
-    pub fn as_indirect(&self) -> Result<IndirectAtom> {
-        if self.is_indirect() {
-            unsafe { Ok(self.atom.indirect) }
-        } else {
-            Err(Error::NotIndirectAtom)
-        }
-    }
-
-    pub fn as_either(&self) -> Either<DirectAtom, IndirectAtom> {
-        if self.is_indirect() {
-            unsafe { Right(self.atom.indirect) }
-        } else {
-            unsafe { Left(self.atom.direct) }
-        }
-    }
-}
-
-#[doc(hidden)]
-#[derive(Copy, Clone)]
-pub struct BrandedAtomHandle<'space, 'id> {
-    handle: AtomHandle<'space>,
-    _brand: Brand<'id>,
-}
-
-impl<'space, 'id> BrandedAtomHandle<'space, 'id> {
-    fn from_unbranded(handle: AtomHandle<'space>) -> Self {
-        Self {
-            handle,
-            _brand: std::marker::PhantomData,
-        }
-    }
-
-    pub fn as_noun(self) -> BrandedNounHandle<'space, 'id> {
-        BrandedNounHandle::from_unbranded(self.handle.as_noun())
-    }
-
-    pub fn as_u64(self) -> Result<u64> {
-        self.handle.as_u64()
-    }
-}
-
-#[derive(Copy, Clone)]
-pub struct CellHandle<'a> {
-    cell: Cell,
-    space: &'a NounSpace,
-}
-
-impl<'a> CellHandle<'a> {
-    pub fn new(cell: Cell, space: &'a NounSpace) -> Self {
-        Self { cell, space }
-    }
-
-    pub fn cell(self) -> Cell {
-        self.cell
-    }
-
-    pub fn space(self) -> &'a NounSpace {
-        self.space
-    }
-
-    pub fn as_noun(self) -> NounHandle<'a> {
-        NounHandle::new(self.cell.as_noun(), self.space)
-    }
-
-    pub fn head(self) -> NounHandle<'a> {
-        NounHandle::new(self.cell.head(self.space), self.space)
-    }
-
-    pub fn tail(self) -> NounHandle<'a> {
-        NounHandle::new(self.cell.tail(self.space), self.space)
-    }
-
-    pub unsafe fn raw_pointer(self) -> *const CellMemory {
-        self.cell.to_raw_pointer(self.space)
-    }
-
-    pub unsafe fn raw_pointer_mut(self) -> *mut CellMemory {
-        let mut cell = self.cell;
-        cell.to_raw_pointer_mut(self.space)
-    }
-
-    pub unsafe fn set_forwarding_pointer(self, new_me: *const CellMemory) {
-        let mut cell = self.cell;
-        cell.set_forwarding_pointer(new_me, self.space);
-    }
-}
-
-#[doc(hidden)]
-#[derive(Copy, Clone)]
-pub struct BrandedCellHandle<'space, 'id> {
-    handle: CellHandle<'space>,
-    _brand: Brand<'id>,
-}
-
-impl<'space, 'id> BrandedCellHandle<'space, 'id> {
-    fn from_unbranded(handle: CellHandle<'space>) -> Self {
-        Self {
-            handle,
-            _brand: std::marker::PhantomData,
-        }
-    }
-
-    pub fn as_noun(self) -> BrandedNounHandle<'space, 'id> {
-        BrandedNounHandle::from_unbranded(self.handle.as_noun())
-    }
-
-    pub fn head(self) -> BrandedNounHandle<'space, 'id> {
-        BrandedNounHandle::from_unbranded(self.handle.head())
-    }
-
-    pub fn tail(self) -> BrandedNounHandle<'space, 'id> {
-        BrandedNounHandle::from_unbranded(self.handle.tail())
-    }
-}
-
-pub struct NounHandleListIterator<'a> {
-    noun: NounHandle<'a>,
-}
-
-impl<'a> Iterator for NounHandleListIterator<'a> {
-    type Item = NounHandle<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Ok(cell) = self.noun.as_cell() {
-            let head = cell.head();
-            self.noun = cell.tail();
-            Some(head)
-        } else if unsafe { self.noun.noun().raw_equals(&D(0)) } {
-            None
-        } else {
-            panic!("Improper list terminator: {:?}", self.noun.noun());
-        }
-    }
-}
-
 /*  A note on forwarding pointers:
  *
  *  Forwarding pointers are only used temporarily during copies between NockStack frames and between
@@ -958,7 +53,7 @@ impl<'a> Iterator for NounHandleListIterator<'a> {
  *      1. The current frame must be immediately popped after preserving data, when
  *          copying from a junior NockStack frame to a senior NockStack frame.
  *      2. All persistent derived state (e.g. Hot state, Warm state) must be preserved
- *          and the NockStack reset after saving data to the PMA.
+ *          and the root NockStack frame flipped after saving data to the PMA.
  */
 
 /** Tag for a forwarding pointer */
@@ -978,9 +73,9 @@ pub const NONE: Noun = unsafe { DirectAtom::new_unchecked(tas!(b"MORMAGIC")).as_
 #[cfg(feature = "check_acyclic")]
 #[macro_export]
 macro_rules! assert_acyclic {
-    ( $space:expr, $x:expr ) => {
+    ( $x:expr ) => {
         assert_no_alloc::permit_alloc(|| {
-            assert!(crate::noun::acyclic_noun(($x).in_space($space)));
+            assert!(crate::noun::acyclic_noun($x));
         })
     };
 }
@@ -988,15 +83,15 @@ macro_rules! assert_acyclic {
 #[cfg(not(feature = "check_acyclic"))]
 #[macro_export]
 macro_rules! assert_acyclic {
-    ( $space:expr, $x:expr ) => {};
+    ( $x:expr ) => {};
 }
 
-pub(crate) fn acyclic_noun(noun: NounHandle) -> bool {
+pub fn acyclic_noun(noun: Noun) -> bool {
     let mut seen = IntMap::new();
-    acyclic_noun_go(noun.noun(), &mut seen, noun.space())
+    acyclic_noun_go(noun, &mut seen)
 }
 
-fn acyclic_noun_go(noun: Noun, seen: &mut IntMap<u64, ()>, space: &NounSpace) -> bool {
+fn acyclic_noun_go(noun: Noun, seen: &mut IntMap<u64, ()>) -> bool {
     match noun.as_either_atom_cell() {
         Left(_atom) => true,
         Right(cell) => {
@@ -1004,9 +99,8 @@ fn acyclic_noun_go(noun: Noun, seen: &mut IntMap<u64, ()>, space: &NounSpace) ->
                 false
             } else {
                 seen.insert(cell.0, ());
-                let cell_handle = cell.in_space(space);
-                if acyclic_noun_go(cell_handle.head().noun(), seen, space) {
-                    if acyclic_noun_go(cell_handle.tail().noun(), seen, space) {
+                if acyclic_noun_go(cell.head(), seen) {
+                    if acyclic_noun_go(cell.tail(), seen) {
                         seen.remove(cell.0);
                         true
                     } else {
@@ -1023,9 +117,9 @@ fn acyclic_noun_go(noun: Noun, seen: &mut IntMap<u64, ()>, space: &NounSpace) ->
 #[cfg(feature = "check_forwarding")]
 #[macro_export]
 macro_rules! assert_no_forwarding_pointers {
-    ( $space:expr, $x:expr ) => {
+    ( $x:expr ) => {
         assert_no_alloc::permit_alloc(|| {
-            assert!(crate::noun::no_forwarding_pointers(($x).in_space($space)));
+            assert!(crate::noun::no_forwarding_pointers($x));
         })
     };
 }
@@ -1033,21 +127,20 @@ macro_rules! assert_no_forwarding_pointers {
 #[cfg(not(feature = "check_forwarding"))]
 #[macro_export]
 macro_rules! assert_no_forwarding_pointers {
-    ( $space:expr, $x:expr ) => {};
+    ( $x:expr ) => {};
 }
 
-pub(crate) fn no_forwarding_pointers(noun: NounHandle) -> bool {
+pub fn no_forwarding_pointers(noun: Noun) -> bool {
     let mut dbg_stack = Vec::new();
-    let space = noun.space();
-    dbg_stack.push(noun.noun());
+    dbg_stack.push(noun);
 
     while !dbg_stack.is_empty() {
         if let Some(noun) = dbg_stack.pop() {
             if unsafe { noun.raw & FORWARDING_MASK == FORWARDING_TAG } {
                 return false;
-            } else if let Ok(cell) = noun.in_space(space).as_cell() {
-                dbg_stack.push(cell.tail().noun());
-                dbg_stack.push(cell.head().noun());
+            } else if let Ok(cell) = noun.as_cell() {
+                dbg_stack.push(cell.tail());
+                dbg_stack.push(cell.head());
             }
         } else {
             break;
@@ -1070,16 +163,6 @@ fn is_indirect_atom(noun: u64) -> bool {
 /** Test if a noun is a cell. */
 fn is_cell(noun: u64) -> bool {
     noun & CELL_MASK == CELL_TAG
-}
-
-#[inline(always)]
-unsafe fn noun_from_raw(raw: u64) -> Noun {
-    Noun { raw }
-}
-
-#[inline(always)]
-unsafe fn cell_ptr_from_raw_trusted(raw: u64, space: &NounSpace) -> *const CellMemory {
-    TaggedPtr::from_raw(raw).resolve_const_trusted(CELL_MASK, space) as *const CellMemory
 }
 
 /** A noun-related error. */
@@ -1274,65 +357,32 @@ pub struct IndirectAtom(u64);
 impl IndirectAtom {
     /** Tag the pointer and type it as an indirect atom. */
     pub unsafe fn from_raw_pointer(ptr: *const u64) -> Self {
-        IndirectAtom(TaggedPtr::from_stack_ptr(ptr as *const u8, INDIRECT_TAG).raw())
-    }
-
-    pub fn from_offset_words<O: WordOffset>(words: O) -> Self {
-        IndirectAtom(TaggedPtr::from_offset(words, INDIRECT_TAG).raw())
+        IndirectAtom(((ptr as u64) >> 3) | INDIRECT_TAG)
     }
 
     /** Strip the tag from an indirect atom and return it as a mutable pointer to its memory buffer. */
-    unsafe fn to_raw_pointer_mut(&mut self, space: &NounSpace) -> *mut u64 {
-        TaggedPtr::from_raw(self.0).resolve_mut(INDIRECT_MASK, space) as *mut u64
+    unsafe fn to_raw_pointer_mut(&mut self) -> *mut u64 {
+        (self.0 << 3) as *mut u64
     }
 
     /** Strip the tag from an indirect atom and return it as a pointer to its memory buffer. */
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) unsafe fn to_raw_pointer(&self, space: &NounSpace) -> *const u64 {
-        TaggedPtr::from_raw(self.0).resolve_const(INDIRECT_MASK, space) as *const u64
+    pub unsafe fn to_raw_pointer(&self) -> *const u64 {
+        (self.0 << 3) as *const u64
     }
 
-    /** Strip the tag with no location/epoch checks. Trusted local fast path only. */
-    #[inline(always)]
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) unsafe fn to_raw_pointer_trusted(&self, space: &NounSpace) -> *const u64 {
-        TaggedPtr::from_raw(self.0).resolve_const_trusted(INDIRECT_MASK, space) as *const u64
-    }
-
-    /// Get raw pointer for stack-pointer form atoms only
-    pub unsafe fn to_raw_pointer_stack(&self) -> *const u64 {
-        let tagged = TaggedPtr::from_raw(self.0);
-        if tagged.location() == PtrLocation::Stack {
-            ((tagged.payload(INDIRECT_MASK)) << 3) as *const u64
-        } else {
-            panic!("expected stack-pointer Noun, got offset instead");
-        }
-    }
-
-    /// Get mutable raw pointer for stack-pointer form atoms only
-    pub fn to_raw_pointer_mut_stack(&mut self) -> *mut u64 {
-        let tagged = TaggedPtr::from_raw(self.0);
-        if tagged.location() == PtrLocation::Stack {
-            ((tagged.payload(INDIRECT_MASK)) << 3) as *mut u64
-        } else {
-            panic!("expected stack-pointer Noun, got offset instead");
-        }
-    }
-
-    pub unsafe fn set_forwarding_pointer(&mut self, new_me: *const u64, space: &NounSpace) {
+    pub unsafe fn set_forwarding_pointer(&mut self, new_me: *const u64) {
         // This is OK because the size is stored as 64 bit words, not bytes.
         // Thus, a true size value will never be larger than U64::MAX >> 3, and so
         // any of the high bits set as an MSB
-        *self.to_raw_pointer_mut(space).add(1) =
-            TaggedPtr::from_stack_ptr(new_me as *const u8, FORWARDING_TAG).raw();
+        *self.to_raw_pointer_mut().add(1) = ((new_me as u64) >> 3) | FORWARDING_TAG;
     }
 
-    pub(crate) unsafe fn forwarding_pointer(&self, space: &NounSpace) -> Option<IndirectAtom> {
-        let size_raw = *self.to_raw_pointer(space).add(1);
+    pub unsafe fn forwarding_pointer(&self) -> Option<IndirectAtom> {
+        let size_raw = *self.to_raw_pointer().add(1);
         if size_raw & FORWARDING_MASK == FORWARDING_TAG {
-            let ptr =
-                TaggedPtr::from_raw(size_raw).resolve_const(FORWARDING_MASK, space) as *const u64;
-            Some(Self::from_raw_pointer(ptr))
+            // we can replace this by masking out the forwarding pointer and putting in the
+            // indirect tag
+            Some(Self::from_raw_pointer((size_raw << 3) as *const u64))
         } else {
             None
         }
@@ -1349,8 +399,7 @@ impl IndirectAtom {
     ) -> Self {
         let (mut indirect, buffer) = Self::new_raw_mut(allocator, size);
         ptr::copy_nonoverlapping(data, buffer, size);
-        // Use normalize_stack since new_raw_mut creates stack-pointer form atoms
-        *(indirect.normalize_stack())
+        *(indirect.normalize())
     }
 
     /** Make an indirect atom by copying from other memory.
@@ -1364,8 +413,7 @@ impl IndirectAtom {
     ) -> Self {
         let (mut indirect, buffer) = Self::new_raw_mut_bytes(allocator, size);
         ptr::copy_nonoverlapping(data, buffer.as_mut_ptr(), size);
-        // Use normalize_stack since new_raw_mut_bytes creates stack-pointer form atoms
-        *(indirect.normalize_stack())
+        *(indirect.normalize())
     }
 
     pub unsafe fn new_raw_bytes_ref<A: NounAllocator>(allocator: &mut A, data: &[u8]) -> Self {
@@ -1437,82 +485,55 @@ impl IndirectAtom {
         (noun, &mut *(ptr as *mut [u8; N]))
     }
 
-    /** Size of an indirect atom in 64-bit words */
-    pub(crate) fn size(&self, space: &NounSpace) -> usize {
-        unsafe { *(self.to_raw_pointer(space).add(1)) as usize }
+    /** Size of an indirect atom in 64-bit words (not bytes) */
+    pub fn size(&self) -> usize {
+        unsafe { *(self.to_raw_pointer().add(1)) as usize }
     }
 
     /** Memory size of an indirect atom (including size + metadata fields) in 64-bit words */
-    pub(crate) fn raw_size(&self, space: &NounSpace) -> usize {
-        self.size(space) + 2
+    pub fn raw_size(&self) -> usize {
+        self.size() + 2
     }
 
-    pub(crate) fn bit_size(&self, space: &NounSpace) -> usize {
+    pub fn bit_size(&self) -> usize {
         unsafe {
-            ((self.size(space) - 1) << 6) + 64
-                - (*(self.to_raw_pointer(space).add(2 + self.size(space) - 1))).leading_zeros()
-                    as usize
+            ((self.size() - 1) << 6) + 64
+                - (*(self.to_raw_pointer().add(2 + self.size() - 1))).leading_zeros() as usize
         }
     }
 
     /** Pointer to data for indirect atom */
-    pub(crate) fn data_pointer(&self, space: &NounSpace) -> *const u64 {
-        unsafe { self.to_raw_pointer(space).add(2) }
+    pub fn data_pointer(&self) -> *const u64 {
+        unsafe { self.to_raw_pointer().add(2) }
     }
 
-    pub(crate) fn data_pointer_mut(&mut self, space: &NounSpace) -> *mut u64 {
-        unsafe { self.to_raw_pointer_mut(space).add(2) }
+    pub fn data_pointer_mut(&mut self) -> *mut u64 {
+        unsafe { self.to_raw_pointer_mut().add(2) }
     }
 
-    pub fn data_pointer_stack(&self) -> Option<*const u64> {
-        let tagged = TaggedPtr::from_raw(self.0);
-        if tagged.location() == PtrLocation::Stack {
-            Some(((tagged.payload(INDIRECT_MASK)) << 3) as *const u64)
-        } else {
-            None
-        }
+    pub fn as_slice(&self) -> &[u64] {
+        unsafe { from_raw_parts(self.data_pointer(), self.size()) }
     }
 
-    pub(crate) fn as_slice(&self, space: &NounSpace) -> &[u64] {
-        unsafe { from_raw_parts(self.data_pointer(space), self.size(space)) }
+    pub fn as_mut_slice(&mut self) -> &mut [u64] {
+        unsafe { from_raw_parts_mut(self.data_pointer_mut(), self.size()) }
     }
 
-    #[inline(always)]
-    pub(crate) fn size_trusted(&self, space: &NounSpace) -> usize {
-        unsafe { *(self.to_raw_pointer_trusted(space).add(1)) as usize }
+    pub fn as_ne_bytes(&self) -> &[u8] {
+        unsafe { from_raw_parts(self.data_pointer() as *const u8, self.size() << 3) }
     }
 
-    #[inline(always)]
-    pub(crate) fn data_pointer_trusted(&self, space: &NounSpace) -> *const u64 {
-        unsafe { self.to_raw_pointer_trusted(space).add(2) }
-    }
-
-    #[inline(always)]
-    pub(crate) fn as_slice_trusted(&self, space: &NounSpace) -> &[u64] {
-        unsafe { from_raw_parts(self.data_pointer_trusted(space), self.size_trusted(space)) }
-    }
-
-    pub(crate) fn as_mut_slice(&mut self, space: &NounSpace) -> &mut [u64] {
-        unsafe { from_raw_parts_mut(self.data_pointer_mut(space), self.size(space)) }
-    }
-
-    pub(crate) fn as_ne_bytes(&self, space: &NounSpace) -> &[u8] {
-        unsafe { from_raw_parts(self.data_pointer(space) as *const u8, self.size(space) << 3) }
-    }
-
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_ne_bytes(&self, space: &NounSpace) -> Vec<u8> {
-        self.as_ne_bytes(space).to_vec()
+    pub fn to_ne_bytes(&self) -> Vec<u8> {
+        self.as_ne_bytes().to_vec()
     }
 
     #[allow(unused)]
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_be_bytes(&self, space: &NounSpace) -> Vec<u8> {
-        if self.size(space) == 1 {
-            let num = unsafe { *(self.data_pointer(space)) };
+    pub fn to_be_bytes(&self) -> Vec<u8> {
+        if self.size() == 1 {
+            let num = unsafe { *(self.data_pointer()) };
             num.to_be_bytes().to_vec()
         } else {
-            let mut bytes_ne = self.to_ne_bytes(space);
+            let mut bytes_ne = self.to_ne_bytes();
             #[cfg(target_endian = "little")]
             {
                 bytes_ne.reverse()
@@ -1522,13 +543,12 @@ impl IndirectAtom {
     }
 
     #[allow(unused)]
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_le_bytes(&self, space: &NounSpace) -> Vec<u8> {
-        if self.size(space) == 1 {
-            let num = unsafe { *(self.data_pointer(space)) };
+    pub fn to_le_bytes(&self) -> Vec<u8> {
+        if self.size() == 1 {
+            let num = unsafe { *(self.data_pointer()) };
             num.to_le_bytes().to_vec()
         } else {
-            let mut bytes_ne = self.to_ne_bytes(space);
+            let mut bytes_ne = self.to_ne_bytes();
             #[cfg(target_endian = "big")]
             {
                 bytes_ne.reverse()
@@ -1538,18 +558,17 @@ impl IndirectAtom {
         }
     }
 
-    #[allow(unused)]
     /** BitSlice view on an indirect atom, with lifetime tied to reference to indirect atom. */
-    pub(crate) fn as_bitslice(&self, space: &NounSpace) -> &BitSlice<u64, Lsb0> {
-        BitSlice::from_slice(self.as_slice(space))
+    pub fn as_bitslice(&self) -> &BitSlice<u64, Lsb0> {
+        BitSlice::from_slice(self.as_slice())
     }
 
-    pub(crate) fn as_bitslice_mut(&mut self, space: &NounSpace) -> &mut BitSlice<u64, Lsb0> {
-        BitSlice::from_slice_mut(self.as_mut_slice(space))
+    pub fn as_bitslice_mut(&mut self) -> &mut BitSlice<u64, Lsb0> {
+        BitSlice::from_slice_mut(self.as_mut_slice())
     }
 
-    pub(crate) fn as_ubig<S: Stack>(&self, stack: &mut S, space: &NounSpace) -> UBig {
-        let bytes_mem_repr = self.as_ne_bytes(space);
+    pub fn as_ubig<S: Stack>(&self, stack: &mut S) -> UBig {
+        let bytes_mem_repr = self.as_ne_bytes();
 
         #[cfg(target_endian = "little")]
         {
@@ -1561,19 +580,19 @@ impl IndirectAtom {
         }
     }
 
-    pub(crate) unsafe fn as_u64(self, space: &NounSpace) -> Result<u64> {
-        if self.size(space) == 1 {
-            Ok(*(self.data_pointer(space)))
+    pub unsafe fn as_u64(self) -> Result<u64> {
+        if self.size() == 1 {
+            Ok(*(self.data_pointer()))
         } else {
             Err(Error::NotRepresentable)
         }
     }
 
     /** Produce a SoftFloat-compatible ordered pair of 64-bit words */
-    pub(crate) fn as_u64_pair(self, space: &NounSpace) -> Result<[u64; 2]> {
-        if self.size(space) <= 2 {
+    pub fn as_u64_pair(self) -> Result<[u64; 2]> {
+        if self.size() <= 2 {
             let u128_array = &mut [0u64; 2];
-            u128_array.copy_from_slice(&(self.as_slice(space)[0..2]));
+            u128_array.copy_from_slice(&(self.as_slice()[0..2]));
             Ok(*u128_array)
         } else {
             Err(Error::NotRepresentable)
@@ -1581,57 +600,25 @@ impl IndirectAtom {
     }
 
     /** Ensure that the size does not contain any trailing 0 words */
-    pub(crate) unsafe fn normalize(&mut self, space: &NounSpace) -> &Self {
-        let mut index = self.size(space) - 1;
-        let data = self.data_pointer(space);
+    pub unsafe fn normalize(&mut self) -> &Self {
+        let mut index = self.size() - 1;
+        let data = self.data_pointer();
         loop {
             if index == 0 || *(data.add(index)) != 0 {
                 break;
             }
             index -= 1;
         }
-        *(self.to_raw_pointer_mut(space).add(1)) = (index + 1) as u64;
-        self
-    }
-
-    /// Normalize a stack-pointer form indirect atom (no arena needed).
-    /// Panics if the atom is in offset form.
-    pub unsafe fn normalize_stack(&mut self) -> &Self {
-        let ptr = self.to_raw_pointer_mut_stack();
-        let mut index = (*(ptr.add(1)) as usize) - 1; // size is at offset 1
-        let data = ptr.add(2); // data starts at offset 2
-        loop {
-            if index == 0 || *(data.add(index)) != 0 {
-                break;
-            }
-            index -= 1;
-        }
-        *(ptr.add(1)) = (index + 1) as u64;
+        *(self.to_raw_pointer_mut().add(1)) = (index + 1) as u64;
         self
     }
 
     /** Normalize, but convert to direct atom if it will fit */
-    pub unsafe fn normalize_as_atom(&mut self, space: &NounSpace) -> Atom {
-        self.normalize(space);
-        if self.size(space) == 1 && *(self.data_pointer(space)) <= DIRECT_MAX {
+    pub unsafe fn normalize_as_atom(&mut self) -> Atom {
+        self.normalize();
+        if self.size() == 1 && *(self.data_pointer()) <= DIRECT_MAX {
             Atom {
-                direct: DirectAtom(*(self.data_pointer(space))),
-            }
-        } else {
-            Atom { indirect: *self }
-        }
-    }
-
-    /// Normalize a stack-pointer form atom, converting to direct if it fits.
-    /// Panics if the atom is in offset form.
-    pub unsafe fn normalize_as_atom_stack(&mut self) -> Atom {
-        self.normalize_stack();
-        let ptr = self.to_raw_pointer_stack();
-        let size = *(ptr.add(1)) as usize;
-        let data = ptr.add(2);
-        if size == 1 && *data <= DIRECT_MAX {
-            Atom {
-                direct: DirectAtom(*data),
+                direct: DirectAtom(*(self.data_pointer())),
             }
         } else {
             Atom { indirect: *self }
@@ -1656,17 +643,16 @@ impl IndirectAtom {
 //      b) disables no-allocation, creates a string, utilitzes it (eprintf or generate tape), and then deallocates
 impl fmt::Debug for IndirectAtom {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tagged = TaggedPtr::from_raw(self.0);
-        match tagged.location() {
-            PtrLocation::Stack => {
-                let ptr = ((tagged.payload(INDIRECT_MASK)) << 3) as *const u8;
-                write!(f, "IndirectAtom(StackPtr={ptr:p})")
+        write!(f, "0x")?;
+        let mut i = self.size() - 1;
+        loop {
+            write!(f, "_{:016x}", unsafe { *(self.data_pointer().add(i)) })?;
+            if i == 0 {
+                break;
             }
-            PtrLocation::Offset => {
-                let offset = tagged.payload(INDIRECT_MASK);
-                write!(f, "IndirectAtom(PmaOffset={offset})")
-            }
+            i -= 1;
         }
+        Ok(())
     }
 }
 
@@ -1684,58 +670,37 @@ pub struct Cell(u64);
 
 impl Cell {
     pub unsafe fn from_raw_pointer(ptr: *const CellMemory) -> Self {
-        Cell(TaggedPtr::from_stack_ptr(ptr as *const u8, CELL_TAG).raw())
+        Cell(((ptr as u64) >> 3) | CELL_TAG)
     }
 
-    pub fn from_offset_words<O: WordOffset>(words: O) -> Self {
-        Cell(TaggedPtr::from_offset(words, CELL_TAG).raw())
+    pub unsafe fn to_raw_pointer(&self) -> *const CellMemory {
+        (self.0 << 3) as *const CellMemory
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) unsafe fn to_raw_pointer(&self, space: &NounSpace) -> *const CellMemory {
-        TaggedPtr::from_raw(self.0).resolve_const(CELL_MASK, space) as *const CellMemory
+    pub unsafe fn to_raw_pointer_mut(&mut self) -> *mut CellMemory {
+        (self.0 << 3) as *mut CellMemory
     }
 
-    #[inline(always)]
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) unsafe fn to_raw_pointer_trusted(&self, space: &NounSpace) -> *const CellMemory {
-        TaggedPtr::from_raw(self.0).resolve_const_trusted(CELL_MASK, space) as *const CellMemory
+    pub unsafe fn head_as_mut(mut self) -> *mut Noun {
+        &mut (*self.to_raw_pointer_mut()).head as *mut Noun
     }
 
-    pub(crate) unsafe fn to_raw_pointer_mut(&mut self, space: &NounSpace) -> *mut CellMemory {
-        TaggedPtr::from_raw(self.0).resolve_mut(CELL_MASK, space) as *mut CellMemory
+    pub unsafe fn tail_as_mut(mut self) -> *mut Noun {
+        &mut (*self.to_raw_pointer_mut()).tail as *mut Noun
     }
 
-    #[inline(always)]
-    pub fn stack_memory_pointer(&self) -> Option<*const CellMemory> {
-        let tagged = TaggedPtr::from_raw(self.0);
-        if tagged.location() == PtrLocation::Stack {
-            Some(((tagged.payload(CELL_MASK)) << 3) as *const CellMemory)
-        } else {
-            None
+    pub unsafe fn set_forwarding_pointer(&mut self, new_me: *const CellMemory) {
+        (*self.to_raw_pointer_mut()).head = Noun {
+            raw: ((new_me as u64) >> 3) | FORWARDING_TAG,
         }
     }
 
-    pub(crate) unsafe fn head_as_mut(mut self, space: &NounSpace) -> *mut Noun {
-        &mut (*self.to_raw_pointer_mut(space)).head as *mut Noun
-    }
-
-    pub(crate) unsafe fn tail_as_mut(mut self, space: &NounSpace) -> *mut Noun {
-        &mut (*self.to_raw_pointer_mut(space)).tail as *mut Noun
-    }
-
-    pub unsafe fn set_forwarding_pointer(&mut self, new_me: *const CellMemory, space: &NounSpace) {
-        (*self.to_raw_pointer_mut(space)).head = Noun {
-            raw: TaggedPtr::from_stack_ptr(new_me as *const u8, FORWARDING_TAG).raw(),
-        }
-    }
-
-    pub(crate) unsafe fn forwarding_pointer(&self, space: &NounSpace) -> Option<Cell> {
-        let head_raw = (*self.to_raw_pointer(space)).head.raw;
+    pub unsafe fn forwarding_pointer(&self) -> Option<Cell> {
+        let head_raw = (*self.to_raw_pointer()).head.raw;
         if head_raw & FORWARDING_MASK == FORWARDING_TAG {
-            let ptr = TaggedPtr::from_raw(head_raw).resolve_const(FORWARDING_MASK, space)
-                as *const CellMemory;
-            Some(Self::from_raw_pointer(ptr))
+            // we can replace this by masking out the forwarding pointer and putting in the cell
+            // tag
+            Some(Self::from_raw_pointer((head_raw << 3) as *const CellMemory))
         } else {
             None
         }
@@ -1776,34 +741,18 @@ impl Cell {
     }
 
     // TODO: idk about making these owned independently of their parent
-    pub(crate) fn head(&self, space: &NounSpace) -> Noun {
-        unsafe { (*(self.to_raw_pointer(space))).head }
+    pub fn head(&self) -> Noun {
+        unsafe { (*(self.to_raw_pointer())).head }
     }
 
     // TODO: Ditto, etc.
-    pub(crate) fn tail(&self, space: &NounSpace) -> Noun {
-        unsafe { (*(self.to_raw_pointer(space))).tail }
+    pub fn tail(&self) -> Noun {
+        unsafe { (*(self.to_raw_pointer())).tail }
     }
 
-    #[inline(always)]
-    pub(crate) fn head_tail(&self, space: &NounSpace) -> (Noun, Noun) {
+    pub fn head_ref(&self) -> &Noun {
         unsafe {
-            let cell = self.to_raw_pointer(space);
-            ((*cell).head, (*cell).tail)
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn head_tail_trusted(&self, space: &NounSpace) -> (Noun, Noun) {
-        unsafe {
-            let cell = self.to_raw_pointer_trusted(space);
-            ((*cell).head, (*cell).tail)
-        }
-    }
-
-    pub(crate) fn head_ref<'a>(&'a self, space: &'a NounSpace) -> &'a Noun {
-        unsafe {
-            self.to_raw_pointer(space)
+            self.to_raw_pointer()
                 .as_ref()
                 .map(|cell| &cell.head)
                 .unwrap_or_else(|| panic!("head_ref: invalid pointer"))
@@ -1811,9 +760,9 @@ impl Cell {
     }
 
     // TODO: Ditto, etc.
-    pub(crate) fn tail_ref<'a>(&'a self, space: &'a NounSpace) -> &'a Noun {
+    pub fn tail_ref(&self) -> &Noun {
         unsafe {
-            self.to_raw_pointer(space)
+            self.to_raw_pointer()
                 .as_ref()
                 .map(|cell| &cell.tail)
                 .unwrap_or_else(|| panic!("head_ref: invalid pointer"))
@@ -1827,60 +776,41 @@ impl Cell {
     pub fn as_noun(&self) -> Noun {
         Noun { cell: *self }
     }
-
-    pub fn in_space<'a>(self, space: &'a NounSpace) -> CellHandle<'a> {
-        CellHandle::new(self, space)
-    }
 }
 
 impl fmt::Debug for Cell {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let tagged = TaggedPtr::from_raw(self.0);
-        match tagged.location() {
-            PtrLocation::Stack => {
-                let ptr = ((tagged.payload(CELL_MASK)) << 3) as *const u8;
-                write!(f, "Cell(StackPtr={ptr:p})")
-            }
-            PtrLocation::Offset => {
-                let offset = tagged.payload(CELL_MASK);
-                write!(f, "Cell(PmaOffset={offset})")
-            }
-        }
+        write!(f, "[")?;
+        let cell = *self;
+        write!(f, "{:?},", cell.head())?;
+        write!(f, " {:?}]", unsafe { cell.tail().raw })?;
+        Ok(())
     }
 }
 
-pub struct FullDebugCell<'a, 'b> {
-    pub cell: &'a Cell,
-    pub space: &'b NounSpace,
-}
+pub struct FullDebugCell<'a>(pub &'a Cell);
 
-impl fmt::Debug for FullDebugCell<'_, '_> {
+impl fmt::Debug for FullDebugCell<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fn do_fmt(
-            cell: &Cell,
-            space: &NounSpace,
-            brackets: bool,
-            f: &mut fmt::Formatter,
-        ) -> fmt::Result {
+        fn do_fmt(cell: &Cell, brackets: bool, f: &mut fmt::Formatter) -> fmt::Result {
             if brackets {
                 write!(f, "[")?;
             }
-            let cell_handle = (*cell).in_space(space);
-            match cell_handle.head().as_cell() {
+            match cell.head().as_cell() {
                 Ok(head_cell) => {
-                    do_fmt(&head_cell.cell(), space, true, f)?;
+                    do_fmt(&head_cell, true, f)?;
                     write!(f, " ")?;
                 }
                 Err(_) => {
-                    write!(f, "{:?} ", cell_handle.head().noun())?;
+                    write!(f, "{:?} ", cell.head())?;
                 }
             }
-            match cell_handle.tail().as_cell() {
+            match cell.tail().as_cell() {
                 Ok(next_cell) => {
-                    do_fmt(&next_cell.cell(), space, false, f)?;
+                    do_fmt(&next_cell, false, f)?;
                 }
                 Err(_) => {
-                    write!(f, "{:?}", cell_handle.tail().noun())?;
+                    write!(f, "{:?}", cell.tail())?;
                 }
             }
             if brackets {
@@ -1889,23 +819,20 @@ impl fmt::Debug for FullDebugCell<'_, '_> {
             Ok(())
         }
 
-        do_fmt(self.cell, self.space, true, f)?;
+        do_fmt(self.0, true, f)?;
         Ok(())
     }
 }
 
 // Render a path which is a linked-list of cells of of atoms (direct and indirect strings)
-pub struct DebugPath<'a, 'b> {
-    pub cell: &'a Cell,
-    pub space: &'b NounSpace,
-}
+pub struct DebugPath<'a>(pub &'a Cell);
 
-impl fmt::Debug for DebugPath<'_, '_> {
+impl fmt::Debug for DebugPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "[")?;
-        let mut cell = *self.cell;
+        let mut cell = *self.0;
         loop {
-            let head = cell.head(self.space).as_atom();
+            let head = cell.head().as_atom();
             match head {
                 Ok(atom) => {
                     if atom.is_direct() {
@@ -1920,13 +847,13 @@ impl fmt::Debug for DebugPath<'_, '_> {
                     write!(f, "ERR, not atom")?;
                 }
             }
-            match cell.tail(self.space).as_cell() {
+            match cell.tail().as_cell() {
                 Ok(next_cell) => {
                     write!(f, " ")?;
                     cell = next_cell;
                 }
                 Err(_) => {
-                    write!(f, " {:?}]", cell.tail(self.space))?;
+                    write!(f, " {:?}]", cell.tail())?;
                     break;
                 }
             }
@@ -2012,7 +939,7 @@ impl<'a> IndirectAxisIterator<'a> {
 
 // Direct axis traversal without bitvec - for u64 axes
 #[inline(always)]
-fn slot_direct(cell: &Cell, axis: u64, space: &NounSpace) -> Result<Noun> {
+fn slot_direct(cell: &Cell, axis: u64) -> Result<Noun> {
     if axis == 0 {
         return Err(Error::NotRepresentable);
     }
@@ -2026,7 +953,7 @@ fn slot_direct(cell: &Cell, axis: u64, space: &NounSpace) -> Result<Noun> {
 
     for idx in (0..highest).rev() {
         let descend_tail = ((axis >> idx) & 1) != 0;
-        let memory = unsafe { current.to_raw_pointer(space) };
+        let memory = unsafe { current.to_raw_pointer() };
         noun = unsafe {
             if descend_tail {
                 (*memory).tail
@@ -2047,50 +974,11 @@ fn slot_direct(cell: &Cell, axis: u64, space: &NounSpace) -> Result<Noun> {
     Ok(noun)
 }
 
-// Trusted local axis traversal for the interpreter hot path.
-// This skips location and epoch checks and assumes all traversed nouns are
-// stack-local or PMA-local.
-#[inline(always)]
-fn slot_direct_trusted(cell: &Cell, axis: u64, space: &NounSpace) -> Result<Noun> {
-    if axis == 0 {
-        return Err(Error::NotRepresentable);
-    }
-    if axis == 1 {
-        return Ok(cell.as_noun());
-    }
-
-    let highest = 63 - axis.leading_zeros() as usize;
-    let mut current_raw = cell.0;
-    let mut noun_raw = current_raw;
-
-    for idx in (0..highest).rev() {
-        let descend_tail = ((axis >> idx) & 1) != 0;
-        let memory = unsafe { cell_ptr_from_raw_trusted(current_raw, space) };
-        noun_raw = unsafe {
-            if descend_tail {
-                (*memory).tail.raw
-            } else {
-                (*memory).head.raw
-            }
-        };
-
-        if idx != 0 {
-            if is_cell(noun_raw) {
-                current_raw = noun_raw;
-            } else {
-                return Err(Error::NotRepresentable);
-            }
-        }
-    }
-
-    Ok(unsafe { noun_from_raw(noun_raw) })
-}
-
 impl Slots for Cell {}
 
 // Indirect axis traversal - for large axes stored in word slices
 #[inline(always)]
-fn slot_indirect(cell: &Cell, words: &[u64], space: &NounSpace) -> Result<Noun> {
+fn slot_indirect(cell: &Cell, words: &[u64]) -> Result<Noun> {
     if words.is_empty() {
         return Err(Error::NotRepresentable);
     }
@@ -2123,7 +1011,7 @@ fn slot_indirect(cell: &Cell, words: &[u64], space: &NounSpace) -> Result<Noun> 
         let bit_idx = idx & 63;
         let descend_tail = ((words[word_idx] >> bit_idx) & 1) != 0;
 
-        let memory = unsafe { current.to_raw_pointer(space) };
+        let memory = unsafe { current.to_raw_pointer() };
         noun = unsafe {
             if descend_tail {
                 (*memory).tail
@@ -2144,69 +1032,15 @@ fn slot_indirect(cell: &Cell, words: &[u64], space: &NounSpace) -> Result<Noun> 
     Ok(noun)
 }
 
-#[inline(always)]
-fn slot_indirect_trusted(cell: &Cell, words: &[u64], space: &NounSpace) -> Result<Noun> {
-    if words.is_empty() {
-        return Err(Error::NotRepresentable);
-    }
-
-    let mut highest_word_idx = words.len() - 1;
-    while highest_word_idx > 0 && words[highest_word_idx] == 0 {
-        highest_word_idx -= 1;
-    }
-
-    let highest_word = words[highest_word_idx];
-    if highest_word == 0 {
-        return Err(Error::NotRepresentable);
-    }
-
-    let highest_bit_in_word = 63 - highest_word.leading_zeros() as usize;
-    let highest = (highest_word_idx << 6) + highest_bit_in_word;
-
-    if highest == 0 {
-        return Ok(cell.as_noun());
-    }
-
-    let mut current_raw = cell.0;
-    let mut noun_raw = current_raw;
-    let mut idx = highest;
-
-    while idx != 0 {
-        idx -= 1;
-        let word_idx = idx >> 6;
-        let bit_idx = idx & 63;
-        let descend_tail = ((words[word_idx] >> bit_idx) & 1) != 0;
-
-        let memory = unsafe { cell_ptr_from_raw_trusted(current_raw, space) };
-        noun_raw = unsafe {
-            if descend_tail {
-                (*memory).tail.raw
-            } else {
-                (*memory).head.raw
-            }
-        };
-
-        if idx != 0 {
-            if is_cell(noun_raw) {
-                current_raw = noun_raw;
-            } else {
-                return Err(Error::NotRepresentable);
-            }
-        }
-    }
-
-    Ok(unsafe { noun_from_raw(noun_raw) })
-}
-
 impl private::RawSlots for Cell {
     #[inline(always)]
-    fn raw_slot_direct(&self, axis: u64, space: &NounSpace) -> Result<Noun> {
-        slot_direct(self, axis, space)
+    fn raw_slot_direct(&self, axis: u64) -> Result<Noun> {
+        slot_direct(self, axis)
     }
 
     #[inline(always)]
-    fn raw_slot_indirect(&self, axis: &[u64], space: &NounSpace) -> Result<Noun> {
-        slot_indirect(self, axis, space)
+    fn raw_slot_indirect(&self, axis: &[u64]) -> Result<Noun> {
+        slot_indirect(self, axis)
     }
 }
 
@@ -2265,11 +1099,11 @@ impl Atom {
         unsafe { is_indirect_atom(self.raw) }
     }
 
-    pub(crate) fn is_normalized(&self, space: &NounSpace) -> bool {
+    pub fn is_normalized(&self) -> bool {
         unsafe {
             if let Some(indirect) = self.indirect() {
-                if (indirect.size(space) == 1 && *indirect.data_pointer(space) <= DIRECT_MAX)
-                    || *indirect.data_pointer(space).add(indirect.size(space) - 1) == 0
+                if (indirect.size() == 1 && *indirect.data_pointer() <= DIRECT_MAX)
+                    || *indirect.data_pointer().add(indirect.size() - 1) == 0
                 {
                     return false;
                 }
@@ -2307,53 +1141,48 @@ impl Atom {
         Noun { atom: self }
     }
 
-    pub fn in_space<'a>(self, space: &'a NounSpace) -> AtomHandle<'a> {
-        AtomHandle::new(self, space)
-    }
-
     /// Returns a slice of bytes in native-endian order. Currently, Sword only supports
     /// little-endian machines, so this will return little-endian.
-    pub(crate) fn as_ne_bytes(&self, space: &NounSpace) -> &[u8] {
+    pub fn as_ne_bytes(&self) -> &[u8] {
         if self.is_direct() {
             unsafe { self.direct.as_ne_bytes() }
         } else {
-            unsafe { self.indirect.as_ne_bytes(space) }
+            unsafe { self.indirect.as_ne_bytes() }
         }
     }
 
     /// Returns Vec<u8> in native-endian order
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) fn to_ne_bytes(&self, space: &NounSpace) -> Vec<u8> {
+    pub fn to_ne_bytes(&self) -> Vec<u8> {
         if self.is_direct() {
             unsafe { self.direct.to_ne_bytes() }
         } else {
-            unsafe { self.indirect.to_ne_bytes(space) }
+            unsafe { self.indirect.to_ne_bytes() }
         }
     }
 
     /// Returns Vec<u8> in big-endian order
-    pub(crate) fn to_be_bytes(self, space: &NounSpace) -> Vec<u8> {
+    pub fn to_be_bytes(self) -> Vec<u8> {
         if self.is_direct() {
             unsafe { self.direct.to_be_bytes() }
         } else {
-            unsafe { self.indirect.to_be_bytes(space) }
+            unsafe { self.indirect.to_be_bytes() }
         }
     }
 
     /// Returns Vec<u8> in little-endian order
-    pub(crate) fn to_le_bytes(self, space: &NounSpace) -> Vec<u8> {
+    pub fn to_le_bytes(self) -> Vec<u8> {
         if self.is_direct() {
             unsafe { self.direct.to_le_bytes() }
         } else {
-            unsafe { self.indirect.to_le_bytes(space) }
+            unsafe { self.indirect.to_le_bytes() }
         }
     }
 
-    pub(crate) fn as_u64(self, space: &NounSpace) -> Result<u64> {
+    pub fn as_u64(self) -> Result<u64> {
         if self.is_direct() {
             Ok(unsafe { self.direct.data() })
         } else {
-            unsafe { self.indirect.as_u64(space) }
+            unsafe { self.indirect.as_u64() }
         }
     }
 
@@ -2366,36 +1195,36 @@ impl Atom {
     }
 
     /** Produce a SoftFloat-compatible ordered pair of 64-bit words */
-    pub(crate) unsafe fn as_u64_pair(self, space: &NounSpace) -> Result<[u64; 2]> {
+    pub unsafe fn as_u64_pair(self) -> Result<[u64; 2]> {
         if self.is_direct() {
             let u128_array = &mut [0u64; 2];
             u128_array[0] = self.as_direct()?.data();
             u128_array[1] = 0x0_u64;
             Ok(*u128_array)
         } else {
-            unsafe { self.indirect.as_u64_pair(space) }
+            unsafe { self.indirect.as_u64_pair() }
         }
     }
 
-    pub(crate) fn as_bitslice(&self, space: &NounSpace) -> &BitSlice<u64, Lsb0> {
+    pub fn as_bitslice(&self) -> &BitSlice<u64, Lsb0> {
         if self.is_indirect() {
-            unsafe { self.indirect.as_bitslice(space) }
+            unsafe { self.indirect.as_bitslice() }
         } else {
             unsafe { self.direct.as_bitslice() }
         }
     }
 
-    pub(crate) fn as_bitslice_mut(&mut self, space: &NounSpace) -> &mut BitSlice<u64, Lsb0> {
+    pub fn as_bitslice_mut(&mut self) -> &mut BitSlice<u64, Lsb0> {
         if self.is_indirect() {
-            unsafe { self.indirect.as_bitslice_mut(space) }
+            unsafe { self.indirect.as_bitslice_mut() }
         } else {
             unsafe { self.direct.as_bitslice_mut() }
         }
     }
 
-    pub(crate) fn as_ubig<S: Stack>(self, stack: &mut S, space: &NounSpace) -> UBig {
+    pub fn as_ubig<S: Stack>(self, stack: &mut S) -> UBig {
         if self.is_indirect() {
-            unsafe { self.indirect.as_ubig(stack, space) }
+            unsafe { self.indirect.as_ubig(stack) }
         } else {
             unsafe { self.direct.as_ubig(stack) }
         }
@@ -2417,30 +1246,31 @@ impl Atom {
         }
     }
 
-    pub(crate) fn size(&self, space: &NounSpace) -> usize {
+    /// Size of the atom in 64-bit words (not bytes). Direct atoms return 1.
+    pub fn size(&self) -> usize {
         match self.as_either() {
             Left(_direct) => 1,
-            Right(indirect) => indirect.size(space),
+            Right(indirect) => indirect.size(),
         }
     }
 
-    pub(crate) fn bit_size(&self, space: &NounSpace) -> usize {
+    pub fn bit_size(&self) -> usize {
         match self.as_either() {
             Left(direct) => direct.bit_size(),
-            Right(indirect) => indirect.bit_size(space),
+            Right(indirect) => indirect.bit_size(),
         }
     }
 
-    pub(crate) fn data_pointer(&self, space: &NounSpace) -> *const u64 {
+    pub fn data_pointer(&self) -> *const u64 {
         match self.as_either() {
             Left(_direct) => (self as *const Atom) as *const u64,
-            Right(indirect) => indirect.data_pointer(space),
+            Right(indirect) => indirect.data_pointer(),
         }
     }
 
-    pub(crate) unsafe fn normalize(&mut self, space: &NounSpace) -> Atom {
+    pub unsafe fn normalize(&mut self) -> Atom {
         if self.is_indirect() {
-            self.indirect.normalize_as_atom(space)
+            self.indirect.normalize_as_atom()
         } else {
             *self
         }
@@ -2486,47 +1316,31 @@ impl Allocated {
         unsafe { is_cell(self.raw) }
     }
 
-    #[allow(clippy::wrong_self_convention)]
-    pub(crate) unsafe fn to_raw_pointer(&self, space: &NounSpace) -> *const u64 {
-        let tagged = TaggedPtr::from_raw(self.raw);
-        if self.is_indirect() {
-            tagged.resolve_const(INDIRECT_MASK, space) as *const u64
-        } else {
-            tagged.resolve_const(CELL_MASK, space) as *const u64
-        }
+    pub unsafe fn to_raw_pointer(&self) -> *const u64 {
+        (self.raw << 3) as *const u64
     }
 
-    pub(crate) unsafe fn to_raw_pointer_mut(&mut self, space: &NounSpace) -> *mut u64 {
-        let tagged = TaggedPtr::from_raw(self.raw);
-        if self.is_indirect() {
-            tagged.resolve_mut(INDIRECT_MASK, space) as *mut u64
-        } else {
-            tagged.resolve_mut(CELL_MASK, space) as *mut u64
-        }
+    pub unsafe fn to_raw_pointer_mut(&mut self) -> *mut u64 {
+        (self.raw << 3) as *mut u64
     }
 
-    pub(crate) unsafe fn const_to_raw_pointer_mut(self, space: &NounSpace) -> *mut u64 {
-        let tagged = TaggedPtr::from_raw(self.raw);
-        if self.is_indirect() {
-            tagged.resolve_mut(INDIRECT_MASK, space) as *mut u64
-        } else {
-            tagged.resolve_mut(CELL_MASK, space) as *mut u64
-        }
+    unsafe fn const_to_raw_pointer_mut(self) -> *mut u64 {
+        (self.raw << 3) as *mut u64
     }
 
-    pub(crate) unsafe fn forwarding_pointer(&self, space: &NounSpace) -> Option<Allocated> {
+    pub unsafe fn forwarding_pointer(&self) -> Option<Allocated> {
         match self.as_either() {
-            Left(indirect) => indirect.forwarding_pointer(space).map(|i| i.as_allocated()),
-            Right(cell) => cell.forwarding_pointer(space).map(|c| c.as_allocated()),
+            Left(indirect) => indirect.forwarding_pointer().map(|i| i.as_allocated()),
+            Right(cell) => cell.forwarding_pointer().map(|c| c.as_allocated()),
         }
     }
 
-    pub(crate) unsafe fn get_metadata(&self, space: &NounSpace) -> u64 {
-        *(self.to_raw_pointer(space))
+    pub unsafe fn get_metadata(&self) -> u64 {
+        *(self.to_raw_pointer())
     }
 
-    pub(crate) unsafe fn set_metadata(&mut self, metadata: u64, space: &NounSpace) {
-        *(self.const_to_raw_pointer_mut(space)) = metadata;
+    pub unsafe fn set_metadata(&mut self, metadata: u64) {
+        *(self.const_to_raw_pointer_mut()) = metadata;
     }
 
     pub fn as_either(&self) -> Either<IndirectAtom, Cell> {
@@ -2557,9 +1371,9 @@ impl Allocated {
         Noun { allocated: *self }
     }
 
-    pub(crate) fn get_cached_mug(self: Allocated, space: &NounSpace) -> Option<u32> {
+    pub fn get_cached_mug(self: Allocated) -> Option<u32> {
         unsafe {
-            let bottom_metadata = self.get_metadata(space) as u32 & 0x7FFFFFFF; // magic number: LS 31 bits
+            let bottom_metadata = self.get_metadata() as u32 & 0x7FFFFFFF; // magic number: LS 31 bits
             if bottom_metadata > 0 {
                 Some(bottom_metadata)
             } else {
@@ -2592,10 +1406,6 @@ impl Noun {
         unsafe { self.raw == u64::MAX }
     }
 
-    pub fn in_space<'a>(self, space: &'a NounSpace) -> NounHandle<'a> {
-        NounHandle::new(self, space)
-    }
-
     pub fn is_direct(&self) -> bool {
         unsafe { is_direct_atom(self.raw) }
     }
@@ -2610,58 +1420,6 @@ impl Noun {
 
     pub fn is_allocated(&self) -> bool {
         self.is_indirect() || self.is_cell()
-    }
-
-    pub(crate) fn repr(&self, space: &NounSpace) -> NounRepr {
-        let raw = unsafe { self.as_raw() };
-        if is_direct_atom(raw) {
-            return NounRepr::Direct;
-        }
-
-        enum AllocKind {
-            Indirect,
-            Cell,
-            Forwarding,
-        }
-
-        let (mask, kind) = if is_indirect_atom(raw) {
-            (INDIRECT_MASK, AllocKind::Indirect)
-        } else if is_cell(raw) {
-            (CELL_MASK, AllocKind::Cell)
-        } else if raw & FORWARDING_MASK == FORWARDING_TAG {
-            (FORWARDING_MASK, AllocKind::Forwarding)
-        } else {
-            unreachable!("unknown noun tag for raw {:#x}", raw);
-        };
-
-        let tagged = TaggedPtr::from_raw(raw);
-        let location = match tagged.location() {
-            PtrLocation::Offset => {
-                if matches!(kind, AllocKind::Forwarding) {
-                    panic!("forwarding pointers cannot be offset-form");
-                }
-                AllocLocation::PmaOffset
-            }
-            PtrLocation::Stack => {
-                let ptr = (tagged.payload(mask) << 3) as *const u8;
-                space.classify_ptr(ptr)
-            }
-        };
-
-        match kind {
-            AllocKind::Indirect => NounRepr::Indirect(location),
-            AllocKind::Cell => NounRepr::Cell(location),
-            AllocKind::Forwarding => NounRepr::Forwarding(location),
-        }
-    }
-
-    pub(crate) fn allocated_location(&self, space: &NounSpace) -> Option<AllocLocation> {
-        self.repr(space).location()
-    }
-
-    #[inline]
-    pub(crate) fn is_stack_allocated(&self, space: &NounSpace) -> bool {
-        matches!(self.allocated_location(space), Some(AllocLocation::Stack))
     }
 
     pub fn is_cell(&self) -> bool {
@@ -2799,19 +1557,19 @@ impl Noun {
      *
      * This counts the total size, see mass_frame() to count the size in the current frame.
      */
-    pub(crate) fn mass(self, space: &NounSpace) -> usize {
+    pub fn mass(self) -> usize {
         unsafe {
-            let res = self.mass_wind(space, &|_| true);
-            self.mass_unwind(space, &|_| true);
+            let res = self.mass_wind(&|_| true);
+            self.mass_unwind(&|_| true);
             res
         }
     }
 
     /** Produce the size of a noun in the current frame, in words */
-    pub(crate) fn mass_frame(self, stack: &NockStack, space: &NounSpace) -> usize {
+    pub fn mass_frame(self, stack: &NockStack) -> usize {
         unsafe {
-            let res = self.mass_wind(space, &|p| stack.is_in_frame(p));
-            self.mass_unwind(space, &|p| stack.is_in_frame(p));
+            let res = self.mass_wind(&|p| stack.is_in_frame(p));
+            self.mass_unwind(&|p| stack.is_in_frame(p));
             res
         }
     }
@@ -2830,22 +1588,17 @@ impl Noun {
      * the first noun, and the second will be the mass of the second noun minus the overlap with
      * the first noun.
      */
-    pub(crate) unsafe fn mass_wind(
-        self,
-        space: &NounSpace,
-        inside: &impl Fn(*const u64) -> bool,
-    ) -> usize {
+    pub unsafe fn mass_wind(self, inside: &impl Fn(*const u64) -> bool) -> usize {
         if let Ok(mut allocated) = self.as_allocated() {
-            if inside(allocated.to_raw_pointer(space)) {
-                if allocated.get_metadata(space) & (1 << 32) == 0 {
-                    allocated.set_metadata(allocated.get_metadata(space) | (1 << 32), space);
+            if inside(allocated.to_raw_pointer()) {
+                if allocated.get_metadata() & (1 << 32) == 0 {
+                    allocated.set_metadata(allocated.get_metadata() | (1 << 32));
                     match allocated.as_either() {
-                        Left(indirect) => indirect.size(space) + 2,
+                        Left(indirect) => indirect.size() + 2,
                         Right(cell) => {
-                            let cell_handle = cell.in_space(space);
                             word_size_of::<CellMemory>()
-                                + cell_handle.head().noun().mass_wind(space, inside)
-                                + cell_handle.tail().noun().mass_wind(space, inside)
+                                + cell.head().mass_wind(inside)
+                                + cell.tail().mass_wind(inside)
                         }
                     }
                 } else {
@@ -2860,18 +1613,13 @@ impl Noun {
     }
 
     /** See mass_wind() */
-    pub(crate) unsafe fn mass_unwind(
-        self,
-        space: &NounSpace,
-        inside: &impl Fn(*const u64) -> bool,
-    ) {
+    pub unsafe fn mass_unwind(self, inside: &impl Fn(*const u64) -> bool) {
         if let Ok(mut allocated) = self.as_allocated() {
-            if inside(allocated.to_raw_pointer(space)) {
-                allocated.set_metadata(allocated.get_metadata(space) & !(1 << 32), space);
+            if inside(allocated.to_raw_pointer()) {
+                allocated.set_metadata(allocated.get_metadata() & !(1 << 32));
                 if let Right(cell) = allocated.as_either() {
-                    let cell_handle = cell.in_space(space);
-                    cell_handle.head().noun().mass_unwind(space, inside);
-                    cell_handle.tail().noun().mass_unwind(space, inside);
+                    cell.head().mass_unwind(inside);
+                    cell.tail().mass_unwind(inside);
                 }
             }
         }
@@ -2887,6 +1635,19 @@ impl fmt::Debug for Noun {
                 write!(f, "{:?}", self.indirect)
             } else if self.is_cell() {
                 write!(f, "{:?}", self.cell)
+            } else if self.allocated.forwarding_pointer().is_some() {
+                write!(
+                    f,
+                    "Noun::Forwarding({:?})",
+                    self.allocated
+                        .forwarding_pointer()
+                        .unwrap_or_else(|| panic!(
+                            "Panicked at {}:{} (git sha: {:?})",
+                            file!(),
+                            line!(),
+                            option_env!("GIT_SHA")
+                        ))
+                )
             } else {
                 write!(f, "Noun::Unknown({:x})", self.raw)
             }
@@ -2897,9 +1658,9 @@ impl fmt::Debug for Noun {
 impl Slots for Noun {}
 impl private::RawSlots for Noun {
     #[inline(always)]
-    fn raw_slot_direct(&self, axis: u64, space: &NounSpace) -> Result<Noun> {
+    fn raw_slot_direct(&self, axis: u64) -> Result<Noun> {
         match self.as_either_atom_cell() {
-            Right(cell) => cell.raw_slot_direct(axis, space),
+            Right(cell) => cell.raw_slot_direct(axis),
             Left(_atom) => {
                 if axis == 1 {
                     Ok(*self)
@@ -2912,9 +1673,9 @@ impl private::RawSlots for Noun {
     }
 
     #[inline(always)]
-    fn raw_slot_indirect(&self, axis: &[u64], space: &NounSpace) -> Result<Noun> {
+    fn raw_slot_indirect(&self, axis: &[u64]) -> Result<Noun> {
         match self.as_either_atom_cell() {
-            Right(cell) => cell.raw_slot_indirect(axis, space),
+            Right(cell) => cell.raw_slot_indirect(axis),
             Left(_atom) => {
                 // Check if axis is 1 (all words are 0 except word[0] & 1 == 1)
                 if axis.len() == 1 && axis[0] == 1 {
@@ -2925,72 +1686,6 @@ impl private::RawSlots for Noun {
                     // Axis tried to descend through atom
                     Err(Error::NotCell)
                 }
-            }
-        }
-    }
-}
-
-impl Noun {
-    #[inline(always)]
-    fn raw_slot_direct_trusted(self, axis: u64, space: &NounSpace) -> Result<Noun> {
-        match self.as_either_atom_cell() {
-            Right(cell) => slot_direct_trusted(&cell, axis, space),
-            Left(_atom) => {
-                if axis == 1 {
-                    Ok(self)
-                } else if axis == 0 {
-                    Err(Error::NotRepresentable)
-                } else {
-                    Err(Error::NotCell)
-                }
-            }
-        }
-    }
-
-    #[inline(always)]
-    fn raw_slot_indirect_trusted(self, axis: &[u64], space: &NounSpace) -> Result<Noun> {
-        match self.as_either_atom_cell() {
-            Right(cell) => slot_indirect_trusted(&cell, axis, space),
-            Left(_atom) => {
-                if axis.len() == 1 && axis[0] == 1 {
-                    Ok(self)
-                } else if axis.is_empty() || (axis.len() == 1 && axis[0] == 0) {
-                    Err(Error::NotRepresentable)
-                } else {
-                    Err(Error::NotCell)
-                }
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn slot_direct_trusted_or_checked(
-        self,
-        axis: u64,
-        space: &NounSpace,
-    ) -> Result<Noun> {
-        self.raw_slot_direct_trusted(axis, space)
-    }
-
-    #[inline(always)]
-    pub(crate) fn slot_indirect_trusted_or_checked(
-        self,
-        axis: &[u64],
-        space: &NounSpace,
-    ) -> Result<Noun> {
-        self.raw_slot_indirect_trusted(axis, space)
-    }
-
-    #[inline(always)]
-    pub(crate) fn slot_atom_trusted_or_checked(
-        self,
-        atom: Atom,
-        space: &NounSpace,
-    ) -> Result<Noun> {
-        match atom.as_either() {
-            Left(direct) => self.slot_direct_trusted_or_checked(direct.data(), space),
-            Right(indirect) => {
-                self.slot_indirect_trusted_or_checked(indirect.as_slice_trusted(space), space)
             }
         }
     }
@@ -3015,28 +1710,26 @@ pub trait NounAllocator: Sized + Stack {
 
     /** Check if two allocated nouns are equal **/
     unsafe fn equals(&mut self, a: *mut Noun, b: *mut Noun) -> bool;
-
-    fn noun_space(&self) -> NounSpace;
 }
 
 /**
  * Implementing types allow component Nouns to be retreived by numeric axis
  */
-pub(crate) trait Slots: private::RawSlots {
+pub trait Slots: private::RawSlots {
     /**
      * Retrieve component Noun at given axis, or fail with descriptive error
      */
-    fn slot(&self, axis: u64, space: &NounSpace) -> Result<Noun> {
-        self.raw_slot_direct(axis, space)
+    fn slot(&self, axis: u64) -> Result<Noun> {
+        self.raw_slot_direct(axis)
     }
 
     /**
      * Retrieve component Noun at axis given as Atom, or fail with descriptive error
      */
-    fn slot_atom(&self, atom: Atom, space: &NounSpace) -> Result<Noun> {
+    fn slot_atom(&self, atom: Atom) -> Result<Noun> {
         match atom.as_either() {
-            Left(direct) => self.raw_slot_direct(direct.data(), space),
-            Right(indirect) => self.raw_slot_indirect(indirect.as_slice(space), space),
+            Left(direct) => self.raw_slot_direct(direct.data()),
+            Right(indirect) => self.raw_slot_indirect(indirect.as_slice()),
         }
     }
 }
@@ -3045,7 +1738,7 @@ pub(crate) trait Slots: private::RawSlots {
  * Implementation methods that should not be made available to derived crates
  */
 mod private {
-    use crate::noun::{Noun, NounSpace, Result};
+    use crate::noun::{Noun, Result};
 
     /**
      * Implementation of the Slots trait
@@ -3054,127 +1747,89 @@ mod private {
         /**
          * Actual logic of retreiving Noun object at some axis (direct)
          */
-        fn raw_slot_direct(&self, axis: u64, space: &NounSpace) -> Result<Noun>;
+        fn raw_slot_direct(&self, axis: u64) -> Result<Noun>;
 
         /**
          * Actual logic of retreiving Noun object at some axis (indirect)
          */
-        fn raw_slot_indirect(&self, axis: &[u64], space: &NounSpace) -> Result<Noun>;
+        fn raw_slot_indirect(&self, axis: &[u64]) -> Result<Noun>;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::jets::util::test::init_context;
-    use crate::noun::{Cell, NounSpace, Slots, D};
+    use crate::noun::{Cell, Slots, D};
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_slot_direct_simple() {
         let mut context = init_context();
-        let space = NounSpace::stack_only(&context.stack);
         let cell = Cell::new(&mut context.stack, D(1), D(2));
 
         // axis 1 returns the whole cell
         assert!(unsafe {
-            cell.slot(1, &space)
-                .expect("axis 1 should resolve to the whole cell")
+            cell.slot(1)
+                .expect("slot(1) should exist")
                 .raw_equals(&cell.as_noun())
         });
 
         // axis 2 returns head
         assert!(unsafe {
-            cell.slot(2, &space)
-                .expect("axis 2 should resolve to the head")
+            cell.slot(2)
+                .expect("slot(2) should exist")
                 .raw_equals(&D(1))
         });
 
         // axis 3 returns tail
         assert!(unsafe {
-            cell.slot(3, &space)
-                .expect("axis 3 should resolve to the tail")
+            cell.slot(3)
+                .expect("slot(3) should exist")
                 .raw_equals(&D(2))
         });
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_slot_direct_nested() {
         let mut context = init_context();
-        let space = NounSpace::stack_only(&context.stack);
         let inner = Cell::new(&mut context.stack, D(3), D(4));
         // cell = [1 [3 4]]
         let cell = Cell::new(&mut context.stack, D(1), inner.as_noun());
 
         // axis 6 = 110 binary = tail then head = head of tail = 3
         assert!(unsafe {
-            cell.slot(6, &space)
-                .expect("axis 6 should resolve to tail/head")
+            cell.slot(6)
+                .expect("slot(6) should exist")
                 .raw_equals(&D(3))
         });
 
         // axis 7 = 111 binary = tail then tail = tail of tail = 4
         assert!(unsafe {
-            cell.slot(7, &space)
-                .expect("axis 7 should resolve to tail/tail")
+            cell.slot(7)
+                .expect("slot(7) should exist")
                 .raw_equals(&D(4))
         });
 
         // axis 4 = 100 binary = head then stop = should fail (head is atom)
-        assert!(cell.slot(4, &space).is_err());
+        assert!(cell.slot(4).is_err());
 
         // cell2 = [[3 4] 2]
         let cell2 = Cell::new(&mut context.stack, inner.as_noun(), D(2));
         // axis 5 = 101 binary = head then tail = tail of head = 4
         assert!(unsafe {
             cell2
-                .slot(5, &space)
-                .expect("axis 5 should resolve to head/tail")
+                .slot(5)
+                .expect("slot(5) should exist")
                 .raw_equals(&D(4))
         });
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_slot_zero_axis() {
         let mut context = init_context();
-        let space = NounSpace::stack_only(&context.stack);
         let cell = Cell::new(&mut context.stack, D(1), D(2));
 
         // axis 0 should fail
-        assert!(cell.slot(0, &space).is_err());
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
-    fn test_with_brand_valid_usage() {
-        let mut context = init_context();
-        let space = NounSpace::stack_only(&context.stack);
-        let cell = Cell::new(&mut context.stack, D(10), D(20)).as_noun();
-
-        space.with_brand(|space| {
-            let cell = space.handle(cell).as_cell().expect("cell");
-            assert_eq!(
-                cell.head()
-                    .as_atom()
-                    .expect("head atom")
-                    .as_u64()
-                    .expect("head atom should fit in u64"),
-                10
-            );
-            assert_eq!(
-                cell.tail()
-                    .as_atom()
-                    .expect("tail atom")
-                    .as_u64()
-                    .expect("tail atom should fit in u64"),
-                20
-            );
-            assert!(matches!(
-                cell.as_noun().repr(),
-                crate::noun::NounRepr::Cell(_)
-            ));
-        });
+        assert!(cell.slot(0).is_err());
     }
 }
 
@@ -3190,10 +1845,9 @@ mod test {
     #[cfg_attr(miri, ignore)]
     fn test_to_ne_bytes_direct() {
         let mut context = init_context();
-        let space = context.stack.noun_space();
         let big = ubig!(0x1234567890abcdefa0);
         let atom = Atom::from_ubig(&mut context.stack, &big);
-        let bytes = atom.in_space(&space).to_ne_bytes();
+        let bytes = atom.to_ne_bytes();
         #[cfg(target_endian = "little")]
         {
             assert_eq!(
@@ -3221,9 +1875,8 @@ mod test {
     #[cfg_attr(miri, ignore)]
     fn test_to_ne_bytes_indirect() {
         let mut context = init_context();
-        let space = context.stack.noun_space();
         let atom = Atom::new(&mut context.stack, 0x1234);
-        let bytes = atom.in_space(&space).to_ne_bytes();
+        let bytes = atom.to_ne_bytes();
         #[cfg(target_endian = "little")]
         {
             assert_eq!(bytes, vec![0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
@@ -3239,15 +1892,14 @@ mod test {
     #[cfg_attr(miri, ignore)]
     fn test_to_x_bytes_direct() {
         let mut context = init_context();
-        let space = context.stack.noun_space();
         let atom = Atom::new(&mut context.stack, 0x1234);
-        let bytes_le = atom.in_space(&space).to_le_bytes();
+        let bytes_le = atom.to_le_bytes();
         assert_eq!(
             bytes_le,
             vec![0x34, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
 
-        let bytes_be = atom.in_space(&space).to_be_bytes();
+        let bytes_be = atom.to_be_bytes();
         assert_eq!(
             bytes_be,
             vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12, 0x34]
@@ -3259,15 +1911,14 @@ mod test {
     #[cfg_attr(miri, ignore)]
     fn test_to_le_bytes_indirect() {
         let mut context = init_context();
-        let space = context.stack.noun_space();
         let big = ubig!(0x1234567890abcd);
         let atom = Atom::from_ubig(&mut context.stack, &big);
-        let bytes = atom.in_space(&space).to_le_bytes();
+        let bytes = atom.to_le_bytes();
         assert_eq!(bytes, vec![0xcd, 0xab, 0x90, 0x78, 0x56, 0x34, 0x12, 0x00]);
         //
         let big = ubig!(0x1234567890abcdefa0);
         let atom = Atom::from_ubig(&mut context.stack, &big);
-        let bytes = atom.in_space(&space).to_le_bytes();
+        let bytes = atom.to_le_bytes();
         assert_eq!(
             bytes,
             vec![
@@ -3282,15 +1933,14 @@ mod test {
     #[cfg_attr(miri, ignore)]
     fn test_to_be_bytes_indirect() {
         let mut context = init_context();
-        let space = context.stack.noun_space();
         let big = ubig!(0x34567890abcdef);
         let atom = Atom::from_ubig(&mut context.stack, &big);
-        let bytes = atom.in_space(&space).to_be_bytes();
+        let bytes = atom.to_be_bytes();
         assert_eq!(bytes, vec![0x00, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]);
         //
         let big = ubig!(0x1234567890abcdefa0);
         let atom = Atom::from_ubig(&mut context.stack, &big);
-        let bytes = atom.in_space(&space).to_be_bytes();
+        let bytes = atom.to_be_bytes();
         assert_eq!(
             bytes,
             vec![

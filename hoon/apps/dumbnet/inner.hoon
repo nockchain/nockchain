@@ -7,7 +7,7 @@
 /=  mine  /common/pow
 /=  nv  /common/nock-verifier
 /=  zeke  /common/zeke
-/=  *  /common/h-zoon
+/=  *  /common/zoon
 /=  *  /common/wrapper
 ::
 ::  Never use c-transact face, always use the lustar `t`
@@ -33,18 +33,17 @@
     ::
     ::  use this for production
     |=  arg=load-kernel-state:dk
+    ~&  [%nockchain-state-version -.arg]
     ::  cut
     |^
-    =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-9 arg)))
+    =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-6 arg)))
     =.  c.k  ~>  %bout  check-and-repair:con
-    ~|  %v1-phase-must-be-lte-asert-phase
-    ?>  (lte v1-phase.constants.k asert-phase.constants.k)
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-9
+    ++  state-n-to-6
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%9 -.arg)
+      ?.  ?=(%6 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -54,110 +53,8 @@
           %3  $(arg (state-3-to-4 arg))
           %4  $(arg (state-4-to-5 arg))
           %5  $(arg (state-5-to-6 arg))
-          %6  $(arg (state-6-to-7 arg))
-          %7  $(arg (state-7-to-8 arg))
-          %8  $(arg (state-8-to-9 arg))
         ==
       arg
-    ::
-    ::  upgrade kernel state 8 to kernel state 9
-    ::    h-zoon replaces the remaining consensus z containers with
-    ::    digest-keyed h containers. kernel-state-8 already carries the
-    ::    full post-phase-2 constants shape. this migration preserves constants
-    ::    and only rewrites consensus container representation.
-    ++  state-8-to-9
-      |=  arg=kernel-state-8:dk
-      ^-  kernel-state-9:dk
-      =/  new-c=consensus-state-9:dk
-        %*  .  *consensus-state-9:dk
-          blocks-needed-by  (zh-jult blocks-needed-by.c.arg)
-          excluded-txs      (zh-silt excluded-txs.c.arg)
-          spent-by          (zh-jult spent-by.c.arg)
-          pending-blocks    (zh-molt pending-blocks.c.arg)
-          balance           (zh-balmilt blocks.c.arg balance.c.arg)
-          txs               (zh-milt txs.c.arg)
-          raw-txs           (zh-molt raw-txs.c.arg)
-          blocks            (zh-molt blocks.c.arg)
-          heaviest-block    heaviest-block.c.arg
-          min-timestamps    (zh-molt min-timestamps.c.arg)
-          epoch-start       (zh-molt epoch-start.c.arg)
-          targets           (zh-molt targets.c.arg)
-          btc-data          btc-data.c.arg
-          genesis-seal      genesis-seal.c.arg
-        ==
-      =/  new-m=mining-state-9:dk
-        %*  .  *mining-state-9:dk
-          mining           mining.m.arg
-          shares           shares.m.arg
-          v0-shares        v0-shares.m.arg
-          candidate-block  *page:t
-          candidate-acc    *tx-acc:t
-          next-nonce       next-nonce.m.arg
-        ==
-      :*  %9
-          c=new-c
-          a=a.arg
-          m=new-m
-          d=d.arg
-          constants=constants.arg
-      ==
-    ::
-    ::  upgrade kernel state 7 to kernel state 8
-    ::    blockchain-constants:v1 gained a sixth asert-* field
-    ::    (asert-anchor-min-timestamp) at phase 2 of 014-aletheia.
-    ::    kernel-state-7 uses the frozen phase-1 shape (five asert
-    ::    fields) so old %7 states still decode; kernel-state-8 uses
-    ::    the full post-phase-2 blockchain-constants:v1. we discard
-    ::    the old constants noun and let update-constants reseed it
-    ::    from *blockchain-constants:t (which now pins the canonical
-    ::    mainnet anchor median-of-11).
-    ++  state-7-to-8
-      |=  arg=kernel-state-7:dk
-      ^-  kernel-state-8:dk
-      :*  %8
-          c=c.arg
-          a=a.arg
-          ::  discard stale pre-upgrade candidate; miner will rebuild on next tick
-          m=m.arg(candidate-block *page:t, candidate-acc *tx-acc:t)
-          d=d.arg
-          constants=*blockchain-constants:t
-      ==
-    ::
-    ::  upgrade kernel state 6 to kernel state 7
-    ::    blockchain-constants:v1 was extended with five ASERT fields in
-    ::    the original aletheia phase 1. kernel-state-6 uses
-    ::    blockchain-constants-v1-pre-asert (the frozen pre-ASERT shape) so
-    ::    that old %6 states can decode cleanly. kernel-state-7 uses the
-    ::    phase-1 snapshot of blockchain-constants:v1 (five asert-* fields,
-    ::    no asert-anchor-min-timestamp). we discard the old constants and
-    ::    let the chained state-7-to-8 upgrade plus update-constants fill
-    ::    in current defaults below.
-    ++  state-6-to-7
-      |=  arg=kernel-state-6:dk
-      ^-  kernel-state-7:dk
-      ::  guard: refuse if mainnet chain has already crossed ASERT activation.
-      ::  replicates is-mainnet logic inline to avoid calling dumb-derived with
-      ::  pre-ASERT constants (incompatible type).
-      =/  on-mainnet=?
-        ?~  genesis-seal.c.arg
-          ?^  genesis-id=(~(get z-by heaviest-chain.d.arg) 0)
-            =/  genesis  (~(get z-by blocks.c.arg) u.genesis-id)
-            ?~  genesis  %.n
-            =((hash:page-msg:t ~(msg get:local-page:t u.genesis)) realnet-genesis-msg:dk)
-          %.n
-        =(realnet-genesis-msg:dk msg-hash.u.genesis-seal.c.arg)
-      =/  phase  asert-phase:*blockchain-constants:t
-      ?:  &(on-mainnet ?=(^ highest-block-height.d.arg) (gte u.highest-block-height.d.arg phase))
-        ~>  %slog.[0 'FATAL: late-upgrade - mainnet chain crossed ASERT activation under pre-ASERT rules']
-        !!
-      :*  %7
-          c=c.arg
-          a=a.arg
-          ::  discard stale pre-upgrade candidate; miner will rebuild on next tick
-          m=m.arg(candidate-block *page:t, candidate-acc *tx-acc:t)
-          d=d.arg
-          constants=*blockchain-constants-v1-phase-1:dk
-      ==
     ::
     ::  upgrade kernel state 5 to kernel state 6
     ++  state-5-to-6
@@ -198,7 +95,7 @@
           next-nonce       next-nonce.m.arg
         ==
       =/  default-constants=blockchain-constants:t  *blockchain-constants:t
-      =/  new-constants=blockchain-constants-v1-pre-asert:dk
+      =/  new-constants=blockchain-constants:t
         :*  v1-phase.default-constants
             bythos-phase.default-constants
             data.default-constants
@@ -235,9 +132,9 @@
             ~
         (~(put z-ju bnb) tx-id block-id)
       ~>  %slog.[0 'load: Indexed blocks by transaction id']
-      =/  rtx=(z-map tx-id:v0:t *)  raw-txs.c.arg
-      =/  bnb=(z-map tx-id:v0:t *)  blocks-needed-by
-      =/  excluded-map=(z-map tx-id:v0:t *)  (~(dif z-by rtx) bnb)
+      =/  rtx=(map tx-id:v0:t *)  raw-txs.c.arg
+      =/  bnb=(map tx-id:v0:t *)  blocks-needed-by
+      =/  excluded-map=(map tx-id:v0:t *)  (~(dif z-by rtx) bnb)
       =/  excluded-txs=(z-set tx-id:v0:t)  ~(key z-by excluded-map)
       =+
         ?:  =(*(z-set tx-id:v0:t) excluded-txs)
@@ -384,9 +281,9 @@
   ++  peek
     |=  arg=path
     ^-  (unit (unit *))
-    |^
     ~>  %slog.[0 (cat 3 'peek: %' -.arg)]
     =/  =(pole)  arg
+    |^
     ?+  pole  ~
     ::
         [%mainnet ~]
@@ -394,44 +291,22 @@
     ::
         [%genesis-seal-set ~]
       ``?=(^ genesis-seal.c.k)
-    ::  Expose the active blockchain constants so external tools (E2E
-    ::  harness, diagnostics) can verify a running node's configuration
-    ::  without relying on hardcoded values.
-        [%constants ~]
-      ``constants.k
     ::
         [%blocks ~]
       ^-  (unit (unit (z-map block-id:t page:t)))
-      ``(hz-molt (~(run h-by blocks.c.k) to-page:local-page:t))
-    ::
-        [%h-blocks ~]
-      ^-  (unit (unit (h-map block-id:t page:t)))
-      ``(~(run h-by blocks.c.k) to-page:local-page:t)
+      ``(~(run z-by blocks.c.k) to-page:local-page:t)
     ::
         [%transactions ~]
       ^-  (unit (unit (z-mip block-id:t tx-id:t tx:t)))
-      ``(hz-milt txs.c.k)
-    ::
-        [%h-transactions ~]
-      ^-  (unit (unit (h-mip block-id:t tx-id:t tx:t)))
       ``txs.c.k
     ::
         [%raw-transactions ~]
       ^-  (unit (unit (z-map tx-id:t [=raw-tx:t heard-at=@])))
-      ``(hz-molt raw-txs.c.k)
-    ::
-        [%h-raw-transactions ~]
-      ^-  (unit (unit (h-map tx-id:t [=raw-tx:t heard-at=@])))
       ``raw-txs.c.k
     ::
       :: transactions unneeded by any block
         [%excluded-txs ~]
       ^-  (unit (unit (z-set tx-id:t)))
-      ``(hz-silt excluded-txs.c.k)
-    ::
-      :: transactions unneeded by any block
-        [%h-excluded-txs ~]
-      ^-  (unit (unit (h-set tx-id:t)))
       ``excluded-txs.c.k
     ::
     ::  For %block, %transaction, %raw-transaction, and %balance scries, the ID is
@@ -440,7 +315,7 @@
       ^-  (unit (unit page:t))
       :: scry for a validated block (this does not look at pending state)
       =/  block-id  (from-b58:hash:t bid.pole)
-      `(bind (~(get h-by blocks.c.k) block-id) to-page:local-page:t)
+      `(bind (~(get z-by blocks.c.k) block-id) to-page:local-page:t)
     ::
         [%elders bid=@ ~]
       ::  get ancestor block IDs up to 24 deep for a given block
@@ -455,16 +330,7 @@
       ::  scry for txs included in a validated block
       ^-  (unit (unit (z-map tx-id:t tx:t)))
       :-  ~
-      %+  bind
-      %-  ~(get h-by txs.c.k)
-      (from-b58:hash:t bid.pole)
-      hz-molt
-    ::
-        [%h-block-transactions bid=@ ~]
-      ::  scry for txs included in a validated block
-      ^-  (unit (unit (h-map tx-id:t tx:t)))
-      :-  ~
-      %-  ~(get h-by txs.c.k)
+      %-  ~(get z-by txs.c.k)
       (from-b58:hash:t bid.pole)
     ::
         [%block-transaction bid=@ tid=@ ~]
@@ -472,9 +338,9 @@
       ^-  (unit (unit tx:t))
       =/  tx-id  (from-b58:hash:t tid.pole)
       =/  block-id  (from-b58:hash:t bid.pole)
-      =/  block-txs  (~(get h-by txs.c.k) block-id)
+      =/  block-txs  (~(get z-by txs.c.k) block-id)
       ?~  block-txs  ~
-      =/  maybe-tx  (~(get h-by u.block-txs) tx-id)
+      =/  maybe-tx  (~(get z-by u.block-txs) tx-id)
       ?~  maybe-tx  ~
       ``u.maybe-tx
     ::
@@ -483,14 +349,6 @@
       ^-  (unit (unit raw-tx:t))
       :-  ~
       (get-raw-tx:con (from-b58:hash:t tid.pole))
-    ::
-        [%heavy-txs pag=@ ~]
-      ^-  (unit (unit heavy-txs))
-      ?~  height=((soft page-number:t) pag.pole)
-        ~
-      ?~  found=(heavy-txs-at u.height)
-        [~ ~]
-      ``u.found
     ::
         [%heavy ~]
       ^-  (unit (unit (unit block-id:t)))
@@ -506,7 +364,7 @@
         (~(get z-by heaviest-chain.d.k) u.num)
       ?~  id
         [~ ~]
-      `(bind (~(get h-by blocks.c.k) u.id) to-page:local-page:t)
+      `(bind (~(get z-by blocks.c.k) u.id) to-page:local-page:t)
     ::
         [%heaviest-chain ~]
       ^-  (unit (unit [page-number:t block-id:t]))
@@ -525,7 +383,10 @@
       ``heaviest-chain.d.k
     ::
         [%heaviest-chain-blocks-range start=@ end=@ ~]
-      (heaviest-chain-blocks-range start.pole end.pole)
+      (heaviest-chain-blocks-range start.pole end.pole %.y)
+    ::
+        [%heaviest-chain-blocks-range-no-pow start=@ end=@ ~]
+      (heaviest-chain-blocks-range start.pole end.pole %.n)
     ::
         [%desk-hash ~]
       ^-  (unit (unit (unit @uvI)))
@@ -542,22 +403,14 @@
         [%balance bid=@ ~]
       ^-  (unit (unit (z-map nname:t nnote:t)))
       :-  ~
-      %+  bind
-      %-  ~(get h-by balance.c.k)
-      (from-b58:hash:t bid.pole)
-      hz-molt
-    ::
-        [%h-balance bid=@ ~]
-      ^-  (unit (unit (h-map nname:t nnote:t)))
-      :-  ~
-      %-  ~(get h-by balance.c.k)
+      %-  ~(get z-by balance.c.k)
       (from-b58:hash:t bid.pole)
     ::
         [%heaviest-block ~]
       ^-  (unit (unit page:t))
       ?~  heaviest-block.c.k
         [~ ~]
-      =/  heaviest-block  (~(get h-by blocks.c.k) u.heaviest-block.c.k)
+      =/  heaviest-block  (~(get z-by blocks.c.k) u.heaviest-block.c.k)
       ?~  heaviest-block  ~
       ``(to-page:local-page:t u.heaviest-block)
     ::
@@ -565,22 +418,10 @@
       ^-  (unit (unit (z-map nname:t nnote:t)))
       ?~  heaviest-block.c.k
         [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
+      ?.  (~(has z-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
       :-  ~
-      %+  bind
-      %-  ~(get h-by balance.c.k)
-      u.heaviest-block.c.k
-      hz-molt
-    ::
-        [%h-current-balance ~]
-      ^-  (unit (unit (h-map nname:t nnote:t)))
-      ?~  heaviest-block.c.k
-        [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
-        [~ ~]
-      :-  ~
-      %-  ~(get h-by balance.c.k)
+      %-  ~(get z-by balance.c.k)
       u.heaviest-block.c.k
     ::
         [%balance-by-first-name first-name=@t ~]
@@ -588,9 +429,9 @@
       =/  first-name=hash:t  (from-b58:hash:t first-name.pole)
       ?~  heaviest-block.c.k
         [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
+      ?.  (~(has z-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
+      ?~  bal=(~(get z-by balance.c.k) u.heaviest-block.c.k)
         [~ ~]
       ?~  highest=highest-block-height.d.k
         [~ ~]
@@ -598,7 +439,7 @@
       %-  some
       :+  u.highest
         u.heaviest-block.c.k
-      %-  ~(rep h-by u.bal)
+      %-  ~(rep z-by u.bal)
       |=  [[k=nname:t v=nnote:t] bal=(z-map nname:t nnote:t)]
       ?.  =(~(first-name get:nnote:t v) first-name)
         bal
@@ -609,9 +450,9 @@
       =/  pubkey=schnorr-pubkey:t  (from-b58:schnorr-pubkey:t key-b58.pole)
       ?~  heaviest-block.c.k
         [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
+      ?.  (~(has z-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
+      ?~  bal=(~(get z-by balance.c.k) u.heaviest-block.c.k)
         [~ ~]
       ?~  highest=highest-block-height.d.k
         [~ ~]
@@ -619,7 +460,7 @@
       %-  some
       :+  u.highest
         u.heaviest-block.c.k
-      %-  ~(rep h-by u.bal)
+      %-  ~(rep z-by u.bal)
       |=  [[k=nname:t v=nnote:t] pub-bal=(z-map nname:t nnote:t)]
       ::  only include v0 notes; v1 notes use lock-roots
       ?.  ?=(^ -.v)
@@ -634,7 +475,7 @@
       ^-  (unit (unit [(each (z-set sig:t) (z-set hash:t)) (unit page-summary:t)]))
       ?~  heaviest-block.c.k
         ``[[%& ~(key z-by v0-shares.m.k)] ~]
-      =/  heaviest-block  (~(get h-by blocks.c.k) u.heaviest-block.c.k)
+      =/  heaviest-block  (~(get z-by blocks.c.k) u.heaviest-block.c.k)
       ?~  heaviest-block
         ``[[%& ~(key z-by v0-shares.m.k)] ~]
       ?~  highest-block-height.d.k
@@ -653,8 +494,7 @@
       :-  ~
       %~  tap  z-by
       ^-  (z-map block-id:t page:t)
-      %-  hz-molt
-      %-  ~(run h-by blocks.c.k)
+      %-  ~(run z-by blocks.c.k)
       |=  lp=local-page:t
       ^-  page:t
       ?^  -.lp  lp(pow ~)
@@ -663,52 +503,44 @@
         [%tx-accepted tid-b58=@t ~]
       ^-  (unit (unit ?))
       =+  tid=(from-b58:hash:t tid-b58:pole)
-      ``(~(has h-by raw-txs.c.k) tid)
+      ``(~(has z-by raw-txs.c.k) tid)
     ==
-    ::
-    +$  heavy-tx  [=tx-id:t =raw-tx:t]
-    +$  heavy-txs
-      $:  =page-number:t
-          =block-id:t
-          =page:t
-          txs=(list heavy-tx)
-      ==
-    ::
-    ++  heavy-txs-at
-      |=  =page-number:t
-      ^-  (unit heavy-txs)
-      ?~  block-id=(~(get z-by heaviest-chain.d.k) page-number)
-        ~
-      ?~  local-page=(~(get h-by blocks.c.k) u.block-id)
-        ~
-      =/  =page:t  (to-page:local-page:t u.local-page)
-      =/  txs=(list heavy-tx)
-        %+  turn  ~(tap z-in ~(tx-ids get:page:t page))
-        |=  =tx-id:t
-        [tx-id (got-raw-tx:con tx-id)]
-      `[page-number u.block-id page txs]
-    ::
     ++  heaviest-chain-blocks-range
-      |=  [start=@ end=@]
-      ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t raw-tx:t)])))
+      |=  [start=@ end=@ include-pow=?]
+      ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])))
       =/  start-height  ((soft page-number:t) start)
       =/  end-height  ((soft page-number:t) end)
       ?~  start-height  ~
       ?~  end-height  ~
+      ::  ensure start <= end
       ?:  (gth u.start-height u.end-height)
         ``~
-      =/  result=(list [page-number:t block-id:t page:t (z-map tx-id:t raw-tx:t)])
+      =/  to-page
+        ?:  include-pow
+          to-page:local-page:t
+        to-page-no-pow:local-page:t
+      ::  build list of blocks in range from heaviest chain
+      =/  result=(list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
         =/  height  u.start-height
-        |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t raw-tx:t)])
+        |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t tx:t)])
         ?:  (gth height u.end-height)
           ~
-        ?~  heavy-txs=(heavy-txs-at height)
+        ::  get block-id from heaviest chain
+        =/  block-id=(unit block-id:t)
+          (~(get z-by heaviest-chain.d.k) height)
+        ?~  block-id
           $(height +(height))
-        =/  txs-map=(z-map tx-id:t raw-tx:t)
-          %+  roll  txs.u.heavy-txs
-          |=  [[=tx-id:t =raw-tx:t] acc=(z-map tx-id:t raw-tx:t)]
-          (~(put z-by acc) tx-id raw-tx)
-        :-  [height block-id.u.heavy-txs page.u.heavy-txs txs-map]
+        ::  get block data
+        =/  local-block=(unit local-page:t)
+          (~(get z-by blocks.c.k) u.block-id)
+        ?~  local-block
+          $(height +(height))
+        ::  get transactions for this block
+        =/  block-txs=(unit (z-map tx-id:t tx:t))
+          (~(get z-by txs.c.k) u.block-id)
+        =/  txs-map  ?~(block-txs ~ u.block-txs)
+        ::  add to result list
+        :-  [height u.block-id (to-page u.local-block) txs-map]
         $(height +(height))
       ``result
     --
@@ -748,7 +580,7 @@
     :_  effs
     =/  version=proof-version:sp
       (height-to-proof-version:con ~(height get:page:t candidate-block.m.k))
-    =/  target  ~(target get:page:t candidate-block.m.k)
+    =/  target  (~(got z-by targets.c.k) ~(parent get:page:t candidate-block.m.k))
     =/  commit  (block-commitment:page:t candidate-block.m.k)
     ?-  version
       %0  [%mine %0 commit target pow-len:t]
@@ -792,9 +624,9 @@
         (missing-parent-effects ~(digest get:page:t pag) ~(height get:page:t pag) u.peer-id)
       ::  if we don't have parent and block claims to be heaviest
       ::  request ancestors to catch up or handle reorg
-      ?.  (~(has h-by blocks.c.k) ~(parent get:page:t pag))
+      ?.  (~(has z-by blocks.c.k) ~(parent get:page:t pag))
         ?:  %+  compare-heaviness:page:t  pag
-            (~(got h-by blocks.c.k) u.heaviest-block.c.k)
+            (~(got z-by blocks.c.k) u.heaviest-block.c.k)
           =/  peer-id=(unit @)  (get-peer-id wir)
           ?~  peer-id
             ~|("heard-block: Unsupported wire: {<wir>}" !!)
@@ -843,7 +675,7 @@
         ::  block has bad data
         :_  k
         ::  the order here matters since we want to add the block to tracking
-        ::  and then ban the peer who sent it. this path replaces %liar-peer
+        ::  and then ban the peer who sent it. we do this instead of %liar-peer
         ::  since its possible for another poke to be processed after %track %add
         ::  but before %liar-block-id, so more peers may be added to tracking
         ::  before %liar-block-id is processed.
@@ -859,7 +691,7 @@
       ::
       ::  tell driver we have seen this block so don't send it back to the kernel again
       =.  block-effs
-        [[%seen %block ~(digest get:page:t pag) ~] block-effs]
+        [[%seen %block ~(digest get:page:t pag) `~(height get:page:t pag)] block-effs]
       ::  stop tracking block id as soon as we verify pow
       =.  block-effs
         %+  snoc  block-effs
@@ -880,7 +712,7 @@
           [%request %raw-tx %by-id tx-id]
         :_  k
         ?:  %+  compare-heaviness:page:t  pag
-            (~(got h-by blocks.c.k) (need heaviest-block.c.k))
+            (~(got z-by blocks.c.k) (need heaviest-block.c.k))
           ~>  %slog.[0 'heard-block: Gossiping new heaviest block (transactions pending validation)']
           :-  [%gossip %0 %heard-block pag]
           block-effs
@@ -928,7 +760,7 @@
         |-
         ?~  ids  ~
         ?:  =(height 0)  ~
-        ?:  (~(has h-by blocks.c.k) i.ids)
+        ?:  (~(has z-by blocks.c.k) i.ids)
           `[i.ids height]
         $(ids t.ids, height (dec height))
       ?~  latest-known
@@ -970,8 +802,8 @@
     ::
     ++  check-duplicate-block
       |=  digest=block-id:t
-      ?|  (~(has h-by blocks.c.k) digest)
-          (~(has h-by pending-blocks.c.k) digest)
+      ?|  (~(has z-by blocks.c.k) digest)
+          (~(has z-by pending-blocks.c.k) digest)
       ==
     ::
     ++  check-genesis
@@ -1118,9 +950,9 @@
           ::  won't accidentally throw out a block that contained a valid tx-id
           ::  just because we received a tx that claimed the same id as the valid
           ::  one.
-          =/  tx-pending-blocks  (~(get h-ju blocks-needed-by.c.k) ~(id get:raw-tx:t raw))
+          =/  tx-pending-blocks  (~(get z-ju blocks-needed-by.c.k) ~(id get:raw-tx:t raw))
           =.  c.k
-            %-  ~(rep h-in tx-pending-blocks)
+            %-  ~(rep z-in tx-pending-blocks)
             |=  [id=block-id:t c=_c.k]
             =.  c.k  c
             (reject-pending-block:con id)
@@ -1192,7 +1024,7 @@
         =^  new-effs  k
           %:  process-block-with-txs
             now  eny
-            page:(~(got h-by pending-blocks.c.k) bid)
+            page:(~(got z-by pending-blocks.c.k) bid)
             :: if the block is bad, then tell the driver we dont want to see it
             :: again
             ~[[%seen %block bid ~]]
@@ -1283,10 +1115,7 @@
         ~>  %slog.[0 'accept-block: New heaviest block!']
         =/  span=span-effect:dk
           :+  %span  %new-heaviest-chain
-          :~  'block_height'^n+~(height get:page:t pag)
-              'heaviest_block_digest'^s+(to-b58:hash:t ~(digest get:page:t pag))
-              'block_target'^s+(scot %ux (merge:bignum:t ~(target get:page:t pag)))
-          ==
+          ~['block_height'^n+~(height get:page:t pag) 'heaviest_block_digest'^s+(to-b58:hash:t ~(digest get:page:t pag))]
         :*  [%gossip %0 %heard-block pag]
             span
             effs
@@ -1334,7 +1163,7 @@
       ::
       ::  if new block is heaviest, regossip txs that haven't been garbage collected
       =?  effs  is-new-heaviest
-        %-  ~(rep h-in excluded-txs.c.k)
+        %-  ~(rep z-in excluded-txs.c.k)
         |=  [=tx-id:t effs=_effs]
         [[%gossip %0 %heard-tx (got-raw-tx:con tx-id)] effs]
       ::  regossip block transactions if mining
@@ -1467,7 +1296,7 @@
         :: of height N+1
         :: Also emit %seen for the heaviest block so our cache can start to update
         =/  height=page-number:t
-          +(~(height get:local-page:t (~(got h-by blocks.c.k) u.heaviest-block.c.k)))
+          +(~(height get:local-page:t (~(got z-by blocks.c.k) u.heaviest-block.c.k)))
         =/  born-effects=(list effect:dk)
           :~  [%request %block %by-height height]
               [%seen %block u.heaviest-block.c.k `height]
@@ -1488,7 +1317,7 @@
           ~>  %slog.[1 'do-pow: Mined for wrong (old) block commitment']
           [~ k]
         ?:  %+  check-target:mine  dig.command
-            ~(target get:page:t candidate-block.m.k)
+            (~(got z-by targets.c.k) ~(parent get:page:t candidate-block.m.k))
           =.  m.k  (set-pow:min prf.command)
           =.  m.k  set-digest:min
           =^  heard-block-effs  k  (heard-block /poke/miner now candidate-block.m.k eny)
@@ -1605,7 +1434,7 @@
         =/  heavy-height=page-number:t
           ?~  heaviest-block.c.k
             *page-number:t  ::  rerequest genesis block
-          +(~(height get:local-page:t (~(got h-by blocks.c.k) u.heaviest-block.c.k)))
+          +(~(height get:local-page:t (~(got z-by blocks.c.k) u.heaviest-block.c.k)))
         =.  effects
           [[%request %block %by-height heavy-height] effects]
         =.  effects
@@ -1723,7 +1552,7 @@
       %-  ~(rep z-in ~(tx-ids get:page:t page))
       |=  [=tx-id:t effects=(list effect:dk)]
       ^-  (list effect:dk)
-      =/  tx=raw-tx:t  raw-tx:(~(got h-by raw-txs.c.k) tx-id)
+      =/  tx=raw-tx:t  raw-tx:(~(got z-by raw-txs.c.k) tx-id)
       =/  fec=effect:dk  [%gossip %0 %heard-tx tx]
       [fec effects]
     ::

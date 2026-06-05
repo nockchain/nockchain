@@ -1,6 +1,0 @@
-**
-!.dockerignore
-!Dockerfile
-!target/
-!target/release/
-!target/release/nockchain

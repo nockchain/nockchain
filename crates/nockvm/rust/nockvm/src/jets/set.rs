@@ -6,7 +6,7 @@ use crate::jets::util::slot;
 use crate::jets::{JetErr, Result};
 use crate::mem::NockStack;
 //use crate::mug::mug;
-use crate::noun::{Noun, NounSpace, Slots, D, NO, T, YES};
+use crate::noun::{Noun, Slots, D, NO, T, YES};
 
 type JetResult<T> = std::result::Result<T, JetErr>;
 
@@ -15,10 +15,10 @@ fn is_yes(noun: Noun) -> bool {
     unsafe { noun.raw_equals(&YES) }
 }
 
-fn decompose(node: Noun, space: &NounSpace) -> JetResult<(Noun, Noun, Noun)> {
-    let cell = node.in_space(space).as_cell()?;
+fn decompose(node: Noun) -> JetResult<(Noun, Noun, Noun)> {
+    let cell = node.as_cell()?;
     let tail = cell.tail().as_cell()?;
-    Ok((cell.head().noun(), tail.head().noun(), tail.tail().noun()))
+    Ok((cell.head(), tail.head(), tail.tail()))
 }
 
 fn make_node(stack: &mut NockStack, value: Noun, left: Noun, right: Noun) -> Noun {
@@ -28,21 +28,20 @@ fn make_node(stack: &mut NockStack, value: Noun, left: Noun, right: Noun) -> Nou
 
 // TODO: fix this jet. identical elements are not being deduplicated
 pub fn jet_put(context: &mut Context, subject: Noun) -> Result {
-    let space = context.stack.noun_space();
-    let elem = slot(subject, 6, &space)?;
-    let parent = match slot(subject, 7, &space) {
+    let elem = slot(subject, 6)?;
+    let parent = match slot(subject, 7) {
         Ok(parent) => parent,
         Err(_) => return Err(JetErr::Punt),
     };
-    let set = match slot(parent, 6, &space) {
+    let set = match slot(parent, 6) {
         Ok(set) => set,
         Err(_) => return Err(JetErr::Punt),
     };
 
-    put_iter(&mut context.stack, set, elem, &space)
+    put_iter(&mut context.stack, set, elem)
 }
 
-fn put_iter(stack: &mut NockStack, root: Noun, elem: Noun, space: &NounSpace) -> JetResult<Noun> {
+fn put_iter(stack: &mut NockStack, root: Noun, elem: Noun) -> JetResult<Noun> {
     if unsafe { root.raw_equals(&D(0)) } {
         return Ok(make_node(stack, elem, D(0), D(0)));
     }
@@ -55,13 +54,13 @@ fn put_iter(stack: &mut NockStack, root: Noun, elem: Noun, space: &NounSpace) ->
             break;
         }
 
-        let (value, left, right) = decompose(current, space)?;
+        let (value, left, right) = decompose(current)?;
 
         if unsafe { elem.raw_equals(&value) } {
             return Ok(root);
         }
 
-        let go_left = is_yes(gor(stack, elem, value, space));
+        let go_left = is_yes(gor(stack, elem, value));
         path.push((current, go_left));
         current = if go_left { left } else { right };
     }
@@ -69,17 +68,17 @@ fn put_iter(stack: &mut NockStack, root: Noun, elem: Noun, space: &NounSpace) ->
     let mut new_subtree = make_node(stack, elem, D(0), D(0));
 
     while let Some((node, went_left)) = path.pop() {
-        let (value, left, right) = decompose(node, space)?;
-        let (c_val, c_left, c_right) = decompose(new_subtree, space)?;
+        let (value, left, right) = decompose(node)?;
+        let (c_val, c_left, c_right) = decompose(new_subtree)?;
 
         new_subtree = if went_left {
-            if is_yes(mor(stack, value, c_val, space)) {
+            if is_yes(mor(stack, value, c_val)) {
                 make_node(stack, value, new_subtree, right)
             } else {
                 let new_a = make_node(stack, value, c_right, right);
                 make_node(stack, c_val, c_left, new_a)
             }
-        } else if is_yes(mor(stack, value, c_val, space)) {
+        } else if is_yes(mor(stack, value, c_val)) {
             make_node(stack, value, left, new_subtree)
         } else {
             let new_a = make_node(stack, value, left, c_left);
@@ -91,28 +90,23 @@ fn put_iter(stack: &mut NockStack, root: Noun, elem: Noun, space: &NounSpace) ->
 }
 
 #[inline(always)]
-fn ord_cmp(stack: &mut NockStack, a: Noun, b: Noun, space: &NounSpace) -> Ordering {
+fn ord_cmp(stack: &mut NockStack, a: Noun, b: Noun) -> Ordering {
     unsafe {
         if a.raw_equals(&b) {
             return Ordering::Equal;
         }
     }
-    if is_yes(gor(stack, b, a, space)) {
+    if is_yes(gor(stack, b, a)) {
         return Ordering::Less;
     } else {
         return Ordering::Greater;
     }
 }
 
-fn has_loop(
-    stack: &mut NockStack,
-    mut tree: Noun,
-    elem: Noun,
-    space: &NounSpace,
-) -> JetResult<bool> {
+fn has_loop(stack: &mut NockStack, mut tree: Noun, elem: Noun) -> JetResult<bool> {
     while unsafe { !tree.raw_equals(&D(0)) } {
-        let (val, left, right) = decompose(tree, space)?;
-        match ord_cmp(stack, elem, val, space) {
+        let (val, left, right) = decompose(tree)?;
+        match ord_cmp(stack, elem, val) {
             Ordering::Equal => return Ok(true),
             Ordering::Less => tree = left,
             Ordering::Greater => tree = right,
@@ -123,17 +117,16 @@ fn has_loop(
 
 // TODO: check this jet.
 pub fn jet_has(context: &mut Context, subject: Noun) -> Result {
-    let space = context.stack.noun_space();
-    let elem = subject.slot(6, &space)?;
-    let parent = match subject.slot(7, &space) {
+    let elem = subject.slot(6)?;
+    let parent = match subject.slot(7) {
         Ok(parent) => parent,
         Err(_) => return Err(JetErr::Punt),
     };
-    let set = match parent.slot(6, &space) {
+    let set = match parent.slot(6) {
         Ok(set) => set,
         Err(_) => return Err(JetErr::Punt),
     };
-    let present = has_loop(&mut context.stack, set, elem, &space)?;
+    let present = has_loop(&mut context.stack, set, elem)?;
     Ok(if present { YES } else { NO })
 }
 
@@ -167,17 +160,15 @@ mod tests {
     //    }
 
     fn contains(stack: &mut NockStack, mut tree: Noun, elem: Noun) -> bool {
-        let space = stack.noun_space();
         loop {
             if unsafe { tree.raw_equals(&D(0)) } {
                 return false;
             }
-            let (value, left, right) =
-                decompose(tree, &space).expect("tree should be valid set node");
+            let (value, left, right) = decompose(tree).expect("tree should be valid set node");
             if unsafe { value.raw_equals(&elem) } {
                 return true;
             }
-            tree = if is_yes(gor(stack, elem, value, &space)) {
+            tree = if is_yes(gor(stack, elem, value)) {
                 left
             } else {
                 right
@@ -186,7 +177,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn insert_into_empty_set() {
         let context = &mut init_context();
         let elem = D(1);
@@ -197,7 +187,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn insert_duplicate_retains_tree() {
         let context = &mut init_context();
         let set = node(&mut context.stack, D(5), D(0), D(0));
@@ -207,7 +196,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn insert_distinct_elements() {
         let context = &mut init_context();
         let base = node(&mut context.stack, D(9), D(0), D(0));
@@ -226,22 +214,21 @@ mod tests {
     }
 
     fn put_recursive(stack: &mut NockStack, tree: Noun, elem: Noun) -> JetResult<Noun> {
-        let space = stack.noun_space();
         if unsafe { tree.raw_equals(&D(0)) } {
             return Ok(make_node(stack, elem, D(0), D(0)));
         }
 
-        let (value, left, right) = decompose(tree, &space)?;
+        let (value, left, right) = decompose(tree)?;
 
         if unsafe { elem.raw_equals(&value) } {
             return Ok(tree);
         }
 
-        if is_yes(gor(stack, elem, value, &space)) {
+        if is_yes(gor(stack, elem, value)) {
             let c = put_recursive(stack, left, elem)?;
-            let (c_val, c_left, c_right) = decompose(c, &space)?;
+            let (c_val, c_left, c_right) = decompose(c)?;
 
-            if is_yes(mor(stack, value, c_val, &space)) {
+            if is_yes(mor(stack, value, c_val)) {
                 Ok(make_node(stack, value, c, right))
             } else {
                 let new_a = make_node(stack, value, c_right, right);
@@ -249,9 +236,9 @@ mod tests {
             }
         } else {
             let c = put_recursive(stack, right, elem)?;
-            let (c_val, c_left, c_right) = decompose(c, &space)?;
+            let (c_val, c_left, c_right) = decompose(c)?;
 
-            if is_yes(mor(stack, value, c_val, &space)) {
+            if is_yes(mor(stack, value, c_val)) {
                 Ok(make_node(stack, value, left, c))
             } else {
                 let new_a = make_node(stack, value, left, c_left);
@@ -273,7 +260,7 @@ mod tests {
         }
     }
 
-    fn tree_height(tree: Noun, space: &NounSpace) -> usize {
+    fn tree_height(tree: Noun) -> usize {
         let mut max = 0usize;
         let mut stack_vec = vec![(tree, 0usize)];
 
@@ -286,7 +273,7 @@ mod tests {
                 max = depth;
             }
 
-            let (value, left, right) = decompose(node, space).unwrap_or((node, D(0), D(0)));
+            let (value, left, right) = decompose(node).unwrap_or((node, D(0), D(0)));
             let _ = value;
             stack_vec.push((left, depth + 1));
             stack_vec.push((right, depth + 1));
@@ -296,7 +283,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn put_matches_recursive_small_inputs() {
         let mut base = [1u64, 2, 3, 4];
         let mut perms = Vec::new();
@@ -306,42 +292,39 @@ mod tests {
             let context = &mut init_context();
             let mut jet_tree = D(0);
             let mut rec_tree = D(0);
-            let space = context.stack.noun_space();
 
             for val in perm {
                 let noun_val = D(val);
-                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val, &space)
+                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val)
                     .expect("put_iter should succeed");
                 rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val)
                     .expect("put_recursive should succeed");
             }
 
-            assert_eq!(tree_height(jet_tree, &space), tree_height(rec_tree, &space));
+            assert_eq!(tree_height(jet_tree), tree_height(rec_tree));
             assert_noun_eq(&mut context.stack, jet_tree, rec_tree);
         }
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn put_matches_recursive_random_inputs() {
         let mut seed = 0xDEADBEEFu64;
         for _ in 0..20 {
             let context = &mut init_context();
             let mut jet_tree = D(0);
             let mut rec_tree = D(0);
-            let space = context.stack.noun_space();
 
             for _ in 0..80 {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let value = (seed >> 32) & 0xFFFF;
                 let noun_val = D(value);
-                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val, &space)
+                jet_tree = put_iter(&mut context.stack, jet_tree, noun_val)
                     .expect("put_iter should succeed");
                 rec_tree = put_recursive(&mut context.stack, rec_tree, noun_val)
                     .expect("put_recursive should succeed");
             }
 
-            assert_eq!(tree_height(jet_tree, &space), tree_height(rec_tree, &space));
+            assert_eq!(tree_height(jet_tree), tree_height(rec_tree));
             assert_noun_eq(&mut context.stack, jet_tree, rec_tree);
         }
     }

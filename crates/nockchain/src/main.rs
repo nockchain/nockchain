@@ -1,6 +1,7 @@
 use std::error::Error;
 
 use chaff::Chaff;
+use clap::Parser;
 use kernels_open_dumb::KERNEL;
 use nockapp::kernel::boot;
 use nockchain::NockchainAPIConfig;
@@ -19,7 +20,7 @@ static ALLOC: tracy_client::ProfiledAllocator<tikv_jemallocator::Jemalloc> =
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     nockvm::check_endian();
-    let cli = nockchain::NockchainCli::parse_with_default_stack_size(boot::NockStackSize::Large);
+    let cli = nockchain::NockchainCli::parse();
     boot::init_default_tracing(&cli.nockapp_cli);
 
     let prover_hot_state = produce_prover_hot_state();

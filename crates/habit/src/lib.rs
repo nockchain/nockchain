@@ -486,6 +486,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn reads_unary_across_bytes() {
         let bytes = Bytes::from(vec![0b0000_0000, 0b0001_0000]);
@@ -640,6 +641,7 @@ mod tests {
             }
         }
     }
+
     quickcheck::quickcheck! {
         fn prop_write_then_read_bits(payload: Vec<u8>, bit_count: usize) -> TestResult {
             let bits = bit_count % 129;

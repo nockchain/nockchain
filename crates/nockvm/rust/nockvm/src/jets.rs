@@ -1,5 +1,3 @@
-#![allow(clippy::missing_safety_doc)]
-
 pub mod cold;
 pub mod hot;
 pub mod warm;
@@ -43,7 +41,7 @@ use crate::jets::sort::*;
 use crate::jets::tree::*;
 use crate::jets::warm::Warm;
 use crate::mem::{NockStack, Preserve};
-use crate::noun::{self, Noun};
+use crate::noun::{self, Noun, Slots};
 
 crate::gdb!();
 
@@ -211,7 +209,7 @@ pub mod util {
 
     use super::*;
     use crate::interpreter::interpret;
-    use crate::noun::{Noun, NounSpace, D, T};
+    use crate::noun::{Noun, D, T};
 
     pub const BAIL_EXIT: JetErr = JetErr::Fail(Error::Deterministic(Mote::Exit, D(0)));
     pub const BAIL_FAIL: JetErr = JetErr::Fail(Error::NonDeterministic(Mote::Fail, D(0)));
@@ -256,9 +254,8 @@ pub mod util {
         bits_to_word(checked_left_shift(bloq, step)?)
     }
 
-    pub fn slot(noun: Noun, axis: u64, space: &NounSpace) -> Result {
-        noun.slot_direct_trusted_or_checked(axis, space)
-            .map_err(|_e| BAIL_EXIT)
+    pub fn slot(noun: Noun, axis: u64) -> Result {
+        noun.slot(axis).map_err(|_e| BAIL_EXIT)
     }
 
     /// Extract a bloq and check that it's computable by the current system
@@ -272,10 +269,10 @@ pub mod util {
     }
 
     /// Extract the bloq and step from a bite
-    pub fn bite(a: Noun, space: &NounSpace) -> result::Result<(usize, usize), JetErr> {
-        if let Ok(cell) = a.in_space(space).as_cell() {
-            let bloq = bloq(cell.head().noun())?;
-            let step = cell.tail().noun().as_direct()?.data() as usize;
+    pub fn bite(a: Noun) -> result::Result<(usize, usize), JetErr> {
+        if let Ok(cell) = a.as_cell() {
+            let bloq = bloq(cell.head())?;
+            let step = cell.tail().as_direct()?.data() as usize;
             Ok((bloq, step))
         } else {
             bloq(a).map(|x| (x, 1_usize))
@@ -318,21 +315,10 @@ pub mod util {
     }
 
     pub fn slam(context: &mut Context, gate: Noun, sample: Noun) -> result::Result<Noun, JetErr> {
-        let space = context.stack.fast_noun_space();
-        slam_with_space(context, gate, sample, &space)
-    }
-
-    pub fn slam_with_space(
-        context: &mut Context,
-        gate: Noun,
-        sample: Noun,
-        space: &NounSpace,
-    ) -> result::Result<Noun, JetErr> {
-        let gate_cell = gate.as_cell()?;
-        let (gate_head, gate_tail) = gate_cell.head_tail_trusted(space);
-        let gate_tail_cell = gate_tail.as_cell()?;
-        let (_sample_slot, gate_context_tail) = gate_tail_cell.head_tail_trusted(space);
-        let core: Noun = T(&mut context.stack, &[gate_head, sample, gate_context_tail]);
+        let core: Noun = T(
+            &mut context.stack,
+            &[gate.as_cell()?.head(), sample, gate.as_cell()?.tail().as_cell()?.tail()],
+        );
         kick(context, core, D(2))
     }
 
@@ -362,8 +348,7 @@ pub mod util {
         }
 
         pub fn init_context() -> Context {
-            let mut stack = NockStack::new(crate::mem::NOCK_STACK_SIZE_TINY, 0);
-            let arena = stack.arena().clone();
+            let mut stack = NockStack::new(8 << 10 << 10, 0);
             let cold = Cold::new(&mut stack);
             let warm = Warm::new(&mut stack);
             let hot = Hot::init(&mut stack, URBIT_HOT_STATE);
@@ -383,7 +368,6 @@ pub mod util {
                 trace_info: None,
                 running_status: cancel,
                 test_jets,
-                arena,
             }
         }
 
@@ -480,7 +464,6 @@ pub mod util {
                 )
             });
             assert!(res.is_atom(), "jet result not atom");
-            let space = context.stack.fast_noun_space();
             let res_siz = res
                 .atom()
                 .unwrap_or_else(|| {
@@ -491,7 +474,6 @@ pub mod util {
                         option_env!("GIT_SHA")
                     )
                 })
-                .in_space(&space)
                 .size();
             assert!(siz == res_siz, "got: {res_siz}, need: {siz}");
         }

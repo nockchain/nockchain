@@ -1,8 +1,6 @@
 use noun_serde::NounDecodeError;
 use thiserror::Error;
 
-use crate::noun::slab::NounSlab;
-
 #[derive(Debug, Error)]
 pub enum ExternalError {
     #[error("unknown error: {0}")]
@@ -29,7 +27,7 @@ pub enum CrownError<T = ExternalError> {
     #[error("{0}")]
     InterpreterError(#[from] SwordError),
     #[error("kernel error")]
-    KernelError(Option<NounSlab>),
+    KernelError(Option<nockvm::noun::Noun>),
     #[error("{0}")]
     Utf8FromError(#[from] std::string::FromUtf8Error),
     #[error("{0}")]
@@ -42,10 +40,6 @@ pub enum CrownError<T = ExternalError> {
     BootError,
     #[error("Serf load error")]
     SerfLoadError,
-    #[error("{0}")]
-    SerfInitAllocationError(String),
-    #[error("{0}")]
-    SerfInitPanic(String),
     #[error(
         "checkpoint ker_hash != current ker_hash: checkpoint={checkpoint} current={current}. Rebuild with matching kernel assets or resync checkpoints."
     )]
@@ -74,8 +68,6 @@ pub enum CrownError<T = ExternalError> {
     EncodeError(#[from] bincode::error::EncodeError),
     #[error("state jam format error: the state jam file format is not recognized")]
     StateJamFormatError,
-    #[error("timeout")]
-    Timeout,
     #[error("unknown error: {0}")]
     Unknown(String),
     #[error("conversion error: {0}")]

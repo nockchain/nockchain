@@ -1,14 +1,11 @@
 use std::ptr::{copy_nonoverlapping, null_mut};
 use std::slice;
-use std::time::Instant;
 
 use either::Either::{self, *};
-use tracing::debug;
 
 use crate::mem::{NockStack, Preserve};
 use crate::mug::mug_u32;
-use crate::noun::{Noun, NounAllocator};
-use crate::pma::{Pma, PmaCopy, PmaCopyFrom};
+use crate::noun::Noun;
 use crate::unifying_equality::unifying_equality;
 
 type MutStemEntry<T> = Either<*mut MutStem<T>, Leaf<T>>;
@@ -634,393 +631,6 @@ impl<T: Copy + Preserve> Preserve for Hamt<T> {
     // gen2 + gen3: 257.47 seconds
 }
 
-impl<T: Copy + PmaCopy> PmaCopy for Hamt<T> {
-    #[cfg(feature = "pma-assert")]
-    fn assert_in_pma(&self, pma: &Pma) {
-        unsafe {
-            // Check root stem is in PMA
-            assert!(
-                pma.contains_ptr(self.0 as *const u8),
-                "HAMT root stem should be in PMA"
-            );
-
-            // Empty HAMT - nothing else to check
-            if (*self.0).bitmap == 0 {
-                return;
-            }
-
-            // Traverse and check all internal structures
-            let mut stk: [(Stem<T>, u32, usize); 6] = [(
-                Stem {
-                    bitmap: 0,
-                    typemap: 0,
-                    buffer: null_mut(),
-                },
-                0,
-                0,
-            ); 6];
-            stk[0] = ((*self.0), (*self.0).bitmap, 0);
-            let mut depth = 1;
-
-            loop {
-                if depth == 0 {
-                    break;
-                }
-                let (stem, bits, next_idx) = &mut stk[depth - 1];
-
-                if *bits == 0 {
-                    depth -= 1;
-                    continue;
-                }
-
-                let bit = bits.trailing_zeros();
-                *bits &= *bits - 1;
-                let idx = *next_idx;
-                *next_idx = idx + 1;
-
-                let ep = stem.buffer.add(idx);
-                let is_stem = ((stem.typemap >> bit) & 1) != 0;
-
-                if is_stem {
-                    let child = (*ep).stem;
-                    assert!(
-                        pma.contains_ptr(child.buffer as *const u8),
-                        "HAMT child stem buffer should be in PMA"
-                    );
-                    stk[depth] = (child, child.bitmap, 0);
-                    depth += 1;
-                } else {
-                    let leaf = (*ep).leaf;
-                    assert!(
-                        pma.contains_ptr(leaf.buffer as *const u8),
-                        "HAMT leaf buffer should be in PMA"
-                    );
-                    // Check all nouns in key-value pairs
-                    let mut p = leaf.buffer;
-                    let end = p.add(leaf.len);
-                    while p != end {
-                        (*p).0.assert_in_pma(pma);
-                        (*p).1.assert_in_pma(pma);
-                        p = p.add(1);
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "pma-assert"))]
-    #[inline(always)]
-    fn assert_in_pma(&self, _pma: &Pma) {}
-
-    /// Copy this HAMT and all its contents to the PMA.
-    ///
-    /// This copies:
-    /// - The root Stem
-    /// - All child Stems and their entry buffers
-    /// - All Leaves and their key-value pair buffers
-    /// - All Nouns in keys, converted to offset form
-    /// - All T values in values (via T::copy_to_pma)
-    ///
-    /// After this call, self.0 points to the PMA copy and all internal
-    /// pointers reference PMA locations.
-    unsafe fn copy_to_pma(&mut self, stack: &NockStack, pma: &mut Pma) {
-        let trace = std::env::var_os("NOCK_PMA_TRACE").is_some();
-        if pma.contains_ptr(self.0 as *const u8) {
-            if trace {
-                debug!("pma-copy: hamt skip: root already in PMA");
-            }
-            return;
-        }
-
-        let trace_start = Instant::now();
-        let mut last_progress = trace_start;
-        let mut stem_copies = 0usize;
-        let mut leaf_copies = 0usize;
-        let mut leaf_pairs = 0usize;
-        let mut stem_skips = 0usize;
-        let mut leaf_skips = 0usize;
-        let trace_detail = trace
-            && std::env::var_os("NOCK_PMA_TRACE_HAMT_DETAIL").is_some()
-            && std::any::type_name::<T>().contains("WarmEntry");
-        if trace {
-            let root_size = (*self.0).size();
-            debug!(
-                "pma-copy: hamt start: root_ptr={:p} root_size={}",
-                self.0, root_size
-            );
-        }
-
-        // Copy root stem to PMA
-        let dest_stem: *mut Stem<T> = pma.alloc_struct(1);
-        copy_nonoverlapping(self.0, dest_stem, 1);
-        self.0 = dest_stem;
-        stem_copies += 1;
-
-        // Copy root's buffer to PMA
-        let sz = (*dest_stem).size();
-        if sz > 0 {
-            let src_buffer = (*dest_stem).buffer;
-            if !pma.contains_ptr(src_buffer as *const u8) {
-                let dest_buffer: *mut Entry<T> = pma.alloc_struct(sz);
-                copy_nonoverlapping(src_buffer, dest_buffer, sz);
-                (*dest_stem).buffer = dest_buffer;
-            } else {
-                stem_skips += 1;
-            }
-        }
-
-        // Worklist: (stem whose buffer is already in PMA, remaining bitmap bits, next buffer index)
-        let mut stk: [(Stem<T>, u32, usize); 6] = [(
-            Stem {
-                bitmap: 0,
-                typemap: 0,
-                buffer: null_mut(),
-            },
-            0,
-            0,
-        ); 6];
-        stk[0] = (*dest_stem, (*dest_stem).bitmap, 0);
-        let mut depth = 1;
-
-        loop {
-            if depth == 0 {
-                break;
-            }
-            let (stem, bits, next_idx) = &mut stk[depth - 1];
-
-            if *bits == 0 {
-                depth -= 1;
-                continue;
-            }
-
-            let bit = bits.trailing_zeros(); // 0..31
-            *bits &= *bits - 1; // clear lsb set bit
-            let idx = *next_idx;
-            *next_idx = idx + 1;
-
-            let ep = stem.buffer.add(idx);
-            let is_stem = ((stem.typemap >> bit) & 1) != 0;
-
-            if is_stem {
-                // Child stem - copy its buffer to PMA
-                let child = (*ep).stem;
-                if pma.contains_ptr(child.buffer as *const u8) {
-                    stem_skips += 1;
-                    continue;
-                }
-                let csz = child.size();
-                let db: *mut Entry<T> = pma.alloc_struct(csz);
-                copy_nonoverlapping(child.buffer, db, csz);
-                let new_stem = Stem {
-                    bitmap: child.bitmap,
-                    typemap: child.typemap,
-                    buffer: db,
-                };
-                *ep = Entry { stem: new_stem };
-                stem_copies += 1;
-                stk[depth] = (new_stem, new_stem.bitmap, 0);
-                depth += 1;
-            } else {
-                // Leaf - copy its buffer to PMA and evacuate all nouns
-                let leaf = (*ep).leaf;
-                if pma.contains_ptr(leaf.buffer as *const u8) {
-                    leaf_skips += 1;
-                    continue;
-                }
-                let len = leaf.len;
-                let db: *mut (Noun, T) = pma.alloc_struct(len);
-                copy_nonoverlapping(leaf.buffer, db, len);
-                let new_leaf = Leaf { len, buffer: db };
-                leaf_copies += 1;
-                if trace_detail {
-                    debug!(
-                        "pma-copy: hamt leaf start: len={}, pair_index_start={}",
-                        len, leaf_pairs
-                    );
-                }
-
-                // Evacuate all nouns in key-value pairs
-                let mut p = new_leaf.buffer;
-                let end = p.add(len);
-                while p != end {
-                    if trace_detail {
-                        debug!("pma-copy: hamt pair {} key start", leaf_pairs);
-                    }
-                    (*p).0.copy_to_pma(stack, pma);
-                    if trace_detail {
-                        debug!("pma-copy: hamt pair {} key done", leaf_pairs);
-                        debug!("pma-copy: hamt pair {} val start", leaf_pairs);
-                    }
-                    (*p).1.copy_to_pma(stack, pma);
-                    if trace_detail {
-                        debug!("pma-copy: hamt pair {} val done", leaf_pairs);
-                    }
-                    p = p.add(1);
-                    leaf_pairs += 1;
-                    if trace && (leaf_pairs & 0x3fff == 0) {
-                        let now = Instant::now();
-                        if now.duration_since(last_progress).as_millis() >= 2000 {
-                            debug!(
-                                "pma-copy: hamt progress: stems_copied={}, leaves_copied={}, leaf_pairs={}, stem_skips={}, leaf_skips={}, elapsed_ms={}",
-                                stem_copies,
-                                leaf_copies,
-                                leaf_pairs,
-                                stem_skips,
-                                leaf_skips,
-                                trace_start.elapsed().as_millis()
-                            );
-                            last_progress = now;
-                        }
-                    }
-                }
-                if trace_detail {
-                    debug!(
-                        "pma-copy: hamt leaf done: len={}, pair_index_end={}",
-                        len, leaf_pairs
-                    );
-                }
-                *ep = Entry { leaf: new_leaf };
-            }
-        }
-
-        if trace {
-            debug!(
-                "pma-copy: hamt done: stems_copied={}, leaves_copied={}, leaf_pairs={}, stem_skips={}, leaf_skips={}, elapsed_ms={}",
-                stem_copies,
-                leaf_copies,
-                leaf_pairs,
-                stem_skips,
-                leaf_skips,
-                trace_start.elapsed().as_millis()
-            );
-        }
-    }
-}
-
-impl<T: Copy + PmaCopyFrom> PmaCopyFrom for Hamt<T> {
-    unsafe fn copy_from_pma(&mut self, from_pma: &Pma, to_pma: &mut Pma) {
-        if !from_pma.contains_ptr(self.0 as *const u8) {
-            return;
-        }
-        let trace = std::env::var_os("NOCK_PMA_TRACE").is_some();
-        let trace_start = Instant::now();
-        let mut last_progress = trace_start;
-        let mut stem_copies = 0usize;
-        let mut leaf_copies = 0usize;
-        let mut leaf_pairs = 0usize;
-
-        if trace {
-            let root_size = (*self.0).size();
-            debug!(
-                "pma-gc: hamt start: root_ptr={:p} root_size={}",
-                self.0, root_size
-            );
-        }
-
-        let dest_stem: *mut Stem<T> = to_pma.alloc_struct(1);
-        copy_nonoverlapping(self.0, dest_stem, 1);
-        self.0 = dest_stem;
-        stem_copies += 1;
-
-        let sz = (*dest_stem).size();
-        if sz > 0 {
-            let src_buffer = (*dest_stem).buffer;
-            let dest_buffer: *mut Entry<T> = to_pma.alloc_struct(sz);
-            copy_nonoverlapping(src_buffer, dest_buffer, sz);
-            (*dest_stem).buffer = dest_buffer;
-        }
-
-        let mut stk: [(Stem<T>, u32, usize); 6] = [(
-            Stem {
-                bitmap: 0,
-                typemap: 0,
-                buffer: null_mut(),
-            },
-            0,
-            0,
-        ); 6];
-        stk[0] = (*dest_stem, (*dest_stem).bitmap, 0);
-        let mut depth = 1;
-
-        loop {
-            if depth == 0 {
-                break;
-            }
-            let (stem, bits, next_idx) = &mut stk[depth - 1];
-
-            if *bits == 0 {
-                depth -= 1;
-                continue;
-            }
-
-            let bit = bits.trailing_zeros();
-            *bits &= *bits - 1;
-            let idx = *next_idx;
-            *next_idx = idx + 1;
-
-            let ep = stem.buffer.add(idx);
-            let is_stem = ((stem.typemap >> bit) & 1) != 0;
-
-            if is_stem {
-                let child = (*ep).stem;
-                let csz = child.size();
-                let db: *mut Entry<T> = to_pma.alloc_struct(csz);
-                copy_nonoverlapping(child.buffer, db, csz);
-                let new_stem = Stem {
-                    bitmap: child.bitmap,
-                    typemap: child.typemap,
-                    buffer: db,
-                };
-                *ep = Entry { stem: new_stem };
-                stem_copies += 1;
-                debug_assert!(depth < 6);
-                stk[depth] = (new_stem, new_stem.bitmap, 0);
-                depth += 1;
-            } else {
-                let leaf = (*ep).leaf;
-                let len = leaf.len;
-                let db: *mut (Noun, T) = to_pma.alloc_struct(len);
-                copy_nonoverlapping(leaf.buffer, db, len);
-                let new_leaf = Leaf { len, buffer: db };
-                leaf_copies += 1;
-
-                let mut p = new_leaf.buffer;
-                let end = p.add(len);
-                while p != end {
-                    (*p).0.copy_from_pma(from_pma, to_pma);
-                    (*p).1.copy_from_pma(from_pma, to_pma);
-                    p = p.add(1);
-                    leaf_pairs += 1;
-                    if trace && (leaf_pairs & 0x3fff == 0) {
-                        let now = Instant::now();
-                        if now.duration_since(last_progress).as_millis() >= 2000 {
-                            debug!(
-                                "pma-gc: hamt progress: stems_copied={}, leaves_copied={}, leaf_pairs={}, elapsed_ms={}",
-                                stem_copies,
-                                leaf_copies,
-                                leaf_pairs,
-                                trace_start.elapsed().as_millis()
-                            );
-                            last_progress = now;
-                        }
-                    }
-                }
-                *ep = Entry { leaf: new_leaf };
-            }
-        }
-
-        if trace {
-            debug!(
-                "pma-gc: hamt done: stems_copied={}, leaves_copied={}, leaf_pairs={}, elapsed_ms={}",
-                stem_copies,
-                leaf_copies,
-                leaf_pairs,
-                trace_start.elapsed().as_millis()
-            );
-        }
-    }
-}
-
 /// 🐹
 /// Humorously named iterator for Hamt, which is a portmanteau of Hamt and iterator.
 /// Maximum depth of the HAMT is 6, so we can safely use a fixed size array for the traversal stack.
@@ -1122,7 +732,6 @@ mod test {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_hamt_into_iter() {
         let size = 1 << 27;
         let top_slots = 100;
@@ -1144,7 +753,6 @@ mod test {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_hamt_iter_big() {
         let size = 1 << 27;
         let top_slots = 100;
@@ -1163,7 +771,6 @@ mod test {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_hamt() {
         let size = 1 << 27;
         let top_slots = 100;
@@ -1184,7 +791,6 @@ mod test {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_hamt_collision_check() {
         let size = 1 << 27;
         let top_slots = 100;
@@ -1220,7 +826,6 @@ mod test {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_hamt_collision_iter() {
         let size = 1 << 27;
         let top_slots = 100;

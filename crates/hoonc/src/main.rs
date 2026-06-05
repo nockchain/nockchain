@@ -6,7 +6,8 @@ use nockvm::mem::{AllocationError, NewStackError};
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let cli = HoonCli::parse();
+    let mut cli = HoonCli::parse();
+    cli.boot.save_interval = None;
     boot::init_default_tracing(&cli.boot.clone());
     let result = std::panic::AssertUnwindSafe(async {
         let (mut nockapp, _) = initialize_hoonc(cli).await?;

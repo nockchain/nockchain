@@ -4,9 +4,7 @@ use either::Either::{self, Left, Right};
 use nockvm_macros::tas;
 
 use crate::jets::*;
-use crate::mem::{NockStack, Preserve};
-use crate::noun::{Atom, DirectAtom, IndirectAtom, Noun, NounAllocator, D, T};
-use crate::pma::{Pma, PmaCopy, PmaCopyFrom};
+use crate::noun::{Atom, DirectAtom, IndirectAtom, Noun, D, T};
 
 /** Root for Hoon %k.138
  */
@@ -840,7 +838,6 @@ pub struct Hot(*mut HotMem);
 impl Hot {
     pub fn init(stack: &mut NockStack, constant_hot_state: &[HotEntry]) -> Self {
         unsafe {
-            let space = stack.noun_space();
             let mut next = Hot(null_mut());
             for (htap, axe, jet) in constant_hot_state {
                 let mut a_path = D(0);
@@ -848,7 +845,7 @@ impl Hot {
                     match i {
                         Left(tas) => {
                             let chum = IndirectAtom::new_raw_bytes_ref(stack, tas)
-                                .normalize_as_atom(&space)
+                                .normalize_as_atom()
                                 .as_noun();
                             a_path = T(stack, &[chum, a_path]);
                         }
@@ -920,59 +917,6 @@ impl Preserve for Hot {
             (*it.0).a_path.assert_in_stack(stack);
             (*it.0).axis.assert_in_stack(stack);
             it = &mut (*it.0).next;
-        }
-    }
-}
-
-impl PmaCopy for Hot {
-    #[cfg(feature = "pma-assert")]
-    fn assert_in_pma(&self, pma: &Pma) {
-        let mut it = *self;
-        while !it.0.is_null() {
-            assert!(
-                pma.contains_ptr(it.0 as *const u8),
-                "Hot node should be in PMA"
-            );
-            unsafe {
-                (*it.0).a_path.assert_in_pma(pma);
-                (*it.0).axis.assert_in_pma(pma);
-            }
-            it = unsafe { (*it.0).next };
-        }
-    }
-
-    #[cfg(not(feature = "pma-assert"))]
-    #[inline(always)]
-    fn assert_in_pma(&self, _pma: &Pma) {}
-
-    unsafe fn copy_to_pma(&mut self, stack: &NockStack, pma: &mut Pma) {
-        let mut ptr: *mut Hot = self;
-        while !(*ptr).0.is_null() {
-            if pma.contains_ptr((*ptr).0 as *const u8) {
-                break;
-            }
-            let src = (*ptr).0;
-            (*src).a_path.copy_to_pma(stack, pma);
-            (*src).axis.copy_to_pma(stack, pma);
-            let dest_mem: *mut HotMem = pma.alloc_struct(1);
-            copy_nonoverlapping(src, dest_mem, 1);
-            *ptr = Hot(dest_mem);
-            ptr = &mut (*dest_mem).next;
-        }
-    }
-}
-
-impl PmaCopyFrom for Hot {
-    unsafe fn copy_from_pma(&mut self, from_pma: &Pma, to_pma: &mut Pma) {
-        let mut ptr: *mut Hot = self;
-        while !(*ptr).0.is_null() {
-            let src = (*ptr).0;
-            let dest_mem: *mut HotMem = to_pma.alloc_struct(1);
-            copy_nonoverlapping(src, dest_mem, 1);
-            *ptr = Hot(dest_mem);
-            (*dest_mem).a_path.copy_from_pma(from_pma, to_pma);
-            (*dest_mem).axis.copy_from_pma(from_pma, to_pma);
-            ptr = &mut (*dest_mem).next;
         }
     }
 }
