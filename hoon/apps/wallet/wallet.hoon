@@ -5,7 +5,6 @@
 /=  transact  /common/tx-engine
 /=  z   /common/zeke
 /=  zo  /common/zoon
-/=  hz  /common/h-zoon
 /=  dumb  /apps/dumbnet/lib/types
 /=  bridge  /apps/bridge/types
 /=  *   /common/zose
@@ -36,7 +35,7 @@
   ^-  state:wt
   |^
   |-
-  ?:  ?=(%8 -.old)
+  ?:  ?=(%6 -.old)
     old
   ~>  %slog.[0 'load: State upgrade required']
   ?-  -.old
@@ -46,8 +45,6 @@
     %3  $(old state-3-4)
     %4  $(old state-4-5)
     %5  $(old state-5-6)
-    %6  $(old state-6-7)
-    %7  $(old state-7-8)
   ==
   ::
   ++  state-0-1
@@ -136,32 +133,10 @@
     ==
   ::
   ++  state-5-6
-    ^-  state-6:wt
+    ^-  state:wt
     ?>  ?=(%5 -.old)
     ~>  %slog.[0 'upgrade version 5 to 6']
     :*  %6
-        balance.old
-        active-master.old
-        keys.old
-        *blockchain-constants-v1-pre-asert:wt
-    ==
-  ::
-  ++  state-6-7
-    ^-  state-7:wt
-    ?>  ?=(%6 -.old)
-    ~>  %slog.[0 'upgrade version 6 to 7']
-    :*  %7
-        balance.old
-        active-master.old
-        keys.old
-        *blockchain-constants-v1-phase-1:wt
-    ==
-  ::
-  ++  state-7-8
-    ^-  state-8:wt
-    ?>  ?=(%7 -.old)
-    ~>  %slog.[0 'upgrade version 7 to 8']
-    :*  %8
         balance.old
         active-master.old
         keys.old
@@ -222,20 +197,6 @@
     ?:  ?=(%1 -.coil)
       ~
     `~(address to-b58:coil:wt coil)
-    ::
-    ::  returns local v1 signer pubkey hashes
-      [%signing-keys ~]
-    :+  ~
-      ~
-    %+  murn
-      ~(coils get:v %pub)
-    |=  =coil:wt
-    ?.  ?=(%1 -.coil)
-      ~
-    =/  signer-pkh=hash:transact
-      %-  hash:schnorr-pubkey:transact
-      (from-ser:schnorr-pubkey:transact p.key.coil)
-    `signer-pkh
     ::
     ::  returns tracked first-name lock cache entries in machine-readable form
       [%tracked-locks ~]
@@ -873,7 +834,7 @@
     =+  data=data:*blockchain-constants:transact
     =/  valid=(reason:dumb ~)
       %-  validate-with-context:spends:transact
-      [(zh-molt:hz notes.balance.state) signed-spends height.balance.state max-size.data bythos-phase.bc.state]
+      [notes.balance.state signed-spends height.balance.state max-size.data bythos-phase.bc.state]
     ?-    -.valid
         %.y
       =/  nock-cause=$>(%fact cause:dumb)

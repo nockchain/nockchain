@@ -1,8 +1,7 @@
 /=  dk  /apps/dumbnet/lib/types
 /=  sp  /common/stark/prover
 /=  dumb-transact  /common/tx-engine
-/=  asert  /apps/dumbnet/lib/asert
-/=  *  /common/h-zoon
+/=  *  /common/zoon
 ::
 :: everything to do with mining and mining state
 ::
@@ -51,35 +50,35 @@
   max-block-size:t
 ::
 ::  grab all raw-txs that could possibly be included in block.
-::  note that this map could include txs that are not spendable
+::  note that this set could include txs that are not spendable
 ::  from the current heaviest balance. we rely on the logic inside
 ::  of process:tx-acc to catch these txs and reject them.
 ++  candidate-txs
   |=  c=consensus-state:dk
-  ^-  (h-map tx-id:t raw-tx:t)
+  ^-  (z-set raw-tx:t)
   |^
-    %-  ~(rep h-in candidate-tx-ids)
-    |=  [=tx-id:t txs=(h-map tx-id:t raw-tx:t)]
-    =/  raw  raw-tx:(~(got h-by raw-txs.c) tx-id)
-    (~(put h-by txs) [tx-id raw])
+    %-  ~(rep z-in candidate-tx-ids)
+    |=  [=tx-id:t txs=(set raw-tx:t)]
+    =/  raw  raw-tx:(~(got z-by raw-txs.c) tx-id)
+    (~(put z-in txs) raw)
   ::
   ::  union of excluded tx-ids and pending block tx ids
   ::  excluding tx-ids already included in candidate block
   ++  candidate-tx-ids
-    %-  %~  dif  h-in
-        (~(uni h-in excluded-txs.c) pending-block-tx-ids)
-    (zh-silt ~(tx-ids get:page:t candidate-block.m))
+    %-  %~  dif  z-in
+        (~(uni z-in excluded-txs.c) pending-block-tx-ids)
+    ~(tx-ids get:page:t candidate-block.m)
   ::
   ::  set of available raw-txs from pending blocks
   ++  pending-block-tx-ids
-    ^-  (h-set tx-id:t)
-    %-  ~(rep h-by pending-blocks.c)
-    |=  [[block-id:t pag=page:t *] all=(h-set tx-id:t)]
-    ^-  (h-set tx-id:t)
-    %-  ~(rep h-in (zh-silt ~(tx-ids get:page:t pag)))
+    ^-  (z-set tx-id:t)
+    %-  ~(rep z-by pending-blocks.c)
+    |=  [[block-id:t pag=page:t *] all=(z-set tx-id:t)]
+    ^-  (z-set tx-id:t)
+    %-  ~(rep z-in ~(tx-ids get:page:t pag))
     |=  [=tx-id:t all=_all]
-    ?:  (~(has h-by raw-txs.c) tx-id)
-      (~(put h-in all) tx-id)
+    ?:  (~(has z-by raw-txs.c) tx-id)
+      (~(put z-in all) tx-id)
     all
   --
 ::
@@ -117,8 +116,8 @@
   ^-  mining-state:dk
   ::  if the mining pubkey is not set, do nothing
   ?:  no-keys-set  m
-  %-  ~(rep h-by (candidate-txs c))
-  |=  [[=tx-id:t raw=raw-tx:t] min=_m]
+  %-  ~(rep z-in (candidate-txs c))
+  |=  [raw=raw-tx:t min=_m]
   =.  m  min
   (heard-new-tx raw)
 ::
@@ -213,16 +212,7 @@
   =.  candidate-block.m
     ?^  -.candidate-block.m
       candidate-block.m(coinbase (new:v0:coinbase-split:t new-assets v0-shares.m))
-    ::  v1 candidate: dispatch on activation height. Post-activation
-    ::  uses the fee-aware 80/20 fund-aware builder (014-aletheia) which
-    ::  takes emission and fees separately so the fund slot is computed
-    ::  from the subsidy alone; pre-activation retains the existing
-    ::  proportional-allocation arm.
-    ?:  (pre-asert-activation:t height.candidate-block.m)
-      candidate-block.m(coinbase (new:v1:coinbase-split:t new-assets shares.m))
-    =/  emission=coins:t
-      (emission-calc:coinbase:t height.candidate-block.m)
-    candidate-block.m(coinbase (new-with-fund-share:v1:coinbase-split:t emission new-fees shares.m))
+    candidate-block.m(coinbase (new:v1:coinbase-split:t new-assets shares.m))
   ::  check size of candidate block
   ?.  candidate-block-below-max-size
     ~>  %slog.[3 log-message-exceeds-max-size]
@@ -276,49 +266,21 @@
         (to-b58:hash:t u.heaviest-block.c)
     ==
   ~>  %slog.[0 log-message]
-  =/  parent-local=local-page:t  (~(got h-by blocks.c) u.heaviest-block.c)
+  =/  parent-local=local-page:t  (~(got z-by blocks.c) u.heaviest-block.c)
   =/  parent=page:t  (to-page:local-page:t parent-local)
-  ::  determine the target the candidate (child of .parent) must have.
-  ::    post-activation: compute aserti3-2d fresh from the anchor and the
-  ::    parent's stored median-of-11. pre-activation: read the next target
-  ::    stored at parent.digest by the epoch rule.
-  =/  candidate-height=@  +(~(height get:page:t parent))
-  =/  candidate-target=bignum:bignum:t
-    ?:  (post-asert-activation:t candidate-height)
-      =/  parent-min-ts=@
-        (~(got h-by min-timestamps.c) u.heaviest-block.c)
-      ::  phase 2 of 014-aletheia: the anchor's median-of-11 is a
-      ::  hardcoded protocol constant. paired with the [%65.499 ...]
-      ::  checkpoint, only the canonical anchor block is admissible
-      ::  at the anchor height, so reading the constant is consensus-
-      ::  identical to the phase-1 parent-walk.
-      =/  anchor-min-ts=@
-        asert-anchor-min-timestamp.blockchain-constants
-      %-  chunk:bignum:t
-      %-  compute-target:asert
-      :*  asert-anchor-target-atom.blockchain-constants
-          anchor-min-ts
-          asert-anchor-height.blockchain-constants
-          parent-min-ts
-          candidate-height
-          asert-ideal-block-time.blockchain-constants
-          asert-half-life.blockchain-constants
-          max-target-atom:t
-      ==
-    (~(got h-by targets.c) u.heaviest-block.c)
   =.  candidate-block.m
     ?^  -.parent
       ::  v0 parent -
       ::    if candidate height is less than cutoff, use v0 new-candidate with v0 shares
       ::    otherwise use v1 new-candidate with v1 shares
       ?:  (lth +(height.parent) v1-phase.blockchain-constants)
-        (new-candidate:v0:page:t parent now candidate-target v0-shares.m)
-      (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+        (new-candidate:v0:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) v0-shares.m)
+      (new-candidate:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) shares.m)
     ::  v1 parent - use v1 new-candidate with v1 shares
-    (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+    (new-candidate:page:t parent now (~(got z-by targets.c) u.heaviest-block.c) shares.m)
   =.  candidate-acc.m
     %+  new:tx-acc:t
-      (~(get h-by balance.c) u.heaviest-block.c)
+      (~(get z-by balance.c) u.heaviest-block.c)
     ~(height get:page:t candidate-block.m)
   ::
   ::  roll over the candidate txs and try to include them in the new candidate block

@@ -1,5 +1,4 @@
 pub mod bytes;
-pub(crate) mod durability;
 pub mod error;
 pub mod scry;
 pub mod slogger;
@@ -12,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 pub use bytes::ToBytes;
+use either::Either;
 pub use error::{CrownError, Result};
 use nockvm::hamt::Hamt;
 use nockvm::interpreter::{self, Context, NockCancelToken};
@@ -19,11 +19,7 @@ use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{Hot, HotEntry};
 use nockvm::jets::warm::Warm;
 use nockvm::mem::NockStack;
-pub use nockvm::mem::{
-    NOCK_STACK_1KB, NOCK_STACK_SIZE, NOCK_STACK_SIZE_HUGE, NOCK_STACK_SIZE_LARGE,
-    NOCK_STACK_SIZE_MEDIUM, NOCK_STACK_SIZE_SMALL, NOCK_STACK_SIZE_TINY,
-};
-use nockvm::noun::{Noun, NounSpace, D};
+use nockvm::noun::{Noun, D};
 use nockvm::serialization::jam;
 use nockvm::trace::TraceInfo;
 use slogger::CrownSlogger;
@@ -37,6 +33,24 @@ pub struct DA(pub u128);
 const EPOCH_DA: u128 = 170141184475152167957503069145530368000;
 // ~s1
 const S1: u128 = 18446744073709551616;
+
+pub const NOCK_STACK_1KB: usize = 1 << 7;
+
+pub const NOCK_STACK_SIZE_TINY: usize = (NOCK_STACK_1KB << 10 << 10) * 2; // 2GB
+
+pub const NOCK_STACK_SIZE_SMALL: usize = (NOCK_STACK_1KB << 10 << 10) * 4; // 4GB
+
+// nock stack size
+pub const NOCK_STACK_SIZE: usize = (NOCK_STACK_1KB << 10 << 10) * 8; // 8GB
+
+// nock stack size
+pub const NOCK_STACK_SIZE_MEDIUM: usize = (NOCK_STACK_1KB << 10 << 10) * 16; // 16GB
+
+// LARGE nock stack size
+pub const NOCK_STACK_SIZE_LARGE: usize = (NOCK_STACK_1KB << 10 << 10) * 32; // 32GB
+
+// HUGE nock stack size
+pub const NOCK_STACK_SIZE_HUGE: usize = (NOCK_STACK_1KB << 10 << 10) * 64; // 64GB
 
 /**
  *   ::  +from-unix: unix seconds to @da
@@ -84,9 +98,7 @@ pub use nockvm::ext::make_tas;
 // serialize a noun for writing over a socket or a file descriptor
 pub fn serialize_noun(stack: &mut NockStack, noun: Noun) -> Result<Vec<u8>> {
     let atom = jam(stack, noun);
-    let space = stack.noun_space();
-    let atom_handle = atom.in_space(&space);
-    let size = atom_handle.size() << 3;
+    let size = atom.size() << 3;
 
     let buf = unsafe { from_raw_parts_mut(stack.struct_alloc::<u8>(size + 5), size + 5) };
     buf[0] = 0u8;
@@ -95,32 +107,27 @@ pub fn serialize_noun(stack: &mut NockStack, noun: Noun) -> Result<Vec<u8>> {
     buf[3] = (size >> 16) as u8;
     buf[4] = (size >> 24) as u8;
 
-    if atom_handle.is_direct() {
-        let direct = atom_handle
-            .atom()
-            .as_direct()
-            .expect("direct atom expected");
-        unsafe {
+    match atom.as_either() {
+        Either::Left(direct) => unsafe {
             copy_nonoverlapping(
                 &direct.data() as *const u64 as *const u8,
                 buf.as_mut_ptr().add(5),
                 size,
             );
-        }
-    } else {
-        unsafe {
+        },
+        Either::Right(indirect) => unsafe {
             copy_nonoverlapping(
-                atom_handle.data_pointer() as *const u8,
+                indirect.data_pointer() as *const u8,
                 buf.as_mut_ptr().add(5),
                 size,
             );
-        }
-    }
+        },
+    };
     Ok(buf.to_vec())
 }
 
-pub fn compute_timer_time(time: Noun, space: &NounSpace) -> Result<u64> {
-    let time_atom = time.in_space(space).as_atom()?;
+pub fn compute_timer_time(time: Noun) -> Result<u64> {
+    let time_atom = time.as_atom()?;
     let mut time_bytes: &[u8] = time_atom.as_ne_bytes();
     let timer_time: u128 = da_to_unix_ms(DA(ReadBytesExt::read_u128::<LittleEndian>(
         &mut time_bytes,
@@ -149,7 +156,6 @@ pub fn create_context(
     trace_info: Option<TraceInfo>,
     test_jets: Vec<NounSlab>,
 ) -> Context {
-    let arena = stack.arena().clone();
     let cache = Hamt::<Noun>::new(&mut stack);
     let test_jets = {
         let mut hamt = Hamt::<()>::new(&mut stack);
@@ -176,6 +182,5 @@ pub fn create_context(
         trace_info,
         test_jets,
         running_status: cancel,
-        arena,
     }
 }

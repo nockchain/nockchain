@@ -1,6 +1,6 @@
 use core::ops::{Add, Div, Mul, Neg, Sub};
 
-use nockvm::noun::{IndirectAtom, NounSpace};
+use nockvm::noun::IndirectAtom;
 use noun_serde::{NounDecode, NounEncode};
 use num_traits::{MulAdd, Pow};
 
@@ -25,11 +25,8 @@ impl NounEncode for Felt {
 
 // Custom NounDecode implementation for Felt
 impl NounDecode for Felt {
-    fn from_noun(
-        noun: &nockvm::noun::Noun,
-        space: &NounSpace,
-    ) -> Result<Self, noun_serde::NounDecodeError> {
-        let felt_slice = noun.as_felt(space)?;
+    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+        let felt_slice = noun.as_felt()?;
         let res: [Belt; 3] = [felt_slice[0], felt_slice[1], felt_slice[2]];
         Ok(Felt(res))
     }

@@ -26,8 +26,7 @@ impl<'s> NockWriter<'s, '_> {
     }
 
     unsafe fn finalize(mut self) -> Atom {
-        let space = self.stack.noun_space();
-        self.indirect.normalize_as_atom(&space)
+        self.indirect.normalize_as_atom()
     }
 
     unsafe fn expand(&mut self) {
