@@ -1,13 +1,8 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, Write};
 
 use nockapp::kernel::boot;
-use nockapp::noun::slab::NounSlab;
-use nockapp::wire::{SystemWire, Wire};
-use nockapp::{http_driver, AtomExt, NockApp};
-use nockvm::noun::{Atom, D, T};
-use nockvm_macros::tas;
+use nockapp::{http_driver, NockApp};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -16,7 +11,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let kernel = fs::read("out.jam").map_err(|e| format!("Failed to read out.jam: {}", e))?;
 
-    let mut nockapp: NockApp = boot::setup(&kernel, Some(cli), &[], "http-server", None)
+    let mut nockapp: NockApp = boot::setup(&kernel, cli, &[], "{{project_name}}", None)
         .await
         .map_err(|e| format!("Kernel setup failed: {}", e))?;
 

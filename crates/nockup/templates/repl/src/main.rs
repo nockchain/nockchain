@@ -7,7 +7,7 @@ use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{SystemWire, Wire};
 use nockapp::{exit_driver, AtomExt, NockApp};
-use nockvm::noun::{Atom, D, T};
+use nockvm::noun::{Atom, D, NounAllocator, T};
 use nockvm_macros::tas;
 
 fn string_to_atom(slab: &mut NounSlab, s: &str) -> Result<Atom, Box<dyn Error>> {
@@ -33,7 +33,8 @@ async fn process_input(nockapp: &mut NockApp, input: &str) -> Result<String, Box
         Ok(effects) => {
             let mut results = Vec::new();
             for (_i, effect) in effects.iter().enumerate() {
-                let effect_noun = unsafe { effect.root() };
+                let space = effect.noun_space();
+                let effect_noun = unsafe { effect.root().in_space(&space) };
                 if let Ok(cell) = effect_noun.as_cell() {
                     let Ok(head_atom) = cell.head().as_atom() else {
                         todo!()
@@ -66,7 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let kernel = fs::read("out.jam").map_err(|e| format!("Failed to read out.jam: {}", e))?;
 
-    let mut nockapp: NockApp = boot::setup(&kernel, Some(cli), &[], "repl", None).await?;
+    let mut nockapp: NockApp = boot::setup(&kernel, cli, &[], "{{project_name}}", None).await?;
 
     loop {
         print!("repl> ");
@@ -93,6 +94,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
             Err(error) => {
+                let _ = error;
                 println!("Closing program...");
                 break;
             }

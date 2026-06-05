@@ -1,23 +1,12 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 
-use grpc::string_to_atom;
-use nockapp::driver::{make_driver, IODriverFn, NockAppHandle, Operation};
+use {{rust_crate_name}}::GRPC_PORT;
 use nockapp::kernel::boot;
-use nockapp::noun::slab::NounSlab;
-use nockapp::wire::{SystemWire, Wire, WireRepr, WireTag as AppWireTag};
-use nockapp::{exit_driver, file_driver, AtomExt, Bytes, NockApp, NockAppError, Noun};
-use nockapp_grpc::client::NockAppGrpcClient;
-use nockapp_grpc::driver::{grpc_listener_driver, grpc_server_driver};
-use nockapp_grpc::wire_conversion::create_grpc_wire;
-use nockapp_grpc::NockAppGrpcServer;
-use nockvm::noun::{Atom, D, T};
-use nockvm_macros::tas;
-use noun_serde::{NounDecode, NounDecodeError, NounEncode};
-use tracing::{error, info};
+use nockapp::{exit_driver, NockApp};
+use nockapp_grpc::services::private_nockapp::grpc_server_driver;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -30,12 +19,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let kernel = fs::read("out.jam")
         .or_else(|_| fs::read(&fallback_filename))
         .map_err(|e| format!("Failed to read kernel file: {}", e))?;
-    let mut nockapp: NockApp = boot::setup(&kernel, Some(cli), &[], source_filename, None)
+    let mut nockapp: NockApp = boot::setup(&kernel, cli, &[], source_filename, None)
         .await
         .map_err(|e| format!("Kernel setup failed: {}", e))?;
 
     //  Set up drivers.
-    nockapp.add_io_driver(grpc_server_driver()).await;
+    let addr: SocketAddr = format!("127.0.0.1:{GRPC_PORT}").parse()?;
+    nockapp.add_io_driver(grpc_server_driver(addr)).await;
     nockapp.add_io_driver(exit_driver()).await;
 
     //  Run app kernel.

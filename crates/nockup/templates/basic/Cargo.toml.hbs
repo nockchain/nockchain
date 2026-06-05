@@ -1,9 +1,9 @@
 [package]
 name = "{{project_name}}"
-version = "0.1.0"
+version = "{{version}}"
 edition = "2021"
-authors = ["{{author_name}} <{{author_email}}>"]
-description = "A NockApp project"
+authors = {{toml_authors}}
+description = {{toml_description}}
 
 [[bin]]
 name = "{{project_name}}"
