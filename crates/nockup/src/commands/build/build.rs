@@ -171,6 +171,9 @@ pub async fn run(project: &str) -> Result<()> {
             ));
         }
 
+        let out_jam = project_dir.join("out.jam");
+        ensure_hoonc_output_exists(&out_jam).await?;
+
         // move out.jam to {bin_name}.jam if the program has multiple names
         if binaries.len() > 1 {
             let target_jam = project_dir.join(format!(
@@ -180,7 +183,7 @@ pub async fn run(project: &str) -> Result<()> {
                     .expect("bin_path should have a file stem")
                     .to_string_lossy()
             ));
-            tokio::fs::rename(project_dir.join("out.jam"), &target_jam)
+            tokio::fs::rename(&out_jam, &target_jam)
                 .await
                 .context(format!(
                     "Failed to rename out.jam to {}",
@@ -195,6 +198,24 @@ pub async fn run(project: &str) -> Result<()> {
     }
 
     println!("{} Hoon compilation completed successfully!", "✓".green());
+
+    Ok(())
+}
+
+async fn ensure_hoonc_output_exists(output_path: &Path) -> Result<()> {
+    let metadata = tokio::fs::metadata(output_path).await.with_context(|| {
+        format!(
+            "hoonc did not produce expected output file '{}'",
+            output_path.display()
+        )
+    })?;
+
+    if metadata.len() == 0 {
+        return Err(anyhow::anyhow!(
+            "hoonc produced empty output file '{}'",
+            output_path.display()
+        ));
+    }
 
     Ok(())
 }
@@ -268,4 +289,55 @@ async fn should_install_dependencies(project_dir: &Path) -> Result<bool> {
     }
 
     Ok(false) // Everything looks good, no install needed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_hoonc_output_exists;
+
+    #[tokio::test]
+    async fn accepts_non_empty_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::write(&output_path, b"jam")
+            .await
+            .expect("write output");
+
+        ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect("non-empty output should be accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+
+        let err = ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect_err("missing output should fail");
+
+        assert!(
+            err.to_string().contains("did not produce expected output"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::write(&output_path, b"")
+            .await
+            .expect("write output");
+
+        let err = ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect_err("empty output should fail");
+
+        assert!(
+            err.to_string().contains("produced empty output"),
+            "unexpected error: {err:?}"
+        );
+    }
 }
