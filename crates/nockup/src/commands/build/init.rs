@@ -8,6 +8,9 @@ use handlebars::{no_escape, Handlebars};
 
 use crate::manifest::NockAppManifest;
 
+const TEMPLATE_COMPATIBILITY_MANIFEST: &str = "nockup-template.toml";
+const NOCKCHAIN_REV_CONTEXT_KEY: &str = "nockchain_rev";
+
 pub async fn run() -> Result<()> {
     let cwd = std::env::current_dir()?;
     let manifest_path = cwd.join("nockapp.toml");
@@ -52,8 +55,8 @@ pub async fn run() -> Result<()> {
     let template_src = if let Some(commit) = template_commit {
         // TODO: template_commit currently relies on a pre-existing
         // `<template>-<commit>` cache directory that `nockup channel update`
-        // does not populate. Commit metadata is also read from the root
-        // template cache, so pinned template revs need a dedicated fix.
+        // does not populate. Define template-version and dependency
+        // compatibility semantics before making this public path reliable.
         cache_dir.join(format!("{}-{}", template_name, commit))
     } else {
         cache_dir.join(template_name)
@@ -68,9 +71,8 @@ pub async fn run() -> Result<()> {
         );
     }
 
-    // Build Handlebars context from manifest (same as your old one, but cleaner)
-    let mut context = build_handlebars_context(&manifest)?;
-    apply_template_source_context(&mut context, &template_src)?;
+    // Build Handlebars context from the app manifest and template bundle metadata.
+    let context = build_template_context(&manifest, &template_src)?;
 
     // Copy and render the template
     copy_and_render_template(&template_src, target_dir, &context)?;
@@ -121,47 +123,57 @@ fn build_handlebars_context(manifest: &NockAppManifest) -> Result<HashMap<String
         toml::Value::Array(authors.into_iter().map(toml::Value::String).collect()).to_string(),
     );
     ctx.insert("license".to_string(), p.license.clone().unwrap_or_default());
-    ctx.insert(
-        "nockapp_commit_hash".to_string(),
-        env!("GIT_HASH").to_string(),
-    );
 
     Ok(ctx)
 }
 
-fn apply_template_source_context(
+fn build_template_context(
+    manifest: &NockAppManifest,
+    template_src: &Path,
+) -> Result<HashMap<String, String>> {
+    let mut ctx = build_handlebars_context(manifest)?;
+    apply_template_compatibility_context(&mut ctx, template_src)?;
+    Ok(ctx)
+}
+
+fn apply_template_compatibility_context(
     ctx: &mut HashMap<String, String>,
     template_src: &Path,
 ) -> Result<()> {
-    if let Some(commit_hash) = template_source_commit_hash(template_src)? {
-        ctx.insert("nockapp_commit_hash".to_string(), commit_hash);
-    }
+    let compatibility_path = template_compatibility_manifest_path(template_src)?;
+    let compatibility_toml = fs::read_to_string(&compatibility_path)
+        .with_context(|| format!("Failed to read {}", compatibility_path.display()))?;
+    let compatibility_toml: toml::Value = toml::from_str(&compatibility_toml)
+        .with_context(|| format!("Failed to parse {}", compatibility_path.display()))?;
+    let nockchain_rev = compatibility_toml
+        .get("nockchain")
+        .and_then(|nockchain| nockchain.get("rev"))
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|rev| !rev.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} must define [nockchain].rev",
+                compatibility_path.display()
+            )
+        })?;
 
+    ctx.insert(
+        NOCKCHAIN_REV_CONTEXT_KEY.to_string(),
+        nockchain_rev.to_string(),
+    );
     Ok(())
 }
 
-fn template_source_commit_hash(template_src: &Path) -> Result<Option<String>> {
-    let Some(template_cache_dir) = template_src.parent() else {
-        return Ok(None);
-    };
-    let commit_path = template_cache_dir.join("commit.toml");
+fn template_compatibility_manifest_path(template_src: &Path) -> Result<std::path::PathBuf> {
+    let template_root = template_src.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine template root for {}",
+            template_src.display()
+        )
+    })?;
 
-    if !commit_path.exists() {
-        return Ok(None);
-    }
-
-    let commit_toml = fs::read_to_string(&commit_path)
-        .with_context(|| format!("Failed to read {}", commit_path.display()))?;
-    let commit_toml: toml::Value = toml::from_str(&commit_toml)
-        .with_context(|| format!("Failed to parse {}", commit_path.display()))?;
-    let commit_hash = commit_toml
-        .get("commit")
-        .and_then(|commit| commit.get("id"))
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|commit| !commit.is_empty());
-
-    Ok(commit_hash.map(ToOwned::to_owned))
+    Ok(template_root.join(TEMPLATE_COMPATIBILITY_MANIFEST))
 }
 
 fn split_author_name_email(author: &str) -> (String, String) {
@@ -243,7 +255,7 @@ mod tests {
     use super::*;
     use crate::manifest::PackageMeta;
 
-    const TEST_NOCKCHAIN_REV: &str = "0123456789abcdef0123456789abcdef01234567";
+    const TEMPLATE_NOCKCHAIN_REV: &str = "5d022ced55040221e8b6fcfd78114189fbae91a0";
 
     fn complete_template_context() -> HashMap<String, String> {
         HashMap::from([
@@ -268,8 +280,8 @@ mod tests {
                 r#"["Ada Lovelace <ada@example.com>"]"#.to_string(),
             ),
             (
-                "nockapp_commit_hash".to_string(),
-                TEST_NOCKCHAIN_REV.to_string(),
+                NOCKCHAIN_REV_CONTEXT_KEY.to_string(),
+                TEMPLATE_NOCKCHAIN_REV.to_string(),
             ),
         ])
     }
@@ -300,6 +312,25 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("templates")
             .join(template_name)
+    }
+
+    fn bundled_template_compatibility_manifest() -> toml::Value {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("templates")
+            .join("nockup-template.toml");
+        let manifest = fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", manifest_path.display()));
+        toml::from_str(&manifest)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", manifest_path.display()))
+    }
+
+    fn bundled_template_nockchain_rev() -> String {
+        bundled_template_compatibility_manifest()
+            .get("nockchain")
+            .and_then(|nockchain| nockchain.get("rev"))
+            .and_then(toml::Value::as_str)
+            .expect("nockup-template.toml should contain nockchain.rev")
+            .to_string()
     }
 
     fn render_template_dir(
@@ -434,9 +465,6 @@ edition = "2021"
             ctx.get("toml_authors"),
             Some(&r#"["Ada Lovelace <ada@example.com>"]"#.to_string())
         );
-        assert!(ctx
-            .get("nockapp_commit_hash")
-            .is_some_and(|rev| !rev.trim().is_empty()));
     }
 
     #[test]
@@ -456,25 +484,29 @@ edition = "2021"
     }
 
     #[test]
-    fn template_source_commit_overrides_build_hash_in_context() {
+    fn template_compatibility_manifest_adds_nockchain_rev_to_context() {
         let tmp = tempdir().expect("tempdir should be created");
-        let template_src = tmp.path().join("basic");
+        let template_root = tmp.path().join("templates");
+        let template_src = template_root.join("basic");
         fs::create_dir_all(&template_src).expect("template dir should be created");
         fs::write(
-            tmp.path().join("commit.toml"),
-            format!("[commit]\nid = \"{TEST_NOCKCHAIN_REV}\"\n"),
+            template_root.join(TEMPLATE_COMPATIBILITY_MANIFEST),
+            format!("[nockchain]\nrev = \"{TEMPLATE_NOCKCHAIN_REV}\"\n"),
         )
-        .expect("commit file should be written");
-        let mut ctx = HashMap::from([(
-            "nockapp_commit_hash".to_string(),
-            "fallback-rev".to_string(),
-        )]);
+        .expect("compatibility manifest should be written");
+        let manifest = NockAppManifest {
+            package: PackageMeta {
+                name: "arcadia".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
-        apply_template_source_context(&mut ctx, &template_src).expect("context should update");
+        let ctx = build_template_context(&manifest, &template_src).expect("context should build");
 
         assert_eq!(
-            ctx.get("nockapp_commit_hash"),
-            Some(&TEST_NOCKCHAIN_REV.to_string())
+            ctx.get(NOCKCHAIN_REV_CONTEXT_KEY),
+            Some(&TEMPLATE_NOCKCHAIN_REV.to_string())
         );
     }
 
@@ -498,7 +530,29 @@ edition = "2021"
     fn bundled_templates_render_valid_cargo_manifests() {
         for template_dir in bundled_template_dirs() {
             let cargo_toml = rendered_cargo_manifest(&template_dir, &complete_template_context());
-            assert_nockchain_deps_use_rev(&cargo_toml, TEST_NOCKCHAIN_REV);
+            assert_nockchain_deps_use_rev(&cargo_toml, TEMPLATE_NOCKCHAIN_REV);
+        }
+    }
+
+    #[test]
+    fn bundled_templates_source_nockchain_rev_from_compatibility_manifest() {
+        let nockchain_rev = bundled_template_nockchain_rev();
+        assert_eq!(nockchain_rev, TEMPLATE_NOCKCHAIN_REV);
+
+        for template_dir in bundled_template_dirs() {
+            let manifest_source = fs::read_to_string(template_dir.join("Cargo.toml.hbs"))
+                .expect("template manifest should be readable");
+
+            assert!(
+                manifest_source.contains(r#"rev = "{{nockchain_rev}}""#),
+                "{} should render Nockchain deps from nockchain_rev",
+                template_dir.display()
+            );
+            assert!(
+                !manifest_source.contains(TEMPLATE_NOCKCHAIN_REV),
+                "{} should not duplicate the compatibility rev literal",
+                template_dir.display()
+            );
         }
     }
 
@@ -589,12 +643,9 @@ edition = "2021"
             },
             ..Default::default()
         };
-        let mut context = build_handlebars_context(&manifest).expect("context should build");
-        context.insert(
-            "nockapp_commit_hash".to_string(),
-            TEST_NOCKCHAIN_REV.to_string(),
-        );
         let basic_template_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates/basic");
+        let context =
+            build_template_context(&manifest, &basic_template_dir).expect("context should build");
 
         let cargo_toml = rendered_cargo_manifest(&basic_template_dir, &context);
         let package = cargo_toml
@@ -619,43 +670,5 @@ edition = "2021"
             })
             .collect::<Vec<_>>();
         assert_eq!(rendered_authors, authors);
-    }
-
-    #[test]
-    fn template_cache_commit_flows_into_generated_cargo_manifest() {
-        let tmp = tempdir().expect("tempdir should be created");
-        let template_src = tmp.path().join("basic");
-        fs::create_dir_all(&template_src).expect("template dir should be created");
-        fs::write(
-            tmp.path().join("commit.toml"),
-            format!("[commit]\nid = \"{TEST_NOCKCHAIN_REV}\"\n"),
-        )
-        .expect("commit file should be written");
-        fs::write(
-            template_src.join("Cargo.toml.hbs"),
-            r#"[package]
-name = "{{project_name}}"
-version = "{{version}}"
-edition = "2021"
-
-[dependencies]
-nockapp = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockapp_commit_hash}}" }
-nockvm = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockapp_commit_hash}}" }
-"#,
-        )
-        .expect("template manifest should be written");
-        let manifest = NockAppManifest {
-            package: PackageMeta {
-                name: "arcadia".to_string(),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let mut context = build_handlebars_context(&manifest).expect("context should build");
-
-        apply_template_source_context(&mut context, &template_src).expect("context should update");
-        let cargo_toml = rendered_cargo_manifest(&template_src, &context);
-
-        assert_nockchain_deps_use_rev(&cargo_toml, TEST_NOCKCHAIN_REV);
     }
 }

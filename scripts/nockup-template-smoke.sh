@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/nockup-template-smoke.sh [--keep-temp] [--skip-runtime] [--skip-grpc-runtime]
+Usage: scripts/nockup-template-smoke.sh [--keep-temp] [--offline] [--skip-runtime] [--skip-grpc-runtime]
 
 Generates every bundled Nockup template from the current checkout, patches
 generated Nockchain git dependencies to this local checkout, builds each
@@ -12,6 +12,7 @@ generated apps.
 
 Options:
   --keep-temp           Leave the temporary workspace in place for inspection.
+  --offline             Run Cargo in offline mode to catch unexpected network access.
   --skip-runtime        Only generate and build templates.
   --skip-grpc-runtime   Skip the gRPC listen/talk runtime smoke.
   -h, --help            Show this help.
@@ -19,6 +20,7 @@ USAGE
 }
 
 KEEP_TEMP=0
+OFFLINE=0
 RUN_RUNTIME=1
 RUN_GRPC_RUNTIME=1
 
@@ -26,6 +28,9 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --keep-temp)
       KEEP_TEMP=1
+      ;;
+    --offline)
+      OFFLINE=1
       ;;
     --skip-runtime)
       RUN_RUNTIME=0
@@ -66,6 +71,10 @@ export CARGO_TARGET_DIR="${SMOKE_TARGET}"
 export HOME="${SMOKE_HOME}"
 export NO_COLOR=1
 export PATH="${SMOKE_TARGET}/release:${SMOKE_TARGET}/debug:${CARGO_HOME}/bin:${PATH}"
+
+if [ "${OFFLINE}" -eq 1 ]; then
+  export CARGO_NET_OFFLINE=true
+fi
 
 cleanup() {
   status="$1"
@@ -363,11 +372,6 @@ cargo build --release -p hoonc >"${SMOKE_LOGS}/cargo-build-hoonc.log" 2>&1
 
 log "seeding local template cache"
 cp -R "${REPO_ROOT}/crates/nockup/templates/." "${SMOKE_HOME}/.nockup/templates/"
-commit_hash="$(git rev-parse HEAD)"
-cat > "${SMOKE_HOME}/.nockup/templates/commit.toml" <<EOF
-[commit]
-id = "${commit_hash}"
-EOF
 
 for template in ${TEMPLATE_NAMES}; do
   log "generating ${template}"
