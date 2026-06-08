@@ -37,11 +37,6 @@ jobs:
           staging_sha="$(git rev-parse HEAD)"
           nockchain_sha="$(git ls-remote https://github.com/nockchain/nockchain.git refs/heads/master | awk '{print $1}')"
 
-          if [ -z "$nockchain_sha" ]; then
-            echo "failed to resolve nockchain/nockchain master SHA" >&2
-            exit 1
-          fi
-
           should_sync=false
           reason="already-in-sync"
 
@@ -51,6 +46,9 @@ jobs:
           elif [ "$FORCE_SYNC" = "true" ]; then
             should_sync=true
             reason="manual-force"
+          elif [ -z "$nockchain_sha" ]; then
+            should_sync=true
+            reason="remote-head-unavailable"
           elif [ "$staging_sha" != "$nockchain_sha" ]; then
             should_sync=true
             reason="heads-diverged"
