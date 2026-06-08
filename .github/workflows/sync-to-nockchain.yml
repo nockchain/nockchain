@@ -79,11 +79,16 @@ jobs:
             exit 1
           fi
 
-          auth_header="$(printf 'x-access-token:%s' "$NOCKCHAIN_SYNC_TOKEN" | base64 | tr -d '\n')"
-          export GIT_CONFIG_COUNT=1
-          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-          export GIT_CONFIG_VALUE_0="authorization: basic $auth_header"
-
+          cat > "$RUNNER_TEMP/git-askpass.sh" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            Username*) echo "x-access-token" ;;
+            Password*) echo "$NOCKCHAIN_SYNC_TOKEN" ;;
+          esac
+          EOF
+          chmod 700 "$RUNNER_TEMP/git-askpass.sh"
+          export GIT_ASKPASS="$RUNNER_TEMP/git-askpass.sh"
+          export GIT_TERMINAL_PROMPT=0
           git push https://github.com/nockchain/nockchain.git master:master
 
       - name: Skip sync
