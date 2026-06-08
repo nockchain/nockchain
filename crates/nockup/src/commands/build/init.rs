@@ -55,7 +55,7 @@ pub async fn run() -> Result<()> {
 
     let template_src = if let Some(commit) = template_commit {
         // TODO: template_commit currently relies on a pre-existing
-        // `<template>-<commit>` cache directory that `nockup channel update`
+        // `<template>-<commit>` cache directory that `nockup update`
         // does not populate. Define template-version and dependency
         // compatibility semantics before making this public path reliable.
         cache_dir.join(format!("{}-{}", template_name, commit))
@@ -66,7 +66,7 @@ pub async fn run() -> Result<()> {
     if !template_src.exists() {
         anyhow::bail!(
             "Template '{}' not found in cache at {}.\n\
-             Run `nockup channel update` or check your template-commit hash.",
+             Run `nockup update` or check your template-commit hash.",
             template_name,
             template_src.display()
         );
