@@ -2,25 +2,24 @@ use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Atom, Cell, IndirectAtom, Noun};
+use nockvm::noun::{Atom, IndirectAtom, Noun, NounSpace};
 use nockvm_macros::tas;
 use tracing::debug;
 
 use crate::form::belt::{bpow, Belt};
 use crate::form::felt::*;
 use crate::form::handle::new_handle_mut_felt;
-use crate::form::noun_ext::{AtomMathExt, NounMathExt};
-use crate::form::poly::{BPolySlice, Element, FPolySlice, Poly, PolySlice};
+use crate::form::noun_ext::{AtomMathExt, NounMathExt, NounMathExtHandle};
+use crate::form::poly::{BPolySlice, Element, FPolySlice, Poly};
 use crate::form::structs::{HoonList, HoonMapIter};
 use crate::jets::proof_gen_jets::{MPUltra, ProofMap};
 pub struct IndexFeltMap(pub ProofMap<usize, Felt>);
 pub struct IndexBeltMap(pub ProofMap<usize, Belt>);
 
-impl TryFrom<Noun> for IndexFeltMap {
-    type Error = JetErr;
-
-    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
-        let hoon_map = HoonMapIter::from(hoon_map);
+impl IndexFeltMap {
+    pub fn try_from(hoon_map: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let hoon_map_handle = hoon_map.in_space(space);
+        let hoon_map = HoonMapIter::new(&hoon_map_handle);
         let mut map = ProofMap::<usize, Felt>::new();
 
         for term_noun in hoon_map.into_iter() {
@@ -35,7 +34,7 @@ impl TryFrom<Noun> for IndexFeltMap {
                 });
                 (
                     term_cell.head().as_atom()?.as_u64()? as usize,
-                    *term_cell.tail().as_atom()?.as_felt()?,
+                    *term_cell.tail().as_atom()?.atom().as_felt(space)?,
                 )
             };
 
@@ -45,11 +44,10 @@ impl TryFrom<Noun> for IndexFeltMap {
     }
 }
 
-impl TryFrom<Noun> for IndexBeltMap {
-    type Error = JetErr;
-
-    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
-        let hoon_map = HoonMapIter::from(hoon_map);
+impl IndexBeltMap {
+    pub fn try_from(hoon_map: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let hoon_map_handle = hoon_map.in_space(space);
+        let hoon_map = HoonMapIter::new(&hoon_map_handle);
         let mut map = ProofMap::<usize, Belt>::new();
 
         for term_noun in hoon_map.into_iter() {
@@ -64,7 +62,7 @@ impl TryFrom<Noun> for IndexBeltMap {
                 });
                 (
                     term_cell.head().as_atom()?.as_u64()? as usize,
-                    term_cell.tail().as_atom()?.as_belt()?,
+                    term_cell.tail().as_atom()?.atom().as_belt(space)?,
                 )
             };
 
@@ -75,89 +73,94 @@ impl TryFrom<Noun> for IndexBeltMap {
 }
 
 pub fn evaluate_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let mut sam_cur: Cell = sam.as_cell()?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let mut sam_cur = sam.in_space(&space).as_cell()?;
 
     // Extract all parameters from the subject
-    let trace_evaluations = sam_cur.head();
+    let trace_evaluations = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let comp_evaluations = sam_cur.head();
+    let comp_evaluations = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let trace_elems = sam_cur.head();
+    let trace_elems = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let comp_elems = sam_cur.head();
+    let comp_elems = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let num_comp_pieces = sam_cur.head();
+    let num_comp_pieces = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let weights = sam_cur.head();
+    let weights = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let heights = sam_cur.head();
+    let heights = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let full_widths = sam_cur.head();
+    let full_widths = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let omega = sam_cur.head();
+    let omega = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let index = sam_cur.head();
+    let index = sam_cur.head().noun();
     sam_cur = sam_cur.tail().as_cell()?;
-    let deep_challenge = sam_cur.head();
-    let new_comp_eval = sam_cur.tail();
+    let deep_challenge = sam_cur.head().noun();
+    let new_comp_eval = sam_cur.tail().noun();
 
     // Convert nouns to appropriate types
-    let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations) else {
+    let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations, &space) else {
         debug!("trace_evaluations is not a valid FPolySlice");
         return Err(BAIL_FAIL);
     };
-    let Ok(comp_evaluations) = FPolySlice::try_from(comp_evaluations) else {
+    let Ok(comp_evaluations) = FPolySlice::try_from(comp_evaluations, &space) else {
         debug!("comp_evaluations is not a valid FPolySlice");
         return Err(BAIL_FAIL);
     };
-    let trace_elems: Vec<Belt> = HoonList::try_from(trace_elems)?
+    let trace_elems: Vec<Belt> = HoonList::try_from(trace_elems, &space)?
         .into_iter()
         .map(|x| {
-            x.as_atom()
+            x.in_space(&space)
+                .as_atom()
                 .expect("trace_elems element should be an atom")
                 .as_u64()
                 .expect("trace_elems element should be a u64")
         })
         .map(Belt)
         .collect();
-    let comp_elems: Vec<Belt> = HoonList::try_from(comp_elems)?
+    let comp_elems: Vec<Belt> = HoonList::try_from(comp_elems, &space)?
         .into_iter()
         .map(|x| {
-            x.as_atom()
+            x.in_space(&space)
+                .as_atom()
                 .expect("comp_elems element should be an atom")
                 .as_u64()
                 .expect("comp_elems element should be a u64")
         })
         .map(Belt)
         .collect();
-    let num_comp_pieces = num_comp_pieces.as_atom()?.as_u64()?;
-    let Ok(weights) = FPolySlice::try_from(weights) else {
+    let num_comp_pieces = num_comp_pieces.in_space(&space).as_atom()?.as_u64()?;
+    let Ok(weights) = FPolySlice::try_from(weights, &space) else {
         debug!("weights is not a valid FPolySlice");
         return Err(BAIL_FAIL);
     };
-    let heights: Vec<u64> = HoonList::try_from(heights)?
+    let heights: Vec<u64> = HoonList::try_from(heights, &space)?
         .into_iter()
         .map(|x| {
-            x.as_atom()
+            x.in_space(&space)
+                .as_atom()
                 .expect("heights element should be an atom")
                 .as_u64()
                 .expect("heights element should be a u64")
         })
         .collect();
-    let full_widths: Vec<u64> = HoonList::try_from(full_widths)?
+    let full_widths: Vec<u64> = HoonList::try_from(full_widths, &space)?
         .into_iter()
         .map(|x| {
-            x.as_atom()
+            x.in_space(&space)
+                .as_atom()
                 .expect("full_widths element should be an atom")
                 .as_u64()
                 .expect("full_widths element should be a u64")
         })
         .collect();
-    let omega = omega.as_felt()?;
-    let index = index.as_atom()?.as_u64()?;
-    let deep_challenge = deep_challenge.as_felt()?;
-    let new_comp_eval = new_comp_eval.as_felt()?;
+    let omega = omega.as_felt(&space)?;
+    let index = index.in_space(&space).as_atom()?.as_u64()?;
+    let deep_challenge = deep_challenge.as_felt(&space)?;
+    let new_comp_eval = new_comp_eval.as_felt(&space)?;
 
     //  TODO use g defined wherever it is
     let g = Felt::lift(Belt(7));
@@ -268,7 +271,7 @@ trait Fops:
     Element + Copy + core::ops::Add<Output = Self> + core::ops::Mul<Output = Self> + PartialEq + Eq
 {
     fn to_noun(self, stack: &mut NockStack) -> Noun;
-    fn from_noun(noun: Noun) -> Result<Self, JetErr>;
+    fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, JetErr>;
     // =/  pow-op   ?:(=(field %base) bpow fpow)
     fn pow(&self, exp: u64) -> Self;
     // =/  lift-op  ?:(=(field %base) |=(v=@ `@ux`v) lift)
@@ -280,8 +283,8 @@ impl Fops for Belt {
         Atom::new(stack, self.0).as_noun()
     }
 
-    fn from_noun(noun: Noun) -> Result<Self, JetErr> {
-        Ok(Belt(noun.as_atom()?.as_u64()?))
+    fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        Ok(Belt(noun.in_space(space).as_atom()?.as_u64()?))
     }
 
     fn pow(&self, exp: u64) -> Self {
@@ -300,8 +303,8 @@ impl Fops for Felt {
         a.as_noun()
     }
 
-    fn from_noun(noun: Noun) -> Result<Self, JetErr> {
-        if let Ok(r) = noun.as_felt() {
+    fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        if let Ok(r) = noun.as_felt(space) {
             Ok(*r)
         } else {
             Err(BAIL_FAIL)
@@ -326,29 +329,30 @@ pub fn mpeval_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> 
     //         com-map=(map @ elt)
     //     ==
     // ^-  elt
-    let sam = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
     let stack = &mut context.stack;
-    let [field, mp, args, chal_map, dyns, com_map] = sam.uncell()?;
-    let chals = BPolySlice::try_from(chal_map)?.0;
+    let [field, mp, args, chal_map, dyns, com_map] = sam.uncell(&space)?;
+    let chals = BPolySlice::try_from(chal_map, &space)?.0;
 
-    let Ok(dyns) = BPolySlice::try_from(dyns) else {
+    let Ok(dyns) = BPolySlice::try_from(dyns, &space) else {
         return Err(BAIL_FAIL);
     };
 
     let ret = match field.as_direct()?.data() {
         tas!(b"ext") => {
-            let Ok(com_map) = IndexFeltMap::try_from(com_map) else {
+            let Ok(com_map) = IndexFeltMap::try_from(com_map, &space) else {
                 return Err(BAIL_FAIL);
             };
-            let args = FPolySlice::try_from(args)?.0;
-            mpeval::<Felt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
+            let args = FPolySlice::try_from(args, &space)?.0;
+            mpeval::<Felt>(mp, args, chals, dyns.0, Some(&com_map.0), &space)?.to_noun(stack)
         }
         tas!(b"base") => {
-            let Ok(com_map) = IndexBeltMap::try_from(com_map) else {
+            let Ok(com_map) = IndexBeltMap::try_from(com_map, &space) else {
                 return Err(BAIL_FAIL);
             };
-            let args = BPolySlice::try_from(args)?.0;
-            mpeval::<Belt>(mp, args, chals, dyns.0, Some(&com_map.0))?.to_noun(stack)
+            let args = BPolySlice::try_from(args, &space)?.0;
+            mpeval::<Belt>(mp, args, chals, dyns.0, Some(&com_map.0), &space)?.to_noun(stack)
         }
         _ => return Err(BAIL_FAIL),
     };
@@ -362,11 +366,9 @@ fn mpeval<F: Fops>(
     chals: &[Belt],
     dyns: &[Belt],
     com_map: Option<&ProofMap<usize, F>>,
+    space: &NounSpace,
     //com_map: Noun,
-) -> Result<F, JetErr>
-where
-    for<'a> PolySlice<'a, F>: TryFrom<Noun>,
-{
+) -> Result<F, JetErr> {
     /*
     let Ok(args) = PolySlice::try_from(args) else {
         return jet_err();
@@ -390,15 +392,16 @@ where
 
     // %+  roll  ~(tap by mp)
     // |=  [[k=bpoly v=belt] acc=_init-zero]
-    let mut mp = HoonMapIter::from(mp);
+    let mp_handle = mp.in_space(space);
+    let mut mp = HoonMapIter::new(&mp_handle);
 
     mp.try_fold(F::zero(), |acc, n| {
         let [k, v] = n.uncell()?;
 
-        let Ok(k) = BPolySlice::try_from(k) else {
+        let Ok(k) = BPolySlice::try_from(k.noun(), space) else {
             return Err(BAIL_FAIL);
         };
-        let v = Belt::from_noun(v)?;
+        let v = Belt::from_noun(v.noun(), space)?;
         // =/  coeff=@ux  (lift-op v)
         let coeff = F::lift(v);
         // ?:  =(init-zero coeff)
@@ -486,25 +489,26 @@ pub fn mpeval_ultra_felt(
     args: &[Felt],
     chals: &[Belt],
     dyns: &[Belt],
+    space: &NounSpace,
 ) -> Result<Vec<Felt>, JetErr> {
     match mp {
         MPUltra::Mega(mp_mega) => {
             let mut vec: Vec<Felt> = Vec::new();
-            let eval = mpeval::<Felt>(*mp_mega, args, chals, dyns, None)?;
+            let eval = mpeval::<Felt>(*mp_mega, args, chals, dyns, None, space)?;
             vec.push(eval);
             Ok(vec)
         }
         MPUltra::Comp(mp_comp) => {
             let mut deps = ProofMap::new();
             for (i, dep) in mp_comp.dep.iter().enumerate() {
-                let eval = mpeval::<Felt>(*dep, args, chals, dyns, None)?;
+                let eval = mpeval::<Felt>(*dep, args, chals, dyns, None, space)?;
                 deps.insert(i, eval);
             }
 
             mp_comp
                 .com
                 .iter()
-                .map(|com| mpeval::<Felt>(*com, args, chals, dyns, Some(&deps)))
+                .map(|com| mpeval::<Felt>(*com, args, chals, dyns, Some(&deps), space))
                 .collect()
         }
     }

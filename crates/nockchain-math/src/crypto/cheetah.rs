@@ -50,6 +50,9 @@ pub enum CheetahError {
     #[error("invalid base58 string length, got {0}")]
     InvalidLength(usize),
 
+    #[error("invalid base58 format prefix byte, got {0:#x}")]
+    BadPrefix(u8),
+
     #[error("array conversion failed")]
     ArrayConversion,
 
@@ -67,13 +70,15 @@ pub struct CheetahPoint {
 impl CheetahPoint {
     ///  A pubkey consists of a leading 1 byte and 12 base field elements that are 8 bytes each. (12*8) + 1 = 97.
     const BYTES: usize = 97;
+    ///  The documented format/version prefix byte written by `into_base58`.
+    const FORMAT_PREFIX: u8 = 0x1;
     pub fn into_base58(&self) -> Result<String, CheetahError> {
         if self.inf {
             return Err(CheetahError::NotOnCurve);
         }
         // Convert the Belt values to u64 bytes
         let mut bytes = Vec::new();
-        bytes.push(0x1);
+        bytes.push(Self::FORMAT_PREFIX);
         for belt in self.y.0.iter().rev().chain(self.x.0.iter().rev()) {
             bytes.extend_from_slice(&belt.0.to_be_bytes());
         }
@@ -86,6 +91,12 @@ impl CheetahPoint {
                 return Err(CheetahError::ZPubUsed);
             }
             return Err(CheetahError::InvalidLength(v.len()));
+        }
+
+        //  The first byte is the format/version prefix (always 0x01, written by
+        //  `into_base58`). Require it so the base58 encoding of a point is unique.
+        if v[0] != Self::FORMAT_PREFIX {
+            return Err(CheetahError::BadPrefix(v[0]));
         }
 
         let mut v64 = v[1..]
@@ -329,6 +340,33 @@ pub fn ch_scal_big(n: &UBig, p: &CheetahPoint) -> Result<CheetahPoint, JetErr> {
     Ok(acc)
 }
 
+/// Number of 32-bit (bloq-5) blocks in `x`, i.e. Hoon `(met 5 x)`; 0 for `x == 0`.
+#[inline(always)]
+fn met5(x: u64) -> u32 {
+    if x == 0 {
+        0
+    } else {
+        (64 - x.leading_zeros()).div_ceil(32)
+    }
+}
+
+/// Reconstruct a belt-schnorr scalar from its `t8` limbs exactly as Hoon
+/// `t8-to-atom` = `(rap 5 (leaf-sequence:shape t))`:
+///
+///   `rap 5 [l0 l1 ...] = cat(5, l0, cat(5, l1, ...))`
+///   `cat(5, b, c)      = b + (c << 32*(met 5 b))`
+///
+/// `(met 5 0) == 0`, so a zero limb does not advance the position — this is not a
+/// plain base-2^32 reconstruction. Limbs are field elements (`< prime < 2^64`).
+pub fn belt_schnorr_t8_to_ubig(limbs: &[Belt]) -> UBig {
+    let mut acc = UBig::from(0u8);
+    for limb in limbs.iter().rev() {
+        let shift = (32 * met5(limb.0)) as usize;
+        acc = UBig::from(limb.0) + (acc << shift);
+    }
+    acc
+}
+
 pub fn trunc_g_order(a: &[u64]) -> UBig {
     let mut result = UBig::from(a[0]);
     result += &*P_BIG * UBig::from(a[1]);
@@ -341,6 +379,30 @@ pub fn trunc_g_order(a: &[u64]) -> UBig {
 mod test {
     use super::*;
     use crate::belt::Belt;
+
+    #[test]
+    fn test_base58_prefix_validation() {
+        // Canonical encoding round-trips.
+        let b58 = A_GEN.into_base58().expect("A_GEN encodes to base58");
+        assert_eq!(
+            CheetahPoint::from_base58(&b58).expect("canonical base58 decodes"),
+            A_GEN
+        );
+
+        // Tamper only the format prefix byte: the coordinate bytes (and hence the
+        // decoded point) are unchanged, but the string must now be rejected so it
+        // cannot alias the canonical encoding.
+        let mut raw = bs58::decode(&b58)
+            .into_vec()
+            .expect("base58 string decodes to bytes");
+        assert_eq!(raw[0], CheetahPoint::FORMAT_PREFIX);
+        raw[0] = 0x02;
+        let bad = bs58::encode(raw).into_string();
+        assert!(matches!(
+            CheetahPoint::from_base58(&bad),
+            Err(CheetahError::BadPrefix(0x02))
+        ));
+    }
 
     const F6_TEST: F6lt = F6lt([
         Belt(13724052584687643294),

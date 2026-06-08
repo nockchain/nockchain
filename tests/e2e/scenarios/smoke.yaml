@@ -1,0 +1,17 @@
+name: "smoke_startup"
+seed: 1
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6100"
+    grpc_private_port: 7100
+    fakenet: true
+    no_default_peers: true
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 20000
+asserts:
+  - assert: grpc_ready
+    node: "node-a"

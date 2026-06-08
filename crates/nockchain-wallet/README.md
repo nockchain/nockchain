@@ -67,6 +67,12 @@ nockchain-wallet watch multisig --threshold <M> --participants "<pkh-a>,<pkh-b>,
 
 # Import a master public key from exported file
 nockchain-wallet import-master-pubkey keys.export
+
+# Show the active master extended private key
+nockchain-wallet show-master-zprv
+
+# Show the active master raw private key as base58
+nockchain-wallet show-master-prv
 ```
 
 The exported keys file contains all wallet keys as a `jam` file that can be imported on another instance.

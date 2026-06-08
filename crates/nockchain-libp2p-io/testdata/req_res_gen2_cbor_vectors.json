@@ -1,0 +1,87 @@
+{
+  "schema_version": "req_res_gen2_cbor_v1",
+  "request_vectors": [
+    {
+      "id": "batch_request_single_item",
+      "variant": "batch_request",
+      "pow_hex": "00000000000000000000000000000000",
+      "nonce": 0,
+      "items": [
+        {
+          "item_id": 1,
+          "message_hex": "010203"
+        }
+      ],
+      "cbor_hex": "a16c426174636852657175657374a363706f779000000000000000000000000000000000656e6f6e636500656974656d7381a2676974656d5f696401676d65737361676543010203"
+    },
+    {
+      "id": "batch_request_multi_item",
+      "variant": "batch_request",
+      "pow_hex": "ffffffffffffffffffffffffffffffff",
+      "nonce": 42,
+      "items": [
+        {
+          "item_id": 1,
+          "message_hex": "aa"
+        },
+        {
+          "item_id": 7,
+          "message_hex": "deadbeef"
+        }
+      ],
+      "cbor_hex": "a16c426174636852657175657374a363706f779018ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff18ff656e6f6e6365182a656974656d7382a2676974656d5f696401676d65737361676541aaa2676974656d5f696407676d65737361676544deadbeef"
+    }
+  ],
+  "response_vectors": [
+    {
+      "id": "batch_result_mixed_statuses",
+      "variant": "batch_result",
+      "results": [
+        {
+          "item_id": 1,
+          "status": "result",
+          "error": null,
+          "envelope": {
+            "kind": "heard_block",
+            "block_id": "block-abc",
+            "tx_id": null,
+            "message_hex": "deadbeef"
+          }
+        },
+        {
+          "item_id": 2,
+          "status": "ack",
+          "error": null,
+          "envelope": null
+        },
+        {
+          "item_id": 3,
+          "status": "not_found",
+          "error": null,
+          "envelope": null
+        },
+        {
+          "item_id": 4,
+          "status": "error",
+          "error": "backpressure",
+          "envelope": null
+        }
+      ],
+      "cbor_hex": "a16b4261746368526573756c74a167726573756c747384a4676974656d5f6964016673746174757366526573756c74656572726f72f668656e76656c6f7065a4646b696e646a4865617264426c6f636b68626c6f636b5f696469626c6f636b2d6162636574785f6964f6676d65737361676544deadbeefa4676974656d5f696402667374617475736341636b656572726f72f668656e76656c6f7065f6a4676974656d5f69640366737461747573684e6f74466f756e64656572726f72f668656e76656c6f7065f6a4676974656d5f69640466737461747573654572726f72656572726f726c4261636b707265737375726568656e76656c6f7065f6"
+    }
+  ],
+  "invalid_vectors": [
+    {
+      "id": "request_empty_payload",
+      "target": "request",
+      "cbor_hex": "",
+      "error_substring": "Eof"
+    },
+    {
+      "id": "response_empty_payload",
+      "target": "response",
+      "cbor_hex": "",
+      "error_substring": "Eof"
+    }
+  ]
+}

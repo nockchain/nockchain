@@ -8,12 +8,13 @@ Canonical/Legacy: Legacy (crate-level test fixture reference; canonical docs spi
 ## Layout
 
 - `jams/v0/`: v0 fixtures (`balance.jam`, `early-balance.jam`, `note.jam`, `raw-tx.jam`, `timelock.jam`)
-- `jams/v1/`: v1 fixtures (`note.jam`, `raw-tx.jam`)
+- `jams/v1/`: v1 fixtures (`note.jam`, `raw-tx.jam`, sig-hash oracles)
 
 ## Where These Fixtures Are Used
 
 - `tests/balance_from_peek_v0.rs` and `tests/balance_from_peek_v1.rs` decode `jams/v0/early-balance.jam`, validate expected fields, and assert noun roundtrips.
 - `tests/raw_tx_from_jam_v0.rs` and `tests/raw_tx_from_jam_v1.rs` decode `raw-tx.jam` / `note.jam` fixtures and assert structural invariants + noun roundtrips.
+- `tests/spend1_signature_verification_v1.rs` decodes `raw-tx.jam` plus the `%1` sig-hash oracle fixture and checks Rust `Spend1::sig_hash_digest()` parity against the Hoon-generated oracle.
 - `src/tx_engine/v0/note.rs` unit tests load `jams/v0/{balance,note,timelock}.jam`.
 
 ## Updating Fixtures
@@ -34,7 +35,8 @@ These tests use fixed `include_bytes!` paths, so fixture files must exist at com
 ## Regeneration Flow
 `hoon-closed` regeneration flow
 - Run all commands from the repo root.
-- Each `hoon-closed` run writes `out.jam`; move it to the fixture path shown below.
+- `out.jam` is the compiled generator artifact, not the kicked generator result.
+- To save the actual fixture payload, pass `--out-dir /tmp/nockchain-fixtures` and copy the emitted script-stem `.jam` from there.
 
 ## Fixture map
 - `open/crates/nockchain-types/jams/v0/raw-tx.jam`
@@ -43,8 +45,9 @@ These tests use fixed `include_bytes!` paths, so fixture files must exist at com
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v0/generate-raw-tx.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v0/raw-tx.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-raw-tx.jam open/crates/nockchain-types/jams/v0/raw-tx.jam
 ```
 - `open/crates/nockchain-types/jams/v0/note.jam`
   - generator: `closed/hoon/scripts/fixtures/v0/generate-note.hoon`
@@ -52,8 +55,9 @@ cp out.jam open/crates/nockchain-types/jams/v0/raw-tx.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v0/generate-note.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v0/note.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-note.jam open/crates/nockchain-types/jams/v0/note.jam
 ```
 - `open/crates/nockchain-types/jams/v0/balance.jam`
   - generator: `closed/hoon/scripts/fixtures/v0/generate-balance.hoon`
@@ -61,8 +65,9 @@ cp out.jam open/crates/nockchain-types/jams/v0/note.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v0/generate-balance.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v0/balance.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-balance.jam open/crates/nockchain-types/jams/v0/balance.jam
 ```
 - `open/crates/nockchain-types/jams/v0/timelock.jam`
   - generator: `closed/hoon/scripts/fixtures/v0/generate-timelock.hoon`
@@ -70,8 +75,9 @@ cp out.jam open/crates/nockchain-types/jams/v0/balance.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v0/generate-timelock.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v0/timelock.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-timelock.jam open/crates/nockchain-types/jams/v0/timelock.jam
 ```
 - `open/crates/nockchain-types/jams/v1/raw-tx.jam`
   - generator: `closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx.hoon`
@@ -79,8 +85,9 @@ cp out.jam open/crates/nockchain-types/jams/v0/timelock.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v1/raw-tx.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-v1-raw-tx.jam open/crates/nockchain-types/jams/v1/raw-tx.jam
 ```
 - `open/crates/nockchain-types/jams/v1/note.jam`
   - generator: `closed/hoon/scripts/fixtures/v1/generate-v1-note.hoon`
@@ -88,8 +95,9 @@ cp out.jam open/crates/nockchain-types/jams/v1/raw-tx.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v1/generate-v1-note.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v1/note.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-v1-note.jam open/crates/nockchain-types/jams/v1/note.jam
 ```
 - `open/crates/nockchain-types/jams/v1/raw-tx-word-count-oracle.jam`
   - generator: `closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx-word-count-golden.hoon`
@@ -97,8 +105,19 @@ cp out.jam open/crates/nockchain-types/jams/v1/note.jam
 ```bash
 cargo run --profile release --bin hoon-closed -- \
   closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx-word-count-golden.hoon \
-  closed/hoon
-cp out.jam open/crates/nockchain-types/jams/v1/raw-tx-word-count-oracle.jam
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-v1-raw-tx-word-count-golden.jam open/crates/nockchain-types/jams/v1/raw-tx-word-count-oracle.jam
+```
+- `open/crates/nockchain-types/jams/v1/raw-tx-spend1-sig-hash-oracle.jam`
+  - generator: `closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx-spend1-sig-hash-oracle.hoon`
+  - command:
+```bash
+cargo run --profile release --bin hoon-closed -- \
+  closed/hoon/scripts/fixtures/v1/generate-v1-raw-tx-spend1-sig-hash-oracle.hoon \
+  closed/hoon \
+  --out-dir /tmp/nockchain-fixtures
+cp /tmp/nockchain-fixtures/generate-v1-raw-tx-spend1-sig-hash-oracle.jam open/crates/nockchain-types/jams/v1/raw-tx-spend1-sig-hash-oracle.jam
 ```
 
 ## Captured fixture (no direct Hoon script)

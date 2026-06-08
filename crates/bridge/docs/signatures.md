@@ -73,14 +73,14 @@ Bridge signature gossip is handled by `bridge.ingress.v1.BridgeIngress` (`proto/
 
 The kernel now emits only:
 
-- `%create-withdrawal-txs reqs=(list nock-withdrawal-request)`
+- `%base-block-withdrawals-pending pending=pending-base-block-withdrawals`
 - `%commit-nock-deposits reqs=(list nock-deposit-request)`
 - `%grpc grpc-effect`
 - `%stop reason=cord last=stop-info`
 
 Deposit signature flow in this document is tied to `%commit-nock-deposits`.
-`%create-withdrawal-txs` currently carries withdrawal intent metadata and is not
-yet part of the ETH multisig deposit-signature path.
+`%base-block-withdrawals-pending` carries withdrawal intent metadata for the
+pending Base batch and is not part of the ETH multisig deposit-signature path.
 
 ## Serialization Format
 

@@ -1,3 +1,5 @@
+#![allow(clippy::missing_safety_doc)]
+
 use std::io::Error;
 use std::ptr::NonNull;
 use std::result::Result;
@@ -84,7 +86,8 @@ pub struct TraceInfo {
 impl TraceInfo {
     pub fn append_trace(&mut self, stack: &mut NockStack, path: Noun) {
         if let Some(filter) = self.filter.as_mut() {
-            if !filter.should_trace(path) {
+            let space = stack.noun_space();
+            if !filter.should_trace(path, &space) {
                 return;
             }
         }
@@ -136,31 +139,37 @@ pub unsafe fn write_nock_trace(
 pub fn path_to_cord(stack: &mut NockStack, path: Noun) -> Atom {
     let mut cursor = path;
     let mut length = 0usize;
+    let space = stack.noun_space();
 
     // count how much size we need
-    while let Ok(c) = cursor.as_cell() {
+    while let Ok(c) = cursor.in_space(&space).as_cell() {
         unsafe {
             match c.head().as_either_atom_cell() {
                 Left(a) => {
                     length += 1;
-                    length += met3_usize(a);
+                    length += met3_usize(a.atom(), &space);
                 }
                 Right(ch) => {
                     if let Ok(nm) = ch.head().as_atom() {
                         if let Ok(kv) = ch.tail().as_atom() {
-                            let kvt = scow(stack, DirectAtom::new_unchecked(tas!(b"ud")), kv)
-                                .expect("scow should succeed in path_to_cord");
-                            let kvc =
-                                rap(stack, 3, kvt).expect("rap should succeed in path_to_cord");
+                            let kvt = scow(
+                                stack,
+                                DirectAtom::new_unchecked(tas!(b"ud")),
+                                kv.atom(),
+                                &space,
+                            )
+                            .expect("scow should succeed in path_to_cord");
+                            let kvc = rap(stack, 3, kvt, &space)
+                                .expect("rap should succeed in path_to_cord");
                             length += 1;
-                            length += met3_usize(nm);
-                            length += met3_usize(kvc);
+                            length += met3_usize(nm.atom(), &space);
+                            length += met3_usize(kvc, &space);
                         }
                     }
                 }
             }
         }
-        cursor = c.tail();
+        cursor = c.tail().noun();
     }
 
     // reset cursor, then actually write the path
@@ -169,39 +178,44 @@ pub fn path_to_cord(stack: &mut NockStack, path: Noun) -> Atom {
     let (mut deres, buffer) = unsafe { IndirectAtom::new_raw_mut_bytes(stack, length) };
     let slash = (b"/")[0];
 
-    while let Ok(c) = cursor.as_cell() {
+    while let Ok(c) = cursor.in_space(&space).as_cell() {
         unsafe {
             match c.head().as_either_atom_cell() {
                 Left(a) => {
                     buffer[idx] = slash;
                     idx += 1;
-                    let bytelen = met3_usize(a);
+                    let bytelen = met3_usize(a.atom(), &space);
                     buffer[idx..idx + bytelen].copy_from_slice(&a.as_ne_bytes()[0..bytelen]);
                     idx += bytelen;
                 }
                 Right(ch) => {
                     if let Ok(nm) = ch.head().as_atom() {
                         if let Ok(kv) = ch.tail().as_atom() {
-                            let kvt = scow(stack, DirectAtom::new_unchecked(tas!(b"ud")), kv)
-                                .expect("scow should succeed in path_to_cord");
-                            let kvc =
-                                rap(stack, 3, kvt).expect("rap should succeed in path_to_cord");
+                            let kvt = scow(
+                                stack,
+                                DirectAtom::new_unchecked(tas!(b"ud")),
+                                kv.atom(),
+                                &space,
+                            )
+                            .expect("scow should succeed in path_to_cord");
+                            let kvc = rap(stack, 3, kvt, &space)
+                                .expect("rap should succeed in path_to_cord");
                             buffer[idx] = slash;
                             idx += 1;
-                            let nmlen = met3_usize(nm);
+                            let nmlen = met3_usize(nm.atom(), &space);
                             buffer[idx..idx + nmlen].copy_from_slice(&nm.as_ne_bytes()[0..nmlen]);
                             idx += nmlen;
-                            let kvclen = met3_usize(kvc);
+                            let kvclen = met3_usize(kvc, &space);
                             buffer[idx..idx + kvclen]
-                                .copy_from_slice(&kvc.as_ne_bytes()[0..kvclen]);
+                                .copy_from_slice(&kvc.in_space(&space).as_ne_bytes()[0..kvclen]);
                             idx += kvclen;
                         }
                     }
                 }
             }
         }
-        cursor = c.tail();
+        cursor = c.tail().noun();
     }
 
-    unsafe { deres.normalize_as_atom() }
+    unsafe { deres.normalize_as_atom(&space) }
 }

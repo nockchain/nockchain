@@ -4,15 +4,11 @@ use nockapp::noun::slab::{Jammer, NounSlab};
 use nockapp::utils::make_tas;
 use nockapp::wire::Wire;
 use nockapp::{AtomExt, Bytes, NockApp, NockAppError, ToBytes};
-use nockchain_types::BlockchainConstants;
+pub use nockchain_types::{fakenet_blockchain_constants, BlockchainConstants, Seconds};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
 use noun_serde::NounEncode;
 
-#[cfg(feature = "bazel_build")]
-pub static FAKENET_GENESIS_BLOCK: &[u8] = include_bytes!(env!("FAKENET_GENESIS_PATH"));
-
-#[cfg(not(feature = "bazel_build"))]
 pub static FAKENET_GENESIS_BLOCK: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/jams/fakenet-genesis-pow-2-bex-1.jam"
@@ -24,7 +20,7 @@ pub const FAKENET_GENESIS_MESSAGE: &str = "3WNP3WtcQJYtP5PCvFHDQVEeiZEznsULEY5Lc
 pub const REALNET_GENESIS_MESSAGE: &str = "2c8Ltbg44dPkEGcNPupcVAtDgD87753M9pG2fg8yC2mTEqg5qAFvvbT";
 
 pub enum SetupCommand {
-    PokeFakenetConstants(BlockchainConstants),
+    PokeFakenetConstants(Box<BlockchainConstants>),
     PokeSetGenesisSeal(String),
     PokeSetBtcData,
 }

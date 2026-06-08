@@ -10,15 +10,16 @@ use nockvm::noun::{Atom, Noun};
 use crate::form::crypto::argon2::{argon2_hook, Argon2Args};
 
 pub fn argon2_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let parent_core = slot(subject, 7)?;
-    let params = slot(parent_core, 6)?;
+    let space = context.stack.noun_space();
+    let parent_core = slot(subject, 7, &space)?;
+    let params = slot(parent_core, 6, &space)?;
 
     // prepare parameters
-    let args = Argon2Args::from_noun(&mut context.stack, &params)?;
+    let args = Argon2Args::from_noun(&mut context.stack, &params, &space)?;
 
-    let sam = slot(subject, 6)?;
-    let msg: Byts = Byts::from_noun(&mut context.stack, &slot(sam, 2)?)?;
-    let sat: Byts = Byts::from_noun(&mut context.stack, &slot(sam, 3)?)?;
+    let sam = slot(subject, 6, &space)?;
+    let msg: Byts = Byts::from_noun(&mut context.stack, &slot(sam, 2, &space)?, &space)?;
+    let sat: Byts = Byts::from_noun(&mut context.stack, &slot(sam, 3, &space)?, &space)?;
 
     let mut res = vec![0; args.out];
     argon2_hook(args, &msg.0, &sat.0, &mut res).map_err(|_| BAIL_EXIT)?;
@@ -113,14 +114,16 @@ pub mod test {
         let salt = salt_byts.clone().into_noun(&mut context.stack);
         let inner = T(&mut context.stack, &[password, salt]);
 
-        let args = Argon2Args::from_noun(&mut context.stack, &params).unwrap_or_else(|err| {
-            panic!(
-                "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                file!(),
-                line!(),
-                option_env!("GIT_SHA")
-            )
-        });
+        let space = context.stack.noun_space();
+        let args =
+            Argon2Args::from_noun(&mut context.stack, &params, &space).unwrap_or_else(|err| {
+                panic!(
+                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            });
         let expected_tag = &mut vec![0u8; args.out];
 
         argon2_hook(args, &password_byts.0, &salt_byts.0, expected_tag).unwrap_or_else(|err| {

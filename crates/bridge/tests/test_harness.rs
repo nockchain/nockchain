@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alloy::primitives::Address;
-use bridge::proposal_cache::{ProposalCache, ProposalStatus, SignatureAddResult};
-use bridge::types::{DepositId, NockDepositRequestData};
+use bridge::deposit::cache::{ProposalCache, ProposalStatus, SignatureAddResult};
+use bridge::deposit::types::{DepositId, NockDepositRequestData};
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::Hash as Tip5Hash;
 use nockchain_types::v1::Name;
@@ -252,7 +252,7 @@ impl TestNode {
 
         self.proposal_cache.add_signature(
             deposit_id,
-            bridge::proposal_cache::SignatureData {
+            bridge::deposit::cache::SignatureData {
                 signer_address,
                 signature,
                 proposal_hash,
@@ -675,7 +675,7 @@ mod tests {
                 cache
                     .add_signature(
                         &deposit_id,
-                        bridge::proposal_cache::SignatureData {
+                        bridge::deposit::cache::SignatureData {
                             signer_address: signer,
                             signature: vec![i; 65],
                             proposal_hash,
@@ -732,7 +732,7 @@ mod tests {
                 cache
                     .add_signature(
                         &deposit_id,
-                        bridge::proposal_cache::SignatureData {
+                        bridge::deposit::cache::SignatureData {
                             signer_address: signer,
                             signature: vec![i; 65],
                             proposal_hash,
@@ -811,7 +811,7 @@ mod tests {
                 cache
                     .add_signature(
                         deposit_id,
-                        bridge::proposal_cache::SignatureData {
+                        bridge::deposit::cache::SignatureData {
                             signer_address: signer,
                             signature: vec![i; 65],
                             proposal_hash,
@@ -883,7 +883,7 @@ mod tests {
                 cache
                     .add_signature(
                         &deposit_id,
-                        bridge::proposal_cache::SignatureData {
+                        bridge::deposit::cache::SignatureData {
                             signer_address: signer,
                             signature: vec![i; 65],
                             proposal_hash,
@@ -934,7 +934,7 @@ mod tests {
             cache
                 .add_signature(
                     &deposit_id1,
-                    bridge::proposal_cache::SignatureData {
+                    bridge::deposit::cache::SignatureData {
                         signer_address: signer,
                         signature: vec![i; 65],
                         proposal_hash: proposal_hash1,
@@ -997,7 +997,7 @@ mod tests {
             cache
                 .add_signature(
                     &deposit_id,
-                    bridge::proposal_cache::SignatureData {
+                    bridge::deposit::cache::SignatureData {
                         signer_address: Address::ZERO,
                         signature: vec![1; 65],
                         proposal_hash,
@@ -1044,7 +1044,7 @@ mod tests {
                 cache
                     .add_signature(
                         &deposit_id,
-                        bridge::proposal_cache::SignatureData {
+                        bridge::deposit::cache::SignatureData {
                             signer_address: signer,
                             signature: vec![i; 65],
                             proposal_hash,

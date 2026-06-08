@@ -8,20 +8,28 @@ use nockapp::driver::{NockAppHandle, PokeResult};
 use nockapp::nockapp::NockAppExit;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::WireRepr;
+use nockchain_libp2p_io::metrics::NockchainP2PMetrics;
+use nockchain_libp2p_io::peer_stats::{
+    global_peer_stats_registry, PeerReqResGeneration as TransportPeerReqResGeneration,
+    PeerStatsEntry as TransportPeerStatsEntry, PeerStatsRegistry as TransportPeerStatsRegistry,
+};
 use nockchain_types::tx_engine::{v0, v1};
-use nockvm::noun::SIG;
+use nockvm::noun::{NounAllocator, SIG};
 use noun_serde::{NounDecode, NounEncode};
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::Builder as ReflectionBuilder;
+use tonic_web::GrpcWebLayer;
 use tracing::{debug, error, info, warn};
 
 use super::block_explorer::BlockExplorerCache;
 use super::cache::{
     AddressBalanceCache, DEFAULT_PAGE_BYTES, DEFAULT_PAGE_SIZE, MAX_PAGE_BYTES, MAX_PAGE_SIZE,
 };
+use super::cors::cors_layer_from_env;
+use super::ip_blocklist::{blocklist_layer, IpBlocklist};
 use super::metrics::{init_metrics, NockchainGrpcApiMetrics};
 use crate::error::{NockAppGrpcError, Result};
 use crate::pb::common::v1::{Acknowledged, ErrorCode, ErrorStatus};
@@ -44,6 +52,7 @@ use crate::v2::pagination::{
 use crate::wire_conversion::{create_grpc_wire, grpc_wire_to_nockapp};
 
 const DEFAULT_HEAVIEST_CHAIN_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_BLOCK_EXPLORER_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 
 #[async_trait]
 pub trait BalanceHandle: Send + Sync {
@@ -174,8 +183,23 @@ impl PublicNockchainGrpcServer {
             self.block_explorer_cache.clone(),
             self.metrics.clone(),
         ));
+        // Restrict browser CORS to an explicit allowlist from
+        // NOCKCHAIN_API_CORS_ALLOWED_ORIGINS (comma/whitespace separated).
+        // Empty/unset => no browser origins allowed; native gRPC clients send
+        // no Origin header and are unaffected. Methods/headers stay permissive
+        // so gRPC-Web still works for an allowed origin.
+        let cors = cors_layer_from_env();
+
+        // Reject blocked client IPs (from the front proxy's x-forwarded-for)
+        // before requests reach any service. Configured via the
+        // NOCKCHAIN_API_IP_BLOCKLIST env var on top of compiled-in defaults.
+        let blocklist = IpBlocklist::from_env_and_defaults();
 
         Server::builder()
+            .accept_http1(true)
+            .layer(cors)
+            .layer(GrpcWebLayer::new())
+            .layer(blocklist_layer(blocklist, self.metrics.clone()))
             .add_service(health_service)
             .add_service(reflection_service_v1)
             .add_service(nockchain_api)
@@ -221,7 +245,9 @@ impl PublicNockchainGrpcServer {
         let result = match peek_result {
             Ok(Some(result_slab)) => {
                 let result_noun = unsafe { result_slab.root() };
-                match <Option<Option<(v1::BlockHeight, v1::Hash)>>>::from_noun(&result_noun) {
+                let space = result_slab.noun_space();
+                match <Option<Option<(v1::BlockHeight, v1::Hash)>>>::from_noun(&result_noun, &space)
+                {
                     Ok(opt) => Ok(opt.flatten()),
                     // Peek either returned [~ ~] or ~
                     Err(_) => Err(NockAppGrpcError::PeekReturnedNoData),
@@ -273,7 +299,7 @@ impl PublicNockchainGrpcServer {
             };
 
             info!("Block explorer refresh worker starting");
-            let mut interval = time::interval(Duration::from_secs(15));
+            let mut interval = time::interval(DEFAULT_BLOCK_EXPLORER_REFRESH_INTERVAL);
             let mut initialized = false;
             let mut backfill_started = false;
 
@@ -429,6 +455,8 @@ pub struct NockchainMetricsServer {
     handle: Arc<dyn BalanceHandle>,
     block_explorer_cache: Arc<BlockExplorerCache>,
     metrics: Arc<NockchainGrpcApiMetrics>,
+    peer_stats_registry: Arc<TransportPeerStatsRegistry>,
+    transport_metrics: Arc<NockchainP2PMetrics>,
 }
 
 impl NockchainBlockServer {
@@ -455,6 +483,96 @@ impl NockchainMetricsServer {
             handle,
             block_explorer_cache: cache,
             metrics,
+            peer_stats_registry: global_peer_stats_registry(),
+            transport_metrics: Arc::new(
+                NockchainP2PMetrics::register(gnort::global_metrics_registry())
+                    .expect("Failed to register transport metrics!"),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_peer_stats_registry(
+        handle: Arc<dyn BalanceHandle>,
+        cache: Arc<BlockExplorerCache>,
+        metrics: Arc<NockchainGrpcApiMetrics>,
+        peer_stats_registry: Arc<TransportPeerStatsRegistry>,
+    ) -> Self {
+        Self {
+            handle,
+            block_explorer_cache: cache,
+            metrics,
+            peer_stats_registry,
+            transport_metrics: Arc::new(
+                NockchainP2PMetrics::register(gnort::global_metrics_registry())
+                    .expect("Failed to register transport metrics!"),
+            ),
+        }
+    }
+
+    fn map_peer_generation(generation: TransportPeerReqResGeneration) -> PeerReqResGeneration {
+        match generation {
+            TransportPeerReqResGeneration::Unknown => PeerReqResGeneration::Unspecified,
+            TransportPeerReqResGeneration::Gen1 => PeerReqResGeneration::Gen1,
+            TransportPeerReqResGeneration::Gen2 => PeerReqResGeneration::Gen2,
+        }
+    }
+
+    fn map_peer_stat(entry: TransportPeerStatsEntry) -> PeerStat {
+        PeerStat {
+            peer_id: entry.peer_id,
+            protocol_generation: Self::map_peer_generation(entry.protocol_generation).into(),
+            request_count: entry.request_count,
+            bytes_sent: entry.bytes_sent,
+            bytes_received: entry.bytes_received,
+            average_round_trip_ms: entry.average_round_trip_ms,
+            average_batch_size: entry.average_batch_size,
+            failure_count: entry.failure_count,
+            timeout_count: entry.timeout_count,
+            blocks_received: entry.blocks_received,
+            average_block_propagation_ms: entry.average_block_propagation_ms,
+            connection_duration_seconds: entry.connection_duration_seconds,
+        }
+    }
+
+    fn req_res_metrics_snapshot(&self) -> ReqResMetricsData {
+        ReqResMetricsData {
+            gen1_outbound_timeouts: self
+                .transport_metrics
+                .gen1_outbound_timeouts
+                .fetch_add(0)
+                .try_into()
+                .expect("timeout counter should fit in u64"),
+            gen2_outbound_timeouts: self
+                .transport_metrics
+                .gen2_outbound_timeouts
+                .fetch_add(0)
+                .try_into()
+                .expect("timeout counter should fit in u64"),
+            gen2_batch_requests_sent: self
+                .transport_metrics
+                .gen2_batch_requests_sent
+                .fetch_add(0)
+                .try_into()
+                .expect("batch request counter should fit in u64"),
+            gen2_batch_requests_received: self
+                .transport_metrics
+                .gen2_batch_requests_received
+                .fetch_add(0)
+                .try_into()
+                .expect("batch request counter should fit in u64"),
+            req_res_fallback_total: self
+                .transport_metrics
+                .req_res_fallback_total
+                .fetch_add(0)
+                .try_into()
+                .expect("fallback counter should fit in u64"),
+            req_res_block_by_height_gen1_routed: self
+                .transport_metrics
+                .req_res_block_by_height_gen1_routed
+                .fetch_add(0)
+                .try_into()
+                .expect("fallback route counter should fit in u64"),
         }
     }
 }
@@ -553,6 +671,34 @@ impl NockchainMetricsService for NockchainMetricsServer {
             };
             Ok(Response::new(resp))
         }
+    }
+
+    async fn get_peer_stats(
+        &self,
+        _request: Request<GetPeerStatsRequest>,
+    ) -> std::result::Result<Response<GetPeerStatsResponse>, Status> {
+        let snapshot = self.peer_stats_registry.snapshot();
+        Ok(Response::new(GetPeerStatsResponse {
+            result: Some(get_peer_stats_response::Result::Stats(PeerStatsData {
+                collected_at_unix_ms: snapshot.collected_at_unix_ms,
+                peers: snapshot
+                    .peers
+                    .into_iter()
+                    .map(Self::map_peer_stat)
+                    .collect(),
+            })),
+        }))
+    }
+
+    async fn get_req_res_metrics(
+        &self,
+        _request: Request<GetReqResMetricsRequest>,
+    ) -> std::result::Result<Response<GetReqResMetricsResponse>, Status> {
+        Ok(Response::new(GetReqResMetricsResponse {
+            result: Some(get_req_res_metrics_response::Result::Metrics(
+                self.req_res_metrics_snapshot(),
+            )),
+        }))
     }
 }
 
@@ -758,7 +904,9 @@ impl NockchainService for PublicNockchainGrpcServer {
                 match peek_result {
                     Ok(Some(result_slab)) => {
                         let result_noun = unsafe { result_slab.root() };
-                        let result = <Option<Option<v0::BalanceUpdate>>>::from_noun(&result_noun);
+                        let space = result_slab.noun_space();
+                        let result =
+                            <Option<Option<v0::BalanceUpdate>>>::from_noun(&result_noun, &space);
 
                         match result {
                             Ok(update) => {
@@ -985,7 +1133,9 @@ impl NockchainService for PublicNockchainGrpcServer {
                 match peek_result {
                     Ok(Some(result_slab)) => {
                         let result_noun = unsafe { result_slab.root() };
-                        let result = <Option<Option<v1::BalanceUpdate>>>::from_noun(&result_noun);
+                        let space = result_slab.noun_space();
+                        let result =
+                            <Option<Option<v1::BalanceUpdate>>>::from_noun(&result_noun, &space);
 
                         match result {
                             Ok(update) => {
@@ -1320,7 +1470,8 @@ impl NockchainService for PublicNockchainGrpcServer {
         match peek_result {
             Ok(Some(result_slab)) => {
                 let result_noun = unsafe { result_slab.root() };
-                match <Option<Option<bool>>>::from_noun(&result_noun) {
+                let space = result_slab.noun_space();
+                match <Option<Option<bool>>>::from_noun(&result_noun, &space) {
                     Ok(opt) => {
                         let accepted = opt.flatten().unwrap_or(false);
                         timed_return(
@@ -1863,6 +2014,11 @@ mod tests {
     use std::sync::Arc;
 
     use nockapp_grpc_proto::pb::common::v1::Base58Hash;
+    use nockchain_libp2p_io::peer_stats::{
+        PeerReqResGeneration as TransportPeerReqResGeneration,
+        PeerStatsEntry as TransportPeerStatsEntry, PeerStatsRegistry as TransportPeerStatsRegistry,
+        PeerStatsSnapshot as TransportPeerStatsSnapshot,
+    };
     use nockchain_math::crypto::cheetah::A_GEN;
     use nockchain_types::v1::Hash;
 
@@ -1914,8 +2070,9 @@ mod tests {
             &self,
             path: NounSlab,
         ) -> std::result::Result<Option<NounSlab>, nockapp::nockapp::error::NockAppError> {
+            let space = path.noun_space();
             let root = unsafe { path.root() };
-            if let Ok(segments) = <Vec<String>>::from_noun(&root) {
+            if let Ok(segments) = <Vec<String>>::from_noun(&root, &space) {
                 if segments.first().map(String::as_str) == Some("heaviest-chain") {
                     let mut slab = NounSlab::new();
                     let noun = Some(Some((
@@ -1950,8 +2107,9 @@ mod tests {
             &self,
             path: NounSlab,
         ) -> std::result::Result<Option<NounSlab>, nockapp::nockapp::error::NockAppError> {
+            let space = path.noun_space();
             let root = unsafe { path.root() };
-            if let Ok(segments) = <Vec<String>>::from_noun(&root) {
+            if let Ok(segments) = <Vec<String>>::from_noun(&root, &space) {
                 if segments.first().map(String::as_str) == Some("heaviest-chain") {
                     let mut slab = NounSlab::new();
                     let noun = Some(Some((
@@ -1980,7 +2138,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn wallet_get_balance_uses_cache_for_subsequent_pages() {
         let (update, expected_names) = fixtures_v1::make_balance_update(4);
         let handle = Arc::new(MockHandleV0::new(update));
@@ -2056,7 +2214,7 @@ mod tests {
         assert_eq!(handle.peek_calls(), 1, "cache should prevent second peek");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn wallet_get_balance_by_first_name_uses_cache_for_subsequent_pages() {
         // TODO: finish test
         let (update, expected_names) = fixtures::make_balance_update(4);
@@ -2133,6 +2291,141 @@ mod tests {
 
         assert_eq!(collected_sorted, expected_sorted);
         assert_eq!(handle.peek_calls(), 1, "cache should prevent second peek");
+    }
+
+    #[tokio::test]
+    async fn get_peer_stats_returns_snapshot_from_registry() {
+        let (update, _) = fixtures::make_balance_update(1);
+        let handle = Arc::new(MockHandle::new(update));
+        let metrics = init_metrics();
+        let cache = Arc::new(BlockExplorerCache::new(metrics.clone()));
+        let peer_stats_registry = Arc::new(TransportPeerStatsRegistry::default());
+        peer_stats_registry.replace_snapshot(TransportPeerStatsSnapshot {
+            collected_at_unix_ms: 42,
+            peers: vec![TransportPeerStatsEntry {
+                peer_id: "peer-1".to_string(),
+                protocol_generation: TransportPeerReqResGeneration::Gen2,
+                request_count: 7,
+                bytes_sent: 128,
+                bytes_received: 512,
+                average_round_trip_ms: 4.5,
+                average_batch_size: 3.5,
+                failure_count: 1,
+                timeout_count: 0,
+                blocks_received: 2,
+                average_block_propagation_ms: 1.25,
+                connection_duration_seconds: 33,
+            }],
+        });
+        let server = NockchainMetricsServer::with_peer_stats_registry(
+            handle, cache, metrics, peer_stats_registry,
+        );
+
+        let response = server
+            .get_peer_stats(Request::new(GetPeerStatsRequest {}))
+            .await
+            .expect("peer stats response")
+            .into_inner();
+
+        let stats = match response.result {
+            Some(get_peer_stats_response::Result::Stats(stats)) => stats,
+            other => panic!("unexpected response: {:?}", other),
+        };
+        assert_eq!(stats.collected_at_unix_ms, 42);
+        assert_eq!(stats.peers.len(), 1);
+        assert_eq!(stats.peers[0].peer_id, "peer-1");
+        assert_eq!(
+            stats.peers[0].protocol_generation,
+            PeerReqResGeneration::Gen2 as i32
+        );
+        assert_eq!(stats.peers[0].request_count, 7);
+        assert_eq!(stats.peers[0].bytes_received, 512);
+        assert_eq!(stats.peers[0].connection_duration_seconds, 33);
+    }
+
+    #[tokio::test]
+    async fn get_req_res_metrics_returns_transport_counters() {
+        let (update, _) = fixtures::make_balance_update(1);
+        let handle = Arc::new(MockHandle::new(update));
+        let metrics = init_metrics();
+        let cache = Arc::new(BlockExplorerCache::new(metrics.clone()));
+        let server = NockchainMetricsServer::new(handle, cache, metrics);
+
+        let baseline_gen1: u64 = server
+            .transport_metrics
+            .gen1_outbound_timeouts
+            .fetch_add(0)
+            .try_into()
+            .expect("timeout counter should fit in u64");
+        let baseline_gen2: u64 = server
+            .transport_metrics
+            .gen2_outbound_timeouts
+            .fetch_add(0)
+            .try_into()
+            .expect("timeout counter should fit in u64");
+        let baseline_sent: u64 = server
+            .transport_metrics
+            .gen2_batch_requests_sent
+            .fetch_add(0)
+            .try_into()
+            .expect("batch request counter should fit in u64");
+        let baseline_received: u64 = server
+            .transport_metrics
+            .gen2_batch_requests_received
+            .fetch_add(0)
+            .try_into()
+            .expect("batch request counter should fit in u64");
+        let baseline_fallback: u64 = server
+            .transport_metrics
+            .req_res_fallback_total
+            .fetch_add(0)
+            .try_into()
+            .expect("fallback counter should fit in u64");
+        let baseline_routed: u64 = server
+            .transport_metrics
+            .req_res_block_by_height_gen1_routed
+            .fetch_add(0)
+            .try_into()
+            .expect("fallback route counter should fit in u64");
+
+        server.transport_metrics.gen1_outbound_timeouts.fetch_add(2);
+        server.transport_metrics.gen2_outbound_timeouts.fetch_add(3);
+        server
+            .transport_metrics
+            .gen2_batch_requests_sent
+            .fetch_add(5);
+        server
+            .transport_metrics
+            .gen2_batch_requests_received
+            .fetch_add(7);
+        server
+            .transport_metrics
+            .req_res_fallback_total
+            .fetch_add(11);
+        server
+            .transport_metrics
+            .req_res_block_by_height_gen1_routed
+            .fetch_add(13);
+
+        let response = server
+            .get_req_res_metrics(Request::new(GetReqResMetricsRequest {}))
+            .await
+            .expect("req-res metrics response")
+            .into_inner();
+
+        let metrics = match response.result {
+            Some(get_req_res_metrics_response::Result::Metrics(metrics)) => metrics,
+            other => panic!("unexpected response: {:?}", other),
+        };
+        assert_eq!(metrics.gen1_outbound_timeouts, baseline_gen1 + 2);
+        assert_eq!(metrics.gen2_outbound_timeouts, baseline_gen2 + 3);
+        assert_eq!(metrics.gen2_batch_requests_sent, baseline_sent + 5);
+        assert_eq!(metrics.gen2_batch_requests_received, baseline_received + 7);
+        assert_eq!(metrics.req_res_fallback_total, baseline_fallback + 11);
+        assert_eq!(
+            metrics.req_res_block_by_height_gen1_routed,
+            baseline_routed + 13
+        );
     }
 
     fn encode_balance_update(update: &v1::BalanceUpdate) -> NounSlab {

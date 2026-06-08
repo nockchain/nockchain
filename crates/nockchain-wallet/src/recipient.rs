@@ -13,7 +13,7 @@ pub const BRIDGE_LOCK_ROOT_DEFAULT_B58: &str =
     "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd";
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+#[serde(deny_unknown_fields, tag = "kind", rename_all = "lowercase")]
 pub enum RecipientSpecToken {
     P2pkh {
         address: String,
@@ -26,6 +26,8 @@ pub enum RecipientSpecToken {
     },
     #[serde(rename = "bridge-deposit")]
     BridgeDeposit {
+        #[serde(default)]
+        root: Option<String>,
         #[serde(rename = "evm-address")]
         evm_address: String,
         amount: u64,
@@ -44,6 +46,7 @@ pub enum RecipientSpec {
     },
     #[noun(tag = "bridge-deposit")]
     BridgeDeposit {
+        root: Hash,
         evm_address: EthAddress,
         amount: u64,
     },
@@ -171,6 +174,7 @@ impl RecipientSpecToken {
                 })
             }
             RecipientSpecToken::BridgeDeposit {
+                root,
                 evm_address,
                 amount,
             } => {
@@ -187,7 +191,9 @@ impl RecipientSpecToken {
                         format_eth_addr_error(err)
                     )))
                 })?;
+                let parsed_root = resolve_bridge_lock_root(root.as_deref())?;
                 Ok(RecipientSpec::BridgeDeposit {
+                    root: parsed_root,
                     evm_address: parsed,
                     amount,
                 })
@@ -242,6 +248,27 @@ fn evm_address_to_based(evm_address: EthAddress) -> [u64; 3] {
     [limbs[0], limbs[1], limbs[2]]
 }
 
+fn default_bridge_lock_root() -> Result<Hash, NockAppError> {
+    Hash::from_base58(BRIDGE_LOCK_ROOT_DEFAULT_B58).map_err(|err| {
+        NockAppError::from(CrownError::Unknown(format!(
+            "Invalid bridge lock root constant '{}': {}",
+            BRIDGE_LOCK_ROOT_DEFAULT_B58, err
+        )))
+    })
+}
+
+fn resolve_bridge_lock_root(raw_root: Option<&str>) -> Result<Hash, NockAppError> {
+    let Some(root) = raw_root.map(str::trim).filter(|value| !value.is_empty()) else {
+        return default_bridge_lock_root();
+    };
+    Hash::from_base58(root).map_err(|err| {
+        NockAppError::from(CrownError::Unknown(format!(
+            "Invalid bridge deposit lock root '{}': {}",
+            root, err
+        )))
+    })
+}
+
 /// Converts CLI recipient specs into planner outputs with tx-builder-compatible note-data.
 pub fn planner_recipient_outputs(
     recipients: &[RecipientSpec],
@@ -286,15 +313,11 @@ pub fn planner_recipient_output(
             })
         }
         RecipientSpec::BridgeDeposit {
+            root,
             evm_address,
             amount,
         } => Ok(PlannedOutput {
-            lock_root: Hash::from_base58(BRIDGE_LOCK_ROOT_DEFAULT_B58).map_err(|err| {
-                NockAppError::from(CrownError::Unknown(format!(
-                    "Invalid bridge lock root constant '{}': {}",
-                    BRIDGE_LOCK_ROOT_DEFAULT_B58, err
-                )))
-            })?,
+            lock_root: root.clone(),
             amount: *amount,
             note_data: vec![RawNoteDataEntry::from_bridge_deposit(evm_address_to_based(
                 *evm_address,
@@ -324,7 +347,7 @@ pub fn planner_refund_output_template(
 #[cfg(test)]
 mod tests {
     use nockapp::noun::slab::{NockJammer, NounSlab};
-    use nockvm::noun::FullDebugCell;
+    use nockvm::noun::NounAllocator;
     use noun_serde::NounDecode;
 
     use super::*;
@@ -396,6 +419,17 @@ mod tests {
     }
 
     #[test]
+    fn bridge_deposit_rejects_unknown_json_field() {
+        let raw = format!(
+            "{{\"kind\":\"bridge-deposit\",\"evm-address\":\"{}\",\"amount\":10,\"unexpected\":true}}",
+            SAMPLE_EVM_ADDRESS
+        );
+        let err = RecipientSpecToken::from_cli_arg(&raw)
+            .expect_err("bridge deposit with unknown field should fail");
+        assert!(format!("{err}").contains("unknown field"));
+    }
+
+    #[test]
     fn parse_recipient_arg_rejects_empty() {
         let err = RecipientSpecToken::from_cli_arg("   ").expect_err("empty spec should fail");
         assert!(format!("{err}").contains("cannot be empty"));
@@ -414,6 +448,7 @@ mod tests {
                 amount: 5,
             },
             RecipientSpecToken::BridgeDeposit {
+                root: None,
                 evm_address: SAMPLE_EVM_ADDRESS.to_string(),
                 amount: 9,
             },
@@ -488,6 +523,7 @@ mod tests {
                 amount: 20,
             },
             RecipientSpec::BridgeDeposit {
+                root: default_bridge_lock_root().expect("default bridge root"),
                 evm_address: EthAddress::from_hex_str(SAMPLE_EVM_ADDRESS)
                     .expect("sample evm address"),
                 amount: 30,
@@ -497,9 +533,9 @@ mod tests {
         let mut slab = NounSlab::<NockJammer>::new();
         for spec in specs {
             let noun = spec.to_noun(&mut slab);
-            eprintln!("spec noun: {:?}", FullDebugCell(&noun.as_cell().unwrap()));
-            let decoded =
-                RecipientSpec::from_noun(&noun).expect("recipient spec should decode from noun");
+            let space = slab.noun_space();
+            let decoded = RecipientSpec::from_noun(&noun, &space)
+                .expect("recipient spec should decode from noun");
             assert_eq!(decoded, spec);
         }
     }

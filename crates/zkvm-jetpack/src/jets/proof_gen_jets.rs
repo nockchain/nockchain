@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
-use nockvm::noun::{IndirectAtom, Noun, D};
+use nockvm::noun::{IndirectAtom, Noun, NounSpace, D};
 use nockvm_macros::tas;
 use noun_serde::NounDecode;
 use tracing::debug;
@@ -29,12 +29,10 @@ pub struct MPComp {
     pub com: Vec<Noun>,
 }
 
-impl TryFrom<Noun> for MPComp {
-    type Error = JetErr;
-
-    fn try_from(noun: Noun) -> Result<Self, Self::Error> {
-        let dep_list = HoonList::try_from(slot(noun, 2)?)?;
-        let com_list = HoonList::try_from(slot(noun, 3)?)?;
+impl MPComp {
+    pub fn try_from(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let dep_list = HoonList::try_from(slot(noun, 2, space)?, space)?;
+        let com_list = HoonList::try_from(slot(noun, 3, space)?, space)?;
 
         let mut dep = Vec::with_capacity(dep_list.count());
         let mut com = Vec::with_capacity(com_list.count());
@@ -51,11 +49,9 @@ impl TryFrom<Noun> for MPComp {
     }
 }
 
-impl TryFrom<Noun> for MPUltra {
-    type Error = JetErr;
-
-    fn try_from(mp_ultra: Noun) -> Result<Self, Self::Error> {
-        let mp_ultra_cell = mp_ultra.as_cell().unwrap_or_else(|err| {
+impl MPUltra {
+    pub fn try_from(mp_ultra: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let mp_ultra_cell = mp_ultra.in_space(space).as_cell().unwrap_or_else(|err| {
             panic!(
                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
                 file!(),
@@ -83,8 +79,11 @@ impl TryFrom<Noun> for MPUltra {
                     option_env!("GIT_SHA")
                 )
             }) {
-            tas!(b"mega") => Ok(MPUltra::Mega(mp_ultra_cell.tail())),
-            tas!(b"comp") => Ok(MPUltra::Comp(MPComp::try_from(mp_ultra_cell.tail())?)),
+            tas!(b"mega") => Ok(MPUltra::Mega(mp_ultra_cell.tail().noun())),
+            tas!(b"comp") => Ok(MPUltra::Comp(MPComp::try_from(
+                mp_ultra_cell.tail().noun(),
+                space,
+            )?)),
             _ => panic!("Invalid MPUltra type"),
         }
     }
@@ -115,11 +114,10 @@ pub struct ConstraintData {
     pub degs: Vec<u64>,
 }
 
-impl TryFrom<Noun> for CountMap {
-    type Error = JetErr;
-
-    fn try_from(noun: Noun) -> Result<Self, Self::Error> {
-        let counts = HoonMapIter::from(noun);
+impl CountMap {
+    pub fn try_from(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let noun_handle = noun.in_space(space);
+        let counts = HoonMapIter::new(&noun_handle);
 
         let mut outer = ProofMap::<usize, Counts>::new();
 
@@ -134,13 +132,16 @@ impl TryFrom<Noun> for CountMap {
                     )
                 });
                 (term_cell.head().as_atom()?.as_u64()? as usize, {
-                    let tail = term_cell.tail();
+                    let tail = term_cell.tail().noun();
                     Counts {
-                        boundary: slot(tail, 2)?.as_atom()?.as_u64()? as usize,
-                        row: slot(tail, 6)?.as_atom()?.as_u64()? as usize,
-                        transition: slot(tail, 14)?.as_atom()?.as_u64()? as usize,
-                        terminal: slot(tail, 30)?.as_atom()?.as_u64()? as usize,
-                        extra: slot(tail, 31)?.as_atom()?.as_u64()? as usize,
+                        boundary: slot(tail, 2, space)?.in_space(space).as_atom()?.as_u64()?
+                            as usize,
+                        row: slot(tail, 6, space)?.in_space(space).as_atom()?.as_u64()? as usize,
+                        transition: slot(tail, 14, space)?.in_space(space).as_atom()?.as_u64()?
+                            as usize,
+                        terminal: slot(tail, 30, space)?.in_space(space).as_atom()?.as_u64()?
+                            as usize,
+                        extra: slot(tail, 31, space)?.in_space(space).as_atom()?.as_u64()? as usize,
                     }
                 })
             };
@@ -150,12 +151,11 @@ impl TryFrom<Noun> for CountMap {
     }
 }
 
-impl TryFrom<Noun> for IndexBPolyMap<'_> {
-    type Error = JetErr;
-
-    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
+impl IndexBPolyMap<'_> {
+    pub fn try_from(hoon_map: Noun, space: &NounSpace) -> Result<Self, JetErr> {
         let mut composition_chals = ProofMap::<usize, &[Belt]>::new();
-        let hoon_map = HoonMapIter::from(hoon_map);
+        let hoon_map_handle = hoon_map.in_space(space);
+        let hoon_map = HoonMapIter::new(&hoon_map_handle);
 
         for term_noun in hoon_map.into_iter() {
             let (k, v): (usize, &[Belt]) = {
@@ -169,7 +169,7 @@ impl TryFrom<Noun> for IndexBPolyMap<'_> {
                 });
                 (
                     term_cell.head().as_atom()?.as_u64()? as usize,
-                    BPolySlice::try_from(term_cell.tail())
+                    BPolySlice::try_from(term_cell.tail().noun(), space)
                         .unwrap_or_else(|err| {
                             panic!(
                                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
@@ -187,11 +187,10 @@ impl TryFrom<Noun> for IndexBPolyMap<'_> {
     }
 }
 
-impl TryFrom<Noun> for Constraints {
-    type Error = JetErr;
-
-    fn try_from(hoon_map: Noun) -> Result<Self, Self::Error> {
-        let hoon_map = HoonMapIter::from(hoon_map);
+impl Constraints {
+    pub fn try_from(hoon_map: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let hoon_map_handle = hoon_map.in_space(space);
+        let hoon_map = HoonMapIter::new(&hoon_map_handle);
         let mut constraints = ProofMap::new();
 
         for term_noun in hoon_map.into_iter() {
@@ -206,7 +205,7 @@ impl TryFrom<Noun> for Constraints {
                 });
                 (
                     term_cell.head().as_atom()?.as_u64()? as usize,
-                    MPDenseConstraints::try_from(term_cell.tail())?,
+                    MPDenseConstraints::try_from(term_cell.tail().noun(), space)?,
                 )
             };
 
@@ -216,26 +215,23 @@ impl TryFrom<Noun> for Constraints {
     }
 }
 
-impl TryFrom<Noun> for MPDenseConstraints {
-    type Error = JetErr;
-
-    fn try_from(noun: Noun) -> Result<Self, Self::Error> {
-        let [boundary, row, transition, terminal, extra] = noun.uncell()?;
-
-        let boundary: Vec<ConstraintData> = HoonList::try_from(boundary)?
-            .map(ConstraintData::try_from)
+impl MPDenseConstraints {
+    pub fn try_from(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let [boundary, row, transition, terminal, extra] = noun.uncell(space)?;
+        let boundary: Vec<ConstraintData> = HoonList::try_from(boundary, space)?
+            .map(|x| ConstraintData::try_from(x, space))
             .collect::<Result<Vec<ConstraintData>, _>>()?;
-        let row: Vec<ConstraintData> = HoonList::try_from(row)?
-            .map(ConstraintData::try_from)
+        let row: Vec<ConstraintData> = HoonList::try_from(row, space)?
+            .map(|x| ConstraintData::try_from(x, space))
             .collect::<Result<Vec<ConstraintData>, _>>()?;
-        let transition: Vec<ConstraintData> = HoonList::try_from(transition)?
-            .map(ConstraintData::try_from)
+        let transition: Vec<ConstraintData> = HoonList::try_from(transition, space)?
+            .map(|x| ConstraintData::try_from(x, space))
             .collect::<Result<Vec<ConstraintData>, _>>()?;
-        let terminal: Vec<ConstraintData> = HoonList::try_from(terminal)?
-            .map(ConstraintData::try_from)
+        let terminal: Vec<ConstraintData> = HoonList::try_from(terminal, space)?
+            .map(|x| ConstraintData::try_from(x, space))
             .collect::<Result<Vec<ConstraintData>, _>>()?;
-        let extra: Vec<ConstraintData> = HoonList::try_from(extra)?
-            .map(ConstraintData::try_from)
+        let extra: Vec<ConstraintData> = HoonList::try_from(extra, space)?
+            .map(|x| ConstraintData::try_from(x, space))
             .collect::<Result<Vec<ConstraintData>, _>>()?;
 
         Ok(MPDenseConstraints {
@@ -248,14 +244,12 @@ impl TryFrom<Noun> for MPDenseConstraints {
     }
 }
 
-impl TryFrom<Noun> for ConstraintData {
-    type Error = JetErr;
-
-    fn try_from(noun: Noun) -> Result<Self, Self::Error> {
-        let cell = noun.as_cell()?;
-        let cs = MPUltra::try_from(cell.head())?;
-        let degs: Vec<u64> = HoonList::try_from(cell.tail())?
-            .map(|n| n.as_atom()?.as_u64())
+impl ConstraintData {
+    pub fn try_from(noun: Noun, space: &NounSpace) -> Result<Self, JetErr> {
+        let cell = noun.in_space(space).as_cell()?;
+        let cs = MPUltra::try_from(cell.head().noun(), space)?;
+        let degs: Vec<u64> = HoonList::try_from(cell.tail().noun(), space)?
+            .map(|n| n.in_space(space).as_atom()?.as_u64())
             .collect::<Result<Vec<u64>, _>>()?;
         Ok(ConstraintData {
             constraint: cs,
@@ -265,12 +259,13 @@ impl TryFrom<Noun> for ConstraintData {
 }
 
 pub fn precompute_ntts_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let polys = slot(sam, 2)?;
-    let height = slot(sam, 6)?.as_atom()?.as_u64()? as usize;
-    let max_ntt_len = slot(sam, 7)?.as_atom()?.as_u64()? as usize;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let polys = slot(sam, 2, &space)?;
+    let height = slot(sam, 6, &space)?.in_space(&space).as_atom()?.as_u64()? as usize;
+    let max_ntt_len = slot(sam, 7, &space)?.in_space(&space).as_atom()?.as_u64()? as usize;
 
-    let polys = MarySlice::try_from(polys).unwrap_or_else(|err| {
+    let polys = MarySlice::try_from(polys, &space).unwrap_or_else(|err| {
         panic!(
             "Panicked with {err:?} at {}:{} (git sha: {:?})",
             file!(),
@@ -290,32 +285,34 @@ pub fn precompute_ntts_jet(context: &mut Context, subject: Noun) -> Result<Noun,
 }
 
 pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
     let [trace_evaluations, heights, constraint_map, counts_map, dyn_list, weights_map, challenges, deep_challange, table_full_widths, is_extra] =
-        sam.uncell()?;
+        sam.uncell(&space)?;
 
-    let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations) else {
+    let Ok(trace_evaluations) = FPolySlice::try_from(trace_evaluations, &space) else {
         debug!("trace_evaluations is not a valid FPolySlice");
         return Err(BAIL_FAIL);
     };
-    let Ok(heights) = Vec::<u64>::from_noun(&heights) else {
+    let Ok(heights) = Vec::<u64>::from_noun(&heights, &space) else {
         debug!("heights decode failed");
         return Err(BAIL_FAIL);
     };
-    let constraint_map = Constraints::try_from(constraint_map)?;
-    let counts_map = CountMap::try_from(counts_map)?;
+    let constraint_map = Constraints::try_from(constraint_map, &space)?;
+    let counts_map = CountMap::try_from(counts_map, &space)?;
 
-    let dyn_list: Vec<BPolySlice<'_>> = HoonList::try_from(dyn_list)?
+    let dyn_list: Vec<BPolySlice<'_>> = HoonList::try_from(dyn_list, &space)?
         .into_iter()
-        .map(BPolySlice::try_from)
+        .map(|x| BPolySlice::try_from(x, &space))
         .collect::<Result<Vec<BPolySlice<'_>>, _>>()?;
-    let weights_map = IndexBPolyMap::try_from(weights_map)?;
-    let challenges = BPolySlice::try_from(challenges)?;
-    let deep_challenge = deep_challange.as_felt()?;
-    let table_full_widths: Vec<u64> = HoonList::try_from(table_full_widths)?
+    let weights_map = IndexBPolyMap::try_from(weights_map, &space)?;
+    let challenges = BPolySlice::try_from(challenges, &space)?;
+    let deep_challenge = deep_challange.as_felt(&space)?;
+    let table_full_widths: Vec<u64> = HoonList::try_from(table_full_widths, &space)?
         .into_iter()
         .map(|x| {
-            x.as_atom()
+            x.in_space(&space)
+                .as_atom()
                 .expect("table_full_widths element should be an atom")
                 .as_u64()
                 .expect("table_full_widths element should be a u64")
@@ -325,7 +322,7 @@ pub fn eval_composition_poly_jet(context: &mut Context, subject: Noun) -> Result
 
     let res = eval_composition_poly(
         &trace_evaluations, &heights, &constraint_map, &counts_map, &dyn_list, &weights_map,
-        &challenges, deep_challenge, &table_full_widths, is_extra,
+        &challenges, deep_challenge, &table_full_widths, is_extra, &space,
     )?;
 
     let (res_atom, res_felt): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
@@ -345,6 +342,7 @@ fn eval_composition_poly(
     deep_challenge: &Felt,
     table_full_widths: &[u64],
     is_extra: bool,
+    space: &NounSpace,
 ) -> Result<Felt, JetErr> {
     let dp = degree_processing(heights, is_extra, constraint_map);
 
@@ -388,6 +386,7 @@ fn eval_composition_poly(
             challenges.0,
             &dp.fri_degree_bound,
             deep_challenge,
+            space,
         )?;
         acc = fadd_(&acc, &fmul_(&boundary_zerofier, &boundary_eval));
 
@@ -400,6 +399,7 @@ fn eval_composition_poly(
             challenges.0,
             &dp.fri_degree_bound,
             deep_challenge,
+            space,
         )?;
         acc = fadd_(&acc, &fmul_(&row_zerofier, &row_eval));
 
@@ -412,6 +412,7 @@ fn eval_composition_poly(
             challenges.0,
             &dp.fri_degree_bound,
             deep_challenge,
+            space,
         )?;
         acc = fadd_(&acc, &fmul_(&transition_zerofier, &trans_eval));
 
@@ -424,6 +425,7 @@ fn eval_composition_poly(
             challenges.0,
             &dp.fri_degree_bound,
             deep_challenge,
+            space,
         )?;
         acc = fadd_(&acc, &fmul_(&terminal_zerofier, &term_eval));
 
@@ -437,6 +439,7 @@ fn eval_composition_poly(
                 challenges.0,
                 &dp.fri_degree_bound,
                 deep_challenge,
+                space,
             )?;
             acc = fadd_(&acc, &fmul_(&row_zerofier, &extra_eval));
         }
@@ -445,6 +448,7 @@ fn eval_composition_poly(
     Ok(acc)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_constraints(
     constraints: &[PolyWithDegreeFudges<'_>],
     dyns: &BPolySlice<'_>,
@@ -453,12 +457,13 @@ fn evaluate_constraints(
     challenges: &[Belt],
     fri_degree_bound: &u64,
     deep_challenge: &Felt,
+    space: &NounSpace,
 ) -> Result<Felt, JetErr> {
     let mut acc = Felt::zero();
     let mut idx = 0;
 
     for constraint in constraints {
-        let evaled = mpeval_ultra_felt(constraint.poly, evals, challenges, dyns.0)?;
+        let evaled = mpeval_ultra_felt(constraint.poly, evals, challenges, dyns.0, space)?;
         for (deg, eval) in constraint.degrees.iter().zip(evaled.iter()) {
             let alpha = Felt::lift(weights[2 * idx]);
             let beta = Felt::lift(weights[2 * idx + 1]);
@@ -622,35 +627,36 @@ fn compute_degree(typ: &ConstraintType, height: u64, deg: u64) -> u64 {
 }
 
 pub fn compute_deep_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let trace_polys = slot(sam, 2)?;
-    let trace_openings = slot(sam, 6)?;
-    let composition_pieces = slot(sam, 14)?;
-    let composition_piece_openings = slot(sam, 30)?;
-    let weights = slot(sam, 62)?;
-    let omicrons = slot(sam, 126)?;
-    let deep_challenge = slot(sam, 254)?;
-    let comp_eval_point = slot(sam, 255)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let trace_polys = slot(sam, 2, &space)?;
+    let trace_openings = slot(sam, 6, &space)?;
+    let composition_pieces = slot(sam, 14, &space)?;
+    let composition_piece_openings = slot(sam, 30, &space)?;
+    let weights = slot(sam, 62, &space)?;
+    let omicrons = slot(sam, 126, &space)?;
+    let deep_challenge = slot(sam, 254, &space)?;
+    let comp_eval_point = slot(sam, 255, &space)?;
 
     //  TODO: implement conversion from NounError to JetErr
     let (Ok(trace_openings), Ok(composition_piece_openings), Ok(weights), Ok(omicrons)) = (
-        FPolySlice::try_from(trace_openings),
-        FPolySlice::try_from(composition_piece_openings),
-        FPolySlice::try_from(weights),
-        FPolySlice::try_from(omicrons),
+        FPolySlice::try_from(trace_openings, &space),
+        FPolySlice::try_from(composition_piece_openings, &space),
+        FPolySlice::try_from(weights, &space),
+        FPolySlice::try_from(omicrons, &space),
     ) else {
         debug!("one of trace_openings, composition_piece_openings, weights, or omicrons is not a valid FPolySlice");
         return Err(BAIL_FAIL);
     };
 
-    let trace_polys = HoonList::try_from(trace_polys)?;
-    let composition_pieces = HoonList::try_from(composition_pieces)?;
-    let deep_challenge = deep_challenge.as_felt()?;
-    let comp_eval_point = comp_eval_point.as_felt()?;
+    let trace_polys = HoonList::try_from(trace_polys, &space)?;
+    let composition_pieces = HoonList::try_from(composition_pieces, &space)?;
+    let deep_challenge = deep_challenge.as_felt(&space)?;
+    let comp_eval_point = comp_eval_point.as_felt(&space)?;
 
     let compute_deep_res = compute_deep(
         trace_polys, trace_openings.0, composition_pieces, composition_piece_openings.0, weights.0,
-        omicrons.0, deep_challenge, comp_eval_point,
+        omicrons.0, deep_challenge, comp_eval_point, &space,
     );
 
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =

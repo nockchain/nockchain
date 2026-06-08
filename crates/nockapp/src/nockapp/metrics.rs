@@ -1,3 +1,4 @@
+use gnort::instrument::{Count, Gauge, TimingCount};
 use gnort::*;
 
 metrics_struct![
@@ -11,6 +12,17 @@ metrics_struct![
     (least_free_space_seen_in_slam, "nockapp.least_free_space_seen_in_slam", Gauge),
     (save_jam_time, "nockapp.save_jam_time", TimingCount),
     (load_cue_time, "nockapp.load_cue_time", TimingCount),
+    (event_log_append, "nockapp.event_log.append", TimingCount),
+    (event_log_commit_failures, "nockapp.event_log.commit_failures", Count),
+    (snapshot_build, "nockapp.snapshot.build", TimingCount),
+    (snapshot_build_failures, "nockapp.snapshot.build_failures", Count),
+    (snapshot_verify, "nockapp.snapshot.verify", TimingCount),
+    (snapshot_verify_failures, "nockapp.snapshot.verify_failures", Count),
+    (snapshot_cleanup, "nockapp.snapshot.cleanup", TimingCount),
+    (snapshot_cleanup_failures, "nockapp.snapshot.cleanup_failures", Count),
+    (replay_apply, "nockapp.replay.apply", TimingCount),
+    (replay_failures, "nockapp.replay.failures", Count),
+    (replay_events, "nockapp.replay.events", Count),
     (serf_loop_blocking_recv, "nockapp.serf_loop.blocking_recv", TimingCount),
     (serf_loop_all, "nockapp.serf_loop.all", TimingCount),
     (serf_loop_load_state, "nockapp.serf_loop.load_state", TimingCount),
@@ -25,3 +37,44 @@ metrics_struct![
     (serf_loop_provide_metrics, "nockapp.serf_loop.provide_metrics", TimingCount),
     (next_effect_lagged_error, "nockapp.next_effect.lag", Count)
 ];
+
+#[allow(clippy::derivable_impls)]
+impl Default for NockAppMetrics {
+    fn default() -> Self {
+        Self {
+            handle_shutdown: Count::default(),
+            handle_save_permit_res: Count::default(),
+            handle_action: Count::default(),
+            handle_exit: Count::default(),
+            poke_during_exit: Count::default(),
+            peek_during_exit: Count::default(),
+            least_free_space_seen_in_slam: Gauge::default(),
+            save_jam_time: TimingCount::default(),
+            load_cue_time: TimingCount::default(),
+            event_log_append: TimingCount::default(),
+            event_log_commit_failures: Count::default(),
+            snapshot_build: TimingCount::default(),
+            snapshot_build_failures: Count::default(),
+            snapshot_verify: TimingCount::default(),
+            snapshot_verify_failures: Count::default(),
+            snapshot_cleanup: TimingCount::default(),
+            snapshot_cleanup_failures: Count::default(),
+            replay_apply: TimingCount::default(),
+            replay_failures: Count::default(),
+            replay_events: Count::default(),
+            serf_loop_blocking_recv: TimingCount::default(),
+            serf_loop_all: TimingCount::default(),
+            serf_loop_load_state: TimingCount::default(),
+            serf_loop_get_state_bytes: TimingCount::default(),
+            serf_loop_get_kernel_state_slab: TimingCount::default(),
+            serf_loop_get_cold_state_slab: TimingCount::default(),
+            serf_loop_checkpoint: TimingCount::default(),
+            serf_loop_noun_encode_cold_state: TimingCount::default(),
+            serf_loop_copy_state_noun: TimingCount::default(),
+            serf_loop_peek: TimingCount::default(),
+            serf_loop_poke: TimingCount::default(),
+            serf_loop_provide_metrics: TimingCount::default(),
+            next_effect_lagged_error: Count::default(),
+        }
+    }
+}

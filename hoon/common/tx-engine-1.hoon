@@ -1,6 +1,6 @@
 /=  v0  /common/tx-engine-0
 /=  *  /common/zeke
-/=  *  /common/zoon
+/=  *  /common/h-zoon
 |%
 ::  import
 ++  hash  hash:v0
@@ -20,6 +20,42 @@
 ++  reason
   |$  object
   (each object term)
+::
+::  $fund-address: lock-script hash that receives the 20% protocol-fund
+::  share of every post-activation coinbase (014-aletheia, asert-phase
+::  onward). The lock-root of a 3-of-4 multisig over the four pkhs in
+::  /asert-protocol-lock-fund.txt at the repo root; spending the fund
+::  therefore requires three of four signatures.
+::
+::  Computed once by /scripts/generate-fund-address.hoon and pasted in
+::  here as a base58 literal. Re-run that script after any change to
+::  the participant set, the threshold, or the lock-script structure
+::  to regenerate the value below. The pin is enforced by
+::  test-fund-address-is-3-of-4-multisig in
+::  /tests/dumb/mod/unit/coinbase-split.
+++  fund-address
+  ^-  hash
+  (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
+::
+::  +post-asert-activation: 014-aletheia activation predicate, 2-arg form.
+::    Returns %.y when `height` is at or past the asert-phase boundary.
+::    The 1-arg wrappers in /common/tx-engine close over the kernel's
+::    blockchain-constants; this 2-arg form is for callers (like
+::    +new-candidate below) that already have asert-phase as a separate
+::    parameter rather than via blockchain-constants. SINGLE source of
+::    truth for the boundary semantics — see
+::    014-aletheia-emissions-audit.md finding #3.
+++  post-asert-activation
+  |=  [height=@ asert-phase=@]
+  ^-  ?
+  (gte height asert-phase)
+::
+::  +pre-asert-activation: inverse of +post-asert-activation, for readability at
+::  call sites that branch on the legacy / activated split.
+++  pre-asert-activation
+  |=  [height=@ asert-phase=@]
+  ^-  ?
+  (lth height asert-phase)
 ::
 ::  $page: page with v1 coinbase-split
 ++  page
@@ -41,7 +77,7 @@
     ==
   ::
   ++  new-candidate
-    |=  [par=$^(page:v0 form) now=@da target-bn=bignum:bn =shares]
+    |=  [par=$^(page:v0 form) now=@da target-bn=bignum:bn =shares asert-phase=@]
     ^-  form
     ::  extract common fields from either v0 or v1 parent
     =/  [par-accumulated-work=bignum:bn par-digest=hash par-epoch-counter=@ par-height=@]
@@ -57,6 +93,15 @@
       ?:  =(+(par-epoch-counter) blocks-per-epoch:v0)  0
       +(par-epoch-counter)
     =/  height=@  +(par-height)
+    =/  emission=coins  (emission-calc:coinbase:v0 height)
+    ::  Pre-activation: 100% of emission to the miner per ++new:coinbase-split.
+    ::  Post-activation: 80% miner / 20% fund (014-aletheia). Fees are zero
+    ::  at candidate construction; the miner module re-runs the builder
+    ::  with the live fee total each time the mempool changes.
+    =/  cb=coinbase-split
+      ?:  (pre-asert-activation height asert-phase)
+        (new:coinbase-split emission shares)
+      (new-with-fund-share:coinbase-split emission 0 shares)
     %*  .  *form
       height            height
       parent            par-digest
@@ -64,9 +109,7 @@
       epoch-counter     epoch-counter
       target            target-bn
       accumulated-work  accumulated-work
-      coinbase          %+  new:coinbase-split
-                          (emission-calc:coinbase:v0 height)
-                        shares
+      coinbase          cb
     ==
   ::
   ++  to-local-page
@@ -91,7 +134,7 @@
   ++  hashable-tx-ids
     |=  tx-ids=(z-set tx-id)
     ^-  hashable:tip5
-    ?~  tx-ids  leaf+tx-ids
+    ?@  tx-ids  leaf+tx-ids
     :+  hash+n.tx-ids
       $(tx-ids l.tx-ids)
     $(tx-ids r.tx-ids)
@@ -177,6 +220,35 @@
           ::  divisor for input fees (inputs cost 1/divisor of outputs)
           input-fee-divisor=4
           *blockchain-constants:v0
+          ::  aserti3-2d difficulty adjustment.
+          ::    .asert-phase: activation height. at or after, target is
+          ::       computed per-block via aserti3-2d instead of epoch retarget.
+          ::    .asert-anchor-height / -target-atom: the fixed anchor (height,
+          ::       target-atom) used as the aserti3-2d reference. anchor-target
+          ::       is 2^291: at constant hashrate H, expected blocks/sec is
+          ::       H*target/max, so to cut block time 600s → 150s (4x more
+          ::       blocks per sec) we increase target by ~4x, which reduces
+          ::       per-block difficulty (max/target) by the same factor.
+          ::       2^291 is the closest power of 2 to 4 * pre-activation
+          ::       mainnet target (~2^291.38); it yields ~3.2x faster blocks
+          ::       (expected ~187s) under the same hashrate, slightly
+          ::       conservative vs the ideal 150s.
+          ::    .asert-anchor-min-timestamp: median-of-11 timestamp at the
+          ::       anchor block (height 65,499). pinned at phase-2 cutover
+          ::       to the value observed when the canonical mainnet block at
+          ::       asert-anchor-height was finalized. replaces phase-1's
+          ::       runtime parent-walk through .blocks / .min-timestamps.
+          ::    .asert-ideal-block-time: post-asert-activation block time in seconds.
+          ::    .asert-half-life: real-time seconds of drift to halve or double.
+          ::    rbits is hardcoded to 16 in lib/asert.hoon (the polynomial
+          ::       coefficients are tied to that precision and cannot be varied
+          ::       per-constants without a hard fork of the polynomial itself).
+          asert-phase=65.500
+          asert-anchor-height=65.499
+          asert-anchor-target-atom=^~((bex 291))
+          asert-ideal-block-time=150
+          asert-half-life=^~((mul 12 ^~((mul 60 60))))
+          asert-anchor-min-timestamp=9.223.372.093.639.027.842
       ==
   $:  v1-phase=@
       bythos-phase=@
@@ -184,6 +256,12 @@
       base-fee=@
       input-fee-divisor=@
       blockchain-constants:v0
+      asert-phase=@
+      asert-anchor-height=@
+      asert-anchor-target-atom=@
+      asert-ideal-block-time=@
+      asert-half-life=@
+      asert-anchor-min-timestamp=@
   ==
 :: $nname
 ++  nname
@@ -279,7 +357,7 @@
     |=  =form
     |^
       ^-  ?
-      %-  ~(rep by form)
+      %-  ~(rep z-by form)
       |=  [[k=@tas v=*] a=?]
       ?&(a (^based k) (based-noun v))
     ++  based-noun
@@ -291,7 +369,7 @@
     |=  =form
     ^-  hashable:tip5
     |^
-      ?~  form  leaf+~
+      ?@  form  leaf+~
       :+  [leaf+p.n.form (hashable-noun q.n.form)]
         $(form l.form)
       $(form r.form)
@@ -345,6 +423,10 @@
       (based:^hash p.u.output-source.form)
     ?&  based-output-source
         (based:^hash lock-root.form)
+        ::  note-data values are hashed into the seed (and thus the tx id), so
+        ::  every value must be a valid field leaf or the id hash would assert.
+        ::  Reject deterministically here rather than crash during hashing.
+        (based:note-data note-data.form)
         (^based gift.form)
         (based:^hash parent-hash.form)
     ==
@@ -394,7 +476,7 @@
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+~
+    ?@  form  leaf+~
     :+  (hashable:seed n.form)
       $(form l.form)
     $(form r.form)
@@ -402,7 +484,7 @@
   ++  sig-hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  (sig-hashable:seed n.form)
       $(form l.form)
     $(form r.form)
@@ -539,9 +621,21 @@
       recursion-depth  +(recursion-depth)
     ==
   ::
+  ::  +based: parser-level shape check for v1 coinbase-split.
+  ::    Allows up to `max-coinbase-split:v0 + 1` entries — the +1 is
+  ::    the post-asert-activation fund slot (014-aletheia). Pre-activation v1
+  ::    builders only emit one entry per `shares` key (capped at
+  ::    `max-coinbase-split` by ++validate:shares), so honest
+  ::    pre-asert-activation blocks never reach the relaxed bound.
+  ::
+  ::    NOTE: this parser is height-blind by design. The consensus-layer
+  ::    rule that pre-activation v1 blocks cap at `max-coinbase-split`
+  ::    (no fund slot before activation) is enforced in
+  ::    +validate-page-with-txs in apps/dumbnet/lib/consensus.hoon
+  ::    via the %coinbase-split-pre-activation-too-many reason.
   ++  based
     |=  =form
-    ?.  (lte ~(wyt z-by form) max-coinbase-split:v0)
+    ?.  (lte ~(wyt z-by form) +(max-coinbase-split:v0))
       %|
     %+  levy  ~(tap z-by form)
     |=  [h=^hash =coins]
@@ -550,10 +644,32 @@
         (based:^hash h)
     ==
   ::
+  ::  +new-with-fund-share: post-asert-activation 80/20 coinbase-split builder.
+  ::    Splits a block's coinbase between the protocol fund and the
+  ::    miner-side recipients:
+  ::      fund        = floor(emission / 5)               :: 20% of subsidy
+  ::      miner-pool  = (emission - fund) + fees          :: 80% + all fees
+  ::    The miner-pool is distributed across `shares` via the same
+  ::    proportional-allocation arm as ++new (per-block atom remainders
+  ::    accrue to the first share key in z-map order, preserving the
+  ::    legacy single-miner behaviour and supporting up-to-2 partner
+  ::    splits). The fund is added as one additional output.
+  ::    `shares` must NOT include `fund-address`.
+  ::    Fees are computed from the subsidy alone — folding fees into the
+  ::    fund slot would be rejected by +check-fund-split.
+  ++  new-with-fund-share
+    |=  [emission=coins fees=coins =shares]
+    ^-  form
+    ?<  (~(has z-by shares) fund-address)
+    =/  fund-coins=coins   (div emission 5)
+    =/  miner-pool=coins   (add fees (sub emission fund-coins))
+    =/  miner-split=form   (new miner-pool shares)
+    (~(put z-by miner-split) fund-address fund-coins)
+  ::
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [hash+p.n.form leaf+q.n.form]
       $(form l.form)
     $(form r.form)
@@ -789,7 +905,7 @@
     |=  =form
     ^-  hashable:tip5
     |-
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [(hashable:nname p.n.form) (hashable:spend q.n.form)]
       $(form l.form)
     $(form r.form)
@@ -837,7 +953,7 @@
     (gth data-size max)
   ::
   ++  validate-with-context
-    |=  $:  balance=(z-map nname nnote)
+    |=  $:  balance=(h-map nname nnote)
             sps=form
             page-num=page-number
             max-size=@
@@ -849,7 +965,7 @@
     %+  roll  ~(tap z-by sps)
     |=  [[nam=nname sp=spend] acc=(reason ~)]
     ?.  ?=(%.y -.acc)  acc
-    =/  mnote=(unit nnote)  (~(get z-by balance) nam)
+    =/  mnote=(unit nnote)  (~(get h-by balance) nam)
     ?~  mnote  [%.n %v1-input-missing]
     =/  note=nnote  u.mnote
     ?-    -.sp
@@ -993,7 +1109,7 @@
   ++  hashable
     |=  =form
     ^-  hashable:tip5
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [(hashable:nname p.n.form) (hashable:input q.n.form)]
       $(form l.form)
     $(form r.form)
@@ -1208,12 +1324,22 @@
   ++  based
     |=  =form
     ^-  ?
+    |^
     ?&  (based:lock-merkle-proof lmp.form)
         (based:pkh-signature pkh.form)
+        ::  hax preimage *values* are hashed into the witness (and thus the tx
+        ::  id), so every value's leaves must be valid field atoms or the id
+        ::  hash would assert. Validate values, not only keys, so a malformed
+        ::  preimage is rejected deterministically instead of crashing hashing.
         %-  ~(rep z-by hax.form)
         |=  [[k=^hash v=*] a=?]
-        &(a (based:^hash k))
+        ?&(a (based:^hash k) (based-noun v))
     ==
+    ++  based-noun
+      |=  n=*
+      ?^  n  ?&($(n -.n) $(n +.n))
+      (^based n)
+    --
   ::
   ++  hashable
     |=  =form
@@ -1227,7 +1353,7 @@
   ++  hashable-hax
     |=  m=(z-map ^hash *)
     ^-  hashable:tip5
-    ?~  m  leaf+m
+    ?@  m  leaf+m
     :+  [hash+p.n.m (hashable-noun q.n.m)]
         $(m l.m)
     $(m r.m)
@@ -1649,7 +1775,7 @@
     ++  hashable-hashes
       |=  hs=(z-set ^hash)
       ^-  hashable:tip5
-      ?~  hs  leaf+hs
+      ?@  hs  leaf+hs
       :+  hash+n.hs
         $(hs l.hs)
       $(hs r.hs)
@@ -1690,7 +1816,7 @@
     based:^hash
   ++  hashable
     |=  =form
-    ?~  form  leaf+~
+    ?@  form  leaf+~
     :*  hash+n.form
         $(form l.form)
         $(form r.form)
@@ -1780,7 +1906,7 @@
     |=  =form
     ^-  hashable:tip5
     |^
-    ?~  form  leaf+form
+    ?@  form  leaf+form
     :+  [hash+p.n.form (hashable-val q.n.form)]
       $(form l.form)
     $(form r.form)

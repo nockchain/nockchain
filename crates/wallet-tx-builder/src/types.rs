@@ -1,8 +1,10 @@
 use bytes::Bytes;
+use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Nicks, SchnorrPubkey, Version};
 use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
 use nockchain_types::tx_engine::v1::note::Note;
 use nockchain_types::tx_engine::v1::tx::SpendCondition;
+use thiserror::Error;
 
 use crate::note_data::DecodedNoteData;
 
@@ -101,6 +103,14 @@ pub enum CandidateNote {
     V1(CandidateV1Note),
 }
 
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum CandidateNoteConversionError {
+    #[error("cannot convert legacy v0 candidate note {first}/{last} into a v1 note")]
+    UnsupportedV0 { first: String, last: String },
+    #[error("candidate raw note-data entry {key} failed to decode: {message}")]
+    InvalidRawNoteData { key: String, message: String },
+}
+
 impl CandidateNote {
     /// Builds a candidate note from a decoded tx-engine note value.
     pub fn from_note(name: &Name, note: &Note) -> Self {
@@ -120,7 +130,7 @@ impl CandidateNote {
                     .iter()
                     .map(|entry| RawNoteDataEntry {
                         key: entry.key.clone(),
-                        blob: entry.blob.clone(),
+                        blob: entry.raw_blob(),
                     })
                     .collect::<Vec<_>>();
                 let decoded_note_data = DecodedNoteData::from(&note_v1.note_data);
@@ -194,6 +204,44 @@ impl CandidateNote {
     }
 }
 
+impl TryFrom<&CandidateNote> for Note {
+    type Error = CandidateNoteConversionError;
+
+    fn try_from(candidate: &CandidateNote) -> Result<Self, Self::Error> {
+        match candidate {
+            CandidateNote::V0(note) => Err(CandidateNoteConversionError::UnsupportedV0 {
+                first: note.identity.name.first.to_base58(),
+                last: note.identity.name.last.to_base58(),
+            }),
+            CandidateNote::V1(note) => {
+                let note_data = nockchain_types::v1::NoteData::new(
+                    note.raw_note_data
+                        .iter()
+                        .map(|entry| {
+                            nockchain_types::v1::NoteDataEntry::from_raw_blob(
+                                entry.key.clone(),
+                                entry.blob.clone(),
+                            )
+                            .map_err(|err| {
+                                CandidateNoteConversionError::InvalidRawNoteData {
+                                    key: entry.key.clone(),
+                                    message: err.to_string(),
+                                }
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                Ok(Note::V1(nockchain_types::v1::NoteV1::new(
+                    note.identity.origin_page.clone(),
+                    note.identity.name.clone(),
+                    note_data,
+                    note.assets.clone(),
+                )))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Planner output target with amount and optional note-data payloads.
 pub struct PlannedOutput {
@@ -206,8 +254,8 @@ pub struct PlannedOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-/// Planner mode selects between fixed-recipient create-tx and legacy v0 sweep migration.
-pub enum PlanningMode {
+/// Create-tx planner mode selects between fixed-recipient transfer and legacy v0 sweep migration.
+pub enum CreateTxPlanningMode {
     /// Standard create-tx planner behavior with fixed recipient outputs and optional refund.
     Standard,
     /// Full-sweep migration mode that spends all admissible v0 notes into one destination output.
@@ -215,6 +263,14 @@ pub enum PlanningMode {
         /// Destination output template used for fee accounting and final emission.
         destination_output: PlannedOutput,
     },
+}
+/// Refund output template whose amount is always assigned by the planner.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct RefundOutputTemplate {
+    /// Destination lock root for the refund/change output.
+    pub lock_root: Hash,
+    /// Output note-data that contributes to seed-word accounting.
+    pub note_data: Vec<RawNoteDataEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,8 +298,8 @@ pub struct AssembledTransaction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Full planner input bundle for deterministic create-tx planning.
 pub struct PlanRequest {
-    /// Planner mode controls output/funding semantics.
-    pub planning_mode: PlanningMode,
+    /// Create-tx planner mode controls output/funding semantics.
+    pub planning_mode: CreateTxPlanningMode,
     /// Selection mode: caller-specified manual candidate set (by note names) or automatic candidate search.
     pub selection_mode: SelectionMode,
     /// Order used when sorting candidate notes by their `assets` value.
@@ -261,11 +317,40 @@ pub struct PlanRequest {
     /// Recipient outputs requested by the command.
     pub recipient_outputs: Vec<PlannedOutput>,
     /// Refund output template; amount is set by planner and must always exist.
+    /// TODO(withdrawals): Stop overloading `amount = 0` as "planner fills this
+    /// later". Model the refund amount as an explicit optional/planner-owned
+    /// field instead.
     pub refund_output: PlannedOutput,
     /// Relative timelock minimum used to classify coinbase-style locks.
     pub coinbase_relative_min: Option<u64>,
     /// Signer pubkeys used by v0 migration admission checks.
     pub v0_migration_signer_pubkeys: Vec<SchnorrPubkey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Full planner input bundle for deterministic withdrawal planning.
+pub struct WithdrawalPlanRequest {
+    /// Chain fee/timelock context.
+    pub chain_context: ChainContext,
+    /// Normalized candidate notes from a single wallet snapshot.
+    pub candidates: Vec<CandidateNote>,
+    /// Gross amount burned on Base. The planner solves for the net recipient
+    /// amount such that
+    /// `burned_amount = withdrawal_fee + net_recipient_amount + final_fee`.
+    pub burned_amount: u64,
+    /// Bridge fee charged per whole NOCK of burned amount, expressed in nicks.
+    pub nicks_fee_per_nock: u64,
+    /// Destination lock root for the net withdrawal output.
+    pub recipient_lock_root: Hash,
+    /// Base event id embedded in `%bridge-w` note-data as canonical based-list digits.
+    pub beid: Vec<Belt>,
+    /// Base block hash embedded in the fixed bridge withdrawal note-data.
+    pub base_hash: Hash,
+    /// Base batch end height embedded in the fixed bridge withdrawal note-data.
+    pub base_batch_end: u64,
+    /// Refund output template; the planner assigns the refund amount when a
+    /// positive remainder exists.
+    pub refund_output: RefundOutputTemplate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,4 +377,17 @@ pub struct PlanResult {
     pub word_counts: WordCountBreakdown,
     /// Human-readable planner decisions for debugging.
     pub debug_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Final withdrawal planner output including the solved net payout amount.
+pub struct WithdrawalPlanResult {
+    /// Gross amount burned on Base that the withdrawal is consuming.
+    pub burned_amount: u64,
+    /// Bridge-retained withdrawal fee deducted from the gross burn.
+    pub withdrawal_fee: u64,
+    /// Net amount disbursed to the Nockchain recipient after fee deduction.
+    pub net_recipient_amount: u64,
+    /// Shared plan result for selected inputs, outputs, and final fee.
+    pub plan: PlanResult,
 }

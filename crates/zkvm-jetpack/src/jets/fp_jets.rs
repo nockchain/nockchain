@@ -12,14 +12,17 @@ use crate::form::poly::FPolySlice;
 use crate::form::structs::HoonList;
 
 pub fn fp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
-    let sam = slot(subject, 6)?;
-    let p = slot(sam, 2)?;
-    let offset = slot(sam, 6)?;
-    let order = slot(sam, 7)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let p = slot(sam, 2, &space)?;
+    let offset = slot(sam, 6, &space)?;
+    let order = slot(sam, 7, &space)?;
 
-    let (Ok(p_poly), Ok(offset_felt), Ok(order_atom)) =
-        (FPolySlice::try_from(p), offset.as_felt(), order.as_atom())
-    else {
+    let (Ok(p_poly), Ok(offset_felt), Ok(order_atom)) = (
+        FPolySlice::try_from(p, &space),
+        offset.as_felt(&space),
+        order.as_atom(),
+    ) else {
         debug!("p not an fpoly, offset not a felt, or order not an atom");
         return Err(BAIL_FAIL);
     };
@@ -36,15 +39,16 @@ pub fn fp_coseword_jet(context: &mut Context, subject: Noun) -> Result {
 }
 
 pub fn init_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
-    let poly = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let poly = slot(subject, 6, &space)?;
 
-    let list_felt = HoonList::try_from(poly)?.into_iter();
+    let list_felt = HoonList::try_from(poly, &space)?.into_iter();
     let count = list_felt.count();
 
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =
         new_handle_mut_slice(&mut context.stack, Some(count));
     for (i, felt_noun) in list_felt.enumerate() {
-        let Ok(felt) = felt_noun.as_felt() else {
+        let Ok(felt) = felt_noun.as_felt(&space) else {
             debug!("list element not a felt");
             return Err(BAIL_FAIL);
         };
@@ -56,10 +60,11 @@ pub fn init_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
     Ok(res_cell)
 }
 pub fn fpeval_jet(context: &mut Context, subject: Noun) -> Result {
-    let sam = slot(subject, 6)?;
-    let fp = slot(sam, 2)?;
-    let felt = slot(sam, 3)?;
-    let (Ok(fp_poly), Ok(felt)) = (FPolySlice::try_from(fp), felt.as_felt()) else {
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let fp = slot(sam, 2, &space)?;
+    let felt = slot(sam, 3, &space)?;
+    let (Ok(fp_poly), Ok(felt)) = (FPolySlice::try_from(fp, &space), felt.as_felt(&space)) else {
         debug!("fp or fq not an fpoly");
         return Err(BAIL_FAIL);
     };
@@ -71,9 +76,10 @@ pub fn fpeval_jet(context: &mut Context, subject: Noun) -> Result {
 }
 
 pub fn lift_to_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
-    let belt = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let belt = slot(subject, 6, &space)?;
 
-    let Ok(belts) = HoonList::try_from(belt) else {
+    let Ok(belts) = HoonList::try_from(belt, &space) else {
         debug!("belts not a list");
         return Err(BAIL_FAIL);
     };
@@ -83,7 +89,7 @@ pub fn lift_to_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
     let (res, res_poly): (IndirectAtom, &mut [Felt]) =
         new_handle_mut_slice(&mut context.stack, Some(count));
 
-    lift_to_fpoly(belts, res_poly);
+    lift_to_fpoly(belts, res_poly, &space);
 
     let res_cell = finalize_poly(&mut context.stack, Some(res_poly.len()), res);
 
@@ -91,7 +97,8 @@ pub fn lift_to_fpoly_jet(context: &mut Context, subject: Noun) -> Result {
 }
 
 pub fn range_jet(context: &mut Context, subject: Noun) -> Result {
-    let sample = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let sample = slot(subject, 6, &space)?;
 
     let mut res = D(0);
     let mut dest: *mut Noun = &mut res;
@@ -99,13 +106,13 @@ pub fn range_jet(context: &mut Context, subject: Noun) -> Result {
     let start: u64;
     let end: u64;
 
-    if let Ok(atom) = sample.as_atom() {
+    if let Ok(atom) = sample.in_space(&space).as_atom() {
         start = 0;
-        end = atom.as_direct()?.data();
+        end = atom.atom().as_direct()?.data();
     } else {
-        let cell = sample.as_cell()?;
-        start = cell.head().as_atom()?.as_direct()?.data();
-        end = cell.tail().as_atom()?.as_direct()?.data();
+        let cell = sample.in_space(&space).as_cell()?;
+        start = cell.head().as_atom()?.atom().as_direct()?.data();
+        end = cell.tail().as_atom()?.atom().as_direct()?.data();
     }
 
     for idx in start..end {

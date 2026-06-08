@@ -180,12 +180,10 @@ fn note_name_key(name: &Name) -> NoteNameKey {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use nockapp::noun::slab::{NockJammer, NounSlab};
     use nockchain_math::belt::Belt;
+    use nockchain_math::owned_based_noun::OwnedBasedNoun;
     use nockchain_types::tx_engine::common::Nicks;
     use nockchain_types::tx_engine::v1::note::{Balance, Note, NoteData, NoteDataEntry, NoteV1};
-    use noun_serde::NounEncode;
 
     use super::*;
 
@@ -197,15 +195,11 @@ mod tests {
         Name::new(hash(v), hash(v + 100))
     }
 
-    fn jam<T: NounEncode>(value: &T) -> Bytes {
-        let mut slab: NounSlab<NockJammer> = NounSlab::new();
-        let noun = value.to_noun(&mut slab);
-        slab.set_root(noun);
-        slab.jam()
-    }
-
     fn note_v1(name: Name, origin_page: u64, assets: u64, key: &str, value: u64) -> Note {
-        let note_data = NoteData::new(vec![NoteDataEntry::new(key.to_string(), jam(&value))]);
+        let note_data = NoteData::new(vec![NoteDataEntry::new(
+            key.to_string(),
+            OwnedBasedNoun::try_atom(value).expect("fixture raw note-data value must be based"),
+        )]);
         Note::V1(NoteV1::new(
             BlockHeight(Belt(origin_page)),
             name,

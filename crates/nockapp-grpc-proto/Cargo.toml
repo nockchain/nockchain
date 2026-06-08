@@ -11,6 +11,7 @@ client = []
 
 [dependencies]
 anyhow = { workspace = true }
+nockapp = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { workspace = true }
 nockvm_macros = { workspace = true }

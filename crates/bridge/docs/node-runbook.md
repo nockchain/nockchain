@@ -109,7 +109,7 @@ Set verbosity with `RUST_LOG`:
 
 ```bash
 RUST_LOG=info cargo run -p bridge
-RUST_LOG=bridge::runtime=debug,bridge::ethereum=trace cargo run -p bridge
+RUST_LOG=bridge::shared::runtime=debug,bridge::shared::base=trace cargo run -p bridge
 RUST_LOG=debug cargo run -p bridge
 ```
 

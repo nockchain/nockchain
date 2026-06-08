@@ -1,0 +1,284 @@
+# Nous long-haul scenario: >6-node sustained full-gen2 traffic with wallet load.
+#
+# This scenario is intentionally separate from the recurring validation suite.
+# It expands the steady-state soak to a 7-node network (2 miners + 5 full
+# nodes) and is meant to be driven by `scripts/run_nous_long_haul_testnet.sh`
+# with defaults that hold the load for at least two hours.
+
+name: "nous_gen2_long_haul"
+seed: 41
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-c"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
+      - node: "full-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_3}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-d"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_3}/quic-v1"
+      - node: "full-c"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_4}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-e"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-c"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_4}/quic-v1"
+      - node: "full-d"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_5}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 30000
+
+  - action: start_nodes
+    ids: ["miner-b", "full-a", "full-b", "full-c", "full-d", "full-e"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "full-c"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "full-d"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "full-e"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-e"
+    height: 10
+    timeout_ms: 180000
+
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-long-haul"
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/miner-a"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "${BASE_PRIVATE_GRPC_PORT}"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "${LONG_HAUL_TARGET_NOTES}"
+      STEADY_STATE_TXS: "${LONG_HAUL_STEADY_STATE_TXS}"
+      MAX_ITERATIONS: "${LONG_HAUL_MAX_ITERATIONS}"
+      DELAY_SECONDS: "${LONG_HAUL_DELAY_SECONDS}"
+      DUST_AMOUNT: "${LONG_HAUL_DUST_AMOUNT}"
+      FEE: "${LONG_HAUL_FEE}"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Maximum iterations ("
+
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - "count=$(grep -c 'TRANSACTION(SUCCESS)' ./logs/transaction_log.txt || true); echo \"success_count=$count\"; test \"$count\" -ge \"${LONG_HAUL_MIN_SUCCESS_TXS}\""
+    cwd: "${RUN_DIR}/stuffer-long-haul"
+    expect: "success_count="
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-c"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-d"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-e"
+    height: 100
+    timeout_ms: 600000
+
+  - action: sleep
+    millis: 60000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a", "full-b", "full-c", "full-d", "full-e"]
+    timeout_ms: 180000

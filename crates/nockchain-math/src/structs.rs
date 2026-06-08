@@ -1,74 +1,85 @@
 use nockvm::jets::sort::util::gor;
 use nockvm::mem::NockStack;
-use nockvm::noun::{Cell, Noun};
+use nockvm::noun::{Cell, CellHandle, Noun, NounHandle, NounSpace};
 use nockvm::unifying_equality::unifying_equality;
 
 use crate::noun_ext::NounMathExt;
 
 #[derive(Copy, Clone)]
-pub struct HoonList {
-    pub(super) next: Option<Cell>,
+pub struct HoonList<'a> {
+    pub(super) next: Option<Noun>,
+    pub(super) space: &'a NounSpace,
 }
 
-impl Iterator for HoonList {
+impl<'a> Iterator for HoonList<'a> {
     type Item = Noun;
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        self.next.take().map(|cell| {
-            let tail = cell.tail();
-            self.next = if tail.is_cell() {
-                Some(tail.as_cell().unwrap_or_else(|err| {
-                    panic!(
-                        "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                        file!(),
-                        line!(),
-                        option_env!("GIT_SHA")
-                    )
-                }))
-            } else {
-                None
-            };
-            cell.head()
-        })
-    }
-}
-
-impl TryFrom<Noun> for HoonList {
-    type Error = nockvm::noun::Error;
-    fn try_from(n: Noun) -> core::result::Result<Self, Self::Error> {
-        if n.is_cell() {
-            Ok(HoonList::from(n.as_cell().unwrap_or_else(|err| {
+        self.next.take().map(|noun| {
+            let cell = noun.in_space(self.space).as_cell().unwrap_or_else(|err| {
                 panic!(
                     "Panicked with {err:?} at {}:{} (git sha: {:?})",
                     file!(),
                     line!(),
                     option_env!("GIT_SHA")
                 )
-            })))
+            });
+            let tail = cell.tail().noun();
+            self.next = if tail.is_cell() { Some(tail) } else { None };
+            cell.head().noun()
+        })
+    }
+}
+
+impl<'a> HoonList<'a> {
+    pub fn try_from(
+        n: Noun,
+        space: &'a NounSpace,
+    ) -> core::result::Result<Self, nockvm::noun::Error> {
+        if n.is_cell() {
+            let _ = n.in_space(space).as_cell().unwrap_or_else(|err| {
+                panic!(
+                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            });
+            Ok(HoonList {
+                next: Some(n),
+                space,
+            })
         } else {
-            Ok(HoonList { next: None })
+            Ok(HoonList { next: None, space })
         }
     }
-}
 
-impl From<Cell> for HoonList {
-    fn from(c: Cell) -> Self {
-        Self { next: Some(c) }
+    pub fn from_cell(c: Cell, space: &'a NounSpace) -> Self {
+        Self {
+            next: Some(c.as_noun()),
+            space,
+        }
+    }
+
+    pub fn space(&self) -> &'a NounSpace {
+        self.space
     }
 }
 
-pub fn next_cell(cell: Cell) -> Option<Cell> {
-    let tail = cell.tail();
+pub fn next_cell(cell: Cell, space: &NounSpace) -> Option<Cell> {
+    let cell_handle = CellHandle::new(cell, space);
+    let tail = cell_handle.tail().noun();
     if tail.is_cell() {
-        Some(tail.as_cell().unwrap_or_else(|err| {
+        let handle = tail.in_space(space).as_cell().unwrap_or_else(|err| {
             panic!(
                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
                 file!(),
                 line!(),
                 option_env!("GIT_SHA")
             )
-        }))
+        });
+        Some(handle.cell())
     } else {
         None
     }
@@ -76,49 +87,86 @@ pub fn next_cell(cell: Cell) -> Option<Cell> {
 
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
-pub struct HoonMap {
+pub struct HoonMap<'a> {
     pub(super) node: Noun,
-    pub(super) left: Option<Cell>,
-    pub(super) right: Option<Cell>,
+    pub(super) left: Option<Noun>,
+    pub(super) right: Option<Noun>,
+    pub(super) space: &'a NounSpace,
 }
 
-impl HoonMap {
+impl<'a> HoonMap<'a> {
     pub fn get(&self, stack: &mut NockStack, mut k: Noun) -> Option<Noun> {
-        let [mut ck, cv] = self.node.uncell().ok()?;
+        let [mut ck, cv] = self.node.uncell(self.space).ok()?;
 
         if unsafe { unifying_equality(stack, &mut ck, &mut k) } {
             // ?:  =(b p.n.a)
             //   (some q.n.a)
             Some(cv)
-        } else if gor(stack, k, ck).as_direct().map(|v| v.data()) == Ok(0) {
+        } else if gor(stack, k, ck, self.space).as_direct().map(|v| v.data()) == Ok(0) {
             // ?:  (gor b p.n.a)
             //   $(a l.a)
-            let map: Self = self.left?.try_into().ok()?;
+            let map = Self::try_from(self.left?.in_space(self.space)).ok()?;
             map.get(stack, k)
         } else {
             // $(a r.a)
-            let map: Self = self.right?.try_into().ok()?;
+            let map = Self::try_from(self.right?.in_space(self.space)).ok()?;
             map.get(stack, k)
+        }
+    }
+
+    pub fn try_from(n: NounHandle<'a>) -> std::result::Result<Self, nockvm::noun::Error> {
+        if n.is_cell() {
+            let cell = n.as_cell().unwrap_or_else(|err| {
+                panic!(
+                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
+                    file!(),
+                    line!(),
+                    option_env!("GIT_SHA")
+                )
+            });
+            HoonMap::try_from_cell(cell)
+        } else {
+            not_cell()
+        }
+    }
+
+    pub fn try_from_cell(c: CellHandle<'a>) -> std::result::Result<Self, nockvm::noun::Error> {
+        let tail = c.tail();
+        if let Ok(cell_tail) = tail.as_cell() {
+            let left = cell_tail.head().noun();
+            let right = cell_tail.tail().noun();
+
+            Ok(Self {
+                node: c.head().noun(),
+                left: left.is_cell().then_some(left),
+                right: right.is_cell().then_some(right),
+                space: c.space(),
+            })
+        } else {
+            not_cell()
         }
     }
 }
 #[allow(dead_code)]
 #[derive(Clone)]
-pub struct HoonMapIter {
-    pub(super) stack: Vec<Option<Cell>>,
+pub struct HoonMapIter<'a> {
+    pub(super) stack: Vec<Option<NounHandle<'a>>>,
+    pub(super) space: &'a NounSpace,
 }
 
-impl Iterator for HoonMapIter {
-    type Item = Noun;
+impl<'a> Iterator for HoonMapIter<'a> {
+    type Item = NounHandle<'a>;
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(maybe_cell) = self.stack.pop() {
-            if let Some(cell) = maybe_cell {
-                if let Ok(cell_trie) = HoonMap::try_from(cell) {
-                    self.stack.push(cell_trie.right);
-                    self.stack.push(cell_trie.left);
-                    return Some(cell_trie.node);
+            if let Some(noun) = maybe_cell {
+                if let Ok(cell_trie) = HoonMap::try_from(noun) {
+                    self.stack
+                        .push(cell_trie.right.map(|n| n.in_space(self.space)));
+                    self.stack
+                        .push(cell_trie.left.map(|n| n.in_space(self.space)));
+                    return Some(cell_trie.node.in_space(self.space));
                 } else {
                     return self.next();
                 }
@@ -133,53 +181,266 @@ fn not_cell<T>() -> core::result::Result<T, nockvm::noun::Error> {
     Err(nockvm::noun::Error::NotCell)
 }
 
-impl TryFrom<Noun> for HoonMap {
-    type Error = nockvm::noun::Error;
-
-    fn try_from(n: Noun) -> std::result::Result<Self, Self::Error> {
+impl<'a> HoonMapIter<'a> {
+    pub fn new(n: &'a NounHandle) -> Self {
         if n.is_cell() {
-            HoonMap::try_from(n.as_cell().unwrap_or_else(|err| {
-                panic!(
-                    "Panicked with {err:?} at {}:{} (git sha: {:?})",
-                    file!(),
-                    line!(),
-                    option_env!("GIT_SHA")
-                )
-            }))
-        } else {
-            not_cell()
-        }
-    }
-}
-
-impl TryFrom<Cell> for HoonMap {
-    type Error = nockvm::noun::Error;
-
-    fn try_from(c: Cell) -> std::result::Result<Self, Self::Error> {
-        let tail: Noun = c.tail();
-        if let Ok(cell_tail) = tail.as_cell() {
-            let left = cell_tail.head();
-            let right = cell_tail.tail();
-
-            Ok(Self {
-                node: c.head(),
-                left: left.as_cell().ok(),
-                right: right.as_cell().ok(),
-            })
-        } else {
-            not_cell()
-        }
-    }
-}
-
-impl From<Noun> for HoonMapIter {
-    fn from(n: Noun) -> Self {
-        if let Ok(c) = n.as_cell() {
             Self {
-                stack: vec![Some(c)],
+                stack: vec![Some(*n)],
+                space: n.space(),
             }
         } else {
-            Self { stack: vec![None] }
+            Self {
+                stack: vec![None],
+                space: n.space(),
+            }
         }
+    }
+}
+
+/// Strictly collect every entry node (`[key value]` slot) of a z-map (treap),
+/// returning an error on *any* malformed node instead of silently skipping it.
+///
+/// The lenient `HoonMapIter` `Iterator` impl drops malformed subtrees (and
+/// callers further `.filter(|e| e.is_cell())` away non-cell entries), which lets
+/// a malformed noun decode to a normalized struct in Rust while Hoon
+/// `based`/`validate` would reject it — a Rust/Hoon interpretation drift. Use
+/// this in consensus transaction decoders so malformed input fails to decode.
+///
+/// A node must be a `[entry [left right]]` cell; each child must be either a
+/// further node cell or the empty-map marker `~` (the atom 0). The returned
+/// entry nouns are NOT required to be cells — the caller's decode (e.g.
+/// `uncell`) enforces the `[key value]` shape, so a non-cell entry still errors.
+pub fn collect_zmap_entries_strict<'a>(
+    root: &NounHandle<'a>,
+) -> std::result::Result<Vec<NounHandle<'a>>, nockvm::noun::Error> {
+    let space = root.space();
+    let mut out: Vec<NounHandle<'a>> = Vec::new();
+    let mut stack: Vec<NounHandle<'a>> = vec![*root];
+    while let Some(noun) = stack.pop() {
+        if !noun.is_cell() {
+            // A non-cell subtree is only valid as the empty-map marker `~` (0).
+            if noun.as_atom()?.as_u64()? != 0 {
+                return not_cell();
+            }
+            continue;
+        }
+        let cell = noun.as_cell()?;
+        let children = cell.tail().as_cell()?;
+        stack.push(children.tail().noun().in_space(space));
+        stack.push(children.head().noun().in_space(space));
+        out.push(cell.head().noun().in_space(space));
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use nockvm::noun::{AllocLocation, NounRepr, D, T};
+    use nockvm::pma::{Pma, PmaCopy};
+    use noun_serde::NounEncode;
+
+    use super::*;
+    use crate::zoon::zmap::ZMap;
+
+    fn test_pma_path(label: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let mut path = std::env::temp_dir();
+        path.push(format!("nockchain_math_{label}_{pid}_{id}.mmap"));
+        path
+    }
+
+    fn test_pma(label: &str) -> Pma {
+        Pma::new(100000, test_pma_path(label)).expect("failed to create test PMA")
+    }
+
+    // Strict z-map collection must reject malformed treap nodes
+    // instead of silently skipping them (which would let Rust normalize a noun
+    // that Hoon rejects). A treap node is `[entry [left right]]` with each child
+    // either a node cell or the empty marker `~` (0).
+    #[test]
+    fn collect_zmap_entries_strict_accepts_valid_rejects_malformed() {
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+
+        // valid single-node treap: [[1 2] [~ ~]]
+        let entry = T(&mut stack, &[D(1), D(2)]);
+        let empty_children = T(&mut stack, &[D(0), D(0)]);
+        let good = T(&mut stack, &[entry, empty_children]);
+
+        // malformed: left child is a non-zero atom (neither a node nor ~)
+        let bad_children = T(&mut stack, &[D(5), D(0)]);
+        let bad_child = T(&mut stack, &[entry, bad_children]);
+
+        // malformed: tail is not a `[left right]` cell
+        let bad_tail = T(&mut stack, &[entry, D(7)]);
+
+        let space = stack.noun_space();
+
+        let ok = collect_zmap_entries_strict(&good.in_space(&space))
+            .expect("a valid single-node treap should collect");
+        assert_eq!(ok.len(), 1, "valid treap should yield exactly one entry");
+
+        assert!(
+            collect_zmap_entries_strict(&bad_child.in_space(&space)).is_err(),
+            "a non-zero, non-cell subtree must be rejected, not skipped"
+        );
+        assert!(
+            collect_zmap_entries_strict(&bad_tail.in_space(&space)).is_err(),
+            "a node whose tail is not a [left right] cell must be rejected"
+        );
+
+        // the empty map (~) is valid and yields nothing
+        let empty = D(0).in_space(&space);
+        assert_eq!(
+            collect_zmap_entries_strict(&empty)
+                .expect("empty map decodes")
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn hoon_list_reads_pma_backed_cells() {
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+        let mut pma = test_pma("hoon_list");
+
+        let first = T(&mut stack, &[D(1), D(2)]);
+        let second = T(&mut stack, &[D(3), D(4)]);
+        let tail = T(&mut stack, &[second, D(0)]);
+        let mut list = T(&mut stack, &[first, tail]);
+
+        unsafe {
+            list.copy_to_pma(&stack, &mut pma);
+        }
+
+        let space = NounSpace::pma_only(&pma);
+        let items: Vec<Noun> = HoonList::try_from(list, &space)
+            .expect("PMA-backed list should decode")
+            .collect();
+
+        assert_eq!(items.len(), 2, "list length should be preserved");
+        assert_eq!(
+            items[0].in_space(&space).repr(),
+            NounRepr::Cell(AllocLocation::PmaOffset),
+            "first element should remain a PMA offset-form cell"
+        );
+        assert_eq!(
+            items[1].in_space(&space).repr(),
+            NounRepr::Cell(AllocLocation::PmaOffset),
+            "second element should remain a PMA offset-form cell"
+        );
+
+        let first = items[0]
+            .in_space(&space)
+            .as_cell()
+            .expect("first item should be a cell");
+        assert_eq!(
+            first
+                .head()
+                .as_atom()
+                .expect("first head should be an atom")
+                .as_u64()
+                .expect("first head should fit in u64"),
+            1
+        );
+        assert_eq!(
+            first
+                .tail()
+                .as_atom()
+                .expect("first tail should be an atom")
+                .as_u64()
+                .expect("first tail should fit in u64"),
+            2
+        );
+
+        let second = items[1]
+            .in_space(&space)
+            .as_cell()
+            .expect("second item should be a cell");
+        assert_eq!(
+            second
+                .head()
+                .as_atom()
+                .expect("second head should be an atom")
+                .as_u64()
+                .expect("second head should fit in u64"),
+            3
+        );
+        assert_eq!(
+            second
+                .tail()
+                .as_atom()
+                .expect("second tail should be an atom")
+                .as_u64()
+                .expect("second tail should fit in u64"),
+            4
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "file-backed PMA unsupported in Miri")]
+    fn hoon_map_get_and_iter_work_for_pma_backed_maps() {
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+        let map = ZMap::try_from_entries(vec![(7u64, 70u64), (3u64, 30u64), (11u64, 110u64)])
+            .expect("owned z-map should build");
+        let mut map_noun = map.to_noun(&mut stack);
+        let mut pma = test_pma("hoon_map");
+
+        unsafe {
+            map_noun.copy_to_pma(&stack, &mut pma);
+        }
+
+        let space = NounSpace::pma_only(&pma);
+        let hoon_map =
+            HoonMap::try_from(map_noun.in_space(&space)).expect("PMA-backed map should decode");
+
+        let mut lookup_stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+        let value = hoon_map
+            .get(&mut lookup_stack, D(11))
+            .expect("existing key should be found");
+        assert_eq!(
+            value
+                .in_space(&space)
+                .as_atom()
+                .expect("map lookup value should be an atom")
+                .as_u64()
+                .expect("map lookup value should fit in u64"),
+            110
+        );
+        assert!(
+            hoon_map.get(&mut lookup_stack, D(99)).is_none(),
+            "missing key should not resolve"
+        );
+
+        let map_handle = map_noun.in_space(&space);
+        let mut entries: Vec<(u64, u64)> = HoonMapIter::new(&map_handle)
+            .map(|entry| {
+                let pair = entry
+                    .as_cell()
+                    .expect("map iterator should yield entry pairs");
+                let key = pair
+                    .head()
+                    .as_atom()
+                    .expect("map iterator key should be an atom")
+                    .as_u64()
+                    .expect("map iterator key should fit in u64");
+                let value = pair
+                    .tail()
+                    .as_atom()
+                    .expect("map iterator value should be an atom")
+                    .as_u64()
+                    .expect("map iterator value should fit in u64");
+                (key, value)
+            })
+            .collect();
+        entries.sort_unstable();
+
+        assert_eq!(entries, vec![(3, 30), (7, 70), (11, 110)]);
     }
 }

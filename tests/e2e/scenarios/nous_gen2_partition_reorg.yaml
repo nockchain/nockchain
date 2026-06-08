@@ -1,0 +1,315 @@
+# Nous rollout scenario: partition, fork, heal, and post-reorg transaction over gen2
+#
+# Exercises the highest-risk sync path for Nous once gen2 send is enabled:
+# two miners fork under partition, a full node follows one side, the network
+# heals, and all peers must converge to the heaviest chain. After convergence,
+# a wallet transaction must be mined successfully to prove the network remains
+# usable after the reorg.
+
+name: "nous_gen2_partition_reorg"
+seed: 31
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    restart_peer_from:
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_pkh"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_pkh}"]
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "recipient_pkh"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${recipient_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${recipient_pkh}"]
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: partition
+    groups:
+      - ["miner-a", "full-a"]
+      - ["miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 8
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 8
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 6
+    timeout_ms: 180000
+
+  - action: partition
+    groups:
+      - ["miner-a", "miner-b", "full-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: disable_mining
+    node: "miner-b"
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 20
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 20
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 20
+    timeout_ms: 300000
+
+  - action: wait_for_heads_equal
+    nodes: ["miner-a", "miner-b", "full-a"]
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "tx_path"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "send-tx"
+    args: ["${tx_path}"]
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "post_reorg_tx"
+
+  - action: wait_for_tx_accepted
+    node: "miner-a"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "miner-b"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-a"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_in_block
+    node: "miner-a"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 180000
+
+  - action: wait_for_heads_equal
+    nodes: ["miner-a", "miner-b", "full-a"]
+    timeout_ms: 300000
+
+  - action: wait_for_tx_in_block
+    node: "miner-b"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 180000
+
+  - action: wait_for_tx_in_block
+    node: "full-a"
+    tx: "${post_reorg_tx}"
+    timeout_ms: 180000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a"]
+    timeout_ms: 30000
+  - assert: tx_in_block
+    node: "full-a"
+    tx: "${post_reorg_tx}"

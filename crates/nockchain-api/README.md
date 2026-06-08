@@ -70,3 +70,24 @@ That’s it—the API surface piggybacks on the running node; there is no separa
 - This binary shares the same hot prover state (`zkvm-jetpack::produce_prover_hot_state`) as every other Nockchain node; make sure the host has enough RAM for the prover plus the gRPC caches.
 
 Deployments today are integration testbeds, not hardened services. Control access, scrape the metrics, and expect breaking changes until we tag an official release.
+
+## PMA quickstart (local snapshots)
+
+The repository ships with a 2.5 GiB checkpoint in `test-api/.data.nockchain/checkpoints`. You can boot the public API directly on top of that snapshot and exercise the memfd-backed PMA without running a full sync:
+
+```bash
+cargo run --release -p nockchain-api -- \
+  --data-dir test-api/.data.nockchain \
+  --identity-path test-api/.nockchain_identity \
+  --no-default-peers \
+  --bind /ip4/127.0.0.1/udp/0/quic-v1 \
+  --bind-public-grpc-addr 127.0.0.1:5555
+```
+
+Key points:
+
+- `--data-dir` now takes the exact directory containing your `checkpoints/` folder; point it at `test-api/.data.nockchain` (or any other PMA workspace).
+- `--identity-path` overrides the default `.nockchain_identity`; pass the matching key from `test-api` so the node can re-use the provided peer ID.
+- All stack allocations now go through the memfd-backed PMA implementation, so once the node is up you can watch the `nockvm.pma.*` gnort metrics (paging ratios, touched pages, etc.) while issuing peeks.
+
+This is the minimal way to reproduce RSS measurements for the PMA work: start the API against the canned data dir, point your `nockchain-peek` clients at `127.0.0.1:5555`, and observe the metrics as the OS pages the slab in and out.

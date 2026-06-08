@@ -18,7 +18,7 @@ cd crates/bridge/contracts
 
 # Required environment variables:
 #   TENDERLY_ACCESS_KEY, TENDERLY_ACCOUNT_ID, TENDERLY_PROJECT_SLUG,
-#   TENDERLY_PRIVATE_KEY, BRIDGE_NODE_0..BRIDGE_NODE_4
+#   TENDERLY_TEST_PRIVATE_KEY, BRIDGE_NODE_0..BRIDGE_NODE_4
 ./scripts/tenderly-vnet-deploy.sh --cleanup-old --cleanup-prefix bridge-vnet --cleanup-keep 3
 
 # Load generated RPC + contract addresses for bridge runtime scripts
@@ -89,7 +89,7 @@ source environments/base-sepolia.example
 
 ```bash
 export TENDERLY_RPC_URL="<rpc-url>"
-export TENDERLY_PRIVATE_KEY="0x..."
+export TENDERLY_TEST_PRIVATE_KEY="0x..."
 export BRIDGE_NODE_0="0x..."
 # ... etc
 ```
@@ -97,7 +97,7 @@ export BRIDGE_NODE_0="0x..."
 ### Required Variables
 
 - `TENDERLY_RPC_URL` - RPC endpoint from Tenderly
-- `TENDERLY_PRIVATE_KEY` - Deployer account private key (hex, with 0x)
+- `TENDERLY_TEST_PRIVATE_KEY` - Test deployer account private key (hex, with 0x)
 - `BRIDGE_NODE_0` through `BRIDGE_NODE_4` - Five bridge node addresses
 - `NOCK_NAME` - Token name (e.g., "Nock")
 - `NOCK_SYMBOL` - Token symbol (e.g., "NOCK")
@@ -134,6 +134,13 @@ This script:
 The generated env file includes `TENDERLY_RPC_URL`, `BASE_WS_URL`,
 `INBOX_CONTRACT_ADDRESS`, and `NOCK_CONTRACT_ADDRESS` for downstream bridge
 scripts.
+
+To cleanup old or current bridge VNETs without provisioning a new one:
+
+```bash
+./scripts/tenderly-vnet-cleanup.sh
+./scripts/tenderly-vnet-cleanup.sh --current
+```
 
 ### Manual Network/Funding Path (Fallback)
 
@@ -198,7 +205,7 @@ make deploy
 ### Additional Forge Flags
 
 ```bash
-make deploy EXTRA_FLAGS="--skip-simulation --gas-price 1000000"
+make deploy EXTRA_FLAGS="--skip-simulation"
 ```
 
 ### Manual Deployment
@@ -208,7 +215,7 @@ For full control, call forge directly:
 ```bash
   forge script forge/Deploy.s.sol:Deploy \
   --rpc-url "$TENDERLY_RPC_URL" \
-  --private-key "$TENDERLY_PRIVATE_KEY" \
+  --private-key "$TENDERLY_TEST_PRIVATE_KEY" \
   --broadcast \
   --slow
 ```

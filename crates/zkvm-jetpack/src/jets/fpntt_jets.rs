@@ -54,17 +54,22 @@ pub fn felt_as_noun(context: &mut Context, felt: Felt) -> Result<Noun, JetErr> {
 
 // frep_jet
 pub fn frep_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sample = slot(subject, 6)?;
-    let x = hoon_list_to_vecbelt(sample)?;
+    let space = context.stack.noun_space();
+    let sample = slot(subject, 6, &space)?;
+    let x = hoon_list_to_vecbelt(sample, &space)?;
     let felt = frep(x)?;
     felt_as_noun(context, felt)
 }
 
 pub fn fp_ntt_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sample = slot(subject, 6)?;
-    let [fp_noun, root_noun] = sample.uncell()?;
+    let space = context.stack.noun_space();
+    let sample = slot(subject, 6, &space)?;
+    let [fp_noun, root_noun] = sample.uncell(&space)?;
 
-    let (Ok(fp), Ok(root)) = (FPolySlice::try_from(fp_noun), root_noun.as_felt()) else {
+    let (Ok(fp), Ok(root)) = (
+        FPolySlice::try_from(fp_noun, &space),
+        root_noun.as_felt(&space),
+    ) else {
         return Err(BAIL_FAIL);
     };
 

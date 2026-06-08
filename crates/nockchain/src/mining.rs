@@ -11,9 +11,8 @@ use nockapp::save::SaveableCheckpoint;
 use nockapp::utils::NOCK_STACK_SIZE_TINY;
 use nockapp::CrownError;
 use nockchain_libp2p_io::tip5_util::tip5_hash_to_base58;
-use nockvm::ext::NounExt;
 use nockvm::interpreter::NockCancelToken;
-use nockvm::noun::{Atom, D, NO, T, YES};
+use nockvm::noun::{Atom, NounAllocator, D, NO, T, YES};
 use nockvm_macros::tas;
 use rand::Rng;
 use tokio::sync::Mutex;
@@ -178,63 +177,112 @@ pub fn create_mining_driver(
                             let slab = slab_res.expect("Mining attempt result failed");
                             let result = unsafe { slab.root() };
 
-                            match HoonList::try_from(*result) {
-                                Err(_) => {
-                                    start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
-                                }
-                                Ok(effects) => {
-                                    let mining_result =
-                                        effects.filter_map(|effect| {
-                                            if effect.is_atom() {
-                                                None
-                                            } else {
-                                                let Ok(effect_cell) = effect.as_cell() else {
-                                                    error!("Expected effect to be a cell");
-                                                    return None;
-                                                };
-                                                let hed = effect_cell.head();
-                                                if hed.eq_bytes("mine-result") {
-                                                    Some(effect_cell.tail())
-                                                } else {
-                                                    None
-                                                }
-                                            }
-                                    }).next();
-                                    match mining_result {
-                                        None => {
-                                            start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, None, id).await;
-                                        },
-                                        Some(mine_result) => {
-                                            let Ok([res, tail]) = mine_result.uncell() else {
-                                                return Err(NockAppError::OtherError(String::from("Expected two elements in mining result")));
-                                            };
-                                            if unsafe { res.raw_equals(&D(0)) } {
-                                                // success
-                                                // poke main kernel with mined block and start a new attempt
-                                                info!("Found block! thread={id}");
-                                                let Ok([hash, poke]) = tail.uncell() else {
-                                                    error!("Expected two elements in tail");
-                                                    return Err(NockAppError::OtherError(String::from("Expected two elements in tail")));
-                                                };
-                                                let mut poke_slab = NounSlab::new();
-                                                poke_slab.copy_into(poke);
-                                                handle.poke(MiningWire::Mined.to_wire(), poke_slab).await.expect("Could not poke nockchain with mined PoW");
+                            enum MiningOutcome {
+                                Retry { nonce: Option<NounSlab> },
+                                Mined { poke: NounSlab, nonce: NounSlab },
+                            }
 
-                                                // launch new attempt
-                                                let mut nonce_slab = NounSlab::new();
-                                                nonce_slab.copy_into(hash);
-                                                start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, Some(nonce_slab), id).await;
-                                            } else {
-                                                // failure
-                                                //  launch new attempt, using hash as new nonce
-                                                //  nonce is tail
-                                                debug!("didn't find block, starting new attempt. thread={id}");
-                                                let mut nonce_slab = NounSlab::new();
-                                                nonce_slab.copy_into(tail);
-                                                start_mining_attempt(serf, mining_data.lock().await, &mut mining_attempts, Some(nonce_slab), id).await;
+                            let outcome = (|| -> Result<MiningOutcome, NockAppError> {
+                                let space = slab.noun_space();
+                                match HoonList::try_from(*result, &space) {
+                                    Err(_) => Ok(MiningOutcome::Retry { nonce: None }),
+                                    Ok(effects) => {
+                                        let mining_result = effects
+                                            .filter_map(|effect| {
+                                                if effect.is_atom() {
+                                                    None
+                                                } else {
+                                                    let Ok(effect_cell) =
+                                                        effect.in_space(&space).as_cell()
+                                                    else {
+                                                        error!("Expected effect to be a cell");
+                                                        return None;
+                                                    };
+                                                    let hed = effect_cell.head();
+                                                    if hed.eq_bytes("mine-result") {
+                                                        Some(effect_cell.tail().noun())
+                                                    } else {
+                                                        None
+                                                    }
+                                                }
+                                            })
+                                            .next();
+                                        match mining_result {
+                                            None => Ok(MiningOutcome::Retry { nonce: None }),
+                                            Some(mine_result) => {
+                                                let Ok([res, tail]) =
+                                                    mine_result.uncell(&space)
+                                                else {
+                                                    return Err(NockAppError::OtherError(
+                                                        String::from(
+                                                            "Expected two elements in mining result",
+                                                        ),
+                                                    ));
+                                                };
+                                                if unsafe { res.raw_equals(&D(0)) } {
+                                                    // success
+                                                    // poke main kernel with mined block and start a new attempt
+                                                    info!("Found block! thread={id}");
+                                                    let Ok([hash, poke]) = tail.uncell(&space) else {
+                                                        error!("Expected two elements in tail");
+                                                        return Err(NockAppError::OtherError(
+                                                            String::from(
+                                                                "Expected two elements in tail",
+                                                            ),
+                                                        ));
+                                                    };
+                                                    let mut poke_slab = NounSlab::new();
+                                                    poke_slab.copy_into(poke, &space);
+
+                                                    let mut nonce_slab = NounSlab::new();
+                                                    nonce_slab.copy_into(hash, &space);
+                                                    Ok(MiningOutcome::Mined {
+                                                        poke: poke_slab,
+                                                        nonce: nonce_slab,
+                                                    })
+                                                } else {
+                                                    // failure
+                                                    //  launch new attempt, using hash as new nonce
+                                                    //  nonce is tail
+                                                    debug!(
+                                                        "didn't find block, starting new attempt. thread={id}"
+                                                    );
+                                                    let mut nonce_slab = NounSlab::new();
+                                                    nonce_slab.copy_into(tail, &space);
+                                                    Ok(MiningOutcome::Retry {
+                                                        nonce: Some(nonce_slab),
+                                                    })
+                                                }
                                             }
                                         }
                                     }
+                                }
+                            })()?;
+
+                            match outcome {
+                                MiningOutcome::Retry { nonce } => {
+                                    start_mining_attempt(
+                                        serf,
+                                        mining_data.lock().await,
+                                        &mut mining_attempts,
+                                        nonce,
+                                        id,
+                                    )
+                                    .await;
+                                }
+                                MiningOutcome::Mined { poke, nonce } => {
+                                    handle
+                                        .poke(MiningWire::Mined.to_wire(), poke)
+                                        .await
+                                        .expect("Could not poke nockchain with mined PoW");
+                                    start_mining_attempt(
+                                        serf,
+                                        mining_data.lock().await,
+                                        &mut mining_attempts,
+                                        Some(nonce),
+                                        id,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -249,29 +297,47 @@ pub fn create_mining_driver(
                             continue;
                         };
 
-                        if effect_cell.head().eq_bytes("mine") {
-                            let (version_slab, header_slab, target_slab, pow_len) = {
-                                let [version, commit, target, pow_len_noun] = effect_cell.tail().uncell().expect(
-                                    "Expected three elements in %mine effect",
-                                );
-                                let mut version_slab = NounSlab::new();
-                                version_slab.copy_into(version);
-                                let mut header_slab = NounSlab::new();
-                                header_slab.copy_into(commit);
-                                let mut target_slab = NounSlab::new();
-                                target_slab.copy_into(target);
-                                let pow_len =
-                                    pow_len_noun
+                        let candidate = {
+                            let space = effect.noun_space();
+                            let effect_cell = effect_cell.in_space(&space);
+                            if effect_cell.head().eq_bytes("mine") {
+                                let (version_slab, header_slab, target_slab, pow_len) = {
+                                    let [version, commit, target, pow_len_noun] = effect_cell
+                                        .tail()
+                                        .noun()
+                                        .uncell(&space)
+                                        .expect("Expected three elements in %mine effect");
+                                    let mut version_slab = NounSlab::new();
+                                    version_slab.copy_into(version, &space);
+                                    let mut header_slab = NounSlab::new();
+                                    header_slab.copy_into(commit, &space);
+                                    let mut target_slab = NounSlab::new();
+                                    target_slab.copy_into(target, &space);
+                                    let pow_len = pow_len_noun
+                                        .in_space(&space)
                                         .as_atom()
                                         .expect("Expected pow-len to be an atom")
                                         .as_u64()
                                         .expect("Expected pow-len to be a u64");
-                                (version_slab, header_slab, target_slab, pow_len)
-                            };
-                            debug!("received new candidate block header: {:?}",
-                                tip5_hash_to_base58(*unsafe { header_slab.root() })
-                                .expect("Failed to convert header to Base58")
-                            );
+                                    (version_slab, header_slab, target_slab, pow_len)
+                                };
+                                Some((version_slab, header_slab, target_slab, pow_len))
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some((version_slab, header_slab, target_slab, pow_len)) = candidate {
+                            {
+                                let header_space = header_slab.noun_space();
+                                debug!(
+                                    "received new candidate block header: {:?}",
+                                    tip5_hash_to_base58(
+                                        *unsafe { header_slab.root() },
+                                        &header_space
+                                    )
+                                    .expect("Failed to convert header to Base58")
+                                );
+                            }
                             *(mining_data.lock().await) = Some(MiningData {
                                 block_header: header_slab,
                                 version: version_slab,
@@ -289,6 +355,7 @@ pub fn create_mining_driver(
                                         None,
                                         hot_state.clone(),
                                         NOCK_STACK_SIZE_TINY,
+                                        None,
                                         test_jets.clone(),
                                         Default::default(),
                                     )
@@ -318,10 +385,14 @@ pub fn create_mining_driver(
 
 fn create_poke(mining_data: &MiningData, nonce: &NounSlab) -> NounSlab {
     let mut slab = NounSlab::new();
-    let header = slab.copy_into(unsafe { *(mining_data.block_header.root()) });
-    let version = slab.copy_into(unsafe { *(mining_data.version.root()) });
-    let target = slab.copy_into(unsafe { *(mining_data.target.root()) });
-    let nonce = slab.copy_into(unsafe { *(nonce.root()) });
+    let header_space = mining_data.block_header.noun_space();
+    let version_space = mining_data.version.noun_space();
+    let target_space = mining_data.target.noun_space();
+    let nonce_space = nonce.noun_space();
+    let header = slab.copy_into(unsafe { *(mining_data.block_header.root()) }, &header_space);
+    let version = slab.copy_into(unsafe { *(mining_data.version.root()) }, &version_space);
+    let target = slab.copy_into(unsafe { *(mining_data.target.root()) }, &target_space);
+    let nonce = slab.copy_into(unsafe { *(nonce.root()) }, &nonce_space);
     let poke_noun = T(
         &mut slab,
         &[version, header, nonce, target, D(mining_data.pow_len)],
@@ -433,12 +504,18 @@ async fn start_mining_attempt(
     let mining_data_ref = mining_data
         .as_ref()
         .expect("Mining data should already be initialized");
+    let header_space = mining_data_ref.block_header.noun_space();
+    let nonce_space = nonce.noun_space();
     debug!(
         "starting mining attempt on thread {:?} on header {:?}with nonce: {:?}",
         id,
-        tip5_hash_to_base58(*unsafe { mining_data_ref.block_header.root() })
-            .expect("Failed to convert block header to Base58"),
-        tip5_hash_to_base58(*unsafe { nonce.root() }).expect("Failed to convert nonce to Base58"),
+        tip5_hash_to_base58(
+            *unsafe { mining_data_ref.block_header.root() },
+            &header_space
+        )
+        .expect("Failed to convert block header to Base58"),
+        tip5_hash_to_base58(*unsafe { nonce.root() }, &nonce_space)
+            .expect("Failed to convert nonce to Base58"),
     );
     let poke_slab = create_poke(mining_data_ref, &nonce);
     mining_attempts.spawn(async move {

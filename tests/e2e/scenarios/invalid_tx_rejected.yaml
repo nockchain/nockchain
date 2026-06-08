@@ -1,0 +1,34 @@
+name: "invalid_tx_rejected"
+seed: 4
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6501"
+    grpc_private_port: 7501
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 2
+    bind:
+      - "/ip4/127.0.0.1/udp/4501/quic-v1"
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: wait_for_height
+    node: "node-a"
+    height: 1
+    timeout_ms: 30000
+  - action: submit_tx
+    node: "node-a"
+    fixture: "raw_tx_v1.jam"
+    expect: ack
+    store_as: "bad-tx"
+asserts:
+  - assert: tx_not_accepted
+    node: "node-a"
+    tx: "bad-tx"

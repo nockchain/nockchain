@@ -2,9 +2,10 @@ pub mod page;
 
 use anyhow::Result;
 use nockchain_math::belt::{Belt, PRIME};
-use nockchain_math::crypto::cheetah::{CheetahError, CheetahPoint};
+use nockchain_math::crypto::cheetah::{ch_scal_big, CheetahError, CheetahPoint, A_GEN};
+use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::zoon::zmap::ZMap;
-use nockvm::noun::{Noun, NounAllocator, D};
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use num_bigint::BigUint;
 pub use page::{BigNum, BlockId, CoinbaseSplit, Page, PageMsg};
@@ -22,6 +23,11 @@ impl SchnorrPubkey {
 
     pub fn from_base58(b58: &str) -> Result<Self, CheetahError> {
         Ok(SchnorrPubkey(CheetahPoint::from_base58(b58)?))
+    }
+
+    pub fn from_secret_scalar_biguint(scalar: &BigUint) -> anyhow::Result<Self> {
+        let scalar = ibig::UBig::from_be_bytes(&scalar.to_bytes_be());
+        Ok(SchnorrPubkey(ch_scal_big(&scalar, &A_GEN)?))
     }
 }
 
@@ -43,10 +49,28 @@ impl NounEncode for Signature {
 }
 
 impl NounDecode for Signature {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        Ok(Signature(
-            ZMap::<SchnorrPubkey, SchnorrSignature>::from_noun(noun)?.into_entries(),
-        ))
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        if let Ok(atom) = noun.in_space(space).as_atom() {
+            if atom.as_u64()? == 0 {
+                return Ok(Signature(Vec::new()));
+            }
+            return Err(NounDecodeError::Custom("signature node not a cell".into()));
+        }
+
+        let entries = nockchain_math::structs::collect_zmap_entries_strict(&noun.in_space(space))
+            .map_err(|_| NounDecodeError::Custom("malformed signature z-map node".into()))?
+            .into_iter()
+            .map(|entry| {
+                let [key, value] = entry
+                    .uncell()
+                    .map_err(|_| NounDecodeError::Custom("signature entry not a pair".into()))?;
+                let pubkey = SchnorrPubkey::from_noun_handle(&key)?;
+                let signature = SchnorrSignature::from_noun_handle(&value)?;
+                Ok((pubkey, signature))
+            })
+            .collect::<Result<Vec<_>, NounDecodeError>>()?;
+
+        Ok(Signature(entries))
     }
 }
 
@@ -98,7 +122,7 @@ impl NounEncode for Version {
 }
 
 impl NounDecode for Version {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, _space: &NounSpace) -> Result<Self, NounDecodeError> {
         match noun.as_atom()?.as_direct() {
             Ok(ver) if ver.data() == 0 => Ok(Version::V0),
             Ok(ver) if ver.data() == 1 => Ok(Version::V1),
@@ -122,6 +146,8 @@ pub enum HashDecodeError {
     Base58(#[from] bs58::decode::Error),
     #[error("expected {expected} bytes for tip5 hash, got {actual}")]
     InvalidByteLength { expected: usize, actual: usize },
+    #[error("base58 string is not the canonical encoding of this tip5 hash")]
+    NonCanonical,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NounDecode, NounEncode, Serialize, Deserialize)]
@@ -145,10 +171,20 @@ impl Hash {
             *belt = Belt(rem_u64);
             value /= &prime;
         }
-        if value > prime {
+        // A canonical tip5 hash occupies exactly five base-p limbs. Any nonzero
+        // remaining quotient means the value is out of the tip5 domain (e.g. a
+        // v0 pubkey) and must be rejected rather than silently truncated --
+        // truncation would let many distinct base58 strings alias one digest.
+        if value != BigUint::from(0u8) {
             return Err(HashDecodeError::ProvidedValueTooLarge);
         }
-        Ok(Hash(belts))
+        let hash = Hash(belts);
+        // Reject non-canonical spellings (e.g. leading-`1`/zero-byte padding)
+        // that decode to the same digest: require the exact canonical encoding.
+        if hash.to_base58() != s {
+            return Err(HashDecodeError::NonCanonical);
+        }
+        Ok(hash)
     }
 
     /// Decode a tip5 hash from a big-endian 32-byte value using base-p decomposition.
@@ -354,6 +390,41 @@ mod tests {
                 actual: 39
             }
         ));
+    }
+
+    // Base58 tip5-hash decoding must be canonical, so distinct
+    // strings cannot alias the same five-limb digest.
+    #[test]
+    fn from_base58_rejects_non_canonical_leading_one() {
+        // A known-canonical hash, then the same string with an extra leading
+        // '1' (a leading zero byte): it decodes to the same digest but is not
+        // the canonical spelling, so it must be rejected rather than aliased.
+        let canonical = "3giXkwW4zbFhoyJu27RbP6VNiYgR6yaTfk2AYnEHvxtVaGbmcVD6jb9";
+        Hash::from_base58(canonical).expect("canonical hash decodes");
+        let padded = format!("1{canonical}");
+        assert!(
+            matches!(
+                Hash::from_base58(&padded),
+                Err(HashDecodeError::NonCanonical)
+            ),
+            "leading-'1'-padded base58 must be rejected as non-canonical"
+        );
+    }
+
+    #[test]
+    fn from_base58_rejects_out_of_domain_high_quotient() {
+        // p^5 needs a sixth base-p limb (out of the five-limb tip5 domain). The
+        // old `value > prime` check accepted it and truncated it to the all-zero
+        // digest -- an alias of the empty string. It must now be rejected.
+        let p5 = BigUint::from(PRIME).pow(5);
+        let s = bs58::encode(p5.to_bytes_be()).into_string();
+        assert!(
+            matches!(
+                Hash::from_base58(&s),
+                Err(HashDecodeError::ProvidedValueTooLarge)
+            ),
+            "a value with a nonzero high quotient must be rejected, not truncated"
+        );
     }
 
     #[test]

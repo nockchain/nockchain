@@ -1,0 +1,1167 @@
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use async_trait::async_trait;
+use backon::Retryable;
+use nockapp::noun::slab::{NockJammer, NounSlab};
+use nockapp::{Bytes, ToBytes};
+use nockapp_grpc::services::private_nockapp::client::PrivateNockAppGrpcClient;
+use nockchain_types::tx_engine::common::{BlockId, Heavy, Page, TxId};
+use nockchain_types::BlockchainConstants;
+use nockvm::noun::{NounAllocator, NounSpace};
+use noun_serde::prelude::*;
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
+
+use crate::core::loop_policy::NockObserverLoopPolicy;
+use crate::core::observation::nock::{plan_nock_tick, NockPlanAction, NockPlanInput};
+use crate::core::ports::{NockSourcePort, NockTipInfo};
+use crate::observability::metrics;
+use crate::observability::status::BridgeStatus;
+use crate::observability::tui::types::{
+    AlertSeverity, ChainState, NetworkState, NockchainApiStatus,
+};
+use crate::shared::errors::BridgeError;
+use crate::shared::runtime::{BridgeEvent, BridgeRuntimeHandle, ChainEvent, NockBlockEvent};
+use crate::shared::stop::StopHandle;
+use crate::shared::types::Tx;
+use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
+
+const CLIENT_PID: i32 = 1;
+pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
+
+/// Default nockchain confirmation depth used by the driver if not specified in config.
+///
+/// The bridge kernel assumes blocks it receives are final; this is enforced by the Rust driver.
+pub const DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH: u64 = 100;
+
+#[cfg(test)]
+fn confirmed_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64> {
+    let target = if confirmation_depth == 0 {
+        chain_tip
+    } else {
+        chain_tip.saturating_sub(confirmation_depth)
+    };
+    if target == 0 {
+        None
+    } else {
+        Some(target)
+    }
+}
+
+pub struct NockGrpcSource {
+    client: PrivateNockAppGrpcClient,
+}
+
+impl NockGrpcSource {
+    pub async fn connect(endpoint: String) -> Result<Self, BridgeError> {
+        let client = PrivateNockAppGrpcClient::connect(endpoint)
+            .await
+            .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+        Ok(Self { client })
+    }
+
+    pub fn from_client(client: PrivateNockAppGrpcClient) -> Self {
+        Self { client }
+    }
+}
+
+pub async fn fetch_private_blockchain_constants(
+    endpoint: &str,
+) -> Result<BlockchainConstants, BridgeError> {
+    let mut client = PrivateNockAppGrpcClient::connect(endpoint.to_string())
+        .await
+        .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+    fetch_private_blockchain_constants_from_client(&mut client).await
+}
+
+pub async fn fetch_private_blockchain_constants_from_client(
+    client: &mut PrivateNockAppGrpcClient,
+) -> Result<BlockchainConstants, BridgeError> {
+    let mut path_slab = NounSlab::<NockJammer>::new();
+    let path_noun = vec![BLOCKCHAIN_CONSTANTS_PATH.to_string()].to_noun(&mut path_slab);
+    path_slab.set_root(path_noun);
+    let response = client
+        .peek(CLIENT_PID, path_slab.jam().to_vec())
+        .await
+        .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+    decode_blockchain_constants_response(response)
+}
+
+pub async fn bootstrap_blockchain_constants(
+    endpoint: &str,
+) -> Result<BlockchainConstants, BridgeError> {
+    fetch_private_blockchain_constants(endpoint).await
+}
+
+pub fn validate_blockchain_constants_match(
+    expected: &BlockchainConstants,
+    actual: &BlockchainConstants,
+) -> Result<(), BridgeError> {
+    if actual == expected {
+        return Ok(());
+    }
+
+    Err(BridgeError::Runtime(format!(
+        "connected nockchain node reported blockchain constants that differ from bridge kernel state: expected({}) got({})",
+        format_blockchain_constants(expected),
+        format_blockchain_constants(actual),
+    )))
+}
+
+fn format_blockchain_constants(constants: &BlockchainConstants) -> String {
+    format!(
+        "v1_phase={}, bythos_phase={}, base_fee={}, coinbase_timelock_min={}",
+        constants.v1_phase,
+        constants.bythos_phase,
+        constants.base_fee,
+        constants.coinbase_timelock_min,
+    )
+}
+
+fn decode_blockchain_constants_response(
+    bytes: Vec<u8>,
+) -> Result<BlockchainConstants, BridgeError> {
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let noun = slab.cue_into(Bytes::from(bytes)).map_err(|err| {
+        BridgeError::Runtime(format!(
+            "failed to cue blockchain-constants response: {err}"
+        ))
+    })?;
+    let space = slab.noun_space();
+    let payload =
+        Option::<Option<BlockchainConstants>>::from_noun(&noun, &space).map_err(|err| {
+            BridgeError::Runtime(format!(
+                "failed to decode blockchain-constants response: {err}"
+            ))
+        })?;
+    payload.flatten().ok_or_else(|| {
+        BridgeError::Runtime("nockchain node returned no blockchain-constants payload".into())
+    })
+}
+
+fn nock_block_still_waiting_for_kernel(
+    in_flight_height: Option<u64>,
+    next_needed_height: Option<u64>,
+) -> bool {
+    in_flight_height.is_some() && in_flight_height == next_needed_height
+}
+
+#[async_trait]
+impl NockSourcePort for NockGrpcSource {
+    async fn tip_info(&mut self) -> Result<Option<NockTipInfo>, BridgeError> {
+        let info = Self::fetch_tip_info_from_client(&mut self.client).await?;
+        Ok(info.map(|(height, tip_hash)| NockTipInfo { height, tip_hash }))
+    }
+
+    async fn fetch_block_at_height(
+        &mut self,
+        height: u64,
+    ) -> Result<Option<NockBlockEvent>, BridgeError> {
+        Self::fetch_block_at_height_from_client(&mut self.client, height).await
+    }
+}
+
+impl NockGrpcSource {
+    async fn fetch_tip_info_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+    ) -> Result<Option<(u64, String)>, BridgeError> {
+        let heavy_path = vec![Bytes::from("heavy")];
+        let heavy_bytes = jam_path(&heavy_path)?;
+        let response = client
+            .peek(CLIENT_PID, heavy_bytes)
+            .await
+            .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+        let heavy: Heavy = {
+            let (heavy_slab, heavy_noun) = cue_response(response)?;
+            let heavy_space = heavy_slab.noun_space();
+            heavy_noun.decode(&heavy_space).map_err(|err| {
+                BridgeError::EventMonitoring(format!("failed to decode heavy response: {}", err))
+            })?
+        };
+        let Some(block_id_base58) = heavy.to_base58() else {
+            return Ok(None);
+        };
+        let tip_hash = block_id_base58.clone();
+
+        let block_path = vec![Bytes::from("block"), Bytes::from(block_id_base58)];
+        let block_bytes = jam_path(&block_path)?;
+        let response = client
+            .peek(CLIENT_PID, block_bytes)
+            .await
+            .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+        let (page, _page_noun) = {
+            let (page_slab, block_noun) = cue_response(response)?;
+            let page_space = page_slab.noun_space();
+            decode_page_from_peek(&block_noun, &page_space)?
+        };
+        Ok(Some((page.height, tip_hash)))
+    }
+
+    async fn fetch_block_at_height_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+        height: u64,
+    ) -> Result<Option<NockBlockEvent>, BridgeError> {
+        let heavy_n_path = vec![Bytes::from("heavy-n"), Bytes::from(height.to_bytes()?)];
+        let heavy_n_bytes = jam_path(&heavy_n_path)?;
+        let response = client
+            .peek(CLIENT_PID, heavy_n_bytes)
+            .await
+            .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+        let (page_slab, block_noun) = cue_response(response)?;
+        let (page, page_noun) = {
+            let page_space = page_slab.noun_space();
+            match decode_page_from_peek(&block_noun, &page_space) {
+                Ok(result) => result,
+                Err(_) => return Ok(None),
+            }
+        };
+
+        let txs = Self::fetch_transactions_from_client(client, &page.digest, &page.tx_ids).await?;
+
+        Ok(Some(NockBlockEvent {
+            block: page,
+            page_slab,
+            page_noun,
+            txs,
+        }))
+    }
+
+    async fn fetch_transactions_from_client(
+        client: &mut PrivateNockAppGrpcClient,
+        block_id: &BlockId,
+        tx_ids: &[TxId],
+    ) -> Result<Vec<(TxId, Tx)>, BridgeError> {
+        let block_id_base58 = block_id.to_base58();
+        let mut txs = Vec::with_capacity(tx_ids.len());
+        for tx_id in tx_ids {
+            let tx_id_base58 = tx_id.to_base58();
+            let tx_path = vec![
+                Bytes::from("block-transaction"),
+                Bytes::from(block_id_base58.clone()),
+                Bytes::from(tx_id_base58),
+            ];
+            let tx_bytes = jam_path(&tx_path)?;
+            let response = client
+                .peek(CLIENT_PID, tx_bytes)
+                .await
+                .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+            let (tx_slab, tx_noun) = cue_response(response)?;
+            let tx_space = tx_slab.noun_space();
+            let tx = decode_tx_from_peek(&tx_noun, &tx_space)?;
+            txs.push((tx_id.clone(), tx));
+        }
+        Ok(txs)
+    }
+}
+
+struct NockWatcherConnection {
+    endpoint: String,
+    policy: NockObserverLoopPolicy,
+}
+
+struct NockWatcherDeps {
+    runtime: Arc<BridgeRuntimeHandle>,
+    stop: StopHandle,
+    confirmed_snapshot: Option<Arc<BridgeNoteSnapshotService>>,
+}
+
+struct NockWatcherConfig {
+    confirmation_depth: u64,
+}
+
+struct NockWatcherUi {
+    /// Optional bridge_status for connection status + alert updates.
+    bridge_status: Option<BridgeStatus>,
+}
+
+pub struct NockchainWatcher {
+    connection: NockWatcherConnection,
+    deps: NockWatcherDeps,
+    config: NockWatcherConfig,
+    ui: NockWatcherUi,
+}
+
+impl NockchainWatcher {
+    pub fn new(
+        endpoint: String,
+        runtime: Arc<BridgeRuntimeHandle>,
+        confirmation_depth: u64,
+        stop: StopHandle,
+    ) -> Self {
+        Self::with_policy(
+            endpoint,
+            runtime,
+            confirmation_depth,
+            stop,
+            NockObserverLoopPolicy::default(),
+        )
+    }
+
+    pub fn with_poll_interval(
+        endpoint: String,
+        runtime: Arc<BridgeRuntimeHandle>,
+        poll_interval: Duration,
+        confirmation_depth: u64,
+        stop: StopHandle,
+    ) -> Self {
+        let policy = NockObserverLoopPolicy {
+            poll_interval,
+            ..NockObserverLoopPolicy::default()
+        };
+        Self::with_policy(endpoint, runtime, confirmation_depth, stop, policy)
+    }
+
+    pub fn with_policy(
+        endpoint: String,
+        runtime: Arc<BridgeRuntimeHandle>,
+        confirmation_depth: u64,
+        stop: StopHandle,
+        policy: NockObserverLoopPolicy,
+    ) -> Self {
+        Self {
+            connection: NockWatcherConnection { endpoint, policy },
+            deps: NockWatcherDeps {
+                runtime,
+                stop,
+                confirmed_snapshot: None,
+            },
+            config: NockWatcherConfig { confirmation_depth },
+            ui: NockWatcherUi {
+                bridge_status: None,
+            },
+        }
+    }
+
+    /// Set the TUI state for connection status updates.
+    pub fn with_bridge_status(mut self, bridge_status: BridgeStatus) -> Self {
+        self.ui.bridge_status = Some(bridge_status);
+        self
+    }
+
+    pub fn with_confirmed_snapshot_service(
+        mut self,
+        snapshot_service: Arc<BridgeNoteSnapshotService>,
+    ) -> Self {
+        self.deps.confirmed_snapshot = Some(snapshot_service);
+        self
+    }
+
+    /// Update the nockchain API connection status in the TUI.
+    fn update_status(&self, status: NockchainApiStatus) {
+        if let Some(ref bridge_status) = self.ui.bridge_status {
+            bridge_status.update_nockchain_api_status(status);
+        }
+    }
+
+    /// Update the nockchain tip hash in the TUI.
+    fn update_tip_hash(&self, tip_hash: String) {
+        if let Some(ref bridge_status) = self.ui.bridge_status {
+            bridge_status.update_nockchain_tip_hash(tip_hash);
+        }
+    }
+
+    /// Push an alert to the TUI.
+    fn push_alert(&self, severity: AlertSeverity, title: String, message: String) {
+        if let Some(ref bridge_status) = self.ui.bridge_status {
+            bridge_status.push_alert(severity, title, message, "nock-watcher".to_string());
+        }
+    }
+
+    pub async fn run(self) -> Result<(), BridgeError> {
+        let mut was_connected = false;
+
+        // Unlimited retries with exponential backoff by default.
+        let connect_backoff = self.connection.policy.connect_retry;
+
+        self.update_status(NockchainApiStatus::connecting(0, None));
+
+        loop {
+            if self.deps.stop.is_stopped() {
+                sleep(self.connection.policy.poll_interval).await;
+                continue;
+            }
+
+            let attempt_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let attempt_count_notify = attempt_count.clone();
+            let endpoint = self.connection.endpoint.clone();
+            let connect = || async { PrivateNockAppGrpcClient::connect(endpoint.clone()).await };
+
+            self.update_status(NockchainApiStatus::connecting(1, None));
+
+            let connect_result = connect
+                .retry(connect_backoff.exponential_builder())
+                .notify(|err, dur| {
+                    let attempt =
+                        attempt_count_notify.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let error_msg = err.to_string();
+
+                    self.update_status(NockchainApiStatus::connecting(
+                        attempt + 1,
+                        Some(error_msg.clone()),
+                    ));
+
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        endpoint=%self.connection.endpoint,
+                        error=%error_msg,
+                        attempt=attempt,
+                        backoff_secs=dur.as_secs(),
+                        "failed to connect, will retry"
+                    );
+
+                    if attempt == 1 || attempt.is_multiple_of(10) {
+                        self.push_alert(
+                            AlertSeverity::Warning,
+                            "Nockchain API Connection Failed".to_string(),
+                            format!(
+                                "Attempt {}: {}",
+                                attempt,
+                                truncate_error_msg(&error_msg, 50)
+                            ),
+                        );
+                    }
+                })
+                .await;
+
+            match connect_result {
+                Ok(client) => {
+                    self.update_status(NockchainApiStatus::connected());
+
+                    if was_connected {
+                        info!(
+                            target: "bridge.nock-watcher",
+                            endpoint=%self.connection.endpoint,
+                            "reconnected to nockchain gRPC endpoint"
+                        );
+                        self.push_alert(
+                            AlertSeverity::Info,
+                            "Nockchain API Reconnected".to_string(),
+                            format!("Reconnected to {}", self.connection.endpoint),
+                        );
+                    } else {
+                        info!(
+                            target: "bridge.nock-watcher",
+                            endpoint=%self.connection.endpoint,
+                            "connected to nockchain gRPC endpoint"
+                        );
+                    }
+                    was_connected = true;
+
+                    let mut source = NockGrpcSource::from_client(client);
+                    if let Err(err) = self.stream_events_with_source(&mut source).await {
+                        let error_msg = err.to_string();
+                        warn!(
+                            target: "bridge.nock-watcher",
+                            error=%error_msg,
+                            "nockchain watcher stream failed, reconnecting"
+                        );
+                        self.update_status(NockchainApiStatus::disconnected(error_msg.clone()));
+                        self.push_alert(
+                            AlertSeverity::Warning,
+                            "Nockchain API Disconnected".to_string(),
+                            format!("Connection lost: {}", truncate_error_msg(&error_msg, 60)),
+                        );
+                    }
+                }
+                Err(err) => {
+                    // Should not happen with unlimited retries
+                    let error_msg = err.to_string();
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        endpoint=%self.connection.endpoint,
+                        error=%error_msg,
+                        "connect failed unexpectedly"
+                    );
+                    self.update_status(NockchainApiStatus::disconnected(error_msg));
+                    sleep(self.connection.policy.connect_failure_sleep).await;
+                }
+            }
+        }
+    }
+
+    async fn stream_events_with_source<S>(&self, source: &mut S) -> Result<(), BridgeError>
+    where
+        S: NockSourcePort,
+    {
+        let poll_interval = self.connection.policy.poll_interval;
+        info!(
+            target: "bridge.nock-watcher",
+            confirmation_depth = self.config.confirmation_depth,
+            "starting nock observer with confirmation depth"
+        );
+        let mut nock_block_in_flight: Option<u64> = None;
+        loop {
+            if self.deps.stop.is_stopped() {
+                sleep(poll_interval).await;
+                continue;
+            }
+            let tip_info = match source.tip_info().await {
+                Ok(info) => info,
+                Err(err) => {
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        error=%err,
+                        "failed to fetch tip height"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+            };
+
+            if let Some(info) = &tip_info {
+                self.update_tip_hash(info.tip_hash.clone());
+            }
+
+            let next_needed_height = match self.deps.runtime.peek_nock_next_height().await {
+                Ok(height) => height,
+                Err(err) => {
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        error=%err,
+                        "failed to peek nock next height"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+            };
+
+            if nock_block_still_waiting_for_kernel(nock_block_in_flight, next_needed_height) {
+                let height = nock_block_in_flight.unwrap_or_default();
+                debug!(
+                    target: "bridge.nock-watcher",
+                    height,
+                    "nock block already enqueued, waiting for kernel height advance"
+                );
+                sleep(poll_interval).await;
+                continue;
+            }
+            nock_block_in_flight = None;
+
+            let action = plan_nock_tick(NockPlanInput {
+                tip_height: tip_info.as_ref().map(|info| info.height),
+                next_needed_height,
+                confirmation_depth: self.config.confirmation_depth,
+            });
+
+            let (tip_height, target_height) = match action {
+                NockPlanAction::NoTipAvailable => {
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        "no heaviest block available from private nockapp"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+                NockPlanAction::NoPendingHeight {
+                    tip_height,
+                    confirmed_target,
+                } => {
+                    nock_block_in_flight = None;
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        tip_height,
+                        confirmed_target,
+                        "kernel has no pending nock block"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+                NockPlanAction::BootstrapUnconfirmed {
+                    tip_height,
+                    confirmation_depth,
+                } => {
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        tip_height,
+                        confirmation_depth,
+                        "no confirmed block yet (bootstrap)"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+                NockPlanAction::NotYetConfirmed {
+                    tip_height,
+                    confirmed_target,
+                    next_needed_height,
+                } => {
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        tip_height,
+                        confirmed_target,
+                        next_needed_height,
+                        "target height not yet confirmed for kernel need"
+                    );
+                    sleep(poll_interval).await;
+                    continue;
+                }
+                NockPlanAction::FetchHeight {
+                    tip_height, height, ..
+                } => (tip_height, height),
+            };
+
+            match source.fetch_block_at_height(target_height).await {
+                Ok(Some(event)) => {
+                    let height = event.block.height;
+                    let block_hash = event.block.digest.to_base58();
+                    let confirmed_block_id = event.block.digest.clone();
+                    let txs_count = event.txs.len();
+                    self.deps
+                        .runtime
+                        .send_event(BridgeEvent::Chain(Box::new(ChainEvent::Nock(event))))
+                        .await?;
+                    nock_block_in_flight = Some(height);
+                    if let Some(snapshot_service) = &self.deps.confirmed_snapshot {
+                        if let Err(err) = snapshot_service
+                            .refresh_on_confirmed_block(height, &confirmed_block_id)
+                            .await
+                        {
+                            warn!(
+                                target: "bridge.nock-watcher",
+                                height,
+                                block_id = %block_hash,
+                                error = %err,
+                                "failed to refresh confirmed bridge note snapshot"
+                            );
+                        }
+                    }
+                    info!(
+                        target: "bridge.nock-watcher",
+                        height,
+                        tip_height,
+                        confirmations = tip_height - height,
+                        hash=%block_hash,
+                        txs_count=%txs_count,
+                        "emitted confirmed nock block"
+                    );
+                }
+                Ok(None) => {
+                    debug!(
+                        target: "bridge.nock-watcher",
+                        target = target_height,
+                        "block at target height not found"
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        target: "bridge.nock-watcher",
+                        target = target_height,
+                        error=%err,
+                        "failed to fetch block at height"
+                    );
+                }
+            }
+            sleep(poll_interval).await;
+        }
+    }
+}
+
+/// Poll chain heights and kernel state, update TUI NetworkState.
+pub async fn run_network_monitor(
+    runtime: Arc<BridgeRuntimeHandle>,
+    bridge_status: BridgeStatus,
+    poll_interval: Duration,
+) -> Result<(), BridgeError> {
+    let mut interval = tokio::time::interval(poll_interval);
+
+    // Fetch fakenet status once; retry until available.
+    // The peek returns true for fakenet, false for mainnet.
+    let mut is_fakenet: Option<bool> = None;
+
+    loop {
+        interval.tick().await;
+
+        // Peek kernel state counts (includes hold status)
+        // This method never fails - returns defaults on error
+        let current_bridge_state = runtime.update_bridge_state().await;
+        let base_height = current_bridge_state
+            .base_next_height
+            .map(|height| height.saturating_sub(1));
+        let nock_height = current_bridge_state
+            .nock_next_height
+            .map(|height| height.saturating_sub(1));
+
+        if is_fakenet.is_none() {
+            match current_bridge_state.is_fakenet {
+                Some(status) => {
+                    info!(
+                        target: "bridge.network-monitor",
+                        is_fakenet = status,
+                        "detected network mode: {}",
+                        if status { "fakenet" } else { "mainnet" }
+                    );
+                    is_fakenet = Some(status);
+                }
+                None => {
+                    warn!(
+                        target: "bridge.network-monitor",
+                        "failed to peek network mode, will retry"
+                    );
+                }
+            }
+        }
+
+        let now = SystemTime::now();
+        let state = bridge_status.network();
+        let base_tip_hash = current_bridge_state
+            .base_tip_hash
+            .clone()
+            .unwrap_or_else(|| state.base.tip_hash.clone());
+        let mut network_state = NetworkState {
+            nockchain_api_status: state.nockchain_api_status.clone(),
+            ..Default::default()
+        };
+        network_state.base.tip_hash = base_tip_hash.clone();
+        network_state.nockchain.tip_hash = state.nockchain.tip_hash.clone();
+        network_state.base_next_height = current_bridge_state.base_next_height;
+        network_state.nock_next_height = current_bridge_state.nock_next_height;
+
+        if let Some(height) = base_height {
+            network_state.base = ChainState {
+                height,
+                tip_hash: base_tip_hash.clone(),
+                confirmations: 0,
+                is_syncing: false,
+                last_updated: Some(now),
+            };
+            debug!(
+                target: "bridge.network-monitor",
+                base_height = height,
+                "updated base chain height"
+            );
+        }
+
+        if let Some(height) = nock_height {
+            let tip_hash = state.nockchain.tip_hash.clone();
+
+            network_state.nockchain = ChainState {
+                height,
+                tip_hash,
+                confirmations: 0,
+                is_syncing: false,
+                last_updated: Some(now),
+            };
+            debug!(
+                target: "bridge.network-monitor",
+                nock_height = height,
+                "updated nockchain height"
+            );
+        }
+
+        // Populate kernel state counts
+        network_state.unsettled_deposit_count = current_bridge_state.unsettled_deposits;
+        network_state.unsettled_withdrawal_count = current_bridge_state.unsettled_withdrawals;
+
+        // Pending deposits come from kernel state counts (independent of TUI focus).
+        network_state.pending_deposits = current_bridge_state.unsettled_deposits;
+        network_state.pending_withdrawals = current_bridge_state.unsettled_withdrawals;
+
+        // Populate hold status
+        network_state.base_hold = current_bridge_state.base_hold;
+        network_state.nock_hold = current_bridge_state.nock_hold;
+        network_state.kernel_stopped = current_bridge_state.kernel_stopped;
+        network_state.base_hold_height = if current_bridge_state.base_hold {
+            current_bridge_state.base_hold_height
+        } else {
+            None
+        };
+        network_state.nock_hold_height = if current_bridge_state.nock_hold {
+            current_bridge_state.nock_hold_height
+        } else {
+            None
+        };
+
+        // Populate network mode (mainnet vs fakenet)
+        // is_fakenet is true for fakenet, so invert for is_mainnet
+        network_state.is_mainnet = is_fakenet.map(|f| !f);
+
+        debug!(
+            target: "bridge.network-monitor",
+            unsettled_deposits = current_bridge_state.unsettled_deposits,
+            unsettled_withdrawals = current_bridge_state.unsettled_withdrawals,
+            base_hold = current_bridge_state.base_hold,
+            nock_hold = current_bridge_state.nock_hold,
+            kernel_stopped = current_bridge_state.kernel_stopped,
+            "updated kernel state counts"
+        );
+
+        metrics::update_bridge_metrics(&network_state, bridge_status.last_deposit_nonce());
+        bridge_status.update_network(network_state);
+    }
+}
+
+/// Truncate an error message for display in alerts.
+fn truncate_error_msg(error: &str, max_len: usize) -> String {
+    if error.len() <= max_len {
+        error.to_string()
+    } else {
+        format!("{}...", &error[..max_len])
+    }
+}
+
+fn jam_path(path: &[Bytes]) -> Result<Vec<u8>, BridgeError> {
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let mut list = nockvm::noun::D(0);
+    for segment in path.iter().rev() {
+        let atom = unsafe {
+            let mut ia = nockvm::noun::IndirectAtom::new_raw_bytes(
+                &mut slab,
+                segment.len(),
+                segment.as_ptr(),
+            );
+            let space = slab.noun_space();
+            ia.normalize_as_atom(&space).as_noun()
+        };
+        list = nockvm::noun::T(&mut slab, &[atom, list]);
+    }
+    slab.set_root(list);
+    Ok(slab.jam().to_vec())
+}
+
+fn cue_response(bytes: Vec<u8>) -> Result<(NounSlab<NockJammer>, nockapp::Noun), BridgeError> {
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let noun = slab
+        .cue_into(Bytes::from(bytes))
+        .map_err(|err| BridgeError::EventMonitoring(err.to_string()))?;
+    Ok((slab, noun))
+}
+
+fn decode_page_from_peek(
+    noun: &nockapp::Noun,
+    space: &NounSpace,
+) -> Result<(Page, nockapp::Noun), BridgeError> {
+    let outer_cell = noun
+        .in_space(space)
+        .as_cell()
+        .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
+
+    let outer_head = outer_cell.head();
+    let outer_tail = outer_cell.tail();
+
+    let outer_tag = outer_head.as_atom().map_err(|_| {
+        BridgeError::EventMonitoring("peek response outer unit tag expected to be atom".into())
+    })?;
+
+    let outer_tag_val = outer_tag
+        .as_u64()
+        .map_err(|_| BridgeError::EventMonitoring("peek response outer tag too large".into()))?;
+
+    if outer_tag_val != 0 {
+        return Err(BridgeError::EventMonitoring(format!(
+            "peek response indicates no data (outer unit tag={})",
+            outer_tag_val
+        )));
+    }
+
+    let inner = outer_tail.noun();
+
+    if inner.is_atom() {
+        return Err(BridgeError::EventMonitoring(
+            "peek response inner is atom (no data)".into(),
+        ));
+    }
+
+    let inner_cell = inner.in_space(space).as_cell().map_err(|_| {
+        BridgeError::EventMonitoring("peek response inner expected to be cell".into())
+    })?;
+
+    let inner_head = inner_cell.head();
+    let inner_tail = inner_cell.tail();
+
+    if let Ok(tag_atom) = inner_head.as_atom() {
+        if let Ok(tag_val) = tag_atom.as_u64() {
+            if tag_val == 0 {
+                if inner_tail.is_atom() {
+                    if let Ok(atom) = inner_tail.as_atom() {
+                        if let Ok(val) = atom.as_u64() {
+                            if val == 0 {
+                                return Err(BridgeError::EventMonitoring(
+                                    "block not found (inner unit is null)".into(),
+                                ));
+                            }
+                        }
+                    }
+                    return Err(BridgeError::EventMonitoring(
+                        "inner_tail is atom but not null - unexpected structure".into(),
+                    ));
+                }
+
+                let inner_tail = inner_tail.noun();
+                let page = Page::from_noun(&inner_tail, space).map_err(|err| {
+                    BridgeError::EventMonitoring(format!(
+                        "failed to decode Page (after inner unwrap): {}",
+                        err
+                    ))
+                })?;
+                return Ok((page, inner_tail));
+            }
+        }
+    }
+
+    let page = Page::from_noun(&inner, space)
+        .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Page: {}", err)))?;
+    Ok((page, inner))
+}
+
+fn decode_tx_from_peek(noun: &nockapp::Noun, space: &NounSpace) -> Result<Tx, BridgeError> {
+    // peek returns (unit (unit tx:t)), need to unwrap both layers
+    let outer_cell = noun
+        .in_space(space)
+        .as_cell()
+        .map_err(|_| BridgeError::EventMonitoring("peek response expected to be cell".into()))?;
+
+    let outer_tag = outer_cell.head().as_atom().map_err(|_| {
+        BridgeError::EventMonitoring("peek response outer unit tag expected to be atom".into())
+    })?;
+
+    if outer_tag
+        .as_u64()
+        .map_err(|_| BridgeError::EventMonitoring("peek response outer tag too large".into()))?
+        != 0
+    {
+        return Err(BridgeError::EventMonitoring(
+            "peek response indicates no data for transaction (outer unit)".into(),
+        ));
+    }
+
+    let inner_cell = outer_cell.tail().as_cell().map_err(|_| {
+        BridgeError::EventMonitoring("peek response inner unit expected to be cell".into())
+    })?;
+
+    let inner_tag = inner_cell.head().as_atom().map_err(|_| {
+        BridgeError::EventMonitoring("peek response inner unit tag expected to be atom".into())
+    })?;
+
+    if inner_tag
+        .as_u64()
+        .map_err(|_| BridgeError::EventMonitoring("peek response inner tag too large".into()))?
+        != 0
+    {
+        return Err(BridgeError::EventMonitoring(
+            "peek response indicates no data for transaction (inner unit)".into(),
+        ));
+    }
+
+    Tx::from_noun(&inner_cell.tail().noun(), space)
+        .map_err(|err| BridgeError::EventMonitoring(format!("failed to decode Tx: {}", err)))
+}
+
+#[cfg(test)]
+mod tests {
+    use nockchain_types::default_fakenet_blockchain_constants;
+
+    use super::*;
+
+    fn atom_to_string(atom: nockvm::noun::AtomHandle<'_>) -> String {
+        let mut bytes = atom.to_be_bytes();
+        while bytes.first() == Some(&0) {
+            bytes.remove(0);
+        }
+        bytes.reverse();
+        String::from_utf8(bytes).expect("utf8")
+    }
+
+    #[test]
+    fn jam_path_roundtrips_through_cue() {
+        let path = vec![Bytes::from("block"), Bytes::from("42")];
+        let jammed = jam_path(&path).expect("jam path");
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let mut current = slab
+            .cue_into(Bytes::from(jammed.clone()))
+            .expect("cue jammed path");
+        let space = slab.noun_space();
+        for segment in path {
+            let cell = current.in_space(&space).as_cell().expect("cell");
+            let atom = cell.head().as_atom().expect("atom");
+            let decoded = atom_to_string(atom);
+            assert_eq!(decoded, segment);
+            current = cell.tail().noun();
+        }
+    }
+
+    #[test]
+    fn hash_to_base58_produces_valid_output() {
+        use nockchain_math::belt::Belt;
+        use nockchain_types::tx_engine::common::Hash;
+
+        let hash = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
+        let base58 = hash.to_base58();
+        assert!(!base58.is_empty());
+    }
+
+    #[test]
+    fn nock_in_flight_guard_waits_until_kernel_height_advances() {
+        assert!(nock_block_still_waiting_for_kernel(Some(7), Some(7)));
+        assert!(!nock_block_still_waiting_for_kernel(Some(7), Some(8)));
+        assert!(!nock_block_still_waiting_for_kernel(Some(7), None));
+        assert!(!nock_block_still_waiting_for_kernel(None, Some(7)));
+    }
+
+    #[test]
+    fn tx_id_to_base58_does_not_error() {
+        use nockchain_math::belt::Belt;
+        use nockchain_types::tx_engine::common::Hash;
+
+        let tx_id = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
+        let result = tx_id.to_base58();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn decode_page_from_peek_decodes_tagged_bn_numbers() {
+        use nockchain_math::belt::Belt;
+        use nockchain_types::tx_engine::common::{CoinbaseSplit, Hash};
+        use noun_serde::NounEncode;
+        use num_bigint::BigUint;
+
+        fn tagged_bn_noun(allocator: &mut NounSlab<NockJammer>, chunks: &[u32]) -> nockapp::Noun {
+            let chunks_noun = chunks.to_vec().to_noun(allocator);
+            nockvm::noun::T(allocator, &[nockvm::noun::D(28258), chunks_noun])
+        }
+
+        fn biguint_from_u32_chunks(chunks: &[u32]) -> BigUint {
+            let mut bytes = Vec::with_capacity(chunks.len() * 4);
+            for &chunk in chunks {
+                bytes.extend_from_slice(&chunk.to_le_bytes());
+            }
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            BigUint::from_bytes_le(&bytes)
+        }
+
+        let digest = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
+        let parent = Hash([Belt(6), Belt(7), Belt(8), Belt(9), Belt(10)]);
+        let expected_coinbase = CoinbaseSplit::V0(vec![0xaa, 0xbb]);
+        let expected_msg = vec![7u32, 8u32, 9u32];
+
+        let target_chunks = [0x89abcdef, 0x01234567, 0xfedcba98, 0x76543210];
+        let accumulated_work_chunks = [0xffffffff, 0x00000000, 0x22222222, 0x33333333, 0x44444444];
+
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let digest_noun = digest.to_noun(&mut slab);
+        let parent_noun = parent.to_noun(&mut slab);
+        let coinbase_noun = expected_coinbase.to_noun(&mut slab);
+        let msg_noun = expected_msg.to_noun(&mut slab);
+        let target_noun = tagged_bn_noun(&mut slab, &target_chunks);
+        let accumulated_work_noun = tagged_bn_noun(&mut slab, &accumulated_work_chunks);
+
+        let page_noun = nockvm::noun::T(
+            &mut slab,
+            &[
+                nockvm::noun::D(1), // page version
+                digest_noun,
+                nockvm::noun::D(0), // no pow
+                parent_noun,
+                nockvm::noun::D(0), // empty tx_ids z-set
+                coinbase_noun,
+                nockvm::noun::D(1_717_171),
+                nockvm::noun::D(42),
+                target_noun,
+                accumulated_work_noun,
+                nockvm::noun::D(77),
+                msg_noun,
+            ],
+        );
+
+        // peek response shape: [~ [~ page]]
+        let inner_unit = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), page_noun]);
+        let peek_noun = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), inner_unit]);
+        let space = slab.noun_space();
+
+        let (page, _) = decode_page_from_peek(&peek_noun, &space).expect("decode tagged-bn page");
+
+        assert_eq!(page.digest, digest, "digest should decode correctly");
+        assert_eq!(page.parent, parent, "parent should decode correctly");
+        assert_eq!(page.coinbase, expected_coinbase, "coinbase should decode");
+        assert_eq!(page.timestamp, 1_717_171, "timestamp should decode");
+        assert_eq!(page.epoch_counter, 42, "epoch counter should decode");
+        assert_eq!(page.height, 77, "height should decode");
+        assert_eq!(page.msg, expected_msg, "msg should decode");
+        assert_eq!(
+            page.target.0,
+            biguint_from_u32_chunks(&target_chunks),
+            "target should decode via [%bn (list u32)] path"
+        );
+        assert_eq!(
+            page.accumulated_work.0,
+            biguint_from_u32_chunks(&accumulated_work_chunks),
+            "accumulated_work should decode via [%bn (list u32)] path"
+        );
+    }
+
+    #[test]
+    fn confirmed_height_returns_none_during_bootstrap() {
+        let depth = DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH;
+        assert!(confirmed_height(0, depth).is_none());
+        assert!(confirmed_height(depth, depth).is_none());
+    }
+
+    #[test]
+    fn confirmed_height_zero_depth_uses_current_tip() {
+        assert_eq!(confirmed_height(0, 0), None);
+        assert_eq!(confirmed_height(50, 0), Some(50));
+    }
+
+    #[test]
+    fn confirmed_height_returns_target_when_ready() {
+        let depth = DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH;
+        let tip = depth + 50;
+        let target = confirmed_height(tip, depth);
+        assert!(target.is_some());
+        assert_eq!(target.expect("target should be Some for valid input"), 50);
+    }
+
+    #[test]
+    fn truncate_error_msg_short_string() {
+        let msg = "short error";
+        assert_eq!(truncate_error_msg(msg, 50), "short error");
+    }
+
+    #[test]
+    fn truncate_error_msg_exact_length() {
+        let msg = "12345";
+        assert_eq!(truncate_error_msg(msg, 5), "12345");
+    }
+
+    #[test]
+    fn truncate_error_msg_long_string() {
+        let msg = "this is a very long error message that should be truncated";
+        let result = truncate_error_msg(msg, 20);
+        assert_eq!(result, "this is a very long ...");
+        assert_eq!(result.len(), 23); // 20 + "..."
+    }
+
+    #[test]
+    fn decode_blockchain_constants_response_roundtrips_nested_unit_payload() {
+        let constants = default_fakenet_blockchain_constants();
+        let mut slab = NounSlab::<NockJammer>::new();
+        let noun = Some(Some(constants.clone())).to_noun(&mut slab);
+        slab.set_root(noun);
+
+        let decoded =
+            decode_blockchain_constants_response(slab.jam().to_vec()).expect("decode response");
+        assert_eq!(decoded, constants);
+    }
+
+    #[test]
+    fn validate_blockchain_constants_match_accepts_equal_values() {
+        let constants = default_fakenet_blockchain_constants();
+        validate_blockchain_constants_match(&constants, &constants)
+            .expect("matching constants should validate");
+    }
+
+    #[test]
+    fn validate_blockchain_constants_match_rejects_mismatch() {
+        let expected = default_fakenet_blockchain_constants();
+        let mut actual = expected.clone();
+        actual.base_fee += 1;
+
+        let err = validate_blockchain_constants_match(&expected, &actual)
+            .expect_err("mismatched constants should fail");
+        let message = err.to_string();
+        assert!(message.contains("bridge kernel state"));
+        assert!(message.contains("expected("));
+        assert!(message.contains("got("));
+    }
+}

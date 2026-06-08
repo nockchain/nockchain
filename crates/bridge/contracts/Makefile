@@ -73,7 +73,7 @@ integration-test:
 	fi; \
 	forge script forge/IntegrationTest.s.sol:IntegrationTest \
 		--rpc-url "$${TENDERLY_RPC_URL}" \
-		--private-key "$${TEST_ACCOUNT_PRIVATE_KEY:-$${TENDERLY_PRIVATE_KEY}}" \
+		--private-key "$${TEST_ACCOUNT_PRIVATE_KEY:-$${TENDERLY_TEST_PRIVATE_KEY}}" \
 		--broadcast \
 		--slow
 

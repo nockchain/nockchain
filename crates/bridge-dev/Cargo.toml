@@ -1,0 +1,39 @@
+[package]
+name = "bridge-dev"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+alloy = { workspace = true }
+anyhow = { workspace = true }
+bridge = { path = "../bridge" }
+bs58 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+ibig = { workspace = true }
+libc = { workspace = true }
+nockapp-grpc = { workspace = true }
+nockchain-math = { workspace = true }
+nockchain-types = { path = "../nockchain-types" }
+op-alloy = { workspace = true, features = ["network"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+toml = { workspace = true }
+tonic = { workspace = true }
+
+[dev-dependencies]
+aws-sdk-s3 = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }

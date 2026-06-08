@@ -1,0 +1,28 @@
+[package]
+name = "nockchain-e2e"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+hex.workspace = true
+libc.workspace = true
+nockapp.workspace = true
+nockapp-grpc-proto.workspace = true
+nockchain.workspace = true
+nockchain-math.workspace = true
+nockchain-testkit.workspace = true
+nockchain-types.workspace = true
+nockvm.workspace = true
+noun-serde.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+testcontainers.workspace = true
+tokio = { workspace = true, features = ["macros", "process", "rt-multi-thread", "time"] }
+tonic.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

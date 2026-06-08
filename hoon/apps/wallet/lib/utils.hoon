@@ -36,14 +36,55 @@
 ::
 ++  estimate-fee
   |%
+  ::  Commonly used constants
+  ::  - 13 leaves for the key which is a schnorr-pubkey:
+  ::    - 6 for x, 6 for y, 1 for inf flag
+  ::  - 16 leaves for the signature
+  ++  pubkey-count  13
+  ++  signature-count  16
+  ++  hash-count  5
+  ++  pkh-spend
+    |=  $:  =note-data:t
+            num-input-notes=@
+            m=@
+            signers=(z-set:zo schnorr-pubkey:t)
+        ==
+    =/  seed-count=@
+      =/  data-size=@
+        %-  num-of-leaves:shape
+        %-  ~(rep z-by:zo note-data)
+        |=  [[k=@tas v=*] tree=*]
+        [k v tree]
+      ::  each seed is a spend from an input note into output note(s).
+      ::  note-data is attached to the output of each seed.
+      ::  note-data size is calculated from the inputs even though it should not be.
+      (mul data-size num-input-notes)
+    =/  witness-count=@
+      =/  pkh-count
+        =/  num-sigs-required  (mul m num-input-notes)
+        (map-words num-sigs-required hash-count (add signature-count pubkey-count))
+      =/  lmp-count
+        ::  1 for the sig at the end of the list, 1 for the number of signers (m),
+        ::  added to the number of leaves in the set of valid signers
+        =/  pkh-spend-condition  :(add 1 1 (set-words hash-count pubkey-count))
+        =/  merk-proof  (add hash-count 1)
+        =/  axis-count  1
+        :(add pkh-spend-condition merk-proof axis-count)
+      :(add hax-count=1 tim-count=1 pkh-count lmp-count)
+    =/  fee  (mul base-fee.bc (add witness-count seed-count))
+    (max fee min-fee.data.bc)
+  ::
+  ++  transaction
+    |=  [=transaction:wt page-num=page-number:transact]
+    (spends spends.transaction inputs.metadata.transaction page-num)
   ++  spends
-    |=  [raw-spends=spends:v1:transact =input-display:wt page-num=page-number:transact]
+    |=  [raw-spends=spends:v1:transact =input-metadata:wt page-num=page-number:transact]
     =/  bythos-active=?  (gte page-num bythos-phase.bc)
     =/  seeds-count=@
       :: count seeds against the tx-engine instance already bound to this wallet's constants
       (count-seed-words:spends:t [raw-spends page-num])
     =/  witness-count=@
-      (count-witness-words [raw-spends input-display page-num])
+      (count-witness-words [raw-spends input-metadata page-num])
     ::  match consensus formula:
     ::    - pre-bythos: legacy base-fee (2x current base-fee), no input discount
     ::    - post-bythos: configured base-fee with discounted input fees
@@ -55,37 +96,34 @@
     (max word-fee min-fee.data.bc)
   ::
   ++  count-witness-words-raw
-    |=  [raw-spends=spends:v1:transact =input-display:wt]
+    |=  [raw-spends=spends:v1:transact =input-metadata:wt]
     ^-  @
     %-  ~(rep z-by:zo raw-spends)
     |=  [[nam=nname:transact sp=spend:v1:transact] acc=@]
     %+  add  acc
-    (witness-words sp nam input-display)
+    (witness-words sp nam input-metadata)
   ::
   ++  count-witness-words
-    |=  [raw-spends=spends:v1:transact =input-display:wt page-num=page-number:transact]
+    |=  [raw-spends=spends:v1:transact =input-metadata:wt page-num=page-number:transact]
     ?:  (gte page-num bythos-phase.bc)
-      (count-witness-words-raw [raw-spends input-display])
-    (count-witness-words-raw [raw-spends input-display])
+      (count-witness-words-raw [raw-spends input-metadata])
+    (count-witness-words-raw [raw-spends input-metadata])
   ::
   ::  +witness-words: estimate the number of words in a witness
   ++  witness-words
-    |=  [=spend:v1:transact nam=nname:transact =input-display:wt]
+    |=  [=spend:v1:transact nam=nname:transact =input-metadata:wt]
     ?-    -.spend
         %0
-      ?>  ?=(%0 -.input-display)
+      ?>  ?=(%0 -.input-metadata)
       =/  signature-leaves=@
-        ::  - 13 leaves for the key which is a schnorr-pubkey:
-        ::    - 6 for x, 6 for y, 1 for inf flag
-        ::  - 16 leaves for the signature
         =/  num-sigs-required=@
-          =/  =sig:transact  (~(got z-by:zo p.input-display) nam)
+          =/  =sig:transact  (~(got z-by:zo p.input-metadata) nam)
           m.sig
-        (map-words num-sigs-required 13 16)
+        (map-words num-sigs-required signature-count pubkey-count)
       signature-leaves
     ::
         %1
-      ?>  ?=(%1 -.input-display)
+      ?>  ?=(%1 -.input-metadata)
       =/  =witness:transact  witness.+.spend
       ?>  ?&  !=(*lock-merkle-proof:v1:transact lmp.witness)
               =(~ tim.witness)
@@ -95,18 +133,15 @@
       =/  tim-count=@  (num-of-leaves:shape tim.witness)
       =/  hax-count=@  (num-of-leaves:shape hax.witness)
       =/  pkh-count=@
-        ::  5 leaves for the key which is a hash
-        ::  13 leaves for the schnorr-pubkey: 6 for x, 6 for y, 1 for inf flag
-        ::  16 leaves for the signature
         =/  num-sigs-required=@
-          =/  sc=spend-condition:transact  (~(got z-by:zo p.input-display) nam)
+          =/  sc=spend-condition:transact  (~(got z-by:zo p.input-metadata) nam)
           %+  roll  sc
           |=  [lp=lock-primitive:transact acc=@]
           ::  TODO handle hax lock primitives size contribution. for now we will just do pkhs
           ?.  ?=(%pkh -.lp)
             acc
           (add acc m.lp)
-        (map-words num-sigs-required 5 (add 13 16))
+        (map-words num-sigs-required hash-count (add pubkey-count signature-count))
       :(add lmp-count pkh-count tim-count hax-count)
     ==
   ::
@@ -127,6 +162,13 @@
     =+  per-node-count=(add key-leaves val-leaves)
     %+  add  (mul entries per-node-count)
     (add entries 1)
+  ::
+  ++  set-words
+    |=  $:  entries=@
+            val-leaves=@
+        ==
+    ^-  @
+    (map-words entries 0 val-leaves)
   --
 ++  locks
   |%
@@ -798,7 +840,18 @@
             '\0a          - Assets should go to lock script root (this should be bridge operator lock root): '
             (to-b58:hash:transact root.data)
             '\0a          - EVM recipient address (tokens should mint to this address): '
-            (format-ux:common addr.data)
+            (format-ux:common evm-addr.data)
+          ==
+        ::
+            %bridge-withdrawal
+          ;:  (cury cat 3)
+            '\0a  - Lock data included in note: '
+            (bool-text %.n)
+            '\0a  - Bridge Withdrawal: '
+            '\0a          - Assets should go to lock script root: '
+            (to-b58:hash:transact root.data)
+            '\0a          - Base batch end: '
+            (format-ui:common base-batch-end.data)
           ==
         ==
     ::
@@ -911,16 +964,16 @@
         |=  $:  name=@t
                 outs=outputs:v1:transact
                 fees=@
-                display=transaction-display:wt
+                metadata=metadata:wt
                 get-note=$-(nname:transact nnote:transact)
                 wd=(unit witness-data:wt)
             ==
         ^-  @t
         =/  input-notes=tape
-          ?:  ?=(%0 -.inputs.display)
+          ?:  ?=(%0 -.inputs.metadata)
             %-  zing
             %+  turn
-            ~(tap z-in:zo ~(key z-by:zo p.inputs.display))
+            ~(tap z-in:zo ~(key z-by:zo p.inputs.metadata))
             |=  =nname:transact
             =+  note=(get-note nname)
             ?@  -.note
@@ -928,7 +981,7 @@
             "\0a{(trip (note:v0 note))}"
           %-  zing
           %+  turn
-            ~(tap z-by:zo p.inputs.display)
+            ~(tap z-by:zo p.inputs.metadata)
           |=  [name=nname:transact sc=spend-condition:transact]
           =/  out-note=nnote:transact  (get-note name)
           ?^  -.out-note
@@ -941,10 +994,10 @@
           |=  out=output:v1:transact
           =/  out-note=nnote:v1:transact  note.out
           =+  fn=~(first-name get:nnote:transact out-note)
-          =+  metadata=(~(get z-by:zo outputs.display) fn)
+          =+  out-metadata=(~(get z-by:zo outputs.metadata) fn)
           ?^  -.out-note
             "\0a{(trip (note:v0 out-note))}"
-          "\0a{(trip (note-from-output out-note metadata))}"
+          "\0a{(trip (note-from-output out-note out-metadata))}"
         %-  crip
         """
 

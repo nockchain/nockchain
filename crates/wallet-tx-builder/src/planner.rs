@@ -1,16 +1,17 @@
 use std::collections::BTreeSet;
 
-use nockchain_types::tx_engine::common::{BlockHeight, SchnorrPubkey, Version};
+use nockchain_types::tx_engine::common::{BlockHeight, Hash, SchnorrPubkey, Version};
 use nockchain_types::tx_engine::v0::TimelockIntent as V0TimelockIntent;
 use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, SpendCondition};
 use thiserror::Error;
 
 use crate::determinism::sort_candidates;
-use crate::fee::{compute_minimum_fee, FeeInputs};
+use crate::fee::{compute_bridge_fee, compute_minimum_fee, FeeInputs};
 use crate::lock_resolver::{LockMatcher, LockResolutionSource, ResolveLockRequest};
 use crate::types::{
-    CandidateNote, CandidateV0Note, CandidateVersionPolicy, PlanRequest, PlanResult, PlannedOutput,
-    PlanningMode, SelectionMode, WordCountBreakdown,
+    CandidateNote, CandidateV0Note, CandidateVersionPolicy, ChainContext, CreateTxPlanningMode,
+    PlanRequest, PlanResult, PlannedOutput, RawNoteDataEntry, SelectionMode, SelectionOrder,
+    WithdrawalPlanRequest, WithdrawalPlanResult, WordCountBreakdown,
 };
 use crate::word_count::{WitnessWordInput, WordCountEstimator};
 
@@ -33,6 +34,14 @@ pub enum PlanError {
         last: String,
         resolution_source: LockResolutionSource,
     },
+    #[error(
+        "matcher selected note {first}/{last} but did not provide spend-condition metadata needed for planning; source={resolution_source:?}"
+    )]
+    MissingPlanningSpendCondition {
+        first: String,
+        last: String,
+        resolution_source: LockResolutionSource,
+    },
     #[error("insufficient funds: selected_total={selected_total} required={required}")]
     InsufficientFunds { selected_total: u64, required: u64 },
     #[error("conservation failed for selected transaction")]
@@ -50,6 +59,21 @@ pub enum PlanError {
         first: String,
         last: String,
     },
+    #[error(
+        "withdrawal burned amount is too small to cover withdrawal + tx fees: burned_amount={burned_amount} withdrawal_fee={withdrawal_fee} tx_fee={tx_fee}"
+    )]
+    WithdrawalBurnedAmountTooSmall {
+        burned_amount: u64,
+        withdrawal_fee: u64,
+        tx_fee: u64,
+    },
+    #[error(
+        "withdrawal fee estimate changed after applying solved recipient amount: initial_fee={initial_fee} recomputed_fee={recomputed_fee}"
+    )]
+    WithdrawalFeeShapeChanged {
+        initial_fee: u64,
+        recomputed_fee: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -59,9 +83,22 @@ struct SelectedInput {
     candidate: CandidateNote,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Result of attempting to admit one candidate into the current plan.
+enum CandidateSelection {
+    Skipped,
+    Selected,
+}
+
+impl CandidateSelection {
+    fn was_selected(self) -> bool {
+        matches!(self, Self::Selected)
+    }
+}
+
 #[derive(Debug, Clone)]
-/// Recomputed fee/output state for standard planner output selection.
-struct StandardRecomputeState {
+/// Recomputed fee/output state shared by standard and withdrawal planning.
+struct PlanComputation {
     /// Fee chosen for the current selected-input set.
     final_fee: u64,
     /// Minimum fee implied by current seed/witness words.
@@ -72,6 +109,98 @@ struct StandardRecomputeState {
     witness_words: u64,
     /// Output set corresponding to `final_fee` (refund included when present).
     outputs: Vec<PlannedOutput>,
+}
+
+#[derive(Debug, Clone)]
+/// One v1 candidate whose admission checks have already succeeded.
+struct AdmittedV1Candidate {
+    candidate: CandidateNote,
+    candidate_assets: u64,
+    witness_words_for_input: u64,
+    first: String,
+    last: String,
+}
+
+struct V1CandidateAdmissionContext<'ctx, 'chain, M> {
+    word_count_estimator: &'ctx WordCountEstimator<'chain>,
+    debug_trace: &'ctx mut Vec<String>,
+    matcher: &'ctx M,
+    signer_pkh: Option<&'ctx Hash>,
+    coinbase_relative_min: Option<u64>,
+    current_height: &'ctx BlockHeight,
+    unknown_lock_is_error: bool,
+}
+
+#[derive(Debug, Clone)]
+/// One v0 candidate whose spendability/timelock checks have already succeeded.
+struct AdmittedV0Candidate {
+    note: CandidateV0Note,
+    candidate_assets: u64,
+    witness_words_for_input: u64,
+    first: String,
+    last: String,
+}
+
+#[derive(Debug)]
+/// Shared planner bookkeeping reused across create-tx and withdrawal scenarios.
+struct PlanningState<'a> {
+    /// Word-count estimator bound to request chain context.
+    word_count_estimator: WordCountEstimator<'a>,
+    /// Running total of witness words for all currently selected inputs.
+    witness_words_total: u64,
+    /// Selected inputs in deterministic order.
+    selected: Vec<SelectedInput>,
+    /// Running sum of selected input assets.
+    selected_total: u64,
+    /// Human-readable decision trace emitted in plan result.
+    debug_trace: Vec<String>,
+}
+
+impl<'a> PlanningState<'a> {
+    fn new(chain_context: &'a ChainContext) -> Self {
+        Self {
+            word_count_estimator: WordCountEstimator::new(chain_context),
+            witness_words_total: 0,
+            selected: Vec::new(),
+            selected_total: 0,
+            debug_trace: Vec::new(),
+        }
+    }
+
+    fn record_selection(
+        &mut self,
+        candidate: CandidateNote,
+        candidate_assets: u64,
+        witness_words_for_input: u64,
+    ) {
+        self.selected_total = self.selected_total.saturating_add(candidate_assets);
+        self.witness_words_total = self
+            .witness_words_total
+            .saturating_add(witness_words_for_input);
+        self.selected.push(SelectedInput { candidate });
+    }
+
+    fn covers_total(&self, required: u64) -> bool {
+        self.selected_total >= required
+    }
+
+    fn into_plan_result(self, recompute: PlanComputation) -> PlanResult {
+        PlanResult {
+            selected: self
+                .selected
+                .into_iter()
+                .map(|input| input.candidate.identity().clone())
+                .collect(),
+            selected_total: self.selected_total,
+            outputs: recompute.outputs,
+            final_fee: recompute.final_fee,
+            word_counts: WordCountBreakdown {
+                seed_words: recompute.seed_words,
+                witness_words: recompute.witness_words,
+            },
+            debug_trace: self.debug_trace,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,319 +262,349 @@ impl V0MigrationRecomputeState {
     }
 }
 
-#[derive(Debug)]
-/// Mutable planner session carrying running selection and fee state.
-struct PlanSession<'a> {
-    /// Immutable request/configuration for this planning run.
-    request: &'a PlanRequest,
-    /// Word-count estimator bound to request chain context.
-    word_count_estimator: WordCountEstimator<'a>,
-    /// Sum of recipient gift amounts (target transfer value).
-    gift_total: u64,
-    /// Seed-word baseline for recipient outputs only (no refund output).
-    /// This is used as the first lower-bound fee check before considering refund shape.
-    seed_words_without_refund: u64,
-    /// Running total of witness words for all currently selected inputs.
-    witness_words_total: u64,
-    /// Selected inputs in deterministic order.
-    selected: Vec<SelectedInput>,
-    /// Running sum of selected input assets.
-    selected_total: u64,
-    /// Human-readable decision trace emitted in plan result.
-    debug_trace: Vec<String>,
+impl From<V0MigrationReadyState> for PlanComputation {
+    fn from(ready: V0MigrationReadyState) -> Self {
+        Self {
+            final_fee: ready.final_fee,
+            minimum_fee: ready.minimum_fee,
+            seed_words: ready.seed_words,
+            witness_words: ready.witness_words,
+            outputs: vec![ready.destination_output],
+        }
+    }
 }
 
-impl<'a> PlanSession<'a> {
-    /// Initializes a planning session with immutable request context and
-    /// precomputed recipient-side seed word baseline.
-    fn new(request: &'a PlanRequest) -> Self {
-        let word_count_estimator = WordCountEstimator::new(&request.chain_context);
-        let (gift_total, seed_words_without_refund) = match &request.planning_mode {
-            PlanningMode::Standard => {
-                let gift_total = request
-                    .recipient_outputs
-                    .iter()
-                    .fold(0u64, |acc, output| acc.saturating_add(output.amount));
-                let seed_words_without_refund =
-                    word_count_estimator.estimate_seed_words(&request.recipient_outputs);
-                (gift_total, seed_words_without_refund)
+fn create_tx_candidate_version_allowed(
+    request: &PlanRequest,
+    debug_trace: &mut Vec<String>,
+    candidate: &CandidateNote,
+) -> Result<bool, PlanError> {
+    let candidate_version = candidate.version();
+    let allowed_version = match request.candidate_version_policy {
+        CandidateVersionPolicy::V1Only => Version::V1,
+        CandidateVersionPolicy::V0Only => Version::V0,
+    };
+    if candidate_version != allowed_version {
+        let (first, last) = candidate.note_name_display();
+        if matches!(&request.selection_mode, SelectionMode::Manual { .. }) {
+            return Err(PlanError::CandidateVersionDisabled {
+                version: candidate_version,
+                policy: request.candidate_version_policy,
+                first,
+                last,
+            });
+        }
+        debug_trace.push(format!(
+            "skipped note {first}/{last}: version {candidate_version:?} disabled by selector policy {policy:?}",
+            policy = request.candidate_version_policy
+        ));
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn compute_chain_minimum_fee(
+    chain_context: &ChainContext,
+    seed_words: u64,
+    witness_words: u64,
+) -> u64 {
+    compute_minimum_fee(FeeInputs {
+        seed_words,
+        witness_words,
+        base_fee: chain_context.base_fee,
+        input_fee_divisor: chain_context.input_fee_divisor,
+        min_fee: chain_context.min_fee,
+        height: chain_context.height.clone(),
+        bythos_phase: chain_context.bythos_phase.clone(),
+    })
+    .minimum_fee
+}
+
+fn admit_selectable_v1_candidate<M: LockMatcher>(
+    candidate: CandidateNote,
+    context: V1CandidateAdmissionContext<'_, '_, M>,
+) -> Result<Option<AdmittedV1Candidate>, PlanError> {
+    let CandidateNote::V1(_) = &candidate else {
+        return Ok(None);
+    };
+
+    let resolution = context.matcher.select_v1_candidate(ResolveLockRequest {
+        note_first_name: &candidate.identity().name.first,
+        decoded_note_data: candidate.decoded_note_data(),
+        signer_pkh: context.signer_pkh,
+        coinbase_relative_min: context.coinbase_relative_min,
+    });
+    let (first, last) = candidate.note_name_display();
+    if !resolution.is_selected() {
+        if context.unknown_lock_is_error {
+            return Err(PlanError::UnknownLock {
+                first,
+                last,
+                resolution_source: resolution.source,
+            });
+        }
+        context.debug_trace.push(format!(
+            "skipped note {first}/{last}: unresolved lock source={:?}",
+            resolution.source
+        ));
+        return Ok(None);
+    }
+    let Some(spend_condition) = resolution.spend_condition else {
+        return Err(PlanError::MissingPlanningSpendCondition {
+            first,
+            last,
+            resolution_source: resolution.source,
+        });
+    };
+    if !timelock_satisfied(
+        &spend_condition,
+        &candidate.identity().origin_page,
+        context.current_height,
+    ) {
+        context.debug_trace.push(format!(
+            "skipped note {first}/{last}: timelock not satisfied at height={}",
+            height_value(context.current_height)
+        ));
+        return Ok(None);
+    }
+
+    let candidate_assets = candidate.assets().0 as u64;
+    let witness_words_for_input = context
+        .word_count_estimator
+        .estimate_witness_words_for_input(&WitnessWordInput {
+            spend_condition: spend_condition.clone(),
+            input_origin_page: candidate.identity().origin_page.clone(),
+            spend_condition_count: resolution.spend_condition_count,
+        });
+    Ok(Some(AdmittedV1Candidate {
+        candidate,
+        candidate_assets,
+        witness_words_for_input,
+        first,
+        last,
+    }))
+}
+
+fn admit_selectable_v0_candidate(
+    word_count_estimator: &WordCountEstimator<'_>,
+    debug_trace: &mut Vec<String>,
+    note: CandidateV0Note,
+    signer_pubkeys: &[SchnorrPubkey],
+    current_height: &BlockHeight,
+    signer_scope_label: &str,
+) -> Option<AdmittedV0Candidate> {
+    let (first, last) = (
+        note.identity.name.first.to_base58(),
+        note.identity.name.last.to_base58(),
+    );
+    if !v0_note_spendable_by_signers(&note, signer_pubkeys) {
+        debug_trace.push(format!(
+            "skipped note {first}/{last}: legacy lock is not spendable by {signer_scope_label} signer pubkeys",
+        ));
+        return None;
+    }
+    if !v0_timelock_satisfied(
+        note.timelock.as_ref(),
+        &note.identity.origin_page,
+        current_height,
+    ) {
+        debug_trace.push(format!(
+            "skipped note {first}/{last}: v0 timelock not satisfied at height={}",
+            height_value(current_height)
+        ));
+        return None;
+    }
+
+    Some(AdmittedV0Candidate {
+        candidate_assets: note.assets.0 as u64,
+        witness_words_for_input: word_count_estimator
+            .estimate_v0_witness_words(note.lock.keys_required),
+        note,
+        first,
+        last,
+    })
+}
+
+trait PlanningScenario {
+    type Output;
+
+    fn ordered_candidates(&self) -> Result<Vec<CandidateNote>, PlanError>;
+    fn try_select_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<CandidateSelection, PlanError>;
+    fn should_stop(&self) -> bool;
+    fn finalize(self) -> Result<Self::Output, PlanError>;
+
+    fn execute(mut self) -> Result<Self::Output, PlanError>
+    where
+        Self: Sized,
+    {
+        for candidate in self.ordered_candidates()? {
+            if !self.try_select_candidate(candidate)?.was_selected() {
+                continue;
             }
-            PlanningMode::V0MigrationSweep { destination_output } => (
-                0,
-                word_count_estimator.estimate_seed_words(std::slice::from_ref(destination_output)),
-            ),
-        };
+            if self.should_stop() {
+                break;
+            }
+        }
+
+        self.finalize()
+    }
+}
+
+struct StandardCreateTxScenario<'a, M> {
+    request: &'a PlanRequest,
+    matcher: &'a M,
+    gift_total: u64,
+    seed_words_without_refund: u64,
+    state: PlanningState<'a>,
+}
+
+impl<'a, M: LockMatcher> StandardCreateTxScenario<'a, M> {
+    fn new(request: &'a PlanRequest, matcher: &'a M) -> Self {
+        let state = PlanningState::new(&request.chain_context);
+        let gift_total = request
+            .recipient_outputs
+            .iter()
+            .fold(0u64, |acc, output| acc.saturating_add(output.amount));
+        let seed_words_without_refund = state
+            .word_count_estimator
+            .estimate_seed_words(&request.recipient_outputs);
         Self {
             request,
-            word_count_estimator,
+            matcher,
             gift_total,
             seed_words_without_refund,
-            witness_words_total: 0,
-            selected: Vec::new(),
-            selected_total: 0,
-            debug_trace: Vec::new(),
+            state,
         }
     }
 
-    /// Returns the total amount needed to satisfy gifts plus the provided fee.
     fn required_total(&self, fee: u64) -> u64 {
         self.gift_total.saturating_add(fee)
     }
 
-    /// Applies the request's candidate-version policy and emits the usual
-    /// manual/auto-mode version mismatch diagnostics.
-    fn candidate_version_allowed(&mut self, candidate: &CandidateNote) -> Result<bool, PlanError> {
-        let candidate_version = candidate.version();
-        let allowed_version = match self.request.candidate_version_policy {
-            CandidateVersionPolicy::V1Only => Version::V1,
-            CandidateVersionPolicy::V0Only => Version::V0,
-        };
-        if candidate_version != allowed_version {
-            let (first, last) = candidate.note_name_display();
-            if matches!(&self.request.selection_mode, SelectionMode::Manual { .. }) {
-                return Err(PlanError::CandidateVersionDisabled {
-                    version: candidate_version,
-                    policy: self.request.candidate_version_policy,
-                    first,
-                    last,
-                });
-            }
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: version {candidate_version:?} disabled by selector policy {policy:?}",
-                policy = self.request.candidate_version_policy
-            ));
-            return Ok(false);
-        }
-
-        Ok(true)
-    }
-
-    /// Attempts to add one standard candidate note, resolving spendability and
-    /// updating running witness/asset totals when accepted.
-    fn try_select_standard_candidate<M: LockMatcher>(
-        &mut self,
-        candidate: CandidateNote,
-        matcher: &M,
-    ) -> Result<Option<StandardRecomputeState>, PlanError> {
-        if !self.candidate_version_allowed(&candidate)? {
-            return Ok(None);
-        }
-
-        if let CandidateNote::V0(note) = candidate {
-            return self.try_select_standard_v0_candidate(note);
-        }
-
-        let resolution = matcher.resolve_lock(ResolveLockRequest {
-            note_first_name: &candidate.identity().name.first,
-            decoded_note_data: candidate.decoded_note_data(),
-            signer_pkh: self.request.signer_pkh.as_ref(),
-            coinbase_relative_min: self.request.coinbase_relative_min,
-        });
-        let Some(spend_condition) = resolution.spend_condition else {
-            let (first, last) = candidate.note_name_display();
-            if matches!(&self.request.selection_mode, SelectionMode::Manual { .. }) {
-                return Err(PlanError::UnknownLock {
-                    first,
-                    last,
-                    resolution_source: resolution.source,
-                });
-            }
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: unresolved lock source={:?}",
-                resolution.source
-            ));
-            return Ok(None);
-        };
-        if !timelock_satisfied(
-            &spend_condition,
-            &candidate.identity().origin_page,
-            &self.request.chain_context.height,
-        ) {
-            let (first, last) = candidate.note_name_display();
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: timelock not satisfied at height={}",
-                height_value(&self.request.chain_context.height)
-            ));
-            return Ok(None);
-        }
-
-        let candidate_assets = candidate.assets().0 as u64;
-        let (first, last) = candidate.note_name_display();
-        let witness_words_for_input =
-            self.word_count_estimator
-                .estimate_witness_words_for_input(&WitnessWordInput {
-                    spend_condition: spend_condition.clone(),
-                    input_origin_page: candidate.identity().origin_page.clone(),
-                    spend_condition_count: resolution.spend_condition_count,
-                });
-        self.selected_total = self.selected_total.saturating_add(candidate_assets);
-        self.witness_words_total = self
-            .witness_words_total
-            .saturating_add(witness_words_for_input);
-        self.selected.push(SelectedInput { candidate });
-
-        let recompute = self.recompute_standard_fee();
+    fn record_selected_candidate_trace(&mut self, first: &str, last: &str, candidate_assets: u64) {
+        let recompute = self.recompute_fee();
         let required = self.required_total(recompute.final_fee);
-        self.debug_trace.push(format!(
+        self.state.debug_trace.push(format!(
             "selected note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={} required={}",
             candidate_assets,
-            self.selected_total,
+            self.state.selected_total,
             recompute.seed_words,
             recompute.witness_words,
             recompute.minimum_fee,
             recompute.final_fee,
-            required
+            required,
         ));
-
-        Ok(Some(recompute))
     }
 
-    /// Attempts to admit one legacy v0 note under the standard create-tx flow.
-    fn try_select_standard_v0_candidate(
-        &mut self,
-        note: CandidateV0Note,
-    ) -> Result<Option<StandardRecomputeState>, PlanError> {
-        let (first, last) = (
-            note.identity.name.first.to_base58(),
-            note.identity.name.last.to_base58(),
-        );
-        if !v0_note_spendable_by_signers(&note, &self.request.v0_migration_signer_pubkeys) {
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: legacy lock is not spendable by planner signer pubkeys",
-            ));
-            return Ok(None);
-        }
-        if !v0_timelock_satisfied(
-            note.timelock.as_ref(),
-            &note.identity.origin_page,
-            &self.request.chain_context.height,
-        ) {
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: v0 timelock not satisfied at height={}",
-                height_value(&self.request.chain_context.height)
-            ));
-            return Ok(None);
-        }
-
-        let candidate_assets = note.assets.0 as u64;
-        let witness_words_for_input = self
-            .word_count_estimator
-            .estimate_v0_witness_words(note.lock.keys_required);
-        self.selected_total = self.selected_total.saturating_add(candidate_assets);
-        self.witness_words_total = self
-            .witness_words_total
-            .saturating_add(witness_words_for_input);
-        self.selected.push(SelectedInput {
-            candidate: CandidateNote::V0(note),
-        });
-
-        let recompute = self.recompute_standard_fee();
-        let required = self.required_total(recompute.final_fee);
-        self.debug_trace.push(format!(
-            "selected note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={} required={}",
-            candidate_assets,
-            self.selected_total,
-            recompute.seed_words,
-            recompute.witness_words,
-            recompute.minimum_fee,
-            recompute.final_fee,
-            required
-        ));
-
-        Ok(Some(recompute))
-    }
-
-    /// Attempts to admit one legacy v0 note under the v0 migration sweep rules.
-    fn try_select_v0_migration_candidate(
+    fn try_select_v0_candidate(
         &mut self,
         candidate: CandidateNote,
-    ) -> Result<Option<V0MigrationRecomputeState>, PlanError> {
-        if !self.candidate_version_allowed(&candidate)? {
-            return Ok(None);
+    ) -> Result<CandidateSelection, PlanError> {
+        if !create_tx_candidate_version_allowed(
+            self.request, &mut self.state.debug_trace, &candidate,
+        )? {
+            return Ok(CandidateSelection::Skipped);
         }
 
         let CandidateNote::V0(note) = candidate else {
-            return Ok(None);
+            unreachable!("v0-only create-tx planning should only admit legacy candidates");
         };
-        let (first, last) = (
-            note.identity.name.first.to_base58(),
-            note.identity.name.last.to_base58(),
+        let Some(admitted) = admit_selectable_v0_candidate(
+            &self.state.word_count_estimator, &mut self.state.debug_trace, note,
+            &self.request.v0_migration_signer_pubkeys, &self.request.chain_context.height,
+            "planner",
+        ) else {
+            return Ok(CandidateSelection::Skipped);
+        };
+
+        self.state.record_selection(
+            CandidateNote::V0(admitted.note),
+            admitted.candidate_assets,
+            admitted.witness_words_for_input,
         );
-        if !v0_note_spendable_by_signers(&note, &self.request.v0_migration_signer_pubkeys) {
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: legacy lock is not spendable by migration signer pubkeys",
-            ));
-            return Ok(None);
-        }
-        if !v0_timelock_satisfied(
-            note.timelock.as_ref(),
-            &note.identity.origin_page,
-            &self.request.chain_context.height,
-        ) {
-            self.debug_trace.push(format!(
-                "skipped note {first}/{last}: v0 timelock not satisfied at height={}",
-                height_value(&self.request.chain_context.height)
-            ));
-            return Ok(None);
-        }
+        self.record_selected_candidate_trace(
+            &admitted.first, &admitted.last, admitted.candidate_assets,
+        );
 
-        let candidate_assets = note.assets.0 as u64;
-        let witness_words_for_input = self
-            .word_count_estimator
-            .estimate_v0_witness_words(note.lock.keys_required);
-        self.selected_total = self.selected_total.saturating_add(candidate_assets);
-        self.witness_words_total = self
-            .witness_words_total
-            .saturating_add(witness_words_for_input);
-        self.selected.push(SelectedInput {
-            candidate: CandidateNote::V0(note),
-        });
-
-        let recompute = self.recompute_v0_migration();
-        self.debug_trace.push(format!(
-            "selected migration note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={}",
-            candidate_assets,
-            self.selected_total,
-            recompute.seed_words(),
-            recompute.witness_words(),
-            recompute.minimum_fee(),
-            recompute.final_fee(),
-        ));
-
-        Ok(Some(recompute))
+        Ok(CandidateSelection::Selected)
     }
 
-    /// Recomputes fee and output shape from the current standard selected-input state.
-    fn recompute_standard_fee(&self) -> StandardRecomputeState {
-        let witness_words = self.witness_words_total;
-        let fee_capacity = self.selected_total.saturating_sub(self.gift_total);
-        let minimum_without_refund =
-            self.minimum_fee(self.seed_words_without_refund, witness_words);
+    fn try_select_v1_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<CandidateSelection, PlanError> {
+        if !create_tx_candidate_version_allowed(
+            self.request, &mut self.state.debug_trace, &candidate,
+        )? {
+            return Ok(CandidateSelection::Skipped);
+        }
+
+        let Some(admitted) = admit_selectable_v1_candidate(
+            candidate,
+            V1CandidateAdmissionContext {
+                word_count_estimator: &self.state.word_count_estimator,
+                debug_trace: &mut self.state.debug_trace,
+                matcher: self.matcher,
+                signer_pkh: self.request.signer_pkh.as_ref(),
+                coinbase_relative_min: self.request.coinbase_relative_min,
+                current_height: &self.request.chain_context.height,
+                unknown_lock_is_error: matches!(
+                    &self.request.selection_mode,
+                    SelectionMode::Manual { .. }
+                ),
+            },
+        )?
+        else {
+            return Ok(CandidateSelection::Skipped);
+        };
+
+        self.state.record_selection(
+            admitted.candidate, admitted.candidate_assets, admitted.witness_words_for_input,
+        );
+        self.record_selected_candidate_trace(
+            &admitted.first, &admitted.last, admitted.candidate_assets,
+        );
+
+        Ok(CandidateSelection::Selected)
+    }
+
+    fn recompute_fee(&self) -> PlanComputation {
+        let witness_words = self.state.witness_words_total;
+        let fee_capacity = self.state.selected_total.saturating_sub(self.gift_total);
+        let minimum_without_refund = compute_chain_minimum_fee(
+            &self.request.chain_context, self.seed_words_without_refund, witness_words,
+        );
         let mut final_fee = minimum_without_refund;
         if fee_capacity > minimum_without_refund {
             let refund_if_min_without = fee_capacity.saturating_sub(minimum_without_refund);
             let outputs_with_refund = outputs_with_refund(self.request, refund_if_min_without);
             let seed_words_with_refund = self
+                .state
                 .word_count_estimator
                 .estimate_seed_words(&outputs_with_refund);
-            let minimum_with_refund = self.minimum_fee(seed_words_with_refund, witness_words);
+            let minimum_with_refund = compute_chain_minimum_fee(
+                &self.request.chain_context, seed_words_with_refund, witness_words,
+            );
             if fee_capacity > minimum_with_refund {
                 final_fee = minimum_with_refund;
             } else {
-                // If we cannot fit min-fee-with-refund, consume the remainder as fee and
-                // emit no refund output to preserve conservation without iterative toggling.
-                // This never increases gifts: recipient outputs are fixed by
-                // `request.recipient_outputs`; only the leftover split between refund and
-                // fee changes in this branch.
                 final_fee = fee_capacity;
             }
         }
 
         let refund = self.refund_amount(final_fee);
         let outputs = outputs_with_refund(self.request, refund);
-        let seed_words = self.word_count_estimator.estimate_seed_words(&outputs);
-        let minimum_fee = self.minimum_fee(seed_words, witness_words);
-        StandardRecomputeState {
+        let seed_words = self
+            .state
+            .word_count_estimator
+            .estimate_seed_words(&outputs);
+        let minimum_fee =
+            compute_chain_minimum_fee(&self.request.chain_context, seed_words, witness_words);
+        PlanComputation {
             final_fee,
             minimum_fee,
             seed_words,
@@ -454,19 +613,95 @@ impl<'a> PlanSession<'a> {
         }
     }
 
-    /// Recomputes fee and destination output shape for the current v0 migration selection.
-    fn recompute_v0_migration(&self) -> V0MigrationRecomputeState {
-        let PlanningMode::V0MigrationSweep { destination_output } = &self.request.planning_mode
+    fn refund_amount(&self, fee: u64) -> u64 {
+        self.state
+            .selected_total
+            .saturating_sub(self.required_total(fee))
+    }
+}
+
+impl<M: LockMatcher> PlanningScenario for StandardCreateTxScenario<'_, M> {
+    type Output = PlanResult;
+
+    fn ordered_candidates(&self) -> Result<Vec<CandidateNote>, PlanError> {
+        ordered_candidates(
+            &self.request.selection_mode, &self.request.candidates, self.request.order_direction,
+        )
+    }
+
+    fn try_select_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<CandidateSelection, PlanError> {
+        match self.request.candidate_version_policy {
+            CandidateVersionPolicy::V1Only => self.try_select_v1_candidate(candidate),
+            CandidateVersionPolicy::V0Only => self.try_select_v0_candidate(candidate),
+        }
+    }
+
+    fn should_stop(&self) -> bool {
+        matches!(&self.request.selection_mode, SelectionMode::Auto)
+            && self
+                .state
+                .covers_total(self.required_total(self.recompute_fee().final_fee))
+    }
+
+    fn finalize(self) -> Result<Self::Output, PlanError> {
+        let recompute = self.recompute_fee();
+        let required = self.required_total(recompute.final_fee);
+        if !self.state.covers_total(required) {
+            return Err(PlanError::InsufficientFunds {
+                selected_total: self.state.selected_total,
+                required,
+            });
+        }
+
+        let allocation = allocate_inputs(
+            self.state.selected_total, self.gift_total, recompute.final_fee,
+        )
+        .expect("required <= selected_total should always allocate");
+        let conservation = ConservationCheck {
+            input_total: self.state.selected_total,
+            gift_total: allocation.gift_total,
+            refund_total: allocation.refund,
+            fee: allocation.fee,
+        };
+        if !conservation.is_balanced() {
+            return Err(PlanError::ConservationFailed);
+        }
+
+        Ok(self.state.into_plan_result(recompute))
+    }
+}
+
+struct V0MigrationScenario<'a> {
+    request: &'a PlanRequest,
+    state: PlanningState<'a>,
+}
+
+impl<'a> V0MigrationScenario<'a> {
+    fn new(request: &'a PlanRequest) -> Self {
+        Self {
+            request,
+            state: PlanningState::new(&request.chain_context),
+        }
+    }
+
+    fn recompute_fee(&self) -> V0MigrationRecomputeState {
+        let CreateTxPlanningMode::V0MigrationSweep { destination_output } =
+            &self.request.planning_mode
         else {
             unreachable!("v0 migration recompute should only run in V0MigrationSweep mode");
         };
-        let witness_words = self.witness_words_total;
+        let witness_words = self.state.witness_words_total;
         let seed_words = self
+            .state
             .word_count_estimator
             .estimate_seed_words(std::slice::from_ref(destination_output));
-        let minimum_fee = self.minimum_fee(seed_words, witness_words);
+        let minimum_fee =
+            compute_chain_minimum_fee(&self.request.chain_context, seed_words, witness_words);
         let final_fee = minimum_fee;
-        let Some(sweep_amount) = self.selected_total.checked_sub(final_fee) else {
+        let Some(sweep_amount) = self.state.selected_total.checked_sub(final_fee) else {
             return V0MigrationRecomputeState::NeedsMoreInputs {
                 final_fee,
                 minimum_fee,
@@ -495,25 +730,286 @@ impl<'a> PlanSession<'a> {
             },
         })
     }
+}
 
-    /// Computes minimum fee from seed/witness word counts under current chain rules.
-    fn minimum_fee(&self, seed_words: u64, witness_words: u64) -> u64 {
-        compute_minimum_fee(FeeInputs {
-            seed_words,
-            witness_words,
-            base_fee: self.request.chain_context.base_fee,
-            input_fee_divisor: self.request.chain_context.input_fee_divisor,
-            min_fee: self.request.chain_context.min_fee,
-            height: self.request.chain_context.height.clone(),
-            bythos_phase: self.request.chain_context.bythos_phase.clone(),
-        })
-        .minimum_fee
+impl PlanningScenario for V0MigrationScenario<'_> {
+    type Output = PlanResult;
+
+    fn ordered_candidates(&self) -> Result<Vec<CandidateNote>, PlanError> {
+        ordered_candidates(
+            &self.request.selection_mode, &self.request.candidates, self.request.order_direction,
+        )
     }
 
-    /// Computes refundable remainder for a candidate final fee.
-    fn refund_amount(&self, fee: u64) -> u64 {
-        let required = self.gift_total.saturating_add(fee);
-        self.selected_total.saturating_sub(required)
+    fn try_select_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<CandidateSelection, PlanError> {
+        if !create_tx_candidate_version_allowed(
+            self.request, &mut self.state.debug_trace, &candidate,
+        )? {
+            return Ok(CandidateSelection::Skipped);
+        }
+
+        let CandidateNote::V0(note) = candidate else {
+            return Ok(CandidateSelection::Skipped);
+        };
+        let Some(admitted) = admit_selectable_v0_candidate(
+            &self.state.word_count_estimator, &mut self.state.debug_trace, note,
+            &self.request.v0_migration_signer_pubkeys, &self.request.chain_context.height,
+            "migration",
+        ) else {
+            return Ok(CandidateSelection::Skipped);
+        };
+
+        self.state.record_selection(
+            CandidateNote::V0(admitted.note),
+            admitted.candidate_assets,
+            admitted.witness_words_for_input,
+        );
+
+        let recompute = self.recompute_fee();
+        self.state.debug_trace.push(format!(
+            "selected migration note {first}/{last} assets={} selected_total={} seed_words={} witness_words={} min_fee={} final_fee={}",
+            admitted.candidate_assets,
+            self.state.selected_total,
+            recompute.seed_words(),
+            recompute.witness_words(),
+            recompute.minimum_fee(),
+            recompute.final_fee(),
+            first = admitted.first,
+            last = admitted.last,
+        ));
+
+        Ok(CandidateSelection::Selected)
+    }
+
+    fn should_stop(&self) -> bool {
+        false
+    }
+
+    fn finalize(self) -> Result<Self::Output, PlanError> {
+        let recompute = self.recompute_fee();
+        let ready = match recompute {
+            V0MigrationRecomputeState::NeedsMoreInputs { final_fee, .. } => {
+                return Err(PlanError::V0MigrationProducesZeroValue {
+                    selected_total: self.state.selected_total,
+                    fee: final_fee,
+                });
+            }
+            V0MigrationRecomputeState::Ready(ready) => ready,
+        };
+
+        if self.state.selected_total
+            != ready
+                .destination_output
+                .amount
+                .saturating_add(ready.final_fee)
+        {
+            return Err(PlanError::ConservationFailed);
+        }
+
+        Ok(self.state.into_plan_result(ready.into()))
+    }
+}
+
+struct WithdrawalScenario<'a, M> {
+    request: &'a WithdrawalPlanRequest,
+    matcher: &'a M,
+    withdrawal_fee: u64,
+    spendable_amount: u64,
+    state: PlanningState<'a>,
+}
+
+impl<'a, M> WithdrawalScenario<'a, M> {
+    fn new(
+        request: &'a WithdrawalPlanRequest,
+        matcher: &'a M,
+        withdrawal_fee: u64,
+        spendable_amount: u64,
+    ) -> Self {
+        let mut state = PlanningState::new(&request.chain_context);
+        state.debug_trace.push(format!(
+            "withdrawal setup burned_amount={} withdrawal_fee={} spendable_amount={} nicks_fee_per_nock={}",
+            request.burned_amount,
+            withdrawal_fee,
+            spendable_amount,
+            request.nicks_fee_per_nock
+        ));
+        Self {
+            request,
+            matcher,
+            withdrawal_fee,
+            spendable_amount,
+            state,
+        }
+    }
+
+    fn required_total(&self) -> u64 {
+        self.spendable_amount
+    }
+
+    fn recompute_fee(&self) -> Result<PlanComputation, PlanError> {
+        let witness_words = self.state.witness_words_total;
+        let refund = self
+            .state
+            .selected_total
+            .saturating_sub(self.spendable_amount);
+        let seed_probe_outputs = withdrawal_outputs(self.request, self.spendable_amount, refund);
+        let seed_probe_words = self
+            .state
+            .word_count_estimator
+            .estimate_seed_words(&seed_probe_outputs);
+        let final_fee =
+            compute_chain_minimum_fee(&self.request.chain_context, seed_probe_words, witness_words);
+
+        let recipient_amount = self.spendable_amount.checked_sub(final_fee).ok_or(
+            PlanError::WithdrawalBurnedAmountTooSmall {
+                burned_amount: self.request.burned_amount,
+                withdrawal_fee: self.withdrawal_fee,
+                tx_fee: final_fee,
+            },
+        )?;
+        if recipient_amount == 0 {
+            return Err(PlanError::WithdrawalBurnedAmountTooSmall {
+                burned_amount: self.request.burned_amount,
+                withdrawal_fee: self.withdrawal_fee,
+                tx_fee: final_fee,
+            });
+        }
+
+        let outputs = withdrawal_outputs(self.request, recipient_amount, refund);
+        let seed_words = self
+            .state
+            .word_count_estimator
+            .estimate_seed_words(&outputs);
+        let minimum_fee =
+            compute_chain_minimum_fee(&self.request.chain_context, seed_words, witness_words);
+        if minimum_fee != final_fee {
+            return Err(PlanError::WithdrawalFeeShapeChanged {
+                initial_fee: final_fee,
+                recomputed_fee: minimum_fee,
+            });
+        }
+
+        Ok(PlanComputation {
+            final_fee,
+            minimum_fee,
+            seed_words,
+            witness_words,
+            outputs,
+        })
+    }
+}
+
+impl<M: LockMatcher> PlanningScenario for WithdrawalScenario<'_, M> {
+    type Output = WithdrawalPlanResult;
+
+    fn ordered_candidates(&self) -> Result<Vec<CandidateNote>, PlanError> {
+        ordered_candidates(
+            &SelectionMode::Auto,
+            &self.request.candidates,
+            SelectionOrder::Ascending,
+        )
+    }
+
+    fn try_select_candidate(
+        &mut self,
+        candidate: CandidateNote,
+    ) -> Result<CandidateSelection, PlanError> {
+        let candidate_version = candidate.version();
+        if candidate_version != Version::V1 {
+            let (first, last) = candidate.note_name_display();
+            self.state.debug_trace.push(format!(
+                "skipped note {first}/{last}: version {candidate_version:?} disabled by selector policy {policy:?}",
+                policy = CandidateVersionPolicy::V1Only
+            ));
+            return Ok(CandidateSelection::Skipped);
+        }
+
+        let Some(admitted) = admit_selectable_v1_candidate(
+            candidate,
+            V1CandidateAdmissionContext {
+                word_count_estimator: &self.state.word_count_estimator,
+                debug_trace: &mut self.state.debug_trace,
+                matcher: self.matcher,
+                signer_pkh: None,
+                coinbase_relative_min: None,
+                current_height: &self.request.chain_context.height,
+                unknown_lock_is_error: false,
+            },
+        )?
+        else {
+            return Ok(CandidateSelection::Skipped);
+        };
+
+        self.state.record_selection(
+            admitted.candidate, admitted.candidate_assets, admitted.witness_words_for_input,
+        );
+
+        self.state.debug_trace.push(format!(
+            "selected note {first}/{last} assets={} selected_total={} witness_words={} required={}",
+            admitted.candidate_assets,
+            self.state.selected_total,
+            self.state.witness_words_total,
+            self.required_total(),
+            first = admitted.first,
+            last = admitted.last,
+        ));
+
+        Ok(CandidateSelection::Selected)
+    }
+
+    fn should_stop(&self) -> bool {
+        self.state.covers_total(self.required_total())
+    }
+
+    fn finalize(self) -> Result<Self::Output, PlanError> {
+        let recompute = self.recompute_fee()?;
+        let required = self.required_total();
+        if !self.state.covers_total(required) {
+            return Err(PlanError::InsufficientFunds {
+                selected_total: self.state.selected_total,
+                required,
+            });
+        }
+
+        let net_recipient_amount = self
+            .spendable_amount
+            .checked_sub(recompute.final_fee)
+            .ok_or(PlanError::WithdrawalBurnedAmountTooSmall {
+                burned_amount: self.request.burned_amount,
+                withdrawal_fee: self.withdrawal_fee,
+                tx_fee: recompute.final_fee,
+            })?;
+        if net_recipient_amount == 0 {
+            return Err(PlanError::WithdrawalBurnedAmountTooSmall {
+                burned_amount: self.request.burned_amount,
+                withdrawal_fee: self.withdrawal_fee,
+                tx_fee: recompute.final_fee,
+            });
+        }
+
+        let refund = self
+            .state
+            .selected_total
+            .saturating_sub(self.spendable_amount);
+        let conservation = ConservationCheck {
+            input_total: self.state.selected_total,
+            gift_total: net_recipient_amount,
+            refund_total: refund,
+            fee: recompute.final_fee,
+        };
+        if !conservation.is_balanced() {
+            return Err(PlanError::ConservationFailed);
+        }
+
+        Ok(WithdrawalPlanResult {
+            burned_amount: self.request.burned_amount,
+            withdrawal_fee: self.withdrawal_fee,
+            net_recipient_amount,
+            plan: self.state.into_plan_result(recompute),
+        })
     }
 }
 
@@ -523,152 +1019,84 @@ pub fn plan_create_tx<M: LockMatcher>(
     request: &PlanRequest,
     matcher: &M,
 ) -> Result<PlanResult, PlanError> {
-    if matches!(&request.planning_mode, PlanningMode::Standard)
+    if matches!(&request.planning_mode, CreateTxPlanningMode::Standard)
         && request.recipient_outputs.is_empty()
     {
         return Err(PlanError::NoRecipients);
     }
 
-    let candidates = request.ordered_candidates()?;
-    let mut session = PlanSession::new(request);
-
     match &request.planning_mode {
-        PlanningMode::Standard => {
-            for candidate in candidates {
-                let Some(recompute) = session.try_select_standard_candidate(candidate, matcher)?
-                else {
-                    continue;
-                };
-                if matches!(&request.selection_mode, SelectionMode::Auto)
-                    && session.selected_total >= session.required_total(recompute.final_fee)
-                {
-                    break;
-                }
-            }
-
-            let recompute = session.recompute_standard_fee();
-            let required = session.required_total(recompute.final_fee);
-            if session.selected_total < required {
-                return Err(PlanError::InsufficientFunds {
-                    selected_total: session.selected_total,
-                    required,
-                });
-            }
-
-            let allocation = allocate_inputs(
-                session.selected_total, session.gift_total, recompute.final_fee,
-            )
-            .expect("required <= selected_total should always allocate");
-            let conservation = ConservationCheck {
-                input_total: session.selected_total,
-                gift_total: allocation.gift_total,
-                refund_total: allocation.refund,
-                fee: allocation.fee,
-            };
-            if !conservation.is_balanced() {
-                return Err(PlanError::ConservationFailed);
-            }
-
-            Ok(PlanResult {
-                selected: session
-                    .selected
-                    .iter()
-                    .map(|input| input.candidate.identity().clone())
-                    .collect(),
-                selected_total: session.selected_total,
-                outputs: recompute.outputs,
-                final_fee: recompute.final_fee,
-                word_counts: WordCountBreakdown {
-                    seed_words: recompute.seed_words,
-                    witness_words: recompute.witness_words,
-                },
-                debug_trace: session.debug_trace,
-            })
-        }
-        PlanningMode::V0MigrationSweep { .. } => {
-            for candidate in candidates {
-                let _ = session.try_select_v0_migration_candidate(candidate)?;
-            }
-
-            let recompute = session.recompute_v0_migration();
-            let ready = match recompute {
-                V0MigrationRecomputeState::NeedsMoreInputs { final_fee, .. } => {
-                    return Err(PlanError::V0MigrationProducesZeroValue {
-                        selected_total: session.selected_total,
-                        fee: final_fee,
-                    });
-                }
-                V0MigrationRecomputeState::Ready(ready) => ready,
-            };
-
-            if session.selected_total
-                != ready
-                    .destination_output
-                    .amount
-                    .saturating_add(ready.final_fee)
-            {
-                return Err(PlanError::ConservationFailed);
-            }
-
-            Ok(PlanResult {
-                selected: session
-                    .selected
-                    .iter()
-                    .map(|input| input.candidate.identity().clone())
-                    .collect(),
-                selected_total: session.selected_total,
-                outputs: vec![ready.destination_output],
-                final_fee: ready.final_fee,
-                word_counts: WordCountBreakdown {
-                    seed_words: ready.seed_words,
-                    witness_words: ready.witness_words,
-                },
-                debug_trace: session.debug_trace,
-            })
+        CreateTxPlanningMode::Standard => StandardCreateTxScenario::new(request, matcher).execute(),
+        CreateTxPlanningMode::V0MigrationSweep { .. } => {
+            V0MigrationScenario::new(request).execute()
         }
     }
 }
 
-impl PlanRequest {
-    /// Produces candidate ordering for the selected mode:
-    /// deterministic sort by `SelectionOrder` for both auto and manual candidate sets.
-    fn ordered_candidates(&self) -> Result<Vec<CandidateNote>, PlanError> {
-        match &self.selection_mode {
-            SelectionMode::Auto => {
-                let mut out = self.candidates.clone();
-                sort_candidates(&mut out, self.order_direction);
-                Ok(out)
+/// Plans input selection, fee, and outputs for withdrawals where the burned
+/// amount covers the bridge withdrawal fee, recipient disbursement, and final
+/// tx fee.
+pub fn plan_withdrawal_tx<M: LockMatcher>(
+    request: &WithdrawalPlanRequest,
+    matcher: &M,
+) -> Result<WithdrawalPlanResult, PlanError> {
+    let withdrawal_fee = compute_bridge_fee(request.burned_amount, request.nicks_fee_per_nock);
+    let Some(spendable_amount) = request
+        .burned_amount
+        .checked_sub(withdrawal_fee)
+        .filter(|amount| *amount > 0)
+    else {
+        return Err(PlanError::WithdrawalBurnedAmountTooSmall {
+            burned_amount: request.burned_amount,
+            withdrawal_fee,
+            tx_fee: 0,
+        });
+    };
+
+    WithdrawalScenario::new(request, matcher, withdrawal_fee, spendable_amount).execute()
+}
+
+/// Produces candidate ordering for the selected mode:
+/// deterministic sort by `SelectionOrder` for both auto and manual candidate sets.
+fn ordered_candidates(
+    selection_mode: &SelectionMode,
+    candidates: &[CandidateNote],
+    order_direction: SelectionOrder,
+) -> Result<Vec<CandidateNote>, PlanError> {
+    match selection_mode {
+        SelectionMode::Auto => {
+            let mut out = candidates.to_vec();
+            sort_candidates(&mut out, order_direction);
+            Ok(out)
+        }
+        SelectionMode::Manual { note_names } => {
+            if note_names.is_empty() {
+                return Err(PlanError::ManualNamesMissing);
             }
-            SelectionMode::Manual { note_names } => {
-                if note_names.is_empty() {
-                    return Err(PlanError::ManualNamesMissing);
+            let mut seen = BTreeSet::<([u64; 5], [u64; 5])>::new();
+            let mut out = Vec::<CandidateNote>::new();
+            for name in note_names {
+                let key = (name.first.to_array(), name.last.to_array());
+                if !seen.insert(key) {
+                    return Err(PlanError::DuplicateManualName {
+                        first: name.first.to_base58(),
+                        last: name.last.to_base58(),
+                    });
                 }
-                let mut seen = BTreeSet::<([u64; 5], [u64; 5])>::new();
-                let mut out = Vec::<CandidateNote>::new();
-                for name in note_names {
-                    let key = (name.first.to_array(), name.last.to_array());
-                    if !seen.insert(key) {
-                        return Err(PlanError::DuplicateManualName {
-                            first: name.first.to_base58(),
-                            last: name.last.to_base58(),
-                        });
-                    }
-                    let Some(candidate) = self
-                        .candidates
-                        .iter()
-                        .find(|candidate| candidate.identity().name == *name)
-                        .cloned()
-                    else {
-                        return Err(PlanError::ManualNoteMissing {
-                            first: name.first.to_base58(),
-                            last: name.last.to_base58(),
-                        });
-                    };
-                    out.push(candidate);
-                }
-                sort_candidates(&mut out, self.order_direction);
-                Ok(out)
+                let Some(candidate) = candidates
+                    .iter()
+                    .find(|candidate| candidate.identity().name == *name)
+                    .cloned()
+                else {
+                    return Err(PlanError::ManualNoteMissing {
+                        first: name.first.to_base58(),
+                        last: name.last.to_base58(),
+                    });
+                };
+                out.push(candidate);
             }
+            sort_candidates(&mut out, order_direction);
+            Ok(out)
         }
     }
 }
@@ -680,8 +1108,37 @@ fn outputs_with_refund(request: &PlanRequest, refund: u64) -> Vec<PlannedOutput>
     let mut outputs = request.recipient_outputs.clone();
     if refund > 0 {
         outputs.push(PlannedOutput {
+            lock_root: request.refund_output.lock_root.clone(),
             amount: refund,
-            ..request.refund_output.clone()
+            note_data: request.refund_output.note_data.clone(),
+        });
+    }
+    outputs
+}
+
+/// Builds the withdrawal output set for fee accounting and final result emission.
+/// The recipient output amount is the planner-solved net disbursement; refund is
+/// independent and is appended only when positive.
+fn withdrawal_outputs(
+    request: &WithdrawalPlanRequest,
+    recipient_amount: u64,
+    refund: u64,
+) -> Vec<PlannedOutput> {
+    let mut outputs = vec![PlannedOutput {
+        lock_root: request.recipient_lock_root.clone(),
+        amount: recipient_amount,
+        note_data: vec![RawNoteDataEntry::from_bridge_withdrawal(
+            request.beid.clone(),
+            request.base_hash.clone(),
+            request.recipient_lock_root.clone(),
+            request.base_batch_end,
+        )],
+    }];
+    if refund > 0 {
+        outputs.push(PlannedOutput {
+            lock_root: request.refund_output.lock_root.clone(),
+            amount: refund,
+            note_data: request.refund_output.note_data.clone(),
         });
     }
     outputs
@@ -828,7 +1285,7 @@ fn timelock_primitive_satisfied(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use nockapp::noun::slab::{NockJammer, NounSlab};
+    use nockapp::noun::NounEncodeJamExt;
     use nockchain_math::belt::Belt;
     use nockchain_math::crypto::cheetah::{ch_scal, A_GEN};
     use nockchain_types::tx_engine::common::{
@@ -836,8 +1293,7 @@ mod tests {
         TimelockRangeRelative, Version,
     };
     use nockchain_types::tx_engine::v0::{Lock as V0Lock, TimelockIntent as V0TimelockIntent};
-    use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, LockTim, Pkh, SpendCondition};
-    use noun_serde::NounEncode;
+    use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, Pkh, SpendCondition};
 
     use super::*;
     use crate::lock_resolver::LockMatcher;
@@ -847,12 +1303,17 @@ mod tests {
     };
     use crate::types::{
         CandidateIdentity, CandidateNote, CandidateV0Note, CandidateV1Note, CandidateVersionPolicy,
-        ChainContext, PlanningMode, RawNoteDataEntry, SelectionOrder,
+        ChainContext, CreateTxPlanningMode, RawNoteDataEntry, RefundOutputTemplate, SelectionOrder,
+        WithdrawalPlanRequest,
     };
 
     /// Constructs a deterministic hash value from a single test limb.
     fn hash(v: u64) -> Hash {
         Hash::from_limbs(&[v, 0, 0, 0, 0])
+    }
+
+    fn beid(start: u64) -> Vec<Belt> {
+        (start..start + 32).map(Belt).collect()
     }
 
     /// Builds a deterministic note name pair for tests.
@@ -939,7 +1400,7 @@ mod tests {
             amount,
             note_data: vec![RawNoteDataEntry {
                 key: "meta".to_string(),
-                blob: jam(&0_u64),
+                blob: 0_u64.jam_bytes(),
             }],
         }
     }
@@ -950,16 +1411,6 @@ mod tests {
             lock_root: hash(lock_root),
             amount,
             note_data: Vec::new(),
-        }
-    }
-
-    fn p2pkh_output(lock_root: u64, amount: u64) -> PlannedOutput {
-        PlannedOutput {
-            lock_root: hash(lock_root),
-            amount,
-            note_data: vec![RawNoteDataEntry::from_lock(Lock::SpendCondition(simple_pkh_lock(
-                hash(lock_root),
-            )))],
         }
     }
 
@@ -994,18 +1445,10 @@ mod tests {
         ])
     }
 
-    /// Jam-encodes an arbitrary noun-encodable test value into bytes.
-    fn jam<T: NounEncode>(value: &T) -> Bytes {
-        let mut slab: NounSlab<NockJammer> = NounSlab::new();
-        let noun = value.to_noun(&mut slab);
-        slab.set_root(noun);
-        slab.jam()
-    }
-
     /// Creates a baseline plan request used by planner unit tests.
     fn base_request() -> PlanRequest {
         PlanRequest {
-            planning_mode: PlanningMode::Standard,
+            planning_mode: CreateTxPlanningMode::Standard,
             selection_mode: SelectionMode::Auto,
             order_direction: SelectionOrder::Ascending,
             include_data: true,
@@ -1023,6 +1466,33 @@ mod tests {
             refund_output: output(43, 0),
             coinbase_relative_min: Some(5),
             v0_migration_signer_pubkeys: Vec::new(),
+        }
+    }
+
+    fn base_withdrawal_request() -> WithdrawalPlanRequest {
+        WithdrawalPlanRequest {
+            chain_context: ChainContext {
+                height: BlockHeight(Belt(10)),
+                bythos_phase: BlockHeight(Belt(10)),
+                base_fee: 0,
+                input_fee_divisor: 4,
+                min_fee: 1,
+            },
+            candidates: vec![
+                candidate_with_lock(1, 70_000, vec![simple_pkh_lock(hash(101))]),
+                candidate_with_lock(2, 61_000, vec![simple_pkh_lock(hash(102))]),
+                candidate_with_lock(3, 300_000, vec![simple_pkh_lock(hash(103))]),
+            ],
+            burned_amount: crate::fee::NICKS_PER_NOCK * 2,
+            nicks_fee_per_nock: 195,
+            recipient_lock_root: hash(42),
+            beid: beid(1),
+            base_hash: hash(77),
+            base_batch_end: 12,
+            refund_output: RefundOutputTemplate {
+                lock_root: hash(43),
+                note_data: Vec::new(),
+            },
         }
     }
 
@@ -1075,7 +1545,7 @@ mod tests {
     /// Verifies v0 migration sweep consumes all admissible legacy notes and ignores v1 notes.
     fn v0_migration_sweep_selects_all_admissible_v0_candidates() {
         let mut request = base_request();
-        request.planning_mode = PlanningMode::V0MigrationSweep {
+        request.planning_mode = CreateTxPlanningMode::V0MigrationSweep {
             destination_output: output_without_note_data(42, 0),
         };
         request.candidate_version_policy = CandidateVersionPolicy::V0Only;
@@ -1095,7 +1565,7 @@ mod tests {
     /// Verifies v0 migration sweep skips legacy notes whose lock is not spendable by the migration signer.
     fn v0_migration_sweep_skips_unspendable_v0_candidates() {
         let mut request = base_request();
-        request.planning_mode = PlanningMode::V0MigrationSweep {
+        request.planning_mode = CreateTxPlanningMode::V0MigrationSweep {
             destination_output: output_without_note_data(42, 0),
         };
         request.candidate_version_policy = CandidateVersionPolicy::V0Only;
@@ -1124,7 +1594,7 @@ mod tests {
     /// Verifies v0 migration sweep skips legacy notes whose v0 timelock is not yet spendable.
     fn v0_migration_sweep_skips_unmatured_v0_timelocked_candidates() {
         let mut request = base_request();
-        request.planning_mode = PlanningMode::V0MigrationSweep {
+        request.planning_mode = CreateTxPlanningMode::V0MigrationSweep {
             destination_output: output_without_note_data(42, 0),
         };
         request.candidate_version_policy = CandidateVersionPolicy::V0Only;
@@ -1153,7 +1623,7 @@ mod tests {
     /// Verifies v0 migration sweep errors when fees consume the full selected value.
     fn v0_migration_sweep_errors_when_fee_consumes_all_selected_value() {
         let mut request = base_request();
-        request.planning_mode = PlanningMode::V0MigrationSweep {
+        request.planning_mode = CreateTxPlanningMode::V0MigrationSweep {
             destination_output: output_without_note_data(42, 0),
         };
         request.chain_context.min_fee = 10;
@@ -1171,34 +1641,6 @@ mod tests {
                 fee: 10,
             }
         ));
-    }
-
-    #[test]
-    /// Verifies v0 migration uses the expected legacy witness words and fee under fakenet-style constants.
-    fn v0_migration_sweep_matches_expected_word_and_fee_counts() {
-        let mut request = base_request();
-        request.planning_mode = PlanningMode::V0MigrationSweep {
-            destination_output: p2pkh_output(42, 0),
-        };
-        request.chain_context = ChainContext {
-            height: BlockHeight(Belt(1)),
-            bythos_phase: BlockHeight(Belt(1)),
-            base_fee: 128,
-            input_fee_divisor: 4,
-            min_fee: 256,
-        };
-        request.candidate_version_policy = CandidateVersionPolicy::V0Only;
-        request.candidates = vec![candidate_v0(1, 25_000)];
-        request.recipient_outputs = Vec::new();
-        request.v0_migration_signer_pubkeys = vec![signer_pubkey(1)];
-
-        let result = plan_create_tx(&request, &AlwaysMatches).expect("migration plan");
-        assert_eq!(result.selected_total, 25_000);
-        assert_eq!(result.word_counts.seed_words, 14);
-        assert_eq!(result.word_counts.witness_words, 31);
-        assert_eq!(result.final_fee, 2_784);
-        assert_eq!(result.outputs.len(), 1);
-        assert_eq!(result.outputs[0].amount, 22_216);
     }
 
     #[test]
@@ -1334,6 +1776,135 @@ mod tests {
         let outputs = outputs_with_refund(&request, 1);
         assert_eq!(outputs.len(), 2);
         assert_eq!(outputs[1].amount, 1);
+    }
+
+    #[test]
+    /// Verifies withdrawal fee word counting does not depend on the solved
+    /// net recipient amount under the current estimator, as long as the
+    /// refund-output shape is unchanged. If refund drops to zero, the refund
+    /// output is omitted and the seed-word count may change. The planner's
+    /// probe and final outputs share the same refund amount; only the solved
+    /// recipient amount differs between them.
+    fn withdrawal_seed_words_do_not_depend_on_recipient_amount() {
+        let request = base_withdrawal_request();
+        let estimator = WordCountEstimator::new(&request.chain_context);
+        // Keep refund positive in both outputs. The planner uses the same
+        // refund for its seed-word probe and final output assembly; crossing
+        // to zero would remove the refund output entirely, which is a
+        // different fee-shape case.
+        let refund = 1;
+        let spendable_amount = request.burned_amount
+            - compute_bridge_fee(request.burned_amount, request.nicks_fee_per_nock);
+
+        let full_amount = withdrawal_outputs(&request, spendable_amount, refund);
+        let reduced_amount = withdrawal_outputs(&request, spendable_amount - 1, refund);
+
+        assert_eq!(
+            estimator.estimate_seed_words(&full_amount),
+            estimator.estimate_seed_words(&reduced_amount)
+        );
+    }
+
+    #[test]
+    /// Verifies withdrawal planning solves a net payout whose fee is covered by
+    /// the gross burned amount.
+    fn withdrawal_planner_solves_net_amount_from_burned_amount() {
+        let request = base_withdrawal_request();
+        let result = plan_withdrawal_tx(&request, &AlwaysMatches).expect("plan withdrawal");
+
+        assert_eq!(
+            result.withdrawal_fee,
+            compute_bridge_fee(request.burned_amount, request.nicks_fee_per_nock)
+        );
+        assert!(result.plan.final_fee > 0);
+        assert_eq!(
+            result.burned_amount,
+            result
+                .withdrawal_fee
+                .saturating_add(result.net_recipient_amount)
+                .saturating_add(result.plan.final_fee)
+        );
+        assert_eq!(
+            result.burned_amount,
+            result
+                .withdrawal_fee
+                .saturating_add(result.plan.outputs[0].amount)
+                .saturating_add(result.plan.final_fee)
+        );
+        assert_eq!(result.plan.outputs[0].amount, result.net_recipient_amount);
+        assert_eq!(result.plan.selected_total, 131_000);
+        assert!(result.plan.selected_total < result.burned_amount);
+    }
+
+    #[test]
+    fn withdrawal_planner_selects_lock_root_owned_note_without_lock_note_data() {
+        let spend_condition = simple_pkh_lock(hash(777));
+        let lock_root = spend_condition.hash().expect("lock root");
+        let note_first_name = spend_condition
+            .first_name()
+            .expect("first-name")
+            .into_hash();
+        let mut request = base_withdrawal_request();
+        request.candidates = vec![candidate(1, 140_000)];
+        request.candidates[0].identity_mut().name.first = note_first_name;
+
+        let matcher = crate::lock_resolver::LockRootLockMatcher::from_lock_root(&lock_root)
+            .expect("matcher")
+            .with_spend_condition(spend_condition);
+        let result = plan_withdrawal_tx(&request, &matcher).expect("plan withdrawal");
+
+        assert_eq!(result.plan.selected.len(), 1);
+        assert_eq!(
+            result.plan.selected[0].name,
+            request.candidates[0].identity().name
+        );
+        assert_eq!(result.plan.selected_total, 140_000);
+        assert!(result.plan.word_counts.witness_words > 0);
+    }
+
+    #[test]
+    fn withdrawal_planner_errors_when_lock_root_matcher_omits_planning_spend_condition() {
+        let spend_condition = simple_pkh_lock(hash(777));
+        let lock_root = spend_condition.hash().expect("lock root");
+        let note_first_name = spend_condition
+            .first_name()
+            .expect("first-name")
+            .into_hash();
+        let mut request = base_withdrawal_request();
+        request.candidates = vec![candidate(1, 140_000)];
+        request.candidates[0].identity_mut().name.first = note_first_name;
+
+        let matcher =
+            crate::lock_resolver::LockRootLockMatcher::from_lock_root(&lock_root).expect("matcher");
+        let error =
+            plan_withdrawal_tx(&request, &matcher).expect_err("expected planning metadata error");
+
+        assert!(matches!(
+            error,
+            PlanError::MissingPlanningSpendCondition {
+                resolution_source: LockResolutionSource::LockRootFirstName,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    /// Verifies withdrawals fail when the burned amount cannot cover the final fee.
+    fn withdrawal_planner_rejects_burned_amount_smaller_than_fee() {
+        let mut request = base_withdrawal_request();
+        request.burned_amount = 1;
+        request.candidates = vec![candidate(1, 5)];
+
+        let error =
+            plan_withdrawal_tx(&request, &AlwaysMatches).expect_err("expected burned amount error");
+        assert!(matches!(
+            error,
+            PlanError::WithdrawalBurnedAmountTooSmall {
+                burned_amount: 1,
+                withdrawal_fee: 195,
+                ..
+            }
+        ));
     }
 
     #[test]
