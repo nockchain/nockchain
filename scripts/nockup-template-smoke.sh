@@ -62,8 +62,7 @@ SMOKE_HOME="${WORK_ROOT}/home"
 SMOKE_TARGET="${WORK_ROOT}/target"
 SMOKE_WORKSPACE="${WORK_ROOT}/workspace"
 SMOKE_LOGS="${WORK_ROOT}/logs"
-PIDS=""
-PORTS_TO_CLEAN=""
+BACKGROUND_JOBS=""
 
 export CARGO_HOME="${CARGO_HOME:-${ORIGINAL_HOME}/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-${ORIGINAL_HOME}/.rustup}"
@@ -79,14 +78,16 @@ fi
 
 cleanup() {
   status="$1"
+  jobs="${BACKGROUND_JOBS}"
+  BACKGROUND_JOBS=""
 
-  for pid in ${PIDS}; do
-    kill "${pid}" >/dev/null 2>&1 || true
-    wait "${pid}" >/dev/null 2>&1 || true
-  done
-
-  for port in ${PORTS_TO_CLEAN}; do
-    kill_port_listeners "${port}"
+  for job in ${jobs}; do
+    pid="${job%%:*}"
+    port="${job#*:}"
+    if [ "${port}" = "-" ]; then
+      port=""
+    fi
+    stop_background_job "${pid}" "${port}" 0 || true
   done
 
   if [ "${status}" -eq 0 ] && [ "${KEEP_TEMP}" -eq 0 ]; then
@@ -260,12 +261,29 @@ wait_for_port_free() {
   return 1
 }
 
-kill_port_listeners() {
-  port="$1"
+is_descendant_of() {
+  current="$1"
+  root="$2"
+
+  while [ -n "${current}" ] && [ "${current}" != "1" ]; do
+    if [ "${current}" = "${root}" ]; then
+      return 0
+    fi
+    current="$(ps -o ppid= -p "${current}" 2>/dev/null | tr -d ' ')"
+  done
+
+  return 1
+}
+
+kill_owned_port_listeners() {
+  root_pid="$1"
+  port="$2"
   listener_pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
 
   for listener_pid in ${listener_pids}; do
-    kill "${listener_pid}" >/dev/null 2>&1 || true
+    if is_descendant_of "${listener_pid}" "${root_pid}"; then
+      kill "${listener_pid}" >/dev/null 2>&1 || true
+    fi
   done
 }
 
@@ -273,25 +291,50 @@ track_background() {
   pid="$1"
   port="${2:-}"
 
-  PIDS="${PIDS} ${pid}"
-  if [ -n "${port}" ]; then
-    PORTS_TO_CLEAN="${PORTS_TO_CLEAN} ${port}"
-  fi
+  BACKGROUND_JOBS="${BACKGROUND_JOBS} ${pid}:${port:--}"
+}
+
+untrack_background() {
+  pid="$1"
+  kept_jobs=""
+
+  for job in ${BACKGROUND_JOBS}; do
+    job_pid="${job%%:*}"
+    if [ "${job_pid}" != "${pid}" ]; then
+      kept_jobs="${kept_jobs} ${job}"
+    fi
+  done
+
+  BACKGROUND_JOBS="${kept_jobs}"
 }
 
 stop_background() {
   pid="$1"
   port="${2:-}"
 
+  stop_background_job "${pid}" "${port}" 1
+  untrack_background "${pid}"
+}
+
+stop_background_job() {
+  pid="$1"
+  port="${2:-}"
+  require_port_free_after_stop="$3"
+
+  if [ -n "${port}" ]; then
+    kill_owned_port_listeners "${pid}" "${port}"
+  fi
+
   kill "${pid}" >/dev/null 2>&1 || true
   wait "${pid}" >/dev/null 2>&1 || true
 
   if [ -n "${port}" ]; then
-    kill_port_listeners "${port}"
-  fi
-
-  if [ -n "${port}" ]; then
-    wait_for_port_free "${port}"
+    if ! wait_for_port_free "${port}"; then
+      if [ "${require_port_free_after_stop}" -eq 1 ]; then
+        echo "port ${port} is still in use after stopping background process ${pid}" >&2
+        return 1
+      fi
+    fi
   fi
 }
 
@@ -408,9 +451,10 @@ run_grpc() {
 }
 
 need_cmd cargo
-need_cmd curl
-need_cmd git
-need_cmd lsof
+if [ "${RUN_RUNTIME}" -eq 1 ]; then
+  need_cmd curl
+  need_cmd lsof
+fi
 
 mkdir -p "${SMOKE_HOME}/.nockup/templates" "${SMOKE_WORKSPACE}" "${SMOKE_LOGS}"
 
