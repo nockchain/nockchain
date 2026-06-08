@@ -19,18 +19,20 @@ into setup, operations, and governance guides.
    provisioning, monitoring, logging, and incident response.
 5. [`governance.md`](./governance.md) – Upgrade procedures for contracts, the
    kernel jam, and the Rust runtime, plus multisig responsibilities.
-6. [`../OPERATOR-SETUP.md`](../OPERATOR-SETUP.md) – Provisioning and initial
+6. [`release-punchlist.md`](./release-punchlist.md) – Mainnet launch checklist
+   for network-specific config, contract wiring, and R2 journal setup.
+7. [`../OPERATOR-SETUP.md`](../OPERATOR-SETUP.md) – Provisioning and initial
    host/bootstrap setup for new bridge operators.
-7. [`../QUICKSTART.md`](../QUICKSTART.md) – Build/test/run quickstart for local
+8. [`../QUICKSTART.md`](../QUICKSTART.md) – Build/test/run quickstart for local
    bridge development and first boot.
-8. [`bridge-withdrawals.md`](./bridge-withdrawals.md) – Canonical bridge
+9. [`bridge-withdrawals.md`](./bridge-withdrawals.md) – Canonical bridge
    withdrawal protocol and implementation spec.
-9. [`withdrawal-dapp.md`](./withdrawal-dapp.md) – DApp/frontend-oriented
+10. [`withdrawal-dapp.md`](./withdrawal-dapp.md) – DApp/frontend-oriented
    withdrawal product and implementation guide derived from the canonical
    withdrawal spec.
-10. [`../draft/README.md`](../draft/README.md) – Withdrawal milestone plans
+11. [`../draft/README.md`](../draft/README.md) – Withdrawal milestone plans
    and dated progress log.
-11. [`../draft/specs/test-harness.md`](../draft/specs/test-harness.md) –
+12. [`../draft/specs/test-harness.md`](../draft/specs/test-harness.md) –
    Deterministic test harness design for bridge runtime/kernel tests and the
    kernel-to-signing seam.
 

@@ -1,0 +1,408 @@
+# Nous rollout scenario: rolling per-node rollback from gen2 send to gen1
+#
+# Exercises the operator rollback procedure: a 4-node network (1 miner +
+# 3 syncing peers) starts fully upgraded with gen2 send enabled. Nodes are
+# stopped one at a time, have gen2 send disabled, and are restarted while
+# the rest continue serving traffic. After each rollback restart the node
+# must resync and converge with at least one peer. After all 4 nodes have
+# rolled back to gen1 outbound, a final round of transaction traffic
+# confirms the fully-rolled-back network remains operational.
+#
+# This is the inverse of nous_gen2_rolling_restart.yaml and directly
+# exercises the rollback lever documented in NOUS-OPERATOR-GUIDE.md.
+#
+# Coverage:
+# - Mixed gen2/gen1 send traffic during progressive rollback
+# - Peer reconnection and protocol renegotiation after rollback restarts
+# - Sync correctness when each rollback creates a brief sync gap
+# - Network convergence after all nodes rolled back
+# - Post-rollback transaction acceptance on gen1-only network
+
+name: "nous_gen2_rolling_rollback"
+seed: 34
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    restart_peer_from:
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
+      - node: "full-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_3}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+
+  - id: "full-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_1}/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT_2}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+
+steps:
+  # ── Bootstrap: start miner-a first for wallet setup ──
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_pkh"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_pkh}"]
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "recipient_pkh"
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${recipient_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${recipient_pkh}"]
+
+  # ── Start remaining nodes (all gen2-send) ──
+  - action: start_nodes
+    ids: ["miner-b", "full-a", "full-b"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 300000
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  # ── Phase 1: establish baseline — all gen2 send, height 5 ──
+  - action: wait_for_height
+    node: "miner-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 5
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 5
+    timeout_ms: 180000
+
+  # ── Rolling rollback 1/4: full-a → gen1 send ──
+  - action: stop_nodes
+    ids: ["full-a"]
+
+  - action: set_node_env
+    node: "full-a"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "false"
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 7
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 7
+    timeout_ms: 180000
+
+  # ── Rolling rollback 2/4: full-b → gen1 send ──
+  - action: stop_nodes
+    ids: ["full-b"]
+
+  - action: set_node_env
+    node: "full-b"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "false"
+
+  - action: start_nodes
+    ids: ["full-b"]
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 9
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 9
+    timeout_ms: 180000
+
+  # ── Rolling rollback 3/4: miner-b → gen1 send ──
+  # Miner rollback is the highest-risk step: the network briefly loses a miner.
+  - action: stop_nodes
+    ids: ["miner-b"]
+
+  - action: set_node_env
+    node: "miner-b"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "false"
+
+  - action: start_nodes
+    ids: ["miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 11
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 11
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 11
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 11
+    timeout_ms: 180000
+
+  # ── Rolling rollback 4/4: miner-a → gen1 send ──
+  # Last node: after this the entire network is back to gen1-send.
+  - action: stop_nodes
+    ids: ["miner-a"]
+
+  - action: set_node_env
+    node: "miner-a"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "false"
+
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 13
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 13
+    timeout_ms: 180000
+
+  # ── Phase 2: post-rollback convergence and transaction ──
+  # All 4 nodes are now gen1-send. Verify the network converges and a
+  # transaction can be created, submitted, accepted, and mined.
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 13
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 13
+    timeout_ms: 180000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "post_rollback_tx_path"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "send-tx"
+    args: ["${post_rollback_tx_path}"]
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "post_rollback_tx"
+
+  - action: wait_for_tx_accepted
+    node: "miner-a"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "miner-b"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-a"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-b"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_in_block
+    node: "miner-a"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 180000
+
+  - action: wait_for_tx_in_block
+    node: "miner-b"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 180000
+
+  - action: wait_for_tx_in_block
+    node: "full-a"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 180000
+
+  - action: wait_for_tx_in_block
+    node: "full-b"
+    tx: "${post_rollback_tx}"
+    timeout_ms: 180000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a", "full-b"]
+    timeout_ms: 180000
+  - assert: tx_in_block
+    node: "full-b"
+    tx: "${post_rollback_tx}"

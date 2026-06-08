@@ -26,6 +26,28 @@ contract NockWithdrawalTest is BridgeTestBase {
         assertEq(nock.balanceOf(burner), 0);
     }
 
+    function testBurnAcceptsTrailingCalldata() public {
+        address burner = makeAddr("burner");
+        uint256 amount = nockAmount(25);
+        bytes32 commitment = keccak256("withdrawal-commitment");
+        bytes memory trailer =
+            hex"4e4f434b57443121000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627";
+
+        mintFromInbox(burner, amount);
+
+        bytes memory data = bytes.concat(abi.encodeWithSelector(Nock.burn.selector, amount, commitment), trailer);
+        assertEq(data.length, 116);
+
+        vm.expectEmit(true, true, true, true, address(nock));
+        emit Nock.BurnForWithdrawal(burner, amount, commitment);
+
+        vm.prank(burner);
+        (bool ok, bytes memory returnData) = address(nock).call(data);
+        assertTrue(ok, string(returnData));
+
+        assertEq(nock.balanceOf(burner), 0);
+    }
+
     function testBurnRequiresPositiveAmount() public {
         address burner = makeAddr("burner");
         mintFromInbox(burner, nockAmount(1));

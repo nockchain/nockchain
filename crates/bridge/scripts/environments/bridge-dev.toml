@@ -1,0 +1,26 @@
+[profile]
+name = "virtual-testnet"
+
+[vnet]
+name_prefix = "bridge-vnet"
+cleanup_keep = 3
+cleanup_old_before_fresh = true
+
+[cluster]
+base_confirmation_depth = 0
+nockchain_confirmation_depth = 1
+default_deposit_amount_nicks = 7000000000
+default_deposit_fee_nicks = 3457024
+
+[aliases.deposit_recipient]
+evm_address = "0x15A3DF65662B0235CdF27B3A8dD0f35D41E8A5BE"
+source_env = "TENDERLY_PUBLIC_ADDRESS"
+
+[aliases.withdraw_holder]
+evm_address = "0x15A3DF65662B0235CdF27B3A8dD0f35D41E8A5BE"
+source_env = "TENDERLY_PUBLIC_ADDRESS"
+private_key = "0xf9dca69398d5030c8f57a92cb69e4930caf448aefc493357dcafda87747f6098"
+private_key_env = "TENDERLY_TEST_PRIVATE_KEY"
+
+[aliases.withdraw_dest]
+nockchain_address = "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"

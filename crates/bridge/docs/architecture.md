@@ -23,7 +23,7 @@ It is an implementation map for this crate, not chain-level protocol authority.
 | ---------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
 | On-chain   | `contracts/MessageInbox.sol`                                   | UUPS-upgradeable inbox that mints wrapped nock after seeing a 3-of-5 bridge signature set. Tracks node roster, burns, and prevents replay.    | Solidity |
 | On-chain   | `contracts/Nock.sol`                                           | Non-upgradeable ERC-20 that lets users burn to exit back to Nockchain and forwards those burns to the inbox.                                  | Solidity |
-| Kernel     | `open/hoon/apps/bridge/*.hoon` -> `open/assets/bridge.jam`     | Deterministic state machine for cross-chain hashchain state; emits `%create-withdrawal-txs`, `%commit-nock-deposits`, `%grpc`, `%stop`.     | Hoon     |
+| Kernel     | `open/hoon/apps/bridge/*.hoon` -> `open/assets/bridge.jam`     | Deterministic state machine for cross-chain hashchain state; stages Base withdrawals with `%base-block-withdrawals-pending`, then commits on ack. | Hoon     |
 | Runtime    | `src/runtime.rs`                                               | Asynchronous event router and kernel poke/peek wrapper that feeds causes into the kernel.                                                     | Rust     |
 | Observers  | `src/ethereum.rs`, `src/nockchain.rs`                          | Pull data from Base (via `alloy` WS) and from the private nockchain gRPC API, turn them into `BridgeEvent`s, and hand them to the runtime.   | Rust     |
 | Interfaces | `src/ingress.rs`, `nockapp_grpc::driver::grpc_listener_driver` | gRPC entry points for peer coordination plus a listener driver for kernel `%grpc` effects.                                                    | Rust     |
@@ -82,7 +82,7 @@ Deposit submission is currently driven by deposit-log + cache loops:
 This means signature collection and Base posting are coordinated by Rust loops around `ProposalCache`, not by a direct ingress-to-runtime event path.
 | Effect tag               | Purpose                                                                            | Consumer                                        | Status      |
 | ------------------------ | ---------------------------------------------------------------------------------- | ----------------------------------------------- | ----------- |
-| `create-withdrawal-txs`  | Emit withdrawal requests derived from Base burn events (`nock-withdrawal-request`). | **TODO** withdrawal tx proposal/submission path | **TODO**    |
+| `base-block-withdrawals-pending` | Emit a staged Base batch whose derived withdrawal requests must be durably persisted before Base hashchain commit. | withdrawal execution driver | Implemented |
 | `commit-nock-deposits`   | Emit structured deposit requests for runtime persistence and signing.               | `create_commit_nock_deposits_driver` in `main.rs` | Implemented |
 | `grpc`                   | Make gRPC calls: `peek` for queries, `call` for RPC invocations.                   | gRPC listener driver                            | Implemented |
 | `stop`                   | Freeze processing in kernel and propagate stop to peers.                            | `create_stop_driver` in `main.rs`               | Implemented |
@@ -123,10 +123,10 @@ persisted to the local deposit log.
 2. `BaseBridge::stream_base_events` captures the burn event, packages it as
    `BaseWithdrawalEvent`, and emits a `base-blocks` cause so the kernel can
    queue settlement work.
-3. The kernel emits `create-withdrawal-txs` with `nock-withdrawal-request`
-   entries (`base_event_id`, lock-root recipient, amount, batch-end, as-of).
-4. Runtime-side conversion of these requests into finalized nockchain
-   settlement transactions is still in progress.
+3. The kernel emits `base-block-withdrawals-pending` with the batch identity and
+   derived `nock-withdrawal-request` entries.
+4. Rust persists those requests idempotently, sends
+   `base-block-withdrawals-committed`, and the kernel commits the Base batch.
 
 ## Reference Files
 

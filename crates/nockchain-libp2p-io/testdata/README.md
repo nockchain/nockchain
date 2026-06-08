@@ -4,6 +4,7 @@ This directory holds machine-readable CBOR conformance vectors for the libp2p re
 
 Current fixture:
 - `req_res_gen1_cbor_vectors.json`
+- `req_res_gen2_cbor_vectors.json`
 
 ## Fixture goals
 
@@ -40,3 +41,7 @@ Current entry points:
 - `test_gen1_request_cbor_vectors_roundtrip`
 - `test_gen1_response_cbor_vectors_roundtrip`
 - `test_gen1_invalid_cbor_vectors_fail_decode`
+- `test_gen2_cbor_vector_schema_version`
+- `test_gen2_request_cbor_vectors_roundtrip`
+- `test_gen2_response_cbor_vectors_roundtrip`
+- `test_gen2_invalid_cbor_vectors_fail_decode`

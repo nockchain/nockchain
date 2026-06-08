@@ -1,7 +1,7 @@
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_EXIT, BAIL_FAIL};
 use nockvm::jets::JetErr;
-use nockvm::noun::{Atom, IndirectAtom, Noun, D, T};
+use nockvm::noun::{Atom, IndirectAtom, Noun, NounSpace, D, T};
 use nockvm_macros::tas;
 use tracing::debug;
 
@@ -14,18 +14,19 @@ use crate::form::structs::HoonList;
 use crate::jets::table_utils::*;
 
 pub fn compute_v2_mega_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let table_mary = slot(sam, 2)?;
-    let all_chals = slot(sam, 6)?;
-    let _fock_ret = slot(sam, 7)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let table_mary = slot(sam, 2, &space)?;
+    let all_chals = slot(sam, 6, &space)?;
+    let _fock_ret = slot(sam, 7, &space)?;
 
-    let chals: MegaExtChals = init_mega_ext_chals(all_chals)?;
+    let chals: MegaExtChals = init_mega_ext_chals(all_chals, &space)?;
     let z2: Felt = fmul_(&chals.z, &chals.z);
     let z3: Felt = fmul_(&z2, &chals.z);
     let z_inv: Felt = finv_(&chals.z);
 
-    let table_noun = slot(table_mary, 3)?;
-    let Ok(table) = MarySlice::try_from(table_noun) else {
+    let table_noun = slot(table_mary, 3, &space)?;
+    let Ok(table) = MarySlice::try_from(table_noun, &space) else {
         debug!("cannot convert mary arg to mary");
         return Err(BAIL_FAIL);
     };
@@ -497,16 +498,17 @@ fn compress_ion(ion: &Ion, a: &Felt, b: &Felt, c: &Felt) -> Felt {
 }
 
 pub fn compute_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let table_mary = slot(sam, 2)?;
-    let chals_rd1 = slot(sam, 6)?;
-    let fock_ret = slot(sam, 7)?;
-    let queue = slot(fock_ret, 2)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let table_mary = slot(sam, 2, &space)?;
+    let chals_rd1 = slot(sam, 6, &space)?;
+    let fock_ret = slot(sam, 7, &space)?;
+    let queue = slot(fock_ret, 2, &space)?;
 
-    let chals: ExtChals = init_ext_chals(chals_rd1)?;
+    let chals: ExtChals = init_ext_chals(chals_rd1, &space)?;
 
-    let table_noun = slot(table_mary, 3)?;
-    let Ok(table) = MarySlice::try_from(table_noun) else {
+    let table_noun = slot(table_mary, 3, &space)?;
+    let Ok(table) = MarySlice::try_from(table_noun, &space) else {
         debug!("cannot convert mary arg to mary");
         return Err(BAIL_FAIL);
     };
@@ -515,7 +517,7 @@ pub fn compute_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Nou
         &mut context.stack, NUM_EXT_COLS as usize, table.len as usize,
     );
 
-    let stack: Vec<TreeData> = build_compute_queue(queue, &chals.alf)?;
+    let stack: Vec<TreeData> = build_compute_queue(queue, &chals.alf, &space)?;
     let mut stack_idx: usize = 0;
     let mut row_idx: usize = 0;
 
@@ -527,26 +529,30 @@ pub fn compute_v2_extend_jet(context: &mut Context, subject: Noun) -> Result<Nou
         row.e = stack[stack_idx + 2];
         stack_idx += 3;
 
-        row.f_h = build_tree_data(row.f.n.as_cell()?.head(), &chals.alf)?;
-        row.f_t = build_tree_data(row.f.n.as_cell()?.tail(), &chals.alf)?;
+        let f_cell = row.f.n.in_space(&space).as_cell()?;
+        row.f_h = build_tree_data(f_cell.head().noun(), &chals.alf, &space)?;
+        row.f_t = build_tree_data(f_cell.tail().noun(), &chals.alf, &space)?;
 
-        let op: u64 = if row.f.n.as_cell()?.head().is_atom() {
-            row.f.n.as_cell()?.head().as_atom()?.as_u64()?
+        let op: u64 = if f_cell.head().is_atom() {
+            f_cell.head().as_atom()?.as_u64()?
         } else {
             9
         };
 
         if matches!(op, 2 | 5 | 6 | 7 | 8) {
-            row.f_th = build_tree_data(row.f_t.n.as_cell()?.head(), &chals.alf)?;
+            let f_t_cell = row.f_t.n.in_space(&space).as_cell()?;
+            row.f_th = build_tree_data(f_t_cell.head().noun(), &chals.alf, &space)?;
         }
 
         if matches!(op, 2 | 5 | 6 | 7 | 8) {
-            row.f_tt = build_tree_data(row.f_t.n.as_cell()?.tail(), &chals.alf)?;
+            let f_t_cell = row.f_t.n.in_space(&space).as_cell()?;
+            row.f_tt = build_tree_data(f_t_cell.tail().noun(), &chals.alf, &space)?;
         }
 
         if op == 6 {
-            row.f_tth = build_tree_data(row.f_tt.n.as_cell()?.head(), &chals.alf)?;
-            row.f_ttt = build_tree_data(row.f_tt.n.as_cell()?.tail(), &chals.alf)?;
+            let f_tt_cell = row.f_tt.n.in_space(&space).as_cell()?;
+            row.f_tth = build_tree_data(f_tt_cell.head().noun(), &chals.alf, &space)?;
+            row.f_ttt = build_tree_data(f_tt_cell.tail().noun(), &chals.alf, &space)?;
         }
 
         match op {
@@ -841,11 +847,11 @@ fn write_ext_row_data(table: &mut MarySliceMut, row: &Row, data: &ExtRowData) {
     write_pelt(table, &data.fcons_inv, row, &Col(ext_idx(FCONS_INV_IDX)));
 }
 
-fn build_compute_queue(list: Noun, alf: &Felt) -> Result<Vec<TreeData>, JetErr> {
+fn build_compute_queue(list: Noun, alf: &Felt, space: &NounSpace) -> Result<Vec<TreeData>, JetErr> {
     let mut res: Vec<TreeData> = Vec::<TreeData>::new();
 
-    for n in HoonList::try_from(list)?.into_iter() {
-        let tree_data = build_tree_data(n, alf)?;
+    for n in HoonList::try_from(list, space)?.into_iter() {
+        let tree_data = build_tree_data(n, alf, space)?;
         res.push(tree_data)
     }
     Ok(res)

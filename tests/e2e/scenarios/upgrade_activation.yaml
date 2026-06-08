@@ -1,0 +1,147 @@
+name: "bythos_upgrade_activation"
+seed: 8
+binaries:
+  bythos: "${NOCKCHAIN_BIN_NEW}"
+nodes:
+  - id: "node-a"
+    binary: "${NOCKCHAIN_BIN_OLD}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 6
+    fakenet_bythos_phase: 6
+  - id: "node-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 6
+    fakenet_bythos_phase: 6
+    no_default_peers: true
+    peer_from:
+      - node: "node-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "keygen"
+    capture:
+      regex: '(?m)^(?:###\s*)?Address\s*\r?\n\s*([A-Za-z0-9]+)'
+      store_as: "miner_pkh"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "set-active-master-address"
+    args:
+      - "${miner_pkh}"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "watch"
+    args:
+      - "address"
+      - "${miner_pkh}"
+  - action: wallet
+    wallet: "recipient"
+    node: "node-a"
+    command: "keygen"
+    capture:
+      regex: '(?m)^(?:###\s*)?Address\s*\r?\n\s*([A-Za-z0-9]+)'
+      store_as: "recipient_pkh"
+  - action: set_mining_pkh
+    node: "node-a"
+    value: "${miner_pkh}"
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: start_nodes
+    ids: ["node-b"]
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 30000
+  - action: wait_for_height
+    node: "node-a"
+    height: 5
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 5
+    timeout_ms: 120000
+  - action: upgrade
+    node: "node-a"
+    version: "bythos"
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: stop_nodes
+    ids: ["node-b"]
+  - action: start_nodes
+    ids: ["node-b"]
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 30000
+  - action: wait_for_height
+    node: "node-a"
+    height: 7
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 7
+    timeout_ms: 120000
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "tx_path"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "send-tx"
+    args:
+      - "${tx_path}"
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "tx_id"
+  - action: wait_for_tx_accepted
+    node: "node-a"
+    tx: "${tx_id}"
+    timeout_ms: 60000
+  - action: wait_for_tx_accepted
+    node: "node-b"
+    tx: "${tx_id}"
+    timeout_ms: 60000
+asserts:
+  - assert: heads_equal
+    nodes: ["node-a", "node-b"]
+  - assert: tx_accepted
+    node: "node-a"
+    tx: "${tx_id}"

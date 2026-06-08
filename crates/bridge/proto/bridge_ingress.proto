@@ -61,7 +61,7 @@ message HealthCheckResponse {
   uint64 timestamp_millis = 4;
 }
 
-message SignatureBroadcast {
+message DepositSignatureBroadcast {
   bytes deposit_id = 1;        // DepositId serialized (120 bytes)
   bytes proposal_hash = 2;     // 32 bytes
   bytes signature = 3;         // 65 bytes (r, s, v)
@@ -69,9 +69,36 @@ message SignatureBroadcast {
   uint64 timestamp = 5;        // Unix timestamp
 }
 
+message DepositSignatureBroadcastResponse {
+  bool accepted = 1;
+  string error = 2;
+}
+
+// Compatibility aliases for bridge binaries deployed before the deposit RPCs
+// were renamed. Keep field numbers/wire layout identical to the deposit-
+// prefixed messages above so rolling deploys can bridge the method-name change.
+message SignatureBroadcast {
+  bytes deposit_id = 1;
+  bytes proposal_hash = 2;
+  bytes signature = 3;
+  bytes signer_address = 4;
+  uint64 timestamp = 5;
+}
+
 message SignatureBroadcastResponse {
   bool accepted = 1;
   string error = 2;
+}
+
+message DepositProposalStatusRequest {
+  bytes deposit_id = 1;
+}
+
+message DepositProposalStatusResponse {
+  string status = 1;
+  uint32 signature_count = 2;
+  repeated bytes signers = 3;
+  optional bytes tx_hash = 4;
 }
 
 message ProposalStatusRequest {
@@ -85,14 +112,134 @@ message ProposalStatusResponse {
   optional bytes tx_hash = 4;
 }
 
+message WithdrawalId {
+  // Full kernel/proposal withdrawal reference. Sequencer registration and
+  // ordering are keyed by base_event_id only.
+  bytes as_of = 1;            // 40-byte Base block hash counterpart reference
+  bytes base_event_id = 2;    // unique burn event identifier
+}
+
+message WithdrawalNoteName {
+  bytes first = 1;            // 40-byte note-name first limb-set
+  bytes last = 2;             // 40-byte note-name last limb-set
+}
+
+message WithdrawalSnapshot {
+  uint64 height = 1;
+  bytes block_id = 2;         // 40-byte nockchain block hash
+}
+
+message WithdrawalProposalEnvelope {
+  WithdrawalId withdrawal_id = 1;
+  bytes recipient = 2;        // 40-byte nock lock root
+  uint64 amount = 3;          // Net Nockchain payout after fee deduction
+  uint64 burned_amount = 4;   // Gross Base burn amount consumed by the withdrawal
+  uint64 base_batch_end = 5;
+  uint64 epoch = 6;
+  WithdrawalSnapshot snapshot = 7;
+  repeated WithdrawalNoteName selected_inputs = 8;
+  string transaction_name = 9;
+  bytes proposal_jam = 10;    // jam of the full withdrawal-proposal noun
+  uint64 withdrawal_nonce = 11;
+}
+
+// Domain-separated commit signed by a bridge operator over:
+//   keccak256("bridge.withdrawal.commit.v1" || withdrawal_id || epoch || proposal_hash)
+// This certifies peer commitment to one proposal hash for one withdrawal epoch.
+message WithdrawalCommitSignature {
+  uint64 signer_node_id = 1;
+  WithdrawalId withdrawal_id = 2;
+  uint64 epoch = 3;
+  string proposal_hash = 4;
+  bytes signature = 5;
+}
+
+message WithdrawalCommitCertificate {
+  WithdrawalId withdrawal_id = 1;
+  uint64 epoch = 2;
+  string proposal_hash = 3;
+  repeated WithdrawalCommitSignature signatures = 4;
+}
+
+message WithdrawalProposalBroadcast {
+  uint64 sender_node_id = 1;
+  WithdrawalProposalEnvelope proposal = 2;
+  string proposal_hash = 3;
+  uint64 timestamp = 4;
+}
+
+message WithdrawalProposalBroadcastResponse {
+  bool accepted = 1;
+  string status = 2;
+  string proposal_hash = 3;
+  uint64 responder_node_id = 4;
+  string error = 5;
+  WithdrawalCommitSignature commit_signature = 6;
+}
+
+message CanonicalWithdrawalProposalBroadcast {
+  uint64 sender_node_id = 1;
+  WithdrawalProposalEnvelope proposal = 2;
+  string proposal_hash = 3;
+  uint64 timestamp = 4;
+  WithdrawalCommitCertificate commit_certificate = 5;
+}
+
+message CanonicalWithdrawalProposalBroadcastResponse {
+  bool accepted = 1;
+  string status = 2;
+  string proposal_hash = 3;
+  string error = 4;
+}
+
+message SignedWithdrawalProposalBroadcast {
+  uint64 sender_node_id = 1;
+  WithdrawalProposalEnvelope proposal = 2;
+  string proposal_hash = 3;
+  uint64 timestamp = 4;
+}
+
+message SignedWithdrawalProposalBroadcastResponse {
+  bool accepted = 1;
+  string status = 2;
+  string proposal_hash = 3;
+  uint64 responder_node_id = 4;
+  string error = 5;
+}
+
+message WithdrawalProposalStatusRequest {
+  WithdrawalId withdrawal_id = 1;
+  uint64 epoch = 2;
+}
+
+message WithdrawalProposalStatusResponse {
+  string status = 1;
+  string proposal_hash = 2;
+  string transaction_name = 3;
+  bool canonicalized = 4;
+  string sequenced_state = 5;
+}
+
 // Broadcast when a proposal has been confirmed on-chain
 // Sent by the node that successfully posted to BASE
-message ConfirmationBroadcast {
+message DepositConfirmationBroadcast {
   bytes deposit_id = 1;        // DepositId serialized (120 bytes)
   bytes proposal_hash = 2;     // 32 bytes
   bytes tx_hash = 3;           // 32 bytes - the BASE transaction hash
   uint64 block_number = 4;     // BASE block number where confirmed
   uint64 timestamp = 5;        // Unix timestamp
+}
+
+message DepositConfirmationBroadcastResponse {
+  bool accepted = 1;
+}
+
+message ConfirmationBroadcast {
+  bytes deposit_id = 1;
+  bytes proposal_hash = 2;
+  bytes tx_hash = 3;
+  uint64 block_number = 4;
+  uint64 timestamp = 5;
 }
 
 message ConfirmationBroadcastResponse {
@@ -115,10 +262,148 @@ message StopBroadcastResponse {
   bool accepted = 1;
 }
 
+message SequencerAuthorizeProposalRequest {
+  WithdrawalProposalEnvelope proposal = 1;
+  WithdrawalCommitCertificate commit_certificate = 2;
+  uint64 caller_node_id = 3;
+}
+
+message SequencerRecordCanonicalRequest {
+  WithdrawalProposalEnvelope proposal = 1;
+  WithdrawalCommitCertificate commit_certificate = 2;
+  uint64 caller_node_id = 3;
+}
+
+message SequencerSubmitProposalRequest {
+  WithdrawalProposalEnvelope proposal = 1;
+  uint64 caller_node_id = 2;
+}
+
+message SequencerRecordSignedProposalRequest {
+  WithdrawalProposalEnvelope proposal = 1;
+  uint64 signer_node_id = 2;
+}
+
+message SequencerReservedWithdrawalInputsRequest {}
+
+message SequencerReservedWithdrawalInputsResponse {
+  repeated WithdrawalNoteName reserved_inputs = 1;
+}
+
+message SequencerRegisterWithdrawalRequest {
+  reserved 1;
+  reserved "withdrawal_id";
+  uint64 withdrawal_nonce = 2;
+  bytes recipient = 3;        // 40-byte nock lock root from the tracked request
+  uint64 burned_amount = 4;   // Gross Base burn amount from the tracked request
+  uint64 base_batch_end = 5;  // Base batch endpoint used for canonical withdrawal ordering
+  bytes base_event_id = 6;    // 32-byte unique Base burn event identifier
+}
+
+message SequencerAdvancePrecanonicalHandoffRequest {
+  WithdrawalId withdrawal_id = 1;
+  uint64 epoch = 2;
+  uint64 next_handoff_index = 3;
+  uint64 turn_started_base_height = 4;
+}
+
+message SequencerUpdateResponse {
+  bool request_accepted = 1;
+  string error = 2;
+}
+
+message SequencedWithdrawalStatusRequest {
+  WithdrawalId withdrawal_id = 1;
+}
+
+message SequencedWithdrawalStatusResponse {
+  bool found = 1;
+  uint64 current_epoch = 2;
+  string state = 3;
+  string proposal_hash = 4;
+  string authorized_transaction_name = 6;
+  uint64 withdrawal_nonce = 7;
+  uint64 handoff_index = 8;
+  optional uint64 turn_started_base_height = 9;
+  optional uint64 current_confirmed_base_height = 10;
+  uint64 handoff_window_blocks = 11;
+  optional uint64 blocks_until_handoff = 12;
+}
+
+message SequencerCanonicalProposalArtifactsRequest {
+  WithdrawalId withdrawal_id = 1;
+}
+
+message SequencerCanonicalProposalArtifactsResponse {
+  bool found = 1;
+  WithdrawalId withdrawal_id = 2;
+  uint64 epoch = 3;
+  string proposal_hash = 4;
+  uint64 amount = 5;
+  uint64 base_batch_end = 6;
+  WithdrawalSnapshot snapshot = 7;
+  repeated WithdrawalNoteName selected_inputs = 8;
+  bytes transaction_jam = 9;
+  bytes commit_certificate = 10;
+  string authorized_transaction_name = 11;
+  bytes authorized_transaction_jam = 12;
+  bytes authorized_raw_tx = 13;
+}
+
+message NextPendingWithdrawalOrderingRequest {}
+
+message NextPendingWithdrawalOrderingResponse {
+  bool found = 1;
+  WithdrawalId withdrawal_id = 2;
+  uint64 withdrawal_nonce = 3;
+}
+
+message CurrentLiveWithdrawalNonceRequest {}
+
+message CurrentLiveWithdrawalNonceResponse {
+  bool found = 1;
+  uint64 withdrawal_nonce = 2;
+}
+
+message SequencerFrontierAllowsWithdrawalRequest {
+  WithdrawalId withdrawal_id = 1;
+}
+
+message SequencerFrontierAllowsWithdrawalResponse {
+  bool allowed = 1;
+  bool registered = 2;
+  bool is_frontier = 3;
+}
+
 service BridgeIngress {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc BroadcastDepositSignature(DepositSignatureBroadcast) returns (DepositSignatureBroadcastResponse);
+  rpc GetDepositProposalStatus(DepositProposalStatusRequest) returns (DepositProposalStatusResponse);
+  rpc BroadcastWithdrawalProposal(WithdrawalProposalBroadcast) returns (WithdrawalProposalBroadcastResponse);
+  rpc BroadcastCanonicalWithdrawalProposal(CanonicalWithdrawalProposalBroadcast) returns (CanonicalWithdrawalProposalBroadcastResponse);
+  rpc BroadcastSignedWithdrawalProposal(SignedWithdrawalProposalBroadcast) returns (SignedWithdrawalProposalBroadcastResponse);
+  rpc GetWithdrawalProposalStatus(WithdrawalProposalStatusRequest) returns (WithdrawalProposalStatusResponse);
+  rpc BroadcastDepositConfirmation(DepositConfirmationBroadcast) returns (DepositConfirmationBroadcastResponse);
+  rpc BroadcastStop(StopBroadcast) returns (StopBroadcastResponse);
+
+  // Legacy deposit RPC names kept only for rolling deploy compatibility with
+  // bridge binaries that predate the deposit-prefixed endpoint names.
   rpc BroadcastSignature(SignatureBroadcast) returns (SignatureBroadcastResponse);
   rpc GetProposalStatus(ProposalStatusRequest) returns (ProposalStatusResponse);
   rpc BroadcastConfirmation(ConfirmationBroadcast) returns (ConfirmationBroadcastResponse);
-  rpc BroadcastStop(StopBroadcast) returns (StopBroadcastResponse);
+}
+
+service WithdrawalSequencer {
+  rpc RegisterWithdrawal(SequencerRegisterWithdrawalRequest) returns (SequencerUpdateResponse);
+  rpc AdvancePrecanonicalHandoff(SequencerAdvancePrecanonicalHandoffRequest) returns (SequencerUpdateResponse);
+  rpc RecordCanonicalProposal(SequencerRecordCanonicalRequest) returns (SequencerUpdateResponse);
+  rpc RecordSignedProposal(SequencerRecordSignedProposalRequest) returns (SequencerUpdateResponse);
+  rpc GetReservedWithdrawalInputs(SequencerReservedWithdrawalInputsRequest) returns (SequencerReservedWithdrawalInputsResponse);
+  rpc AuthorizeProposal(SequencerAuthorizeProposalRequest) returns (SequencerUpdateResponse);
+  rpc SubmitProposal(SequencerSubmitProposalRequest) returns (SequencerUpdateResponse);
+  rpc GetNextPendingWithdrawalOrdering(NextPendingWithdrawalOrderingRequest) returns (NextPendingWithdrawalOrderingResponse);
+  rpc GetCurrentLiveWithdrawalNonce(CurrentLiveWithdrawalNonceRequest) returns (CurrentLiveWithdrawalNonceResponse);
+  rpc FrontierAllowsWithdrawal(SequencerFrontierAllowsWithdrawalRequest) returns (SequencerFrontierAllowsWithdrawalResponse);
+  rpc GetSequencedWithdrawalStatus(SequencedWithdrawalStatusRequest) returns (SequencedWithdrawalStatusResponse);
+  rpc GetCanonicalProposalArtifacts(SequencerCanonicalProposalArtifactsRequest) returns (SequencerCanonicalProposalArtifactsResponse);
 }

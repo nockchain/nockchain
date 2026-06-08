@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bridge", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
 resolver = "2"
 
 [workspace.package]
@@ -16,6 +16,12 @@ arrayref = "0.3.7"
 askama = "0.12.1"
 assert_cmd = "2.0"
 async-trait = "0.1"
+aws-sdk-s3 = { version = "1", default-features = false, features = [
+    "sigv4a",
+    "http-1x",
+    "default-https-client",
+    "rt-tokio",
+] }
 axum = "0.8.1"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 backon = { version = "1.6", features = ["tokio-sleep"] }
@@ -42,6 +48,7 @@ curve25519-dalek = { version = "4.1.1", default-features = false }
 dashmap = "6.1.0"
 deadpool-diesel = { version = "0.6.1", features = ["rt_tokio_1", "sqlite"] }
 diesel = { version = "2.1.4", features = ["sqlite"] }
+diesel_migrations = { version = "2.3.2", features = ["sqlite"] }
 dirs = "6.0.0"
 divan = "0.1.21"
 ed25519-dalek = { version = "2.1.0", default-features = false }
@@ -59,6 +66,7 @@ hex = "0.4"
 hex-literal = "1.0.0"
 hickory-proto = "0.25.0-alpha.4"
 hickory-resolver = { version = "0.25.0-alpha.4", features = ["system-config"] }
+hmac = "0.12.1"
 image = "0.24.7"
 instant-acme = "0.7.2"
 intmap = "3.1.0"
@@ -103,6 +111,7 @@ rand = { version = "0.9.2", default-features = true, features = ["std"] }
 ratatui = "0.29.0"
 rayon = "1.8.0"
 rcgen = "0.14.3"
+regex = "1.10.4"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "http2",
@@ -111,6 +120,8 @@ reqwest = { version = "0.12", default-features = false, features = [
     "blocking",
 ] }
 rkyv = "0.8.13"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+rustix = { version = "0.38", features = ["fs", "mm"] }
 rustls = "0.23.0"
 rustls-pemfile = "2.0.0"
 rustls-pki-types = "1.13.1"
@@ -118,6 +129,7 @@ serde = "1.0.217"
 serde_bytes = { version = "0.11.15", features = ["alloc"] }
 serde_cbor = "0.11"
 serde_json = "1.0.104"
+serde_yaml = "0.9.34"
 sha1 = { version = "0.10.6", default-features = false }
 sha2 = { version = "0.10.8", default-features = false }
 sha3 = "0.10.8"
@@ -134,7 +146,7 @@ tempfile = "3.3"
 termcolor = "1.4"
 termimad = "0.33.0"
 test-log = "0.2.18"
-testcontainers = { git = "https://github.com/bitemyapp/testcontainers-rs.git", rev = "17c00e411341943196ccd9df1165e60a4d1c40f9" }
+testcontainers = "0.27.3"
 thiserror = "2.0.11"
 tikv-jemallocator = { version = "0.6" }
 tiny-keccak = { version = "2", features = ["keccak"] }
@@ -158,6 +170,7 @@ tonic-health = "0.14.2"
 tonic-prost = "0.14.0"
 tonic-prost-build = "0.14.0"
 tonic-reflection = "0.14.0"
+tonic-web = "0.14.5"
 tower-http = { version = "0.6", features = ["fs"] }
 tracing = "0.1.41"
 tracing-appender = "0.2.4"
@@ -172,6 +185,7 @@ tracing-test = "0.2.5"
 tracing-tracy = { version = "0.11.4" }
 tracy-client = { version = "0.18.2" }
 unroll = "0.1.5"
+uuid = { version = "1.23.1", features = ["v4"] }
 vergen = "8.3.2"
 void = "1.0.2"
 walkdir = "2.5.0"
@@ -203,7 +217,6 @@ path = "crates/kernels"
 
 [workspace.dependencies.kernels-open-bridge]
 path = "crates/kernels/bridge"
-
 [workspace.dependencies.kernels-open-dumb]
 path = "crates/kernels/dumb"
 
@@ -232,11 +245,17 @@ path = "crates/nockapp-grpc-proto"
 [workspace.dependencies.nockchain]
 path = "crates/nockchain"
 
+[workspace.dependencies.nockchain-e2e]
+path = "crates/nockchain-e2e"
+
 [workspace.dependencies.nockchain-libp2p-io]
 path = "crates/nockchain-libp2p-io"
 
 [workspace.dependencies.nockchain-math]
 path = "crates/nockchain-math"
+
+[workspace.dependencies.nockchain-testkit]
+path = "crates/nockchain-testkit"
 
 [workspace.dependencies.nockchain-types]
 path = "crates/nockchain-types"
@@ -259,6 +278,9 @@ path = "crates/noun-serde"
 [workspace.dependencies.noun-serde-derive]
 path = "crates/noun-serde-derive"
 
+[workspace.dependencies.wallet-tx-builder]
+path = "crates/wallet-tx-builder"
+
 [workspace.dependencies.zkvm-jetpack]
 path = "crates/zkvm-jetpack"
 
@@ -268,6 +290,10 @@ path = "crates/zkvm-jetpack"
 op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-consensus" }
 op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-network" }
 op-alloy-rpc-types = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-rpc-types" }
+
+# [lints.clippy]
+# pedantic = { level = "warn", priority = -1 }
+# restriction = { level = "warn", priority = -2 }
 
 # Comment out this block if gdb is lacking info
 [profile.dev]

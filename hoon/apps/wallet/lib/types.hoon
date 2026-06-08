@@ -1,7 +1,6 @@
 /=  transact  /common/tx-engine
 /=  zo  /common/zoon
 /=  *  /common/zose
-/=  bridge  /apps/bridge/types
 /=  dumb  /apps/dumbnet/lib/types
 /=  s10  /apps/wallet/lib/s10
 |_  bc=blockchain-constants:transact
@@ -351,8 +350,52 @@
         bc=blockchain-constants:transact
     ==
   ::
+  ::  frozen pre-ASERT snapshot of blockchain-constants:v1, used to decode
+  ::  old %6 wallet states serialized before the five asert-* fields were added.
+  +$  blockchain-constants-v1-pre-asert
+    $:  v1-phase=@
+        bythos-phase=@
+        data=[max-size=@ min-fee=@]
+        base-fee=@
+        input-fee-divisor=@
+        blockchain-constants:v0:transact
+    ==
+  ::
+  ::  frozen phase-1 snapshot of blockchain-constants:v1 (five asert-*
+  ::  fields, no asert-anchor-min-timestamp). used to decode old %7
+  ::  wallet states serialized before phase 2 of 014-aletheia.
+  +$  blockchain-constants-v1-phase-1
+    $:  v1-phase=@
+        bythos-phase=@
+        data=[max-size=@ min-fee=@]
+        base-fee=@
+        input-fee-divisor=@
+        blockchain-constants:v0:transact
+        asert-phase=@
+        asert-anchor-height=@
+        asert-anchor-target-atom=@
+        asert-ideal-block-time=@
+        asert-half-life=@
+    ==
+  ::
   +$  state-6
     $:  %6
+        balance=balance-v4
+        active-master=active-v4
+        keys=keys-v4
+        bc=blockchain-constants-v1-pre-asert
+    ==
+  ::
+  +$  state-7
+    $:  %7
+        balance=balance-v4
+        active-master=active-v4
+        keys=keys-v4
+        bc=blockchain-constants-v1-phase-1
+    ==
+  ::
+  +$  state-8
+    $:  %8
         balance=balance-v4
         active-master=active-v4
         keys=keys-v4
@@ -369,9 +412,11 @@
         state-4
         state-5
         state-6
+        state-7
+        state-8
     ==
   ::
-  +$  state  $>(%6 versioned-state)
+  +$  state  $>(%8 versioned-state)
   ::
   +$  seed-name   $~('default-seed' @t)
   ::
@@ -387,7 +432,8 @@
     $%  [%pkh recipient=hash:transact gift=coins:transact]
         [%multisig threshold=@ participants=(list hash:transact) gift=coins:transact]
         [%lock-root root=hash:transact gift=coins:transact]
-        [%bridge-deposit address=evm-address:bridge gift=coins:transact]
+        [%bridge-deposit root=hash:transact evm-addr=@ux gift=coins:transact]
+        [%bridge-withdrawal base-event-id=@ base-hash=hash:transact root=hash:transact base-batch-end=@ gift=coins:transact]
     ==
   ++  gift
     |=  =form
@@ -397,6 +443,7 @@
         %multisig   gift.form
         %lock-root  gift.form
         %bridge-deposit  gift.form
+        %bridge-withdrawal  gift.form
     ==
   --
 ::
@@ -451,6 +498,7 @@
         [%show-seed-phrase ~]
         [%show-master-zpub ~]
         [%show-master-zprv ~]
+        [%show-master-prv ~]
         [%show =path]
         [%import-seed-phrase seed-phrase=@t version=key-version]
         [%update-balance-grpc balance=*]
@@ -500,7 +548,7 @@
   ::
   +$  preinput  [name=@t (pair input:transact input-mask)]
   ::
-  +$  input-display
+  +$  input-metadata
     $%  [%0 p=(z-map:zo nname:transact =sig:v0:transact)]
         [%1 p=(z-map:zo nname:transact sc=spend-condition:transact)]
     ==
@@ -510,7 +558,8 @@
     $:  %1
       $%  [%lock =lock:transact include-data=?]
           [%lock-root root=hash:transact]
-          [%bridge-deposit root=hash:transact addr=evm-address:bridge]
+          [%bridge-deposit root=hash:transact evm-addr=@ux]
+          [%bridge-withdrawal root=hash:transact beid=(list @) base-hash=hash:transact base-batch-end=@]
       ==
     ==
   +$  lock-metadata
@@ -519,8 +568,8 @@
   ::
   +$  output-lock-map  (z-map:zo hash:transact lock-metadata)
   ::
-  +$  transaction-display
-    $:  inputs=input-display
+  +$  metadata
+    $:  inputs=input-metadata
         outputs=output-lock-map
     ==
   ::
@@ -528,7 +577,7 @@
     $:  =spends:v1:transact
         fee=@
         orders=(list order)
-        display=transaction-display
+        metadata=metadata
         wd=witness-data
     ==
   ::
@@ -566,7 +615,7 @@
     $:  %1
         name=@t
         =spends:transact
-        display=transaction-display
+        metadata=metadata
         =witness-data
     ==
   ::
@@ -574,7 +623,15 @@
     $+  versioned-transaction
     $^(transaction-0 transaction-1)
   ::
-+$  transaction  transaction-1
+  ++  transaction
+    =<  form
+    |%
+    +$  form  $%(transaction-1)
+    ++  apply
+      |=  =form
+      ^-  spends:v1:transact
+      (apply:witness-data witness-data.form spends.form)
+    --
   ::
   ::
   +$  active-signer-info

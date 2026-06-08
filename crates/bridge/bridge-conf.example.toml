@@ -12,6 +12,10 @@ node_id = 0
 # Ethereum Base L2 WebSocket URL
 base_ws_url = "wss://virtual.base-sepolia.us-east.rpc.tenderly.co/YOUR-TENDERLY-PROJECT-ID"
 
+# Active bridge multisig lock root for this environment.
+# On mainnet this must remain the canonical production bridge root.
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
+
 # Address of the MessageInbox contract on Base L2
 inbox_contract_address = "0x68487BbaE6210a7A5d92c1D3D620e7AC9f7Ae29E"
 nock_contract_address = "0x9f5D8976f0F89eC92241850A585B313F31Ab8b62"
@@ -29,22 +33,35 @@ grpc_address = "http://localhost:5555"
 base_confirmation_depth = 300
 nockchain_confirmation_depth = 100
 
-# Runtime nonce epoch base.
-# Set this to the last successful deposit nonce on Base at activation time.
-# If you omit the start height/tx-id, this must be 0.
-nonce_epoch_base = 150
+# Deposit nonce epoch base.
+# This exists because deposit nonce semantics were corrected by an ad-hoc
+# update about a month after launch. Set it to the last successful deposit
+# nonce on Base at activation time. If you omit the start height/tx-id, this
+# must be 0.
+deposit_nonce_epoch_base = 150
 
-# Runtime nonce epoch start height (required when nonce_epoch_base is non-zero).
-# This must be the height of the anchor deposit that produced nonce_epoch_base.
-nonce_epoch_start_height = 50009
+# Deposit nonce epoch start height (required when deposit_nonce_epoch_base is non-zero).
+# This must be the height of the anchor deposit that produced deposit_nonce_epoch_base.
+deposit_nonce_epoch_start_height = 50009
 
-# Runtime nonce epoch start tx-id (required when nonce_epoch_base is non-zero).
-# This tx-id is the anchor deposit whose nonce is nonce_epoch_base.
+# Deposit nonce epoch start tx-id (required when deposit_nonce_epoch_base is non-zero).
+# This tx-id is the anchor deposit whose nonce is deposit_nonce_epoch_base.
 # Set it to the tx_id corresponding to the last successful deposit
-nonce_epoch_start_tx_id_base58 = "2uYre9HXRP8X6BD7w3GvgfUAU47RSmZDGkz9uJgJmD9CxN7JA69k6MF"
+deposit_nonce_epoch_start_tx_id_base58 = "2uYre9HXRP8X6BD7w3GvgfUAU47RSmZDGkz9uJgJmD9CxN7JA69k6MF"
+
+# Withdrawal activation cutoff.
+# This is a bridge-kernel Nock next height, not an RPC chain tip. Fresh
+# withdrawal projections wait until this frontier is reached, then initialize at
+# the current full Base/Nock kernel position. Earlier Base withdrawal burns are
+# ignored by the local withdrawal projection.
+withdrawal_activation_nock_next_height = 25
 
 # Bridge ingress gRPC listen address (must match this node's entry in [[nodes]])
 ingress_listen_address = "127.0.0.1:8001"
+
+# Withdrawal sequencer gRPC endpoint exposed by the nockchain API node.
+# If omitted, the bridge derives it from grpc_address by adding 100 to the port.
+nockchain_sequencer_api_address = "http://127.0.0.1:5655"
 
 # All 5 bridge nodes configuration
 # Each node needs IP address, Base address (eth_pubkey), and Nockchain public key hash (nock_pkh).

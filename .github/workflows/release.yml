@@ -1,11 +1,15 @@
 name: Release Binaries and Generate Manifests
 
 on:
-  push:
-    branches: ["master", "nightly"]
-    tags: ["v*"]
-  pull_request:
-    branches: ["master", "nightly"]
+  # Binary creation disabled for now: the workflow no longer runs on push/PR/tag.
+  # Re-enable by uncommenting the triggers below. workflow_dispatch keeps it
+  # available to run manually in the meantime.
+  workflow_dispatch:
+  # push:
+  #   branches: ["master", "nightly"]
+  #   tags: ["v*"]
+  # pull_request:
+  #   branches: ["master", "nightly"]
 
 jobs:
   build:

@@ -6,8 +6,10 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 
+async-trait = { workspace = true }
 bs58 = { workspace = true }
 bytes = { workspace = true }
+cbor4ii = { workspace = true, features = ["serde1", "use_std"] }
 config = { workspace = true }
 dashmap = { workspace = true }
 either = { workspace = true }
@@ -39,12 +41,21 @@ num-bigint.workspace = true
 rand = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["alloc", "derive", "serde_derive"] }
 serde_bytes = { workspace = true, features = ["alloc"] }
+signal-hook = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-cbor4ii = { workspace = true, features = ["serde1", "use_std"] }
+chaff = { workspace = true }
 hex = { workspace = true }
+kernels-open-dumb = { workspace = true }
+nockapp-grpc-proto = { workspace = true }
+nockchain = { workspace = true }
+nockchain-types = { workspace = true }
 quickcheck = { workspace = true }
 serde_cbor = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
+tonic = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+zkvm-jetpack = { workspace = true }

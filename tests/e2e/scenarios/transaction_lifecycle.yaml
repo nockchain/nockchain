@@ -1,0 +1,170 @@
+name: "transaction_lifecycle"
+seed: 6
+nodes:
+  - id: "node-a"
+    grpc_public_addr: "127.0.0.1:6701"
+    grpc_private_port: 7701
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 1
+    bind:
+      - "/ip4/127.0.0.1/udp/4701/quic-v1"
+  - id: "node-b"
+    grpc_public_addr: "127.0.0.1:6702"
+    grpc_private_port: 7702
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 1
+    no_default_peers: true
+    peers:
+      - "/ip4/127.0.0.1/udp/4701/quic-v1"
+  - id: "node-c"
+    grpc_public_addr: "127.0.0.1:6703"
+    grpc_private_port: 7703
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 1
+    no_default_peers: true
+    peers:
+      - "/ip4/127.0.0.1/udp/4701/quic-v1"
+steps:
+  - action: start_nodes
+    ids: ["node-a"]
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "keygen"
+    capture:
+      regex: '(?m)^### Address\s*\n([A-Za-z0-9]+)'
+      store_as: "miner_pkh"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "set-active-master-address"
+    args:
+      - "${miner_pkh}"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "watch"
+    args:
+      - "address"
+      - "${miner_pkh}"
+  - action: wallet
+    wallet: "recipient"
+    node: "node-a"
+    command: "keygen"
+    capture:
+      regex: '(?m)^### Address\s*\n([A-Za-z0-9]+)'
+      store_as: "recipient_pkh"
+  - action: wallet
+    wallet: "recipient"
+    node: "node-a"
+    command: "set-active-master-address"
+    args:
+      - "${recipient_pkh}"
+  - action: wallet
+    wallet: "recipient"
+    node: "node-a"
+    command: "watch"
+    args:
+      - "address"
+      - "${recipient_pkh}"
+  - action: set_mining_pkh
+    node: "node-a"
+    value: "${miner_pkh}"
+  - action: wait_for_grpc
+    node: "node-a"
+    timeout_ms: 30000
+  - action: start_nodes
+    ids: ["node-b", "node-c"]
+  - action: wait_for_grpc
+    node: "node-b"
+    timeout_ms: 30000
+  - action: wait_for_grpc
+    node: "node-c"
+    timeout_ms: 30000
+  - action: wait_for_height
+    node: "node-a"
+    height: 2
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-b"
+    height: 2
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-c"
+    height: 2
+    timeout_ms: 120000
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "tx_path"
+  - action: wallet
+    wallet: "miner"
+    node: "node-a"
+    command: "send-tx"
+    args:
+      - "${tx_path}"
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "tx_id"
+  - action: wait_for_tx_accepted
+    node: "node-a"
+    tx: "${tx_id}"
+    timeout_ms: 60000
+  - action: wait_for_tx_accepted
+    node: "node-b"
+    tx: "${tx_id}"
+    timeout_ms: 60000
+  - action: wait_for_tx_accepted
+    node: "node-c"
+    tx: "${tx_id}"
+    timeout_ms: 60000
+  - action: wait_for_height
+    node: "node-a"
+    height: 3
+    timeout_ms: 120000
+  - action: wallet
+    wallet: "recipient"
+    node: "node-a"
+    command: "list-notes-by-address"
+    args:
+      - "${recipient_pkh}"
+    expect: "Wallet Notes for Address"
+asserts:
+  - assert: heads_equal
+    nodes: ["node-a", "node-b", "node-c"]
+    timeout_ms: 120000
+  - assert: tx_accepted
+    node: "node-a"
+    tx: "${tx_id}"

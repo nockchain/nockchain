@@ -5,7 +5,7 @@ use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use nockvm::jets::util::BAIL_EXIT;
 use nockvm::jets::JetErr;
-use nockvm::noun::Noun;
+use nockvm::noun::NounSpace;
 use noun_serde::{NounDecode, NounEncode};
 use num_traits::Pow;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -98,8 +98,12 @@ impl NounEncode for Belt {
 }
 
 impl NounDecode for Belt {
-    fn from_noun(noun: &nockvm::noun::Noun) -> Result<Self, noun_serde::NounDecodeError> {
+    fn from_noun(
+        noun: &nockvm::noun::Noun,
+        space: &NounSpace,
+    ) -> Result<Self, noun_serde::NounDecodeError> {
         let atom = noun
+            .in_space(space)
             .as_atom()
             .map_err(|_| noun_serde::NounDecodeError::ExpectedAtom)?;
         let value = atom
@@ -272,19 +276,6 @@ impl TryFrom<&u64> for Belt {
     fn try_from(f: &u64) -> Result<Self, Self::Error> {
         based!(*f);
         Ok(Belt(*f))
-    }
-}
-
-impl TryFrom<Noun> for Belt {
-    type Error = ();
-
-    #[inline(always)]
-    fn try_from(n: Noun) -> std::result::Result<Self, Self::Error> {
-        if !n.is_atom() {
-            Err(())
-        } else {
-            Belt::try_from(&n.as_atom()?.as_u64()?)
-        }
     }
 }
 

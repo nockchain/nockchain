@@ -9,14 +9,16 @@ use crate::noun::{IndirectAtom, Noun, D};
 crate::gdb!();
 
 pub fn jet_cap(_context: &mut Context, subject: Noun) -> Result {
-    let arg = slot(subject, 6)?;
+    let space = _context.stack.noun_space();
+    let arg = slot(subject, 6, &space)?;
     let tom = arg.as_atom()?;
-    let met = met(0, tom);
+    let tom_handle = tom.in_space(&space);
+    let met = met(0, tom, &space);
 
     unsafe {
         if met < 2 {
             Err(BAIL_EXIT)
-        } else if *(tom.as_bitslice().get_unchecked(met - 2)) {
+        } else if *(tom_handle.as_bitslice().get_unchecked(met - 2)) {
             Ok(D(3))
         } else {
             Ok(D(2))
@@ -26,8 +28,10 @@ pub fn jet_cap(_context: &mut Context, subject: Noun) -> Result {
 
 pub fn jet_mas(context: &mut Context, subject: Noun) -> Result {
     let stack = &mut context.stack;
-    let tom = slot(subject, 6)?.as_atom()?;
-    let met = met(0, tom);
+    let space = stack.noun_space();
+    let tom = slot(subject, 6, &space)?.as_atom()?;
+    let tom_handle = tom.in_space(&space);
+    let met = met(0, tom, &space);
 
     if met < 2 {
         Err(BAIL_EXIT)
@@ -38,17 +42,20 @@ pub fn jet_mas(context: &mut Context, subject: Noun) -> Result {
             unsafe { IndirectAtom::new_raw_mut_bitslice(stack, out_words) };
         out_bs.set(met - 2, true); // Set MSB
         if met > 2 {
-            out_bs[0..(met - 2)].copy_from_bitslice(&tom.as_bitslice()[0..(met - 2)]);
+            out_bs[0..(met - 2)].copy_from_bitslice(&tom_handle.as_bitslice()[0..(met - 2)]);
         };
-        unsafe { Ok(indirect_out.normalize_as_atom().as_noun()) }
+        unsafe { Ok(indirect_out.normalize_as_atom(&space).as_noun()) }
     }
 }
 
 pub fn jet_peg(context: &mut Context, subject: Noun) -> Result {
     let stack = &mut context.stack;
-    let arg = slot(subject, 6)?;
-    let a = slot(arg, 2)?.as_atom()?;
-    let b = slot(arg, 3)?.as_atom()?;
+    let space = stack.noun_space();
+    let arg = slot(subject, 6, &space)?;
+    let a = slot(arg, 2, &space)?.as_atom()?;
+    let b = slot(arg, 3, &space)?.as_atom()?;
+    let a_handle = a.in_space(&space);
+    let b_handle = b.in_space(&space);
 
     unsafe {
         if a.as_noun().raw_equals(&D(0)) {
@@ -60,8 +67,8 @@ pub fn jet_peg(context: &mut Context, subject: Noun) -> Result {
         };
     }
 
-    let a_bits = met(0, a);
-    let b_bits = met(0, b);
+    let a_bits = met(0, a, &space);
+    let b_bits = met(0, b, &space);
     let out_bits = a_bits + b_bits - 1;
 
     let out_words = (out_bits + 63) >> 6; // bits to 8-byte words
@@ -69,10 +76,10 @@ pub fn jet_peg(context: &mut Context, subject: Noun) -> Result {
     let (mut indirect_out, out_bs) =
         unsafe { IndirectAtom::new_raw_mut_bitslice(stack, out_words) };
 
-    out_bs[0..b_bits - 1].copy_from_bitslice(&b.as_bitslice()[0..b_bits - 1]);
-    out_bs[b_bits - 1..out_bits].copy_from_bitslice(&a.as_bitslice()[0..a_bits]);
+    out_bs[0..b_bits - 1].copy_from_bitslice(&b_handle.as_bitslice()[0..b_bits - 1]);
+    out_bs[b_bits - 1..out_bits].copy_from_bitslice(&a_handle.as_bitslice()[0..a_bits]);
 
-    unsafe { Ok(indirect_out.normalize_as_atom().as_noun()) }
+    unsafe { Ok(indirect_out.normalize_as_atom(&space).as_noun()) }
 }
 
 #[cfg(test)]

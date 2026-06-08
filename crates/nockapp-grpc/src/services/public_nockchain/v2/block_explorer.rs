@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,11 +10,11 @@ use nockapp_grpc_proto::pb::public::v2::{
     CoinbaseSplitV1 as ProtoCoinbaseSplitV1, CoinbaseSplitV1Entry, PageMsg as ProtoPageMsg,
     ProofOfWork, TransactionDetails, TransactionInput, TransactionOutput,
 };
-use nockchain_math::noun_ext::NounMathExt;
+use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonMapIter;
 use nockchain_types::tx_engine::common::{BlockHeight, Hash, Name, Page};
 use nockchain_types::tx_engine::v0::{Lock, NoteV0, RawTx};
-use nockvm::noun::{Noun, SIG};
+use nockvm::noun::{Noun, NounAllocator, NounHandle, NounSpace, SIG};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tokio::sync::{RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
@@ -130,6 +129,7 @@ pub struct FullPageDetails {
     /// Block content
     pub tx_ids: Vec<Hash>,
     pub coinbase: CoinbaseSplitValue,
+    pub raw_page_bytes: u64,
     pub msg: PageMsgValue,
 }
 
@@ -212,11 +212,22 @@ pub struct BlockExplorerCache {
 }
 
 impl BlockExplorerCache {
-    const RANGE_CHUNK: u64 = 1024;
+    // Keep each kernel peek small enough for block sync traffic to interleave
+    // between cache slices without waiting on ~27s 1024-block decodes.
+    const RANGE_CHUNK: u64 = 128;
     const INITIAL_SEED_RETRY_DELAY: Duration = Duration::from_secs(2);
     const INITIAL_SEED_MAX_WAIT: Duration = Duration::from_secs(120);
     const MIN_TX_PREFIX_LEN: usize = 8;
     const MAX_PREFIX_MATCHES: usize = 16;
+
+    fn range_chunk_start(upper: u64) -> u64 {
+        upper.saturating_sub(Self::RANGE_CHUNK - 1)
+    }
+
+    fn range_chunk_end(lower: u64, upper: u64) -> u64 {
+        lower.saturating_add(Self::RANGE_CHUNK - 1).min(upper)
+    }
+
     pub fn new(metrics: Arc<NockchainGrpcApiMetrics>) -> Self {
         Self {
             blocks_by_height: Arc::new(RwLock::new(BTreeMap::new())),
@@ -320,7 +331,7 @@ impl BlockExplorerCache {
             self.max_height.store(0, Ordering::Release);
         }
 
-        let first_start = max_height.saturating_sub(Self::RANGE_CHUNK - 1);
+        let first_start = Self::range_chunk_start(max_height);
         info!(
             "Attempting to fetch blocks range {}..={}",
             first_start, max_height
@@ -464,7 +475,7 @@ impl BlockExplorerCache {
         let mut inserted = 0usize;
         let mut chunk_start = last_height + 1;
         while chunk_start <= current_height {
-            let chunk_end = (chunk_start + Self::RANGE_CHUNK - 1).min(current_height);
+            let chunk_end = Self::range_chunk_end(chunk_start, current_height);
             match self.peek_blocks_range(handle, chunk_start, chunk_end).await {
                 Ok(blocks) => {
                     if !blocks.is_empty() {
@@ -669,24 +680,29 @@ impl BlockExplorerCache {
             .ok_or(NockAppGrpcError::PeekFailed)?;
 
         let result_noun = unsafe { result.root() };
-
+        let space = result.noun_space();
+        let result_noun_handle = result_noun.in_space(&space);
         tracing::debug!(
             noun_is_atom = result_noun.is_atom(),
             "peek_full_page raw result"
         );
 
-        let opt: Option<Option<Vec<FullPageEntryNoun>>> = NounDecode::from_noun(&result_noun)
-            .map_err(|e| {
-                tracing::error!("Failed to decode FullPageEntryNoun list: {:?}", e);
-                NockAppGrpcError::NounDecode(e)
-            })?;
-        let entries = opt.flatten().ok_or(NockAppGrpcError::PeekReturnedNoData)?;
+        let entries = decode_optional_optional_vec_handles(result_noun_handle).map_err(|e| {
+            tracing::error!("Failed to decode full page entry list: {:?}", e);
+            NockAppGrpcError::NounDecode(e)
+        })?;
+        let entries = entries.ok_or(NockAppGrpcError::PeekReturnedNoData)?;
 
         let parsed: Vec<FullPageDetails> = entries
             .into_iter()
             .map(|entry| {
-                let entry_height = entry.height.0 .0;
-                FullPageDetails::try_from(entry).map_err(|e| {
+                let entry_height = entry
+                    .slot(2)
+                    .ok()
+                    .and_then(|noun| noun.as_atom().ok())
+                    .and_then(|atom| atom.as_u64().ok())
+                    .unwrap_or(u64::MAX);
+                FullPageDetails::from_noun_handle(&entry).map_err(|e| {
                     tracing::error!(
                         height = entry_height,
                         error = %e,
@@ -858,9 +874,10 @@ impl BlockExplorerCache {
             .ok_or(NockAppGrpcError::PeekFailed)?;
 
         let result_noun = unsafe { result.root() };
+        let space = result.noun_space();
 
         // Decode Option<Option<(BlockHeight, Hash)>>
-        let opt: Option<Option<(BlockHeight, Hash)>> = NounDecode::from_noun(&result_noun)
+        let opt: Option<Option<(BlockHeight, Hash)>> = NounDecode::from_noun(&result_noun, &space)
             .map_err(|e| {
                 error!(
                     "Failed to decode heaviest-chain peek result.\n\
@@ -913,17 +930,19 @@ impl BlockExplorerCache {
             .ok_or(NockAppGrpcError::PeekFailed)?;
 
         let result_noun = unsafe { result.root() };
-
+        let space = result.noun_space();
+        let result_noun_handle = result_noun.in_space(&space);
         // Decode Option<Option<Page>>
-        let opt: Option<Option<Page>> = NounDecode::from_noun(&result_noun).map_err(|e| {
-            error!(
-                "Failed to decode heaviest-block peek result.\n\
+        let opt: Option<Option<Page>> =
+            NounDecode::from_noun_handle(&result_noun_handle).map_err(|e| {
+                error!(
+                    "Failed to decode heaviest-block peek result.\n\
                  Decode error: {:?}\n\
                  Expected: Option<Option<Page>>",
-                e
-            );
-            NockAppGrpcError::NounDecode(e)
-        })?;
+                    e
+                );
+                NockAppGrpcError::NounDecode(e)
+            })?;
 
         debug!(
             "peek_heaviest_block decoded: outer={:?}",
@@ -1006,13 +1025,17 @@ impl BlockExplorerCache {
             .ok_or(NockAppGrpcError::PeekFailed)?;
 
         let result_noun = unsafe { result.root() };
-        let opt: Option<Option<Vec<BlockRangeEntryNoun>>> =
-            NounDecode::from_noun(&result_noun).map_err(NockAppGrpcError::NounDecode)?;
-        let entries = opt.flatten().ok_or(NockAppGrpcError::PeekReturnedNoData)?;
+        let space = result.noun_space();
+        let entries = decode_optional_optional_vec_handles(result_noun.in_space(&space))
+            .map_err(NockAppGrpcError::NounDecode)?
+            .ok_or(NockAppGrpcError::PeekReturnedNoData)?;
 
         let mut parsed = Vec::new();
         for entry in entries {
-            parsed.push(BlockEntryWithTxs::try_from(entry).map_err(NockAppGrpcError::NounDecode)?);
+            parsed.push(
+                BlockEntryWithTxs::from_noun_handle(&entry)
+                    .map_err(NockAppGrpcError::NounDecode)?,
+            );
         }
 
         parsed
@@ -1041,7 +1064,7 @@ impl BlockExplorerCache {
         let mut acc = Vec::new();
         let mut chunk_start = start;
         while chunk_start <= end {
-            let chunk_end = (chunk_start + Self::RANGE_CHUNK - 1).min(end);
+            let chunk_end = Self::range_chunk_end(chunk_start, end);
             match self.peek_blocks_range(handle, chunk_start, chunk_end).await {
                 Ok(mut chunk) => acc.append(&mut chunk),
                 Err(NockAppGrpcError::PeekReturnedNoData) => {
@@ -1082,7 +1105,7 @@ impl BlockExplorerCache {
             if upper == u64::MAX {
                 break;
             }
-            let start = upper.saturating_sub(Self::RANGE_CHUNK - 1);
+            let start = Self::range_chunk_start(upper);
             let chunk = match self.peek_blocks_range(&handle, start, upper).await {
                 Ok(blocks) => blocks,
                 Err(NockAppGrpcError::PeekReturnedNoData) => {
@@ -1254,13 +1277,12 @@ impl BlockExplorerCache {
             .ok_or(NockAppGrpcError::PeekFailed)?;
 
         let result_noun = unsafe { result.root() };
-
-        // Debug: log raw noun structure
+        let space = result.noun_space(); // Debug: log raw noun structure
         let is_atom = result_noun.is_atom();
         let is_cell = result_noun.is_cell();
         if is_atom {
             if let Ok(atom) = result_noun.as_atom() {
-                let val = atom.as_u64().unwrap_or(u64::MAX);
+                let val = atom.in_space(&space).as_u64().unwrap_or(u64::MAX);
                 info!(
                     is_atom,
                     atom_val = val,
@@ -1269,8 +1291,8 @@ impl BlockExplorerCache {
             }
         } else if is_cell {
             if let Ok(cell) = result_noun.as_cell() {
-                let head_is_atom = cell.head().is_atom();
-                let tail_is_atom = cell.tail().is_atom();
+                let head_is_atom = cell.in_space(&space).head().is_atom();
+                let tail_is_atom = cell.in_space(&space).tail().is_atom();
                 info!(
                     head_is_atom,
                     tail_is_atom, "peek_blocks_range raw result is cell"
@@ -1280,21 +1302,21 @@ impl BlockExplorerCache {
 
         // Decode Option<Option<Vec<(height, block-id, page, txs)>>>
         // We need to extract fields from the page and txs
-        let opt: Option<Option<Vec<BlockRangeEntryNoun>>> =
-            NounDecode::from_noun(&result_noun).map_err(|e| {
+        let decoded_entries =
+            decode_optional_optional_vec_handles(result_noun.in_space(&space)).map_err(|e| {
                 // Log detailed noun structure to help diagnose format issues
                 let noun_debug = if result_noun.is_atom() {
                     format!(
                         "atom (value: {:?})",
-                        result_noun.as_atom().ok().and_then(|a| a.as_u64().ok())
+                        result_noun.as_atom().ok().and_then(|a| a.in_space(&space).as_u64().ok())
                     )
                 } else if let Ok(cell) = result_noun.as_cell() {
-                    let head_type = if cell.head().is_atom() {
+                    let head_type = if cell.in_space(&space).head().is_atom() {
                         "atom"
                     } else {
                         "cell"
                     };
-                    let tail_type = if cell.tail().is_atom() {
+                    let tail_type = if cell.in_space(&space).tail().is_atom() {
                         "atom"
                     } else {
                         "cell"
@@ -1303,25 +1325,23 @@ impl BlockExplorerCache {
                 } else {
                     "unknown".to_string()
                 };
-
                 error!(
-                    "Failed to decode BlockRangeEntryNoun list.\n\
+                    "Failed to decode block range entry list.\n\
                      Decode error: {:?}\n\
                      Result noun structure: {}\n\
                      This is likely a Page decoder issue - check tx_ids (z-set vs list), bignum, or coinbase format.",
                     e, noun_debug
                 );
-                NockAppGrpcError::NounDecode(e)
-            })?;
+                NockAppGrpcError::NounDecode(e)})?;
 
-        let outer_some = opt.is_some();
-        let inner_some = opt.as_ref().map(|v| v.is_some()).unwrap_or(false);
+        let outer_some = result_noun.is_cell();
+        let inner_some = decoded_entries.is_some();
         info!(
             outer_some,
             inner_some, "peek_blocks_range decoded outer options"
         );
 
-        let entries = opt.flatten().ok_or_else(|| {
+        let entries = decoded_entries.ok_or_else(|| {
             warn!("peek_blocks_range: opt.flatten() returned None");
             NockAppGrpcError::PeekReturnedNoData
         })?;
@@ -1333,8 +1353,8 @@ impl BlockExplorerCache {
         let entries: Vec<BlockRangeEntry> = entries
             .into_iter()
             .map(|entry| {
-                BlockRangeEntry::try_from(entry).map_err(|e| {
-                    error!("Failed to convert BlockRangeEntryNoun: {:?}", e);
+                BlockRangeEntry::from_noun_handle(&entry).map_err(|e| {
+                    error!("Failed to convert block range entry: {:?}", e);
                     e
                 })
             })
@@ -1366,31 +1386,98 @@ struct BlockRangeEntry {
     tx_ids: Vec<Hash>,
 }
 
-#[derive(Debug, Clone, NounDecode)]
+fn decode_option_handle<'a>(
+    noun: NounHandle<'a>,
+) -> Result<Option<NounHandle<'a>>, NounDecodeError> {
+    if let Ok(atom) = noun.as_atom() {
+        if atom.as_u64()? == 0 {
+            return Ok(None);
+        }
+        return Err(NounDecodeError::Custom("Invalid Option encoding".into()));
+    }
+
+    let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+    let head = cell
+        .head()
+        .as_atom()
+        .map_err(|_| NounDecodeError::ExpectedAtom)?;
+    if head.as_u64()? != 0 {
+        return Err(NounDecodeError::Custom(
+            "Invalid Option encoding - expected ~".into(),
+        ));
+    }
+    Ok(Some(cell.tail()))
+}
+
+fn decode_vec_handles<'a>(noun: NounHandle<'a>) -> Result<Vec<NounHandle<'a>>, NounDecodeError> {
+    let mut result = Vec::new();
+    let mut current = noun;
+
+    while let Ok(cell) = current.as_cell() {
+        result.push(cell.head());
+        current = cell.tail();
+    }
+
+    let atom = current
+        .as_atom()
+        .map_err(|_| NounDecodeError::ExpectedAtom)?;
+    if atom.as_u64()? != 0 {
+        return Err(NounDecodeError::Custom("Invalid list termination".into()));
+    }
+
+    Ok(result)
+}
+
+fn decode_optional_optional_vec_handles<'a>(
+    noun: NounHandle<'a>,
+) -> Result<Option<Vec<NounHandle<'a>>>, NounDecodeError> {
+    let Some(inner) = decode_option_handle(noun)? else {
+        return Ok(None);
+    };
+    let Some(list) = decode_option_handle(inner)? else {
+        return Ok(None);
+    };
+    Ok(Some(decode_vec_handles(list)?))
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
 struct BlockRangeEntryNoun {
     height: BlockHeight,
     tail: BlockRangeEntryTail,
 }
 
-#[derive(Debug, Clone, NounDecode)]
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
 struct BlockRangeEntryTail {
     block_id: Hash,
     tail: PageAndTxs,
 }
 
-#[derive(Debug, Clone, NounDecode)]
+#[cfg(test)]
+#[derive(Debug, Clone, NounEncode, NounDecode)]
 struct PageAndTxs {
     page: Page,
-    txs: Noun,
+    txs: Vec<RawTx>,
 }
 
-impl TryFrom<BlockRangeEntryNoun> for BlockRangeEntry {
-    type Error = NounDecodeError;
+impl BlockRangeEntry {
+    fn from_noun_handle(noun: &NounHandle) -> std::result::Result<Self, NounDecodeError> {
+        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let height = BlockHeight::from_noun_handle(&cell.head())?;
 
-    fn try_from(raw: BlockRangeEntryNoun) -> std::result::Result<Self, Self::Error> {
-        let BlockRangeEntryNoun { height, tail } = raw;
-        let BlockRangeEntryTail { block_id, tail } = tail;
-        let PageAndTxs { page, txs } = tail;
+        let tail = cell
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let block_id = Hash::from_noun_handle(&tail.head())?;
+
+        let page_and_txs = tail
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let page = Page::from_noun_handle(&page_and_txs.head())?;
+        let txs = page_and_txs.tail();
 
         let parent_id = page.parent;
         let timestamp = page.timestamp;
@@ -1408,7 +1495,7 @@ impl TryFrom<BlockRangeEntryNoun> for BlockRangeEntry {
 
 /// Extract transaction IDs from transactions map (z-map tx-id tx)
 fn extract_tx_ids_from_map(
-    txs_noun: &Noun,
+    txs_noun: &NounHandle,
 ) -> std::result::Result<Vec<Hash>, noun_serde::NounDecodeError> {
     // Check if it's an empty map (atom 0)
     if let Ok(atom) = txs_noun.as_atom() {
@@ -1419,7 +1506,7 @@ fn extract_tx_ids_from_map(
 
     // Iterate over the z-map and collect keys (tx-ids)
     let mut tx_ids = Vec::new();
-    for (idx, entry) in HoonMapIter::from(*txs_noun).enumerate() {
+    for (idx, entry) in HoonMapIter::new(txs_noun).enumerate() {
         if !entry.is_cell() {
             return Err(NounDecodeError::Custom(format!(
                 "extract_tx_ids_from_map: entry {} is not a cell (expected z-map [key value] pair)",
@@ -1427,7 +1514,7 @@ fn extract_tx_ids_from_map(
             )));
         }
         let [key, _value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let hash = Hash::from_noun(&key).map_err(|e| {
+        let hash = Hash::from_noun_handle(&key).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "extract_tx_ids_from_map: failed to decode tx_id at entry {}: {}",
                 idx, e
@@ -1444,13 +1531,23 @@ struct BlockEntryWithTxs {
     txs: Vec<(Hash, DecodedTx)>,
 }
 
-impl TryFrom<BlockRangeEntryNoun> for BlockEntryWithTxs {
-    type Error = NounDecodeError;
+impl BlockEntryWithTxs {
+    fn from_noun_handle(noun: &NounHandle) -> std::result::Result<Self, NounDecodeError> {
+        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let height = BlockHeight::from_noun_handle(&cell.head())?;
 
-    fn try_from(raw: BlockRangeEntryNoun) -> std::result::Result<Self, Self::Error> {
-        let BlockRangeEntryNoun { height, tail } = raw;
-        let BlockRangeEntryTail { block_id, tail } = tail;
-        let PageAndTxs { page, txs } = tail;
+        let tail = cell
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let block_id = Hash::from_noun_handle(&tail.head())?;
+
+        let page_and_txs = tail
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let page = Page::from_noun_handle(&page_and_txs.head())?;
+        let txs = page_and_txs.tail();
 
         let parent_id = page.parent;
         let timestamp = page.timestamp;
@@ -1471,7 +1568,7 @@ impl TryFrom<BlockRangeEntryNoun> for BlockEntryWithTxs {
 }
 
 fn extract_transactions_from_map(
-    txs_noun: &Noun,
+    txs_noun: &NounHandle,
 ) -> std::result::Result<Vec<(Hash, DecodedTx)>, noun_serde::NounDecodeError> {
     if let Ok(atom) = txs_noun.as_atom() {
         if atom.as_u64()? == 0 {
@@ -1480,7 +1577,7 @@ fn extract_transactions_from_map(
     }
 
     let mut txs = Vec::new();
-    for (idx, entry) in HoonMapIter::from(*txs_noun).enumerate() {
+    for (idx, entry) in HoonMapIter::new(txs_noun).enumerate() {
         if !entry.is_cell() {
             return Err(NounDecodeError::Custom(format!(
                 "extract_transactions_from_map: entry {} is not a cell (expected z-map [key value] pair)",
@@ -1488,13 +1585,13 @@ fn extract_transactions_from_map(
             )));
         }
         let [key, value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let hash = Hash::from_noun(&key).map_err(|e| {
+        let hash = Hash::from_noun_handle(&key).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "extract_transactions_from_map: failed to decode tx hash at entry {}: {}",
                 idx, e
             ))
         })?;
-        let tx = DecodedTx::from_noun(&value).map_err(|e| {
+        let tx = DecodedTx::from_noun_handle(&value).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "extract_transactions_from_map: failed to decode tx at entry {} (hash={}): {}",
                 idx,
@@ -1552,20 +1649,20 @@ struct TxOutputV0 {
 }
 
 impl NounDecode for DecodedTx {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let version = u64::from_noun(&cell.head())?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
+        let version = u64::from_noun_handle(&cell.head())?;
 
         match version {
             0 => {
                 // v0 tx: [%0 raw-tx:v0 total-size outputs:v0]
                 let tail = cell.tail();
                 let cell = tail.as_cell()?;
-                let raw_tx = RawTx::from_noun(&cell.head())?;
+                let raw_tx = RawTx::from_noun_handle(&cell.head())?;
 
                 let tail = cell.tail();
                 let cell = tail.as_cell()?;
-                let total_size = u64::from_noun(&cell.head())?;
+                let total_size = u64::from_noun_handle(&cell.head())?;
                 let outputs = decode_outputs_v0(&cell.tail())?;
 
                 Ok(DecodedTx::V0(TxV0Data {
@@ -1588,7 +1685,7 @@ impl NounDecode for DecodedTx {
                 let raw_cell = raw_tx_noun
                     .as_cell()
                     .map_err(|e| NounDecodeError::Custom(format!("v1 raw-tx not cell: {e:?}")))?;
-                let raw_version = u64::from_noun(&raw_cell.head()).map_err(|e| {
+                let raw_version = u64::from_noun_handle(&raw_cell.head()).map_err(|e| {
                     NounDecodeError::Custom(format!("v1 raw-tx version not atom: {e:?}"))
                 })?;
                 if raw_version != 1 {
@@ -1600,7 +1697,7 @@ impl NounDecode for DecodedTx {
                 let raw_tail = raw_cell.tail().as_cell().map_err(|e| {
                     NounDecodeError::Custom(format!("v1 raw-tx tail not cell: {e:?}"))
                 })?;
-                let _tx_id = Hash::from_noun(&raw_tail.head()).map_err(|e| {
+                let _tx_id = Hash::from_noun_handle(&raw_tail.head()).map_err(|e| {
                     NounDecodeError::Custom(format!("v1 raw-tx id parse failed: {e:?}"))
                 })?;
                 let spends_noun = raw_tail.tail();
@@ -1614,7 +1711,7 @@ impl NounDecode for DecodedTx {
                 let cell = tail.as_cell().map_err(|e| {
                     NounDecodeError::Custom(format!("v1 tx size/outputs tail not cell: {e:?}"))
                 })?;
-                let total_size = u64::from_noun(&cell.head()).map_err(|e| {
+                let total_size = u64::from_noun_handle(&cell.head()).map_err(|e| {
                     NounDecodeError::Custom(format!("v1 tx total_size not atom: {e:?}"))
                 })?;
                 let outputs = decode_outputs_v1(&cell.tail()).map_err(|e| {
@@ -1637,7 +1734,7 @@ impl NounDecode for DecodedTx {
 }
 
 /// Returns (inputs, total_fee)
-fn decode_v1_spends(noun: &Noun) -> Result<(Vec<TxV1Input>, u64), NounDecodeError> {
+fn decode_v1_spends(noun: &NounHandle) -> Result<(Vec<TxV1Input>, u64), NounDecodeError> {
     if let Ok(atom) = noun.as_atom() {
         if atom.as_u64()? == 0 {
             return Ok((Vec::new(), 0));
@@ -1646,7 +1743,7 @@ fn decode_v1_spends(noun: &Noun) -> Result<(Vec<TxV1Input>, u64), NounDecodeErro
 
     let mut inputs = Vec::new();
     let mut total_fee = 0u64;
-    for (idx, entry) in HoonMapIter::from(*noun).enumerate() {
+    for (idx, entry) in HoonMapIter::new(noun).enumerate() {
         if !entry.is_cell() {
             return Err(NounDecodeError::Custom(format!(
                 "decode_v1_spends: entry {} is not a cell (expected z-map [nname spend] pair)",
@@ -1655,7 +1752,7 @@ fn decode_v1_spends(noun: &Noun) -> Result<(Vec<TxV1Input>, u64), NounDecodeErro
         }
         let [key, value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
         // key is nname (Name type)
-        let name = Name::from_noun(&key).map_err(|e| {
+        let name = Name::from_noun_handle(&key).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_v1_spends: failed to decode name at entry {}: {}",
                 idx, e
@@ -1687,7 +1784,7 @@ fn decode_v1_spends(noun: &Noun) -> Result<(Vec<TxV1Input>, u64), NounDecodeErro
     Ok((inputs, total_fee))
 }
 
-fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
+fn decode_outputs_v1(noun: &NounHandle) -> Result<Vec<TxV1Output>, NounDecodeError> {
     // outputs:v1 can be either:
     // 1. Tagged form from polymorphic outputs: [%1 (z-set output)]
     // 2. Untagged form from tx:v1: (z-set output)
@@ -1728,7 +1825,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
     let mut outputs = Vec::new();
     // z-set structure: [n=value l=z-set r=z-set]
     // HoonMapIter returns n (the value) directly for each node
-    for (idx, entry) in HoonMapIter::from(zset_noun).enumerate() {
+    for (idx, entry) in HoonMapIter::new(&zset_noun).enumerate() {
         if !entry.is_cell() {
             return Err(NounDecodeError::Custom(format!(
                 "decode_outputs_v1: entry {} is not a cell (expected z-set output entry)",
@@ -1758,7 +1855,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
             continue;
         }
 
-        let note_version = u64::from_noun(&note_head).map_err(|e| {
+        let note_version = u64::from_noun_handle(&note_head).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} note version not atom: {e:?}",
                 idx
@@ -1774,7 +1871,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
                 idx
             ))
         })?;
-        let _origin_page = u64::from_noun(&note_tail.head()).map_err(|e| {
+        let _origin_page = u64::from_noun_handle(&note_tail.head()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} origin-page not atom: {e:?}",
                 idx
@@ -1786,7 +1883,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
                 idx
             ))
         })?;
-        let name = Name::from_noun(&note_tail.head()).map_err(|e| {
+        let name = Name::from_noun_handle(&note_tail.head()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} name parse failed: {e:?}",
                 idx
@@ -1799,7 +1896,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
             ))
         })?;
         let _note_data = note_tail.head(); // z-map @tas * - skip
-        let assets = u64::from_noun(&note_tail.tail()).map_err(|e| {
+        let assets = u64::from_noun_handle(&note_tail.tail()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v1: output {} assets not atom: {e:?}",
                 idx
@@ -1815,7 +1912,7 @@ fn decode_outputs_v1(noun: &Noun) -> Result<Vec<TxV1Output>, NounDecodeError> {
     Ok(outputs)
 }
 
-fn decode_outputs_v0(noun: &Noun) -> Result<Vec<TxOutputV0>, NounDecodeError> {
+fn decode_outputs_v0(noun: &NounHandle) -> Result<Vec<TxOutputV0>, NounDecodeError> {
     if let Ok(atom) = noun.as_atom() {
         if atom.as_u64()? == 0 {
             return Ok(Vec::new());
@@ -1823,7 +1920,7 @@ fn decode_outputs_v0(noun: &Noun) -> Result<Vec<TxOutputV0>, NounDecodeError> {
     }
 
     let mut outputs = Vec::new();
-    for (idx, entry) in HoonMapIter::from(*noun).enumerate() {
+    for (idx, entry) in HoonMapIter::new(noun).enumerate() {
         if !entry.is_cell() {
             return Err(NounDecodeError::Custom(format!(
                 "decode_outputs_v0: entry {} is not a cell (expected z-map [lock note] pair)",
@@ -1831,7 +1928,7 @@ fn decode_outputs_v0(noun: &Noun) -> Result<Vec<TxOutputV0>, NounDecodeError> {
             )));
         }
         let [key, value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let lock = Lock::from_noun(&key).map_err(|e| {
+        let lock = Lock::from_noun_handle(&key).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v0: output {} lock parse failed: {}",
                 idx, e
@@ -1840,7 +1937,7 @@ fn decode_outputs_v0(noun: &Noun) -> Result<Vec<TxOutputV0>, NounDecodeError> {
         let value_cell = value.as_cell().map_err(|_| {
             NounDecodeError::Custom(format!("decode_outputs_v0: output {} value not cell", idx))
         })?;
-        let note = NoteV0::from_noun(&value_cell.head()).map_err(|e| {
+        let note = NoteV0::from_noun_handle(&value_cell.head()).map_err(|e| {
             NounDecodeError::Custom(format!(
                 "decode_outputs_v0: output {} note parse failed: {}",
                 idx, e
@@ -2020,66 +2117,41 @@ fn lock_summary(lock: &Lock) -> String {
 // Full Page Details - Noun Decoding Types
 // ============================================================================
 
-/// Noun decoder for full page entry
-#[derive(Debug, Clone, NounDecode)]
-struct FullPageEntryNoun {
-    height: BlockHeight,
-    tail: FullPageEntryTail,
-}
+impl FullPageDetails {
+    fn from_noun_handle(noun: &NounHandle) -> std::result::Result<Self, NounDecodeError> {
+        let cell = noun.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let height = BlockHeight::from_noun_handle(&cell.head())?.0 .0;
 
-#[derive(Debug, Clone, NounDecode)]
-struct FullPageEntryTail {
-    block_id: Hash,
-    tail: FullPageData,
-}
+        let tail = cell
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let block_id = Hash::from_noun_handle(&tail.head())?;
 
-#[derive(Debug, Clone, NounDecode)]
-struct FullPageData {
-    page: FullPageNoun,
-    txs: Noun,
-}
+        let page_and_txs = tail
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let page = page_and_txs.head();
+        let txs_noun = page_and_txs.tail();
 
-/// Full page structure matching Hoon's page type
-#[derive(Debug, Clone)]
-struct FullPageNoun {
-    /// For v1: version tag (%1), for v0: this is actually digest
-    version_or_digest: Noun,
-    /// Remaining page fields
-    rest: Noun,
-}
-
-impl NounDecode for FullPageNoun {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        Ok(Self {
-            version_or_digest: cell.head(),
-            rest: cell.tail(),
-        })
-    }
-}
-
-impl TryFrom<FullPageEntryNoun> for FullPageDetails {
-    type Error = NounDecodeError;
-
-    fn try_from(raw: FullPageEntryNoun) -> Result<Self, Self::Error> {
-        let height = raw.height.0 .0;
-        let block_id = raw.tail.block_id;
-        let page = raw.tail.tail.page;
-        let txs_noun = raw.tail.tail.txs;
+        let page_cell = page.as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        let version_or_digest = page_cell.head();
+        let rest = page_cell.tail();
+        let raw_page_bytes = jammed_noun_len(page.noun(), page.space()) as u64;
 
         // Determine if v0 or v1 page:
         // - v0 page: [digest pow parent ...] where digest is a Hash (cell of 5 Belts)
         // - v1 page: [%1 digest pow parent ...] where %1 is an atom
         // So if head is an atom, it's v1; if head is a cell (Hash), it's v0
-        let head_is_atom = page.version_or_digest.is_atom();
-        let head_is_cell = page.version_or_digest.is_cell();
-        let head_as_u64 = page
-            .version_or_digest
+        let head_is_atom = version_or_digest.is_atom();
+        let head_is_cell = version_or_digest.is_cell();
+        let head_as_u64 = version_or_digest
             .as_atom()
             .ok()
             .and_then(|a| a.as_u64().ok());
-        let head_as_bytes = page.version_or_digest.as_atom().ok().map(|a| {
-            let bytes = a.as_ne_bytes();
+        let head_as_bytes = version_or_digest.as_atom().ok().map(|atom_handle| {
+            let bytes = atom_handle.as_ne_bytes();
             format!("{:?} (len={})", bytes, bytes.len())
         });
         tracing::info!(
@@ -2093,8 +2165,7 @@ impl TryFrom<FullPageEntryNoun> for FullPageDetails {
 
         if head_is_atom {
             // v1 page - head is the version tag
-            let version = page
-                .version_or_digest
+            let version = version_or_digest
                 .as_atom()
                 .map_err(|_| NounDecodeError::Custom("Expected atom for version".into()))?
                 .as_u64()
@@ -2106,11 +2177,11 @@ impl TryFrom<FullPageEntryNoun> for FullPageDetails {
                     version
                 )));
             }
-            decode_v1_page(height, block_id, page.rest, txs_noun)
+            decode_v1_page(height, block_id, raw_page_bytes, rest, txs_noun)
         } else {
             // v0 page - head is the digest
             decode_v0_page(
-                height, block_id, page.version_or_digest, page.rest, txs_noun,
+                height, block_id, raw_page_bytes, version_or_digest, rest, txs_noun,
             )
         }
     }
@@ -2119,12 +2190,13 @@ impl TryFrom<FullPageEntryNoun> for FullPageDetails {
 fn decode_v0_page(
     height: u64,
     block_id: Hash,
-    digest_noun: Noun,
-    rest: Noun,
-    txs_noun: Noun,
+    raw_page_bytes: u64,
+    digest_noun: NounHandle,
+    rest: NounHandle,
+    txs_noun: NounHandle,
 ) -> Result<FullPageDetails, NounDecodeError> {
     // v0 page: [digest pow parent tx-ids coinbase timestamp epoch-counter target accumulated-work height msg]
-    let _digest = Hash::from_noun(&digest_noun)
+    let _digest = Hash::from_noun_handle(&digest_noun)
         .map_err(|e| NounDecodeError::Custom(format!("v0 page digest: {}", e)))?;
 
     let cell = rest
@@ -2137,7 +2209,7 @@ fn decode_v0_page(
         .tail()
         .as_cell()
         .map_err(|_| NounDecodeError::Custom("v0 page: expected cell after pow".into()))?;
-    let parent = Hash::from_noun(&cell.head())
+    let parent = Hash::from_noun_handle(&cell.head())
         .map_err(|e| NounDecodeError::Custom(format!("v0 page parent: {}", e)))?;
 
     let cell = cell
@@ -2216,6 +2288,7 @@ fn decode_v0_page(
         accumulated_work,
         tx_ids,
         coinbase,
+        raw_page_bytes,
         msg,
     })
 }
@@ -2223,14 +2296,16 @@ fn decode_v0_page(
 fn decode_v1_page(
     height: u64,
     block_id: Hash,
-    rest: Noun,
-    txs_noun: Noun,
+    raw_page_bytes: u64,
+    rest: NounHandle,
+    txs_noun: NounHandle,
 ) -> Result<FullPageDetails, NounDecodeError> {
+    let _space = rest.space();
     // v1 page (after version tag): [digest pow parent tx-ids coinbase timestamp epoch-counter target accumulated-work height msg]
     let cell = rest
         .as_cell()
         .map_err(|_| NounDecodeError::Custom("v1 page: rest should be cell".into()))?;
-    let _digest = Hash::from_noun(&cell.head())
+    let _digest = Hash::from_noun_handle(&cell.head())
         .map_err(|e| NounDecodeError::Custom(format!("v1 page digest: {}", e)))?;
 
     let cell = cell
@@ -2244,7 +2319,7 @@ fn decode_v1_page(
         .tail()
         .as_cell()
         .map_err(|_| NounDecodeError::Custom("v1 page: expected cell after pow".into()))?;
-    let parent = Hash::from_noun(&cell.head())
+    let parent = Hash::from_noun_handle(&cell.head())
         .map_err(|e| NounDecodeError::Custom(format!("v1 page parent: {}", e)))?;
 
     let cell = cell
@@ -2323,11 +2398,12 @@ fn decode_v1_page(
         accumulated_work,
         tx_ids,
         coinbase,
+        raw_page_bytes,
         msg,
     })
 }
 
-fn decode_pow(noun: &Noun) -> Result<(bool, Option<Vec<u8>>), NounDecodeError> {
+fn decode_pow(noun: &NounHandle) -> Result<(bool, Option<Vec<u8>>), NounDecodeError> {
     if noun.is_atom() {
         let atom = noun.as_atom()?;
         if atom.as_u64()? == 0 {
@@ -2340,7 +2416,7 @@ fn decode_pow(noun: &Noun) -> Result<(bool, Option<Vec<u8>>), NounDecodeError> {
     }
 }
 
-fn decode_bignum(noun: &Noun) -> Result<BigNumValue, NounDecodeError> {
+fn decode_bignum(noun: &NounHandle) -> Result<BigNumValue, NounDecodeError> {
     // Bignum can be [%bn list-of-u32] or just a raw atom
     if let Ok(cell) = noun.as_cell() {
         if let Ok(tag) = cell.head().as_atom() {
@@ -2373,7 +2449,7 @@ fn decode_bignum(noun: &Noun) -> Result<BigNumValue, NounDecodeError> {
     Ok(BigNumValue { raw_bytes: bytes })
 }
 
-fn decode_coinbase(noun: &Noun) -> Result<CoinbaseSplitValue, NounDecodeError> {
+fn decode_coinbase(noun: &NounHandle) -> Result<CoinbaseSplitValue, NounDecodeError> {
     // Coinbase in pages can be:
     // - Atom 0: empty map (genesis or no coinbase)
     // - v0 raw format: (z-map sig coins) where sig is a complex structure
@@ -2417,7 +2493,7 @@ fn decode_coinbase(noun: &Noun) -> Result<CoinbaseSplitValue, NounDecodeError> {
     }
 }
 
-fn decode_coinbase_v1_map(noun: &Noun) -> Result<Vec<(Hash, u64)>, NounDecodeError> {
+fn decode_coinbase_v1_map(noun: &NounHandle) -> Result<Vec<(Hash, u64)>, NounDecodeError> {
     if let Ok(atom) = noun.as_atom() {
         if atom.as_u64()? == 0 {
             return Ok(Vec::new());
@@ -2425,21 +2501,21 @@ fn decode_coinbase_v1_map(noun: &Noun) -> Result<Vec<(Hash, u64)>, NounDecodeErr
     }
 
     let mut entries = Vec::new();
-    for entry in HoonMapIter::from(*noun) {
+    for entry in HoonMapIter::new(noun) {
         if !entry.is_cell() {
             continue;
         }
         let [key, value] = entry.uncell().map_err(|_| NounDecodeError::ExpectedCell)?;
-        let hash = Hash::from_noun(&key)?;
+        let hash = Hash::from_noun_handle(&key)?;
         let coins = value.as_atom()?.as_u64()?;
         entries.push((hash, coins));
     }
     Ok(entries)
 }
 
-fn count_map_entries(noun: &Noun) -> usize {
+fn count_map_entries(noun: &NounHandle) -> usize {
     let mut count = 0;
-    for entry in HoonMapIter::from(*noun) {
+    for entry in HoonMapIter::new(noun) {
         if entry.is_cell() {
             count += 1;
         }
@@ -2447,7 +2523,7 @@ fn count_map_entries(noun: &Noun) -> usize {
     count
 }
 
-fn decode_page_msg(noun: &Noun) -> Result<PageMsgValue, NounDecodeError> {
+fn decode_page_msg(noun: &NounHandle) -> Result<PageMsgValue, NounDecodeError> {
     // PageMsg is a list of u32, we'll just get the raw bytes
     if let Ok(atom) = noun.as_atom() {
         if atom.as_u64()? == 0 {
@@ -2468,6 +2544,12 @@ fn decode_page_msg(noun: &Noun) -> Result<PageMsgValue, NounDecodeError> {
         current = cell.tail();
     }
     Ok(PageMsgValue { raw: bytes })
+}
+
+fn jammed_noun_len(noun: Noun, space: &NounSpace) -> usize {
+    let mut slab: NounSlab = NounSlab::new();
+    slab.copy_into(noun, space);
+    slab.jam().len()
 }
 
 // ============================================================================
@@ -2508,6 +2590,7 @@ impl FullPageDetails {
             tx_count: self.tx_ids.len() as u32,
             has_pow: self.pow_present,
             version: self.version,
+            raw_page_bytes: Some(self.raw_page_bytes),
         }
     }
 
@@ -2562,8 +2645,12 @@ impl FullPageDetails {
 
 #[cfg(test)]
 mod tests {
+    use nockapp::driver::PokeResult;
+    use nockapp::nockapp::error::NockAppError;
+    use nockapp::wire::WireRepr;
     use nockchain_math::belt::Belt;
-    use nockchain_types::tx_engine::common::{BlockHeight, Hash};
+    use nockchain_types::tx_engine::common::{BigNum, BlockHeight, CoinbaseSplit, Hash, Page};
+    use nockvm::noun::NounAllocator;
     use noun_serde::{NounDecode, NounEncode};
 
     use super::*;
@@ -2575,12 +2662,13 @@ mod tests {
         // Test that BlockHeight encodes as a simple atom
         let height = BlockHeight(Belt(105));
         let height_noun = height.to_noun(&mut slab);
+        let space = slab.noun_space();
 
         // Verify it's an atom
         assert!(height_noun.is_atom(), "BlockHeight should encode as atom");
 
         // Try to decode as u64 directly
-        let result_u64 = u64::from_noun(&height_noun);
+        let result_u64 = u64::from_noun(&height_noun, &space);
         match result_u64 {
             Ok(val) => {
                 println!("BlockHeight decoded as u64: {}", val);
@@ -2592,7 +2680,7 @@ mod tests {
         }
 
         // Try to decode as BlockHeight
-        let result_height = BlockHeight::from_noun(&height_noun);
+        let result_height = BlockHeight::from_noun(&height_noun, &space);
         match result_height {
             Ok(h) => {
                 println!("BlockHeight decoded correctly: {:?}", h);
@@ -2660,13 +2748,221 @@ mod tests {
         let entry_noun = nockvm::noun::T(&mut slab, &[height_noun, block_page_cell]);
 
         // Try to decode it
-        let raw = BlockRangeEntryNoun::from_noun(&entry_noun).expect("decode raw entry");
-        let entry = BlockRangeEntry::try_from(raw).expect("convert raw entry");
+        let space = slab.noun_space();
+        let entry = BlockRangeEntry::from_noun_handle(&entry_noun.in_space(&space))
+            .expect("decode block range entry");
 
         assert_eq!(entry.height, 42);
         assert_eq!(entry.block_id, block_id);
         assert_eq!(entry.parent_id, parent);
         assert_eq!(entry.timestamp, 1234567890);
         assert_eq!(entry.tx_ids.len(), 0);
+    }
+
+    #[test]
+    fn test_full_page_details_reports_jammed_page_bytes() {
+        let mut slab: NounSlab = NounSlab::new();
+
+        let height = BlockHeight(Belt(42));
+        let height_noun = height.to_noun(&mut slab);
+
+        let block_id = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]);
+        let block_id_noun = block_id.to_noun(&mut slab);
+
+        let digest = Hash([Belt(10), Belt(11), Belt(12), Belt(13), Belt(14)]);
+        let pow = nockvm::noun::D(0);
+        let tx_ids_set = nockvm::noun::D(0);
+        let coinbase = nockvm::noun::D(0);
+        let timestamp = Belt(1234567890);
+        let epoch_counter = Belt(0);
+        let target = Belt(100);
+        let accumulated_work = Belt(500);
+        let page_height = Belt(42);
+        let parent = Hash([Belt(20), Belt(21), Belt(22), Belt(23), Belt(24)]);
+        let msg = nockvm::noun::D(0);
+
+        let digest_noun = digest.to_noun(&mut slab);
+        let parent_noun = parent.to_noun(&mut slab);
+        let timestamp_noun = timestamp.to_noun(&mut slab);
+        let epoch_counter_noun = epoch_counter.to_noun(&mut slab);
+        let target_noun = target.to_noun(&mut slab);
+        let accumulated_work_noun = accumulated_work.to_noun(&mut slab);
+        let page_height_noun = page_height.to_noun(&mut slab);
+
+        let page_noun = nockvm::noun::T(
+            &mut slab,
+            &[
+                digest_noun, pow, parent_noun, tx_ids_set, coinbase, timestamp_noun,
+                epoch_counter_noun, target_noun, accumulated_work_noun, page_height_noun, msg,
+            ],
+        );
+        let txs_map_noun = nockvm::noun::D(0);
+        let page_txs_cell = nockvm::noun::T(&mut slab, &[page_noun, txs_map_noun]);
+        let block_page_cell = nockvm::noun::T(&mut slab, &[block_id_noun, page_txs_cell]);
+        let entry_noun = nockvm::noun::T(&mut slab, &[height_noun, block_page_cell]);
+
+        let space = slab.noun_space();
+        let expected_raw_page_bytes = jammed_noun_len(page_noun, &space) as u64;
+        let details = FullPageDetails::from_noun_handle(&entry_noun.in_space(&space))
+            .expect("convert raw entry");
+
+        assert_eq!(details.raw_page_bytes, expected_raw_page_bytes);
+        assert!(details.msg.raw.is_empty());
+    }
+
+    #[test]
+    fn test_range_chunk_helpers_bound_kernel_slice() {
+        assert_eq!(BlockExplorerCache::RANGE_CHUNK, 128);
+        assert_eq!(BlockExplorerCache::range_chunk_start(255), 128);
+        assert_eq!(BlockExplorerCache::range_chunk_end(1, 255), 128);
+        assert_eq!(BlockExplorerCache::range_chunk_end(129, 255), 255);
+    }
+
+    struct RecordingRangeHandle {
+        heaviest_height: u64,
+        requested_ranges: Mutex<Vec<(u64, u64)>>,
+    }
+
+    impl RecordingRangeHandle {
+        fn new(heaviest_height: u64) -> Self {
+            Self {
+                heaviest_height,
+                requested_ranges: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requested_ranges(&self) -> Vec<(u64, u64)> {
+            self.requested_ranges
+                .lock()
+                .expect("requested ranges lock poisoned")
+                .clone()
+        }
+
+        fn encode_heaviest_chain(&self) -> NounSlab {
+            let mut slab = NounSlab::new();
+            let noun = Some(Some((
+                BlockHeight(Belt(self.heaviest_height)),
+                test_hash(self.heaviest_height),
+            )))
+            .to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+
+        fn encode_block_range(&self, end: u64) -> NounSlab {
+            let mut slab = NounSlab::new();
+            let noun = Some(Some(vec![test_block_range_entry(end)])).to_noun(&mut slab);
+            slab.set_root(noun);
+            slab
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BalanceHandle for RecordingRangeHandle {
+        async fn peek(
+            &self,
+            path: NounSlab,
+        ) -> std::result::Result<Option<NounSlab>, NockAppError> {
+            let space = path.noun_space();
+            let root = unsafe { *path.root() };
+            let items = path_items(root, &space);
+            let tag = String::from_noun(&items[0], &space).expect("path tag should decode");
+
+            match tag.as_str() {
+                "heaviest-chain" => Ok(Some(self.encode_heaviest_chain())),
+                "heaviest-chain-blocks-range" => {
+                    assert_eq!(items.len(), 3, "range path should include start and end");
+                    let start = atom_u64(items[1], &space);
+                    let end = atom_u64(items[2], &space);
+                    self.requested_ranges
+                        .lock()
+                        .expect("requested ranges lock poisoned")
+                        .push((start, end));
+                    Ok(Some(self.encode_block_range(end)))
+                }
+                other => panic!("unexpected peek path tag: {other}"),
+            }
+        }
+
+        async fn poke(
+            &self,
+            _wire: WireRepr,
+            _payload: NounSlab,
+        ) -> std::result::Result<PokeResult, NockAppError> {
+            Err(NockAppError::OtherError(
+                "poke not supported in test handle".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_initialize_inner_requests_latest_seed_window_and_queues_backfill() {
+        let metrics = crate::public_nockchain::v2::metrics::init_metrics();
+        let cache = Arc::new(BlockExplorerCache::new(metrics));
+        let handle = Arc::new(RecordingRangeHandle::new(255));
+        let balance_handle: Arc<dyn BalanceHandle> = handle.clone();
+
+        let initialized = cache
+            .clone()
+            .initialize_inner(balance_handle)
+            .await
+            .expect("cache initialization should succeed");
+
+        assert!(initialized, "cache should report a successful seed");
+        assert_eq!(handle.requested_ranges(), vec![(128, 255)]);
+        assert_eq!(cache.get_max_height(), 255);
+        assert_eq!(cache.take_backfill_resume().await, Some(127));
+    }
+
+    fn test_hash(seed: u64) -> Hash {
+        Hash([Belt(seed + 1), Belt(seed + 2), Belt(seed + 3), Belt(seed + 4), Belt(seed + 5)])
+    }
+
+    fn test_block_range_entry(height: u64) -> BlockRangeEntryNoun {
+        let digest = test_hash(height + 10);
+        BlockRangeEntryNoun {
+            height: BlockHeight(Belt(height)),
+            tail: BlockRangeEntryTail {
+                block_id: digest.clone(),
+                tail: PageAndTxs {
+                    page: Page {
+                        digest,
+                        pow: None,
+                        parent: test_hash(height + 20),
+                        tx_ids: Vec::new(),
+                        coinbase: CoinbaseSplit::V1,
+                        timestamp: height * 10,
+                        epoch_counter: 0,
+                        target: BigNum::from_u64(1),
+                        accumulated_work: BigNum::from_u64(height + 1),
+                        height,
+                        msg: Vec::new(),
+                    },
+                    txs: Vec::new(),
+                },
+            },
+        }
+    }
+
+    fn path_items(noun: Noun, space: &NounSpace) -> Vec<Noun> {
+        let mut items = Vec::new();
+        let mut noun = noun.in_space(space);
+        loop {
+            if let Ok(atom) = noun.as_atom() {
+                assert_eq!(atom.as_u64().expect("path terminator should be u64"), 0);
+                return items;
+            }
+            let cell = noun.as_cell().expect("path should decode as noun list");
+            items.push(cell.head().noun());
+            noun = cell.tail();
+        }
+    }
+
+    fn atom_u64(noun: Noun, space: &NounSpace) -> u64 {
+        noun.in_space(space)
+            .as_atom()
+            .expect("expected atom")
+            .as_u64()
+            .expect("expected u64 atom")
     }
 }

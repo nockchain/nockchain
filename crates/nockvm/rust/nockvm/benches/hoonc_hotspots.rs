@@ -22,7 +22,8 @@ impl Slogger for BenchSlogger {
 }
 
 fn bench_context() -> Context {
-    let mut stack = NockStack::new(8 << 20, 0);
+    let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
+    let arena = stack.arena().clone();
     let cold = Cold::new(&mut stack);
     let warm = Warm::new(&mut stack);
     let hot = Hot::init(&mut stack, URBIT_HOT_STATE);
@@ -42,6 +43,7 @@ fn bench_context() -> Context {
         trace_info: None,
         running_status: cancel,
         test_jets,
+        arena,
     }
 }
 
@@ -66,7 +68,7 @@ fn bench_hamt_symbol_table(c: &mut Criterion) {
     c.bench_function("hamt_symbol_table_hot_path", |b| {
         b.iter_batched(
             || {
-                let mut stack = NockStack::new(16 << 20, 0);
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
                 let (table, keys) = build_symbol_table(&mut stack, 256);
                 (stack, table, keys)
             },
@@ -111,7 +113,7 @@ fn bench_noun_preserve(c: &mut Criterion) {
     c.bench_function("noun_preserve_deep_core", |b| {
         b.iter_batched(
             || {
-                let mut stack = NockStack::new(24 << 20, 0);
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
                 let ast = build_deep_ast(&mut stack, 160, 4);
                 (stack, ast)
             },
@@ -183,7 +185,7 @@ fn bench_interpret_hint_case(c: &mut Criterion) {
                 let outcome = interpret(&mut ctx, subj, form);
                 black_box(&outcome);
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         );
     });
 }
@@ -206,7 +208,7 @@ fn bench_unifying_equality(c: &mut Criterion) {
     c.bench_function("unifying_equality_canopy", |b| {
         b.iter_batched(
             || {
-                let mut stack = NockStack::new(24 << 20, 0);
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
                 let mut pairs = Vec::with_capacity(48);
                 for i in 0..48 {
                     let left = build_balanced_tree(&mut stack, 6, i as u64 + 1);
@@ -228,7 +230,7 @@ fn bench_unifying_equality(c: &mut Criterion) {
                     black_box((first, second));
                 }
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         );
     });
 }
@@ -251,7 +253,7 @@ fn bench_cue_jam_roundtrip(c: &mut Criterion) {
     c.bench_function("cue_jam_roundtrip", |b| {
         b.iter_batched(
             || {
-                let mut stack = NockStack::new(32 << 20, 0);
+                let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
                 let noun = build_serialization_fixture(&mut stack);
                 let jammed = jam(&mut stack, noun);
                 (stack, jammed)
@@ -261,7 +263,7 @@ fn bench_cue_jam_roundtrip(c: &mut Criterion) {
                 let rejam = jam(&mut stack, decoded);
                 black_box(rejam);
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         );
     });
 }
@@ -285,7 +287,7 @@ fn bench_warm_lookup(c: &mut Criterion) {
                 let miss = warm.find_jet(&mut ctx.stack, &mut subject, &mut bogus_formula);
                 black_box((hit, miss));
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         );
     });
 }
@@ -320,7 +322,7 @@ fn bench_cache_churn(c: &mut Criterion) {
                 ctx.cache = cache;
                 black_box(ctx.cache.is_null());
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         );
     });
 }

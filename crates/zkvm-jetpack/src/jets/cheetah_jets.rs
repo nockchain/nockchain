@@ -1,11 +1,10 @@
 use ibig::UBig;
-use nockvm::ext::NounExt;
 use nockvm::interpreter::Context;
-use nockvm::jets::util::BAIL_FAIL;
+use nockvm::jets::util::{slot, BAIL_FAIL};
 use nockvm::jets::JetErr;
-use nockvm::noun::{Noun, Slots};
+use nockvm::mem::NockStack;
+use nockvm::noun::Noun;
 use noun_serde::{NounDecode, NounEncode};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 use crate::form::belt::*;
 use crate::form::crypto::cheetah::*;
@@ -13,11 +12,12 @@ use crate::form::tip5;
 
 #[inline(always)]
 pub fn ch_scal_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = subject.slot(6)?;
-    let n_atom = sam.slot(2)?.as_atom()?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let n_atom = slot(sam, 2, &space)?.in_space(&space).as_atom()?;
 
-    let p = sam.slot(3)?;
-    let a_pt = CheetahPoint::from_noun(&p).map_err(|_| BAIL_FAIL)?;
+    let p = slot(sam, 3, &space)?;
+    let a_pt = CheetahPoint::from_noun(&p, &space).map_err(|_| BAIL_FAIL)?;
 
     let res = if let Ok(n) = n_atom.as_u64() {
         ch_scal(n, &a_pt)?
@@ -32,16 +32,23 @@ pub fn ch_scal_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr>
 }
 
 pub fn verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = subject.slot(6)?;
-    let pubkey = sam.slot(2)?;
-    let m = sam.slot(6)?;
-    let chal = sam.slot(14)?.as_atom()?.as_ubig(&mut context.stack);
-    let sig = sam.slot(15)?.as_atom()?.as_ubig(&mut context.stack);
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let pubkey = slot(sam, 2, &space)?;
+    let m = slot(sam, 6, &space)?;
+    let chal = slot(sam, 14, &space)?
+        .in_space(&space)
+        .as_atom()?
+        .as_ubig(&mut context.stack);
+    let sig = slot(sam, 15, &space)?
+        .in_space(&space)
+        .as_atom()?
+        .as_ubig(&mut context.stack);
 
-    let pubkey: CheetahPoint = CheetahPoint::from_noun(&pubkey).map_err(|_| BAIL_FAIL)?;
-    let m = <[Belt; 5]>::from_noun(&m).map_err(|_| BAIL_FAIL)?;
+    let pubkey: CheetahPoint = CheetahPoint::from_noun(&pubkey, &space).map_err(|_| BAIL_FAIL)?;
+    let m = <[Belt; 5]>::from_noun(&m, &space).map_err(|_| BAIL_FAIL)?;
 
-    let res = verify_affine(pubkey, &m, &chal, &sig)?;
+    let res = verify_affine(&pubkey, &m, &chal, &sig)?;
     Ok(res.to_noun(&mut context.stack))
 }
 
@@ -70,14 +77,31 @@ pub(crate) struct ValidateArgs {
 //}
 
 pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let list = subject.slot(6)?;
+    let space = context.stack.noun_space();
+    let list = slot(subject, 6, &space)?;
+    //  `batch-verify:affine:schnorr` = `(levy batch verify)`. Here `chal`/`sig`
+    //  are raw `@ux` scalars (the schnorr arm, not the belt-schnorr t8 wrapper).
+    //  Any element this jet cannot decode as the expected types Punts, so the
+    //  runtime re-runs the authoritative Hoon rather than diverging on a
+    //  malformed input the Hoon would still process.
     let args = list
+        .in_space(&space)
         .list_iter()
         .map(|arg| {
-            let pubkey = CheetahPoint::from_noun(&arg.slot(2)?).map_err(|_| BAIL_FAIL)?;
-            let m = <[Belt; 5]>::from_noun(&arg.slot(6)?).map_err(|_| BAIL_FAIL)?;
-            let chal = arg.slot(14)?.as_atom()?.as_ubig(&mut context.stack);
-            let sig = arg.slot(15)?.as_atom()?.as_ubig(&mut context.stack);
+            let pubkey =
+                CheetahPoint::from_noun(&arg.slot(2)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            let m =
+                <[Belt; 5]>::from_noun(&arg.slot(6)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            let chal = arg
+                .slot(14)?
+                .as_atom()
+                .map_err(|_| JetErr::Punt)?
+                .as_ubig(&mut context.stack);
+            let sig = arg
+                .slot(15)?
+                .as_atom()
+                .map_err(|_| JetErr::Punt)?
+                .as_ubig(&mut context.stack);
             Ok(ValidateArgs {
                 pubkey,
                 m,
@@ -87,37 +111,48 @@ pub fn batch_verify_affine_jet(context: &mut Context, subject: Noun) -> Result<N
         })
         .collect::<Result<Vec<ValidateArgs>, JetErr>>()?;
 
-    let all_signatures_valid = !args
-        .par_iter()
-        .map(|arg| {
-            let ValidateArgs {
-                pubkey,
-                m,
-                chal,
-                sig,
-            } = arg;
-            verify_affine(*pubkey, m, chal, sig).expect("signature verification should succeed")
-        })
-        //  check if any result is invalid and try to short-circuit as soon as an
-        //  invalid result is found
-        .any(|result| !result);
-    Ok(all_signatures_valid.to_noun(&mut context.stack))
+    levy_verify_affine(&args, &mut context.stack)
+}
+
+/// Resolve a batch of decoded signature args exactly as Hoon `(levy batch verify)`:
+/// verify each element in order and short-circuit at the first `%.n`. An empty
+/// batch is `%.y`. A verification that errors (a non-curve point driving
+/// `f6-div` by zero, where the Hoon `verify` crashes) propagates as a
+/// deterministic `JetErr` via `?` — reached only when every earlier element
+/// verified, exactly as `levy` reaches that element before any `%.n`.
+fn levy_verify_affine(args: &[ValidateArgs], stack: &mut NockStack) -> Result<Noun, JetErr> {
+    for arg in args {
+        if !verify_affine(&arg.pubkey, &arg.m, &arg.chal, &arg.sig)? {
+            return Ok(false.to_noun(stack));
+        }
+    }
+    Ok(true.to_noun(stack))
 }
 
 #[inline(always)]
 pub fn verify_affine(
-    pubkey: CheetahPoint,
+    pubkey: &CheetahPoint,
     m: &[Belt],
     chal: &UBig,
     sig: &UBig,
 ) -> Result<bool, JetErr> {
-    let left = ch_scal_big(sig, &A_GEN)?;
-    let right = ch_neg(&ch_scal_big(chal, &pubkey)?);
-    let sum = ch_add(&left, &right)?;
-    if sum.x == F6_ZERO {
-        return Err(BAIL_FAIL);
+    //  Match the Hoon `+verify:affine:schnorr` scalar-range guards
+    //  (open/hoon/common/ztd/three.hoon): both the challenge and response must
+    //  satisfy `0 < scalar < g-order`. `Ok(false)` mirrors the Hoon `?&`
+    //  short-circuit to `%.n` before any scalar multiplication.
+    let zero = UBig::from(0u32);
+    if chal == &zero || sig == &zero || chal >= &*G_ORDER || sig >= &*G_ORDER {
+        return Ok(false);
     }
-
+    let left = ch_scal_big(sig, &A_GEN)?;
+    let right = ch_neg(&ch_scal_big(chal, pubkey)?);
+    let sum = ch_add(&left, &right)?;
+    //  NB: the Hoon `+verify:affine:schnorr` has `?< =(scalar f6-zero)`, which
+    //  compares the whole `a-pt` to an `f6lt` and is therefore always false — a
+    //  no-op. Deployed Hoon proceeds to hash `sum` even when `sum.x` is zero
+    //  (e.g. the identity, where `sum.y == F6_ONE`), so to stay bit-identical we
+    //  proceed here too rather than returning early. (If the Hoon is ever changed
+    //  to actually reject an x-zero sum, this jet must change in lockstep.)
     let mut hashable = vec![Belt(0); 6 * 4 + 5];
     hashable[0..6].copy_from_slice(&sum.x.0);
     hashable[6..12].copy_from_slice(&sum.y.0);
@@ -131,11 +166,46 @@ pub fn verify_affine(
     Ok(truncated_hash == *chal)
 }
 
+/// Jet for `batch-verify:affine:belt-schnorr:cheetah`. The Hoon is
+/// `(levy batch verify)` where `verify` converts each `t8` challenge/response to
+/// an atom via `t8-to-atom` (`rap 5`) and calls `verify:affine:schnorr`. This is
+/// the v1 transaction signature-verification path.
+pub fn belt_schnorr_batch_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
+    let space = context.stack.noun_space();
+    let list = slot(subject, 6, &space)?;
+    //  Decode each `[pk m chal=t8 sig=t8]`. A decode failure means an input this
+    //  jet does not model (e.g. a non-field limb `>= prime`, which the Hoon arm
+    //  still processes via `rap 5`); Punt so the runtime re-runs the authoritative
+    //  Hoon instead of diverging.
+    let args = list
+        .in_space(&space)
+        .list_iter()
+        .map(|arg| {
+            let pubkey =
+                CheetahPoint::from_noun(&arg.slot(2)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            let m =
+                <[Belt; 5]>::from_noun(&arg.slot(6)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            let chal_t8 =
+                <[Belt; 8]>::from_noun(&arg.slot(14)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            let sig_t8 =
+                <[Belt; 8]>::from_noun(&arg.slot(15)?.noun(), &space).map_err(|_| JetErr::Punt)?;
+            Ok(ValidateArgs {
+                pubkey,
+                m,
+                chal: belt_schnorr_t8_to_ubig(&chal_t8),
+                sig: belt_schnorr_t8_to_ubig(&sig_t8),
+            })
+        })
+        .collect::<Result<Vec<ValidateArgs>, JetErr>>()?;
+
+    levy_verify_affine(&args, &mut context.stack)
+}
+
 #[cfg(test)]
 mod tests {
     use ibig::UBig;
     use nockvm::jets::util::test::{assert_jet, init_context, A};
-    use nockvm::noun::{Atom, D, T, YES};
+    use nockvm::noun::{Atom, D, NO, T, YES};
     use noun_serde::NounEncode;
 
     use super::*;
@@ -379,7 +449,7 @@ mod tests {
         };
 
         let m = [Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)];
-        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
+        assert!(verify_affine(&pubkey, &m, &chal, &sig)?);
         Ok(())
     }
 
@@ -414,7 +484,58 @@ mod tests {
             inf: false,
         };
         let m = [Belt(8), Belt(9), Belt(10), Belt(11), Belt(12)];
-        assert!(verify_affine(pubkey, &m, &chal, &sig)?);
+        assert!(verify_affine(&pubkey, &m, &chal, &sig)?);
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_affine_scalar_range_checks() -> Result<(), Box<dyn std::error::Error>> {
+        // Use the dense valid signature as the baseline, then confirm the jet
+        // rejects every out-of-range scalar exactly as Hoon `+verify` does.
+        let chal = UBig::from_str_radix(
+            "6f3cd43cd8709f4368aed04cd84292ab1c380cb645aaa7d010669d70375cbe88", 16,
+        )?;
+        let sig = UBig::from_str_radix(
+            "5197ab182e307a350b5cf3606d6e99a6f35b0d382c8330dde6e51fb6ef8ebb8c", 16,
+        )?;
+        let pubkey = CheetahPoint {
+            x: F6lt([
+                Belt(2754611494552410273),
+                Belt(8599518745794843693),
+                Belt(10526511002404673680),
+                Belt(4830863958577994148),
+                Belt(375185138577093320),
+                Belt(12938930721685970739),
+            ]),
+            y: F6lt([
+                Belt(3062714866612034253),
+                Belt(15671931273416742386),
+                Belt(4071440668668521568),
+                Belt(7738250649524482367),
+                Belt(5259065445844042557),
+                Belt(8456011930642078370),
+            ]),
+            inf: false,
+        };
+        let m = [Belt(8), Belt(9), Belt(10), Belt(11), Belt(12)];
+
+        // Baseline: the canonical signature verifies.
+        assert!(verify_affine(&pubkey, &m, &chal, &sig)?);
+
+        let zero = UBig::from(0u32);
+        // chal == 0 and sig == 0 are rejected.
+        assert!(!verify_affine(&pubkey, &m, &zero, &sig)?);
+        assert!(!verify_affine(&pubkey, &m, &chal, &zero)?);
+        // scalar == g-order is rejected (Hoon requires `lth scalar g-order`).
+        assert!(!verify_affine(&pubkey, &m, &G_ORDER, &sig)?);
+        assert!(!verify_affine(&pubkey, &m, &chal, &G_ORDER)?);
+        // scalar > g-order is rejected. `sig + g-order` reduces to the same
+        // [sig]G group element but is out of range, so it must be rejected to
+        // match Hoon.
+        let sig_plus = &sig + &*G_ORDER;
+        assert!(!verify_affine(&pubkey, &m, &chal, &sig_plus)?);
+        let chal_plus = &chal + &*G_ORDER;
+        assert!(!verify_affine(&pubkey, &m, &chal_plus, &sig)?);
         Ok(())
     }
 
@@ -455,6 +576,123 @@ mod tests {
         let arg = T(&mut context.stack, &[pubkey, m, chal, sig]);
         let sample = T(&mut context.stack, &[arg, arg, arg, arg, arg, arg, D(0)]);
         assert_jet(&mut context, batch_verify_affine_jet, sample, YES);
+        Ok(())
+    }
+
+    // Hand-computed `rap 5` (cat/met) reference for the faithful reconstruction.
+    #[test]
+    fn test_t8_to_scalar_rap5() {
+        let two32 = UBig::from(1u64 << 32);
+        // [1,0,...]: trailing zeros collapse -> 1
+        assert_eq!(
+            belt_schnorr_t8_to_ubig(&[1, 0, 0, 0, 0, 0, 0, 0].map(Belt)),
+            UBig::from(1u64)
+        );
+        // [0,1,0,...]: leading zero has met=0, so l1 lands at position 0 -> 1
+        assert_eq!(
+            belt_schnorr_t8_to_ubig(&[0, 1, 0, 0, 0, 0, 0, 0].map(Belt)),
+            UBig::from(1u64)
+        );
+        // [5,7,0,...]: both nonzero (met=1) -> 5 + 7*2^32
+        assert_eq!(
+            belt_schnorr_t8_to_ubig(&[5, 7, 0, 0, 0, 0, 0, 0].map(Belt)),
+            UBig::from(5u64) + UBig::from(7u64) * &two32
+        );
+        // [5,0,7,0,...]: interior zero does not advance, so l2 lands at 2^32
+        assert_eq!(
+            belt_schnorr_t8_to_ubig(&[5, 0, 7, 0, 0, 0, 0, 0].map(Belt)),
+            UBig::from(5u64) + UBig::from(7u64) * &two32
+        );
+        // a two-block limb (>= 2^32) has met=2, shifting the next limb by 64 bits
+        assert_eq!(
+            belt_schnorr_t8_to_ubig(&[1u64 << 33, 1, 0, 0, 0, 0, 0, 0].map(Belt)),
+            UBig::from(1u64 << 33) + (UBig::from(1u64) << 64)
+        );
+    }
+
+    // The deployed Hoon `?< =(scalar f6-zero)` is a no-op, so an identity sum
+    // (sum.x == 0, from pubkey=A_GEN, chal==sig) must NOT error — it proceeds and
+    // returns a boolean (false here), matching Hoon.
+    #[test]
+    fn test_verify_affine_identity_sum() -> Result<(), Box<dyn std::error::Error>> {
+        let k = UBig::from(12_345u64);
+        let m = [Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)];
+        // sum = k*A_GEN + (-(k*A_GEN)) = identity.
+        let res = verify_affine(&A_GEN, &m, &k, &k)?;
+        assert!(!res);
+        Ok(())
+    }
+
+    fn ubig_to_t8(scalar: &UBig) -> [Belt; 8] {
+        let radix = UBig::from(1u64 << 32);
+        let mut limbs = [Belt(0); 8];
+        let mut x = scalar.clone();
+        for limb in limbs.iter_mut() {
+            let r = &x % &radix;
+            *limb = Belt(u64::try_from(&r).unwrap());
+            x /= &radix;
+        }
+        limbs
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_belt_schnorr_batch_verify_jet() -> Result<(), Box<dyn std::error::Error>> {
+        let mut context = init_context();
+        let chal = UBig::from_str_radix(
+            "6f3cd43cd8709f4368aed04cd84292ab1c380cb645aaa7d010669d70375cbe88", 16,
+        )?;
+        let sig = UBig::from_str_radix(
+            "5197ab182e307a350b5cf3606d6e99a6f35b0d382c8330dde6e51fb6ef8ebb8c", 16,
+        )?;
+        let pubkey = CheetahPoint {
+            x: F6lt([
+                Belt(2754611494552410273),
+                Belt(8599518745794843693),
+                Belt(10526511002404673680),
+                Belt(4830863958577994148),
+                Belt(375185138577093320),
+                Belt(12938930721685970739),
+            ]),
+            y: F6lt([
+                Belt(3062714866612034253),
+                Belt(15671931273416742386),
+                Belt(4071440668668521568),
+                Belt(7738250649524482367),
+                Belt(5259065445844042557),
+                Belt(8456011930642078370),
+            ]),
+            inf: false,
+        };
+        let m = [Belt(8), Belt(9), Belt(10), Belt(11), Belt(12)];
+
+        let chal_t8 = ubig_to_t8(&chal);
+        let sig_t8 = ubig_to_t8(&sig);
+        // this vector has no zero 32-bit limb, so the faithful reconstruction
+        // round-trips back to the original scalar.
+        assert_eq!(belt_schnorr_t8_to_ubig(&chal_t8), chal);
+        assert_eq!(belt_schnorr_t8_to_ubig(&sig_t8), sig);
+
+        let pk_n = pubkey.to_noun(&mut context.stack);
+        let m_n = m.to_noun(&mut context.stack);
+        let chal_n = chal_t8.to_noun(&mut context.stack);
+        let sig_n = sig_t8.to_noun(&mut context.stack);
+        let elem = T(&mut context.stack, &[pk_n, m_n, chal_n, sig_n]);
+        // a batch of two copies of a valid signature verifies.
+        let sample = T(&mut context.stack, &[elem, elem, D(0)]);
+        assert_jet(&mut context, belt_schnorr_batch_verify_jet, sample, YES);
+
+        // empty batch -> levy of empty is %.y
+        let empty = D(0);
+        assert_jet(&mut context, belt_schnorr_batch_verify_jet, empty, YES);
+
+        // corrupt the challenge -> the whole batch fails.
+        let mut bad_chal_t8 = chal_t8;
+        bad_chal_t8[0] = Belt(bad_chal_t8[0].0 ^ 1);
+        let bad_chal_n = bad_chal_t8.to_noun(&mut context.stack);
+        let bad_elem = T(&mut context.stack, &[pk_n, m_n, bad_chal_n, sig_n]);
+        let bad_sample = T(&mut context.stack, &[elem, bad_elem, D(0)]);
+        assert_jet(&mut context, belt_schnorr_batch_verify_jet, bad_sample, NO);
         Ok(())
     }
 }

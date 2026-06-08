@@ -3,28 +3,34 @@
 ~%  %zoon  ..stark-engine-jet-hook:z  ~
 |%
 ::
-+|  %no-by-in
-++  by  %do-not-use
-++  in  %do-not-use
-++  ju  %do-not-use
-++  ja  %do-not-use
-++  bi  %do-not-use
++|  %types
+:: NOTE: empty-checking with ?~ does not work due to %ztree. Use ?@.
+++  ztree
+  |$  [item]
+  $~  ~
+  $|  $@(?(%~ %ztree) [n=item l=(ztree item) r=(ztree item)])
+  |=  a=$@(?(%~ %ztree) [n=* l=(ztree) r=(ztree)])
+  |-  ^-  ?
+  ?@  a  =(~ a)
+  ?&  $(a l.a)
+      $(a r.a)
+  ==
 ::
 +|  %map
 ++  z-map
   |$  [key value]                                       ::  table
-  $|  (tree (pair key value))
-  |=(a=(tree (pair)) ?:(=(~ a) & ~(apt z-by a)))
+  $|  (ztree (pair key value))
+  |=(a=(ztree (pair)) ?@(a =(~ a) ~(apt z-by a)))
 ::
 ++  z-by                                                  ::  z-map engine
   ~/  %z-by
-  =|  a=(tree (pair))  ::  (z-map)
+  =|  a=(ztree (pair))  ::  (z-map)
   |@
   ++  all                                               ::  logical AND
     ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       &
     ?&((b q.n.a) $(a l.a) $(a r.a))
   ::
@@ -32,7 +38,7 @@
     ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?|((b q.n.a) $(a l.a) $(a r.a))
   ::
@@ -40,7 +46,7 @@
     ~/  %bif
     |*  b=*
     |-  ^+  [l=a r=a]
-    ?~  a
+    ?@  a
       [~ ~]
     ?:  =(b p.n.a)
       +.a
@@ -56,15 +62,15 @@
     ~/  %del
     |*  b=*
     |-  ^+  a
-    ?~  a
+    ?@  a
       ~
     ?.  =(b p.n.a)
       ?:  (gor-tip b p.n.a)
         a(l $(a l.a))
       a(r $(a r.a))
-    |-  ^-  [$?(~ _a)]
-    ?~  l.a  r.a
-    ?~  r.a  l.a
+    |-  ^-  [$?(?(%~ %ztree) _a)]
+    ?@  l.a  r.a
+    ?@  r.a  l.a
     ?:  (mor-tip p.n.l.a p.n.r.a)
       l.a(r $(l.a r.l.a))
     r.a(l $(r.a l.r.a))
@@ -73,15 +79,15 @@
     ~/  %dif
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     =+  c=(bif p.n.b)
     ?>  ?=(^ c)
     =+  d=$(a l.c, b l.b)
     =+  e=$(a r.c, b r.b)
-    |-  ^-  [$?(~ _a)]
-    ?~  d  e
-    ?~  e  d
+    |-  ^-  [$?(?(%~ %ztree) _a)]
+    ?@  d  e
+    ?@  e  d
     ?:  (mor-tip p.n.d p.n.e)
       d(r $(d r.d))
     e(l $(e l.e))
@@ -91,7 +97,7 @@
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
-    ?~  a  ~
+    ?@  a  ~
     ?:  =(b p.n.a)  [~ u=(peg c 2)]
     ?:  (gor-tip b p.n.a)
       $(a l.a, c (peg c 6))
@@ -101,12 +107,12 @@
     =<  $
     =|  [l=(unit) r=(unit)]
     |.  ^-  ?
-    ?~  a   &
+    ?@  a   =(~ a)
     ?&  ?~(l & &((gor-tip p.n.a u.l) !=(p.n.a u.l)))
         ?~(r & &((gor-tip u.r p.n.a) !=(u.r p.n.a)))
-        ?~  l.a   &
+        ?@  l.a   &
         &((mor-tip p.n.a p.n.l.a) !=(p.n.a p.n.l.a) $(a l.a, l `p.n.a))
-        ?~  r.a   &
+        ?@  r.a   &
         &((mor-tip p.n.a p.n.r.a) !=(p.n.a p.n.r.a) $(a r.a, r `p.n.a))
     ==
   ::
@@ -115,7 +121,7 @@
     |*  b=(list [p=* q=*])
     =>  .(b `(list _?>(?=(^ a) n.a))`b)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put p.i.b q.i.b))
   ::
@@ -124,7 +130,7 @@
     |*  b=*
     =>  .(b `_?>(?=(^ a) p.n.a)`b)
     |-  ^-  (unit _?>(?=(^ a) q.n.a))
-    ?~  a
+    ?@  a
       ~
     ?:  =(b p.n.a)
       (some q.n.a)
@@ -151,9 +157,9 @@
     ~/  %int
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       ~
-    ?~  a
+    ?@  a
       ~
     ?:  (mor-tip p.n.a p.n.b)
       ?:  =(p.n.b p.n.a)
@@ -172,7 +178,7 @@
     |*  [key=_?>(?=(^ a) p.n.a) fun=$-(_?>(?=(^ a) q.n.a) _?>(?=(^ a) q.n.a))]
     ^+  a
     ::
-    ?~  a  !!
+    ?@  a  !!
     ::
     ?:  =(key p.n.a)
       a(q.n (fun q.n.a))
@@ -193,7 +199,7 @@
     ~/  %put
     |*  [b=* c=*]
     |-  ^+  a
-    ?~  a
+    ?@  a
       [[b c] ~ ~]
     ?:  =(b p.n.a)
       ?:  =(c q.n.a)
@@ -215,14 +221,14 @@
     ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
-    ?~  a  +<+.b
+    ?@  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  rib                                               ::  transform + product
     ~/  %rib
     |*  [b=* c=gate]
     |-  ^+  [b a]
-    ?~  a  [b ~]
+    ?@  a  [b ~]
     =+  d=(c n.a b)
     =.  n.a  +.d
     =+  e=$(a l.a, b -.d)
@@ -233,14 +239,14 @@
     ~/  %run
     |*  b=gate
     |-
-    ?~  a  a
+    ?@  a  a
     [n=[p=p.n.a q=(b q.n.a)] l=$(a l.a) r=$(a r.a)]
   ::
   ++  tap                                               ::  listify pairs
     =<  $
     =+  b=`(list _?>(?=(^ a) n.a))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b [n.a $(a l.a)])
   ::
@@ -248,9 +254,9 @@
     ~/  %uni
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(p.n.b p.n.a)
       b(l $(a l.a, b l.b), r $(a r.a, b r.b))
@@ -267,9 +273,9 @@
     |*  b=_a
     |*  meg=$-([* * *] *)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(p.n.b p.n.a)
       :+  [p.n.a `_?>(?=(^ a) q.n.a)`(meg p.n.a q.n.a q.n.b)]
@@ -287,40 +293,40 @@
     ~/  %urn
     |*  b=$-([* *] *)
     |-
-    ?~  a  ~
+    ?@  a  ~
     a(n n.a(q (b p.n.a q.n.a)), l $(a l.a), r $(a r.a))
   ::
   ++  wyt                                               ::  depth of z-map
     =<  $
     |.  ^-  @
-    ?~(a 0 +((add $(a l.a) $(a r.a))))
+    ?@(a 0 +((add $(a l.a) $(a r.a))))
   ::
   ++  key                                               ::  z-set of keys
     |-  ^-  (z-set _?>(?=(^ a) p.n.a))
-    ?~  a  ~
+    ?@  a  ~
     [p.n.a $(a l.a) $(a r.a)]
   ::
   ++  val                                               ::  list of vals
     =+  b=`(list _?>(?=(^ a) q.n.a))`~
     |-  ^+  b
-    ?~  a   b
+    ?@  a   b
     $(a r.a, b [q.n.a $(a l.a)])
   --
 +|  %set
 ++  z-set
   |$  [item]                                            ::  z-set
-  $|  (tree item)
-  |=(a=(tree) ?:(=(~ a) & ~(apt z-in a)))
+  $|  (ztree item)
+  |=(a=(ztree) ?@(a =(~ a) ~(apt z-in a)))
 ::
 ++  z-in                                                  ::  z-set engine
   ~/  %z-in
-  =|  a=(tree)  :: (z-set)
+  =|  a=(ztree)  :: (z-set)
   |@
   ++  all                                               ::  logical AND
     ~/  %all
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       &
     ?&((b n.a) $(a l.a) $(a r.a))
   ::
@@ -328,7 +334,7 @@
     ~/  %any
     |*  b=$-(* ?)
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?|((b n.a) $(a l.a) $(a r.a))
   ::
@@ -336,11 +342,11 @@
     =<  $
     =|  [l=(unit) r=(unit)]
     |.  ^-  ?
-    ?~  a   &
+    ?@  a   =(~ a)
     ?&  ?~(l & &((gor-tip n.a u.l) !=(n.a u.l)))
         ?~(r & &((gor-tip u.r n.a) !=(u.r n.a)))
-        ?~(l.a & ?&((mor-tip n.a n.l.a) !=(n.a n.l.a) $(a l.a, l `n.a)))
-        ?~(r.a & ?&((mor-tip n.a n.r.a) !=(n.a n.r.a) $(a r.a, r `n.a)))
+        ?@(l.a & ?&((mor-tip n.a n.l.a) !=(n.a n.l.a) $(a l.a, l `n.a)))
+        ?@(r.a & ?&((mor-tip n.a n.r.a) !=(n.a n.r.a) $(a r.a, r `n.a)))
     ==
   ::
   ++  bif                                               ::  splits a by b
@@ -349,7 +355,7 @@
     ^+  [l=a r=a]
     =<  +
     |-  ^+  a
-    ?~  a
+    ?@  a
       [b ~ ~]
     ?:  =(b n.a)
       a
@@ -365,15 +371,15 @@
     ~/  %del
     |*  b=*
     |-  ^+  a
-    ?~  a
+    ?@  a
       ~
     ?.  =(b n.a)
       ?:  (gor-tip b n.a)
         a(l $(a l.a))
       a(r $(a r.a))
-    |-  ^-  [$?(~ _a)]
-    ?~  l.a  r.a
-    ?~  r.a  l.a
+    |-  ^-  [$?(?(%~ %ztree) _a)]
+    ?@  l.a  r.a
+    ?@  r.a  l.a
     ?:  (mor-tip n.l.a n.r.a)
       l.a(r $(l.a r.l.a))
     r.a(l $(r.a l.r.a))
@@ -382,15 +388,15 @@
     ~/  %dif
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     =+  c=(bif n.b)
     ?>  ?=(^ c)
     =+  d=$(a l.c, b l.b)
     =+  e=$(a r.c, b r.b)
-    |-  ^-  [$?(~ _a)]
-    ?~  d  e
-    ?~  e  d
+    |-  ^-  [$?(?(%~ %ztree) _a)]
+    ?@  d  e
+    ?@  e  d
     ?:  (mor-tip n.d n.e)
       d(r $(d r.d))
     e(l $(e l.e))
@@ -400,7 +406,7 @@
     |=  b=*
     =+  c=1
     |-  ^-  (unit @)
-    ?~  a  ~
+    ?@  a  ~
     ?:  =(b n.a)  [~ u=(peg c 2)]
     ?:  (gor-tip b n.a)
       $(a l.a, c (peg c 6))
@@ -410,7 +416,7 @@
     ~/  %gas
     |=  b=(list _?>(?=(^ a) n.a))
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put i.b))
   ::  +has: does :b exist z-in :a?
@@ -434,7 +440,7 @@
     |=  b=(unit _?>(?=(^ a) n.a))
     =>  .(b ?>(?=(^ b) u.b))
     |-  ^-  ?
-    ?~  a
+    ?@  a
       |
     ?:  =(b n.a)
       &
@@ -446,9 +452,9 @@
     ~/  %int
     |*  b=_a
     |-  ^+  a
-    ?~  b
+    ?@  b
       ~
-    ?~  a
+    ?@  a
       ~
     ?.  (mor-tip n.a n.b)
       $(a b, b a)
@@ -462,7 +468,7 @@
     ~/  %put
     |*  b=*
     |-  ^+  a
-    ?~  a
+    ?@  a
       [b ~ ~]
     ?:  =(b n.a)
       a
@@ -482,14 +488,14 @@
     ~/  %rep
     |*  b=_=>(~ |=([* *] +<+))
     |-
-    ?~  a  +<+.b
+    ?@  a  +<+.b
     $(a r.a, +<+.b $(a l.a, +<+.b (b n.a +<+.b)))
   ::
   ++  run                                               ::  apply gate to values
     ~/  %run
     |*  b=gate
     =+  c=`(z-set _?>(?=(^ a) (b n.a)))`~
-    |-  ?~  a  c
+    |-  ?@  a  c
     =.  c  (~(put z-in c) (b n.a))
     =.  c  $(a l.a, c c)
     $(a r.a, c c)
@@ -498,7 +504,7 @@
     =<  $
     =+  b=`(list _?>(?=(^ a) n.a))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b [n.a $(a l.a)])
   ::
@@ -507,9 +513,9 @@
     |*  b=_a
     ?:  =(a b)  a
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
-    ?~  a
+    ?@  a
       b
     ?:  =(n.b n.a)
       b(l $(a l.a, b l.b), r $(a r.a, b r.b))
@@ -524,7 +530,7 @@
   ++  wyt                                               ::  size of z-set
     =<  $
     |.  ^-  @
-    ?~(a 0 +((add $(a l.a) $(a r.a))))
+    ?@(a 0 +((add $(a l.a) $(a r.a))))
   --
 +|  %mip
 ::
@@ -539,7 +545,7 @@
     |*  [b=* c=*]
     =+  d=(~(gut z-by a) b ~)
     =+  e=(~(del z-by d) c)
-    ?~  e
+    ?@  e
       (~(del z-by a) b)
     (~(put z-by a) b e)
   ::
@@ -577,7 +583,7 @@
     =<  $
     =+  b=`_?>(?=(^ a) *(list [x=_p.n.a _?>(?=(^ q.n.a) [y=p v=q]:n.q.n.a)]))`~
     |.  ^+  b
-    ?~  a
+    ?@  a
       b
     $(a r.a, b (welp (turn ~(tap z-by q.n.a) (lead p.n.a)) $(a l.a)))
   --
@@ -589,14 +595,14 @@
   (z-map key (z-set value))
 ::
 ++  z-ju                                                ::  z-jug engine
-  =|  a=(tree (pair * (tree)))                          ::  (z-jug)
+  =|  a=(z-map * (z-set))                               ::  (z-jug)
   |@
   ++  del                                               ::  del key-set pair
     |*  [b=* c=*]
     ^+  a
     =+  d=(get b)
     =+  e=(~(del z-in d) c)
-    ?~  e
+    ?@  e
       (~(del z-by a) b)
     (~(put z-by a) b e)
   ::
@@ -604,14 +610,14 @@
     |*  b=(list [p=* q=*])
     =>  .(b `(list _?>(?=([[* ^] ^] a) [p=p q=n.q]:n.a))`b)
     |-  ^+  a
-    ?~  b
+    ?@  b
       a
     $(b t.b, a (put p.i.b q.i.b))
   ::
   ++  get                                               ::  gets z-set by key
     |*  b=*
     =+  c=(~(get z-by a) b)
-    ?~(c ~ u.c)
+    ?@(c ~ u.c)
   ::
   ++  has                                               ::  existence check
     |*  [b=* c=*]
@@ -687,12 +693,12 @@
 +|   %z-container-from-container
   ++  z-silt                                              :: z-set from list
     |*  a=(list)
-    =+  b=*(tree _?>(?=(^ a) i.a))
+    =+  b=*(ztree _?>(?=(^ a) i.a))
     (~(gas z-in b) a)
   ::
   ++  z-molt                                              :: z-map from pair
       |*  a=(list (pair))
-      (~(gas z-by `(tree [p=_p.i.-.a q=_q.i.-.a])`~) a)
+      (~(gas z-by `(ztree [p=_p.i.-.a q=_q.i.-.a])`~) a)
   ::
   ++  z-malt                                              ::  z-map from list
   |*  a=(list)

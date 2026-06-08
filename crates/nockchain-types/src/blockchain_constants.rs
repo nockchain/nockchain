@@ -3,8 +3,8 @@ use std::time::Duration;
 use ibig::UBig;
 use nockapp::noun::slab::NounSlab;
 use nockapp::noun::IntoSlab;
-use nockvm::noun::{Atom, Noun, NounAllocator, T};
-use noun_serde::NounEncode;
+use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, T};
+use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use tracing::info;
 
 pub const DEFAULT_FAKENET_POW_LEN: u64 = 2;
@@ -13,7 +13,7 @@ pub const FAKENET_V1_PHASE: u64 = 1;
 pub const FAKENET_BYTHOS_PHASE: u64 = 1;
 pub const FAKENET_BASE_FEE: u64 = 128;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, NounEncode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, NounEncode, NounDecode)]
 pub struct Seconds(pub u64);
 
 impl Seconds {
@@ -53,7 +53,7 @@ impl From<Seconds> for Duration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, NounEncode)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, NounEncode, NounDecode)]
 pub struct NoteDataConstraints {
     pub max_size: u64,
     pub min_fee: u64,
@@ -80,6 +80,12 @@ pub struct BlockchainConstants {
     pub note_data: NoteDataConstraints,
     pub base_fee: u64,
     pub input_fee_divisor: u64,
+    pub asert_phase: u64,
+    pub asert_anchor_height: u64,
+    pub asert_anchor_target_atom: UBig,
+    pub asert_ideal_block_time: u64,
+    pub asert_half_life: u64,
+    pub asert_anchor_min_timestamp: u64,
 }
 
 impl BlockchainConstants {
@@ -104,6 +110,16 @@ impl BlockchainConstants {
     pub const DEFAULT_NOTE_DATA_MIN_FEE: u64 = 256;
     pub const DEFAULT_BASE_FEE: u64 = 16_384;
     pub const DEFAULT_INPUT_FEE_DIVISOR: u64 = 4;
+    pub const DEFAULT_ASERT_PHASE: u64 = 65_500;
+    pub const DEFAULT_ASERT_ANCHOR_HEIGHT: u64 = 65_499;
+    pub const DEFAULT_ASERT_ANCHOR_TARGET_BEX: u64 = 291;
+    pub const DEFAULT_ASERT_IDEAL_BLOCK_TIME: u64 = 150;
+    pub const DEFAULT_ASERT_HALF_LIFE: u64 = 43_200;
+    /// Median-of-11 timestamp at the canonical ASERT anchor block (mainnet
+    /// height 65,499), pinned at phase-2 cutover of 014-aletheia. See
+    /// `open/hoon/common/tx-engine-1.hoon`'s `blockchain-constants:v1`
+    /// bunt — must stay in sync.
+    pub const DEFAULT_ASERT_ANCHOR_MIN_TIMESTAMP: u64 = 9_223_372_093_639_027_842;
 
     pub fn new() -> Self {
         let max_target_atom = UBig::from_str_with_radix_prefix(Self::DEFAULT_MAX_TIP5_ATOM)
@@ -111,6 +127,8 @@ impl BlockchainConstants {
         let genesis_target_atom =
             UBig::from_str_with_radix_prefix(Self::DEFAULT_GENESIS_TARGET_ATOM)
                 .expect("Failed to parse genesis target atom");
+        let asert_anchor_target_atom =
+            UBig::from(1u64) << (Self::DEFAULT_ASERT_ANCHOR_TARGET_BEX as usize);
 
         Self {
             max_block_size: Self::DEFAULT_MAX_BLOCK_SIZE,
@@ -135,6 +153,12 @@ impl BlockchainConstants {
             },
             base_fee: Self::DEFAULT_BASE_FEE,
             input_fee_divisor: Self::DEFAULT_INPUT_FEE_DIVISOR,
+            asert_phase: Self::DEFAULT_ASERT_PHASE,
+            asert_anchor_height: Self::DEFAULT_ASERT_ANCHOR_HEIGHT,
+            asert_anchor_target_atom,
+            asert_ideal_block_time: Self::DEFAULT_ASERT_IDEAL_BLOCK_TIME,
+            asert_half_life: Self::DEFAULT_ASERT_HALF_LIFE,
+            asert_anchor_min_timestamp: Self::DEFAULT_ASERT_ANCHOR_MIN_TIMESTAMP,
         }
     }
 
@@ -177,6 +201,26 @@ impl BlockchainConstants {
 
     pub fn with_base_fee(mut self, base_fee: u64) -> Self {
         self.base_fee = base_fee;
+        self
+    }
+
+    pub fn with_asert_phase(mut self, asert_phase: u64) -> Self {
+        self.asert_phase = asert_phase;
+        self
+    }
+
+    pub fn with_asert_anchor_height(mut self, asert_anchor_height: u64) -> Self {
+        self.asert_anchor_height = asert_anchor_height;
+        self
+    }
+
+    pub fn with_asert_anchor_target_atom(mut self, asert_anchor_target_atom: UBig) -> Self {
+        self.asert_anchor_target_atom = asert_anchor_target_atom;
+        self
+    }
+
+    pub fn with_asert_anchor_target_bex(mut self, bex: u64) -> Self {
+        self.asert_anchor_target_atom = UBig::from(1u64) << (bex as usize);
         self
     }
 
@@ -223,12 +267,235 @@ impl NounEncode for BlockchainConstants {
         let input_fee_divisor = Atom::new(allocator, self.input_fee_divisor).as_noun();
         let v0_fields = self.to_blockchain_constants_v0_fields(allocator);
         let v0_constants = T(allocator, &v0_fields);
+        let asert_phase = Atom::new(allocator, self.asert_phase).as_noun();
+        let asert_anchor_height = Atom::new(allocator, self.asert_anchor_height).as_noun();
+        let asert_anchor_target_atom =
+            Atom::from_ubig(allocator, &self.asert_anchor_target_atom).as_noun();
+        let asert_ideal_block_time = Atom::new(allocator, self.asert_ideal_block_time).as_noun();
+        let asert_half_life = Atom::new(allocator, self.asert_half_life).as_noun();
+        let asert_anchor_min_timestamp =
+            Atom::new(allocator, self.asert_anchor_min_timestamp).as_noun();
 
         T(
             allocator,
-            &[v1_phase, bythos_phase, note_data, base_fee, input_fee_divisor, v0_constants],
+            &[
+                v1_phase, bythos_phase, note_data, base_fee, input_fee_divisor, v0_constants,
+                asert_phase, asert_anchor_height, asert_anchor_target_atom, asert_ideal_block_time,
+                asert_half_life, asert_anchor_min_timestamp,
+            ],
         )
     }
+}
+
+// TODO(withdrawals): Replace this manual decode with derived noun-serde once
+// the blockchain-constants wire shape is represented by derive-friendly Rust
+// wrapper types instead of the current mixed v1 wrapper + nested v0 payload.
+impl NounDecode for BlockchainConstants {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let mut outer = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let v1_phase = u64::from_noun(&outer.head().noun(), space)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let bythos_phase = u64::from_noun(&outer.head().noun(), space)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let note_data = NoteDataConstraints::from_noun(&outer.head().noun(), space)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let base_fee = u64::from_noun(&outer.head().noun(), space)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let input_fee_divisor = u64::from_noun(&outer.head().noun(), space)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let mut v0 = outer
+            .head()
+            .noun()
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+        let mut asert = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let max_block_size = u64::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let blocks_per_epoch = u64::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let target_epoch_duration = Seconds::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let update_candidate_timestamp_interval = decode_shifted_seconds(
+            &v0.head().noun(),
+            space,
+            "update-candidate-timestamp-interval",
+        )?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let max_future_timestamp = Seconds::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let min_past_blocks = u64::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let genesis_target_atom = decode_ubig(&v0.head().noun(), space, "genesis-target-atom")?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let max_target_atom = decode_ubig(&v0.head().noun(), space, "max-target-atom")?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let check_pow_flag = bool::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let coinbase_timelock_min = u64::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let pow_len = u64::from_noun(&v0.head().noun(), space)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let max_coinbase_split = u64::from_noun(&v0.head().noun(), space)?;
+        let first_month_coinbase_min = u64::from_noun(&v0.tail().noun(), space)?;
+
+        let asert_phase = u64::from_noun(&asert.head().noun(), space)?;
+        asert = asert
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let asert_anchor_height = u64::from_noun(&asert.head().noun(), space)?;
+        asert = asert
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let asert_anchor_target_atom =
+            decode_ubig(&asert.head().noun(), space, "asert-anchor-target-atom")?;
+        asert = asert
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let asert_ideal_block_time = u64::from_noun(&asert.head().noun(), space)?;
+        asert = asert
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
+
+        let asert_half_life = u64::from_noun(&asert.head().noun(), space)?;
+        let asert_anchor_min_timestamp = u64::from_noun(&asert.tail().noun(), space)?;
+
+        Ok(Self {
+            max_block_size,
+            blocks_per_epoch,
+            target_epoch_duration,
+            update_candidate_timestamp_interval,
+            max_future_timestamp,
+            min_past_blocks,
+            genesis_target_atom,
+            max_target_atom,
+            check_pow_flag,
+            coinbase_timelock_min,
+            pow_len,
+            max_coinbase_split,
+            first_month_coinbase_min,
+            v1_phase,
+            bythos_phase,
+            note_data,
+            base_fee,
+            input_fee_divisor,
+            asert_phase,
+            asert_anchor_height,
+            asert_anchor_target_atom,
+            asert_ideal_block_time,
+            asert_half_life,
+            asert_anchor_min_timestamp,
+        })
+    }
+}
+
+fn decode_ubig(
+    noun: &Noun,
+    space: &NounSpace,
+    field: &'static str,
+) -> Result<UBig, NounDecodeError> {
+    let atom = noun
+        .in_space(space)
+        .as_atom()
+        .map_err(|_| NounDecodeError::Custom(format!("{field} should be atom")))?;
+    Ok(UBig::from_le_bytes(&atom.to_le_bytes()))
+}
+
+fn decode_shifted_seconds(
+    noun: &Noun,
+    space: &NounSpace,
+    field: &'static str,
+) -> Result<Seconds, NounDecodeError> {
+    let encoded = decode_ubig(noun, space, field)?;
+    let lower_mask = UBig::from((1u128 << 64) - 1);
+    if (&encoded & &lower_mask) != UBig::from(0u8) {
+        return Err(NounDecodeError::Custom(format!(
+            "{field} lower 64 bits must be zero"
+        )));
+    }
+    let shifted = encoded >> 64usize;
+    let seconds = u64::try_from(shifted)
+        .map_err(|_| NounDecodeError::Custom(format!("{field} too large for u64 seconds")))?;
+    Ok(Seconds(seconds))
 }
 
 impl IntoSlab for BlockchainConstants {
@@ -261,16 +528,17 @@ pub fn default_fakenet_blockchain_constants() -> BlockchainConstants {
 #[cfg(test)]
 mod tests {
     use ibig::UBig;
+    use nockapp::noun::slab::NockJammer;
 
     use super::*;
 
-    fn tuple_len(noun: Noun) -> usize {
+    fn tuple_len(noun: Noun, space: &nockvm::noun::NounSpace) -> usize {
         let mut len = 0;
         let mut cur = noun;
         loop {
-            if let Ok(cell) = cur.as_cell() {
+            if let Ok(cell) = cur.in_space(space).as_cell() {
                 len += 1;
-                cur = cell.tail();
+                cur = cell.tail().noun();
             } else {
                 len += 1;
                 break;
@@ -348,6 +616,36 @@ mod tests {
         );
         assert_eq!(constants.base_fee, 16_384, "base-fee mismatch");
         assert_eq!(constants.input_fee_divisor, 4, "input-fee-divisor mismatch");
+        assert_eq!(constants.asert_phase, 65_500, "asert-phase mismatch");
+        assert_eq!(
+            constants.asert_anchor_height, 65_499,
+            "asert-anchor-height mismatch"
+        );
+        assert_eq!(
+            constants.asert_anchor_target_atom,
+            UBig::from(1u64) << 291,
+            "asert-anchor-target-atom mismatch"
+        );
+        assert_eq!(
+            constants.asert_ideal_block_time, 150,
+            "asert-ideal-block-time mismatch"
+        );
+        assert_eq!(
+            constants.asert_half_life, 43_200,
+            "asert-half-life mismatch"
+        );
+    }
+
+    #[test]
+    fn blockchain_constants_roundtrip_from_noun_for_mainnet_and_fakenet() {
+        for constants in [BlockchainConstants::default(), default_fakenet_blockchain_constants()] {
+            let mut slab: NounSlab<NockJammer> = NounSlab::new();
+            let noun = constants.to_noun(&mut slab);
+            let space = slab.noun_space();
+            let decoded =
+                BlockchainConstants::from_noun(&noun, &space).expect("decode blockchain constants");
+            assert_eq!(decoded, constants);
+        }
     }
 
     #[test]
@@ -382,11 +680,24 @@ mod tests {
     }
 
     #[test]
+    fn with_asert_overrides_default() {
+        let constants = BlockchainConstants::new()
+            .with_asert_phase(10)
+            .with_asert_anchor_height(9)
+            .with_asert_anchor_target_bex(2);
+
+        assert_eq!(constants.asert_phase, 10);
+        assert_eq!(constants.asert_anchor_height, 9);
+        assert_eq!(constants.asert_anchor_target_atom, UBig::from(1u64) << 2);
+    }
+
+    #[test]
     fn blockchain_constants_encode_in_new_v1_wrapper() {
         let slab = BlockchainConstants::new().into_slab();
         let root = unsafe { *slab.root() };
+        let space = slab.noun_space();
 
-        let outer = root.as_cell().expect("outer tuple");
+        let outer = root.in_space(&space).as_cell().expect("outer tuple");
         let v1_phase_atom = outer.head().as_atom().expect("v1-phase should be atom");
         assert_eq!(
             v1_phase_atom.as_u64().expect("v1-phase as u64"),
@@ -445,17 +756,102 @@ mod tests {
             BlockchainConstants::DEFAULT_INPUT_FEE_DIVISOR
         );
 
-        let v0_constants = input_fee_divisor_and_rest.tail();
+        let v0_and_rest = input_fee_divisor_and_rest
+            .tail()
+            .as_cell()
+            .expect("v0 constants and asert tail tuple");
+        let v0_constants = v0_and_rest.head().noun();
         assert_eq!(
-            tuple_len(v0_constants),
+            tuple_len(v0_constants, &space),
             13,
             "v0 constants should be a 13-tuple"
         );
-        let v0_cell = v0_constants.as_cell().expect("v0 constants tuple");
+        let v0_cell = v0_constants
+            .in_space(&space)
+            .as_cell()
+            .expect("v0 constants tuple");
         let max_block_size_atom = v0_cell.head().as_atom().expect("max-block-size atom");
         assert_eq!(
             max_block_size_atom.as_u64().expect("max-block-size as u64"),
             BlockchainConstants::DEFAULT_MAX_BLOCK_SIZE
+        );
+
+        let asert_phase_and_rest = v0_and_rest
+            .tail()
+            .as_cell()
+            .expect("asert-phase and rest tuple");
+        let asert_phase_atom = asert_phase_and_rest
+            .head()
+            .as_atom()
+            .expect("asert-phase atom");
+        assert_eq!(
+            asert_phase_atom.as_u64().expect("asert-phase as u64"),
+            BlockchainConstants::DEFAULT_ASERT_PHASE
+        );
+
+        let asert_anchor_height_and_rest = asert_phase_and_rest
+            .tail()
+            .as_cell()
+            .expect("asert-anchor-height and rest tuple");
+        let asert_anchor_height_atom = asert_anchor_height_and_rest
+            .head()
+            .as_atom()
+            .expect("asert-anchor-height atom");
+        assert_eq!(
+            asert_anchor_height_atom
+                .as_u64()
+                .expect("asert-anchor-height as u64"),
+            BlockchainConstants::DEFAULT_ASERT_ANCHOR_HEIGHT
+        );
+
+        let asert_anchor_target_and_rest = asert_anchor_height_and_rest
+            .tail()
+            .as_cell()
+            .expect("asert-anchor-target and rest tuple");
+        let _asert_anchor_target_atom = asert_anchor_target_and_rest
+            .head()
+            .as_atom()
+            .expect("asert-anchor-target atom");
+
+        let asert_ideal_and_rest = asert_anchor_target_and_rest
+            .tail()
+            .as_cell()
+            .expect("asert-ideal-block-time and rest tuple");
+        let asert_ideal_atom = asert_ideal_and_rest
+            .head()
+            .as_atom()
+            .expect("asert-ideal-block-time atom");
+        assert_eq!(
+            asert_ideal_atom
+                .as_u64()
+                .expect("asert-ideal-block-time as u64"),
+            BlockchainConstants::DEFAULT_ASERT_IDEAL_BLOCK_TIME
+        );
+
+        let asert_half_life_and_rest = asert_ideal_and_rest
+            .tail()
+            .as_cell()
+            .expect("asert-half-life and rest tuple");
+        let asert_half_life_atom = asert_half_life_and_rest
+            .head()
+            .as_atom()
+            .expect("asert-half-life atom");
+        assert_eq!(
+            asert_half_life_atom
+                .as_u64()
+                .expect("asert-half-life as u64"),
+            BlockchainConstants::DEFAULT_ASERT_HALF_LIFE
+        );
+
+        let asert_anchor_min_timestamp_atom = asert_half_life_and_rest
+            .tail()
+            .as_atom()
+            .expect("asert-anchor-min-timestamp atom");
+        assert_eq!(
+            asert_anchor_min_timestamp_atom
+                .as_u64()
+                .expect("asert-anchor-min-timestamp as u64"),
+            BlockchainConstants::DEFAULT_ASERT_ANCHOR_MIN_TIMESTAMP
         );
     }
 }

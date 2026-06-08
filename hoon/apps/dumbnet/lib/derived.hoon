@@ -1,6 +1,6 @@
 /=  dk  /apps/dumbnet/lib/types
 /=  dumb-transact  /common/tx-engine
-/=  *  /common/zoon
+/=  *  /common/h-zoon
 ::
 |_  [d=derived-state:dk =blockchain-constants:dumb-transact]
 +*  t  ~(. dumb-transact blockchain-constants)
@@ -14,7 +14,7 @@
   =/  heaviest-page=page:t
     ?:  =(~ heaviest-block.c)
       pag  :: genesis block
-    (to-page:local-page:t (~(got z-by blocks.c) (need heaviest-block.c)))
+    (to-page:local-page:t (~(got h-by blocks.c) (need heaviest-block.c)))
   =/  next-parent=block-id:t    ~(digest get:page:t heaviest-page)
   =/  next-height=page-number:t  ~(height get:page:t heaviest-page)
   |-
@@ -31,7 +31,7 @@
     d
   %=  $
     next-height   (dec next-height)
-    next-parent  ~(parent get:local-page:t (~(got z-by blocks.c) next-parent))
+    next-parent  ~(parent get:local-page:t (~(got h-by blocks.c) next-parent))
   ==
 ++  update-highest
   |=  height=page-number:t
@@ -51,7 +51,7 @@
   ^-  (unit ?)
   ?~  genesis-seal.c
     ?^  genesis-id=(~(get z-by heaviest-chain.d) 0)
-      =+  genesis=(~(get z-by blocks.c) u.genesis-id)
+      =+  genesis=(~(get h-by blocks.c) u.genesis-id)
       ?~  genesis
         ~
       `=((hash:page-msg:t ~(msg get:local-page:t u.genesis)) realnet-genesis-msg:dk)

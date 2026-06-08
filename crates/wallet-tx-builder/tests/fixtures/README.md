@@ -10,8 +10,12 @@ Fixture map
   - payload source: `closed/hoon/tests/wallet/mod/note-data-fixtures.hoon`
   - regeneration command:
 ```bash
-cargo run --profile release --bin hoon-closed -- \
-  closed/hoon/scripts/fixtures/v1/generate-note-data-fixtures.hoon \
-  closed/hoon
-cp out.jam open/crates/wallet-tx-builder/tests/fixtures/note_data_fixtures.jam
+make open/crates/wallet-tx-builder/tests/fixtures/note_data_fixtures.jam
+```
+- `open/crates/wallet-tx-builder/tests/fixtures/withdrawal_tx_fixtures.jam`
+  - generator script: `closed/hoon/scripts/fixtures/v1/generate-withdrawal-tx-fixtures.hoon`
+  - payload source: `closed/hoon/tests/wallet/mod/withdrawal-tx-fixtures.hoon`
+  - regeneration command:
+```bash
+make open/crates/wallet-tx-builder/tests/fixtures/withdrawal_tx_fixtures.jam
 ```

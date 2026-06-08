@@ -52,6 +52,16 @@ message GetStatusResponse {
   optional uint64 base_height = 7;
   optional LastDeposit last_submitted_deposit = 8;
   optional SuccessfulDeposit last_successful_deposit = 9;
+  uint64 pending_deposits = 10;
+  uint64 pending_withdrawals = 11;
+  uint64 unsettled_deposit_count = 12;
+  uint64 unsettled_withdrawal_count = 13;
+  optional string degradation_warning = 14;
+  bool nockchain_api_connected = 15;
+  optional string nockchain_api_last_error = 16;
+  uint32 peer_unhealthy_count = 17;
+  optional string last_stop_reason = 18;
+  optional string last_error_summary = 19;
 }
 
 service BridgeStatus {

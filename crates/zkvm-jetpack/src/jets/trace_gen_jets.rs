@@ -10,15 +10,16 @@ use crate::form::handle::new_handle_mut_felt;
 use crate::form::noun_ext::NounMathExt;
 
 pub fn build_tree_data_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
-    let sam = slot(subject, 6)?;
-    let t = slot(sam, 2)?;
-    let alf_noun = slot(sam, 3)?;
-    let Ok(alf) = alf_noun.as_felt() else {
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let t = slot(sam, 2, &space)?;
+    let alf_noun = slot(sam, 3, &space)?;
+    let Ok(alf) = alf_noun.as_felt(&space) else {
         error!("alf not a felt");
         return Err(BAIL_FAIL);
     };
 
-    let tree_data: TreeData = build_tree_data(t, alf)?;
+    let tree_data: TreeData = build_tree_data(t, alf, &space)?;
 
     let (leaf_atom, leaf_res): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);
     let (dyck_atom, dyck_res): (IndirectAtom, &mut Felt) = new_handle_mut_felt(&mut context.stack);

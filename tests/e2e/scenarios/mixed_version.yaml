@@ -1,0 +1,55 @@
+name: "mixed_version_interop"
+seed: 2
+nodes:
+  - id: "node-old"
+    binary: "${NOCKCHAIN_BIN_OLD}"
+    grpc_public_addr: "127.0.0.1:6301"
+    grpc_private_port: 7301
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    bind:
+      - "/ip4/127.0.0.1/udp/4301/quic-v1"
+  - id: "node-new"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6302"
+    grpc_private_port: 7302
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    extra_args:
+      - "--num-threads"
+      - "4"
+    peers:
+      - "/ip4/127.0.0.1/udp/4301/quic-v1"
+steps:
+  - action: start_nodes
+    ids: ["node-old", "node-new"]
+  - action: wait_for_grpc
+    node: "node-old"
+    timeout_ms: 30000
+  - action: wait_for_grpc
+    node: "node-new"
+    timeout_ms: 30000
+  - action: wait_for_height
+    node: "node-old"
+    height: 2
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-new"
+    height: 2
+    timeout_ms: 120000
+  - action: wait_for_height
+    node: "node-new"
+    height: 5
+    timeout_ms: 120000
+asserts:
+  - assert: heads_not_equal
+    nodes: ["node-old", "node-new"]

@@ -1,4 +1,8 @@
+use nockapp::noun::slab::{NockJammer, NounSlab};
+use nockapp::noun::NounEncodeJamExt;
+use nockapp::NounAllocator;
 use nockchain_math::belt::Belt;
+use nockchain_math::owned_based_noun::OwnedBasedNoun;
 use nockchain_types::tx_engine::common::Name;
 use nockchain_types::tx_engine::v1::{
     BalanceUpdate, Hax, HaxPreimage as V1HaxPreimage, LockMerkleProof, LockPrimitive, LockTim,
@@ -34,9 +38,10 @@ use crate::pb::public::v2::{
 
 impl From<NoteDataEntry> for PbNoteDataEntry {
     fn from(entry: NoteDataEntry) -> Self {
+        let blob = entry.raw_blob().to_vec();
         PbNoteDataEntry {
             key: entry.key,
-            blob: entry.blob.to_vec(),
+            blob,
         }
     }
 }
@@ -44,10 +49,8 @@ impl From<NoteDataEntry> for PbNoteDataEntry {
 impl TryFrom<PbNoteDataEntry> for NoteDataEntry {
     type Error = ConversionError;
     fn try_from(entry: PbNoteDataEntry) -> Result<Self, Self::Error> {
-        Ok(NoteDataEntry {
-            key: entry.key,
-            blob: entry.blob.into(),
-        })
+        NoteDataEntry::from_raw_blob(entry.key, prost::bytes::Bytes::from(entry.blob))
+            .map_err(|_| ConversionError::Invalid("NoteDataEntry.blob"))
     }
 }
 
@@ -275,7 +278,7 @@ impl From<LockPrimitive> for PbLockPrimitive {
 impl From<PkhSignatureEntry> for PbPkhSignatureEntry {
     fn from(entry: PkhSignatureEntry) -> Self {
         PbPkhSignatureEntry {
-            hash: Some(PbHash::from(entry.hash)),
+            hash: Some(PbHash::from(entry.pkh)),
             pubkey: Some(PbSchnorrPubkey::from(entry.pubkey)),
             signature: Some(PbSchnorrSignature::from(entry.signature)),
         }
@@ -294,7 +297,7 @@ impl From<V1HaxPreimage> for PbHaxPreimage {
     fn from(preimage: V1HaxPreimage) -> Self {
         PbHaxPreimage {
             hash: Some(PbHash::from(preimage.hash)),
-            value: preimage.value.to_vec(),
+            value: preimage.value.jam_bytes().to_vec(),
         }
     }
 }
@@ -366,7 +369,7 @@ impl TryFrom<PbPkhSignatureEntry> for PkhSignatureEntry {
     type Error = ConversionError;
     fn try_from(entry: PbPkhSignatureEntry) -> Result<Self, Self::Error> {
         Ok(PkhSignatureEntry {
-            hash: v1::Hash::try_from(entry.hash.required("PkhSignatureEntry", "hash")?)?,
+            pkh: v1::Hash::try_from(entry.hash.required("PkhSignatureEntry", "hash")?)?,
             pubkey: entry
                 .pubkey
                 .required("PkhSignatureEntry", "pubkey")?
@@ -394,9 +397,15 @@ impl TryFrom<PbPkhSignature> for PkhSignature {
 impl TryFrom<PbHaxPreimage> for V1HaxPreimage {
     type Error = ConversionError;
     fn try_from(preimage: PbHaxPreimage) -> Result<Self, Self::Error> {
+        let mut slab: NounSlab<NockJammer> = NounSlab::new();
+        let value_noun = slab
+            .cue_into(preimage.value.into())
+            .map_err(|_| ConversionError::Invalid("HaxPreimage.value"))?;
+        let space = slab.noun_space();
         Ok(V1HaxPreimage {
             hash: v1::Hash::try_from(preimage.hash.required("HaxPreimage", "hash")?)?,
-            value: preimage.value.into(),
+            value: OwnedBasedNoun::from_noun(value_noun, &space)
+                .map_err(|_| ConversionError::Invalid("HaxPreimage.value"))?,
         })
     }
 }

@@ -1,5 +1,5 @@
 use nockvm::ext::AtomExt;
-use nockvm::noun::{Noun, NounAllocator};
+use nockvm::noun::{Noun, NounAllocator, NounHandle, NounSpace};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use num_bigint::BigUint;
 
@@ -9,14 +9,14 @@ pub type BlockId = Hash;
 
 /// Decode a z-set into a Vec
 /// z-set structure: either `~` (atom 0) for empty, or `[n=item l=tree r=tree]`
-fn decode_zset<T: NounDecode>(noun: &Noun) -> Result<Vec<T>, NounDecodeError> {
+fn decode_zset<T: NounDecode>(noun: &NounHandle) -> Result<Vec<T>, NounDecodeError> {
     let mut result = Vec::new();
     collect_zset_items(noun, &mut result)?;
     Ok(result)
 }
 
 fn collect_zset_items<T: NounDecode>(
-    noun: &Noun,
+    noun: &NounHandle,
     result: &mut Vec<T>,
 ) -> Result<(), NounDecodeError> {
     // Empty set is atom 0
@@ -41,7 +41,7 @@ fn collect_zset_items<T: NounDecode>(
     collect_zset_items(&l, result)?;
 
     // Add the node item
-    let item = T::from_noun(&n)?;
+    let item = T::from_noun_handle(&n)?;
     result.push(item);
 
     // Recursively collect from right subtree
@@ -70,17 +70,17 @@ impl NounEncode for BigNum {
 }
 
 impl NounDecode for BigNum {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         // Bignum in Hoon is [%bn p=(list u32)] - a tagged cell with u32 chunks
         if let Ok(cell) = noun.as_cell() {
             // Check for %bn tag
-            if let Ok(tag) = cell.head().as_atom() {
+            if let Ok(tag) = cell.in_space(space).head().as_atom() {
                 // %bn = 0x6e62 = 28258 in little-endian ('bn' as cord)
                 let tag_val = tag.as_u64().unwrap_or(u64::MAX);
                 if tag_val == 28258 {
                     // Decode tail as list of u32 chunks (LSB first)
                     let mut chunks: Vec<u32> = Vec::new();
-                    let mut current = cell.tail();
+                    let mut current = cell.in_space(space).tail();
                     while let Ok(list_cell) = current.as_cell() {
                         let chunk = list_cell
                             .head()
@@ -126,7 +126,8 @@ impl NounDecode for BigNum {
         let atom = noun.as_atom().map_err(|_| {
             NounDecodeError::Custom("BigNum: expected atom or [%bn list] cell".into())
         })?;
-        let bytes = atom.as_ne_bytes();
+        let atom_handle = atom.in_space(space);
+        let bytes = atom_handle.as_ne_bytes();
         let biguint = BigUint::from_bytes_le(bytes);
         Ok(BigNum(biguint))
     }
@@ -159,15 +160,15 @@ impl NounEncode for CoinbaseSplit {
 }
 
 impl NounDecode for CoinbaseSplit {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         // Check if it's a tagged cell [%0 data] or [%1 data]
         if let Ok(cell) = noun.as_cell() {
-            if let Ok(tag_atom) = cell.head().as_atom() {
+            if let Ok(tag_atom) = cell.in_space(space).head().as_atom() {
                 if let Ok(tag) = tag_atom.as_u64() {
                     match tag {
                         0 => {
                             // V0: [%0 byte-list]
-                            let bytes = Vec::<u8>::from_noun(&cell.tail())?;
+                            let bytes = Vec::<u8>::from_noun_handle(&cell.in_space(space).tail())?;
                             return Ok(CoinbaseSplit::V0(bytes));
                         }
                         1 => {
@@ -180,7 +181,7 @@ impl NounDecode for CoinbaseSplit {
             }
         }
         // Fallback: try to decode as raw byte list (untagged v0)
-        if let Ok(bytes) = Vec::<u8>::from_noun(noun) {
+        if let Ok(bytes) = Vec::<u8>::from_noun(noun, space) {
             return Ok(CoinbaseSplit::V0(bytes));
         }
         // If all else fails, treat as v1 (unknown structure)
@@ -239,16 +240,17 @@ impl NounEncode for Page {
 impl NounDecode for Page {
     // TODO: Purge these custom Page NounDecode/NounEncode implementations in favor of
     // the standard noun-serde path once it can represent this shape directly.
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let cell = noun
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("Page: expected cell at root".into()))?;
 
         // Check if this is a v1 page (head is atom %1) or v0 page (head is cell/digest)
         let (digest, rest_after_digest) =
-            if cell.head().is_atom() {
+            if cell.in_space(space).head().is_atom() {
                 // v1 page: [%1 digest pow parent ...]
                 let version = cell
+                    .in_space(space)
                     .head()
                     .as_atom()
                     .map_err(|_| NounDecodeError::Custom("Page: version tag not atom".into()))?
@@ -261,10 +263,10 @@ impl NounDecode for Page {
                     )));
                 }
                 // Skip version tag, get digest from tail
-                let rest = cell.tail().as_cell().map_err(|_| {
+                let rest = cell.in_space(space).tail().as_cell().map_err(|_| {
                     NounDecodeError::Custom("Page: expected cell after version".into())
                 })?;
-                let digest = BlockId::from_noun(&rest.head())
+                let digest = BlockId::from_noun_handle(&rest.head())
                     .map_err(|e| NounDecodeError::Custom(format!("Page.digest: {}", e)))?;
                 let rest_after = rest.tail().as_cell().map_err(|_| {
                     NounDecodeError::Custom("Page: expected cell after digest".into())
@@ -272,9 +274,9 @@ impl NounDecode for Page {
                 (digest, rest_after)
             } else {
                 // v0 page: [digest pow parent ...]
-                let digest = BlockId::from_noun(&cell.head())
+                let digest = BlockId::from_noun_handle(&cell.in_space(space).head())
                     .map_err(|e| NounDecodeError::Custom(format!("Page.digest(v0): {}", e)))?;
-                let rest_after = cell.tail().as_cell().map_err(|_| {
+                let rest_after = cell.in_space(space).tail().as_cell().map_err(|_| {
                     NounDecodeError::Custom("Page: expected cell after digest(v0)".into())
                 })?;
                 (digest, rest_after)
@@ -302,7 +304,7 @@ impl NounDecode for Page {
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("Page: expected cell after pow".into()))?;
 
-        let parent = BlockId::from_noun(&rest.head())
+        let parent = BlockId::from_noun_handle(&rest.head())
             .map_err(|e| NounDecodeError::Custom(format!("Page.parent: {}", e)))?;
 
         let rest = rest
@@ -318,7 +320,7 @@ impl NounDecode for Page {
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("Page: expected cell after tx_ids".into()))?;
 
-        let coinbase = CoinbaseSplit::from_noun(&rest.head())
+        let coinbase = CoinbaseSplit::from_noun_handle(&rest.head())
             .map_err(|e| NounDecodeError::Custom(format!("Page.coinbase: {}", e)))?;
 
         let rest = rest
@@ -349,7 +351,7 @@ impl NounDecode for Page {
             NounDecodeError::Custom("Page: expected cell after epoch_counter".into())
         })?;
 
-        let target = BigNum::from_noun(&rest.head())
+        let target = BigNum::from_noun_handle(&rest.head())
             .map_err(|e| NounDecodeError::Custom(format!("Page.target: {}", e)))?;
 
         let rest = rest
@@ -357,7 +359,7 @@ impl NounDecode for Page {
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("Page: expected cell after target".into()))?;
 
-        let accumulated_work = BigNum::from_noun(&rest.head())
+        let accumulated_work = BigNum::from_noun(&rest.head().noun(), space)
             .map_err(|e| NounDecodeError::Custom(format!("Page.accumulated_work: {}", e)))?;
 
         let rest = rest.tail().as_cell().map_err(|_| {
@@ -371,7 +373,7 @@ impl NounDecode for Page {
             .as_u64()
             .map_err(|_| NounDecodeError::Custom("Page.height: too large".into()))?;
 
-        let msg = PageMsg::from_noun(&rest.tail())
+        let msg = PageMsg::from_noun_handle(&rest.tail())
             .map_err(|e| NounDecodeError::Custom(format!("Page.msg: {}", e)))?;
 
         Ok(Page {
