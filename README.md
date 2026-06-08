@@ -16,7 +16,22 @@ Nockchain is a ZK-Proof of Work blockchain that combines sound money incentives 
 > For docs read order, trust policy, and canonical sources, start with [`START_HERE.md`](./START_HERE.md).
 > Consensus/protocol authority is indexed in [`PROTOCOL.md`](./PROTOCOL.md), with canonical upgrade source files in [`changelog/protocol/`](./changelog/protocol/).
 > This README remains a quickstart for setup and operations.
+> Operators upgrading to a PMA-enabled release should also read [`PMA-FAQ.md`](./PMA-FAQ.md).
 
+## This is the first release of the persistent memory arena
+
+The PMA is a major re-architecting of `nockvm`, the runtime for Nockchain, and it significantly reduces the steady-state memory requirements of Nockchain peers and NockApps. We have tested it and run it ourselves but please report any bugs or problems.
+
+High-level take-aways for PMA:
+- Steady-state RAM (RSS) usage has dropped from ~20 GiB to ~1.8 GiB
+- Maximum RAM usage has dropped from ~40 GiB to ~20 GiB. This is much less frequent in the PMA version, but it will happen temporarily with the checkpoint bootstrap on the first post-PMA boot and to a lesser extent garbage collection. During the first boot you will see the RSS be elevated initially (~12-16 GiB) until your first garbage collection, then you should see ~1.8 GiB RSS typically.
+- You should still provision a swap partition of at least 32 GiB as the PMA enables paging out without swapping for the Arvo (persistent state, which includes the entirety of the chain state) but not `nockvm`'s NockStack itself, this is by design to conserve predictable and efficient execution performance in the NockStack.
+- Transaction throughput is improved, 600-700 milliseconds of per-event overhead has been traded down to 2-4 milliseconds of per-event durability overhead. This has a particularly noticeable impact for cheap interstitial events like the timer, duplicate blocks, etc. When we tested baseline against PMA the PMA instance managed to get more than 1,000 blocks ahead of the baseline in a few hours of syncing blocks in the 52k-62k range. This improvement is because the PMA moves the Arvo out of the NockStack and spares the NockStack compacting the entirety of the chain state after every event.
+- Write-through burden on SSD disks is markedly lower, about 2x, than the pre-PMA baseline's behavior. This is based on procfs statistics and not our own measurements so the numbers should be sound. This will vary depending on how you configure the snapshot and garbage collection intervals.
+- No more 2-3 minute checkpoints bookending one after another. Incremental, efficient persistence to disk through the PMA slab.
+- Garbage collection causes a ~5-10 second spike in RSS but it's a lower peak than checkpointing and shouldn't be nearly as susceptible to OOMs as checkpointing was.
+- NockStack gets `madvise` trimmed after every event with a high watermark higher than 512 MiB to align the pages allocated for the Nockchain/NockApp process with what's actually needed/used in practice.
+- PMA includes the PMA slab and .meta sidecar itself, a sqlite3 event log, and snapshots of the slabs aligned to event log positions. Durability is considerably more robust and efficient now. `fsync`/`fdatasync` ordering during post-event the durability cycle is strictly and carefully designed to make the detection of corrupted PMA slabs due to `SIGKILL`, power cuts, etc. trivially cheap and highly reliable.
 
 ## Setup
 

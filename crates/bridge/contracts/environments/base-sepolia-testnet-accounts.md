@@ -16,7 +16,7 @@ For full deployment flow, see [`../DEPLOYMENT.md`](../DEPLOYMENT.md).
 
 ## Funding
 
-The deployer account used by contracts deployment (`TENDERLY_PRIVATE_KEY`) needs Base Sepolia ETH.
+The test deployer account used by contracts deployment (`TENDERLY_TEST_PRIVATE_KEY`) needs Base Sepolia ETH.
 
 Faucets:
 1. Alchemy: https://www.alchemy.com/faucets/base-sepolia
@@ -35,7 +35,7 @@ cast balance "$BASE_SEPOLIA_DEPLOYER_ADDRESS" --rpc-url "$BASE_SEPOLIA_RPC_URL"
 
 Required:
 - `TENDERLY_RPC_URL`
-- `TENDERLY_PRIVATE_KEY`
+- `TENDERLY_TEST_PRIVATE_KEY`
 - `NOCK_NAME`
 - `NOCK_SYMBOL`
 - `BRIDGE_NODE_0`

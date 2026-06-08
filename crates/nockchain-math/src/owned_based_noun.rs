@@ -1,5 +1,5 @@
-use nockvm::noun::Noun;
-use noun_serde::NounDecodeError;
+use nockvm::noun::{Noun, NounAllocator, NounSpace};
+use noun_serde::{NounDecodeError, NounEncode};
 
 use crate::belt::{based_check, Belt};
 use crate::tip5;
@@ -51,9 +51,10 @@ impl OwnedBasedNoun {
     ///
     /// This rejects any atom that is either larger than `u64` or not a valid
     /// base-field element.
-    pub fn from_noun(noun: Noun) -> Result<Self, OwnedBasedNounError> {
+    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Self, OwnedBasedNounError> {
         if noun.is_atom() {
             let atom = noun
+                .in_space(space)
                 .as_atom()
                 .map_err(|_| OwnedBasedNounError::Malformed("expected atom"))?;
             let atom = atom
@@ -66,11 +67,12 @@ impl OwnedBasedNoun {
             Ok(Self::Atom(atom))
         } else {
             let cell = noun
+                .in_space(space)
                 .as_cell()
                 .map_err(|_| OwnedBasedNounError::Malformed("expected cell"))?;
             Ok(Self::cell(
-                Self::from_noun(cell.head())?,
-                Self::from_noun(cell.tail())?,
+                Self::from_noun(cell.head().noun(), space)?,
+                Self::from_noun(cell.tail().noun(), space)?,
             ))
         }
     }
@@ -159,6 +161,44 @@ impl OwnedBasedNoun {
             }
         }
     }
+
+    /// Computes the digest of this noun after applying tx-engine
+    /// `hashable-noun` semantics.
+    ///
+    /// This is different from [`hash_owned_based_noun_varlen`], which hashes
+    /// the noun itself. Here atoms are interpreted as `%leaf` payloads and
+    /// cells are interpreted as hashable pairs, matching Hoon:
+    ///
+    /// ```text
+    /// ?^  n  [$(n -.n) $(n +.n)]
+    /// leaf+n
+    /// ```
+    ///
+    /// TODO(types/maths): Revisit crate layering so primitive digest/hash
+    /// types can live below both `nockchain-math` and `nockchain-types`.
+    /// This currently returns raw limbs to avoid making `nockchain-math`
+    /// depend on `nockchain-types`.
+    pub fn hashable_noun_digest(&self) -> [u64; 5] {
+        match self {
+            Self::Atom(atom) => hash_leaf_belt(*atom),
+            Self::Cell(left, right) => {
+                hash_hashable_pair(left.hashable_noun_digest(), right.hashable_noun_digest())
+            }
+        }
+    }
+}
+
+impl NounEncode for OwnedBasedNoun {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        match self {
+            Self::Atom(atom) => atom.to_noun(allocator),
+            Self::Cell(left, right) => {
+                let left = left.to_noun(allocator);
+                let right = right.to_noun(allocator);
+                nockvm::noun::T(allocator, &[left, right])
+            }
+        }
+    }
 }
 
 /// Computes the tip5 `hash-noun-varlen` digest for an owned noun tree.
@@ -173,6 +213,16 @@ pub fn hash_owned_based_noun_varlen(noun: &OwnedBasedNoun) -> [u64; 5] {
     tip5::hash::hash_varlen(&mut input)
 }
 
+fn hash_leaf_belt(belt: Belt) -> [u64; 5] {
+    let mut input = vec![Belt(1), belt];
+    tip5::hash::hash_varlen(&mut input)
+}
+
+fn hash_hashable_pair(left: [u64; 5], right: [u64; 5]) -> [u64; 5] {
+    let mut input = left.into_iter().chain(right).map(Belt).collect::<Vec<_>>();
+    tip5::hash::hash_10(&mut input)
+}
+
 #[cfg(test)]
 mod tests {
     use ibig::ubig;
@@ -184,47 +234,51 @@ mod tests {
 
     #[test]
     fn from_noun_accepts_direct_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, 7).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Ok(OwnedBasedNoun::Atom(Belt(7)))
         );
     }
 
     #[test]
     fn from_noun_accepts_indirect_based_atoms_that_fit_u64() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, PRIME - 1).as_noun();
+        let space = stack.noun_space();
         let atom = noun.as_atom().expect("noun should be atom");
         assert!(atom.is_indirect());
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Ok(OwnedBasedNoun::Atom(Belt(PRIME - 1)))
         );
     }
 
     #[test]
     fn from_noun_rejects_non_based_atoms() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let noun = Atom::new(&mut stack, PRIME).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Err(OwnedBasedNounError::AtomNotBased(PRIME))
         );
     }
 
     #[test]
     fn from_noun_rejects_atoms_larger_than_u64() {
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
         let big = ubig!(1) << 80;
         let noun = Atom::from_ubig(&mut stack, &big).as_noun();
+        let space = stack.noun_space();
 
         assert_eq!(
-            OwnedBasedNoun::from_noun(noun),
+            OwnedBasedNoun::from_noun(noun, &space),
             Err(OwnedBasedNounError::AtomTooLarge)
         );
     }

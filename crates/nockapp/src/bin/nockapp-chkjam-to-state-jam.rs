@@ -5,7 +5,7 @@ use clap::Parser;
 use nockapp::export::ExportedState;
 use nockapp::kernel::form::LoadState;
 use nockapp::noun::slab::NockJammer;
-use nockapp::save::{SaveableCheckpoint, Saver};
+use nockapp::save::{CheckpointBootstrapReader, SaveableCheckpoint};
 use tempfile::TempDir;
 use tokio::fs;
 
@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
             event_num: checkpoint.event_num,
             kernel_state: checkpoint.state,
         };
-        let exported = ExportedState::from_loadstate(load_state);
+        let exported = ExportedState::from_loadstate::<NockJammer>(load_state);
         let event_num = exported.event_num;
         let ker_hash = exported.ker_hash;
         let encoded = exported
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
 
         // Verify output can be decoded back into a load state before writing.
         let decoded = ExportedState::decode(&encoded).context("failed to decode output bytes")?;
-        let _ = decoded.to_loadstate().map_err(|err| {
+        let _ = decoded.to_loadstate::<NockJammer>().map_err(|err| {
             anyhow::anyhow!("decoded output did not produce a valid load state: {err}")
         })?;
 
@@ -114,7 +114,8 @@ async fn main() -> Result<()> {
 async fn load_checkpoint(input: &Path) -> Result<SaveableCheckpoint> {
     if input.is_dir() {
         let path = input.to_path_buf();
-        let (_, checkpoint) = Saver::<NockJammer>::try_load::<SaveableCheckpoint>(&path, None)
+        let checkpoint = CheckpointBootstrapReader::<NockJammer>::new(path)
+            .load_latest(None)
             .await
             .with_context(|| format!("failed to load checkpoint directory {}", input.display()))?;
         return checkpoint.with_context(|| format!("no checkpoint found in {}", input.display()));
@@ -138,15 +139,15 @@ async fn load_checkpoint(input: &Path) -> Result<SaveableCheckpoint> {
         .await
         .with_context(|| format!("failed to copy {} to {}", input.display(), copied.display()))?;
 
-    let (_, checkpoint) =
-        Saver::<NockJammer>::try_load::<SaveableCheckpoint>(&checkpoint_dir, None)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to decode checkpoint from temporary copy of {}",
-                    input.display()
-                )
-            })?;
+    let checkpoint = CheckpointBootstrapReader::<NockJammer>::new(checkpoint_dir)
+        .load_latest(None)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to decode checkpoint from temporary copy of {}",
+                input.display()
+            )
+        })?;
 
     checkpoint.with_context(|| format!("no checkpoint found in {}", input.display()))
 }

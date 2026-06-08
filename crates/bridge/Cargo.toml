@@ -18,6 +18,7 @@ snmalloc = ["dep:snmalloc-rs"]
 alloy = { workspace = true, features = ["provider-ws", "signer-local"] }
 anyhow.workspace = true
 async-trait.workspace = true
+aws-sdk-s3.workspace = true
 backon.workspace = true
 bincode.workspace = true
 blake3.workspace = true
@@ -31,12 +32,13 @@ futures.workspace = true
 getrandom.workspace = true
 gnort = { workspace = true }
 hex.workspace = true
+hmac.workspace = true
 # Force SQLite to be built from source for the target (Linux)
 ibig.workspace = true
 kernels-open-bridge = { workspace = true }
 libsqlite3-sys = { workspace = true }
 nockapp.workspace = true
-nockapp-grpc = { workspace = true, default-features = false, features = [
+nockapp-grpc = { path = "../nockapp-grpc", default-features = false, features = [
   "client",
 ] }
 nockchain-libp2p-io.workspace = true
@@ -50,10 +52,12 @@ num-bigint.workspace = true
 op-alloy = { workspace = true, features = ["network"] }
 prost = { workspace = true }
 ratatui.workspace = true
+reqwest.workspace = true
 rustls = { workspace = true, features = ["aws_lc_rs"] }
 serde.workspace = true
 serde_bytes.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 snmalloc-rs = { workspace = true, optional = true }
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
@@ -66,6 +70,7 @@ tonic-reflection = { workspace = true }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+wallet-tx-builder.workspace = true
 zkvm-jetpack.workspace = true
 
 [build-dependencies]

@@ -12,6 +12,12 @@ pub(crate) struct MemoryAllocation {
 
 pub trait Stack: Sized {
     // no-std bites me in the keister again
+    ///
+    /// # Safety
+    ///
+    /// The caller must pass a valid [`Layout`]. The implementation must return a pointer that is
+    /// aligned for `layout`, refers to at least `layout.size()` bytes of writable memory, and
+    /// remains valid for the lifetime expected by the stack allocator contract used by `ibig`.
     unsafe fn alloc_layout(&mut self, layout: Layout) -> *mut u64;
 }
 

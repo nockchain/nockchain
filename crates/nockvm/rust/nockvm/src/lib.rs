@@ -15,9 +15,10 @@ pub mod jets;
 pub mod mem;
 pub mod mug;
 pub mod noun;
+pub mod offset;
+pub mod pma;
 pub mod serialization;
 pub mod site;
-pub mod substantive;
 pub mod trace;
 pub mod unifying_equality;
 
@@ -71,7 +72,7 @@ mod tests {
         use crate::mem::NockStack;
         use crate::noun::*;
         use crate::serialization::jam;
-        let mut stack = NockStack::new(8 << 10 << 10, 0);
+        let mut stack = NockStack::new(crate::mem::NOCK_STACK_SIZE_TINY, 0);
         let head = Atom::new(&mut stack, 0).as_noun();
         let tail = Atom::new(&mut stack, 1).as_noun();
         let cell = Cell::new(&mut stack, head, tail).as_noun();

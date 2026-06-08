@@ -1,0 +1,294 @@
+# Nous rollout scenario: staged gen2-send enablement with local testnet traffic
+#
+# This mirrors the intended rollout path for testnet/mainnet operators:
+# 1. bring up miners on shipped gen1-only defaults and full nodes in the
+#    explicit accept-only stage
+# 2. enable gen2 send on full-a so the network has an upgraded sender before
+#    the lagging full-b rejoins
+# 3. enable gen2 send on lagging full-b, generate more traffic, and verify it
+#    completes the targeted catch-up path with full-a over gen2
+#
+# The block-stuffer load path uses a cloned miner wallet so the send path is
+# exercised with real wallet-created transactions rather than fixture replay.
+
+name: "nous_testnet_gen2_send"
+seed: 26
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6301"
+    grpc_private_port: 7301
+    bind:
+      - "/ip4/127.0.0.1/udp/4301/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6302"
+    grpc_private_port: 7302
+    bind:
+      - "/ip4/127.0.0.1/udp/4302/quic-v1"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4301/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "false"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6303"
+    grpc_private_port: 7303
+    bind:
+      - "/ip4/127.0.0.1/udp/4303/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4301/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/4302/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+  - id: "full-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6304"
+    grpc_private_port: 7304
+    bind:
+      - "/ip4/127.0.0.1/udp/4304/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4301/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/4302/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/4303/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "false"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 30000
+
+  - action: start_nodes
+    ids: ["miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["full-b"]
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 10
+    timeout_ms: 180000
+
+  - action: stop_nodes
+    ids: ["full-a"]
+
+  - action: set_node_env
+    node: "full-a"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "true"
+
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-first"
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "7301"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "2"
+      STEADY_STATE_TXS: "2"
+      MAX_ITERATIONS: "4"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 20
+    timeout_ms: 300000
+
+  - action: stop_nodes
+    ids: ["miner-a", "miner-b", "full-b"]
+
+  - action: set_node_env
+    node: "full-b"
+    key: "NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED"
+    value: "true"
+
+  - action: start_nodes
+    ids: ["miner-a", "miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 120000
+
+  # Refresh the stuffer wallet from miner-a before the second load leg.
+  # The first block-stuffer pass mutates local wallet state; re-cloning keeps
+  # the staged-send rehearsal focused on the mixed-generation rejoin path
+  # with fresh wallet checkpoints between legs.
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-second"
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "7301"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "2"
+      STEADY_STATE_TXS: "2"
+      MAX_ITERATIONS: "4"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  - action: start_nodes
+    ids: ["full-b"]
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 120000
+
+  - action: command
+    command: "${REPO_ROOT}/target/release/nockchain-e2e"
+    args:
+      - "assert-peer-speedup"
+      - "--server"
+      - "127.0.0.1:6303"
+      - "--server"
+      - "127.0.0.1:6304"
+      - "--sample-interval-ms"
+      - "5000"
+      - "--min-speedup-ratio"
+      - "1.10"
+      - "--json-out"
+      - "${RUN_DIR}/reports/nous-peer-speedup.json"
+    cwd: "${RUN_DIR}/peer-speedup"
+    expect: "\"passed\": true"
+
+  # Stability hold: let the network run for 30s after full-b rejoins
+  # to confirm no late divergence or stalled sync.
+  - action: sleep
+    millis: 30000
+
+asserts:
+  - assert: req_res_generation
+    node: "full-b"
+    peer: "full-a"
+    generation: gen2
+    timeout_ms: 180000
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a", "full-b"]
+    timeout_ms: 180000

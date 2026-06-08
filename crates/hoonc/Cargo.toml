@@ -18,6 +18,7 @@ no_check_oom = ["nockvm/no_check_oom"]
 bincode = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
+chaff = { workspace = true }
 clap = { workspace = true, features = ["derive", "cargo", "color", "env"] }
 dirs = { workspace = true }
 futures = { workspace = true }

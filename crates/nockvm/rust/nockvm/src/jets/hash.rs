@@ -9,7 +9,8 @@ use crate::noun::Noun;
 crate::gdb!();
 
 pub fn jet_mug(context: &mut Context, subject: Noun) -> Result {
-    let arg = slot(subject, 6)?;
+    let space = context.stack.noun_space();
+    let arg = slot(subject, 6, &space)?;
     Ok(mug(&mut context.stack, arg).as_noun())
 }
 

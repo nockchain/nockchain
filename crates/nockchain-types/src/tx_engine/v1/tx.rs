@@ -1,25 +1,26 @@
 use nockapp::noun::slab::{NockJammer, NounSlab};
-use nockapp::noun::NounAllocatorExt;
 use nockchain_math::belt::Belt;
-use nockchain_math::noun_ext::NounMathExt;
-use nockchain_math::structs::{HoonList, HoonMapIter};
+use nockchain_math::noun_ext::NounMathExtHandle;
+use nockchain_math::owned_based_noun::{owned_based_noun_decode_error, OwnedBasedNoun};
+use nockchain_math::structs::{collect_zmap_entries_strict, HoonList};
 use nockchain_math::zoon::common::DefaultTipHasher;
 use nockchain_math::zoon::zmap::{self, ZMap};
 use nockchain_math::zoon::zset::ZSet;
-use nockvm::ext::{make_tas, AtomExt};
-use nockvm::noun::{Noun, NounAllocator, D};
+use nockvm::ext::make_tas;
+use nockvm::noun::{Noun, NounAllocator, NounSpace, D};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 
 use super::hashable::{
-    hash_leaf_atom, hash_leaf_null, hash_pair, hash_unit_belt, Hashable, HashableEncodingError,
-    HashableTreeHasher,
+    hash_hashable, hash_leaf_atom, hash_leaf_digest, hash_leaf_null, hash_pair, hash_unit_belt,
+    noun_hashable, HashHashable, HashableEncodingError, HashableTreeHasher,
 };
-use super::note::NoteData;
+use super::note::{NoteData, NoteDataValue};
 use crate::tx_engine::common::{
     BlockHeight, BlockHeightDelta, FirstName, Hash, Name, Nicks, SchnorrPubkey, SchnorrSignature,
     Signature, Source, TxId, Version,
 };
 use crate::v0::{TimelockRangeAbsolute, TimelockRangeRelative};
+use crate::EthAddress;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawTx {
@@ -27,6 +28,28 @@ pub struct RawTx {
     pub id: TxId,
     pub spends: Spends,
 }
+
+#[derive(Debug, thiserror::Error)]
+pub enum RawTxIdError {
+    #[error("raw tx id hashing only supports v1 transactions, got {0:?}")]
+    UnsupportedVersion(Version),
+    #[error("failed to encode hashable structure: {0}")]
+    Encode(String),
+    #[error("failed to hash raw tx id: {0}")]
+    Hash(String),
+    #[error("failed to decode raw tx id digest: {0}")]
+    Decode(String),
+    #[error("failed to hash spend-condition: {0}")]
+    LockHash(#[from] LockHashError),
+    #[error("failed to hash witness pubkey: {0}")]
+    PubkeyHash(String),
+}
+
+// Fixed placeholder hash used by the legacy `LockMerkleProof::Stub` hashable form.
+// Stub proofs do not commit to `axis`, so this sentinel preserves the old
+// deterministic digest shape while keeping it distinct from the `%full` path.
+const LOCK_MERKLE_PROOF_STUB_SENTINEL_B58: &str =
+    "6mhCSwJQDvbkbiPAUNjetJtVoo1VLtEhmEYoU4hmdGd6ep1F6ayaV4A";
 
 impl NounEncode for RawTx {
     fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
@@ -38,17 +61,17 @@ impl NounEncode for RawTx {
 }
 
 impl NounDecode for RawTx {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let version = Version::from_noun(&cell.head())?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
+        let version = Version::from_noun(&cell.head().noun(), space)?;
 
         let tail = cell.tail();
         let cell = tail
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("raw-tx tail not a cell".into()))?;
-        let id = TxId::from_noun(&cell.head())?;
+        let id = TxId::from_noun(&cell.head().noun(), space)?;
 
-        let spends = Spends::from_noun(&cell.tail())?;
+        let spends = Spends::from_noun(&cell.tail().noun(), space)?;
 
         if version != Version::V1 {
             return Err(NounDecodeError::Custom("expected raw-tx version 1".into()));
@@ -59,6 +82,191 @@ impl NounDecode for RawTx {
             id,
             spends,
         })
+    }
+}
+
+impl RawTx {
+    pub fn compute_id(&self) -> Result<TxId, RawTxIdError> {
+        self.hash_digest()
+    }
+
+    pub fn compute_id_base58(&self) -> Result<String, RawTxIdError> {
+        Ok(self.compute_id()?.to_base58())
+    }
+}
+
+impl HashHashable for RawTx {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        // TODO(raw-tx-fixture): the Hoon-backed raw-tx parity fixture currently covers a
+        // witness spend with opaque note-data, but not legacy spends, mixed spend maps, or
+        // typed note-data (`%lock`, `%bridge`, `%bridge-w`). Keep this direct hashing path in
+        // sync with Hoon and expand fixture coverage before treating it as exhaustive.
+        if self.version != Version::V1 {
+            return Err(RawTxIdError::UnsupportedVersion(self.version.clone()));
+        }
+
+        let version = hashable_leaf_value_digest(&1_u64)?;
+        let spends = self.spends.hash_digest()?;
+        Ok(hash_pair(&version, &spends))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureMap(pub Vec<(Name, Signature)>);
+
+impl NounEncode for SignatureMap {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        zmap::encode_entries(allocator, &self.0, &DefaultTipHasher)
+            .unwrap_or_else(|_| panic!("failed to encode signature map"))
+    }
+}
+
+impl NounDecode for SignatureMap {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        zmap::decode_entries(noun, space, "signature").map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpendConditionMap(pub Vec<(Name, SpendCondition)>);
+
+impl NounEncode for SpendConditionMap {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        zmap::encode_entries(allocator, &self.0, &DefaultTipHasher)
+            .unwrap_or_else(|_| panic!("failed to encode spend-condition map"))
+    }
+}
+
+impl NounDecode for SpendConditionMap {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        zmap::decode_entries(noun, space, "spend-condition").map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitnessMap(pub Vec<(Name, Witness)>);
+
+impl NounEncode for WitnessMap {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        zmap::encode_entries(allocator, &self.0, &DefaultTipHasher)
+            .unwrap_or_else(|_| panic!("failed to encode witness map"))
+    }
+}
+
+impl NounDecode for WitnessMap {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        zmap::decode_entries(noun, space, "witness").map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub enum InputMetadata {
+    #[noun(tag = 0)]
+    LegacySignatures(SignatureMap),
+    #[noun(tag = 1)]
+    SpendConditions(SpendConditionMap),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub struct LegacyLockMetadata {
+    pub lock: Lock,
+    pub include_data: bool,
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub enum VersionedLockMetadata {
+    #[noun(tag = "lock")]
+    Lock { lock: Lock, include_data: bool },
+    #[noun(tag = "lock-root")]
+    LockRoot(Hash),
+    #[noun(tag = "bridge-deposit")]
+    BridgeDeposit { root: Hash, addr: EthAddress },
+    #[noun(tag = "bridge-withdrawal")]
+    BridgeWithdrawal {
+        root: Hash,
+        beid: Vec<Belt>,
+        base_hash: Hash,
+        base_batch_end: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub enum LockMetadata {
+    #[noun(untagged)]
+    Legacy(LegacyLockMetadata),
+    #[noun(tag = 1)]
+    Versioned(VersionedLockMetadata),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputLockMap(pub Vec<(Hash, LockMetadata)>);
+
+impl NounEncode for OutputLockMap {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        zmap::encode_entries(allocator, &self.0, &DefaultTipHasher)
+            .unwrap_or_else(|_| panic!("failed to encode output-lock map"))
+    }
+}
+
+impl NounDecode for OutputLockMap {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        zmap::decode_entries(noun, space, "output-lock").map(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+pub struct TransactionMetadata {
+    pub inputs: InputMetadata,
+    pub outputs: OutputLockMap,
+}
+
+#[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
+pub enum WitnessData {
+    #[noun(tag = 0)]
+    Signatures(SignatureMap),
+    #[noun(tag = 1)]
+    Witnesses(WitnessMap),
+}
+
+#[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
+pub struct TransactionV1 {
+    pub name: String,
+    pub spends: Spends,
+    pub metadata: TransactionMetadata,
+    pub witness_data: WitnessData,
+}
+
+#[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
+pub enum Transaction {
+    #[noun(tag = 1)]
+    V1(TransactionV1),
+}
+
+fn normalized_name_sort_key(name: &Name) -> ([u8; 40], [u8; 40]) {
+    (name.first.to_be_limb_bytes(), name.last.to_be_limb_bytes())
+}
+
+fn normalized_note_names(inputs: &[Name]) -> Vec<Name> {
+    let mut normalized = inputs.to_vec();
+    normalized.sort_by_key(normalized_name_sort_key);
+    normalized.dedup_by(|left, right| left == right);
+    normalized
+}
+
+impl Transaction {
+    pub fn normalized_input_names(&self) -> Vec<Name> {
+        match self {
+            Transaction::V1(tx) => normalized_note_names(
+                &tx.spends
+                    .0
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+        }
     }
 }
 
@@ -74,44 +282,19 @@ impl NounEncode for Spends {
 }
 
 impl NounDecode for Spends {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        Ok(Self(ZMap::<Name, Spend>::from_noun(noun)?.into_entries()))
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        Ok(Self(
+            ZMap::<Name, Spend>::from_noun(noun, space)?.into_entries(),
+        ))
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
 pub enum Spend {
+    #[noun(tag = 0)]
     Legacy(Spend0),
+    #[noun(tag = 1)]
     Witness(Spend1),
-}
-
-impl NounEncode for Spend {
-    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
-        match self {
-            Spend::Legacy(spend) => {
-                let tag = D(0);
-                let value = spend.to_noun(allocator);
-                nockvm::noun::T(allocator, &[tag, value])
-            }
-            Spend::Witness(spend) => {
-                let tag = D(1);
-                let value = spend.to_noun(allocator);
-                nockvm::noun::T(allocator, &[tag, value])
-            }
-        }
-    }
-}
-
-impl NounDecode for Spend {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let tag = cell.head().as_atom()?.as_u64()?;
-        match tag {
-            0 => Ok(Spend::Legacy(Spend0::from_noun(&cell.tail())?)),
-            1 => Ok(Spend::Witness(Spend1::from_noun(&cell.tail())?)),
-            _ => Err(NounDecodeError::InvalidEnumVariant),
-        }
-    }
 }
 
 #[derive(Debug, Clone, NounEncode, NounDecode, PartialEq)]
@@ -140,8 +323,8 @@ impl NounEncode for Seeds {
 }
 
 impl NounDecode for Seeds {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        Ok(Self(ZSet::<Seed>::from_noun(noun)?.into_items()))
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        Ok(Self(ZSet::<Seed>::from_noun(noun, space)?.into_items()))
     }
 }
 
@@ -184,13 +367,7 @@ impl NounEncode for Witness {
         let pkh = self.pkh_signature.to_noun(allocator);
         let hax = self.hax.iter().fold(D(0), |acc, entry| {
             let mut key = entry.hash.to_noun(allocator);
-            let mut value_noun = unsafe {
-                let mut slab: NounSlab<NockJammer> = NounSlab::new();
-                slab.cue_into(entry.value.clone())
-                    .expect("failed to cue value");
-                let &root = slab.root();
-                allocator.copy_into(root)
-            };
+            let mut value_noun = entry.value.to_noun(allocator);
             zmap::z_map_put(
                 allocator, &acc, &mut key, &mut value_noun, &DefaultTipHasher,
             )
@@ -202,31 +379,32 @@ impl NounEncode for Witness {
 }
 
 impl NounDecode for Witness {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let lock_merkle_proof = LockMerkleProof::from_noun(&cell.head())?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
+        let lock_merkle_proof = LockMerkleProof::from_noun(&cell.head().noun(), space)?;
 
         let tail = cell.tail();
         let cell = tail
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("witness tail not a cell".into()))?;
-        let pkh_signature = PkhSignature::from_noun(&cell.head())?;
+        let pkh_signature = PkhSignature::from_noun(&cell.head().noun(), space)?;
 
         let tail = cell.tail();
         let cell = tail
             .as_cell()
             .map_err(|_| NounDecodeError::Custom("witness hax tail not a cell".into()))?;
 
-        let hax_entries = HoonMapIter::from(cell.head())
-            .filter(|entry| entry.is_cell())
+        let hax_map = cell.head();
+        let hax_entries = collect_zmap_entries_strict(&hax_map)
+            .map_err(|_| NounDecodeError::Custom("malformed witness hax z-map node".into()))?
+            .into_iter()
             .map(|entry| {
                 let [hash_raw, value_noun] = entry.uncell().map_err(|_| {
                     NounDecodeError::Custom("witness hax entry must be a pair".into())
                 })?;
-                let hash = Hash::from_noun(&hash_raw)?;
-                let mut slab: NounSlab<NockJammer> = NounSlab::new();
-                slab.copy_into(value_noun);
-                let value = slab.jam();
+                let hash = Hash::from_noun(&hash_raw.noun(), space)?;
+                let value = OwnedBasedNoun::from_noun(value_noun.noun(), space)
+                    .map_err(owned_based_noun_decode_error)?;
                 Ok(HaxPreimage { hash, value })
             })
             .collect::<Result<Vec<_>, NounDecodeError>>()?;
@@ -243,8 +421,7 @@ impl NounDecode for Witness {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HaxPreimage {
     pub hash: Hash,
-    // Jammed Bytes
-    pub value: bytes::Bytes,
+    pub value: OwnedBasedNoun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,7 +441,7 @@ impl NounEncode for PkhSignature {
             .cloned()
             .map(|entry| {
                 (
-                    entry.hash.clone(),
+                    entry.pkh.clone(),
                     PkhSignatureValue {
                         pubkey: entry.pubkey,
                         signature: entry.signature,
@@ -279,13 +456,13 @@ impl NounEncode for PkhSignature {
 }
 
 impl NounDecode for PkhSignature {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let entries = ZMap::<Hash, PkhSignatureValue>::from_noun(noun)?.into_entries();
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let entries = ZMap::<Hash, PkhSignatureValue>::from_noun(noun, space)?.into_entries();
         Ok(Self(
             entries
                 .into_iter()
                 .map(|(hash, value)| PkhSignatureEntry {
-                    hash,
+                    pkh: hash,
                     pubkey: value.pubkey,
                     signature: value.signature,
                 })
@@ -302,7 +479,7 @@ struct PkhSignatureValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PkhSignatureEntry {
-    pub hash: Hash,
+    pub pkh: Hash,
     pub pubkey: SchnorrPubkey,
     pub signature: SchnorrSignature,
 }
@@ -386,8 +563,8 @@ impl LockMerkleProof {
 }
 
 impl NounDecode for LockMerkleProof {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        if let Ok(full) = LockMerkleProofFull::from_noun(noun) {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        if let Ok(full) = LockMerkleProofFull::from_noun(noun, space) {
             if full.version != nockvm_macros::tas!(b"full") {
                 return Err(NounDecodeError::Custom(
                     "lock-merkle-proof version must be %full".into(),
@@ -395,7 +572,7 @@ impl NounDecode for LockMerkleProof {
             }
             return Ok(Self::Full(full));
         }
-        Ok(Self::Stub(LockMerkleProofStub::from_noun(noun)?))
+        Ok(Self::Stub(LockMerkleProofStub::from_noun(noun, space)?))
     }
 }
 
@@ -418,41 +595,18 @@ impl NounEncode for MerkleProof {
 }
 
 impl NounDecode for MerkleProof {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let root = Hash::from_noun(&cell.head())?;
-        let path_iter = HoonList::try_from(cell.tail())
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
+        let root = Hash::from_noun(&cell.head().noun(), space)?;
+        let path_iter = HoonList::try_from(cell.tail().noun(), space)
             .map_err(|_| NounDecodeError::Custom("merkle proof path must be a list".into()))?;
 
         let mut path = Vec::new();
         for entry in path_iter {
-            path.push(Hash::from_noun(&entry)?);
+            path.push(Hash::from_noun(&entry, space)?);
         }
 
         Ok(Self { root, path })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NumericTag(u64);
-
-impl NumericTag {
-    fn into_inner(self) -> u64 {
-        self.0
-    }
-}
-
-impl NounDecode for NumericTag {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        if let Ok(value) = u64::from_noun(noun) {
-            return Ok(Self(value));
-        }
-
-        let tag = String::from_noun(noun)?;
-        let value = tag.parse::<u64>().map_err(|_| {
-            NounDecodeError::Custom("lock tree tag must contain only digits".into())
-        })?;
-        Ok(Self(value))
     }
 }
 
@@ -460,12 +614,17 @@ impl NounDecode for NumericTag {
 ///
 /// This mirrors `$lock` in `tx-engine-1.hoon`: a lock is either a single
 /// spend-condition leaf, or a tagged `%2/%4/%8/%16` tree.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
 pub enum Lock {
+    #[noun(untagged)]
     SpendCondition(SpendCondition),
+    #[noun(tag = 2)]
     V2(LockV2),
+    #[noun(tag = 4)]
     V4(LockV4),
+    #[noun(tag = 8)]
     V8(LockV8),
+    #[noun(tag = 16)]
     V16(LockV16),
 }
 
@@ -552,54 +711,20 @@ impl Lock {
     }
 }
 
-impl NounEncode for Lock {
-    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
-        match self {
-            Self::SpendCondition(spend_condition) => spend_condition.to_noun(allocator),
-            Self::V2(v2) => {
-                let value = v2.to_noun(allocator);
-                nockvm::noun::T(allocator, &[D(2), value])
-            }
-            Self::V4(v4) => {
-                let value = v4.to_noun(allocator);
-                nockvm::noun::T(allocator, &[D(4), value])
-            }
-            Self::V8(v8) => {
-                let value = v8.to_noun(allocator);
-                nockvm::noun::T(allocator, &[D(8), value])
-            }
-            Self::V16(v16) => {
-                let value = v16.to_noun(allocator);
-                nockvm::noun::T(allocator, &[D(16), value])
-            }
-        }
-    }
-}
-
-impl NounDecode for Lock {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        if let Ok(spend_condition) = SpendCondition::from_noun(noun) {
-            return Ok(Self::SpendCondition(spend_condition));
-        }
-
-        let cell = noun.as_cell().map_err(|_| {
-            NounDecodeError::Custom("lock must be spend-condition or lock tree".into())
-        })?;
-        let tag = NumericTag::from_noun(&cell.head())?.into_inner();
-        match tag {
-            2 => Ok(Self::V2(LockV2::from_noun(&cell.tail())?)),
-            4 => Ok(Self::V4(LockV4::from_noun(&cell.tail())?)),
-            8 => Ok(Self::V8(LockV8::from_noun(&cell.tail())?)),
-            16 => Ok(Self::V16(LockV16::from_noun(&cell.tail())?)),
-            _ => Err(NounDecodeError::Custom(format!(
-                "unsupported lock tree tag: {tag}"
-            ))),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendCondition(pub Vec<LockPrimitive>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredPkhPolicy {
+    pub threshold: usize,
+    pub hashes: Vec<Hash>,
+}
+
+impl RequiredPkhPolicy {
+    pub fn contains(&self, hash: &Hash) -> bool {
+        self.hashes.iter().any(|candidate| candidate == hash)
+    }
+}
 
 impl SpendCondition {
     pub fn new(primitives: Vec<LockPrimitive>) -> Self {
@@ -608,6 +733,19 @@ impl SpendCondition {
 
     pub fn iter(&self) -> impl Iterator<Item = &LockPrimitive> {
         self.0.iter()
+    }
+
+    /// Extracts the PKH threshold rule from a spend condition, if the input is
+    /// controlled by a PKH multisig lock.
+    pub fn required_pkh_policy(&self) -> Option<RequiredPkhPolicy> {
+        for primitive in self.iter() {
+            if let LockPrimitive::Pkh(pkh) = primitive {
+                let threshold = usize::try_from(pkh.m).ok()?;
+                let hashes = pkh.hashes.clone().into_items();
+                return Some(RequiredPkhPolicy { threshold, hashes });
+            }
+        }
+        None
     }
 }
 
@@ -621,13 +759,13 @@ impl NounEncode for SpendCondition {
 }
 
 impl NounDecode for SpendCondition {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let iter = HoonList::try_from(*noun)
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let iter = HoonList::try_from(*noun, space)
             .map_err(|_| NounDecodeError::Custom("spend-condition must be a list".into()))?;
 
         let mut primitives = Vec::new();
         for entry in iter {
-            primitives.push(LockPrimitive::from_noun(&entry)?);
+            primitives.push(LockPrimitive::from_noun(&entry, space)?);
         }
 
         Ok(Self(primitives))
@@ -670,8 +808,8 @@ impl NounEncode for LockPrimitive {
 }
 
 impl NounDecode for LockPrimitive {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
         let tag_atom = cell
             .head()
             .as_atom()
@@ -681,9 +819,18 @@ impl NounDecode for LockPrimitive {
             .map_err(|err| NounDecodeError::Custom(format!("invalid lock-primitive tag: {err}")))?;
 
         match tag.as_str() {
-            "pkh" => Ok(LockPrimitive::Pkh(Pkh::from_noun(&cell.tail())?)),
-            "tim" => Ok(LockPrimitive::Tim(LockTim::from_noun(&cell.tail())?)),
-            "hax" => Ok(LockPrimitive::Hax(Hax::from_noun(&cell.tail())?)),
+            "pkh" => Ok(LockPrimitive::Pkh(Pkh::from_noun(
+                &cell.tail().noun(),
+                space,
+            )?)),
+            "tim" => Ok(LockPrimitive::Tim(LockTim::from_noun(
+                &cell.tail().noun(),
+                space,
+            )?)),
+            "hax" => Ok(LockPrimitive::Hax(Hax::from_noun(
+                &cell.tail().noun(),
+                space,
+            )?)),
             "brn" => Ok(LockPrimitive::Burn),
             _ => Err(NounDecodeError::InvalidEnumVariant),
         }
@@ -718,10 +865,10 @@ impl NounEncode for Pkh {
 }
 
 impl NounDecode for Pkh {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        let cell = noun.as_cell()?;
-        let m = u64::from_noun(&cell.head())?;
-        let hashes = ZSet::<Hash>::from_noun(&cell.tail())?;
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let cell = noun.in_space(space).as_cell()?;
+        let m = u64::from_noun(&cell.head().noun(), space)?;
+        let hashes = ZSet::<Hash>::from_noun(&cell.tail().noun(), space)?;
         Ok(Self { m, hashes })
     }
 }
@@ -758,8 +905,8 @@ impl NounEncode for Hax {
 }
 
 impl NounDecode for Hax {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
-        Ok(Self(ZSet::<Hash>::from_noun(noun)?))
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        Ok(Self(ZSet::<Hash>::from_noun(noun, space)?))
     }
 }
 
@@ -780,7 +927,7 @@ struct FirstNameDigestInput<'a> {
     lock_root: &'a Hash,
 }
 
-impl Hashable for FirstNameDigestInput<'_> {
+impl HashHashable for FirstNameDigestInput<'_> {
     type Error = FirstNameFromLockRootError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -837,7 +984,7 @@ impl SpendCondition {
     }
 }
 
-impl Hashable for SpendCondition {
+impl HashHashable for SpendCondition {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -850,7 +997,7 @@ impl Hashable for SpendCondition {
     }
 }
 
-impl Hashable for LockPrimitive {
+impl HashHashable for LockPrimitive {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -879,7 +1026,7 @@ impl Hashable for LockPrimitive {
     }
 }
 
-impl Hashable for Pkh {
+impl HashHashable for Pkh {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -889,7 +1036,7 @@ impl Hashable for Pkh {
     }
 }
 
-impl Hashable for Hax {
+impl HashHashable for Hax {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -897,7 +1044,7 @@ impl Hashable for Hax {
     }
 }
 
-impl Hashable for LockTim {
+impl HashHashable for LockTim {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -911,7 +1058,7 @@ impl Hashable for LockTim {
     }
 }
 
-impl Hashable for Lock {
+impl HashHashable for Lock {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -941,7 +1088,7 @@ impl Hashable for Lock {
     }
 }
 
-impl Hashable for LockV2 {
+impl HashHashable for LockV2 {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -951,7 +1098,7 @@ impl Hashable for LockV2 {
     }
 }
 
-impl Hashable for LockV4 {
+impl HashHashable for LockV4 {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -961,7 +1108,7 @@ impl Hashable for LockV4 {
     }
 }
 
-impl Hashable for LockV8 {
+impl HashHashable for LockV8 {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
@@ -971,25 +1118,325 @@ impl Hashable for LockV8 {
     }
 }
 
-impl Hashable for LockV16 {
+impl HashHashable for LockV16 {
     type Error = LockHashError;
 
     fn hash_digest(&self) -> Result<Hash, Self::Error> {
         let left = self.p.hash_digest()?;
         let right = self.q.hash_digest()?;
         Ok(hash_pair(&left, &right))
+    }
+}
+
+fn hash_hashable_digest<A: NounAllocator>(
+    allocator: &mut A,
+    hashable: Noun,
+) -> Result<Hash, RawTxIdError> {
+    let digest =
+        hash_hashable(allocator, hashable).map_err(|err| RawTxIdError::Hash(format!("{err:?}")))?;
+    let space = allocator.noun_space();
+    Hash::from_noun(&digest, &space).map_err(|err| RawTxIdError::Decode(err.to_string()))
+}
+
+fn hashable_leaf_value_digest<T: NounEncode>(value: &T) -> Result<Hash, RawTxIdError> {
+    let mut slab = NounSlab::<NockJammer>::new();
+    let noun = value.to_noun(&mut slab);
+    hash_leaf_digest(&mut slab, noun).map_err(|err| RawTxIdError::Hash(format!("{err:?}")))
+}
+
+fn hash_hashable_tuple(items: &[Hash]) -> Hash {
+    let mut iter = items.iter().rev();
+    let Some(last) = iter.next() else {
+        return hash_leaf_null();
+    };
+    let mut digest = last.clone();
+    for item in iter {
+        digest = hash_pair(item, &digest);
+    }
+    digest
+}
+
+impl HashHashable for Name {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        Ok(hash_hashable_tuple(&[
+            self.first.clone(),
+            self.last.clone(),
+            hash_leaf_null(),
+        ]))
+    }
+}
+
+impl HashHashable for Signature {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let signature = ZMap::try_from_entries(self.0.clone())
+            .map_err(|err| RawTxIdError::Encode(format!("signature z-map: {err}")))?;
+        signature.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |pubkey, signature, left, right| {
+                let pubkey_hash = pubkey
+                    .pkh_hash()
+                    .map_err(|err| RawTxIdError::PubkeyHash(err.to_string()))?;
+                let signature = hashable_leaf_value_digest(signature)?;
+                let entry = hash_pair(&pubkey_hash, &signature);
+                Ok(hash_hashable_tuple(&[entry, left, right]))
+            },
+        )
+    }
+}
+
+impl HashHashable for NoteData {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let note_data = ZMap::try_from_entries(
+            self.0
+                .iter()
+                .map(|entry| (NoteDataKey(entry.key.clone()), entry.value.clone())),
+        )
+        .map_err(|err| RawTxIdError::Encode(format!("note-data z-map: {err}")))?;
+        note_data.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |key, value, left, right| {
+                let key = hashable_leaf_value_digest(key)?;
+                let value = value.hash_digest()?;
+                let entry = hash_pair(&key, &value);
+                Ok(hash_hashable_tuple(&[entry, left, right]))
+            },
+        )
+    }
+}
+
+impl HashHashable for NoteDataValue {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        Ok(match self {
+            Self::Noun(noun) => Hash::from_limbs(&noun.hashable_noun_digest()),
+            _ => {
+                let mut slab = NounSlab::<NockJammer>::new();
+                let noun = self.to_noun(&mut slab);
+                let hashable = noun_hashable(&mut slab, noun);
+                hash_hashable_digest(&mut slab, hashable)?
+            }
+        })
+    }
+}
+
+impl HashHashable for Seed {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let note_data = self.note_data.hash_digest()?;
+        let gift = hashable_leaf_value_digest(&self.gift)?;
+        Ok(hash_hashable_tuple(&[
+            self.lock_root.clone(),
+            note_data,
+            gift,
+            self.parent_hash.clone(),
+        ]))
+    }
+}
+
+impl HashHashable for Seeds {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let seeds = ZSet::try_from_items(self.0.clone())
+            .map_err(|err| RawTxIdError::Encode(format!("seeds z-set: {err}")))?;
+        seeds.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |seed, left, right| {
+                let seed = seed.hash_digest()?;
+                Ok(hash_hashable_tuple(&[seed, left, right]))
+            },
+        )
+    }
+}
+
+impl HashHashable for MerkleProof {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let mut tail = hash_leaf_null();
+        for hash in self.path.iter().rev() {
+            tail = hash_pair(hash, &tail);
+        }
+        Ok(hash_pair(&self.root, &tail))
+    }
+}
+
+impl HashHashable for LockMerkleProof {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let spend_condition_hash = self.spend_condition().hash()?;
+        let merkle = self.proof().hash_digest()?;
+        let stub_sentinel = Hash::from_base58(LOCK_MERKLE_PROOF_STUB_SENTINEL_B58)
+            .expect("lock-merkle-proof stub sentinel must parse");
+        Ok(match self {
+            LockMerkleProof::Full(full) => {
+                let version = hashable_leaf_value_digest(&full.version)?;
+                let axis = hashable_leaf_value_digest(&full.axis)?;
+                hash_hashable_tuple(&[version, spend_condition_hash, axis, merkle])
+            }
+            LockMerkleProof::Stub(_) => {
+                let head = hash_pair(&spend_condition_hash, &stub_sentinel);
+                hash_pair(&head, &merkle)
+            }
+        })
+    }
+}
+
+impl HashHashable for PkhSignature {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let entries = ZMap::try_from_entries(self.0.iter().cloned().map(|entry| {
+            (
+                entry.pkh,
+                PkhSignatureValue {
+                    pubkey: entry.pubkey,
+                    signature: entry.signature,
+                },
+            )
+        }))
+        .map_err(|err| RawTxIdError::Encode(format!("pkh-signature z-map: {err}")))?;
+        entries.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |pkh, value, left, right| {
+                let pubkey = value
+                    .pubkey
+                    .pkh_hash()
+                    .map_err(|err| RawTxIdError::PubkeyHash(err.to_string()))?;
+                let signature = hashable_leaf_value_digest(&value.signature)?;
+                let value = hash_pair(&pubkey, &signature);
+                let entry = hash_pair(pkh, &value);
+                Ok(hash_hashable_tuple(&[entry, left, right]))
+            },
+        )
+    }
+}
+
+impl HashHashable for [HaxPreimage] {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let hax =
+            ZMap::try_from_entries(self.iter().cloned().map(|entry| (entry.hash, entry.value)))
+                .map_err(|err| RawTxIdError::Encode(format!("witness hax z-map: {err}")))?;
+        hax.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |hash, value, left, right| {
+                let value = Hash::from_limbs(&value.hashable_noun_digest());
+                let entry = hash_pair(hash, &value);
+                Ok(hash_hashable_tuple(&[entry, left, right]))
+            },
+        )
+    }
+}
+
+impl HashHashable for Witness {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let lmp = self.lock_merkle_proof.hash_digest()?;
+        let pkh = self.pkh_signature.hash_digest()?;
+        let hax = self.hax.as_slice().hash_digest()?;
+        let tim = hashable_leaf_value_digest(&self.tim)?;
+        Ok(hash_hashable_tuple(&[lmp, pkh, hax, tim]))
+    }
+}
+
+impl HashHashable for Spend0 {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let signature = self.signature.hash_digest()?;
+        let seeds = self.seeds.hash_digest()?;
+        let fee = hashable_leaf_value_digest(&self.fee)?;
+        Ok(hash_hashable_tuple(&[signature, seeds, fee]))
+    }
+}
+
+impl HashHashable for Spend1 {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let witness = self.witness.hash_digest()?;
+        let seeds = self.seeds.hash_digest()?;
+        let fee = hashable_leaf_value_digest(&self.fee)?;
+        Ok(hash_hashable_tuple(&[witness, seeds, fee]))
+    }
+}
+
+impl HashHashable for Spend {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        match self {
+            Spend::Legacy(spend) => {
+                let tag = hashable_leaf_value_digest(&0_u64)?;
+                let payload = spend.hash_digest()?;
+                Ok(hash_pair(&tag, &payload))
+            }
+            Spend::Witness(spend) => {
+                let tag = hashable_leaf_value_digest(&1_u64)?;
+                let payload = spend.hash_digest()?;
+                Ok(hash_pair(&tag, &payload))
+            }
+        }
+    }
+}
+
+impl HashHashable for Spends {
+    type Error = RawTxIdError;
+
+    fn hash_digest(&self) -> Result<Hash, Self::Error> {
+        let spends = ZMap::try_from_entries(self.0.clone())
+            .map_err(|err| RawTxIdError::Encode(format!("spends z-map: {err}")))?;
+        spends.try_fold_tree(
+            || Ok(hash_leaf_null()),
+            |name, spend, left, right| {
+                let name = name.hash_digest()?;
+                let spend = spend.hash_digest()?;
+                let entry = hash_pair(&name, &spend);
+                Ok(hash_hashable_tuple(&[entry, left, right]))
+            },
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NoteDataKey(String);
+
+impl NounEncode for NoteDataKey {
+    fn to_noun<A: NounAllocator>(&self, allocator: &mut A) -> Noun {
+        make_tas(allocator, &self.0).as_noun()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use nockapp::noun::slab::{NockJammer, NounSlab};
-    use nockchain_math::belt::Belt;
+    use nockchain_math::belt::{Belt, PRIME};
+    use nockchain_math::zoon::common::DefaultTipHasher;
+    use nockchain_math::zoon::zmap;
+    use nockvm::noun::{NounAllocator, D};
     use noun_serde::{NounDecode, NounEncode};
 
-    use super::{Hax, Lock, LockPrimitive, LockTim, LockV2, LockV4, Pkh, SpendCondition};
+    use super::{
+        HashHashable, Hax, InputMetadata, LegacyLockMetadata, Lock, LockMerkleProof, LockMetadata,
+        LockPrimitive, LockTim, LockV2, LockV4, MerkleProof, Pkh, RawTx, Spend, Spend0,
+        SpendCondition, SpendConditionMap, Transaction, Version, VersionedLockMetadata, Witness,
+        WitnessData, WitnessMap,
+    };
     use crate::tx_engine::common::{
-        BlockHeight, BlockHeightDelta, Hash, TimelockRangeAbsolute, TimelockRangeRelative,
+        BlockHeight, BlockHeightDelta, Hash, Name, Nicks, Signature, TimelockRangeAbsolute,
+        TimelockRangeRelative,
     };
 
     const ADDRESS_A_B58: &str = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV";
@@ -1043,6 +1490,361 @@ mod tests {
 
     fn hax_primitive(hashes: Vec<Hash>) -> LockPrimitive {
         LockPrimitive::Hax(Hax::new(hashes))
+    }
+
+    fn atom_tag_value(noun: &nockvm::noun::Noun, space: &nockvm::noun::NounSpace) -> u64 {
+        noun.in_space(space)
+            .as_atom()
+            .expect("tag must be an atom")
+            .as_u64()
+            .expect("tag should fit in u64")
+    }
+
+    fn sample_transaction_fixture() -> Transaction {
+        const TRANSACTION_JAM: &[u8] = include_bytes!(
+            "../../../../bridge/test-fixtures/transactions/9MpGym52AumtwyBxYPyVsWHvcamUYwZkc1Nq7w3cFGF28u8ceVDwt3e.tx"
+        );
+
+        let mut slab = NounSlab::<NockJammer>::new();
+        let noun = slab
+            .cue_into(TRANSACTION_JAM.to_vec().into())
+            .expect("fixture transaction should cue");
+        let space = slab.noun_space();
+
+        Transaction::from_noun(&noun, &space).expect("fixture transaction should decode")
+    }
+
+    fn raw_tx_from_transaction_fixture(transaction: &Transaction) -> RawTx {
+        let Transaction::V1(tx) = transaction;
+        let spends = match &tx.witness_data {
+            WitnessData::Signatures(signature_map) => tx
+                .spends
+                .0
+                .iter()
+                .map(|(name, spend)| {
+                    let (_, signature) = signature_map
+                        .0
+                        .iter()
+                        .find(|(signature_name, _)| signature_name == name)
+                        .expect("fixture must have matching legacy signature");
+                    let Spend::Legacy(legacy_spend) = spend else {
+                        panic!("legacy witness data requires legacy spends");
+                    };
+                    (
+                        name.clone(),
+                        Spend::Legacy(Spend0 {
+                            signature: signature.clone(),
+                            seeds: legacy_spend.seeds.clone(),
+                            fee: legacy_spend.fee.clone(),
+                        }),
+                    )
+                })
+                .collect(),
+            WitnessData::Witnesses(witness_map) => tx
+                .spends
+                .0
+                .iter()
+                .map(|(name, spend)| {
+                    let (_, witness) = witness_map
+                        .0
+                        .iter()
+                        .find(|(witness_name, _)| witness_name == name)
+                        .expect("fixture must have matching witness");
+                    let Spend::Witness(witness_spend) = spend else {
+                        panic!("witness data requires witness spends");
+                    };
+                    (
+                        name.clone(),
+                        Spend::Witness(super::Spend1 {
+                            witness: witness.clone(),
+                            seeds: witness_spend.seeds.clone(),
+                            fee: witness_spend.fee.clone(),
+                        }),
+                    )
+                })
+                .collect(),
+        };
+        let mut raw_tx = RawTx {
+            version: Version::V1,
+            id: Hash::from_limbs(&[0, 0, 0, 0, 0]),
+            spends: super::Spends(spends),
+        };
+        raw_tx.id = raw_tx
+            .compute_id()
+            .expect("fixture raw tx id should compute");
+        raw_tx
+    }
+
+    #[test]
+    fn derived_integer_tagged_unions_roundtrip() {
+        let address_a = Hash::from_base58(ADDRESS_A_B58).expect("address a should parse");
+        let sample_name = Name::new(address_a.clone(), address_a.clone());
+        let sample_lock = Lock::SpendCondition(pkh_condition(1, vec![address_a.clone()]));
+
+        let input_metadata = InputMetadata::SpendConditions(SpendConditionMap(vec![(
+            sample_name.clone(),
+            pkh_condition(1, vec![address_a.clone()]),
+        )]));
+        let witness_data = WitnessData::Witnesses(WitnessMap(Vec::new()));
+        let spend = Spend::Legacy(Spend0 {
+            signature: Signature(Vec::new()),
+            seeds: super::Seeds(Vec::new()),
+            fee: Nicks(0),
+        });
+        let legacy_lock_metadata = LockMetadata::Legacy(LegacyLockMetadata {
+            lock: sample_lock.clone(),
+            include_data: true,
+        });
+        let versioned_lock_metadata =
+            LockMetadata::Versioned(VersionedLockMetadata::LockRoot(address_a.clone()));
+        let bridge_withdrawal_lock_metadata =
+            LockMetadata::Versioned(VersionedLockMetadata::BridgeWithdrawal {
+                root: address_a.clone(),
+                beid: (1..=32).map(Belt).collect(),
+                base_hash: Hash::from_limbs(&[0x11, 0x22, 0x33, 0x44, 0x55]),
+                base_batch_end: 57_600,
+            });
+
+        let mut slab = NounSlab::<NockJammer>::new();
+
+        let input_noun = input_metadata.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let input_cell = input_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("input metadata must be tagged");
+        assert_eq!(atom_tag_value(&input_cell.head().noun(), &space), 1);
+        assert_eq!(
+            InputMetadata::from_noun(&input_noun, &space).expect("roundtrip input metadata"),
+            input_metadata
+        );
+
+        let witness_noun = witness_data.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let witness_cell = witness_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("witness data must be tagged");
+        assert_eq!(atom_tag_value(&witness_cell.head().noun(), &space), 1);
+        assert_eq!(
+            WitnessData::from_noun(&witness_noun, &space).expect("roundtrip witness data"),
+            witness_data
+        );
+
+        let spend_noun = spend.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let spend_cell = spend_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("spend must be tagged");
+        assert_eq!(atom_tag_value(&spend_cell.head().noun(), &space), 0);
+        assert_eq!(
+            Spend::from_noun(&spend_noun, &space).expect("roundtrip spend"),
+            spend
+        );
+
+        let legacy_noun = legacy_lock_metadata.to_noun(&mut slab);
+        let space = slab.noun_space();
+        assert_eq!(
+            LockMetadata::from_noun(&legacy_noun, &space).expect("roundtrip legacy lock metadata"),
+            legacy_lock_metadata
+        );
+
+        let versioned_noun = versioned_lock_metadata.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let versioned_cell = versioned_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("versioned lock metadata must be tagged");
+        assert_eq!(atom_tag_value(&versioned_cell.head().noun(), &space), 1);
+        assert_eq!(
+            LockMetadata::from_noun(&versioned_noun, &space)
+                .expect("roundtrip versioned lock metadata"),
+            versioned_lock_metadata
+        );
+
+        let bridge_withdrawal_noun = bridge_withdrawal_lock_metadata.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let bridge_withdrawal_cell = bridge_withdrawal_noun
+            .in_space(&space)
+            .as_cell()
+            .expect("bridge-withdrawal lock metadata must be tagged");
+        assert_eq!(
+            atom_tag_value(&bridge_withdrawal_cell.head().noun(), &space),
+            1
+        );
+        assert_eq!(
+            LockMetadata::from_noun(&bridge_withdrawal_noun, &space)
+                .expect("roundtrip bridge-withdrawal lock metadata"),
+            bridge_withdrawal_lock_metadata
+        );
+    }
+
+    #[test]
+    fn derived_integer_tags_decode_manual_tagged_nouns() {
+        let address_a = Hash::from_base58(ADDRESS_A_B58).expect("address a should parse");
+        let sample_name = Name::new(address_a.clone(), address_a.clone());
+        let spend_conditions = SpendConditionMap(vec![(
+            sample_name,
+            pkh_condition(1, vec![address_a.clone()]),
+        )]);
+        let versioned_lock = VersionedLockMetadata::BridgeDeposit {
+            root: address_a.clone(),
+            addr: crate::EthAddress([0x11; 20]),
+        };
+
+        let mut slab = NounSlab::<NockJammer>::new();
+        let spend_conditions_noun = spend_conditions.to_noun(&mut slab);
+        let manual_input = nockvm::noun::T(&mut slab, &[nockvm::noun::D(1), spend_conditions_noun]);
+        let space = slab.noun_space();
+        assert_eq!(
+            InputMetadata::from_noun(&manual_input, &space).expect("decode manual input tag"),
+            InputMetadata::SpendConditions(spend_conditions)
+        );
+
+        let versioned_lock_noun = versioned_lock.to_noun(&mut slab);
+        let manual_lock = nockvm::noun::T(&mut slab, &[nockvm::noun::D(1), versioned_lock_noun]);
+        let space = slab.noun_space();
+        assert_eq!(
+            LockMetadata::from_noun(&manual_lock, &space).expect("decode manual versioned lock"),
+            LockMetadata::Versioned(versioned_lock)
+        );
+    }
+
+    #[test]
+    fn transaction_roundtrip_uses_integer_version_tag() {
+        let mut slab = NounSlab::<NockJammer>::new();
+        let transaction = sample_transaction_fixture();
+
+        let noun = transaction.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let cell = noun
+            .in_space(&space)
+            .as_cell()
+            .expect("transaction should be tagged");
+        let version = cell
+            .head()
+            .as_atom()
+            .expect("transaction version must be atom")
+            .as_u64()
+            .expect("transaction version should fit in u64");
+        assert_eq!(version, 1);
+        assert_eq!(
+            Transaction::from_noun(&noun, &space).expect("roundtrip transaction"),
+            transaction
+        );
+
+        let Transaction::V1(inner) = sample_transaction_fixture();
+        let inner_noun = inner.to_noun(&mut slab);
+        let manual = nockvm::noun::T(&mut slab, &[nockvm::noun::D(1), inner_noun]);
+        let space = slab.noun_space();
+        assert_eq!(
+            Transaction::from_noun(&manual, &space)
+                .expect("decode manual numeric-tagged transaction"),
+            Transaction::V1(inner)
+        );
+    }
+
+    #[test]
+    fn raw_tx_compute_id_changes_with_witness_updates_while_name_stays_stable() {
+        let transaction = sample_transaction_fixture();
+        let stable_name = match &transaction {
+            Transaction::V1(tx) => tx.name.clone(),
+        };
+        let raw_tx = raw_tx_from_transaction_fixture(&transaction);
+        let original_id = raw_tx.compute_id_base58().expect("original raw tx id");
+
+        let mut mutated = raw_tx.clone();
+        let witness_signature = mutated
+            .spends
+            .0
+            .iter_mut()
+            .find_map(|(_, spend)| match spend {
+                Spend::Witness(spend) => spend.witness.pkh_signature.0.first_mut(),
+                Spend::Legacy(_) => None,
+            })
+            .expect("fixture raw tx should contain a witness signature");
+        witness_signature.signature.chal[0].0 += 1;
+
+        let mutated_id = mutated.compute_id_base58().expect("mutated raw tx id");
+        assert_ne!(original_id, mutated_id);
+        assert_eq!(
+            stable_name,
+            match &transaction {
+                Transaction::V1(tx) => tx.name.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn witness_decode_rejects_non_based_hax_preimages() {
+        let lock_merkle_proof = LockMerkleProof::new_stub(
+            SpendCondition::new(vec![LockPrimitive::Burn]),
+            0,
+            MerkleProof {
+                root: Hash::from_limbs(&[1, 0, 0, 0, 0]),
+                path: vec![],
+            },
+        );
+        let pkh_signature = super::PkhSignature::new(vec![]);
+
+        let mut slab = NounSlab::<NockJammer>::new();
+        let lmp = lock_merkle_proof.to_noun(&mut slab);
+        let pkh = pkh_signature.to_noun(&mut slab);
+
+        let mut hax = D(0);
+        let mut key = Hash::from_limbs(&[2, 0, 0, 0, 0]).to_noun(&mut slab);
+        let mut value = PRIME.to_noun(&mut slab);
+        hax = zmap::z_map_put(&mut slab, &hax, &mut key, &mut value, &DefaultTipHasher)
+            .expect("witness hax z-map should encode");
+
+        let tim = 0_usize.to_noun(&mut slab);
+        let witness = nockvm::noun::T(&mut slab, &[lmp, pkh, hax, tim]);
+        let space = slab.noun_space();
+
+        let err =
+            Witness::from_noun(&witness, &space).expect_err("non-based hax preimage should fail");
+        assert!(
+            err.to_string()
+                .contains("owned based noun atom is not based"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn lock_merkle_proof_stub_raw_tx_hash_ignores_axis_but_full_includes_it() {
+        let address_a = Hash::from_base58(ADDRESS_A_B58).expect("address a should parse");
+        let address_b = Hash::from_base58(ADDRESS_B_B58).expect("address b should parse");
+        let spend_condition = pkh_condition(2, vec![address_a.clone(), address_b.clone()]);
+        let merkle_proof = MerkleProof {
+            root: address_a.clone(),
+            path: vec![address_b.clone()],
+        };
+
+        let stub_axis_1 =
+            LockMerkleProof::new_stub(spend_condition.clone(), 1, merkle_proof.clone());
+        let stub_axis_7 =
+            LockMerkleProof::new_stub(spend_condition.clone(), 7, merkle_proof.clone());
+        let full_axis_1 =
+            LockMerkleProof::new_full(spend_condition.clone(), 1, merkle_proof.clone());
+        let full_axis_7 = LockMerkleProof::new_full(spend_condition, 7, merkle_proof);
+
+        assert_eq!(
+            stub_axis_1
+                .hash_digest()
+                .expect("stub raw-tx hash should compute"),
+            stub_axis_7
+                .hash_digest()
+                .expect("stub raw-tx hash should compute")
+        );
+        assert_ne!(
+            full_axis_1
+                .hash_digest()
+                .expect("full raw-tx hash should compute"),
+            full_axis_7
+                .hash_digest()
+                .expect("full raw-tx hash should compute")
+        );
     }
 
     #[test]
@@ -1168,7 +1970,8 @@ mod tests {
 
         let mut slab: NounSlab<NockJammer> = NounSlab::new();
         let noun = lock.to_noun(&mut slab);
-        let decoded = Lock::from_noun(&noun).expect("lock should decode");
+        let space = slab.noun_space();
+        let decoded = Lock::from_noun(&noun, &space).expect("lock should decode");
         assert_eq!(decoded.spend_condition_count(), 4);
         assert_eq!(decoded.flatten_spend_conditions().len(), 4);
     }

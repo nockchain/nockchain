@@ -19,6 +19,8 @@ use bridge_test_harness::{sample_deposit, sample_deposit_with_nonce, TestCluster
 #[cfg(not(feature = "bazel_build"))]
 mod test_harness;
 
+use bridge::deposit::types::DepositId;
+
 #[cfg(not(feature = "bazel_build"))]
 use self::test_harness::{sample_deposit, sample_deposit_with_nonce, TestCluster, TestNode};
 
@@ -43,7 +45,7 @@ async fn test_happy_path_all_nodes_online() {
     // Verify all nodes have threshold
     for node in &cluster.nodes {
         assert!(
-            node.has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit)),
+            node.has_threshold(&DepositId::from_effect_payload(&deposit)),
             "Node {} should have reached threshold",
             node.node_id
         );
@@ -176,7 +178,7 @@ async fn test_below_threshold_bridge_halts() {
     for node in &cluster.nodes {
         if node.is_online() {
             assert!(
-                !node.has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit)),
+                !node.has_threshold(&DepositId::from_effect_payload(&deposit)),
                 "Node {} should NOT have threshold with only 2 signatures",
                 node.node_id
             );
@@ -225,7 +227,7 @@ async fn test_node_recovery_completes_stalled_deposit() {
 
     for node in &online_nodes {
         assert!(
-            !node.has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit)),
+            !node.has_threshold(&DepositId::from_effect_payload(&deposit)),
             "Should not have threshold with 2 nodes"
         );
     }
@@ -243,10 +245,7 @@ async fn test_node_recovery_completes_stalled_deposit() {
     let poster_id = cluster
         .nodes
         .iter()
-        .find(|n| {
-            n.is_online()
-                && n.has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit))
-        })
+        .find(|n| n.is_online() && n.has_threshold(&DepositId::from_effect_payload(&deposit)))
         .map(|n| n.node_id)
         .unwrap();
 
@@ -422,10 +421,7 @@ async fn test_exactly_threshold_signatures() {
     let online_count = cluster
         .nodes
         .iter()
-        .filter(|n| {
-            n.is_online()
-                && n.has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit))
-        })
+        .filter(|n| n.is_online() && n.has_threshold(&DepositId::from_effect_payload(&deposit)))
         .count();
 
     assert_eq!(online_count, 3, "All 3 online nodes should have threshold");
@@ -471,8 +467,7 @@ async fn test_only_proposer_online_fails() {
 
     // Verify proposer alone cannot reach threshold
     assert!(
-        !cluster.nodes[proposer_id]
-            .has_threshold(&bridge::types::DepositId::from_effect_payload(&deposit)),
+        !cluster.nodes[proposer_id].has_threshold(&DepositId::from_effect_payload(&deposit)),
         "Single node should not reach threshold"
     );
 

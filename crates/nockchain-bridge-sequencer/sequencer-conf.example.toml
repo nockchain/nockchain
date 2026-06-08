@@ -1,0 +1,61 @@
+# Withdrawal Sequencer Configuration Example
+# Copy this file to sequencer-conf.toml and fill in with deployment values.
+# The bridge node config should not contain sequencer journal settings.
+
+# Address of the NOCK token contract on Base L2.
+nock_contract_address = "0x..."
+
+# Nockchain confirmations required before sequencer settlement observations are final.
+nockchain_confirmation_depth = 100
+
+# Remote withdrawal sequencer journal.
+# Production defaults to fail-closed if this is enabled but object storage is
+# not configured. Local/dev configs may disable this explicitly.
+[sequencer_journal]
+enabled = true
+verifier_address = "0x..."  # Public address for WITHDRAWAL_SEQUENCER_JOURNAL_SIGNING_KEY
+
+[sequencer_journal.object_store]
+# Keep journal event objects indefinitely until sequencer checkpoint pruning
+# exists and all sequencer binaries understand checkpoint recovery. Current
+# startup recovery requires old cursor event objects to remain readable.
+endpoint = "https://<account-id>.r2.cloudflarestorage.com"
+bucket = "bridge-sequencer-journal"
+region = "auto"
+prefix = "withdrawal-sequencer"
+journal_id = "base-mainnet-bridge-<deployment-id>"
+access_key_id = "..."      # Prefer WITHDRAWAL_SEQUENCER_JOURNAL_OBJECT_STORE_ACCESS_KEY_ID
+secret_access_key = "..."  # Prefer WITHDRAWAL_SEQUENCER_JOURNAL_OBJECT_STORE_SECRET_ACCESS_KEY
+
+# Bridge constants used by the sequencer for validation and deterministic
+# proposal planning. Omit this section to use defaults.
+[constants]
+min_signers = 3
+total_signers = 5
+minimum_event_nocks = 1000000
+nicks_fee_per_nock = 195
+base_blocks_chunk = 100
+base_start_height = 33387036
+nockchain_start_height = 25
+
+# All 5 bridge signer public facts.
+# The standalone sequencer does not need bridge private keys or peer ingress IPs.
+[[nodes]]
+eth_pubkey = "0x..."
+nock_pkh = "..."
+
+[[nodes]]
+eth_pubkey = "0x..."
+nock_pkh = "..."
+
+[[nodes]]
+eth_pubkey = "0x..."
+nock_pkh = "..."
+
+[[nodes]]
+eth_pubkey = "0x..."
+nock_pkh = "..."
+
+[[nodes]]
+eth_pubkey = "0x..."
+nock_pkh = "..."

@@ -1,8 +1,22 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
+#[cfg(test)]
+use nockapp::noun::slab::{NockJammer, NounSlab};
+#[cfg(test)]
+use nockchain_math::belt::Belt;
+#[cfg(test)]
+use nockchain_math::crypto::cheetah::A_GEN;
 use nockchain_types::tx_engine::common::BlockHeight;
+#[cfg(test)]
+use nockchain_types::tx_engine::common::{Hash, SchnorrPubkey, SchnorrSignature};
 use nockchain_types::tx_engine::v1::tx::{LockPrimitive, SpendCondition};
+#[cfg(test)]
+use nockchain_types::tx_engine::v1::tx::{PkhSignature, PkhSignatureEntry};
+#[cfg(test)]
+use nockvm::noun::{Noun, NounAllocator, NounSpace};
+#[cfg(test)]
+use noun_serde::NounEncode;
 
 use crate::note_data::{DecodedNoteDataEntry, DecodedNoteDataPayload, LockDataPayload};
 use crate::types::{ChainContext, PlannedOutput, RawNoteDataEntry};
@@ -90,47 +104,15 @@ impl<'a> WordCountEstimator<'a> {
         bythos_active: bool,
         spend_condition_count: Option<u64>,
     ) -> u64 {
-        // mirror wallet +estimate-fee structure:
-        // witness_words = lmp_words + pkh_signature_words + tim_words + hax_words
         let lmp_words =
             Self::estimate_lmp_words(spend_condition, bythos_active, spend_condition_count);
-        let pkh_signature_words = Self::estimate_pkh_signature_words(spend_condition);
-        let tim_words = 1; // witness.tim is null in current create-tx path
-        let hax_words = 1; // witness.hax is empty map in current create-tx path
+        let pkh_words = Self::estimate_pkh_signature_words(spend_condition);
+        let tim_words = 1;
+        let hax_words = 1;
         lmp_words
-            .saturating_add(pkh_signature_words)
+            .saturating_add(pkh_words)
             .saturating_add(tim_words)
             .saturating_add(hax_words)
-    }
-
-    fn estimate_lmp_words(
-        spend_condition: &SpendCondition,
-        bythos_active: bool,
-        spend_condition_count: Option<u64>,
-    ) -> u64 {
-        // lock-merkle-proof:
-        // stub: [spend_condition axis proof]
-        // full: [%full spend_condition axis proof]
-        // proof: [root path]
-        // path length ~= log2(number of spend conditions). Use 1 (empty path) when
-        // lock-level cardinality is unknown.
-        let version_words: u64 = if bythos_active { 1 } else { 0 };
-        let spend_condition_words = Self::estimate_spend_condition_words(spend_condition);
-        let axis_words = 1;
-        let proof_words = Self::estimate_merkle_proof_words(spend_condition_count);
-        version_words
-            .saturating_add(spend_condition_words)
-            .saturating_add(axis_words)
-            .saturating_add(proof_words)
-    }
-
-    fn estimate_merkle_proof_words(spend_condition_count_hint: Option<u64>) -> u64 {
-        // proof: [root path], where root is one noun-digest (5 atoms) and path is
-        // a list of noun-digests. For a single spend-condition lock, path is empty.
-        let count = Self::normalize_spend_condition_count(spend_condition_count_hint.unwrap_or(1));
-        let path_len = count.ilog2() as u64;
-        let path_words = Self::estimate_list_words_len(path_len, 5);
-        5 + path_words
     }
 
     fn normalize_spend_condition_count(raw_count: u64) -> u64 {
@@ -145,6 +127,29 @@ impl<'a> WordCountEstimator<'a> {
             .unwrap_or(1_u64 << (u64::BITS - 1))
     }
 
+    fn estimate_lmp_words(
+        spend_condition: &SpendCondition,
+        bythos_active: bool,
+        spend_condition_count: Option<u64>,
+    ) -> u64 {
+        let spend_condition_words = Self::estimate_spend_condition_words(spend_condition);
+        let axis_words = 1;
+        let merkle_proof_words = Self::estimate_merkle_proof_words(spend_condition_count);
+        let version_words = if bythos_active { 1 } else { 0 };
+        spend_condition_words
+            .saturating_add(axis_words)
+            .saturating_add(merkle_proof_words)
+            .saturating_add(version_words)
+    }
+
+    fn estimate_merkle_proof_words(spend_condition_count: Option<u64>) -> u64 {
+        let count = Self::normalize_spend_condition_count(spend_condition_count.unwrap_or(1));
+        let path_len = count.ilog2() as u64;
+        let root_words = 5_u64;
+        let path_words = Self::estimate_list_words_len(path_len, 5);
+        root_words.saturating_add(path_words)
+    }
+
     fn estimate_pkh_signature_words(spend_condition: &SpendCondition) -> u64 {
         let num_sigs_required = spend_condition
             .iter()
@@ -153,16 +158,73 @@ impl<'a> WordCountEstimator<'a> {
                 _ => 0,
             })
             .sum::<u64>();
-        // from wallet +estimate-fee:
-        // map-words entries key=hash(5 leaves) value=(pubkey + signature) => 13 + 16
-        Self::map_words(num_sigs_required, 5, 13 + 16)
+        let hash_words = 5_u64;
+        let pubkey_words = 13_u64;
+        let signature_words = 16_u64;
+        Self::map_words(
+            num_sigs_required,
+            hash_words,
+            pubkey_words.saturating_add(signature_words),
+        )
+    }
+
+    #[cfg(test)]
+    fn count_encoded_leaves<T: NounEncode>(value: &T) -> u64 {
+        let mut slab = NounSlab::<NockJammer>::new();
+        let noun = value.to_noun(&mut slab);
+        let space = slab.noun_space();
+        Self::count_noun_leaves(noun, &space)
+    }
+
+    #[cfg(test)]
+    fn count_noun_leaves(noun: Noun, space: &NounSpace) -> u64 {
+        if noun.is_atom() {
+            1
+        } else {
+            let cell = noun
+                .in_space(space)
+                .as_cell()
+                .expect("non-atom noun should always be a cell");
+            Self::count_noun_leaves(cell.head().noun(), space)
+                .saturating_add(Self::count_noun_leaves(cell.tail().noun(), space))
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic_pkh_signature(spend_condition: &SpendCondition) -> PkhSignature {
+        let num_sigs_required = spend_condition
+            .iter()
+            .map(|primitive| match primitive {
+                LockPrimitive::Pkh(pkh) => pkh.m,
+                _ => 0,
+            })
+            .sum::<u64>();
+        PkhSignature(
+            (0..num_sigs_required)
+                .map(|index| PkhSignatureEntry {
+                    pkh: Self::dummy_hash(index),
+                    pubkey: SchnorrPubkey(A_GEN),
+                    signature: SchnorrSignature {
+                        chal: [Belt(0); 8],
+                        sig: [Belt(0); 8],
+                    },
+                })
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    fn dummy_hash(seed: u64) -> Hash {
+        Hash::from_limbs(&[seed, 0, 0, 0, 0])
     }
 
     fn estimate_note_data_words(entries: &[RawNoteDataEntry]) -> u64 {
         if entries.is_empty() {
             return 1;
         }
-        // z-map tree has n+1 null branches. Sum key/value leaves per entry + null branches.
+        // Hoon fee counting first reduces note-data z-maps with `rep z-by`, which turns the map
+        // into a list of key/value pairs. The charged shape is therefore the flattened entry list,
+        // not the raw tree with null branches.
         let kv_words = entries
             .iter()
             .map(|entry| {
@@ -171,7 +233,7 @@ impl<'a> WordCountEstimator<'a> {
                 key_words + value_words
             })
             .sum::<u64>();
-        kv_words.saturating_add(entries.len() as u64 + 1)
+        kv_words.saturating_add(1)
     }
 
     fn estimate_note_data_value_words(entry: &RawNoteDataEntry) -> u64 {
@@ -194,8 +256,7 @@ impl<'a> WordCountEstimator<'a> {
             }
             DecodedNoteDataPayload::BridgeWithdrawal(bridge_w) => {
                 // [%0 beid base-hash lock-root base-batch-end]
-                let beid_words =
-                    Self::estimate_list_words_len(bridge_w.base_event_id.len() as u64, 1);
+                let beid_words = Self::estimate_list_words_len(bridge_w.beid.len() as u64, 1);
                 1 + beid_words + 5 + 5 + 1
             }
             DecodedNoteDataPayload::Raw => Self::estimate_raw_blob_words(&entry.blob),
@@ -316,18 +377,22 @@ pub fn estimate_witness_words(inputs: &[WitnessWordInput], chain_context: &Chain
 
 #[cfg(test)]
 mod tests {
-    use nockapp::noun::slab::{NockJammer, NounSlab};
+    use nockapp::noun::NounEncodeJamExt;
     use nockapp::utils::NOCK_STACK_SIZE;
     use nockchain_math::belt::Belt;
     use nockchain_types::tx_engine::common::Hash;
-    use nockchain_types::tx_engine::v1::note::NoteData;
-    use nockchain_types::tx_engine::v1::tx::{LockPrimitive, Pkh};
+    use nockchain_types::tx_engine::v1::note::{
+        NoteData, NOTE_DATA_KEY_BRIDGE_WITHDRAWAL, NOTE_DATA_KEY_LOCK,
+    };
+    use nockchain_types::tx_engine::v1::tx::{Lock, LockPrimitive, Pkh, Spend};
+    use nockchain_types::v1::Transaction;
     use nockvm::ext::NounExt;
     use nockvm::mem::NockStack;
     use nockvm::noun::Noun;
-    use noun_serde::{NounDecode, NounEncode};
+    use noun_serde::NounDecode;
 
     use super::*;
+    use crate::fee::{compute_minimum_fee, FeeInputs};
     use crate::types::RawNoteDataEntry;
 
     #[derive(Debug, Clone, PartialEq, Eq, NounDecode)]
@@ -336,15 +401,18 @@ mod tests {
         note_data: NoteData,
     }
 
-    fn hash(v: u64) -> Hash {
-        Hash::from_limbs(&[v, 0, 0, 0, 0])
+    #[derive(Debug, Clone, PartialEq, NounDecode)]
+    struct WithdrawalTxFixtureEntry {
+        case: String,
+        transaction: Transaction,
+        height: u64,
+        min_fee: u64,
+        seed_words: u64,
+        witness_words: u64,
     }
 
-    fn jam<T: NounEncode>(value: &T) -> Bytes {
-        let mut slab: NounSlab<NockJammer> = NounSlab::new();
-        let noun = value.to_noun(&mut slab);
-        slab.set_root(noun);
-        slab.jam()
+    fn hash(v: u64) -> Hash {
+        Hash::from_limbs(&[v, 0, 0, 0, 0])
     }
 
     fn output(lock_root: u64, key: &str, value: u64) -> PlannedOutput {
@@ -353,7 +421,7 @@ mod tests {
             amount: 1,
             note_data: vec![RawNoteDataEntry {
                 key: key.to_string(),
-                blob: jam(&value),
+                blob: value.jam_bytes(),
             }],
         }
     }
@@ -362,7 +430,16 @@ mod tests {
         let fixture_bytes = include_bytes!("../tests/fixtures/note_data_fixtures.jam");
         let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
         let noun = Noun::cue_bytes_slice(&mut stack, fixture_bytes).expect("fixture jam must cue");
-        Vec::<FixtureEntry>::from_noun(&noun).expect("fixture noun must decode")
+        let space = stack.noun_space();
+        Vec::<FixtureEntry>::from_noun(&noun, &space).expect("fixture noun must decode")
+    }
+
+    fn decode_withdrawal_tx_fixtures() -> Vec<WithdrawalTxFixtureEntry> {
+        let fixture_bytes = include_bytes!("../tests/fixtures/withdrawal_tx_fixtures.jam");
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let noun = Noun::cue_bytes_slice(&mut stack, fixture_bytes).expect("fixture jam must cue");
+        let space = stack.noun_space();
+        Vec::<WithdrawalTxFixtureEntry>::from_noun(&noun, &space).expect("fixture noun must decode")
     }
 
     fn normalize_case_tag(tag: &str) -> &str {
@@ -383,7 +460,7 @@ mod tests {
             .iter()
             .map(|entry| RawNoteDataEntry {
                 key: entry.key.clone(),
-                blob: entry.blob.clone(),
+                blob: entry.raw_blob(),
             })
             .collect::<Vec<_>>();
         PlannedOutput {
@@ -399,7 +476,7 @@ mod tests {
             .iter()
             .map(|entry| RawNoteDataEntry {
                 key: entry.key.clone(),
-                blob: entry.blob.clone(),
+                blob: entry.raw_blob(),
             })
             .collect::<Vec<_>>();
         PlannedOutput {
@@ -407,6 +484,75 @@ mod tests {
             amount: 1,
             note_data,
         }
+    }
+
+    fn transaction_fixture(case: &str) -> Transaction {
+        decode_withdrawal_tx_fixtures()
+            .into_iter()
+            .find(|fixture| normalize_case_tag(&fixture.case) == case)
+            .unwrap_or_else(|| panic!("missing fixture case: {case}"))
+            .transaction
+    }
+
+    fn withdrawal_tx_fixture_entry(case: &str) -> WithdrawalTxFixtureEntry {
+        decode_withdrawal_tx_fixtures()
+            .into_iter()
+            .find(|fixture| normalize_case_tag(&fixture.case) == case)
+            .unwrap_or_else(|| panic!("missing fixture case: {case}"))
+    }
+
+    fn outputs_from_transaction_fixture(case: &str) -> Vec<PlannedOutput> {
+        let Transaction::V1(tx) = transaction_fixture(case);
+        tx.spends
+            .0
+            .into_iter()
+            .flat_map(|(_, spend)| match spend {
+                Spend::Legacy(spend) => spend.seeds.0,
+                Spend::Witness(spend) => spend.seeds.0,
+            })
+            .map(|seed| PlannedOutput {
+                lock_root: seed.lock_root,
+                amount: seed.gift.0 as u64,
+                note_data: seed
+                    .note_data
+                    .iter()
+                    .map(|entry| RawNoteDataEntry {
+                        key: entry.key.clone(),
+                        blob: entry.raw_blob(),
+                    })
+                    .collect(),
+            })
+            .collect()
+    }
+
+    fn bridge_withdrawal_output_from_transaction_fixture(case: &str) -> PlannedOutput {
+        let mut outputs = outputs_from_transaction_fixture(case)
+            .into_iter()
+            .filter(|output| {
+                output
+                    .note_data
+                    .iter()
+                    .any(|entry| entry.key == NOTE_DATA_KEY_BRIDGE_WITHDRAWAL)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outputs.len(),
+            1,
+            "fixture should contain exactly one bridge-w output"
+        );
+        outputs.pop().expect("bridge-w output")
+    }
+
+    fn refund_outputs_from_transaction_fixture(case: &str) -> Vec<PlannedOutput> {
+        outputs_from_transaction_fixture(case)
+            .into_iter()
+            .filter(|output| {
+                output
+                    .note_data
+                    .iter()
+                    .all(|entry| entry.key != NOTE_DATA_KEY_BRIDGE_WITHDRAWAL)
+            })
+            .collect()
     }
 
     #[test]
@@ -424,25 +570,25 @@ mod tests {
         let bridge_withdrawal_long =
             estimate_seed_words_legacy(&[output_from_fixture("bridge-withdrawal-long-event")]);
 
-        assert_eq!(lock_single, 7);
-        assert_eq!(lock_v2, 12);
-        assert_eq!(lock_v4, 22);
-        assert_eq!(lock_v8, 42);
-        assert_eq!(lock_v16, 82);
-        assert_eq!(bridge_deposit, 8);
-        assert_eq!(bridge_deposit_large, 8);
-        assert_eq!(bridge_withdrawal, 20);
-        assert_eq!(bridge_withdrawal_long, 23);
+        assert_eq!(lock_single, 6);
+        assert_eq!(lock_v2, 11);
+        assert_eq!(lock_v4, 21);
+        assert_eq!(lock_v8, 41);
+        assert_eq!(lock_v16, 81);
+        assert_eq!(bridge_deposit, 7);
+        assert_eq!(bridge_deposit_large, 7);
+        assert_eq!(bridge_withdrawal, 19);
+        assert_eq!(bridge_withdrawal_long, 19);
     }
 
     #[test]
     fn seed_estimate_counts_wildcard_note_data_with_raw_blob_proxy() {
         let note_data = fixture_note_data("wildcard");
         let raw_entry = note_data.iter().next().expect("wildcard fixture entry");
-        let expected_raw_blob_words = (raw_entry.blob.len() as u64).saturating_add(7) / 8;
+        let expected_raw_blob_words = (raw_entry.raw_blob().len() as u64).saturating_add(7) / 8;
         let expected_value_words = expected_raw_blob_words.max(1);
-        // one key/value entry: key (1) + value + z-map null branches (2)
-        let expected_total_words = 1 + expected_value_words + 2;
+        // one key/value entry reduced by `rep z-by` into a singleton list.
+        let expected_total_words = 1 + expected_value_words + 1;
 
         let actual = estimate_seed_words_legacy(&[output_from_fixture("wildcard")]);
         assert_eq!(actual, expected_total_words);
@@ -456,9 +602,9 @@ mod tests {
         ] {
             let note_data = fixture_note_data(case);
             let raw_entry = note_data.iter().next().expect("fixture entry");
-            let expected_raw_blob_words = (raw_entry.blob.len() as u64).saturating_add(7) / 8;
+            let expected_raw_blob_words = (raw_entry.raw_blob().len() as u64).saturating_add(7) / 8;
             let expected_value_words = expected_raw_blob_words.max(1);
-            let expected_total_words = 1 + expected_value_words + 2;
+            let expected_total_words = 1 + expected_value_words + 1;
 
             let actual = estimate_seed_words_legacy(&[output_from_fixture(case)]);
             assert_eq!(actual, expected_total_words, "case {case}");
@@ -507,6 +653,117 @@ mod tests {
             },
         );
         assert_eq!(post, merged);
+    }
+
+    #[test]
+    fn withdrawal_tx_fixture_bridge_w_word_count_matches_note_data_fixture() {
+        let expected = estimate_seed_words_legacy(&[output_from_fixture("bridge-withdrawal")]);
+        let actual =
+            estimate_seed_words_legacy(&[bridge_withdrawal_output_from_transaction_fixture(
+                "bridge-multisig-withdrawal-basic",
+            )]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn withdrawal_tx_fixture_with_change_preserves_bridge_w_word_count() {
+        let expected =
+            estimate_seed_words_legacy(&[output_from_fixture("bridge-withdrawal-long-event")]);
+        let actual =
+            estimate_seed_words_legacy(&[bridge_withdrawal_output_from_transaction_fixture(
+                "bridge-multisig-withdrawal-with-change",
+            )]);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bridge_multisig_withdrawal_fixture_refunds_to_shared_lock() {
+        let Transaction::V1(tx) = transaction_fixture("bridge-multisig-withdrawal-with-change");
+        let nockchain_types::tx_engine::v1::tx::InputMetadata::SpendConditions(input_metadata) =
+            tx.metadata.inputs
+        else {
+            panic!("fixture must carry spend-condition metadata");
+        };
+        let spend_condition = input_metadata
+            .0
+            .into_iter()
+            .next()
+            .map(|(_, spend_condition)| spend_condition)
+            .expect("fixture metadata for witness spend");
+        let expected_lock_root = Lock::SpendCondition(spend_condition)
+            .hash()
+            .expect("fixture lock root");
+
+        let refund_outputs =
+            refund_outputs_from_transaction_fixture("bridge-multisig-withdrawal-with-change");
+        assert_eq!(
+            refund_outputs.len(),
+            1,
+            "fixture should contain exactly one refund output"
+        );
+        let refund_output = &refund_outputs[0];
+        assert_eq!(refund_output.lock_root, expected_lock_root);
+        assert!(
+            refund_output
+                .note_data
+                .iter()
+                .any(|entry| entry.key == NOTE_DATA_KEY_LOCK),
+            "refund output should retain lock note-data"
+        );
+    }
+
+    #[test]
+    fn seed_estimate_matches_bridge_multisig_withdrawal_fixture_fee_component() {
+        let fixture = withdrawal_tx_fixture_entry("bridge-multisig-withdrawal-with-change");
+        let chain_context = ChainContext {
+            height: BlockHeight(Belt(fixture.height)),
+            bythos_phase: BlockHeight(Belt(10)),
+            base_fee: 256,
+            input_fee_divisor: 4,
+            min_fee: 0,
+        };
+
+        let estimated = estimate_seed_words(
+            &outputs_from_transaction_fixture("bridge-multisig-withdrawal-with-change"),
+            &chain_context,
+        );
+
+        assert_eq!(estimated, fixture.seed_words);
+    }
+
+    #[test]
+    fn witness_estimate_matches_bridge_multisig_withdrawal_fixture_fee_component() {
+        let fixture = withdrawal_tx_fixture_entry("bridge-multisig-withdrawal-with-change");
+        let Transaction::V1(tx) = fixture.transaction.clone();
+        let nockchain_types::tx_engine::v1::tx::InputMetadata::SpendConditions(input_metadata) =
+            tx.metadata.inputs
+        else {
+            panic!("fixture must carry spend-condition metadata");
+        };
+        let spend_condition = input_metadata
+            .0
+            .into_iter()
+            .next()
+            .map(|(_, spend_condition)| spend_condition)
+            .expect("fixture metadata for witness spend");
+        let chain_context = ChainContext {
+            height: BlockHeight(Belt(fixture.height)),
+            bythos_phase: BlockHeight(Belt(10)),
+            base_fee: 256,
+            input_fee_divisor: 4,
+            min_fee: 0,
+        };
+
+        let estimated = estimate_witness_words(
+            &[WitnessWordInput {
+                spend_condition,
+                input_origin_page: BlockHeight(Belt(17)),
+                spend_condition_count: Some(1),
+            }],
+            &chain_context,
+        );
+
+        assert_eq!(estimated, fixture.witness_words);
     }
 
     #[test]
@@ -630,5 +887,103 @@ mod tests {
         assert_eq!(estimator.estimate_v0_witness_words(1), 31);
         assert_eq!(estimator.estimate_v0_witness_words(2), 61);
         assert_eq!(estimator.estimate_v0_witness_words(3), 91);
+    }
+
+    #[test]
+    fn witness_estimate_matches_bridge_multisig_withdrawal_fixture_shape() {
+        let Transaction::V1(tx) = transaction_fixture("bridge-multisig-withdrawal-basic");
+        let (name, spend) = tx.spends.0.into_iter().next().expect("fixture spend");
+        let Spend::Witness(spend) = spend else {
+            panic!("fixture must contain a v1 witness spend");
+        };
+        let nockchain_types::tx_engine::v1::tx::InputMetadata::SpendConditions(input_metadata) =
+            tx.metadata.inputs
+        else {
+            panic!("fixture must carry spend-condition metadata");
+        };
+        let spend_condition = input_metadata
+            .0
+            .into_iter()
+            .find(|(candidate, _)| candidate == &name)
+            .map(|(_, spend_condition)| spend_condition)
+            .expect("fixture metadata for witness spend");
+        let bythos_phase = match &spend.witness.lock_merkle_proof {
+            nockchain_types::tx_engine::v1::tx::LockMerkleProof::Full(_) => 17,
+            nockchain_types::tx_engine::v1::tx::LockMerkleProof::Stub(_) => 18,
+        };
+        let context = ChainContext {
+            height: BlockHeight(Belt(10)),
+            bythos_phase: BlockHeight(Belt(bythos_phase)),
+            base_fee: 128,
+            input_fee_divisor: 4,
+            min_fee: 256,
+        };
+        let estimated = estimate_witness_words(
+            &[WitnessWordInput {
+                spend_condition: spend_condition.clone(),
+                input_origin_page: BlockHeight(Belt(17)),
+                spend_condition_count: Some(1),
+            }],
+            &context,
+        );
+        let actual = WordCountEstimator::count_encoded_leaves(
+            &nockchain_types::tx_engine::v1::tx::Witness::new(
+                spend.witness.lock_merkle_proof.clone(),
+                WordCountEstimator::synthetic_pkh_signature(&spend_condition),
+                Vec::new(),
+            ),
+        );
+
+        assert_eq!(estimated, actual);
+    }
+
+    #[test]
+    fn minimum_fee_matches_bridge_multisig_withdrawal_with_change_fixture_fee_components() {
+        let fixture = withdrawal_tx_fixture_entry("bridge-multisig-withdrawal-with-change");
+        let minimum_fee = compute_minimum_fee(FeeInputs {
+            seed_words: fixture.seed_words,
+            witness_words: fixture.witness_words,
+            base_fee: 256,
+            input_fee_divisor: 4,
+            min_fee: 0,
+            height: BlockHeight(Belt(fixture.height)),
+            bythos_phase: BlockHeight(Belt(10)),
+        })
+        .minimum_fee;
+
+        assert_eq!(
+            minimum_fee, fixture.min_fee,
+            "fixture_seed_words={} fixture_witness_words={}",
+            fixture.seed_words, fixture.witness_words
+        );
+    }
+
+    #[test]
+    fn lmp_estimate_matches_bridge_multisig_withdrawal_fixture_shape() {
+        let Transaction::V1(tx) = transaction_fixture("bridge-multisig-withdrawal-with-change");
+        let (name, spend) = tx.spends.0.into_iter().next().expect("fixture spend");
+        let Spend::Witness(spend) = spend else {
+            panic!("fixture must contain a v1 witness spend");
+        };
+        let nockchain_types::tx_engine::v1::tx::InputMetadata::SpendConditions(input_metadata) =
+            tx.metadata.inputs
+        else {
+            panic!("fixture must carry spend-condition metadata");
+        };
+        let spend_condition = input_metadata
+            .0
+            .into_iter()
+            .find(|(candidate, _)| candidate == &name)
+            .map(|(_, spend_condition)| spend_condition)
+            .expect("fixture metadata for witness spend");
+        let bythos_active = matches!(
+            spend.witness.lock_merkle_proof,
+            nockchain_types::tx_engine::v1::tx::LockMerkleProof::Full(_)
+        );
+        let estimated =
+            WordCountEstimator::estimate_lmp_words(&spend_condition, bythos_active, Some(1));
+        let actual = WordCountEstimator::count_encoded_leaves(&spend.witness.lock_merkle_proof);
+
+        assert_eq!(estimated, actual);
     }
 }

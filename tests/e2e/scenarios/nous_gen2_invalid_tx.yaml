@@ -1,0 +1,170 @@
+# Nous rollout scenario: invalid transaction isolation with gen2 enabled
+#
+# Verifies that a malformed transaction does not poison subsequent valid
+# transaction handling when all peers are sending and accepting req-res gen2.
+#
+# 1. Start the miner, create wallets, and mine an initial balance
+# 2. Bring up a second gen2-enabled peer
+# 3. Prepare a valid wallet transaction
+# 4. Submit a known-invalid fixture, then immediately submit the valid tx
+# 5. Assert the invalid tx stays rejected while the valid tx propagates cleanly
+
+name: "nous_gen2_invalid_tx"
+seed: 32
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+  - id: "full-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_pkh"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_pkh}"]
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_pkh}"]
+
+  - action: wallet
+    wallet: "recipient"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "recipient_pkh"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["full-b"]
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 6
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 6
+    timeout_ms: 180000
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "list-notes"
+    capture:
+      regex: '(?s)- Name:\s*(\[[^\]]+\])'
+      store_as: "note_name"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "create-tx"
+    args:
+      - "--names"
+      - "${note_name}"
+      - "--recipient"
+      - '{"kind":"p2pkh","address":"${recipient_pkh}","amount":10000}'
+      - "--fee"
+      - "10000000"
+      - "--save-raw-tx"
+      - "--refund-pkh"
+      - "${miner_pkh}"
+    capture:
+      regex: '- Saved transaction to\s*([^\s]+)'
+      store_as: "valid_tx_path"
+
+  - action: submit_tx
+    node: "miner-a"
+    fixture: "raw_tx_v1.jam"
+    expect: ack
+    store_as: "bad_tx"
+
+  - action: wallet
+    wallet: "miner"
+    node: "miner-a"
+    command: "send-tx"
+    args: ["${valid_tx_path}"]
+    capture:
+      regex: 'Validation for TX\s*([A-Za-z0-9]+)\s*passed'
+      store_as: "valid_tx_id"
+
+  - action: wait_for_tx_accepted
+    node: "miner-a"
+    tx: "${valid_tx_id}"
+    timeout_ms: 60000
+
+  - action: wait_for_tx_accepted
+    node: "full-b"
+    tx: "${valid_tx_id}"
+    timeout_ms: 60000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "full-b"]
+    timeout_ms: 180000
+  - assert: tx_not_accepted
+    node: "miner-a"
+    tx: "bad_tx"
+  - assert: tx_not_accepted
+    node: "full-b"
+    tx: "bad_tx"
+  - assert: tx_accepted
+    node: "miner-a"
+    tx: "${valid_tx_id}"
+  - assert: tx_accepted
+    node: "full-b"
+    tx: "${valid_tx_id}"

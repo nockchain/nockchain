@@ -1,6 +1,6 @@
 use alloy::primitives::Address as AlloyAddress;
 use hex::FromHex;
-use nockvm::noun::{Atom, IndirectAtom, Noun, NounAllocator};
+use nockvm::noun::{Atom, IndirectAtom, Noun, NounAllocator, NounSpace};
 use noun_serde::{NounDecode, NounDecodeError, NounEncode};
 use thiserror::Error;
 
@@ -98,15 +98,17 @@ impl NounEncode for EthAddress {
 
         unsafe {
             let mut atom = IndirectAtom::new_raw_bytes(allocator, trimmed_len, le_bytes.as_ptr());
-            atom.normalize_as_atom().as_noun()
+            let space = allocator.noun_space();
+            atom.normalize_as_atom(&space).as_noun()
         }
     }
 }
 
 impl NounDecode for EthAddress {
-    fn from_noun(noun: &Noun) -> Result<Self, NounDecodeError> {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
         let atom = noun.as_atom().map_err(|_| NounDecodeError::ExpectedAtom)?;
-        let bytes = atom.as_ne_bytes();
+        let atom_handle = atom.in_space(space);
+        let bytes = atom_handle.as_ne_bytes();
         let mut buf = [0u8; EthAddress::LEN];
         for (i, byte) in bytes.iter().enumerate() {
             if i < EthAddress::LEN {
@@ -157,7 +159,8 @@ mod tests {
         let mut slab = NounSlab::<NockJammer>::new();
         let addr = EthAddress::from([0x11; EthAddress::LEN]);
         let noun = addr.to_noun(&mut slab);
-        let decoded = EthAddress::from_noun(&noun).expect("decode");
+        let space = slab.noun_space();
+        let decoded = EthAddress::from_noun(&noun, &space).expect("decode");
         assert_eq!(decoded, addr);
     }
 
@@ -173,8 +176,9 @@ mod tests {
         let atom = noun
             .as_atom()
             .expect("expected EthAddress noun to be an atom");
+        let space = slab.noun_space();
         let be_bytes = {
-            let mut bytes = atom.to_be_bytes();
+            let mut bytes = atom.in_space(&space).to_be_bytes();
             if bytes.len() < EthAddress::LEN {
                 let mut padded = vec![0u8; EthAddress::LEN];
                 padded[EthAddress::LEN - bytes.len()..].copy_from_slice(&bytes);
@@ -198,7 +202,8 @@ mod tests {
         let value = UBig::from_be_bytes(addr.as_slice());
         let mut slab = NounSlab::<NockJammer>::new();
         let noun = Atom::from_ubig(&mut slab, &value).as_noun();
-        let decoded = EthAddress::from_noun(&noun).expect("decode");
+        let space = slab.noun_space();
+        let decoded = EthAddress::from_noun(&noun, &space).expect("decode");
 
         assert_eq!(decoded, addr);
     }

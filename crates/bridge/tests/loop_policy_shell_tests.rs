@@ -6,19 +6,18 @@ use std::time::{Duration, SystemTime};
 
 use alloy::primitives::Address;
 use async_trait::async_trait;
-use bridge::bridge_status::BridgeStatus;
-use bridge::errors::BridgeError;
-use bridge::ethereum::DepositSubmissionResult;
-use bridge::health::SharedHealthState;
-use bridge::loop_policy::PostingLoopPolicy;
-use bridge::ports::BaseContractPort;
-use bridge::proposal_cache::{ProposalCache, SignatureData};
-use bridge::runtime::run_posting_loop_with_policy;
-use bridge::status::BridgeStatusState;
-use bridge::stop::{StopController, StopInfo, StopSource};
-use bridge::types::{
-    zero_tip5_hash, AtomBytes, DepositId, DepositSubmission, EthAddress, NockDepositRequestData,
-    NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash,
+use bridge::core::loop_policy::PostingLoopPolicy;
+use bridge::deposit::base::DepositSubmissionResult;
+use bridge::deposit::cache::{ProposalCache, SignatureData};
+use bridge::deposit::ports::BaseContractPort;
+use bridge::deposit::posting::run_posting_loop_with_policy;
+use bridge::deposit::types::{DepositId, DepositSubmission, NockDepositRequestData};
+use bridge::observability::health::SharedHealthState;
+use bridge::observability::status::{BridgeStatus, BridgeStatusState};
+use bridge::shared::errors::BridgeError;
+use bridge::shared::stop::{StopController, StopInfo, StopSource};
+use bridge::shared::types::{
+    zero_tip5_hash, AtomBytes, EthAddress, NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash,
 };
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::Hash as NockPkh;
@@ -88,6 +87,10 @@ fn test_node_config() -> NodeConfig {
             nock_pkh: NockPkh::from_base58("2222222222222222222222222222222222222222222222222222")
                 .expect("valid test nock pkh"),
         }],
+        bridge_lock_root: NockPkh::from_base58(
+            "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd",
+        )
+        .expect("bridge lock root"),
         my_eth_key: AtomBytes(vec![]),
         my_nock_key: SchnorrSecretKey([Belt(0); 8]),
     }

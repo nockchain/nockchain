@@ -12,7 +12,7 @@ fn main() -> io::Result<()> {
     let output_filename = format!("{}.out", filename);
     let f = File::open(filename)?;
     let in_len = f.metadata()?.len();
-    let mut stack = NockStack::new(1 << 10 << 10 << 10, 0);
+    let mut stack = NockStack::new(nockvm::mem::NOCK_STACK_SIZE_TINY, 0);
     let jammed_input = unsafe {
         let in_map = memmap2::Mmap::map(&f)?;
         let word_len = (in_len + 7) >> 3;
@@ -20,7 +20,7 @@ fn main() -> io::Result<()> {
         write_bytes(dest.add(word_len as usize - 1), 0, 8);
         copy_nonoverlapping(in_map.as_ptr(), dest as *mut u8, in_len as usize);
         mem::drop(in_map);
-        atom.normalize_as_atom()
+        atom.normalize_as_atom_stack()
     };
 
     let now = SystemTime::now();
@@ -52,6 +52,8 @@ fn main() -> io::Result<()> {
     let nuw = SystemTime::now();
 
     let jammed_output = jam(&mut stack, input);
+    let space = stack.noun_space();
+    let jammed_output = jammed_output.in_space(&space);
 
     match nuw.elapsed() {
         Ok(elapse) => {
@@ -69,7 +71,7 @@ fn main() -> io::Result<()> {
     unsafe {
         let mut out_map = memmap2::MmapMut::map_mut(&f_out)?;
         copy_nonoverlapping(
-            jammed_output.data_pointer() as *mut u8,
+            jammed_output.data_pointer() as *const u8,
             out_map.as_mut_ptr(),
             jammed_output.size() << 3,
         );

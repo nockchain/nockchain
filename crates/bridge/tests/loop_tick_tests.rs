@@ -7,28 +7,31 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy::primitives::Address;
 use async_trait::async_trait;
-use bridge::bridge_status::BridgeStatus;
-use bridge::config::NonceEpochConfig;
-use bridge::deposit_log::{DepositLog, DepositLogEntry, DepositLogInsertOutcome};
-use bridge::errors::BridgeError;
-use bridge::ethereum::DepositSubmissionResult;
-use bridge::health::SharedHealthState;
-use bridge::ports::BaseContractPort;
-use bridge::proposal_cache::{ProposalCache, ProposalStatus, SignatureData};
-use bridge::proposer::hoon_proposer;
-use bridge::runtime::{
-    posting_tick_once, signing_tick_once, BridgeEvent, BridgeRuntime, CauseBuildOutcome,
-    CauseBuilder, EventEnvelope, PostingTickConfig, PostingTickContext, PostingTickControl,
-    PostingTickInput, PostingTickNodeState, PostingTickPorts, PostingTickState,
-    SigningLocalStopMode, SigningTickConfig, SigningTickContext, SigningTickControl,
-    SigningTickInput, SigningTickNodeState, SigningTickPorts, SigningTickState,
+use bridge::deposit::base::DepositSubmissionResult;
+use bridge::deposit::cache::{ProposalCache, ProposalStatus, SignatureData};
+use bridge::deposit::log::{DepositLog, DepositLogEntry, DepositLogInsertOutcome};
+use bridge::deposit::ports::BaseContractPort;
+use bridge::deposit::posting::{
+    posting_tick_once, PostingTickConfig, PostingTickContext, PostingTickControl, PostingTickInput,
+    PostingTickNodeState, PostingTickPorts, PostingTickState,
 };
-use bridge::signing::BridgeSigner;
-use bridge::status::BridgeStatusState;
-use bridge::stop::StopController;
-use bridge::types::{
-    zero_tip5_hash, AtomBytes, DepositId, DepositSubmission, EthAddress, NockDepositRequestData,
-    NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash,
+use bridge::deposit::signing::{
+    signing_tick_once, SigningLocalStopMode, SigningTickConfig, SigningTickContext,
+    SigningTickControl, SigningTickInput, SigningTickNodeState, SigningTickPorts, SigningTickState,
+};
+use bridge::deposit::types::{DepositId, DepositSubmission, NockDepositRequestData};
+use bridge::observability::health::SharedHealthState;
+use bridge::observability::status::{BridgeStatus, BridgeStatusState};
+use bridge::shared::config::NonceEpochConfig;
+use bridge::shared::errors::BridgeError;
+use bridge::shared::proposer::active_proposer;
+use bridge::shared::runtime::{
+    BridgeEvent, BridgeRuntime, CauseBuildOutcome, CauseBuilder, EventEnvelope,
+};
+use bridge::shared::signing::BridgeSigner;
+use bridge::shared::stop::StopController;
+use bridge::shared::types::{
+    zero_tip5_hash, AtomBytes, EthAddress, NodeConfig, NodeInfo, SchnorrSecretKey, Tip5Hash,
 };
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::Hash as NockPkh;
@@ -218,6 +221,10 @@ fn test_node_config(node_id: u64) -> NodeConfig {
                 .expect("valid test pkh 2"),
             },
         ],
+        bridge_lock_root: NockPkh::from_base58(
+            "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd",
+        )
+        .expect("bridge lock root"),
         my_eth_key: AtomBytes(vec![]),
         my_nock_key: SchnorrSecretKey([Belt(0); 8]),
     }
@@ -324,7 +331,7 @@ fn non_proposer_node_id_for_height(height: u64) -> u64 {
         .iter()
         .map(|node| node.nock_pkh.clone())
         .collect();
-    let proposer = hoon_proposer(height, &node_pkhs);
+    let proposer = active_proposer(height, &node_pkhs);
     ((proposer + 1) % node_pkhs.len()) as u64
 }
 
@@ -335,7 +342,7 @@ fn proposer_node_id_for_height(height: u64) -> u64 {
         .iter()
         .map(|node| node.nock_pkh.clone())
         .collect();
-    hoon_proposer(height, &node_pkhs) as u64
+    active_proposer(height, &node_pkhs) as u64
 }
 
 async fn seed_deposit_log_from_proposal(log: &DepositLog, proposal: &NockDepositRequestData) {
@@ -526,7 +533,7 @@ async fn signing_tick_without_tip_skips_chain_nonce_query() {
         SigningTickControl::new(bridge_status, stop_controller, stop),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let mut state = SigningTickState::new(SystemTime::now());
@@ -583,7 +590,7 @@ async fn signing_tick_regossip_collecting_my_signature_with_tip() {
         SigningTickControl::new(bridge_status, stop_controller, stop),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let mut state = SigningTickState::default();
@@ -646,7 +653,7 @@ async fn signing_tick_replay_waits_then_signs_then_skips_already_signed() {
         SigningTickControl::new(bridge_status, stop_controller, stop),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let start = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
@@ -745,7 +752,7 @@ async fn signing_tick_nonce_query_error_returns_without_actions() {
         SigningTickControl::new(bridge_status, stop_controller, stop),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let mut state = SigningTickState::new(SystemTime::now());
@@ -803,7 +810,7 @@ async fn signing_tick_nonce_epoch_mismatch_triggers_local_stop_without_runtime_p
             .with_local_stop_mode(SigningLocalStopMode::LocalTriggerOnly),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let mut state = SigningTickState::new(SystemTime::now());
@@ -862,7 +869,7 @@ async fn signing_tick_sqlite_count_error_triggers_local_stop_without_runtime_pee
             .with_local_stop_mode(SigningLocalStopMode::LocalTriggerOnly),
         SigningTickConfig::new(
             &nonce_epoch,
-            bridge::loop_policy::SigningLoopPolicy::default(),
+            bridge::core::loop_policy::SigningLoopPolicy::default(),
         ),
     );
     let mut state = SigningTickState::new(SystemTime::now());

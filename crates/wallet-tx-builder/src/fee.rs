@@ -1,6 +1,7 @@
 use nockchain_types::tx_engine::common::BlockHeight;
 
 const DEFAULT_INPUT_FEE_DIVISOR: u64 = 1;
+pub const NICKS_PER_NOCK: u64 = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeeInputs {
@@ -20,6 +21,17 @@ pub struct FeeBreakdown {
     pub word_fee: u64,
     pub minimum_fee: u64,
     pub witness_divisor: u64,
+}
+
+/// Computes the bridge fee using the same whole-NOCK rounding rule as the
+/// existing bridge deposit path.
+pub fn compute_bridge_fee(amount: u64, nicks_fee_per_nock: u64) -> u64 {
+    if amount == 0 || nicks_fee_per_nock == 0 {
+        return 0;
+    }
+
+    let rounded_nocks = 1u64.saturating_add(amount.saturating_sub(1) / NICKS_PER_NOCK);
+    rounded_nocks.saturating_mul(nicks_fee_per_nock)
 }
 
 pub fn compute_minimum_fee(inputs: FeeInputs) -> FeeBreakdown {
@@ -152,5 +164,22 @@ mod tests {
         assert_eq!(fee.witness_fee, u64::MAX);
         assert_eq!(fee.word_fee, u64::MAX);
         assert_eq!(fee.minimum_fee, u64::MAX);
+    }
+
+    #[test]
+    fn compute_bridge_fee_returns_zero_for_zero_amount() {
+        assert_eq!(compute_bridge_fee(0, 195), 0);
+    }
+
+    #[test]
+    fn compute_bridge_fee_charges_fixed_fee_per_whole_nock() {
+        assert_eq!(compute_bridge_fee(NICKS_PER_NOCK, 195), 195);
+        assert_eq!(compute_bridge_fee(NICKS_PER_NOCK * 2, 195), 390);
+    }
+
+    #[test]
+    fn compute_bridge_fee_rounds_partial_nock_up() {
+        assert_eq!(compute_bridge_fee(1, 195), 195);
+        assert_eq!(compute_bridge_fee(NICKS_PER_NOCK + 1, 195), 390);
     }
 }

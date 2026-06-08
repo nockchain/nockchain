@@ -22,6 +22,7 @@ hex = { workspace = true }
 ibig = { workspace = true }
 nockapp = { workspace = true }
 nockapp-grpc-proto = { workspace = true }
+nockchain-libp2p-io = { workspace = true }
 nockchain-math = { workspace = true }
 nockchain-types = { workspace = true }
 nockvm = { workspace = true }
@@ -38,6 +39,8 @@ tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-prost = { workspace = true }
 tonic-reflection = { workspace = true }
+tonic-web = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
 

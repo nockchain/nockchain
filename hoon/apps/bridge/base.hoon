@@ -19,6 +19,8 @@
     ~>  %slog.[0 'base hold active, not processing incoming base-blocks']
     [~ old-state]
   =/  stop-info  (get-stop-info old-state)
+  ?:  !=(~ pending-base-block-commit.hash-state.state)
+    [[%0 %stop 'pending base block commit active, not processing incoming base-blocks' stop-info]~ old-state]
   =/  blocks=base-blocks  (cook-base-blocks raw)
   =/  first=@  first-height.blocks
   =/  chunk=@  base-blocks-chunk.constants.state
@@ -33,10 +35,19 @@
     [~ state]
   ?^  stop=(validate-base-blocks-sequence blocks)
     [[%0 %stop u.stop stop-info]~ old-state]
-  =+  process-blocks=(process-base-blocks blocks)
-  ?-    -.process-blocks
+  =/  withdrawals=(list nock-withdrawal-request:effect)
+    (base-propose-withdrawals blocks)
+  =/  pending=pending-base-block-withdrawals
+    :*  blocks-hash
+        first-height.blocks
+        last-height.blocks
+        withdrawals
+    ==
+  =/  stage-result=process-result
+    (stage-base-blocks blocks pending)
+  ?-    -.stage-result
        %|
-    =/  =process-fail  +.process-blocks
+    =/  =process-fail  +.stage-result
     ?-    -.process-fail
         %stop
       ::  early stop and roll back to old state if we do not process the base blocks
@@ -48,21 +59,47 @@
     ==
    ::
        %&
-    ::  update state if blocks get processed without stop condition or hold
-    =.  state  p.process-blocks
-    ::  check if we need to remove the hold
+    =.  state  p.stage-result
+    [[%0 %base-block-withdrawals-pending pending]~ state]
+  ==
+::
+++  commit-base-block-withdrawals
+  |=  ack=base-block-commit-ack
+  ^-  [(list effect) bridge-state]
+  =/  old-state  state
+  =/  stop-info  (get-stop-info old-state)
+  =/  maybe-pending=(unit pending-base-block-commit-data)
+    pending-base-block-commit.hash-state.state
+  ?~  maybe-pending
+    [~ old-state]
+  =/  pending=pending-base-block-commit-data  u.maybe-pending
+  =/  metadata=pending-base-block-withdrawals  metadata.pending
+  ?.  =(blocks-hash.ack blocks-hash.metadata)
+    [[%0 %stop 'base block withdrawals commit ack hash mismatch' stop-info]~ old-state]
+  ?.  =(first-height.ack first-height.metadata)
+    [[%0 %stop 'base block withdrawals commit ack first height mismatch' stop-info]~ old-state]
+  ?.  =(last-height.ack last-height.metadata)
+    [[%0 %stop 'base block withdrawals commit ack last height mismatch' stop-info]~ old-state]
+  =/  commit-result=process-result
+    (base-process-deposit-settlements blocks.pending)
+  ?-    -.commit-result
+      %|
+    =/  =process-fail  +.commit-result
+    ?-    -.process-fail
+        %stop
+      [[%0 %stop msg.process-fail stop-info]~ old-state]
+    ::
+        %hold
+      [[%0 %stop 'base block withdrawals commit ack hit base hold' stop-info]~ old-state]
+    ==
+  ::
+      %&
+    =.  state  p.commit-result
+    =.  pending-base-block-commit.hash-state.state  ~
+    =.  state  (commit-base-blocks blocks.pending)
     =?  nock-hold.hash-state.state  ?=(^ nock-hold.hash-state.state)
-      ?:  =(blocks-hash hash.u.nock-hold.hash-state.state)  ~
+      ?:  =(blocks-hash.metadata hash.u.nock-hold.hash-state.state)  ~
       nock-hold.hash-state.state
-    ::
-    =/  current-height=@ud  ~(height get:page:t last-block.state)
-    ::
-    ::  NOTE: This should always be true until we implement withdrawals
-    ?:  =(~ withdrawals.blocks)
-      [~ state]
-    ?~  maybe-proposal=(base-propose-withdrawals blocks)
-      [~ state]
-    :: TODO: when we implement withdrawals, we will emit a real propose effect
     [~ state]
   ==
 ::
@@ -74,7 +111,7 @@
   ?:  ?&  (gte base-start-height.constants.state first-height.blocks)
           (lte base-start-height.constants.state last-height.blocks)
       ==
-      ~
+    ~
   =/  last=base-blocks  (~(got z-by base-hashchain.hash-state.state) last-base-blocks.hash-state.state)
   =/  prev=[bid=bbid parent=bbid]
     (last-block:base-blocks last)
@@ -135,6 +172,8 @@
         ==
       ::
           %burn-for-withdrawal
+        ?:  (lte amount.content.i.txs (mul minimum-event-nocks.constants.state nicks-per-nock:t))
+          ret
         :_  deposit-settlements.ret
         ::  convert base-event-id to blist for z-map compatibility
         %+  ~(put z-by withdrawals.ret)
@@ -142,21 +181,28 @@
         :*  (from-atom:blist base-event-id.i.txs)
             lock-root.content.i.txs
             amount-burned=amount.content.i.txs  ::  TODO: what about withdrawal fees on the nock side?
-            fee=*coins:t
         ==
       ==
     $(txs t.txs)
   --
 ::
-::  +process-base-blocks:
-::    - update hash-state to reflect new base blocks
-::    - process unsettled deposits
+::  +stage-base-blocks:
+::    - store the pending base batch until Rust commits derived withdrawals
 ::
 ::  returns: [%| effect] if stop condition is hit, otherwise, return [%& state]
 ::
-++  process-base-blocks
-  |=  blocks=base-blocks
+++  stage-base-blocks
+  |=  [blocks=base-blocks metadata=pending-base-block-withdrawals]
   ^-  process-result
+  =.  pending-base-block-commit.hash-state.state  `[blocks metadata]
+  [%& state]
+::
+::  +commit-base-blocks:
+::    - update hash-state to reflect a previously staged base block batch
+::
+++  commit-base-blocks
+  |=  blocks=base-blocks
+  ^-  bridge-state
   =/  base-blocks-hash  (hash:base-blocks blocks)
   =.  base-hashchain.hash-state.state
     %+  ~(put z-by base-hashchain.hash-state.state)
@@ -170,7 +216,7 @@
   =?  unsettled-withdrawals.hash-state.state  !=(~ withdrawals.blocks)
     %-  ~(put z-by unsettled-withdrawals.hash-state.state)
     [base-blocks-hash withdrawals.blocks]
-  (base-process-deposit-settlements blocks)
+  state
 ::
 ::  +base-process-deposit-settlements: confirm the deposits in the latest base block batch
 ++  base-process-deposit-settlements
@@ -240,9 +286,17 @@
     ~>  %slog.[0 'settlement amount does not match deposit amount']  %.n
   %.y
 ::
+::  JOIE: when proposing withdrawals, attach height at the end of the batch window to the note-data
 ++  base-propose-withdrawals
   |=  latest-blocks=base-blocks
-  ^-  (unit effect)
-  ::>)  TODO: when we implement withdrawals, return %nock-proposal request if there are qualified withdrawals
-  ~|  %todo  !!
+  ^-  (list nock-withdrawal-request:effect)
+  =/  base-hash  (hash:base-blocks latest-blocks)
+  %+  turn  ~(tap z-by withdrawals.latest-blocks)
+  |=  [=beid =withdrawal]
+  :*  (to-atom:blist beid)
+      dest.withdrawal
+      amount-burned.withdrawal
+      last-height.latest-blocks
+      base-hash
+  ==
 --

@@ -1,7 +1,7 @@
 use std::env::current_dir;
 use std::ffi::OsStr;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{ColorChoice, Parser};
 use nockapp::driver::Operation;
@@ -21,9 +21,6 @@ use tracing::{debug, info, instrument};
 use walkdir::{DirEntry, WalkDir};
 
 pub const OUT_JAM_NAME: &str = "out.jam";
-
-// save interval in milliseconds
-const DEFAULT_SAVE_INTERVAL: u64 = 600000;
 
 pub type Error = Box<dyn std::error::Error>;
 
@@ -57,10 +54,6 @@ pub struct HoonCli {
     pub output: Option<std::path::PathBuf>,
 }
 
-pub fn default_save_interval() -> u64 {
-    DEFAULT_SAVE_INTERVAL
-}
-
 pub async fn hoonc_data_dir() -> PathBuf {
     let hoonc_data_dir = system_data_dir().join("hoonc");
     if !hoonc_data_dir.exists() {
@@ -76,6 +69,28 @@ pub async fn hoonc_data_dir() -> PathBuf {
             });
     }
     hoonc_data_dir
+}
+
+fn dir_has_regular_files(path: &Path) -> bool {
+    path.exists()
+        && std::fs::read_dir(path)
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+            })
+            .unwrap_or(false)
+}
+
+fn has_existing_hoonc_durability_state(hoonc_data_dir: &Path) -> bool {
+    let checkpoints_dir = hoonc_data_dir.join("checkpoints");
+    let pma_dir = hoonc_data_dir.join("pma");
+
+    dir_has_regular_files(&checkpoints_dir)
+        || dir_has_regular_files(&pma_dir)
+        || hoonc_data_dir.join("event-log.sqlite3").exists()
+        || hoonc_data_dir.join("event-log.sqlite3-wal").exists()
+        || hoonc_data_dir.join("event-log.sqlite3-shm").exists()
 }
 
 /// Builds and interprets a Hoon generator.
@@ -229,26 +244,18 @@ async fn initialize_hoonc_inner<J: Jammer + Send + 'static>(
     let mut boot_cli = boot_cli;
     let disable_prewarm = std::env::var("HOONC_DISABLE_PREWARM").is_ok();
     let hoonc_data_dir = data_dir.join("hoonc");
-    let checkpoints_dir = hoonc_data_dir.join("checkpoints");
-    let has_existing_checkpoint = checkpoints_dir.exists()
-        && std::fs::read_dir(&checkpoints_dir)
-            .map(|entries| {
-                entries.filter_map(Result::ok).any(|entry| {
-                    let is_file = entry.file_type().map(|ft| ft.is_file()).unwrap_or(false);
-                    is_file && entry.file_name().to_string_lossy().ends_with(".chkjam")
-                })
-            })
-            .unwrap_or(false);
+    let has_existing_durability_state = has_existing_hoonc_durability_state(&hoonc_data_dir);
 
     let should_use_prewarm = !disable_prewarm
         && boot_cli.state_jam.is_none()
-        && (boot_cli.new || !has_existing_checkpoint);
+        && (boot_cli.new || !has_existing_durability_state);
 
     // Keep the prewarm tempfile alive for the duration of this function when used.
     let mut _prewarm_state_file: Option<NamedTempFile> = None;
     if should_use_prewarm {
         let mut tmp = NamedTempFile::new()?;
         tmp.write_all(PREWARM_STATE_JAM)?;
+        boot_cli.new = true;
         boot_cli.state_jam = Some(tmp.path().to_string_lossy().into_owned());
         _prewarm_state_file = Some(tmp);
     }
@@ -418,6 +425,41 @@ pub fn is_valid_file_or_dir(entry: &DirEntry) -> bool {
         .unwrap_or(false);
 
     is_dir || is_valid_file
+}
+
+#[cfg(test)]
+mod durability_state_tests {
+    use super::has_existing_hoonc_durability_state;
+
+    #[test]
+    fn detects_existing_pma_state_without_checkpoints() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hoonc_data_dir = temp.path().join("hoonc");
+        std::fs::create_dir_all(hoonc_data_dir.join("pma")).expect("create pma dir");
+        std::fs::write(hoonc_data_dir.join("pma").join("0.pma"), b"pma").expect("write pma");
+
+        assert!(has_existing_hoonc_durability_state(&hoonc_data_dir));
+    }
+
+    #[test]
+    fn detects_existing_event_log_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hoonc_data_dir = temp.path().join("hoonc");
+        std::fs::create_dir_all(&hoonc_data_dir).expect("create hoonc dir");
+        std::fs::write(hoonc_data_dir.join("event-log.sqlite3"), b"sqlite")
+            .expect("write event log");
+
+        assert!(has_existing_hoonc_durability_state(&hoonc_data_dir));
+    }
+
+    #[test]
+    fn empty_hoonc_data_dir_does_not_block_prewarm() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hoonc_data_dir = temp.path().join("hoonc");
+        std::fs::create_dir_all(&hoonc_data_dir).expect("create hoonc dir");
+
+        assert!(!has_existing_hoonc_durability_state(&hoonc_data_dir));
+    }
 }
 
 #[instrument]

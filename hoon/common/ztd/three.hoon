@@ -1766,6 +1766,7 @@
   ::  +belt-schnorr: a wrapper for Schnorr signatures that works only with belts
   ::  TODO: audit this around how rip and rep are used
   ++  belt-schnorr
+    ~%  %belt-schnorr  ..belt-schnorr  ~
     |%
     +$  t8  [@ux @ux @ux @ux @ux @ux @ux @ux]  :: 8-tuple of belts
     +$  sk  t8
@@ -1775,14 +1776,18 @@
       |=  =t8
       ^-  ?
       =+  [a=@ux b=@ux c=@ux d=@ux e=@ux f=@ux g=@ux h=@ux]=t8
-      ?&  (^based a)
-          (^based b)
-          (^based c)
-          (^based d)
-          (^based e)
-          (^based f)
-          (^based g)
-          (^based h)
+      ::  each limb must be a canonical 32-bit digit (< 2^32), since +t8-to-atom
+      ::  reconstructs the scalar from these limbs as base-2^32 digits with
+      ::  `rap 5`. `(lth _ (bex 32))` also implies `(^based _)` as 2^32 < prime.
+      =/  lim=@  (bex 32)
+      ?&  (lth a lim)
+          (lth b lim)
+          (lth c lim)
+          (lth d lim)
+          (lth e lim)
+          (lth f lim)
+          (lth g lim)
+          (lth h lim)
       ==
     ::
     ++  atom-to-t8
@@ -1807,6 +1812,7 @@
       (leaf-sequence:shape t)
     ::
     ++  affine
+      ~%  %affine  ..affine  ~
       |%
       ++  sign
         |=  [=sk m=noun-digest:tip5]
@@ -1825,6 +1831,7 @@
         ==
       ::
       ++  batch-verify
+        ~/  %batch-verify
         |=  batch=(list [pk=a-pt:curve m=noun-digest:tip5 =chal =sig])
         ^-  ?
         (levy batch verify)

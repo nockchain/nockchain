@@ -4,18 +4,17 @@ use std::time::Instant;
 use ibig::UBig;
 use kernels_open_miner::KERNEL;
 use nockapp::kernel::boot::{parse_test_jets, TraceOpts};
-use nockapp::kernel::form::SerfThread;
+use nockapp::kernel::form::{PmaConfig, SerfThread};
 use nockapp::noun::slab::NounSlab;
-use nockapp::noun::NounExt;
 use nockapp::save::SaveableCheckpoint;
 use nockapp::utils::NOCK_STACK_SIZE_TINY;
 use nockapp::wire::Wire;
 use nockapp::AtomExt;
 use nockchain::mining::MiningWire;
-use nockchain_math::noun_ext::NounMathExt;
+use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonList;
 use nockchain_types::BlockchainConstants;
-use nockvm::noun::{Atom, Noun, D, T, YES};
+use nockvm::noun::{Atom, Noun, NounAllocator, D, T, YES};
 use nockvm_macros::tas;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
@@ -78,20 +77,21 @@ async fn send_enable_mining(
 }
 
 fn extract_mine_start(slab: &NounSlab) -> Result<(Noun, Noun, Noun, Noun), Box<dyn Error>> {
+    let space = slab.noun_space();
     let root = unsafe { *slab.root() };
-    let effects = HoonList::try_from(root).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+    let effects = HoonList::try_from(root, &space).map_err(|e| Box::new(e) as Box<dyn Error>)?;
     for effect in effects {
-        if let Ok(effect_cell) = effect.as_cell() {
+        if let Ok(effect_cell) = effect.in_space(&space).as_cell() {
             if effect_cell.head().eq_bytes("mine") {
-                let mine_tail = effect_cell.tail();
-                let mine_cell = mine_tail
+                let mine_cell = effect_cell
+                    .tail()
                     .as_cell()
                     .map_err(|e| Box::new(e) as Box<dyn Error>)?;
                 let mine_start = mine_cell.head();
                 let [version, header, target, pow_len] = mine_start
                     .uncell::<4>()
                     .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-                return Ok((version, header, target, pow_len));
+                return Ok((version.noun(), header.noun(), target.noun(), pow_len.noun()));
             }
         }
     }
@@ -122,6 +122,7 @@ async fn benchmark_open_prover_single_attempt() -> Result<(), Box<dyn Error>> {
         None,
         hot_state,
         NOCK_STACK_SIZE_TINY,
+        None::<PmaConfig>,
         test_jets,
         TraceOpts::default(),
     )
@@ -131,9 +132,11 @@ async fn benchmark_open_prover_single_attempt() -> Result<(), Box<dyn Error>> {
     // Initialize mining state so the kernel provides candidate metadata.
     send_set_mining_key(&serf).await?;
     let enable_result = send_enable_mining(&serf).await?;
+    let enable_space = enable_result.noun_space();
     let candidate_data = match extract_mine_start(&enable_result) {
         Ok((version_noun, header_noun, target_noun, pow_len_noun)) => {
             let pow_len_value = pow_len_noun
+                .in_space(&enable_space)
                 .as_atom()
                 .map_err(|e| Box::new(e) as Box<dyn Error>)?
                 .as_u64()
@@ -160,9 +163,9 @@ async fn benchmark_open_prover_single_attempt() -> Result<(), Box<dyn Error>> {
             target,
             pow_len,
         } => (
-            poke_slab.copy_into(version),
-            poke_slab.copy_into(header),
-            poke_slab.copy_into(target),
+            poke_slab.copy_into(version, &enable_space),
+            poke_slab.copy_into(header, &enable_space),
+            poke_slab.copy_into(target, &enable_space),
             pow_len,
         ),
         CandidateData::Synthetic => {
@@ -193,11 +196,13 @@ async fn benchmark_open_prover_single_attempt() -> Result<(), Box<dyn Error>> {
     );
 
     // Verify we received a successful %mine-result effect.
+    let poke_space = poke_result.noun_space();
     let root = unsafe { *poke_result.root() };
     let mut success = false;
-    let effects = HoonList::try_from(root).map_err(|e| Box::new(e) as Box<dyn Error>)?;
+    let effects =
+        HoonList::try_from(root, &poke_space).map_err(|e| Box::new(e) as Box<dyn Error>)?;
     for effect in effects {
-        if let Ok(effect_cell) = effect.as_cell() {
+        if let Ok(effect_cell) = effect.in_space(&poke_space).as_cell() {
             if effect_cell.head().eq_bytes("mine-result") {
                 if let Ok([status, _rest]) = effect_cell.tail().uncell() {
                     if let Ok(status_atom) = status.as_atom() {

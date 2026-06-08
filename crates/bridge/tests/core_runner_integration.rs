@@ -2,12 +2,12 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use bridge::core::base_observer::{BaseObserverCore, BaseObserverRunner, BasePlanAction};
-use bridge::core::nock_observer::{NockObserverCore, NockObserverRunner, NockPlanAction};
-use bridge::errors::BridgeError;
-use bridge::ports::NockTipInfo;
-use bridge::runtime::{BaseBlockBatch, ChainEvent, NockBlockEvent};
-use bridge::types::{zero_tip5_hash, AtomBytes, BaseBlockRef};
+use bridge::core::observation::base::{BaseObserverCore, BaseObserverRunner, BasePlanAction};
+use bridge::core::observation::nock::{NockObserverCore, NockObserverRunner, NockPlanAction};
+use bridge::core::ports::NockTipInfo;
+use bridge::shared::errors::BridgeError;
+use bridge::shared::runtime::{BaseBlockBatch, ChainEvent, NockBlockEvent};
+use bridge::shared::types::{zero_tip5_hash, AtomBytes, BaseBlockRef};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::{BigNum, CoinbaseSplit, Hash as NockHash, Page};
@@ -130,6 +130,29 @@ async fn base_runner_no_pending_height_emits_nothing() {
 
     let action = runner.tick_once().await.unwrap();
     assert_eq!(action, BasePlanAction::NoPendingHeight { chain_tip: 500 });
+    assert!(kernel.events.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn base_runner_pending_commit_emits_nothing() {
+    let source = InMemoryBaseSource::default();
+    *source.chain_tip.lock().await = 500;
+
+    let kernel = InMemoryKernelState::default();
+    *kernel.base_pending_commit_active.lock().await = true;
+    *kernel.base_next_height.lock().await = Some(101);
+
+    let runner = BaseObserverRunner {
+        core: BaseObserverCore {
+            batch_size: 5,
+            confirmation_depth: 10,
+        },
+        source,
+        kernel: kernel.clone(),
+    };
+
+    let action = runner.tick_once().await.unwrap();
+    assert_eq!(action, BasePlanAction::PendingBaseBlockCommitActive);
     assert!(kernel.events.lock().await.is_empty());
 }
 

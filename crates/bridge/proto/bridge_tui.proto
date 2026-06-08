@@ -255,6 +255,88 @@ message MetricsState {
   uint64 latency_count = 9;
 }
 
+enum WithdrawalFrontierStatus {
+  WITHDRAWAL_FRONTIER_STATUS_UNSPECIFIED = 0;
+  UNKNOWN = 1;
+  NONE = 2;
+  PRESENT = 3;
+}
+
+message WithdrawalCacheSummary {
+  uint64 proposal_count = 1;
+  uint64 signature_count = 2;
+}
+
+message WithdrawalLifecycleCounts {
+  uint64 total_count = 1;
+  uint64 live_count = 2;
+  uint64 ordering_blocking_count = 3;
+  uint64 pending_count = 4;
+  uint64 assembling_count = 5;
+  uint64 prepared_count = 6;
+  uint64 peer_canonical_count = 7;
+  uint64 authorized_count = 8;
+  uint64 mempool_accepted_count = 9;
+  uint64 confirmed_count = 10;
+  uint64 below_frontier_count = 11;
+  uint64 above_frontier_count = 12;
+}
+
+message WithdrawalQueueRow {
+  uint64 nonce = 1;
+  string id = 2;
+  string state = 3;
+  uint64 epoch = 4;
+  optional uint64 amount = 5;
+  optional string recipient = 6;
+  optional uint64 base_batch_end = 7;
+  optional string proposal_hash = 8;
+  bool has_commit_certificate = 9;
+  bool has_authorized_transaction = 10;
+  bool has_submitted_transaction = 11;
+  optional uint64 turn_started_base_height = 12;
+  uint64 handoff_index = 13;
+  optional uint64 current_responsible_node = 14;
+  bool is_my_turn = 15;
+  optional uint64 blocks_until_handoff = 16;
+  optional uint64 blocks_until_retry = 17;
+  optional uint64 updated_at_secs = 18;
+}
+
+message WithdrawalLocalSnapshot {
+  optional bool activation_ready = 1;
+  optional uint64 activation_base_next_height = 2;
+  optional uint64 activation_nock_next_height = 3;
+  optional uint64 current_base_next_height = 4;
+  optional uint64 current_nock_next_height = 5;
+  optional uint64 current_base_height = 6;
+  WithdrawalQueueRow frontier_row = 7;
+  repeated WithdrawalQueueRow queue = 8;
+  WithdrawalCacheSummary cache = 9;
+  WithdrawalLifecycleCounts lifecycle = 10;
+  optional string last_error = 11;
+}
+
+message WithdrawalSequencerSnapshot {
+  WithdrawalFrontierStatus frontier_status = 1;
+  optional uint64 frontier_nonce = 2;
+  optional string frontier_state = 3;
+  optional uint64 frontier_epoch = 4;
+  optional uint64 current_confirmed_base_height = 5;
+  optional uint64 handoff_window_blocks = 6;
+  optional uint64 turn_started_base_height = 7;
+  uint64 handoff_index = 8;
+  optional uint64 current_responsible_node = 9;
+  bool is_my_turn = 10;
+  optional uint64 blocks_until_handoff = 11;
+  optional string last_error = 12;
+}
+
+message WithdrawalStateSnapshot {
+  WithdrawalLocalSnapshot local = 1;
+  WithdrawalSequencerSnapshot sequencer = 2;
+}
+
 enum PeerHealthStatus {
   PEER_HEALTH_STATUS_UNSPECIFIED = 0;
   HEALTHY = 1;
@@ -286,6 +368,7 @@ message GetSnapshotResponse {
   AlertsSnapshot alerts = 12;
   MetricsState metrics = 13;
   TransactionState transactions = 14;
+  WithdrawalStateSnapshot withdrawals = 15;
 }
 
 service BridgeTui {

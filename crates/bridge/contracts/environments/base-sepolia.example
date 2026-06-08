@@ -6,8 +6,8 @@
 # Tenderly Node RPC URL (real Base Sepolia, no block limits)
 export TENDERLY_RPC_URL="https://base-sepolia.gateway.tenderly.co/YOUR_ACCESS_KEY"
 
-# Deployer private key (must have Base Sepolia ETH from faucet)
-export TENDERLY_PRIVATE_KEY="0x..."
+# Test deployer private key (must have Base Sepolia ETH from faucet)
+export TENDERLY_TEST_PRIVATE_KEY="0x..."
 
 # Bridge node Ethereum public keys
 export BRIDGE_NODE_0="0x..."
@@ -26,4 +26,3 @@ export DEPLOYER_ADDRESS="0x..."
 export TENDERLY_ACCESS_KEY="YOUR_ACCESS_KEY"
 export TENDERLY_ACCOUNT_ID="littel_wolfur"
 export TENDERLY_PROJECT_SLUG="bridge-contracts"
-

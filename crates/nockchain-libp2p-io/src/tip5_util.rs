@@ -1,16 +1,24 @@
 use bs58;
 use ibig::{ubig, Stack, UBig};
 use nockapp::NockAppError;
-use nockvm::noun::Noun;
+use nockvm::noun::{Noun, NounSpace};
 use noun_serde::prelude::*;
 use num_bigint::BigUint;
 
-//TODO all this stuff would be useful as jets, which mostly just requires
-//using the Atom::as_ubig with the NockStack instead of ibig's heap version
-// which we use to avoid having a NockStack sitting around.
+// TODO: These helpers would be useful as jets. That mostly requires
+// Atom::as_ubig with the NockStack; this path uses ibig's heap allocation to
+// keep NockStack out of the caller surface.
 
 // Goldilocks prime
 const P: u64 = 0xffffffff00000001;
+
+/// Maximum ASCII width of a base58-encoded TIP5 hash.
+///
+/// A TIP5 hash is five limbs modulo the Goldilocks prime, so its value is
+/// strictly less than 2^320. Base58 therefore needs at most 55 characters.
+/// Gen2 responder-fit projection uses this bound when the future block id is
+/// not yet known.
+pub const TIP5_BASE58_MAX_CHARS: usize = 55;
 
 // noun -> tip5 -> ubig -> base58
 
@@ -21,8 +29,8 @@ const P: u64 = 0xffffffff00000001;
 ///
 /// # Returns
 /// The Noun as a Base58 string
-pub fn tip5_hash_to_base58(noun: Noun) -> Result<String, NockAppError> {
-    let tuple: [u64; 5] = noun.decode()?;
+pub fn tip5_hash_to_base58(noun: Noun, space: &NounSpace) -> Result<String, NockAppError> {
+    let tuple: [u64; 5] = noun.decode(space)?;
     let decimal_value = base_p_to_decimal(tuple)?;
     let base58_string = ubig_to_base58(decimal_value);
 
@@ -33,8 +41,9 @@ pub fn tip5_hash_to_base58(noun: Noun) -> Result<String, NockAppError> {
 pub fn tip5_hash_to_base58_stack<S: Stack>(
     stack: &mut S,
     noun: Noun,
+    space: &NounSpace,
 ) -> Result<String, NockAppError> {
-    let tuple: [u64; 5] = noun.decode()?;
+    let tuple: [u64; 5] = noun.decode(space)?;
     let decimal_value = base_p_to_decimal_stack(stack, tuple)?;
     let base58_string = ubig_to_base58(decimal_value);
 
@@ -121,6 +130,14 @@ pub fn decimal_to_base_p(value: UBig) -> Result<[u64; 5], NockAppError> {
         })?;
         value /= &prime;
     }
+    // A canonical tip5 hash occupies exactly five base-p limbs; reject any
+    // nonzero high quotient rather than silently truncating it, which would let
+    // distinct values alias the same five-limb digest.
+    if value != BigUint::from(0u8) {
+        return Err(NockAppError::OtherError(
+            "base58 value is out of the five-limb tip5 domain".to_string(),
+        ));
+    }
     Ok(result)
 }
 
@@ -128,7 +145,7 @@ pub fn decimal_to_base_p(value: UBig) -> Result<[u64; 5], NockAppError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use nockapp::noun::slab::NounSlab;
-    use nockvm::noun::{D, T};
+    use nockvm::noun::{NounAllocator, D, T};
     use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 
     use super::*;
@@ -147,6 +164,24 @@ mod tests {
         iso(tip5);
     }
 
+    // A value out of the five-limb tip5 domain must be rejected,
+    // not silently truncated (truncation aliases distinct values to one digest).
+    #[test]
+    fn decimal_to_base_p_rejects_out_of_domain() {
+        // p^5 needs a sixth base-p limb; the old code mapped it to the all-zero
+        // digest, an alias of the empty base58 string. (Build with `&p * &p`
+        // rather than `UBig::pow`, which is deprecated for leaking via the
+        // global allocator.)
+        let p = UBig::from(P);
+        let p2 = &p * &p;
+        let p4 = &p2 * &p2;
+        let out_of_domain = &p4 * &p;
+        assert!(
+            decimal_to_base_p(out_of_domain).is_err(),
+            "a value with a nonzero high quotient must be rejected"
+        );
+    }
+
     #[test]
     fn test_tip5_hash_to_base58_stack() {
         use nockapp::noun::slab::NounSlab;
@@ -158,7 +193,8 @@ mod tests {
         // Test case 1: Simple tuple [1 2 3 4 5]
         let tuple1 = T(&mut slab, &[D(1), D(2), D(3), D(4), D(5)]);
         let expected1 = "2V9arU36gvtaofWmNowewoj9u7gbNA2qsJZEQ3WPky5mQ";
-        let result1 = tip5_hash_to_base58_stack(&mut slab, tuple1).unwrap();
+        let space = slab.noun_space();
+        let result1 = tip5_hash_to_base58_stack(&mut slab, tuple1, &space).unwrap();
         assert_eq!(result1, expected1);
 
         // Test case 2: Complex values
@@ -173,7 +209,8 @@ mod tests {
             &[a1.as_noun(), a2.as_noun(), a3.as_noun(), a4.as_noun(), a5.as_noun()],
         );
         let expected2 = "6UkUko9WTwwR6VVRXwPQpUy5pswdvNtoyHspY5n9nLVnBxzAgEyMwPR";
-        let result2 = tip5_hash_to_base58_stack(&mut slab, tuple2).unwrap();
+        let space = slab.noun_space();
+        let result2 = tip5_hash_to_base58_stack(&mut slab, tuple2, &space).unwrap();
         assert_eq!(result2, expected2);
     }
 
@@ -187,7 +224,8 @@ mod tests {
         // Test case 1: Simple tuple [1 2 3 4 5]
         let tuple1 = T(&mut slab, &[D(1), D(2), D(3), D(4), D(5)]);
         let expected1 = "2V9arU36gvtaofWmNowewoj9u7gbNA2qsJZEQ3WPky5mQ";
-        let result1 = tip5_hash_to_base58(tuple1).unwrap_or_else(|_| {
+        let space = slab.noun_space();
+        let result1 = tip5_hash_to_base58(tuple1, &space).unwrap_or_else(|_| {
             panic!(
                 "Called `expect()` at {}:{} (git sha: {})",
                 file!(),
@@ -209,7 +247,8 @@ mod tests {
             &[a1.as_noun(), a2.as_noun(), a3.as_noun(), a4.as_noun(), a5.as_noun()],
         );
         let expected2 = "6UkUko9WTwwR6VVRXwPQpUy5pswdvNtoyHspY5n9nLVnBxzAgEyMwPR";
-        let result2 = tip5_hash_to_base58(tuple2).unwrap_or_else(|err| {
+        let space = slab.noun_space();
+        let result2 = tip5_hash_to_base58(tuple2, &space).unwrap_or_else(|err| {
             panic!(
                 "Panicked with {err:?} at {}:{} (git sha: {:?})",
                 file!(),
@@ -218,6 +257,14 @@ mod tests {
             )
         });
         assert_eq!(result2, expected2);
+    }
+
+    #[test]
+    fn test_tip5_base58_max_chars_matches_upper_bound() {
+        let max_tip5 = [P - 1; 5];
+        let encoded =
+            ubig_to_base58(base_p_to_decimal(max_tip5).expect("tip5 upper bound encodes"));
+        assert_eq!(encoded.len(), TIP5_BASE58_MAX_CHARS);
     }
 
     // Wrapper struct for implementing Arbitrary
@@ -431,9 +478,10 @@ mod tests {
                 &mut slab,
                 &[D(tip5[0]), D(tip5[1]), D(tip5[2]), D(tip5[3]), D(tip5[4])],
             );
+            let space = slab.noun_space();
 
             // Convert to base58 and back
-            let base58 = match tip5_hash_to_base58(noun) {
+            let base58 = match tip5_hash_to_base58(noun, &space) {
                 Ok(s) => s,
                 Err(_) => return TestResult::discard(),
             };

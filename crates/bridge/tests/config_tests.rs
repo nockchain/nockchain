@@ -2,10 +2,13 @@ use std::fs;
 use std::str::FromStr;
 
 use alloy::primitives::Address;
-use bridge::config::BridgeConfigToml;
-use ibig::UBig;
+use bridge::shared::config::{
+    BridgeConfigToml, SequencerConfigToml, CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58,
+    CANONICAL_TESTING_BRIDGE_NODE_PKHS_B58,
+};
 use nockchain_math::belt::{Belt, PRIME};
-use nockchain_types::tx_engine::common::Hash as NockPkh;
+use nockchain_types::tx_engine::common::{Hash as NockPkh, SchnorrPubkey};
+use num_bigint::BigUint;
 use tempfile::TempDir;
 
 // FIXME: Bad third-party inputs shouldn't be able to induce panics, this should be Result<>
@@ -14,8 +17,8 @@ fn base58_belts<const N: usize>(value: &str) -> [Belt; N] {
         .into_vec()
         .expect("Failed to decode base58 string");
     assert!(!bytes.is_empty());
-    let mut big = UBig::from_be_bytes(&bytes);
-    let prime = UBig::from(PRIME);
+    let mut big = BigUint::from_bytes_be(&bytes);
+    let prime = BigUint::from(PRIME);
     let mut belts = [Belt(0); N];
     for belt in belts.iter_mut() {
         let rem = (&big % &prime)
@@ -24,7 +27,7 @@ fn base58_belts<const N: usize>(value: &str) -> [Belt; N] {
         *belt = Belt(rem);
         big /= &prime;
     }
-    assert!(big == UBig::from(0u8));
+    assert!(big == BigUint::from(0u8));
     belts
 }
 
@@ -44,6 +47,43 @@ fn sample_pkh_b58() -> &'static str {
     sample_pkhs_b58()[0]
 }
 
+fn sequencer_nodes_toml(pkhs: &[&str]) -> String {
+    format!(
+        r#"
+[[nodes]]
+eth_pubkey = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+nock_pkh = "{pkh0}"
+
+[[nodes]]
+eth_pubkey = "0x0EE156f080d9cB3BaA3C0DB53D07f13D69CEf4C9"
+nock_pkh = "{pkh1}"
+
+[[nodes]]
+eth_pubkey = "0x274BD645de480C325D618c60c661F11275eB77F1"
+nock_pkh = "{pkh2}"
+
+[[nodes]]
+eth_pubkey = "0x6dc59eb20f7928935c47A391e35545a2CEC51013"
+nock_pkh = "{pkh3}"
+
+[[nodes]]
+eth_pubkey = "0xcaB10dA05fC0aDBb7e91Eadc30f224bcDF601375"
+nock_pkh = "{pkh4}"
+"#,
+        pkh0 = pkhs[0],
+        pkh1 = pkhs[1],
+        pkh2 = pkhs[2],
+        pkh3 = pkhs[3],
+        pkh4 = pkhs[4]
+    )
+}
+
+fn derive_runtime_signer_pkh_b58(sk: &bridge::shared::types::SchnorrSecretKey) -> String {
+    let scalar: BigUint = sk.to_big_uint();
+    let pubkey = SchnorrPubkey::from_secret_scalar_biguint(&scalar).expect("derive signer pubkey");
+    pubkey.pkh_hash().expect("hash signer pubkey").to_base58()
+}
+
 #[test]
 fn test_missing_confirmation_depths_fails_parse() {
     let temp_dir = TempDir::new().expect("Failed to create temporary directory");
@@ -54,6 +94,7 @@ fn test_missing_confirmation_depths_fails_parse() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
@@ -107,6 +148,7 @@ fn test_parse_confirmation_depths_present() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
@@ -156,6 +198,87 @@ nock_pkh = "{pkh4}"
 }
 
 #[test]
+fn test_parse_zero_confirmation_depths() {
+    let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+    let config_path = temp_dir.path().join("bridge-conf.toml");
+    let pkhs = sample_pkhs_b58();
+
+    let config_content = format!(
+        r#"
+node_id = 0
+base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
+inbox_contract_address = "0x1234567890123456789012345678901234567890"
+nock_contract_address = "0x0000000000000000000000000000000000000001"
+my_eth_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+my_nock_key = "3yZe7d"
+grpc_address = "http://localhost:5555"
+base_confirmation_depth = 0
+nockchain_confirmation_depth = 0
+
+[[nodes]]
+ip = "localhost:8001"
+eth_pubkey = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
+nock_pkh = "{pkh0}"
+
+[[nodes]]
+ip = "localhost:8002"
+eth_pubkey = "0x0EE156f080d9cB3BaA3C0DB53D07f13D69CEf4C9"
+nock_pkh = "{pkh1}"
+
+[[nodes]]
+ip = "localhost:8003"
+eth_pubkey = "0x274BD645de480C325D618c60c661F11275eB77F1"
+nock_pkh = "{pkh2}"
+
+[[nodes]]
+ip = "localhost:8004"
+eth_pubkey = "0x6dc59eb20f7928935c47A391e35545a2CEC51013"
+nock_pkh = "{pkh3}"
+
+[[nodes]]
+ip = "localhost:8005"
+eth_pubkey = "0xcaB10dA05fC0aDBb7e91Eadc30f224bcDF601375"
+nock_pkh = "{pkh4}"
+"#,
+        pkh0 = pkhs[0],
+        pkh1 = pkhs[1],
+        pkh2 = pkhs[2],
+        pkh3 = pkhs[3],
+        pkh4 = pkhs[4]
+    );
+
+    fs::write(&config_path, config_content).expect("Failed to write test config file");
+
+    let config =
+        BridgeConfigToml::from_file(&config_path).expect("Failed to parse zero-depth config");
+    assert_eq!(config.base_confirmation_depth, 0);
+    assert_eq!(config.nockchain_confirmation_depth, 0);
+}
+
+#[test]
+fn test_example_config_keeps_mainnet_nockchain_confirmation_depth_at_100() {
+    let config: toml::Value =
+        toml::from_str(include_str!("../bridge-conf.example.toml")).expect("parse example config");
+    assert_eq!(
+        config["nockchain_confirmation_depth"].as_integer(),
+        Some(100),
+        "bridge-conf.example.toml should keep the mainnet/default nockchain confirmation depth at 100",
+    );
+}
+
+#[test]
+fn test_example_config_does_not_publish_sequencer_journal_settings() {
+    let config: toml::Value =
+        toml::from_str(include_str!("../bridge-conf.example.toml")).expect("parse example config");
+
+    assert!(
+        config.get("sequencer_journal").is_none(),
+        "bridge-conf.example.toml must not publish sequencer journal settings"
+    );
+}
+
+#[test]
 fn test_parse_valid_toml_config() {
     let temp_dir = TempDir::new().expect("Failed to create temporary directory");
     let config_path = temp_dir.path().join("bridge-conf.toml");
@@ -165,6 +288,7 @@ fn test_parse_valid_toml_config() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
@@ -232,6 +356,89 @@ nock_pkh = "{pkh4}"
 }
 
 #[test]
+fn bridge_dev_nock_keys_roundtrip_through_node_config_to_expected_pkhs() {
+    let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+    let eth_pubkeys = [
+        "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23", "0x0EE156f080d9cB3BaA3C0DB53D07f13D69CEf4C9",
+        "0x274BD645de480C325D618c60c661F11275eB77F1", "0x6dc59eb20f7928935c47A391e35545a2CEC51013",
+        "0xcaB10dA05fC0aDBb7e91Eadc30f224bcDF601375",
+    ];
+    let nock_keys = [
+        "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8T",
+        "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8U",
+        "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8V",
+        "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8W",
+        "5KZuFKrctV5iUburT54Z9fhpf3V3hv2sPf9GRQnjFR8X",
+    ];
+
+    let nodes_toml = CANONICAL_TESTING_BRIDGE_NODE_PKHS_B58
+        .iter()
+        .zip(eth_pubkeys.iter())
+        .enumerate()
+        .map(|(idx, (pkh, eth_pubkey))| {
+            format!(
+                r#"
+[[nodes]]
+ip = "127.0.0.1:{port}"
+eth_pubkey = "{eth_pubkey}"
+nock_pkh = "{pkh}"
+"#,
+                port = 8002 + idx,
+                eth_pubkey = eth_pubkey,
+                pkh = pkh
+            )
+        })
+        .collect::<String>();
+
+    for (node_id, my_nock_key) in nock_keys.iter().enumerate() {
+        let config_path = temp_dir.path().join(format!("bridge-conf-{node_id}.toml"));
+        let config_content = format!(
+            r#"
+node_id = {node_id}
+base_ws_url = "wss://virtual.base-sepolia.example.invalid"
+bridge_lock_root = "{bridge_lock_root}"
+inbox_contract_address = "0xF64BCca17733F76CF837E2FBf108F90120196D39"
+nock_contract_address = "0x264dD62cBa32F8089Bf855fcB4bd5f6C8690fe22"
+my_eth_key = "0x6c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f36231a"
+my_nock_key = "{my_nock_key}"
+grpc_address = "http://127.0.0.1:5002"
+base_confirmation_depth = 0
+nockchain_confirmation_depth = 0
+{nodes_toml}
+
+[constants]
+min_signers = 3
+total_signers = 5
+minimum_event_nocks = 1000
+nicks_fee_per_nock = 195
+base_blocks_chunk = 1
+base_start_height = 40467918
+nockchain_start_height = 1
+"#,
+            node_id = node_id,
+            bridge_lock_root = CANONICAL_TESTING_BRIDGE_LOCK_ROOT_B58,
+            my_nock_key = my_nock_key,
+            nodes_toml = nodes_toml
+        );
+
+        fs::write(&config_path, config_content).expect("Failed to write test config file");
+
+        let config_toml =
+            BridgeConfigToml::from_file(&config_path).expect("Failed to parse TOML config");
+        let node_config = config_toml
+            .to_node_config()
+            .expect("Failed to convert config to node config");
+
+        let actual = derive_runtime_signer_pkh_b58(&node_config.my_nock_key);
+        let expected = node_config.nodes[node_id].nock_pkh.to_base58();
+        assert_eq!(
+            actual, expected,
+            "parsed my_nock_key for node {node_id} should derive the configured node PKH"
+        );
+    }
+}
+
+#[test]
 fn test_hex_key_parsing() {
     let temp_dir = TempDir::new().expect("Failed to create temporary directory");
     let config_path = temp_dir.path().join("bridge-conf.toml");
@@ -241,6 +448,7 @@ fn test_hex_key_parsing() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0xDEADBEEF"
@@ -306,6 +514,7 @@ fn test_base58_key_parsing() {
         r#"
 node_id = 1
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -370,6 +579,7 @@ fn test_conversion_to_node_config() {
         r#"
 node_id = 2
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0xABCD"
@@ -433,6 +643,7 @@ fn test_malformed_toml() {
     let config_content = r#"
 node_id = "not a number"
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 "#;
 
     fs::write(&config_path, config_content).expect("Failed to write test config file");
@@ -460,6 +671,7 @@ fn test_invalid_hex_key() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0xZZZZ"
@@ -515,6 +727,7 @@ fn test_inbox_contract_address_parsing() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -581,6 +794,7 @@ fn test_invalid_base58_pkh_length() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -636,6 +850,7 @@ fn test_invalid_eth_key() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "not a key"
@@ -691,6 +906,7 @@ fn test_invalid_node_count() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -736,6 +952,7 @@ fn test_duplicate_node_ips() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -791,6 +1008,7 @@ fn test_duplicate_eth_pubkeys() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -916,6 +1134,7 @@ fn test_duplicate_nock_pkhs() {
         r#"
 node_id = 0
 base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
 inbox_contract_address = "0x1234567890123456789012345678901234567890"
 nock_contract_address = "0x0000000000000000000000000000000000000001"
 my_eth_key = "0x1234"
@@ -958,5 +1177,130 @@ nock_pkh = "{pkh}"
     let config_toml =
         BridgeConfigToml::from_file(&config_path).expect("Failed to parse TOML config");
     let result = config_toml.to_node_config();
+    assert!(result.is_err());
+}
+
+#[test]
+fn sequencer_config_parses_public_facts_without_bridge_private_keys() {
+    let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+    let config_path = temp_dir.path().join("sequencer-conf.toml");
+    let pkhs = sample_pkhs_b58();
+
+    let config_content = format!(
+        r#"
+nock_contract_address = "0x0000000000000000000000000000000000000001"
+nockchain_confirmation_depth = 100
+
+[sequencer_journal]
+enabled = false
+
+[constants]
+min_signers = 3
+total_signers = 5
+minimum_event_nocks = 1000000
+nicks_fee_per_nock = 195
+base_blocks_chunk = 100
+base_start_height = 33387036
+nockchain_start_height = 25
+
+{nodes}
+"#,
+        nodes = sequencer_nodes_toml(&pkhs)
+    );
+
+    fs::write(&config_path, config_content).expect("Failed to write test config file");
+
+    let config =
+        SequencerConfigToml::from_file(&config_path).expect("Failed to parse sequencer config");
+    assert_eq!(config.nockchain_confirmation_depth, 100);
+    assert_eq!(
+        config
+            .nock_contract_address()
+            .expect("sequencer nock contract address should parse"),
+        Address::from_str("0x0000000000000000000000000000000000000001")
+            .expect("expected address should parse")
+    );
+    assert!(!config.sequencer_journal.enabled);
+    assert_eq!(
+        config
+            .validated_nodes()
+            .expect("sequencer nodes should validate")
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn sequencer_config_defaults_journal_when_section_is_omitted() {
+    let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+    let config_path = temp_dir.path().join("sequencer-conf.toml");
+    let pkhs = sample_pkhs_b58();
+
+    let config_content = format!(
+        r#"
+nock_contract_address = "0x0000000000000000000000000000000000000001"
+nockchain_confirmation_depth = 100
+
+[constants]
+min_signers = 3
+total_signers = 5
+minimum_event_nocks = 1000000
+nicks_fee_per_nock = 195
+base_blocks_chunk = 100
+base_start_height = 33387036
+nockchain_start_height = 25
+
+{nodes}
+"#,
+        nodes = sequencer_nodes_toml(&pkhs)
+    );
+
+    fs::write(&config_path, config_content).expect("Failed to write test config file");
+
+    let config =
+        SequencerConfigToml::from_file(&config_path).expect("Failed to parse sequencer config");
+    assert!(config.sequencer_journal.enabled);
+    assert_eq!(config.sequencer_journal.verifier_address, None);
+    assert_eq!(config.sequencer_journal.object_store.region, "auto");
+    assert_eq!(
+        config.sequencer_journal.object_store.prefix,
+        "withdrawal-sequencer"
+    );
+    assert_eq!(config.sequencer_journal.object_store.journal_id, "default");
+    assert_eq!(
+        config
+            .validated_nodes()
+            .expect("sequencer nodes should validate")
+            .len(),
+        5
+    );
+}
+
+#[test]
+fn sequencer_config_rejects_full_bridge_config_fields() {
+    let temp_dir = TempDir::new().expect("Failed to create temporary directory");
+    let config_path = temp_dir.path().join("sequencer-conf.toml");
+    let pkhs = sample_pkhs_b58();
+
+    let config_content = format!(
+        r#"
+node_id = 0
+base_ws_url = "wss://mainnet.base.org"
+bridge_lock_root = "AcsPkuhXQoGeEsF91yynpm1kcW17PQ2Z1MEozgx7YnDPkZwrtzLuuqd"
+inbox_contract_address = "0x1234567890123456789012345678901234567890"
+nock_contract_address = "0x0000000000000000000000000000000000000001"
+my_eth_key = "0x1234"
+my_nock_key = "3yZe7d"
+grpc_address = "http://localhost:5555"
+nockchain_confirmation_depth = 100
+
+{nodes}
+"#,
+        nodes = sequencer_nodes_toml(&pkhs)
+    );
+
+    fs::write(&config_path, config_content).expect("Failed to write test config file");
+
+    let result = SequencerConfigToml::from_file(&config_path);
     assert!(result.is_err());
 }

@@ -1,8 +1,8 @@
 use argon2::{Algorithm, Argon2, AssociatedData, Params, Version};
 use ibig::UBig;
-use nockvm::ext::{make_tas, AtomExt};
+use nockvm::ext::make_tas;
 use nockvm::jets::cold::{Nounable, NounableResult};
-use nockvm::noun::{Atom, Noun, NounAllocator, Slots, D, T};
+use nockvm::noun::{Atom, Noun, NounAllocator, NounSpace, D, T};
 
 /// Wrapper for the `$byts` Hoon cell `[wid=@ dat=@]`.
 /// `wid` records the bit-width, but the Argon2 jet only needs the big-endian payload,
@@ -27,9 +27,13 @@ impl Nounable for Byts {
         let dat = Atom::from_ubig(stack, &big).as_noun();
         T(stack, &[wid, dat])
     }
-    fn from_noun<A: NounAllocator>(_stack: &mut A, noun: &Noun) -> NounableResult<Self::Target> {
-        let size = noun.slot(2)?;
-        let dat = noun.slot(3)?.as_atom()?;
+    fn from_noun<A: NounAllocator>(
+        _stack: &mut A,
+        noun: &Noun,
+        space: &NounSpace,
+    ) -> NounableResult<Self::Target> {
+        let size = noun.in_space(space).slot(2)?;
+        let dat = noun.in_space(space).slot(3)?.as_atom()?;
 
         let wid = size.as_atom()?.as_u64()? as usize;
         let mut res = vec![0; wid];
@@ -105,9 +109,14 @@ impl Nounable for Argon2Args {
             &[out, typ_noun, vers, threads, mem_cost, time_cost, secret, extra],
         )
     }
-    fn from_noun<A: NounAllocator>(stack: &mut A, params: &Noun) -> NounableResult<Self::Target> {
-        let out = params.slot(2)?.as_atom()?.as_u64()? as usize;
+    fn from_noun<A: NounAllocator>(
+        stack: &mut A,
+        params: &Noun,
+        space: &NounSpace,
+    ) -> NounableResult<Self::Target> {
+        let out = params.in_space(space).slot(2)?.as_atom()?.as_u64()? as usize;
         let typ = params
+            .in_space(space)
             .slot(6)?
             .as_atom()?
             .into_string()
@@ -119,12 +128,14 @@ impl Nounable for Argon2Args {
                     option_env!("GIT_SHA")
                 )
             });
-        let version = params.slot(14)?.as_atom()?.as_u64()? as u8;
-        let threads = params.slot(30)?.as_atom()?.as_u64()? as u32;
-        let mem_cost = params.slot(62)?.as_atom()?.as_u64()? as u32;
-        let time_cost = params.slot(126)?.as_atom()?.as_u64()? as u32;
-        let secret = Byts::from_noun(stack, &params.slot(254)?)?;
-        let extra = Byts::from_noun(stack, &params.slot(255)?)?;
+        let version = params.in_space(space).slot(14)?.as_atom()?.as_u64()? as u8;
+        let threads = params.in_space(space).slot(30)?.as_atom()?.as_u64()? as u32;
+        let mem_cost = params.in_space(space).slot(62)?.as_atom()?.as_u64()? as u32;
+        let time_cost = params.in_space(space).slot(126)?.as_atom()?.as_u64()? as u32;
+        let secret_noun = params.in_space(space).slot(254)?.noun();
+        let extra_noun = params.in_space(space).slot(255)?.noun();
+        let secret = Byts::from_noun(stack, &secret_noun, space)?;
+        let extra = Byts::from_noun(stack, &extra_noun, space)?;
 
         // prepare parameters
         let data = AssociatedData::new(&extra.0).unwrap_or_else(|err| {

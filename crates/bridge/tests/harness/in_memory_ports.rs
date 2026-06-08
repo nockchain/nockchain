@@ -4,13 +4,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bridge::errors::BridgeError;
-use bridge::ethereum::DepositSubmissionResult;
-use bridge::ports::{
-    BaseContractPort, BaseSourcePort, KernelStatePort, NockSourcePort, NockTipInfo,
-};
-use bridge::runtime::{BaseBlockBatch, ChainEvent, EventId, NockBlockEvent};
-use bridge::types::{DepositSubmission, Tip5Hash};
+use bridge::core::ports::{BaseSourcePort, KernelStatePort, NockSourcePort, NockTipInfo};
+use bridge::deposit::base::DepositSubmissionResult;
+use bridge::deposit::ports::BaseContractPort;
+use bridge::deposit::types::DepositSubmission;
+use bridge::shared::errors::BridgeError;
+use bridge::shared::runtime::{BaseBlockBatch, ChainEvent, EventId, NockBlockEvent};
+use bridge::shared::types::Tip5Hash;
 use tokio::sync::Mutex;
 
 type SharedHeightResultQueue = Arc<Mutex<VecDeque<Result<Option<u64>, BridgeError>>>>;
@@ -107,6 +107,7 @@ impl NockSourcePort for InMemoryNockSource {
 #[derive(Clone, Default)]
 pub struct InMemoryKernelState {
     pub base_hold_active: Arc<Mutex<bool>>,
+    pub base_pending_commit_active: Arc<Mutex<bool>>,
     pub base_next_height: Arc<Mutex<Option<u64>>>,
     pub nock_next_height: Arc<Mutex<Option<u64>>>,
     pub events: Arc<Mutex<Vec<ChainEvent>>>,
@@ -124,6 +125,10 @@ impl KernelStatePort for InMemoryKernelState {
             return response;
         }
         Ok(*self.base_hold_active.lock().await)
+    }
+
+    async fn peek_base_pending_commit(&self) -> Result<bool, BridgeError> {
+        Ok(*self.base_pending_commit_active.lock().await)
     }
 
     async fn peek_base_next_height(&self) -> Result<Option<u64>, BridgeError> {
@@ -149,7 +154,7 @@ impl KernelStatePort for InMemoryKernelState {
         }
         self.events.lock().await.push(event);
         Ok(EventId {
-            kind: bridge::runtime::BridgeEventKind::ChainBase,
+            kind: bridge::shared::runtime::BridgeEventKind::ChainBase,
             timestamp_ms: 0,
             digest: [0u8; 32],
         })

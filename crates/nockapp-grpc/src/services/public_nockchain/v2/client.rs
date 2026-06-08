@@ -1,16 +1,23 @@
 use nockapp_grpc_proto::pb::common::v1::{Base58Hash, Base58Pubkey};
+use nockchain_math::belt::Belt;
+use nockchain_types::tx_engine::common::Hash;
 use nockchain_types::tx_engine::v1;
 use tonic::transport::Channel;
+use tonic::Code;
 
 use crate::error::{NockAppGrpcError, Result};
 use crate::pb::common::v1::PageRequest;
 use crate::pb::common::{v1 as pb_common_v1, v2 as pb_common_v2};
+use crate::pb::public::v2::nockchain_block_service_client::NockchainBlockServiceClient;
+use crate::pb::public::v2::nockchain_metrics_service_client::NockchainMetricsServiceClient;
 use crate::pb::public::v2::nockchain_service_client::NockchainServiceClient as PublicNockchainClient;
 use crate::pb::public::v2::*;
 
 #[derive(Clone)]
 pub struct PublicNockchainGrpcClient {
     client: PublicNockchainClient<Channel>,
+    block_client: NockchainBlockServiceClient<Channel>,
+    metrics_client: NockchainMetricsServiceClient<Channel>,
 }
 
 pub enum BalanceRequest {
@@ -19,9 +26,20 @@ pub enum BalanceRequest {
 }
 
 impl PublicNockchainGrpcClient {
+    /// Connects a public Nockchain client that can issue both wallet RPCs and
+    /// transaction-to-block lookup RPCs over the same channel.
     pub async fn connect<T: AsRef<str>>(address: T) -> Result<Self> {
-        let client = PublicNockchainClient::connect(address.as_ref().to_string()).await?;
-        Ok(Self { client })
+        let channel = tonic::transport::Endpoint::new(address.as_ref().to_string())?
+            .connect()
+            .await?;
+        let client = PublicNockchainClient::new(channel.clone());
+        let block_client = NockchainBlockServiceClient::new(channel.clone());
+        let metrics_client = NockchainMetricsServiceClient::new(channel);
+        Ok(Self {
+            client,
+            block_client,
+            metrics_client,
+        })
     }
 
     // Simple autopager: fetches all pages and aggregates notes client-side.
@@ -103,6 +121,7 @@ impl PublicNockchainGrpcClient {
         })
     }
 
+    /// Submits a raw transaction through the public wallet API.
     pub async fn wallet_send_transaction(
         &mut self,
         raw_tx: v1::RawTx,
@@ -130,6 +149,8 @@ impl PublicNockchainGrpcClient {
         }
     }
 
+    /// Queries whether the public API currently considers the transaction
+    /// accepted.
     pub async fn transaction_accepted(
         &mut self,
         tx_id: pb_common_v1::Base58Hash,
@@ -144,6 +165,57 @@ impl PublicNockchainGrpcClient {
         match response.result {
             Some(transaction_accepted_response::Result::Accepted(_)) => Ok(response),
             Some(transaction_accepted_response::Result::Error(err)) => {
+                Err(NockAppGrpcError::Internal(err.message))
+            }
+            None => Err(NockAppGrpcError::Internal("Empty response".into())),
+        }
+    }
+
+    /// Looks up the block currently containing a submitted transaction.
+    ///
+    /// The method returns `Ok(None)` while the tx is still pending or unknown,
+    /// and returns the current inclusion `(height, block_id)` once the block
+    /// index can resolve it.
+    pub async fn get_transaction_block(
+        &mut self,
+        tx_id: pb_common_v1::Base58Hash,
+    ) -> Result<Option<(u64, Hash)>> {
+        let request = GetTransactionBlockRequest { tx_id: Some(tx_id) };
+        let response = match self.block_client.get_transaction_block(request).await {
+            Ok(response) => response.into_inner(),
+            Err(err) if err.code() == Code::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        match response.result {
+            Some(get_transaction_block_response::Result::Block(block)) => {
+                let block_id = block
+                    .block_id
+                    .ok_or_else(|| NockAppGrpcError::Internal("missing block_id".into()))
+                    .and_then(pb_hash_to_domain_hash)?;
+                Ok(Some((block.height, block_id)))
+            }
+            Some(get_transaction_block_response::Result::Pending(_)) => Ok(None),
+            Some(get_transaction_block_response::Result::Error(err)) => {
+                Err(NockAppGrpcError::Internal(err.message))
+            }
+            None => Err(NockAppGrpcError::Internal("Empty response".into())),
+        }
+    }
+
+    /// Reads the public explorer cache's current heaviest height.
+    pub async fn explorer_heaviest_height(&mut self) -> Result<u64> {
+        let response = self
+            .metrics_client
+            .get_explorer_metrics(GetExplorerMetricsRequest {})
+            .await?
+            .into_inner();
+
+        match response.result {
+            Some(get_explorer_metrics_response::Result::Metrics(metrics)) => {
+                Ok(metrics.heaviest_height)
+            }
+            Some(get_explorer_metrics_response::Result::Error(err)) => {
                 Err(NockAppGrpcError::Internal(err.message))
             }
             None => Err(NockAppGrpcError::Internal("Empty response".into())),
@@ -260,4 +332,24 @@ impl PublicNockchainGrpcClient {
     //         },
     //     )
     // }
+}
+
+/// Converts a protobuf hash payload into the tx-engine hash type used by the
+/// bridge runtime.
+fn pb_hash_to_domain_hash(hash: pb_common_v1::Hash) -> Result<Hash> {
+    fn belt(value: Option<pb_common_v1::Belt>, limb: &str) -> Result<Belt> {
+        Ok(Belt(
+            value
+                .ok_or_else(|| NockAppGrpcError::Internal(format!("missing {limb} in block hash")))?
+                .value,
+        ))
+    }
+
+    Ok(Hash([
+        belt(hash.belt_1, "belt_1")?,
+        belt(hash.belt_2, "belt_2")?,
+        belt(hash.belt_3, "belt_3")?,
+        belt(hash.belt_4, "belt_4")?,
+        belt(hash.belt_5, "belt_5")?,
+    ]))
 }

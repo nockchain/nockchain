@@ -13,7 +13,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, io};
 
 use anyhow::{anyhow, Result};
@@ -32,11 +32,12 @@ use nockapp_grpc_proto::pb::public::v2::nockchain_block_service_client::Nockchai
 use nockapp_grpc_proto::pb::public::v2::nockchain_metrics_service_client::NockchainMetricsServiceClient;
 use nockapp_grpc_proto::pb::public::v2::{
     get_block_details_request, get_block_details_response, get_blocks_response,
-    get_explorer_metrics_response, get_transaction_block_response,
+    get_explorer_metrics_response, get_peer_stats_response, get_transaction_block_response,
     get_transaction_details_response, transaction_details, transaction_output, BlockDetails,
     BlockEntry, ExplorerMetrics, GetBlockDetailsRequest, GetBlocksRequest,
-    GetExplorerMetricsRequest, GetTransactionBlockRequest, GetTransactionDetailsRequest,
-    TransactionBlockData, TransactionDetails as RpcTransactionDetails,
+    GetExplorerMetricsRequest, GetPeerStatsRequest, GetTransactionBlockRequest,
+    GetTransactionDetailsRequest, PeerReqResGeneration as RpcPeerReqResGeneration, PeerStat,
+    PeerStatsData, TransactionBlockData, TransactionDetails as RpcTransactionDetails,
 };
 use nockchain_math::belt::Belt;
 use nockchain_types::tx_engine::common::Hash as Tip5Hash;
@@ -73,6 +74,7 @@ enum View {
     BlocksList,
     TransactionsList,
     WalletsList,
+    Nous,
     Metrics,
     BlockDetails(usize), // index in blocks list
     TransactionDetails { block_idx: usize, tx_idx: usize },
@@ -93,6 +95,7 @@ const EMPTY_CACHE_BACKOFF: Duration = Duration::from_secs(30);
 const ERROR_REFRESH_BACKOFF: Duration = Duration::from_secs(5);
 const WALLET_INDEX_CHUNK: usize = 64;
 const NICKS_PER_NOCK: u64 = 65_536;
+const NOUS_BAR_WIDTH: usize = 16;
 const SPINNER_FRAMES: [&str; 4] = ["◴", "◷", "◶", "◵"];
 const SPINNER_COLORS: [Color; 6] = [
     Color::Red,
@@ -146,6 +149,10 @@ struct App {
     metrics_client: Option<NockchainMetricsServiceClient<tonic::transport::Channel>>,
     metrics_data: Option<ExplorerMetrics>,
     metrics_error: Option<String>,
+    peer_stats_data: Option<PeerStatsData>,
+    peer_stats_error: Option<String>,
+    peer_list_state: ListState,
+    compare_peer_anchor: Option<String>,
     last_user_action: Instant,
     help_scroll: u16,
     help_max_scroll: u16,
@@ -359,6 +366,10 @@ impl App {
             metrics_client,
             metrics_data: None,
             metrics_error: None,
+            peer_stats_data: None,
+            peer_stats_error: None,
+            peer_list_state: ListState::default(),
+            compare_peer_anchor: None,
             last_user_action: Instant::now(),
             help_scroll: 0,
             help_max_scroll: 0,
@@ -392,6 +403,7 @@ impl App {
         // Only try to load blocks if connected
         if app.connection_status == ConnectionStatus::Connected {
             let _ = app.load_blocks(None).await; // Don't fail if this errors
+            let _ = app.load_peer_stats().await;
         }
 
         Ok(app)
@@ -402,7 +414,8 @@ impl App {
             View::BlocksList | View::BlockDetails(_) => 0,
             View::TransactionsList | View::TransactionDetails { .. } | View::TransactionSearch => 1,
             View::WalletsList => 2,
-            View::Metrics => 3,
+            View::Nous => 3,
+            View::Metrics => 4,
             View::Help => self.active_tab,
         };
         self.active_tab = tab;
@@ -410,7 +423,7 @@ impl App {
     }
 
     fn activate_tab(&mut self, tab: usize) {
-        match tab % 4 {
+        match tab % 5 {
             0 => self.set_view(View::BlocksList),
             1 => {
                 self.set_view(View::TransactionsList);
@@ -428,6 +441,9 @@ impl App {
                 }
             }
             3 => {
+                self.set_view(View::Nous);
+            }
+            4 => {
                 self.set_view(View::Metrics);
             }
             _ => {}
@@ -435,7 +451,7 @@ impl App {
     }
 
     fn cycle_tabs(&mut self, delta: i32) {
-        let total_tabs = 4;
+        let total_tabs = 5;
         let idx = (self.active_tab as i32 + delta).rem_euclid(total_tabs as i32) as usize;
         self.activate_tab(idx);
     }
@@ -572,6 +588,52 @@ impl App {
         Ok(())
     }
 
+    #[tracing::instrument(name = "tui.block_explorer.load_peer_stats", skip(self))]
+    async fn load_peer_stats(&mut self) -> Result<()> {
+        if self.metrics_client.is_none() {
+            match NockchainMetricsServiceClient::connect(self.server_uri.clone()).await {
+                Ok(client) => self.metrics_client = Some(client),
+                Err(e) => {
+                    self.peer_stats_error = Some(format!("Peer stats connect error: {}", e));
+                    return Ok(());
+                }
+            }
+        }
+
+        let Some(ref mut client) = self.metrics_client else {
+            return Ok(());
+        };
+
+        match client
+            .get_peer_stats(Request::new(GetPeerStatsRequest {}))
+            .await
+        {
+            Ok(response) => {
+                let resp = response.into_inner();
+                match resp.result {
+                    Some(get_peer_stats_response::Result::Stats(stats)) => {
+                        self.peer_stats_data = Some(stats);
+                        self.peer_stats_error = None;
+                        self.sync_peer_selection();
+                        self.clear_missing_peer_compare_anchor();
+                    }
+                    Some(get_peer_stats_response::Result::Error(e)) => {
+                        self.peer_stats_error = Some(format!("Peer stats error: {}", e.message));
+                    }
+                    None => {
+                        self.peer_stats_error = Some("Empty peer stats response".into());
+                    }
+                }
+            }
+            Err(e) => {
+                self.peer_stats_error = Some(format!("Peer stats gRPC error: {}", e));
+                self.metrics_client = None;
+            }
+        }
+
+        Ok(())
+    }
+
     #[tracing::instrument(name = "tui.block_explorer.load_next_page", skip(self))]
     async fn load_next_page(&mut self) -> Result<()> {
         if let Some(token) = self.next_page_token.clone() {
@@ -659,6 +721,7 @@ impl App {
 
                 // Try to load initial blocks
                 let _ = self.load_blocks(None).await;
+                let _ = self.load_peer_stats().await;
                 Ok(())
             }
             Err(e) => {
@@ -1475,6 +1538,108 @@ impl App {
             .and_then(|idx| self.blocks.get(idx))
     }
 
+    fn current_peer_rows(&self) -> Vec<PeerStat> {
+        sorted_peer_stats(
+            self.peer_stats_data
+                .as_ref()
+                .map(|stats| stats.peers.as_slice())
+                .unwrap_or(&[]),
+        )
+    }
+
+    fn sync_peer_selection(&mut self) {
+        let len = self.current_peer_rows().len();
+        if len == 0 {
+            self.peer_list_state.select(None);
+            return;
+        }
+
+        let next = self
+            .peer_list_state
+            .selected()
+            .unwrap_or(0)
+            .min(len.saturating_sub(1));
+        self.peer_list_state.select(Some(next));
+    }
+
+    fn clear_missing_peer_compare_anchor(&mut self) {
+        let Some(anchor) = self.compare_peer_anchor.as_ref() else {
+            return;
+        };
+        if !self
+            .current_peer_rows()
+            .iter()
+            .any(|peer| &peer.peer_id == anchor)
+        {
+            self.compare_peer_anchor = None;
+        }
+    }
+
+    fn selected_peer(&self) -> Option<PeerStat> {
+        let peers = self.current_peer_rows();
+        let idx = self.peer_list_state.selected()?;
+        peers.get(idx).cloned()
+    }
+
+    fn move_peer_selection(&mut self, delta: i32) {
+        let len = self.current_peer_rows().len();
+        if len == 0 {
+            self.peer_list_state.select(None);
+            return;
+        }
+        let current = self.peer_list_state.selected().unwrap_or(0) as i32;
+        let new_idx = (current + delta).clamp(0, (len - 1) as i32) as usize;
+        self.peer_list_state.select(Some(new_idx));
+    }
+
+    fn page_peer_selection(&mut self, delta: i32) {
+        let len = self.current_peer_rows().len();
+        if len == 0 {
+            self.peer_list_state.select(None);
+            return;
+        }
+        let jump = PAGE_JUMP.min(len.saturating_sub(1)) as i32;
+        let current = self.peer_list_state.selected().unwrap_or(0) as i32;
+        let new_idx = (current + delta * jump).clamp(0, (len - 1) as i32) as usize;
+        self.peer_list_state.select(Some(new_idx));
+    }
+
+    fn select_first_peer(&mut self) {
+        if self.current_peer_rows().is_empty() {
+            self.peer_list_state.select(None);
+        } else {
+            self.peer_list_state.select(Some(0));
+        }
+    }
+
+    fn select_last_peer(&mut self) {
+        let len = self.current_peer_rows().len();
+        if len == 0 {
+            self.peer_list_state.select(None);
+        } else {
+            self.peer_list_state.select(Some(len - 1));
+        }
+    }
+
+    fn toggle_peer_compare_anchor(&mut self) {
+        let Some(selected) = self.selected_peer() else {
+            return;
+        };
+
+        if self.compare_peer_anchor.as_deref() == Some(selected.peer_id.as_str()) {
+            self.compare_peer_anchor = None;
+            self.status_message = Some("Cleared pinned comparison peer".into());
+        } else {
+            self.compare_peer_anchor = Some(selected.peer_id.clone());
+            self.status_message = Some(format!(
+                "Pinned {} for side-by-side comparison",
+                short_hash_str(&selected.peer_id)
+            ));
+        }
+        self.clear_status_on_input = true;
+        self.error_message = None;
+    }
+
     fn selected_tx_index(&self) -> Option<usize> {
         self.tx_list_state.selected()
     }
@@ -1512,6 +1677,16 @@ impl App {
 
     fn copy_tx_id(&mut self, tx_id: &str) {
         self.copy_text_to_clipboard(tx_id, "Copied transaction id to clipboard");
+    }
+
+    fn copy_selected_peer_id(&mut self) {
+        let Some(peer) = self.selected_peer() else {
+            self.error_message = Some("No peer selected".into());
+            self.status_message = None;
+            self.clear_status_on_input = false;
+            return;
+        };
+        self.copy_text_to_clipboard(&peer.peer_id, "Copied peer id to clipboard");
     }
 
     fn copy_selected_block_id(&mut self) {
@@ -1675,6 +1850,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         View::BlocksList => render_blocks_list(f, chunks[2], app),
         View::TransactionsList => render_transactions_list(f, chunks[2], app),
         View::WalletsList => render_wallets_list(f, chunks[2], app),
+        View::Nous => render_nous_view(f, chunks[2], app),
         View::Metrics => render_metrics_view(f, chunks[2], app),
         View::BlockDetails(idx) => render_block_details(f, chunks[2], app, *idx),
         View::TransactionDetails { block_idx, tx_idx } => {
@@ -1744,7 +1920,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let titles = ["Blocks", "Transactions", "Wallets", "Metrics"]
+    let titles = ["Blocks", "Transactions", "Wallets", "Nous", "Metrics"]
         .iter()
         .map(|title| Line::from(Span::styled(*title, Style::default().fg(Color::Cyan))))
         .collect::<Vec<_>>();
@@ -2074,6 +2250,201 @@ fn render_metrics_view(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(paragraph, area);
 }
 
+fn render_nous_view(f: &mut Frame, area: Rect, app: &mut App) {
+    app.sync_peer_selection();
+    let peers = app.current_peer_rows();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(4), Constraint::Min(0)])
+        .split(area);
+
+    let summary = Paragraph::new(build_nous_summary_lines(
+        app.peer_stats_data.as_ref(),
+        &peers,
+    ))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Nous Summary")
+            .border_style(Style::default().fg(Color::Cyan)),
+    )
+    .wrap(Wrap { trim: false });
+    f.render_widget(summary, layout[0]);
+
+    if let Some(err) = &app.peer_stats_error {
+        let paragraph = Paragraph::new(vec![Line::from(Span::styled(
+            format!("Peer stats unavailable: {}", err),
+            Style::default().fg(Color::Red),
+        ))])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Nous Peers")
+                .border_style(Style::default().fg(Color::Red)),
+        )
+        .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, layout[1]);
+        return;
+    }
+
+    if app.peer_stats_data.is_none() {
+        let paragraph = Paragraph::new(vec![Line::from(Span::styled(
+            "Loading peer stats…",
+            Style::default().fg(Color::Yellow),
+        ))])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Nous Peers")
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(paragraph, layout[1]);
+        return;
+    }
+
+    if peers.is_empty() {
+        let paragraph = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "No connected peers have been observed yet.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from("Press `r` to refresh after peers connect."),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Nous Peers")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        )
+        .wrap(Wrap { trim: false });
+        f.render_widget(paragraph, layout[1]);
+        return;
+    }
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(layout[1]);
+
+    render_nous_peer_list(f, body[0], app, &peers);
+    render_nous_detail_panel(f, body[1], app, &peers);
+}
+
+fn render_nous_peer_list(f: &mut Frame, area: Rect, app: &mut App, peers: &[PeerStat]) {
+    let items: Vec<ListItem> = peers
+        .iter()
+        .map(|peer| {
+            let generation = peer_generation_label(peer.protocol_generation);
+            let total_bytes = peer_total_bytes(peer);
+            let anchor = if app.compare_peer_anchor.as_deref() == Some(peer.peer_id.as_str()) {
+                "pin"
+            } else {
+                "   "
+            };
+            let header = Line::from(vec![
+                Span::styled(format!("[{}]", anchor), Style::default().fg(Color::Magenta)),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{:<4}", generation),
+                    generation_style(peer.protocol_generation),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    short_hash_str(&peer.peer_id),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw("  up "),
+                Span::styled(
+                    format_duration(Duration::from_secs(peer.connection_duration_seconds)),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]);
+            let stats = Line::from(vec![
+                Span::styled(
+                    format!("req {:>4}", peer.request_count),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(" | "),
+                Span::styled(
+                    format_bytes(total_bytes),
+                    Style::default().fg(Color::LightBlue),
+                ),
+                Span::raw(" | "),
+                Span::styled(
+                    format!("{:.1} ms", peer.average_round_trip_ms),
+                    Style::default().fg(Color::White),
+                ),
+            ]);
+            ListItem::new(vec![header, stats])
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Peers ({}) [Enter pin | c copy | r refresh]",
+            peers.len()
+        )))
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+    f.render_stateful_widget(list, area, &mut app.peer_list_state);
+}
+
+fn render_nous_detail_panel(f: &mut Frame, area: Rect, app: &mut App, peers: &[PeerStat]) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(10), Constraint::Min(0)])
+        .split(area);
+
+    let selected_idx = app.peer_list_state.selected().unwrap_or(0);
+    let Some(selected) = peers.get(selected_idx) else {
+        return;
+    };
+    let comparison = comparison_peer(peers, selected, app.compare_peer_anchor.as_deref());
+
+    let detail = Paragraph::new(build_selected_peer_lines(selected))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Selected Peer")
+                .border_style(generation_style(selected.protocol_generation)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(detail, layout[0]);
+
+    let comparison_title = if app.compare_peer_anchor.is_some() {
+        "Side-by-Side Comparison (pinned)"
+    } else {
+        "Side-by-Side Comparison"
+    };
+    let comparison_lines = match comparison {
+        Some(other) => build_peer_comparison_lines(selected, other),
+        None => vec![
+            Line::from(Span::styled(
+                "Select or pin another peer to compare side-by-side.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(""),
+            Line::from(
+                "When a pinned peer is not set, the TUI auto-picks the busiest peer from the opposite generation.",
+            ),
+        ],
+    };
+    let comparison_paragraph = Paragraph::new(comparison_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(comparison_title)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(comparison_paragraph, layout[1]);
+}
+
 fn render_block_details(f: &mut Frame, area: Rect, app: &mut App, idx: usize) {
     let block = match app.blocks.get(idx).cloned() {
         Some(b) => b,
@@ -2270,6 +2641,15 @@ fn render_block_info_pane(
         Span::styled("  Tx Count    ", label_style),
         Span::styled(format!("{}", block.tx_ids.len()), accent_style),
     ]));
+
+    // Raw page size (prefer raw_page_bytes, fall back to msg.raw.len())
+    if let Some(details) = full_details {
+        let raw_size = observed_raw_page_bytes(details);
+        lines.push(Line::from(vec![
+            Span::styled("  Raw Size    ", label_style),
+            Span::styled(format_bytes(raw_size), accent_style),
+        ]));
+    }
 
     // Coinbase section (if we have full details)
     if let Some(details) = full_details {
@@ -2905,6 +3285,487 @@ fn short_hash_str(text: &str) -> String {
     }
 }
 
+fn peer_generation(value: i32) -> RpcPeerReqResGeneration {
+    RpcPeerReqResGeneration::try_from(value).unwrap_or(RpcPeerReqResGeneration::Unspecified)
+}
+
+fn peer_generation_label(value: i32) -> &'static str {
+    match peer_generation(value) {
+        RpcPeerReqResGeneration::Gen1 => "gen1",
+        RpcPeerReqResGeneration::Gen2 => "gen2",
+        RpcPeerReqResGeneration::Unspecified => "unk",
+    }
+}
+
+fn generation_style(value: i32) -> Style {
+    match peer_generation(value) {
+        RpcPeerReqResGeneration::Gen1 => Style::default().fg(Color::LightRed),
+        RpcPeerReqResGeneration::Gen2 => Style::default().fg(Color::LightGreen),
+        RpcPeerReqResGeneration::Unspecified => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn peer_total_bytes(peer: &PeerStat) -> u64 {
+    peer.bytes_sent.saturating_add(peer.bytes_received)
+}
+
+fn peer_request_rate(peer: &PeerStat) -> f64 {
+    if peer.connection_duration_seconds == 0 {
+        0.0
+    } else {
+        peer.request_count as f64 / peer.connection_duration_seconds as f64
+    }
+}
+
+fn peer_throughput_kib_per_sec(peer: &PeerStat) -> f64 {
+    if peer.connection_duration_seconds == 0 {
+        0.0
+    } else {
+        peer_total_bytes(peer) as f64 / 1024.0 / peer.connection_duration_seconds as f64
+    }
+}
+
+fn peer_block_rate(peer: &PeerStat) -> f64 {
+    if peer.connection_duration_seconds == 0 {
+        0.0
+    } else {
+        peer.blocks_received as f64 / peer.connection_duration_seconds as f64
+    }
+}
+
+fn sorted_peer_stats(peers: &[PeerStat]) -> Vec<PeerStat> {
+    let mut rows = peers.to_vec();
+    rows.sort_by(|left, right| {
+        peer_generation_rank(left.protocol_generation)
+            .cmp(&peer_generation_rank(right.protocol_generation))
+            .then_with(|| right.request_count.cmp(&left.request_count))
+            .then_with(|| peer_total_bytes(right).cmp(&peer_total_bytes(left)))
+            .then_with(|| left.peer_id.cmp(&right.peer_id))
+    });
+    rows
+}
+
+fn peer_generation_rank(value: i32) -> u8 {
+    match peer_generation(value) {
+        RpcPeerReqResGeneration::Gen2 => 0,
+        RpcPeerReqResGeneration::Gen1 => 1,
+        RpcPeerReqResGeneration::Unspecified => 2,
+    }
+}
+
+fn build_nous_summary_lines(
+    snapshot: Option<&PeerStatsData>,
+    peers: &[PeerStat],
+) -> Vec<Line<'static>> {
+    let gen2_count = peers
+        .iter()
+        .filter(|peer| peer_generation(peer.protocol_generation) == RpcPeerReqResGeneration::Gen2)
+        .count();
+    let gen1_count = peers
+        .iter()
+        .filter(|peer| peer_generation(peer.protocol_generation) == RpcPeerReqResGeneration::Gen1)
+        .count();
+    let snapshot_age = snapshot
+        .and_then(|stats| snapshot_age_seconds(stats.collected_at_unix_ms))
+        .map(|age| format!("snapshot {}s ago", age))
+        .unwrap_or_else(|| "snapshot pending".to_string());
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!("Peers: {}", peers.len()),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("gen2 {}", gen2_count),
+            Style::default().fg(Color::LightGreen),
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!("gen1 {}", gen1_count),
+            Style::default().fg(Color::LightRed),
+        ),
+        Span::raw(" | "),
+        Span::styled(snapshot_age, Style::default().fg(Color::Yellow)),
+    ])];
+
+    if let Some(gen2_req_rate) =
+        cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, peer_request_rate)
+    {
+        if let Some(gen1_req_rate) =
+            cohort_average_metric(peers, RpcPeerReqResGeneration::Gen1, peer_request_rate)
+        {
+            let gen2_rtt = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, |peer| {
+                peer.average_round_trip_ms
+            })
+            .unwrap_or(0.0);
+            let gen1_rtt = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen1, |peer| {
+                peer.average_round_trip_ms
+            })
+            .unwrap_or(0.0);
+            let gen2_batch = cohort_average_metric(peers, RpcPeerReqResGeneration::Gen2, |peer| {
+                peer.average_batch_size
+            })
+            .unwrap_or(0.0);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "Speedup: gen2 {:.2}x req/s vs gen1",
+                        speedup_ratio(gen2_req_rate, gen1_req_rate)
+                    ),
+                    Style::default()
+                        .fg(Color::LightGreen)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" | "),
+                Span::styled(
+                    format!("RTT {:.1}ms vs {:.1}ms", gen2_rtt, gen1_rtt),
+                    Style::default().fg(Color::White),
+                ),
+                Span::raw(" | "),
+                Span::styled(
+                    format!("avg batch {:.2}", gen2_batch),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(
+                "Waiting for at least one gen1 peer to compute mixed-generation speedup.",
+            ));
+        }
+    } else {
+        lines.push(Line::from(
+            "Waiting for at least one gen2 peer to compute mixed-generation speedup.",
+        ));
+    }
+
+    lines
+}
+
+fn build_selected_peer_lines(peer: &PeerStat) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled("Peer: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(peer.peer_id.clone(), Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Generation: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                peer_generation_label(peer.protocol_generation),
+                generation_style(peer.protocol_generation).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" | "),
+            Span::styled("Connected: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format_duration(Duration::from_secs(peer.connection_duration_seconds)),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Requests: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} ({:.2}/s)", peer.request_count, peer_request_rate(peer)),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "Throughput: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:.2} KiB/s", peer_throughput_kib_per_sec(peer)),
+                Style::default().fg(Color::LightBlue),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("IO: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format_bytes(peer_total_bytes(peer)),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw(" | "),
+            Span::styled("RTT: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:.1} ms", peer.average_round_trip_ms),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw(" | "),
+            Span::styled("Batch: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{:.2}", peer.average_batch_size),
+                Style::default().fg(Color::Magenta),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Failures: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                peer.failure_count.to_string(),
+                Style::default().fg(Color::LightRed),
+            ),
+            Span::raw(" | "),
+            Span::styled("Timeouts: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                peer.timeout_count.to_string(),
+                Style::default().fg(Color::LightRed),
+            ),
+            Span::raw(" | "),
+            Span::styled("Blocks: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} ({:.3}/s)", peer.blocks_received, peer_block_rate(peer)),
+                Style::default().fg(Color::LightGreen),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Propagation: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:.2} ms", peer.average_block_propagation_ms),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+    ]
+}
+
+fn build_peer_comparison_lines(selected: &PeerStat, other: &PeerStat) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "L ",
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{} ({})",
+                    short_hash_str(&selected.peer_id),
+                    peer_generation_label(selected.protocol_generation)
+                ),
+                Style::default().fg(Color::Green),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "R ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{} ({})",
+                    short_hash_str(&other.peer_id),
+                    peer_generation_label(other.protocol_generation)
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(""),
+        metric_comparison_line(
+            "Req/s",
+            peer_request_rate(selected),
+            peer_request_rate(other),
+            false,
+        ),
+        metric_comparison_line(
+            "KiB/s",
+            peer_throughput_kib_per_sec(selected),
+            peer_throughput_kib_per_sec(other),
+            false,
+        ),
+        metric_comparison_line(
+            "RTT ms", selected.average_round_trip_ms, other.average_round_trip_ms, true,
+        ),
+        metric_comparison_line(
+            "Batch", selected.average_batch_size, other.average_batch_size, false,
+        ),
+        metric_comparison_line(
+            "Blk/s",
+            peer_block_rate(selected),
+            peer_block_rate(other),
+            false,
+        ),
+        metric_comparison_line(
+            "Prop ms", selected.average_block_propagation_ms, other.average_block_propagation_ms,
+            true,
+        ),
+    ]
+}
+
+fn metric_comparison_line(
+    label: &str,
+    left_value: f64,
+    right_value: f64,
+    lower_is_better: bool,
+) -> Line<'static> {
+    let max_value = left_value.max(right_value).max(1.0);
+    let left_better = if lower_is_better {
+        left_value < right_value
+    } else {
+        left_value > right_value
+    };
+    let right_better = if lower_is_better {
+        right_value < left_value
+    } else {
+        right_value > left_value
+    };
+    let left_style = if left_better {
+        Style::default().fg(Color::LightGreen)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let right_style = if right_better {
+        Style::default().fg(Color::LightGreen)
+    } else {
+        Style::default().fg(Color::White)
+    };
+
+    Line::from(vec![
+        Span::styled(
+            format!("{:<7}", label),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{:>7.2} {}",
+                left_value,
+                metric_bar(left_value, max_value, NOUS_BAR_WIDTH)
+            ),
+            left_style,
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            format!(
+                "{:>7.2} {}",
+                right_value,
+                metric_bar(right_value, max_value, NOUS_BAR_WIDTH)
+            ),
+            right_style,
+        ),
+        Span::raw(" | "),
+        Span::styled(
+            comparison_delta_text(left_value, right_value, lower_is_better),
+            Style::default().fg(Color::Magenta),
+        ),
+    ])
+}
+
+fn metric_bar(value: f64, max_value: f64, width: usize) -> String {
+    let ratio = if max_value <= f64::EPSILON {
+        0.0
+    } else {
+        (value / max_value).clamp(0.0, 1.0)
+    };
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    format!("{}{}", "█".repeat(filled), "·".repeat(width - filled))
+}
+
+fn comparison_delta_text(left_value: f64, right_value: f64, lower_is_better: bool) -> String {
+    if (left_value - right_value).abs() < f64::EPSILON {
+        return "even".to_string();
+    }
+
+    let (winner, winner_value, loser_value) = if lower_is_better {
+        if left_value < right_value {
+            ("L", left_value, right_value)
+        } else {
+            ("R", right_value, left_value)
+        }
+    } else if left_value > right_value {
+        ("L", left_value, right_value)
+    } else {
+        ("R", right_value, left_value)
+    };
+
+    if winner_value <= f64::EPSILON || loser_value <= f64::EPSILON {
+        format!("{} leads", winner)
+    } else if lower_is_better {
+        format!("{} {:.2}x lower", winner, loser_value / winner_value)
+    } else {
+        format!("{} {:.2}x higher", winner, winner_value / loser_value)
+    }
+}
+
+fn comparison_peer<'a>(
+    peers: &'a [PeerStat],
+    selected: &PeerStat,
+    anchor: Option<&str>,
+) -> Option<&'a PeerStat> {
+    if let Some(anchor_id) = anchor {
+        if let Some(peer) = peers
+            .iter()
+            .find(|peer| peer.peer_id == anchor_id && peer.peer_id != selected.peer_id)
+        {
+            return Some(peer);
+        }
+    }
+
+    let selected_generation = peer_generation(selected.protocol_generation);
+    peers
+        .iter()
+        .filter(|peer| peer.peer_id != selected.peer_id)
+        .filter(|peer| peer_generation(peer.protocol_generation) != selected_generation)
+        .max_by(|left, right| {
+            peer_request_rate(left)
+                .partial_cmp(&peer_request_rate(right))
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| peer_total_bytes(left).cmp(&peer_total_bytes(right)))
+        })
+        .or_else(|| {
+            peers
+                .iter()
+                .filter(|peer| peer.peer_id != selected.peer_id)
+                .max_by(|left, right| {
+                    peer_request_rate(left)
+                        .partial_cmp(&peer_request_rate(right))
+                        .unwrap_or(Ordering::Equal)
+                        .then_with(|| peer_total_bytes(left).cmp(&peer_total_bytes(right)))
+                })
+        })
+}
+
+fn cohort_average_metric<F>(
+    peers: &[PeerStat],
+    generation: RpcPeerReqResGeneration,
+    metric: F,
+) -> Option<f64>
+where
+    F: Fn(&PeerStat) -> f64,
+{
+    let cohort = peers
+        .iter()
+        .filter(|peer| peer_generation(peer.protocol_generation) == generation)
+        .map(metric)
+        .collect::<Vec<_>>();
+    if cohort.is_empty() {
+        None
+    } else {
+        Some(cohort.iter().sum::<f64>() / cohort.len() as f64)
+    }
+}
+
+fn speedup_ratio(gen2_value: f64, gen1_value: f64) -> f64 {
+    if gen1_value <= f64::EPSILON {
+        0.0
+    } else {
+        gen2_value / gen1_value
+    }
+}
+
+fn snapshot_age_seconds(collected_at_unix_ms: u64) -> Option<u64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    Some(now.saturating_sub(collected_at_unix_ms) / 1_000)
+}
+
 fn format_number(value: u64) -> String {
     let s = value.to_string();
     let mut acc = String::with_capacity(s.len() + s.len() / 3);
@@ -3140,6 +4001,9 @@ fn render_help(f: &mut Frame, area: Rect, app: &App) {
         View::WalletsList => {
             "↑: Up | ↓: Down | PgUp/PgDn: Jump | Home/End: First/last | b/r/e/t: Sort balance/recv/sent/tx | o: Toggle order | Tab/Shift+Tab: Switch tabs | s: Sync all pages | ?: Help | q: Quit"
         }
+        View::Nous => {
+            "↑/↓: Select peer | PgUp/PgDn/Home/End: Jump | Enter: Pin/unpin compare peer | c: Copy peer id | r: Refresh peer stats | Tab/Shift+Tab: Switch tabs | ?: Help | q: Quit"
+        }
         View::BlockDetails(_) => {
             "ESC: Back | ↑↓/PgUp/PgDn: Navigate blocks | Tab: Toggle focus | Enter: TX details | c: Copy tx | n/p: Next/Prev tx | ?: Help | q: Quit"
         }
@@ -3201,6 +4065,26 @@ fn hash_to_string(hash: &nockapp_grpc_proto::pb::common::v1::Hash) -> String {
         hash.belt_4.as_ref().map(|b| b.value).unwrap_or(0),
         hash.belt_5.as_ref().map(|b| b.value).unwrap_or(0),
     )
+}
+
+fn observed_raw_page_bytes(details: &BlockDetails) -> u64 {
+    details.raw_page_bytes.unwrap_or_else(|| {
+        details
+            .msg
+            .as_ref()
+            .map(|msg| msg.raw.len() as u64)
+            .unwrap_or(0)
+    })
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MiB ({} bytes)", bytes as f64 / 1_048_576.0, bytes)
+    } else if bytes >= 1_024 {
+        format!("{:.1} KiB ({} bytes)", bytes as f64 / 1_024.0, bytes)
+    } else {
+        format!("{} bytes", bytes)
+    }
 }
 
 fn format_timestamp(raw_ts: u64) -> String {
@@ -3553,6 +4437,40 @@ async fn run_app(
                                 let res = app.sync_all_blocks().await;
                                 app.stop_busy();
                                 res?;
+                            }
+                            KeyCode::Char('?') => app.open_help(),
+                            _ => {}
+                        },
+                        View::Nous => match key.code {
+                            KeyCode::Char('q') => {
+                                app.request_shutdown();
+                                return Ok(());
+                            }
+                            KeyCode::Esc => app.set_view(View::BlocksList),
+                            KeyCode::Tab => app.cycle_tabs(1),
+                            KeyCode::BackTab => app.cycle_tabs(-1),
+                            KeyCode::Down => app.move_peer_selection(1),
+                            KeyCode::Up => app.move_peer_selection(-1),
+                            KeyCode::PageDown => app.page_peer_selection(1),
+                            KeyCode::PageUp => app.page_peer_selection(-1),
+                            KeyCode::Home => {
+                                app.select_first_peer();
+                            }
+                            KeyCode::End => {
+                                app.select_last_peer();
+                            }
+                            KeyCode::Enter => {
+                                app.toggle_peer_compare_anchor();
+                            }
+                            KeyCode::Char('c') => {
+                                app.copy_selected_peer_id();
+                            }
+                            KeyCode::Char('r') => {
+                                app.peer_stats_error = None;
+                                app.start_busy();
+                                terminal.draw(|f| ui(f, &mut app))?;
+                                let _ = app.load_peer_stats().await;
+                                app.stop_busy();
                             }
                             KeyCode::Char('?') => app.open_help(),
                             _ => {}
@@ -4146,6 +5064,15 @@ fn render_help_menu(f: &mut Frame, area: Rect, app: &mut App) {
             ],
         ),
         (
+            "Nous",
+            vec![
+                "↑/↓        Move peer selection", "PgUp/PgDn Jump by 20 peers",
+                "Home/End  Jump to first/last peer", "Enter      Pin/unpin compare peer",
+                "c          Copy selected peer id", "r          Refresh peer stats",
+                "Tab/Shift+Tab Switch tabs", "?          Show this help",
+            ],
+        ),
+        (
             "Metrics",
             vec![
                 "r          Refresh explorer metrics", "Tab/Shift+Tab Switch tabs",
@@ -4246,4 +5173,169 @@ fn render_help_menu(f: &mut Frame, area: Rect, app: &mut App) {
         .scroll((app.help_scroll, 0));
 
     f.render_widget(paragraph, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use nockapp_grpc_proto::pb::public::v2::{
+        BlockDetails, PageMsg, PeerReqResGeneration as RpcPeerReqResGeneration, PeerStat,
+    };
+
+    use super::{
+        comparison_peer, format_bytes, observed_raw_page_bytes, snapshot_age_seconds,
+        sorted_peer_stats, speedup_ratio,
+    };
+
+    fn test_peer(
+        peer_id: &str,
+        generation: RpcPeerReqResGeneration,
+        request_count: u64,
+        bytes_sent: u64,
+        bytes_received: u64,
+        connection_duration_seconds: u64,
+    ) -> PeerStat {
+        PeerStat {
+            peer_id: peer_id.to_string(),
+            protocol_generation: generation as i32,
+            request_count,
+            bytes_sent,
+            bytes_received,
+            connection_duration_seconds,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prefers_raw_page_bytes_when_present() {
+        let details = BlockDetails {
+            raw_page_bytes: Some(4096),
+            msg: Some(PageMsg {
+                raw: vec![1, 2, 3],
+                decoded: String::new(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(observed_raw_page_bytes(&details), 4096);
+    }
+
+    #[test]
+    fn falls_back_to_msg_raw_len() {
+        let details = BlockDetails {
+            raw_page_bytes: None,
+            msg: Some(PageMsg {
+                raw: vec![0; 512],
+                decoded: String::new(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(observed_raw_page_bytes(&details), 512);
+    }
+
+    #[test]
+    fn returns_zero_when_no_msg_and_no_raw_page_bytes() {
+        let details = BlockDetails {
+            raw_page_bytes: None,
+            msg: None,
+            ..Default::default()
+        };
+        assert_eq!(observed_raw_page_bytes(&details), 0);
+    }
+
+    #[test]
+    fn format_bytes_displays_correctly() {
+        assert_eq!(format_bytes(0), "0 bytes");
+        assert_eq!(format_bytes(512), "512 bytes");
+        assert_eq!(format_bytes(1024), "1.0 KiB (1024 bytes)");
+        assert_eq!(format_bytes(1536), "1.5 KiB (1536 bytes)");
+        assert_eq!(format_bytes(1_048_576), "1.0 MiB (1048576 bytes)");
+        assert_eq!(format_bytes(2_621_440), "2.5 MiB (2621440 bytes)");
+    }
+
+    #[test]
+    fn sorted_peer_stats_orders_gen2_before_gen1_then_activity() {
+        let sorted = sorted_peer_stats(&[
+            test_peer("gen1-busy", RpcPeerReqResGeneration::Gen1, 90, 400, 200, 30),
+            test_peer("gen2-calm", RpcPeerReqResGeneration::Gen2, 10, 100, 50, 30),
+            test_peer("gen2-busy", RpcPeerReqResGeneration::Gen2, 50, 700, 300, 30),
+            test_peer(
+                "unknown",
+                RpcPeerReqResGeneration::Unspecified,
+                200,
+                999,
+                1,
+                30,
+            ),
+        ]);
+
+        let ordered_ids = sorted
+            .iter()
+            .map(|peer| peer.peer_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordered_ids,
+            vec!["gen2-busy", "gen2-calm", "gen1-busy", "unknown"]
+        );
+    }
+
+    #[test]
+    fn comparison_peer_prefers_explicit_anchor() {
+        let peers = vec![
+            test_peer("selected", RpcPeerReqResGeneration::Gen2, 60, 500, 500, 30),
+            test_peer("anchored", RpcPeerReqResGeneration::Gen2, 5, 100, 100, 30),
+            test_peer(
+                "gen1-other",
+                RpcPeerReqResGeneration::Gen1,
+                40,
+                400,
+                400,
+                30,
+            ),
+        ];
+
+        let selected = &peers[0];
+        let compare = comparison_peer(&peers, selected, Some("anchored"))
+            .expect("anchored peer should be returned");
+
+        assert_eq!(compare.peer_id, "anchored");
+    }
+
+    #[test]
+    fn comparison_peer_prefers_opposite_generation_without_anchor() {
+        let peers = vec![
+            test_peer("selected", RpcPeerReqResGeneration::Gen2, 60, 500, 500, 30),
+            test_peer(
+                "same-gen-busy",
+                RpcPeerReqResGeneration::Gen2,
+                120,
+                700,
+                700,
+                30,
+            ),
+            test_peer("gen1-best", RpcPeerReqResGeneration::Gen1, 40, 400, 400, 30),
+        ];
+
+        let selected = &peers[0];
+        let compare = comparison_peer(&peers, selected, None)
+            .expect("opposite-generation peer should be preferred");
+
+        assert_eq!(compare.peer_id, "gen1-best");
+    }
+
+    #[test]
+    fn speedup_ratio_handles_zero_and_nonzero_baselines() {
+        assert_eq!(speedup_ratio(6.0, 2.0), 3.0);
+        assert_eq!(speedup_ratio(6.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn snapshot_age_seconds_saturates_for_future_timestamps() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_millis() as u64;
+
+        assert_eq!(snapshot_age_seconds(now_ms + 5_000), Some(0));
+    }
 }

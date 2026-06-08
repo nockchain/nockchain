@@ -8,27 +8,30 @@ use crate::noun::Noun;
 crate::gdb!();
 
 pub fn jet_dor(context: &mut Context, subject: Noun) -> jets::Result {
-    let sam = slot(subject, 6)?;
-    let a = slot(sam, 2)?;
-    let b = slot(sam, 3)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let a = slot(sam, 2, &space)?;
+    let b = slot(sam, 3, &space)?;
 
-    Ok(util::dor(&mut context.stack, a, b))
+    Ok(util::dor(&mut context.stack, a, b, &space))
 }
 
 pub fn jet_gor(context: &mut Context, subject: Noun) -> jets::Result {
-    let sam = slot(subject, 6)?;
-    let a = slot(sam, 2)?;
-    let b = slot(sam, 3)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let a = slot(sam, 2, &space)?;
+    let b = slot(sam, 3, &space)?;
 
-    Ok(util::gor(&mut context.stack, a, b))
+    Ok(util::gor(&mut context.stack, a, b, &space))
 }
 
 pub fn jet_mor(context: &mut Context, subject: Noun) -> jets::Result {
-    let sam = slot(subject, 6)?;
-    let a = slot(sam, 2)?;
-    let b = slot(sam, 3)?;
+    let space = context.stack.noun_space();
+    let sam = slot(subject, 6, &space)?;
+    let a = slot(sam, 2, &space)?;
+    let b = slot(sam, 3, &space)?;
 
-    Ok(util::mor(&mut context.stack, a, b))
+    Ok(util::mor(&mut context.stack, a, b, &space))
 }
 
 pub mod util {
@@ -40,22 +43,22 @@ pub mod util {
     use crate::jets::util::slot;
     use crate::mem::NockStack;
     use crate::mug::mug;
-    use crate::noun::{Noun, NO, YES};
+    use crate::noun::{Noun, NounSpace, NO, YES};
 
-    pub fn dor(stack: &mut NockStack, a: Noun, b: Noun) -> Noun {
+    pub fn dor(stack: &mut NockStack, a: Noun, b: Noun, space: &NounSpace) -> Noun {
         if unsafe { a.raw_equals(&b) } {
             YES
         } else {
             match (a.as_either_atom_cell(), b.as_either_atom_cell()) {
-                (Left(atom_a), Left(atom_b)) => lth(stack, atom_a, atom_b),
+                (Left(atom_a), Left(atom_b)) => lth(stack, atom_a, atom_b, space),
                 (Left(_), Right(_)) => YES,
                 (Right(_), Left(_)) => NO,
                 (Right(cell_a), Right(cell_b)) => {
-                    let a_head = match slot(cell_a.as_noun(), 2) {
+                    let a_head = match slot(cell_a.as_noun(), 2, space) {
                         Ok(n) => n,
                         Err(_) => return NO,
                     };
-                    let b_head = slot(cell_b.as_noun(), 2).unwrap_or_else(|err| {
+                    let b_head = slot(cell_b.as_noun(), 2, space).unwrap_or_else(|err| {
                         panic!(
                             "Panicked with {err:?} at {}:{} (git sha: {:?})",
                             file!(),
@@ -63,7 +66,7 @@ pub mod util {
                             option_env!("GIT_SHA")
                         )
                     });
-                    let a_tail = slot(cell_a.as_noun(), 3).unwrap_or_else(|err| {
+                    let a_tail = slot(cell_a.as_noun(), 3, space).unwrap_or_else(|err| {
                         panic!(
                             "Panicked with {err:?} at {}:{} (git sha: {:?})",
                             file!(),
@@ -71,7 +74,7 @@ pub mod util {
                             option_env!("GIT_SHA")
                         )
                     });
-                    let b_tail = slot(cell_b.as_noun(), 3).unwrap_or_else(|err| {
+                    let b_tail = slot(cell_b.as_noun(), 3, space).unwrap_or_else(|err| {
                         panic!(
                             "Panicked with {err:?} at {}:{} (git sha: {:?})",
                             file!(),
@@ -80,27 +83,27 @@ pub mod util {
                         )
                     });
                     if unsafe { a_head.raw_equals(&b_head) } {
-                        dor(stack, a_tail, b_tail)
+                        dor(stack, a_tail, b_tail, space)
                     } else {
-                        dor(stack, a_head, b_head)
+                        dor(stack, a_head, b_head, space)
                     }
                 }
             }
         }
     }
 
-    pub fn gor(stack: &mut NockStack, a: Noun, b: Noun) -> Noun {
+    pub fn gor(stack: &mut NockStack, a: Noun, b: Noun, space: &NounSpace) -> Noun {
         let c = mug(stack, a);
         let d = mug(stack, b);
 
         match c.data().cmp(&d.data()) {
             Ordering::Greater => NO,
             Ordering::Less => YES,
-            Ordering::Equal => dor(stack, a, b),
+            Ordering::Equal => dor(stack, a, b, space),
         }
     }
 
-    pub fn mor(stack: &mut NockStack, a: Noun, b: Noun) -> Noun {
+    pub fn mor(stack: &mut NockStack, a: Noun, b: Noun, space: &NounSpace) -> Noun {
         let c = mug(stack, a);
         let d = mug(stack, b);
 
@@ -110,7 +113,7 @@ pub mod util {
         match e.data().cmp(&f.data()) {
             Ordering::Greater => NO,
             Ordering::Less => YES,
-            Ordering::Equal => dor(stack, a, b),
+            Ordering::Equal => dor(stack, a, b, space),
         }
     }
 }
@@ -124,6 +127,7 @@ mod tests {
     use crate::noun::{D, NO, T, YES};
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_dor() {
         let c = &mut init_context();
 
@@ -140,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_gor() {
         let c = &mut init_context();
 
@@ -152,6 +157,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
     fn test_mor() {
         let c = &mut init_context();
 

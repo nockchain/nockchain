@@ -66,8 +66,10 @@
       (nockchain-propose-deposits latest-block)
     ?~  eth-sig-requests
       [~ state]
+    =/  deposit-effects=(list effect)
+      ~[[%0 %commit-nock-deposits eth-sig-requests]]
     ~&  eth-sig-requests+eth-sig-requests
-    [[%0 %commit-nock-deposits eth-sig-requests]~ state]
+    [deposit-effects state]
   ==
 ::
 ::  check if nockchain page belongs to hashchain
@@ -153,33 +155,23 @@
         (~(put z-by deposits.ret) name.u.maybe-intent [tx-id [name recipient amount-to-mint fee]:u.maybe-intent])
       $(tx-list t.tx-list)
     ?:  (is-bridge-withdrawal-tx tx)
-      ::  crash here. there should be no withdrawals from the bridge address until we implement them.
-      ::  the crash will get caught by the virtualization in +handle-cause and a %stop event will be
-      ::  emitted.
-      ~>  %slog.[0 'fatal: withdrawal tx detected, but withdrawals are disabled.']
-      !!
-    ::  TODO: revisit when its time to implement withdrawals
-    ::    produce a withdrawal settlement
-    ::  =/  withdraw-info=(unit [recipient=nock-addr name=nname:t amount=@ as-of=base-hash counterpart-base-event-id=base-event-id])
-    ::    (extract-withdrawal-info tx)
-    ::  ?~  withdraw-info
-    ::    ::  just skip it
-    ::    $(tx-list t.tx-list)
-    ::  =/  w-settle=withdrawal-settlement
-    ::    :*  tx-id
-    ::        name.u.withdraw-info
-    ::        counterpart-base-event-id.u.withdraw-info
-    ::        as-of.u.withdraw-info
-    ::        recipient.u.withdraw-info
-    ::        amount.u.withdraw-info
-    ::        ::  TODO: nock-tx-fee
-    ::        *@
-    ::    ==
-    ::  =.  withdrawal-settlements.ret
-    ::    (~(put z-by withdrawal-settlements.ret) name.u.withdraw-info w-settle)
-    ::  =.  by-tx.ret
-    ::    (~(put z-by by-tx.ret) name.u.withdraw-info tx-id)
-    ::  $(tx-list t.tx-list)
+      =/  withdraw-info=(unit [recipient=nock-lock-root name=nname:t amount=@ base-batch-end=@ as-of=base-hash counterpart=beid])
+        (extract-withdrawal-info tx)
+      ?~  withdraw-info
+          ::  just skip it
+        $(tx-list t.tx-list)
+      =/  w-settle=withdrawal-settlement
+        :*  tx-id
+            name.u.withdraw-info
+            counterpart.u.withdraw-info
+            base-batch-end.u.withdraw-info
+            as-of.u.withdraw-info
+            recipient.u.withdraw-info
+            amount.u.withdraw-info
+        ==
+      =.  withdrawal-settlements.ret
+        (~(put z-by withdrawal-settlements.ret) name.u.withdraw-info w-settle)
+      $(tx-list t.tx-list)
     $(tx-list t.tx-list)
   ::
   ::    +is-bridge-deposit-tx: detect bridge transactions
@@ -227,7 +219,7 @@
         ~>  %slog.[0 'deposit-does-not-meet-minimum-requirement']
         $(outputs-list t.outputs-list)
       ?:  ?&  (~(has z-by note-data) %bridge)
-              =(-.name.note.out (first:nname:v1:t bridge-lock-root.state))
+              =(-.name.note.out (first:nname:v1:t bridge-lock-root.config.state))
           ==
         `out
       $(outputs-list t.outputs-list)
@@ -265,15 +257,85 @@
 ::
 ::  +nockchain-process-withdrawal-settlements:
 ::    processes unsettled withdrawals in new nockchain block
-::    note that withdrawal settlement will contain the amount of tokens burned minus the fee
+::    unsettled withdrawals track the gross/pre-fee amount burned on Base,
+::    while settlements carry the net/post-fee amount disbursed on Nockchain.
+::    kernel reconciliation only enforces identity and basic amount bounds.
 ::    TODO: once withdrawals are implemented, we need to emit holds for withdrawal settlements that we have not
 ::    processed the corresponding withdrawal for.
 ++  nockchain-process-withdrawal-settlements
   |=  latest=nock-block
   ^-  process-result
-  ?^  withdrawal-settlements.latest
-    [%| [%stop 'withdrawal settlement detected but withdrawals are not permitted']]
-  [%& state]
+  =/  settlements  ~(tap z-by withdrawal-settlements.latest)
+  =/  hold  nock-hold.hash-state.state
+  |-
+  ?~  settlements
+    ?~  hold  [%& state]
+    [%| [%hold u.hold]]
+  =/  [name=nname:t settlement=withdrawal-settlement]
+    i.settlements
+  =/  [=beid as-of=base-hash height=@]  [counterpart as-of base-batch-end]:settlement
+  ?.  (~(has z-by base-hashchain.hash-state.state) as-of)
+    ::  this means that we still have not processed the nockchain deposit tx
+    ::  corresponding to the settlement. put a hold on it. if there is already a
+    ::  hold, pick the hold with the greatest height.
+    %=    $
+        settlements
+      t.settlements
+    ::
+        hold
+      ?~  hold  `[as-of height]
+      ?:  (lte height height.u.hold)  hold
+      `[as-of height]
+    ==
+  ::
+  ::  If there is a hold, do not process the settlement
+  ?.  =(~ hold)
+    $(settlements t.settlements)
+  ::
+  ::  find the corresponding unsettled withdrawal in the hash-state.
+  ::  we do not require the bridge node to have seen the proposal prior to observing
+  ::  the withdrawal settlement.
+  ::    - if bridge node has seen proposal, the withdrawal will be in the unsettled withdrawal set.
+  ::    - if the unsettled deposit is not the unsettled deposit set, this is a STOP condition.
+  ?.  (has-unsettled-withdrawal as-of beid)
+    [%| [%stop 'failed to process withdrawal settlement: cannot find unsettled withdrawal in state']]
+  =+  block-with-withdrawal=(~(got z-by base-hashchain.hash-state.state) as-of)
+  =/  maybe-counterpart=(unit withdrawal)
+    (~(get z-by withdrawals.block-with-withdrawal) beid)
+  ?~  maybe-counterpart
+    [%| [%stop 'failed to process withdrawal settlement: counterpart event not found in as-of base block']]
+  =/  counterpart=withdrawal
+    u.maybe-counterpart
+  ?.  (check-withdrawal-settlement counterpart settlement)
+    [%| [%stop 'failed to process withdrawal settlement: counterpart does not match settlement']]
+  ::
+  ::  now that the withdrawal settled on nock, delete it from the tracked state
+  =.  unsettled-withdrawals.hash-state.state
+    (~(del z-bi unsettled-withdrawals.hash-state.state) [as-of beid])
+  $(settlements t.settlements)
+::
+++  has-unsettled-withdrawal
+  |=  [as-of=base-hash =beid]
+  (~(has z-bi unsettled-withdrawals.hash-state.state) as-of beid)
+::
+++  check-withdrawal-settlement
+  |=  $:  counterpart=withdrawal
+          settlement=withdrawal-settlement
+      ==
+  =/  dest-matches=?
+    =(dest.settlement dest.counterpart)
+  ::  counterpart tracks the gross/pre-fee burn amount, while settlement
+  ::  carries the net/post-fee disbursed amount. exact fee correctness is
+  ::  validated in Rust proposal acceptance, so kernel only enforces bounds.
+  =/  amount-in-bounds=?
+    ?&  (gth settled-amount.settlement 0)
+        (lth settled-amount.settlement amount-burned.counterpart)
+    ==
+  ?.  dest-matches
+    ~>  %slog.[0 'settlement destination does not match withdrawal destination']  %.n
+  ?.  amount-in-bounds
+    ~>  %slog.[0 'settlement amount is out of bounds for withdrawal']  %.n
+  %.y
 ::
 ::  +nockchain-propose-deposits:
 ::    This arm only gets called if its our turn to propose and there are deposits in the newst nock block.
@@ -311,25 +373,20 @@
     |=  [note-name=nname:t spend=spend-v1:t]
     ^-  ?
     ::  NOTE: must be spent from bridge
-    =(-.note-name (first:nname:v1:t bridge-lock-root.state))
+    =(-.note-name (first:nname:v1:t bridge-lock-root.config.state))
   =/  output-has-counterpart
     %+  lien  ~(tap z-in outputs.tx)
     |=  out=output:v1:t
     ?>  ?=(@ -.note.out)
     =/  =note-data:t  note-data.note.out
-    ::  check for some kind of bridge key that contains as-of (base hash) and counterpart-base-tx-id
-    ?>  ?&  (lth %ba-blk p)
-            (lth %ba-eid p)
-        ==
-    ?&  (~(has z-by note-data) %ba-blk)
-        (~(has z-by note-data) %ba-eid)
-    ==
+    ::  check for packed withdrawal metadata key.
+    ?>  (lth %bridge-w p)
+    (~(has z-by note-data) %bridge-w)
   ?&(spent-from-bridge output-has-counterpart)
 ::
 ++  extract-withdrawal-info
-  ::>)  TODO: extract fee
   |=  =tx:t
-  ^-  (unit [recipient=nock-addr name=nname:t amount=@ as-of=base-hash counterpart-base-event-id=base-event-id])
+  ^-  (unit [recipient=nock-lock-root name=nname:t amount=@ base-batch-end=@ as-of=base-hash counterpart=beid])
   ?>  ?=(%1 -.tx)
   =/  bridge-output=(unit output:v1:t)
     =/  outputs-list=(list output:v1:t)
@@ -340,43 +397,24 @@
     ?.  ?=(@ -.note.out)
       $(outputs-list t.outputs-list)
     =/  =note-data:t  note-data.note.out
-    ?.  ?&  (~(has z-by note-data) %ba-blk)
-            (~(has z-by note-data) %ba-eid)
-        ==
+    ?.  (~(has z-by note-data) %bridge-w)
       $(outputs-list t.outputs-list)
     `out
   ?~  bridge-output
-    ~|  %no-bridge-data-in-tx  !!
+    ~
   ?>  ?=(@ -.note.u.bridge-output)  :: assert v1 output
   =/  =note-data:t  note-data.note.u.bridge-output
   ::  we already checked that these entries exist in the note data
-  =/  base-block-hash  (~(got z-by note-data) %ba-blk)
-  =/  base-event-id  (~(got z-by note-data) %ba-eid)
-  =/  recipient=nock-addr
-    =+  lock-data=(~(got z-by note-data) %lock)
-    ?~  soft-lock=((soft spend-condition:t) +.lock-data)
-      ~|  %lock-data-malformed-in-tx-output  !!
-    ?.  =((lent u.soft-lock) 1)
-      ~|  %more-than-one-lock-primitive-in-output-lock  !!
-    =+  maybe-pkh=(head u.soft-lock)
-    ?.  ?=(%pkh -.maybe-pkh)
-      ~|  %lock-in-outputs-not-pkh  !!
-    =+  receivers=~(tap z-in h.maybe-pkh)
-    ?>  ?&  =(1 (lent receivers))
-            =(1 m.maybe-pkh)
-        ==
-    (head receivers)
+  =/  withdraw-info  ((soft withdraw-info) (~(got z-by note-data) %bridge-w))
+  ?~  withdraw-info
+    ~&  'withdraw note data malformed'  ~
+  =/  base-block-hash=base-hash  base-hash.u.withdraw-info
+  =/  =beid  beid.u.withdraw-info
+  =/  base-batch-end=@  base-batch-end.u.withdraw-info
+  =/  recipient=nock-lock-root  lock-root.u.withdraw-info
   =/  amount-disbursed  assets.note.u.bridge-output
-  =/  as-of=(unit base-hash)
-    ((soft base-hash) base-block-hash)
-  =/  counterpart-base-tx=(unit @)
-    ((soft @) base-event-id)
-  ?~  as-of
-    ~
-  ?~  counterpart-base-tx
-    ~
   ::  amount sent should be positive
   ?:  (gth amount-disbursed 0)
-    `[recipient name.note.u.bridge-output amount-disbursed u.as-of u.counterpart-base-tx]
+    `[recipient name.note.u.bridge-output amount-disbursed base-batch-end base-block-hash beid]
   ~
 --

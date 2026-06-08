@@ -269,7 +269,8 @@ metrics_struct![
     (
         block_explorer_get_block_details_p99_ms,
         "nockchain_public_grpc.block_explorer.get_block_details.latency_p99_ms", Gauge
-    )
+    ),
+    (api_request_blocked, "nockchain_public_grpc.api_request_blocked", Count)
 ];
 
 static METRICS: OnceCell<Arc<NockchainGrpcApiMetrics>> = OnceCell::new();

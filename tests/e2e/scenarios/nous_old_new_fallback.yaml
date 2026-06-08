@@ -1,0 +1,76 @@
+# Nous rollout scenario: gen2-enabled new node with pre-Nous old node
+#
+# Verifies that a gen2-enabled node can communicate with a pre-Nous binary
+# that only understands gen1.  The new node's outbound protocol ordering
+# prefers gen2, but the old node only registers gen1.  Protocol negotiation
+# should degrade to gen1 and sync must succeed.
+#
+# Generation matrix cell: new(enabled) <-> old (pre-Nous)
+# Expected protocol: /nockchain-1-req-res (old node only supports gen1)
+#
+# Requires NOCKCHAIN_BIN_OLD pointing to a pre-Nous binary that supports
+# --bind-public-grpc-addr for runner control.
+
+name: "nous_old_new_fallback"
+seed: 23
+
+nodes:
+  - id: "node-old"
+    binary: "${NOCKCHAIN_BIN_OLD}"
+    fakenet: true
+    new_state: true
+    mine: true
+    mining_pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV"
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+
+  - id: "node-new"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "node-old"
+        listen: "/ip4/127.0.0.1/udp/${BASE_P2P_PORT}/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+
+steps:
+  - action: start_nodes
+    ids: ["node-old", "node-new"]
+
+  - action: wait_for_grpc
+    node: "node-old"
+    timeout_ms: 30000
+
+  - action: wait_for_grpc
+    node: "node-new"
+    timeout_ms: 30000
+
+  # node-old mines blocks over gen1
+  - action: wait_for_height
+    node: "node-old"
+    height: 5
+    timeout_ms: 120000
+
+  # node-new syncs blocks from node-old via gen1 fallback
+  - action: wait_for_height
+    node: "node-new"
+    height: 5
+    timeout_ms: 120000
+
+asserts:
+  - assert: req_res_generation
+    node: "node-new"
+    peer: "node-old"
+    generation: gen1
+    timeout_ms: 30000
+  - assert: heads_equal
+    nodes: ["node-old", "node-new"]
+    timeout_ms: 30000

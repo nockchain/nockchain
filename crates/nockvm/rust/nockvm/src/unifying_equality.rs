@@ -1,9 +1,10 @@
+#![allow(clippy::missing_safety_doc)]
+
 use either::Either::*;
 use libc::{c_void, memcmp};
 
 use crate::mem::{NockStack, ALLOC, FRAME, STACK};
 use crate::noun::Noun;
-use crate::{assert_acyclic, assert_no_forwarding_pointers};
 
 #[cfg(feature = "check_junior")]
 #[macro_export]
@@ -295,21 +296,28 @@ unsafe fn x_is_junior(
 /// senior noun, *never vice versa*, to avoid introducing references from more senior frames
 /// into more junior frames, which would result in incorrect operation of the copier.
 pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Noun) -> bool {
-    assert_acyclic!(*a);
-    assert_acyclic!(*b);
-    assert_no_forwarding_pointers!(*a);
-    assert_no_forwarding_pointers!(*b);
-    assert_no_junior_pointers!(stack, *a);
-    assert_no_junior_pointers!(stack, *b);
+    #[cfg(any(feature = "check_acyclic", feature = "check_forwarding"))]
+    {
+        let _space = stack.fast_noun_space();
+        crate::assert_acyclic!(_space, *a);
+        crate::assert_acyclic!(_space, *b);
+        crate::assert_no_forwarding_pointers!(_space, *a);
+        crate::assert_no_forwarding_pointers!(_space, *b);
+    }
+    crate::assert_no_junior_pointers!(stack, *a);
+    crate::assert_no_junior_pointers!(stack, *b);
 
     if raw_word_eq(a, b) {
         return true;
     }
 
-    if let (Ok(aa), Ok(bb)) = ((*a).as_allocated(), (*b).as_allocated()) {
-        if let (Some(am), Some(bm)) = (aa.get_cached_mug(), bb.get_cached_mug()) {
-            if am != bm {
-                return false;
+    {
+        let space = stack.fast_noun_space();
+        if let (Ok(aa), Ok(bb)) = ((*a).as_allocated(), (*b).as_allocated()) {
+            if let (Some(am), Some(bm)) = (aa.get_cached_mug(&space), bb.get_cached_mug(&space)) {
+                if am != bm {
+                    return false;
+                }
             }
         }
     }
@@ -331,7 +339,11 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
         }
 
         if let (Ok(xa), Ok(ya)) = ((*x).as_allocated(), (*y).as_allocated()) {
-            if let (Some(xm), Some(ym)) = (xa.get_cached_mug(), ya.get_cached_mug()) {
+            let cached = {
+                let space = stack.fast_noun_space();
+                (xa.get_cached_mug(&space), ya.get_cached_mug(&space))
+            };
+            if let (Some(xm), Some(ym)) = cached {
                 if xm != ym {
                     break;
                 }
@@ -339,16 +351,41 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
 
             match (xa.as_either(), ya.as_either()) {
                 (Left(xi), Left(yi)) => {
-                    if xi.size() == yi.size()
-                        && memcmp(
-                            xi.data_pointer() as *const c_void,
-                            yi.data_pointer() as *const c_void,
-                            xi.size() << 3,
-                        ) == 0
-                    {
-                        let xptr = xi.to_raw_pointer();
-                        let yptr = yi.to_raw_pointer();
-                        if x_is_junior(stack, current_bounds, &mut bounds_state, xptr, yptr) {
+                    let (data_equal, xptr, yptr) = {
+                        let space = stack.fast_noun_space();
+                        let xi_handle = xi.as_atom().in_space(&space);
+                        let yi_handle = yi.as_atom().in_space(&space);
+                        let xsize = xi_handle.size();
+                        let ysize = yi_handle.size();
+                        if xsize != ysize {
+                            (false, std::ptr::null(), std::ptr::null())
+                        } else {
+                            let equal = memcmp(
+                                xi_handle.data_pointer() as *const c_void,
+                                yi_handle.data_pointer() as *const c_void,
+                                xsize << 3,
+                            ) == 0;
+                            (equal, unsafe { xi_handle.raw_pointer() }, unsafe {
+                                yi_handle.raw_pointer()
+                            })
+                        }
+                    };
+
+                    if data_equal {
+                        let replace_x = {
+                            let space = stack.fast_noun_space();
+                            let x_loc = (*x).allocated_location(&space);
+                            let y_loc = (*y).allocated_location(&space);
+                            match (x_loc, y_loc) {
+                                (Some(xl), Some(yl)) if xl.is_pma() && yl.is_stack() => false,
+                                (Some(xl), Some(yl)) if xl.is_stack() && yl.is_pma() => true,
+                                (Some(xl), Some(yl)) if xl.is_pma() && yl.is_pma() => xptr > yptr,
+                                _ => x_is_junior(
+                                    stack, current_bounds, &mut bounds_state, xptr, yptr,
+                                ),
+                            }
+                        };
+                        if replace_x {
                             *x = *y;
                         } else {
                             *y = *x;
@@ -361,16 +398,37 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
                 }
 
                 (Right(xc), Right(yc)) => {
+                    let (xh, yh, xt, yt, xptr, yptr) = {
+                        let space = stack.fast_noun_space();
+                        (
+                            xc.head_as_mut(&space),
+                            yc.head_as_mut(&space),
+                            xc.tail_as_mut(&space),
+                            yc.tail_as_mut(&space),
+                            xc.to_raw_pointer(&space) as *const u64,
+                            yc.to_raw_pointer(&space) as *const u64,
+                        )
+                    };
+
                     // check head; only compute tail eq if needed; push only unequal sides
-                    let xh = xc.head_as_mut();
-                    let yh = yc.head_as_mut();
                     if raw_word_eq(xh, yh) {
-                        let xt = xc.tail_as_mut();
-                        let yt = yc.tail_as_mut();
                         if raw_word_eq(xt, yt) {
-                            let xptr = xc.to_raw_pointer() as *const u64;
-                            let yptr = yc.to_raw_pointer() as *const u64;
-                            if x_is_junior(stack, current_bounds, &mut bounds_state, xptr, yptr) {
+                            let replace_x = {
+                                let space = stack.fast_noun_space();
+                                let x_loc = (*x).allocated_location(&space);
+                                let y_loc = (*y).allocated_location(&space);
+                                match (x_loc, y_loc) {
+                                    (Some(xl), Some(yl)) if xl.is_pma() && yl.is_stack() => false,
+                                    (Some(xl), Some(yl)) if xl.is_stack() && yl.is_pma() => true,
+                                    (Some(xl), Some(yl)) if xl.is_pma() && yl.is_pma() => {
+                                        xptr > yptr
+                                    }
+                                    _ => x_is_junior(
+                                        stack, current_bounds, &mut bounds_state, xptr, yptr,
+                                    ),
+                                }
+                            };
+                            if replace_x {
                                 *x = *y;
                             } else {
                                 *y = *x;
@@ -383,8 +441,6 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
                         }
                     } else {
                         // head unequal; only push tail if it is also unequal
-                        let xt = xc.tail_as_mut();
-                        let yt = yc.tail_as_mut();
                         if !raw_word_eq(xt, yt) {
                             *(stack.push::<(*mut Noun, *mut Noun)>()) = (xt, yt);
                         }
@@ -404,12 +460,16 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
 
     stack.frame_pop();
 
-    assert_acyclic!(*a);
-    assert_acyclic!(*b);
-    assert_no_forwarding_pointers!(*a);
-    assert_no_forwarding_pointers!(*b);
-    assert_no_junior_pointers!(stack, *a);
-    assert_no_junior_pointers!(stack, *b);
+    #[cfg(any(feature = "check_acyclic", feature = "check_forwarding"))]
+    {
+        let _space = stack.fast_noun_space();
+        crate::assert_acyclic!(_space, *a);
+        crate::assert_acyclic!(_space, *b);
+        crate::assert_no_forwarding_pointers!(_space, *a);
+        crate::assert_no_forwarding_pointers!(_space, *b);
+    }
+    crate::assert_no_junior_pointers!(stack, *a);
+    crate::assert_no_junior_pointers!(stack, *b);
 
     raw_word_eq(a, b)
 }

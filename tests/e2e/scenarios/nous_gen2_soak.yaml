@@ -1,0 +1,228 @@
+# Nous soak scenario: sustained full-gen2 traffic on a 4-node testnet
+#
+# Runs a 1-miner + 3-syncing-peer network with req-res gen2 send+accept enabled
+# everywhere, seeds miner-a with a wallet-backed mining address, and then uses
+# the block stuffer to keep submitting wallet-created traffic while the network
+# grows past height 100. The recurring gate keeps this load phase bounded: it
+# only needs enough steady-state traffic to clear 35 successful submissions and
+# then terminate cleanly with a final report artifact. Multi-hour stress belongs
+# in the separate long-haul scenario.
+
+name: "nous_gen2_soak"
+seed: 31
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6401"
+    grpc_private_port: 7401
+    bind:
+      - "/ip4/127.0.0.1/udp/4401/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+  - id: "miner-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6402"
+    grpc_private_port: 7402
+    bind:
+      - "/ip4/127.0.0.1/udp/4402/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4401/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+  - id: "full-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6403"
+    grpc_private_port: 7403
+    bind:
+      - "/ip4/127.0.0.1/udp/4403/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4401/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/4402/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+  - id: "full-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6404"
+    grpc_private_port: 7404
+    bind:
+      - "/ip4/127.0.0.1/udp/4404/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4401/quic-v1"
+      - node: "miner-b"
+        listen: "/ip4/127.0.0.1/udp/4402/quic-v1"
+      - node: "full-a"
+        listen: "/ip4/127.0.0.1/udp/4403/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_IP_BUCKET_REQUEST_ADMISSION_LIMIT: "0"
+      NOCKCHAIN_LIBP2P_FORCE_PEER_DIAL_INTERVAL_SECS: "5"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["miner-b"]
+
+  - action: wait_for_grpc
+    node: "miner-b"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["full-a"]
+
+  - action: wait_for_grpc
+    node: "full-a"
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["full-b"]
+
+  - action: wait_for_grpc
+    node: "full-b"
+    timeout_ms: 300000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 10
+    timeout_ms: 180000
+
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-soak"
+    timeout_ms: 1200000
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${NOCKCHAIN_WALLET_BIN}"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "7401"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "4"
+      STEADY_STATE_TXS: "4"
+      MAX_ITERATIONS: "24"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - "count=$(grep -c 'TRANSACTION(SUCCESS)' ./logs/transaction_log.txt || true); echo \"success_count=$count\"; test \"$count\" -ge 35"
+    cwd: "${RUN_DIR}/stuffer-soak"
+    expect: "success_count="
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "miner-b"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-a"
+    height: 100
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "full-b"
+    height: 100
+    timeout_ms: 600000
+
+  - action: sleep
+    millis: 60000
+
+asserts:
+  - assert: heads_equal
+    nodes: ["miner-a", "miner-b", "full-a", "full-b"]
+    timeout_ms: 180000

@@ -197,6 +197,12 @@ pub struct WalletCli {
     #[arg(long, default_value = "false")]
     pub fakenet: bool,
 
+    #[arg(long, requires = "fakenet")]
+    pub fakenet_v1_phase: Option<u64>,
+
+    #[arg(long, requires = "fakenet")]
+    pub fakenet_bythos_phase: Option<u64>,
+
     #[command(flatten)]
     pub connection: ConnectionCli,
 
@@ -233,6 +239,15 @@ pub enum WatchSubcommand {
         /// Comma-separated list of base58 pubkey hashes for the multisig
         #[arg(long)]
         participants: String,
+    },
+    /// Import many watch-only multisig locks from a manifest file
+    MultisigBatch {
+        /// Threshold (m) value for every manifest entry
+        #[arg(short = 't', long = "threshold")]
+        threshold: u64,
+        /// Path to a newline-delimited manifest of comma-separated participant hashes
+        #[arg(long, value_name = "FILE")]
+        manifest: String,
     },
 }
 
@@ -305,6 +320,29 @@ pub enum Commands {
         /// Label for the child key
         #[arg(short, long, value_parser = validate_label, default_value = None)]
         label: Option<String>,
+    },
+
+    /// Derive a contiguous batch of child keys from the current master key
+    DeriveChildBatch {
+        /// Starting child index, should be in range [0, 2^31)
+        #[arg(long = "start-index", value_parser = clap::value_parser!(u64).range(0..(1u64 << 31)))]
+        start_index: u64,
+
+        /// Number of child keys to derive
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..(1u64 << 31)))]
+        count: u64,
+
+        /// Hardened or unhardened child keys
+        #[arg(long, default_value = "false")]
+        hardened: bool,
+
+        /// Optional label prefix. Derived labels become `<prefix>-<index>`.
+        #[arg(long = "label-prefix", value_parser = validate_label, default_value = None)]
+        label_prefix: Option<String>,
+
+        /// Optional output CSV path. Writes `index,address` rows when provided.
+        #[arg(long = "out", value_name = "FILE")]
+        out: Option<String>,
     },
 
     /// Import keys from a file, extended key, seed phrase, or master private key
@@ -477,6 +515,10 @@ pub enum Commands {
     #[command(name = "show-master-zprv")]
     ShowMasterZPrv,
 
+    /// Show the raw master private key as base58
+    #[command(name = "show-master-prv")]
+    ShowMasterPrv,
+
     /// Show the key tree structure
     #[command(name = "show-key-tree")]
     ShowKeyTree {
@@ -587,6 +629,7 @@ impl Commands {
         match self {
             Commands::Keygen => "keygen",
             Commands::DeriveChild { .. } => "derive-child",
+            Commands::DeriveChildBatch { .. } => "derive-child-batch",
             Commands::ImportKeys { .. } => "import-keys",
             Commands::ExportKeys => "export-keys",
             Commands::ListNotes => "list-notes",
@@ -606,6 +649,7 @@ impl Commands {
             Commands::ShowSeedphrase => "show-seed-phrase",
             Commands::ShowMasterZPub => "show-master-zpub",
             Commands::ShowMasterZPrv => "show-master-zprv",
+            Commands::ShowMasterPrv => "show-master-prv",
             Commands::ShowKeyTree { .. } => "show-key-tree",
             Commands::SignMessage { .. } => "sign-message",
             Commands::VerifyMessage { .. } => "verify-message",
@@ -617,6 +661,7 @@ impl Commands {
                 WatchSubcommand::Pubkey { .. } => "watch-address",
                 //WatchSubcommand::FirstName { .. } => "watch-first-name",
                 WatchSubcommand::Multisig { .. } => "watch-address-multisig",
+                WatchSubcommand::MultisigBatch { .. } => "watch-address-multisig",
             },
         }
     }

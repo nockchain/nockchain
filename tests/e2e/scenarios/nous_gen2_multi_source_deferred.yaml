@@ -1,0 +1,530 @@
+# Nous multi-source deferred-block stress scenario.
+#
+# Companion to `nous_gen2_responder_stress.yaml` targeting a *different*
+# failure class. The 2026-04-17 freeze was a tokio-runtime deadlock (all 40
+# workers parked on futex_wait, heartbeat silent). The 2026-04-18 stall
+# (detected 2026-04-19) was a kernel-side livelock: tokio runtime healthy,
+# heartbeat ticking perfectly, the Hoon kernel's `serf` thread spinning on
+# Nock and never returning from a block poke. Both fired right after
+# `accept-block` followed by a 6-way outbound gossip fan-out.
+#
+# The shape that's new in nous and absent from pre-nous is the
+# `deferred_heard_blocks` buffer in `p2p_state.rs`: future-height heard-blocks
+# (from gossip *or* from request-response) are stashed until `first_negative`
+# advances, then a single `FlushDeferredHeardBlocks` swarm action drains the
+# ready set by serialising `route_response_fact(...).await` per deferred
+# block inside the main libp2p select loop. If any one of those kernel pokes
+# hits a pathological Hoon path, every downstream driver activity freezes
+# while heartbeat (on an independent `tokio::spawn`) keeps ticking —
+# invisible to every assertion that keys off heartbeat presence.
+#
+# The existing responder-stress scenario force-peers every requester to a
+# single responder, so requesters see monotonically-ordered gossip and the
+# deferral buffer rarely holds more than one block at a time. This scenario
+# widens the topology: two upstream responders both sync from the same
+# miner and cross-peer, and every requester peers to both responders. Each
+# block reaches each requester via two distinct paths with clock-level
+# timing offsets, which gives the defer-on-future-height branch in
+# `driver.rs:2322` / `driver.rs:4334` something to actually catch.
+#
+# Assertions are the same four-part battery as responder-stress
+# (heartbeat / oneshot / watchdog / chain-tip-progress) plus one extra:
+# the scenario must observe at least one deferred-flush event on at least
+# one requester. A scenario that produces zero flushes is silently failing
+# to exercise the code path we care about — that's a scenario bug, not a
+# pass.
+#
+# Port range is 4521-4527 to avoid colliding with the 4501-4506 range used
+# by responder-stress and the 4511-4516 range used by gen1_responder_stress.
+
+name: "nous_gen2_multi_source_deferred"
+seed: 43
+
+nodes:
+  - id: "miner-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6521"
+    grpc_private_port: 7521
+    bind:
+      - "/ip4/127.0.0.1/udp/4521/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  - id: "responder-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6522"
+    grpc_private_port: 7522
+    bind:
+      - "/ip4/127.0.0.1/udp/4522/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4521/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  # Second upstream responder. Same role as responder-a, peers to both
+  # miner-a (for sync) and responder-a (for cross-gossip). This is the
+  # key topology shift: requesters hearing the same block via two
+  # asynchronous upstream paths is what generates defer-worthy
+  # height-ahead-of-frontier conditions during catch-up.
+  - id: "responder-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6523"
+    grpc_private_port: 7523
+    bind:
+      - "/ip4/127.0.0.1/udp/4523/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "miner-a"
+        listen: "/ip4/127.0.0.1/udp/4521/quic-v1"
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  - id: "requester-a"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6524"
+    grpc_private_port: 7524
+    bind:
+      - "/ip4/127.0.0.1/udp/4524/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
+      - node: "responder-b"
+        listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  - id: "requester-b"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6525"
+    grpc_private_port: 7525
+    bind:
+      - "/ip4/127.0.0.1/udp/4525/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
+      - node: "responder-b"
+        listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  - id: "requester-c"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6526"
+    grpc_private_port: 7526
+    bind:
+      - "/ip4/127.0.0.1/udp/4526/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
+      - node: "responder-b"
+        listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+  # Late-starting requester. Brought up only after miner has already
+  # reached height 30, so its entire catch-up phase runs while the chain
+  # keeps advancing. This is the condition that most reliably fills the
+  # deferred_heard_blocks buffer: the requester is processing height N
+  # from its bundle-fetch while gossip for heights N+1..N+k arrives from
+  # both responders. Without this node, flushes tend to stay at count=1.
+  - id: "requester-late"
+    binary: "${NOCKCHAIN_BIN_NEW}"
+    grpc_public_addr: "127.0.0.1:6527"
+    grpc_private_port: 7527
+    bind:
+      - "/ip4/127.0.0.1/udp/4527/quic-v1"
+    fakenet: true
+    new_state: true
+    fakenet_pow_len: 2
+    fakenet_log_difficulty: 1
+    fakenet_v1_phase: 3
+    no_default_peers: true
+    peer_from:
+      - node: "responder-a"
+        listen: "/ip4/127.0.0.1/udp/4522/quic-v1"
+      - node: "responder-b"
+        listen: "/ip4/127.0.0.1/udp/4523/quic-v1"
+    env:
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_ACCEPT_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_SEND_ENABLED: "true"
+      NOCKCHAIN_LIBP2P_REQ_RES_GEN2_BUNDLE_ENABLED: "true"
+      RUST_LOG: "info,nockchain::heartbeat=info,nockchain::watchdog=info,nockchain::deferred_flush=info"
+      NO_COLOR: "1"
+
+steps:
+  - action: start_nodes
+    ids: ["miner-a"]
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 120000
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "keygen"
+    capture:
+      regex: ".*"
+      store_as: "miner_a_pkh"
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "set-active-master-address"
+    args: ["${miner_a_pkh}"]
+
+  - action: wallet
+    wallet: "miner-a"
+    node: "miner-a"
+    command: "watch"
+    args: ["address", "${miner_a_pkh}"]
+
+  - action: clone_wallet
+    from: "miner-a"
+    to: "stuffer"
+
+  - action: set_mining_pkh
+    node: "miner-a"
+    value: "${miner_a_pkh}"
+
+  - action: wait_for_grpc
+    node: "miner-a"
+    timeout_ms: 30000
+
+  - action: start_nodes
+    ids: ["responder-a", "responder-b"]
+
+  - action: wait_for_grpc
+    node: "responder-a"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "responder-b"
+    timeout_ms: 120000
+
+  - action: start_nodes
+    ids: ["requester-a", "requester-b", "requester-c"]
+
+  - action: wait_for_grpc
+    node: "requester-a"
+    timeout_ms: 120000
+
+  - action: wait_for_grpc
+    node: "requester-c"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "responder-a"
+    height: 10
+    timeout_ms: 180000
+
+  - action: wait_for_height
+    node: "responder-b"
+    height: 10
+    timeout_ms: 180000
+
+  # Drive sustained tx traffic to make blocks non-empty. Larger blocks +
+  # more txs per block = more kernel work per poke = more chance that a
+  # gossip arriving on one upstream is still-pending on the other when
+  # the requester's bundle-fetch catches up.
+  - action: command
+    command: "bash"
+    args: ["${REPO_ROOT}/scripts/testnet/block_stuffer.sh"]
+    cwd: "${RUN_DIR}/stuffer-multi-source"
+    timeout_ms: 600000
+    env:
+      NOCKAPP_HOME: "${RUN_DIR}/wallets/stuffer"
+      NOCKCHAIN_WALLET_BIN: "${REPO_ROOT}/target/release/nockchain-wallet"
+      NOCKCHAIN_WALLET_PRIVATE_GRPC_PORT: "7521"
+      NOCKCHAIN_WALLET_FAKENET: "true"
+      WALLET_BINARY: "${REPO_ROOT}/scripts/testnet/nockchain-wallet-compat.sh"
+      RECIPIENT_PUBKEY: "${miner_a_pkh}"
+      DUST_PUBKEY: "9phXGACnW4238oqgvn2gpwaUjG3RAqcxq2Ash2vaKp8KjzSd3MQ56Jt"
+      TARGET_NOTES: "8"
+      STEADY_STATE_TXS: "8"
+      MAX_ITERATIONS: "10"
+      DELAY_SECONDS: "1"
+      KEEP_LOGS: "false"
+      STUFFER_SKIP_BUILDUP_TXS: "false"
+    expect: "Transaction submitted successfully"
+
+  # Wait for miner to get meaningfully ahead, then start the late joiner.
+  # Its catch-up phase from 0 to 30 runs concurrently with new block
+  # production, which is the direct driver of deferred-buffer buildup.
+  - action: wait_for_height
+    node: "miner-a"
+    height: 30
+    timeout_ms: 300000
+
+  - action: start_nodes
+    ids: ["requester-late"]
+
+  - action: wait_for_grpc
+    node: "requester-late"
+    timeout_ms: 120000
+
+  - action: wait_for_height
+    node: "miner-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "responder-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "responder-b"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-a"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-b"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-c"
+    height: 80
+    timeout_ms: 600000
+
+  - action: wait_for_height
+    node: "requester-late"
+    height: 80
+    timeout_ms: 600000
+
+  # Let the network settle so any latent deadlock has time to surface.
+  - action: sleep
+    millis: 60000
+
+  # ---- post-run health assertions (same battery as responder-stress
+  # plus a flush-observed assertion that's specific to this scenario) ----
+
+  # 1. Heartbeat presence. `requester-late` starts after miner reaches
+  #    height 30 so its total runtime is shorter (~90s at assertion
+  #    time). Threshold is relaxed for that node only; any silent
+  #    runtime freeze would still produce zero ticks, which trips the
+  #    relaxed >= 10 bound. Other nodes run the full scenario and need
+  #    the tighter >= 30 bound.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a responder-b requester-a requester-b requester-c requester-late; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          ticks=$(grep -ac "nockchain::heartbeat" "$log" || true)
+          if [ "$node" = "requester-late" ]; then
+            min_ticks=10
+          else
+            min_ticks=30
+          fi
+          echo "heartbeat ticks for $node: $ticks (min=$min_ticks)"
+          if [ "$ticks" -lt "$min_ticks" ]; then
+            echo "FAIL: $node emitted only $ticks heartbeat ticks (expected >= $min_ticks)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "heartbeat ticks for"
+
+  # 2. OneShotRecvError noise floor.
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a responder-b requester-a requester-b requester-c requester-late; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          warns=$(grep -ac "Background req-res task lost a oneshot" "$log" || true)
+          echo "oneshot warns for $node: $warns"
+          if [ "$warns" -gt 5 ]; then
+            echo "FAIL: $node emitted $warns OneShotRecvError warnings (expected <= 5)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "oneshot warns for"
+
+  # 3. Watchdog stall events (Linux only).
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a responder-b requester-a requester-b requester-c requester-late; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          stalls=$(grep -ac "libp2p heartbeat has not advanced" "$log" || true)
+          echo "watchdog stalls for $node: $stalls"
+          if [ "$stalls" -gt 0 ]; then
+            echo "FAIL: $node logged $stalls watchdog stall events (expected 0)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "watchdog stalls for"
+
+  # 4. Chain-tip progress in the last ~60s. Kernel-livelock signature
+  #    (see docs/incidents/lax1-stall-20260420/README.md): heartbeat ticks
+  #    but accept-block stops advancing. Fail if any node had zero
+  #    accept-block events after the 12th-from-last heartbeat tick
+  #    (~60s window).
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        for node in miner-a responder-a responder-b requester-a requester-b requester-c requester-late; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          cutoff=$(grep -an "nockchain::heartbeat" "$log" | tail -13 | head -1 | cut -d: -f1 || true)
+          if [ -z "$cutoff" ]; then
+            echo "FAIL: $node has no heartbeats — cannot evaluate progress"
+            fail=1
+            continue
+          fi
+          recent=$(tail -n +"$cutoff" "$log" | grep -ac "accept-block" || true)
+          echo "recent accept-blocks for $node (last ~60s): $recent"
+          if [ "$recent" -lt 1 ]; then
+            echo "FAIL: $node had no accept-block events in last ~60s (kernel-livelock signature)"
+            fail=1
+          fi
+        done
+        exit $fail
+    expect: "recent accept-blocks for"
+
+  # 5. Deferred-flush observability + positive coverage. This scenario's
+  #    whole point is to exercise the defer-on-future-height path. If no
+  #    flush events fire anywhere, the topology isn't producing the
+  #    conditions we're trying to test and the scenario is silently
+  #    useless — fail loudly. Also asserts per-flush elapsed stays bounded
+  #    (>30s means a poke hung inside the flush loop).
+  - action: command
+    command: "bash"
+    args:
+      - "-lc"
+      - |
+        set -euo pipefail
+        fail=0
+        total_flushes=0
+        for node in miner-a responder-a responder-b requester-a requester-b requester-c requester-late; do
+          log="${RUN_DIR}/nodes/"$node"/stdout.log"
+          flushes=$(grep -ac "Completed deferred heard-block flush" "$log" || true)
+          total_flushes=$((total_flushes + flushes))
+          # Strip ANSI escapes (tracing's fmt layer may emit them even when
+          # piped to a file) before extracting the numeric fields.
+          flush_lines=$(grep -a "Completed deferred heard-block flush" "$log" \
+            | sed $'s/\\x1b\\[[0-9;]*m//g' || true)
+          max_count=$(echo "$flush_lines" | sed -n 's/.*count=\([0-9]*\).*/\1/p' | sort -n | tail -1 || true)
+          max_elapsed=$(echo "$flush_lines" | sed -n 's/.*elapsed_ms=\([0-9.]*\).*/\1/p' | sort -n | tail -1 || true)
+          # The scenario runner's variable-expansion hijacks bash
+          # default-fallback curly syntax as a missing-scenario-var
+          # error, so default fallbacks are spelled out with plain
+          # $var tests instead.
+          if [ -z "$max_count" ]; then max_count=0; fi
+          if [ -z "$max_elapsed" ]; then max_elapsed=0; fi
+          echo "deferred flushes for $node: count=$flushes max_count=$max_count max_elapsed_ms=$max_elapsed"
+          awk_result=$(awk -v ms="$max_elapsed" 'BEGIN { print (ms+0 > 30000) ? "hi" : "ok" }')
+          if [ "$awk_result" = "hi" ]; then
+            echo "FAIL: $node observed flush elapsed $max_elapsed ms (>30s, kernel-poke stall inside flush)"
+            fail=1
+          fi
+        done
+        echo "total deferred flushes across scenario: $total_flushes"
+        if [ "$total_flushes" -lt 1 ]; then
+          echo "FAIL: zero deferred-flush events across the whole run — topology is not exercising the defer path"
+          fail=1
+        fi
+        exit $fail
+    expect: "deferred flushes for"
+
+asserts:
+  - assert: heads_equal
+    nodes:
+      - "miner-a"
+      - "responder-a"
+      - "responder-b"
+      - "requester-a"
+      - "requester-b"
+      - "requester-c"
+      - "requester-late"
+    timeout_ms: 180000
