@@ -1,6 +1,6 @@
 [package]
 name = "{{project_name}}"
-version = "{{version}}"
+version = {{toml_version}}
 edition = "2021"
 authors = {{toml_authors}}
 description = {{toml_description}}
@@ -36,6 +36,7 @@ tokio = { version = "1.32", features = [
   "rt-multi-thread",
   "rt",
   "signal",
+  "time",
 ] }
 tokio-util = "0.7.11"
 tracing = "0.1.41"

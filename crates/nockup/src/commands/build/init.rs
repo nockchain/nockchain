@@ -5,8 +5,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use colored::Colorize;
 use handlebars::{no_escape, Handlebars};
+use semver::Version;
 
-use crate::manifest::NockAppManifest;
+use crate::manifest::{NockAppManifest, PackageMeta};
 
 const TEMPLATE_COMPATIBILITY_MANIFEST: &str = "nockup-template.toml";
 const NOCKCHAIN_REV_CONTEXT_KEY: &str = "nockchain_rev";
@@ -96,19 +97,23 @@ pub async fn run() -> Result<()> {
 fn build_handlebars_context(manifest: &NockAppManifest) -> Result<HashMap<String, String>> {
     let mut ctx = HashMap::new();
     let p = &manifest.package;
+    validate_template_manifest_inputs(p)?;
+
     let authors = p.authors.clone().unwrap_or_default();
     let author = authors.join(", ");
     let (author_name, author_email) = authors
         .first()
         .map(|author| split_author_name_email(author))
         .unwrap_or_default();
+    let version = p.version.clone().unwrap_or_else(|| "0.1.0".to_string());
 
     ctx.insert("name".to_string(), p.name.clone());
     ctx.insert("project_name".to_string(), p.name.clone());
     ctx.insert("rust_crate_name".to_string(), rust_crate_name(&p.name));
+    ctx.insert("version".to_string(), version.clone());
     ctx.insert(
-        "version".to_string(),
-        p.version.clone().unwrap_or_else(|| "0.1.0".to_string()),
+        "toml_version".to_string(),
+        toml::Value::String(version).to_string(),
     );
     let description = p.description.clone().unwrap_or_default();
     let toml_description = toml::Value::String(description.clone()).to_string();
@@ -125,6 +130,122 @@ fn build_handlebars_context(manifest: &NockAppManifest) -> Result<HashMap<String
     ctx.insert("license".to_string(), p.license.clone().unwrap_or_default());
 
     Ok(ctx)
+}
+
+fn validate_template_manifest_inputs(package: &PackageMeta) -> Result<()> {
+    validate_project_name(&package.name)?;
+
+    if let Some(version) = package.version.as_deref() {
+        validate_package_version(version)?;
+    }
+
+    Ok(())
+}
+
+fn validate_project_name(project_name: &str) -> Result<()> {
+    if project_name.is_empty() || project_name.trim() != project_name {
+        anyhow::bail!("package.name must be a non-empty Cargo package name");
+    }
+
+    let mut chars = project_name.chars();
+    let first = chars
+        .next()
+        .expect("project_name should be non-empty after validation");
+
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        anyhow::bail!("package.name must start with an ASCII letter or underscore");
+    }
+
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+        anyhow::bail!(
+            "package.name may only contain ASCII letters, digits, hyphens, and underscores"
+        );
+    }
+
+    let rust_crate_name = rust_crate_name(project_name);
+    if !is_valid_rust_identifier(&rust_crate_name) {
+        anyhow::bail!("package.name must produce a valid Rust crate identifier");
+    }
+
+    Ok(())
+}
+
+fn validate_package_version(version: &str) -> Result<()> {
+    if version.trim() != version || Version::parse(version).is_err() {
+        anyhow::bail!("package.version must be a valid semantic version");
+    }
+
+    Ok(())
+}
+
+fn is_valid_rust_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if identifier == "_" || is_rust_keyword(identifier) {
+        return false;
+    }
+
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn is_rust_keyword(identifier: &str) -> bool {
+    matches!(
+        identifier,
+        "as" | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "async"
+            | "await"
+            | "dyn"
+            | "abstract"
+            | "become"
+            | "box"
+            | "do"
+            | "final"
+            | "macro"
+            | "override"
+            | "priv"
+            | "typeof"
+            | "unsized"
+            | "virtual"
+            | "yield"
+            | "try"
+    )
 }
 
 fn build_template_context(
@@ -263,6 +384,7 @@ mod tests {
             ("project_name".to_string(), "arcadia".to_string()),
             ("rust_crate_name".to_string(), "arcadia".to_string()),
             ("version".to_string(), "0.1.0".to_string()),
+            ("toml_version".to_string(), r#""0.1.0""#.to_string()),
             ("description".to_string(), "Example app".to_string()),
             ("project_description".to_string(), "Example app".to_string()),
             (
@@ -447,6 +569,7 @@ edition = "2021"
         assert_eq!(ctx.get("project_name"), Some(&"arcadia".to_string()));
         assert_eq!(ctx.get("rust_crate_name"), Some(&"arcadia".to_string()));
         assert_eq!(ctx.get("version"), Some(&"0.2.0".to_string()));
+        assert_eq!(ctx.get("toml_version"), Some(&r#""0.2.0""#.to_string()));
         assert_eq!(ctx.get("description"), Some(&"Example app".to_string()));
         assert_eq!(
             ctx.get("toml_description"),
@@ -481,6 +604,49 @@ edition = "2021"
 
         assert_eq!(ctx.get("project_name"), Some(&"arcadia-app".to_string()));
         assert_eq!(ctx.get("rust_crate_name"), Some(&"arcadia_app".to_string()));
+    }
+
+    #[test]
+    fn build_handlebars_context_rejects_invalid_project_names() {
+        for project_name in ["3d-app", "bad name", "bad.name", "bad/name"] {
+            let manifest = NockAppManifest {
+                package: PackageMeta {
+                    name: project_name.to_string(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let err = build_handlebars_context(&manifest)
+                .expect_err("invalid project name should be rejected");
+
+            assert!(
+                err.to_string().contains("package.name"),
+                "unexpected error for {project_name}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_handlebars_context_rejects_invalid_versions() {
+        for version in ["not-semver", "0.1.0\"\nlicense = \"MIT"] {
+            let manifest = NockAppManifest {
+                package: PackageMeta {
+                    name: "arcadia".to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            let err = build_handlebars_context(&manifest)
+                .expect_err("invalid version should be rejected");
+
+            assert!(
+                err.to_string().contains("package.version"),
+                "unexpected error for {version}: {err:?}"
+            );
+        }
     }
 
     #[test]

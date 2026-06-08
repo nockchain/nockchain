@@ -1,6 +1,7 @@
 use std::error::Error;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use {{rust_crate_name}}::string_to_atom;
 use {{rust_crate_name}}::GRPC_PORT;
@@ -8,7 +9,7 @@ use nockapp::driver::Operation;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::make_tas;
-use nockapp::{exit_driver, NockApp};
+use nockapp::NockApp;
 use nockapp_grpc::services::private_nockapp::grpc_listener_driver;
 use nockvm::noun::T;
 
@@ -44,9 +45,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             GRPC_PORT.to_string()
         )))
         .await;
-    nockapp.add_io_driver(exit_driver()).await;
 
-    nockapp.run().await.expect("Failed to run app");
+    match tokio::time::timeout(Duration::from_secs(2), nockapp.run()).await {
+        Ok(result) => result.expect("Failed to run app"),
+        Err(_) => println!("Finished gRPC demo request window"),
+    }
 
     Ok(())
 }

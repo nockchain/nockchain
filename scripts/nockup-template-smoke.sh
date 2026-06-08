@@ -63,6 +63,7 @@ SMOKE_TARGET="${WORK_ROOT}/target"
 SMOKE_WORKSPACE="${WORK_ROOT}/workspace"
 SMOKE_LOGS="${WORK_ROOT}/logs"
 PIDS=""
+PORTS_TO_CLEAN=""
 
 export CARGO_HOME="${CARGO_HOME:-${ORIGINAL_HOME}/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-${ORIGINAL_HOME}/.rustup}"
@@ -82,6 +83,10 @@ cleanup() {
   for pid in ${PIDS}; do
     kill "${pid}" >/dev/null 2>&1 || true
     wait "${pid}" >/dev/null 2>&1 || true
+  done
+
+  for port in ${PORTS_TO_CLEAN}; do
+    kill_port_listeners "${port}"
   done
 
   if [ "${status}" -eq 0 ] && [ "${KEEP_TEMP}" -eq 0 ]; then
@@ -255,6 +260,25 @@ wait_for_port_free() {
   return 1
 }
 
+kill_port_listeners() {
+  port="$1"
+  listener_pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
+
+  for listener_pid in ${listener_pids}; do
+    kill "${listener_pid}" >/dev/null 2>&1 || true
+  done
+}
+
+track_background() {
+  pid="$1"
+  port="${2:-}"
+
+  PIDS="${PIDS} ${pid}"
+  if [ -n "${port}" ]; then
+    PORTS_TO_CLEAN="${PORTS_TO_CLEAN} ${port}"
+  fi
+}
+
 stop_background() {
   pid="$1"
   port="${2:-}"
@@ -262,11 +286,8 @@ stop_background() {
   kill "${pid}" >/dev/null 2>&1 || true
   wait "${pid}" >/dev/null 2>&1 || true
 
-  if [ -n "${port}" ] && command -v lsof >/dev/null 2>&1; then
-    listener_pids="$(lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)"
-    for listener_pid in ${listener_pids}; do
-      kill "${listener_pid}" >/dev/null 2>&1 || true
-    done
+  if [ -n "${port}" ]; then
+    kill_port_listeners "${port}"
   fi
 
   if [ -n "${port}" ]; then
@@ -279,6 +300,26 @@ require_port_free() {
 
   if port_is_listening "${port}"; then
     echo "port ${port} is already in use; stop that process or skip the runtime smoke" >&2
+    exit 1
+  fi
+}
+
+assert_log_contains() {
+  log_file="$1"
+  pattern="$2"
+
+  if ! grep -a -q "${pattern}" "${log_file}"; then
+    echo "expected '${pattern}' in ${log_file}" >&2
+    exit 1
+  fi
+}
+
+assert_log_not_contains() {
+  log_file="$1"
+  pattern="$2"
+
+  if grep -a -q "${pattern}" "${log_file}"; then
+    echo "unexpected '${pattern}' in ${log_file}" >&2
     exit 1
   fi
 }
@@ -297,6 +338,8 @@ run_basic() {
   cd "${SMOKE_WORKSPACE}/basic"
   "${SMOKE_TARGET}/debug/nockup" project run smoke-basic \
     >"${SMOKE_LOGS}/run-basic.log" 2>&1
+  assert_log_contains "${SMOKE_LOGS}/run-basic.log" "poked: cause"
+  assert_log_not_contains "${SMOKE_LOGS}/run-basic.log" "command failed"
 }
 
 run_repl() {
@@ -304,6 +347,8 @@ run_repl() {
   cd "${SMOKE_WORKSPACE}/repl"
   printf 'quit\n' | "${SMOKE_TARGET}/debug/nockup" project run smoke-repl \
     >"${SMOKE_LOGS}/run-repl.log" 2>&1
+  assert_log_contains "${SMOKE_LOGS}/run-repl.log" "Exiting..."
+  assert_log_not_contains "${SMOKE_LOGS}/run-repl.log" "command failed"
 }
 
 run_http_server() {
@@ -314,7 +359,7 @@ run_http_server() {
   "${SMOKE_TARGET}/debug/nockup" project run smoke-http-server \
     >"${SMOKE_LOGS}/run-http-server.log" 2>&1 &
   pid="$!"
-  PIDS="${PIDS} ${pid}"
+  track_background "${pid}" 8080
 
   wait_for_http "http://127.0.0.1:8080/" "${SMOKE_LOGS}/http-server-get.body"
   grep -q "Count: 0" "${SMOKE_LOGS}/http-server-get.body"
@@ -334,7 +379,7 @@ run_http_static() {
   "${SMOKE_TARGET}/debug/nockup" project run smoke-http-static \
     >"${SMOKE_LOGS}/run-http-static.log" 2>&1 &
   pid="$!"
-  PIDS="${PIDS} ${pid}"
+  track_background "${pid}" 8080
 
   wait_for_http "http://127.0.0.1:8080/" "${SMOKE_LOGS}/http-static-get.body"
   grep -q "Hello NockApp!" "${SMOKE_LOGS}/http-static-get.body"
@@ -349,12 +394,15 @@ run_grpc() {
   cd "${SMOKE_WORKSPACE}/grpc/smoke-grpc"
   RUST_LOG=debug cargo run --release --bin listen >"${SMOKE_LOGS}/grpc-listen.log" 2>&1 &
   pid="$!"
-  PIDS="${PIDS} ${pid}"
+  track_background "${pid}" 5555
 
   wait_for_port 5555
   RUST_LOG=debug cargo run --release --bin talk >"${SMOKE_LOGS}/grpc-talk.log" 2>&1
   sleep 2
-  grep -a -q "Received peek" "${SMOKE_LOGS}/grpc-listen.log"
+  assert_log_contains "${SMOKE_LOGS}/grpc-listen.log" "Received peek"
+  assert_log_contains "${SMOKE_LOGS}/grpc-listen.log" "Received poke"
+  assert_log_not_contains "${SMOKE_LOGS}/grpc-talk.log" "Poked during exit. Ignoring."
+  assert_log_not_contains "${SMOKE_LOGS}/grpc-talk.log" "Grpc poke not acked"
 
   stop_background "${pid}" 5555
 }
@@ -362,6 +410,7 @@ run_grpc() {
 need_cmd cargo
 need_cmd curl
 need_cmd git
+need_cmd lsof
 
 mkdir -p "${SMOKE_HOME}/.nockup/templates" "${SMOKE_WORKSPACE}" "${SMOKE_LOGS}"
 
