@@ -71,9 +71,17 @@ jobs:
 
       - name: Push to nockchain/nockchain
         if: steps.plan.outputs.should_sync == 'true'
+        env:
+          NOCKCHAIN_SYNC_TOKEN: ${{ secrets.NOCKCHAIN_SYNC_TOKEN }}
         run: |
-          git remote add nockchain https://bitemyapp:${{ secrets.NOCKCHAIN_SYNC_TOKEN }}@github.com/nockchain/nockchain.git
-          git push nockchain master:master
+          if [ -z "$NOCKCHAIN_SYNC_TOKEN" ]; then
+            echo "NOCKCHAIN_SYNC_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+          auth_header="$(printf 'x-access-token:%s' "$NOCKCHAIN_SYNC_TOKEN" | base64 | tr -d '\n')"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $auth_header" \
+            push https://github.com/nockchain/nockchain.git master:master
 
       - name: Skip sync
         if: steps.plan.outputs.should_sync != 'true'
