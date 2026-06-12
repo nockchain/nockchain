@@ -153,6 +153,11 @@ impl<J: Jammer + Send + 'static> NockApp<J> {
         self.kernel.take_pma_timing_samples_detailed()
     }
 
+    /// Produces a checkpoint of the current kernel state.
+    pub fn checkpoint(&self) -> impl Future<Output = crate::Result<SaveableCheckpoint>> {
+        self.kernel.checkpoint()
+    }
+
     /// This constructs a Tokio interval, even though it doesn't look like it, a Tokio runtime is _required_.
     pub async fn new<F, U, E>(kernel_from_boot: F) -> Result<Self, NockAppError>
     where

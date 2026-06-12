@@ -1,0 +1,23 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+# Embeds the cached honc cold-state jam. The crate's build.rs only resolves the
+# asset path and emits HONC_COLD_138_JAM_PATH; under Bazel we set that env var
+# directly to the checked-in asset and provide it as compile_data, so no
+# cargo_build_script is needed (mirrors crates/kernels/*).
+rust_library(
+    name = "honc-cold-138",
+    srcs = ["src/lib.rs"],
+    compile_data = ["//assets:honc-cold-138.jam"],
+    crate_name = "honc_cold_138",
+    edition = "2021",
+    rustc_env = {
+        "HONC_COLD_138_JAM_PATH": "$(location //assets:honc-cold-138.jam)",
+    },
+)

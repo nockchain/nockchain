@@ -5,6 +5,7 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use nockvm::hamt::Hamt;
 use nockvm::interpreter::{interpret, Context, NockCancelToken, Slogger};
 use nockvm::jets;
+use nockvm::jets::JetDispatchMode;
 use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{Hot, URBIT_HOT_STATE};
 use nockvm::jets::warm::Warm;
@@ -34,6 +35,8 @@ fn bench_context() -> Context {
 
     Context {
         stack,
+        op_budget: None,
+        jet_dispatch: JetDispatchMode::Exact,
         slogger,
         cold,
         warm,
@@ -273,7 +276,13 @@ fn bench_warm_lookup(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut ctx = bench_context();
-                ctx.warm = Warm::init(&mut ctx.stack, &mut ctx.cold, &ctx.hot, &ctx.test_jets);
+                ctx.warm = Warm::init(
+                    &mut ctx.stack,
+                    &mut ctx.cold,
+                    &ctx.hot,
+                    &ctx.test_jets,
+                    JetDispatchMode::Exact,
+                );
                 let mut subject = D(0);
                 let leaf = noun::tape(&mut ctx.stack, "leaf");
                 subject = T(&mut ctx.stack, &[leaf, subject]);
@@ -282,9 +291,15 @@ fn bench_warm_lookup(c: &mut Criterion) {
             },
             |(mut ctx, mut subject, mut formula)| {
                 let mut warm = ctx.warm;
-                let hit = warm.find_jet(&mut ctx.stack, &mut subject, &mut formula);
+                let hit =
+                    warm.find_jet(&mut ctx.stack, &mut subject, &mut formula, JetDispatchMode::Exact);
                 let mut bogus_formula = D(0);
-                let miss = warm.find_jet(&mut ctx.stack, &mut subject, &mut bogus_formula);
+                let miss = warm.find_jet(
+                    &mut ctx.stack,
+                    &mut subject,
+                    &mut bogus_formula,
+                    JetDispatchMode::Exact,
+                );
                 black_box((hit, miss));
             },
             BatchSize::LargeInput,

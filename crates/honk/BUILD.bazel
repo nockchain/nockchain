@@ -1,0 +1,71 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+# honk library: the native Hoon compiler API (native/, pipeline, types).
+rust_library(
+    name = "honk_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/bin/**"],
+    ),
+    aliases = aliases(),
+    crate_name = "honk",
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/hatch",
+        "//crates/honc-cold-138",
+        "//crates/hoonc:hoonc_lib",
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+        "//crates/zkvm-jetpack",
+    ] + all_crate_deps(),
+)
+
+# honk binary: the CLI. It embeds the hoonc-built hoon-138 prelude
+# (formula+type), the canonical $octs type, and the hoon-138 source via
+# include_bytes!(env!(...)). The crate's build.rs only sets those env vars to
+# absolute asset paths; under Bazel we replicate that with rustc_env +
+# compile_data (same idiom as crates/kernels/*), so no cargo_build_script is
+# needed.
+rust_binary(
+    name = "honk",
+    srcs = ["src/bin/honk.rs"],
+    aliases = aliases(),
+    compile_data = [
+        "//hoon/common:hoon.hoon",
+        "assets/honc-type-138.jam",
+        "assets/honc-formula-138.jam",
+        "assets/hoonc-octs-type-138.jam",
+    ],
+    crate_name = "honk",
+    crate_root = "src/bin/honk.rs",
+    edition = "2021",
+    rustc_env = {
+        "HONK_HOON_138_SOURCE": "$(location //hoon/common:hoon.hoon)",
+        "HONK_HONC_TYPE_138_JAM": "$(location assets/honc-type-138.jam)",
+        "HONK_HONC_FORMULA_138_JAM": "$(location assets/honc-formula-138.jam)",
+        "HONK_HOONC_OCTS_TYPE_138_JAM": "$(location assets/hoonc-octs-type-138.jam)",
+    },
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        ":honk_lib",
+        "//crates/hatch",
+        "//crates/honc-cold-138",
+        "//crates/hoonc:hoonc_lib",
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+        "//crates/zkvm-jetpack",
+    ] + all_crate_deps(),
+)

@@ -18,6 +18,7 @@ use nockvm::interpreter::{self, Context, NockCancelToken};
 use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{Hot, HotEntry};
 use nockvm::jets::warm::Warm;
+use nockvm::jets::JetDispatchMode;
 use nockvm::mem::NockStack;
 pub use nockvm::mem::{
     NOCK_STACK_1KB, NOCK_STACK_SIZE, NOCK_STACK_SIZE_HUGE, NOCK_STACK_SIZE_LARGE,
@@ -148,6 +149,7 @@ pub fn create_context(
     mut cold: Cold,
     trace_info: Option<TraceInfo>,
     test_jets: Vec<NounSlab>,
+    jet_dispatch: JetDispatchMode,
 ) -> Context {
     let arena = stack.arena().clone();
     let cache = Hamt::<Noun>::new(&mut stack);
@@ -161,12 +163,14 @@ pub fn create_context(
         hamt
     };
     let hot = Hot::init(&mut stack, hot_state);
-    let warm = Warm::init(&mut stack, &mut cold, &hot, &test_jets);
+    let warm = Warm::init(&mut stack, &mut cold, &hot, &test_jets, jet_dispatch);
     let slogger = Box::pin(CrownSlogger {});
     let cancel = Arc::new(AtomicIsize::new(NockCancelToken::RUNNING_IDLE));
 
     interpreter::Context {
         stack,
+        op_budget: None,
+        jet_dispatch,
         slogger,
         cold,
         warm,

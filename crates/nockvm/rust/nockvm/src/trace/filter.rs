@@ -87,3 +87,4 @@ impl TraceFilter for IntervalFilter {
         c.is_multiple_of(self.interval)
     }
 }
+

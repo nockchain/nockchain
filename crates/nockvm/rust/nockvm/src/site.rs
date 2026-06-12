@@ -39,9 +39,10 @@ impl Site {
             )
         });
 
+        let dispatch = ctx.jet_dispatch;
         let mut warm_result = ctx
             .warm
-            .find_jet(&mut ctx.stack, core, &mut battery)
+            .find_jet(&mut ctx.stack, core, &mut battery, dispatch)
             .filter(|(_jet, mut path, _test)| {
                 // check that 7 is a prefix of the parent battery axis,
                 // to ensure that the sample (axis 6) is not part of the jet match.

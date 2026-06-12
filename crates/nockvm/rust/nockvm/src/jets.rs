@@ -51,6 +51,23 @@ crate::gdb!();
 pub type Result = std::result::Result<Noun, JetErr>;
 pub type Jet = fn(&mut Context, Noun) -> Result;
 
+/// How jet matching compares formulas and batteries.
+///
+/// `Exact` matches nouns as-is. `HintBlind` additionally matches modulo
+/// transparent hints (%hand/%hunk/%lose/%mean/%spot): honk requires this
+/// because its natively-minted cores and cued cold-state assets differ
+/// from registered batteries only by such hints, while runtimes whose
+/// registrations and cores come from the same compile (hoonc, nockchain)
+/// never need it. Hint-blind matching costs a formula normalization walk
+/// on warm misses and a structural battery comparison when unification
+/// fails, so it is opt-in per `Context`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub enum JetDispatchMode {
+    #[default]
+    Exact,
+    HintBlind,
+}
+
 /**
  * Only return a deterministic error if the Nock would have deterministically
  * crashed.
@@ -374,6 +391,8 @@ pub mod util {
 
             Context {
                 stack,
+                op_budget: None,
+                jet_dispatch: crate::jets::JetDispatchMode::Exact,
                 slogger,
                 cold,
                 warm,

@@ -1,0 +1,28 @@
+[package]
+name = "honk"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[[bin]]
+name = "honk"
+path = "src/bin/honk.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+chumsky = "0.10"
+hatch = { path = "../hatch" }
+bytes = { workspace = true }
+honc-cold-138 = { path = "../honc-cold-138" }
+hoonc = { path = "../hoonc" }
+nockapp = { path = "../nockapp" }
+nockvm = { path = "../nockvm/rust/nockvm", features = ["sham_hints"] }
+num-bigint = { version = "0.4.6", features = ["serde"] }
+stacker = "0.1"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+walkdir = { workspace = true }
+zkvm-jetpack.workspace = true

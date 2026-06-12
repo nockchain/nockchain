@@ -1,0 +1,41 @@
+[package]
+name = "hatch"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "hatch"
+path = "src/main.rs"
+
+[features]
+default = []
+bazel_build = []
+
+[dependencies]
+ariadne = "0.5.1"
+bitvec = "1"
+bytes = "1.5.0"
+chumsky = { version = "0.10" }
+clap = { version = "4.5", features = ["derive"] }
+either = "1.9.0"
+hoonc = { workspace = true }
+ibig = { workspace = true }
+nockapp = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+num-bigint = { version = "0.4.6", features = ["serde"] }
+num-traits = "0.2"
+rayon = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = { workspace = true }
+tokio = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+nockchain-math = { workspace = true }
+tracing-subscriber = { workspace = true }

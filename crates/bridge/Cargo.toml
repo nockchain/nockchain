@@ -74,6 +74,7 @@ wallet-tx-builder.workspace = true
 zkvm-jetpack.workspace = true
 
 [build-dependencies]
+protoc-bin-vendored = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
