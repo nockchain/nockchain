@@ -4,7 +4,7 @@ use either::Either::*;
 use libc::{c_void, memcmp};
 
 use crate::mem::{NockStack, ALLOC, FRAME, STACK};
-use crate::noun::Noun;
+use crate::noun::{Cell, Noun, NounSpace};
 
 #[cfg(feature = "check_junior")]
 #[macro_export]
@@ -225,6 +225,26 @@ impl FrameBoundsState {
     }
 }
 
+#[derive(Copy, Clone)]
+enum EqualityWork {
+    Compare {
+        x: *mut Noun,
+        y: *mut Noun,
+        x_slot_readonly: bool,
+        y_slot_readonly: bool,
+    },
+    FinishCell {
+        x: *mut Noun,
+        y: *mut Noun,
+        x_slot_readonly: bool,
+        y_slot_readonly: bool,
+        x_noun_readonly: bool,
+        y_noun_readonly: bool,
+        xptr: *const u64,
+        yptr: *const u64,
+    },
+}
+
 // true = x is junior, false = y is junior
 #[inline(always)]
 unsafe fn x_is_junior(
@@ -277,6 +297,67 @@ unsafe fn x_is_junior(
     }
 }
 
+#[inline(always)]
+unsafe fn cell_child_ptrs(
+    cell: Cell,
+    space: &NounSpace,
+    slot_readonly: bool,
+) -> (*mut Noun, *mut Noun) {
+    if slot_readonly {
+        let raw = cell.to_raw_pointer(space);
+        (
+            std::ptr::addr_of!((*raw).head) as *mut Noun,
+            std::ptr::addr_of!((*raw).tail) as *mut Noun,
+        )
+    } else {
+        (cell.head_as_mut(space), cell.tail_as_mut(space))
+    }
+}
+
+#[derive(Copy, Clone)]
+struct RewriteSlot {
+    noun: *mut Noun,
+    allocated_ptr: *const u64,
+    slot_readonly: bool,
+    noun_readonly: bool,
+}
+
+struct RewriteDirection<'a> {
+    stack: &'a NockStack,
+    space: &'a NounSpace,
+    current_bounds: FrameBounds,
+    bounds_state: &'a mut FrameBoundsState,
+    x: RewriteSlot,
+    y: RewriteSlot,
+}
+
+#[inline(always)]
+unsafe fn rewrite_direction(args: RewriteDirection<'_>) -> Option<bool> {
+    if args.x.noun_readonly || args.y.noun_readonly {
+        return None;
+    }
+
+    let x_loc = (*args.x.noun).allocated_location(args.space);
+    let y_loc = (*args.y.noun).allocated_location(args.space);
+    let replace_x = match (x_loc, y_loc) {
+        (Some(xl), Some(yl)) if xl.is_pma() && yl.is_stack() => false,
+        (Some(xl), Some(yl)) if xl.is_stack() && yl.is_pma() => true,
+        (Some(xl), Some(yl)) if xl.is_pma() && yl.is_pma() => {
+            args.x.allocated_ptr > args.y.allocated_ptr
+        }
+        _ => x_is_junior(
+            args.stack, args.current_bounds, args.bounds_state, args.x.allocated_ptr,
+            args.y.allocated_ptr,
+        ),
+    };
+
+    if replace_x {
+        (!args.x.slot_readonly).then_some(true)
+    } else {
+        (!args.y.slot_readonly).then_some(false)
+    }
+}
+
 /// This version of unifying equality is not like that of vere.
 /// Vere does a tree comparison (accelerated by pointer equality and short-circuited by mug
 /// equality) and then unifies the nouns at the top level if they are equal.
@@ -311,13 +392,12 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
         return true;
     }
 
-    {
-        let space = stack.fast_noun_space();
-        if let (Ok(aa), Ok(bb)) = ((*a).as_allocated(), (*b).as_allocated()) {
-            if let (Some(am), Some(bm)) = (aa.get_cached_mug(&space), bb.get_cached_mug(&space)) {
-                if am != bm {
-                    return false;
-                }
+    let space = stack.fast_noun_space();
+    let has_readonly_extra_ranges = space.has_readonly_extra_ptr_ranges();
+    if let (Ok(aa), Ok(bb)) = ((*a).as_allocated(), (*b).as_allocated()) {
+        if let (Some(am), Some(bm)) = (aa.get_cached_mug(&space), bb.get_cached_mug(&space)) {
+            if am != bm {
+                return false;
             }
         }
     }
@@ -325,136 +405,208 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
     stack.frame_push(0);
     let current_bounds = current_frame_bounds(stack);
     let mut bounds_state = FrameBoundsState::new();
-    *(stack.push::<(*mut Noun, *mut Noun)>()) = (a, b);
+    *(stack.push::<EqualityWork>()) = EqualityWork::Compare {
+        x: a,
+        y: b,
+        x_slot_readonly: false,
+        y_slot_readonly: false,
+    };
+    let mut failed = false;
 
     loop {
         if stack.stack_is_empty() {
             break;
         }
 
-        let (x, y): (*mut Noun, *mut Noun) = *(stack.top());
-        if raw_word_eq(x, y) {
-            stack.pop::<(*mut Noun, *mut Noun)>();
-            continue;
-        }
-
-        if let (Ok(xa), Ok(ya)) = ((*x).as_allocated(), (*y).as_allocated()) {
-            let cached = {
-                let space = stack.fast_noun_space();
-                (xa.get_cached_mug(&space), ya.get_cached_mug(&space))
-            };
-            if let (Some(xm), Some(ym)) = cached {
-                if xm != ym {
-                    break;
+        let work: EqualityWork = *(stack.top());
+        stack.pop::<EqualityWork>();
+        match work {
+            EqualityWork::FinishCell {
+                x,
+                y,
+                x_slot_readonly,
+                y_slot_readonly,
+                x_noun_readonly,
+                y_noun_readonly,
+                xptr,
+                yptr,
+            } => {
+                if raw_word_eq(x, y) {
+                    continue;
+                }
+                if let Some(replace_x) = rewrite_direction(RewriteDirection {
+                    stack,
+                    space: &space,
+                    current_bounds,
+                    bounds_state: &mut bounds_state,
+                    x: RewriteSlot {
+                        noun: x,
+                        allocated_ptr: xptr,
+                        slot_readonly: x_slot_readonly,
+                        noun_readonly: x_noun_readonly,
+                    },
+                    y: RewriteSlot {
+                        noun: y,
+                        allocated_ptr: yptr,
+                        slot_readonly: y_slot_readonly,
+                        noun_readonly: y_noun_readonly,
+                    },
+                }) {
+                    if replace_x {
+                        *x = *y;
+                    } else {
+                        *y = *x;
+                    }
                 }
             }
+            EqualityWork::Compare {
+                x,
+                y,
+                x_slot_readonly,
+                y_slot_readonly,
+            } => {
+                if raw_word_eq(x, y) {
+                    continue;
+                }
 
-            match (xa.as_either(), ya.as_either()) {
-                (Left(xi), Left(yi)) => {
-                    let (data_equal, xptr, yptr) = {
-                        let space = stack.fast_noun_space();
-                        let xi_handle = xi.as_atom().in_space(&space);
-                        let yi_handle = yi.as_atom().in_space(&space);
-                        let xsize = xi_handle.size();
-                        let ysize = yi_handle.size();
-                        if xsize != ysize {
-                            (false, std::ptr::null(), std::ptr::null())
-                        } else {
-                            let equal = memcmp(
+                let x_noun_readonly =
+                    has_readonly_extra_ranges && space.noun_in_readonly_extra_range(*x);
+                let y_noun_readonly =
+                    has_readonly_extra_ranges && space.noun_in_readonly_extra_range(*y);
+
+                if let (Ok(xa), Ok(ya)) = ((*x).as_allocated(), (*y).as_allocated()) {
+                    if let (Some(xm), Some(ym)) =
+                        (xa.get_cached_mug(&space), ya.get_cached_mug(&space))
+                    {
+                        if xm != ym {
+                            failed = true;
+                            break;
+                        }
+                    }
+
+                    match (xa.as_either(), ya.as_either()) {
+                        (Left(xi), Left(yi)) => {
+                            let xi_handle = xi.as_atom().in_space(&space);
+                            let yi_handle = yi.as_atom().in_space(&space);
+                            let xsize = xi_handle.size();
+                            let ysize = yi_handle.size();
+                            if xsize != ysize {
+                                failed = true;
+                                break;
+                            }
+
+                            if memcmp(
                                 xi_handle.data_pointer() as *const c_void,
                                 yi_handle.data_pointer() as *const c_void,
                                 xsize << 3,
-                            ) == 0;
-                            (equal, unsafe { xi_handle.raw_pointer() }, unsafe {
-                                yi_handle.raw_pointer()
-                            })
-                        }
-                    };
-
-                    if data_equal {
-                        let replace_x = {
-                            let space = stack.fast_noun_space();
-                            let x_loc = (*x).allocated_location(&space);
-                            let y_loc = (*y).allocated_location(&space);
-                            match (x_loc, y_loc) {
-                                (Some(xl), Some(yl)) if xl.is_pma() && yl.is_stack() => false,
-                                (Some(xl), Some(yl)) if xl.is_stack() && yl.is_pma() => true,
-                                (Some(xl), Some(yl)) if xl.is_pma() && yl.is_pma() => xptr > yptr,
-                                _ => x_is_junior(
-                                    stack, current_bounds, &mut bounds_state, xptr, yptr,
-                                ),
+                            ) != 0
+                            {
+                                failed = true;
+                                break;
                             }
-                        };
-                        if replace_x {
-                            *x = *y;
-                        } else {
-                            *y = *x;
-                        }
-                        stack.pop::<(*mut Noun, *mut Noun)>();
-                        continue;
-                    } else {
-                        break;
-                    }
-                }
 
-                (Right(xc), Right(yc)) => {
-                    let (xh, yh, xt, yt, xptr, yptr) = {
-                        let space = stack.fast_noun_space();
-                        (
-                            xc.head_as_mut(&space),
-                            yc.head_as_mut(&space),
-                            xc.tail_as_mut(&space),
-                            yc.tail_as_mut(&space),
-                            xc.to_raw_pointer(&space) as *const u64,
-                            yc.to_raw_pointer(&space) as *const u64,
-                        )
-                    };
-
-                    // check head; only compute tail eq if needed; push only unequal sides
-                    if raw_word_eq(xh, yh) {
-                        if raw_word_eq(xt, yt) {
-                            let replace_x = {
-                                let space = stack.fast_noun_space();
-                                let x_loc = (*x).allocated_location(&space);
-                                let y_loc = (*y).allocated_location(&space);
-                                match (x_loc, y_loc) {
-                                    (Some(xl), Some(yl)) if xl.is_pma() && yl.is_stack() => false,
-                                    (Some(xl), Some(yl)) if xl.is_stack() && yl.is_pma() => true,
-                                    (Some(xl), Some(yl)) if xl.is_pma() && yl.is_pma() => {
-                                        xptr > yptr
-                                    }
-                                    _ => x_is_junior(
-                                        stack, current_bounds, &mut bounds_state, xptr, yptr,
-                                    ),
+                            let xptr = xi_handle.raw_pointer();
+                            let yptr = yi_handle.raw_pointer();
+                            if let Some(replace_x) = rewrite_direction(RewriteDirection {
+                                stack,
+                                space: &space,
+                                current_bounds,
+                                bounds_state: &mut bounds_state,
+                                x: RewriteSlot {
+                                    noun: x,
+                                    allocated_ptr: xptr,
+                                    slot_readonly: x_slot_readonly,
+                                    noun_readonly: x_noun_readonly,
+                                },
+                                y: RewriteSlot {
+                                    noun: y,
+                                    allocated_ptr: yptr,
+                                    slot_readonly: y_slot_readonly,
+                                    noun_readonly: y_noun_readonly,
+                                },
+                            }) {
+                                if replace_x {
+                                    *x = *y;
+                                } else {
+                                    *y = *x;
                                 }
-                            };
-                            if replace_x {
-                                *x = *y;
-                            } else {
-                                *y = *x;
                             }
-                            stack.pop::<(*mut Noun, *mut Noun)>();
-                            continue;
-                        } else {
-                            *(stack.push::<(*mut Noun, *mut Noun)>()) = (xt, yt);
-                            continue;
                         }
-                    } else {
-                        // head unequal; only push tail if it is also unequal
-                        if !raw_word_eq(xt, yt) {
-                            *(stack.push::<(*mut Noun, *mut Noun)>()) = (xt, yt);
-                        }
-                        *(stack.push::<(*mut Noun, *mut Noun)>()) = (xh, yh);
-                        continue;
-                    }
-                }
 
-                _ => {
+                        (Right(xc), Right(yc)) => {
+                            let x_children_readonly = x_slot_readonly || x_noun_readonly;
+                            let y_children_readonly = y_slot_readonly || y_noun_readonly;
+                            let (xh, xt) = cell_child_ptrs(xc, &space, x_children_readonly);
+                            let (yh, yt) = cell_child_ptrs(yc, &space, y_children_readonly);
+                            let xptr = xc.to_raw_pointer(&space) as *const u64;
+                            let yptr = yc.to_raw_pointer(&space) as *const u64;
+
+                            if raw_word_eq(xh, yh) && raw_word_eq(xt, yt) {
+                                if let Some(replace_x) = rewrite_direction(RewriteDirection {
+                                    stack,
+                                    space: &space,
+                                    current_bounds,
+                                    bounds_state: &mut bounds_state,
+                                    x: RewriteSlot {
+                                        noun: x,
+                                        allocated_ptr: xptr,
+                                        slot_readonly: x_slot_readonly,
+                                        noun_readonly: x_noun_readonly,
+                                    },
+                                    y: RewriteSlot {
+                                        noun: y,
+                                        allocated_ptr: yptr,
+                                        slot_readonly: y_slot_readonly,
+                                        noun_readonly: y_noun_readonly,
+                                    },
+                                }) {
+                                    if replace_x {
+                                        *x = *y;
+                                    } else {
+                                        *y = *x;
+                                    }
+                                }
+                                continue;
+                            }
+
+                            *(stack.push::<EqualityWork>()) = EqualityWork::FinishCell {
+                                x,
+                                y,
+                                x_slot_readonly,
+                                y_slot_readonly,
+                                x_noun_readonly,
+                                y_noun_readonly,
+                                xptr,
+                                yptr,
+                            };
+                            if !raw_word_eq(xt, yt) {
+                                *(stack.push::<EqualityWork>()) = EqualityWork::Compare {
+                                    x: xt,
+                                    y: yt,
+                                    x_slot_readonly: x_children_readonly,
+                                    y_slot_readonly: y_children_readonly,
+                                };
+                            }
+                            if !raw_word_eq(xh, yh) {
+                                *(stack.push::<EqualityWork>()) = EqualityWork::Compare {
+                                    x: xh,
+                                    y: yh,
+                                    x_slot_readonly: x_children_readonly,
+                                    y_slot_readonly: y_children_readonly,
+                                };
+                            }
+                        }
+
+                        _ => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                } else {
+                    failed = true;
                     break;
-                } // cells don't unify with atoms
+                }
             }
-        } else {
-            break; // direct atom and not raw-equal
         }
     }
 
@@ -471,7 +623,7 @@ pub unsafe fn unifying_equality(stack: &mut NockStack, a: *mut Noun, b: *mut Nou
     crate::assert_no_junior_pointers!(stack, *a);
     crate::assert_no_junior_pointers!(stack, *b);
 
-    raw_word_eq(a, b)
+    !failed
 }
 
 #[inline(always)]
@@ -578,5 +730,89 @@ fn lower_pointer_first(a: *const u64, b: *const u64) -> (*const u64, *const u64)
         (a, b)
     } else {
         (b, a)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unifying_equality;
+    use crate::mem::{NockStack, NOCK_STACK_SIZE_TINY};
+    use crate::noun::{Cell, CellMemory, Noun, D};
+    use crate::pma::{test_pma_path, Pma};
+
+    unsafe fn foreign_cell(head: Noun, tail: Noun) -> (*mut CellMemory, Noun, Vec<(usize, usize)>) {
+        let ptr = Box::into_raw(Box::new(CellMemory {
+            metadata: 0,
+            head,
+            tail,
+        }));
+        let start = ptr as usize;
+        let end = start + std::mem::size_of::<CellMemory>();
+        (
+            ptr,
+            Cell::from_raw_pointer(ptr).as_noun(),
+            vec![(start, end)],
+        )
+    }
+
+    #[test]
+    fn readonly_extra_range_does_not_unify_foreign_root() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
+        let stack_cell = Cell::new(&mut stack, D(1), D(2)).as_noun();
+        let original_stack_cell = unsafe { stack_cell.as_raw() };
+
+        unsafe {
+            let (foreign_ptr, foreign_noun, ranges) = foreign_cell(D(1), D(2));
+            let original_foreign = *foreign_ptr;
+            let previous_ranges = stack.replace_extra_noun_ptr_ranges(ranges);
+
+            let mut left = foreign_noun;
+            let mut right = stack_cell;
+            assert!(unifying_equality(&mut stack, &mut left, &mut right));
+            assert_eq!(right.as_raw(), original_stack_cell);
+            assert_eq!((*foreign_ptr).head.as_raw(), original_foreign.head.as_raw());
+            assert_eq!((*foreign_ptr).tail.as_raw(), original_foreign.tail.as_raw());
+
+            stack.replace_extra_noun_ptr_ranges(previous_ranges);
+            drop(Box::from_raw(foreign_ptr));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn readonly_extra_range_still_unifies_pma_descendants() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
+        let path = test_pma_path("readonly_extra_range_still_unifies_pma_descendants");
+        let mut pma = Pma::new(1024, path.clone()).expect("create PMA");
+        stack.install_pma_arena(std::sync::Arc::clone(pma.arena()));
+
+        let pma_child = Cell::new(&mut pma, D(1), D(2)).as_noun();
+        let stack_child = Cell::new(&mut stack, D(1), D(2)).as_noun();
+        let mut stack_outer = Cell::new(&mut stack, stack_child, D(0)).as_noun();
+        let original_stack_outer = unsafe { stack_outer.as_raw() };
+
+        unsafe {
+            let (foreign_ptr, foreign_noun, ranges) = foreign_cell(pma_child, D(0));
+            let previous_ranges = stack.replace_extra_noun_ptr_ranges(ranges);
+
+            let mut left = foreign_noun;
+            assert!(unifying_equality(&mut stack, &mut left, &mut stack_outer));
+
+            let space = stack.noun_space();
+            let outer = stack_outer
+                .in_space(&space)
+                .as_cell()
+                .expect("stack outer cell");
+            assert_eq!(stack_outer.as_raw(), original_stack_outer);
+            assert!(outer.head().noun().raw_equals(&pma_child));
+            assert_eq!((*foreign_ptr).head.as_raw(), pma_child.as_raw());
+            assert_eq!((*foreign_ptr).tail.as_raw(), D(0).as_raw());
+
+            stack.replace_extra_noun_ptr_ranges(previous_ranges);
+            drop(Box::from_raw(foreign_ptr));
+        }
+
+        drop(pma);
+        std::fs::remove_file(path).expect("remove PMA file");
     }
 }

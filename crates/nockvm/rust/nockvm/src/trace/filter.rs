@@ -87,3 +87,60 @@ impl TraceFilter for IntervalFilter {
         c.is_multiple_of(self.interval)
     }
 }
+
+pub struct PathPrefixFilter<T> {
+    pub prefixes: Vec<T>,
+}
+
+impl<T: AsRef<str> + Send> TraceFilter for PathPrefixFilter<T> {
+    fn should_trace(&mut self, path: Noun, space: &NounSpace) -> bool {
+        fn atom_text(atom: crate::noun::AtomHandle<'_>) -> Option<String> {
+            let text = std::str::from_utf8(atom.as_ne_bytes()).ok()?;
+            Some(text.trim_end_matches('\0').to_string())
+        }
+
+        fn atom_decimal(atom: crate::noun::AtomHandle<'_>) -> Option<String> {
+            atom.as_u64().ok().map(|n| n.to_string())
+        }
+
+        fn path_to_string(path: Noun, space: &NounSpace) -> Option<String> {
+            let mut parts = Vec::new();
+            let mut cursor = path;
+            loop {
+                if cursor
+                    .in_space(space)
+                    .as_atom()
+                    .ok()
+                    .and_then(|atom| atom.as_u64().ok())
+                    .map(|n| n == 0)
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                let cell = cursor.in_space(space).as_cell().ok()?;
+                match cell.head().as_either_atom_cell() {
+                    either::Either::Left(atom) => {
+                        parts.push(atom_text(atom)?);
+                    }
+                    either::Either::Right(pair) => {
+                        let name = atom_text(pair.head().as_atom().ok()?)?;
+                        let value = atom_decimal(pair.tail().as_atom().ok()?)?;
+                        parts.push(format!("{name}{value}"));
+                    }
+                }
+                cursor = cell.tail().noun();
+            }
+            Some(format!("/{}", parts.join("/")))
+        }
+
+        let Some(path_text) = path_to_string(path, space) else {
+            return false;
+        };
+
+        self.prefixes
+            .iter()
+            .map(|prefix| prefix.as_ref())
+            .filter(|prefix| !prefix.is_empty())
+            .any(|prefix| path_text.starts_with(prefix))
+    }
+}

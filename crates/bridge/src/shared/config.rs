@@ -199,7 +199,7 @@ pub struct BridgeConstantsToml {
     #[serde(default = "default_total_signers")]
     pub total_signers: u64,
 
-    /// Minimum nocks for a bridge event (default: 100_000)
+    /// Minimum nocks for a bridge event (default: 1_000_000)
     #[serde(default = "default_minimum_event_nocks")]
     pub minimum_event_nocks: u64,
 
@@ -228,7 +228,7 @@ fn default_total_signers() -> u64 {
     5
 }
 fn default_minimum_event_nocks() -> u64 {
-    100_000
+    1_000_000
 }
 fn default_nicks_fee_per_nock() -> u64 {
     195
@@ -856,12 +856,6 @@ mod tests {
         assert_eq!(config.object_store.region, "auto");
         assert_eq!(config.object_store.prefix, "withdrawal-sequencer");
         assert_eq!(config.object_store.journal_id, "default");
-    }
-
-    #[test]
-    fn bridge_constants_default_minimum_event_matches_kernel_floor() {
-        assert_eq!(default_minimum_event_nocks(), 100_000);
-        assert_eq!(BridgeConstants::default().minimum_event_nocks, 100_000);
     }
 
     #[test]

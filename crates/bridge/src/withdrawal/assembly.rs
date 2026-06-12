@@ -1815,7 +1815,7 @@ mod tests {
         SequencedWithdrawalStatusResponse, WithdrawalCommitCertificate, WithdrawalCommitSignature,
     };
     use crate::shared::signing::BridgeSigner;
-    use crate::shared::types::zero_tip5_hash;
+    use crate::shared::types::{zero_tip5_hash, AtomBytes};
     use crate::withdrawal::proposals::WithdrawalProjectionStore;
     use crate::withdrawal::snapshot::{BridgeNoteSnapshotSource, BridgeOwnedNoteSelectors};
     use crate::withdrawal::transport::{compute_withdrawal_commit_digest, withdrawal_id_to_proto};
@@ -2297,10 +2297,8 @@ mod tests {
         }
     }
 
-    fn sample_base_event_id(start: u8) -> crate::shared::types::BaseEventId {
-        crate::shared::types::BaseEventId(
-            (0..32).map(|offset| start.wrapping_add(offset)).collect(),
-        )
+    fn sample_base_event_id(start: u8) -> AtomBytes {
+        AtomBytes((0..32).map(|offset| start.wrapping_add(offset)).collect())
     }
 
     #[test]
@@ -3174,9 +3172,7 @@ mod tests {
         let existing = sample_withdrawal_request();
         let same_batch_later = NockWithdrawalRequestKernelData {
             as_of: Tip5Hash([Belt(31), Belt(32), Belt(33), Belt(34), Belt(35)]),
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 9).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 9).collect()),
             recipient: Tip5Hash([Belt(111), Belt(112), Belt(113), Belt(114), Belt(115)]),
             amount: existing.amount.saturating_add(1),
             base_batch_end: existing.base_batch_end,
@@ -3219,9 +3215,7 @@ mod tests {
         let existing = sample_withdrawal_request();
         let same_batch_later = NockWithdrawalRequestKernelData {
             as_of: Tip5Hash([Belt(31), Belt(32), Belt(33), Belt(34), Belt(35)]),
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 9).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 9).collect()),
             recipient: Tip5Hash([Belt(111), Belt(112), Belt(113), Belt(114), Belt(115)]),
             amount: existing.amount.saturating_add(1),
             base_batch_end: existing.base_batch_end,
@@ -3274,9 +3268,7 @@ mod tests {
         let existing = sample_withdrawal_request();
         let same_batch_later = NockWithdrawalRequestKernelData {
             as_of: Tip5Hash([Belt(31), Belt(32), Belt(33), Belt(34), Belt(35)]),
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 9).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 9).collect()),
             recipient: Tip5Hash([Belt(111), Belt(112), Belt(113), Belt(114), Belt(115)]),
             amount: existing.amount.saturating_add(1),
             base_batch_end: existing.base_batch_end,

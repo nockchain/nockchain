@@ -336,6 +336,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::types::WithdrawalId;
 
     fn sample_facts() -> WithdrawalApprovalFacts {
@@ -355,9 +356,7 @@ mod tests {
                     &facts.withdrawal_id_as_of,
                 )
                 .unwrap_or_else(|_| crate::shared::types::zero_tip5_hash()),
-                base_event_id: crate::shared::types::BaseEventId(
-                    hex::decode(&facts.withdrawal_id_base_event_id).unwrap(),
-                ),
+                base_event_id: AtomBytes(hex::decode(&facts.withdrawal_id_base_event_id).unwrap()),
             },
             recipient: None,
             gross_burned_amount: None,

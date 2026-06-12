@@ -205,7 +205,7 @@
         ==
       ::
           %burn-for-withdrawal
-        ?:  (lth amount.content.i.txs (mul minimum-event-nocks.constants.state nicks-per-nock:t))
+        ?:  (lte amount.content.i.txs (mul minimum-event-nocks.constants.state nicks-per-nock:t))
           ret
         :_  deposit-settlements.ret
         ::  convert base-event-id to blist for z-map compatibility

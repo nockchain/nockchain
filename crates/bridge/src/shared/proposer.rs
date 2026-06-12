@@ -121,12 +121,12 @@ mod tests {
         let withdrawal_a = WithdrawalId {
             as_of: NockPkh::from_base58("7777777777777777777777777777777777777777777777777777")
                 .unwrap(),
-            base_event_id: crate::shared::types::BaseEventId((0..32).collect()),
+            base_event_id: crate::shared::types::AtomBytes((0..32).collect()),
         };
         let withdrawal_b = WithdrawalId {
             as_of: NockPkh::from_base58("8888888888888888888888888888888888888888888888888888")
                 .unwrap(),
-            base_event_id: crate::shared::types::BaseEventId((32..64).collect()),
+            base_event_id: crate::shared::types::AtomBytes((32..64).collect()),
         };
 
         let a0 = withdrawal_active_proposer(&withdrawal_a, 0, &pkhs);
@@ -143,7 +143,7 @@ mod tests {
         let withdrawal = WithdrawalId {
             as_of: NockPkh::from_base58("7777777777777777777777777777777777777777777777777777")
                 .unwrap(),
-            base_event_id: crate::shared::types::BaseEventId((0..32).collect()),
+            base_event_id: crate::shared::types::AtomBytes((0..32).collect()),
         };
 
         let turn0 = withdrawal_turn_proposer(&withdrawal, 3, 0, &pkhs);
@@ -158,7 +158,7 @@ mod tests {
         let withdrawal_a = WithdrawalId {
             as_of: NockPkh::from_base58("7777777777777777777777777777777777777777777777777777")
                 .unwrap(),
-            base_event_id: crate::shared::types::BaseEventId((0..32).collect()),
+            base_event_id: crate::shared::types::AtomBytes((0..32).collect()),
         };
         let withdrawal_b = WithdrawalId {
             as_of: NockPkh::from_base58("8888888888888888888888888888888888888888888888888888")

@@ -8,7 +8,10 @@ use clap::{Args, ColorChoice, Parser, ValueEnum};
 use nockvm::jets::hot::HotEntry;
 use nockvm::noun::Atom;
 use nockvm::pma::Pma;
-use nockvm::trace::{IntervalFilter, KeywordFilter, TraceFilter, TraceInfo, TracingBackend};
+use nockvm::trace::{
+    IntervalFilter, KeywordFilter, ParquetBackend, PathPrefixFilter, TraceFilter, TraceInfo,
+    TracingBackend,
+};
 use tokio::fs;
 use tracing::{debug, info, warn, Level, Subscriber};
 use tracing_subscriber::fmt::format::Writer;
@@ -175,6 +178,60 @@ impl NockStackSize {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum TraceMode {
     Tracing,
+    #[value(name = "parquet")]
+    CaptureParquet,
+}
+
+fn split_csv_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn build_trace_filter(
+    keyword_filter: Option<String>,
+    interval_filter: Option<usize>,
+    path_prefix_filter: Option<String>,
+) -> Option<Box<dyn TraceFilter>> {
+    let keywords = keyword_filter
+        .as_deref()
+        .map(split_csv_list)
+        .filter(|items| !items.is_empty());
+    let prefixes = path_prefix_filter
+        .as_deref()
+        .map(split_csv_list)
+        .filter(|items| !items.is_empty());
+
+    match (keywords, interval_filter, prefixes) {
+        (Some(keywords), Some(interval), Some(prefixes)) => Some(
+            KeywordFilter { keywords }
+                .or(IntervalFilter { interval, cnt: 0 })
+                .and(PathPrefixFilter { prefixes })
+                .boxed(),
+        ),
+        (Some(keywords), Some(interval), None) => Some(
+            KeywordFilter { keywords }
+                .or(IntervalFilter { interval, cnt: 0 })
+                .boxed(),
+        ),
+        (Some(keywords), None, Some(prefixes)) => Some(
+            KeywordFilter { keywords }
+                .and(PathPrefixFilter { prefixes })
+                .boxed(),
+        ),
+        (None, Some(interval), Some(prefixes)) => Some(
+            IntervalFilter { interval, cnt: 0 }
+                .and(PathPrefixFilter { prefixes })
+                .boxed(),
+        ),
+        (Some(keywords), None, None) => Some(KeywordFilter { keywords }.boxed()),
+        (None, Some(interval), None) => Some(IntervalFilter { interval, cnt: 0 }.boxed()),
+        (None, None, Some(prefixes)) => Some(PathPrefixFilter { prefixes }.boxed()),
+        (None, None, None) => None,
+    }
 }
 
 /// Trace options for NockApp
@@ -189,29 +246,44 @@ pub struct TraceOpts {
 
     #[arg(long, requires = "mode")]
     pub interval_filter: Option<usize>,
+
+    #[arg(long, requires = "mode")]
+    pub path_prefix_filter: Option<String>,
+
+    #[arg(long, requires = "mode")]
+    pub parquet_output: Option<String>,
 }
 
 impl From<TraceOpts> for Option<TraceInfo> {
     fn from(trace_opts: TraceOpts) -> Self {
-        let keyword_filter = trace_opts
-            .keyword_filter
-            .map(|v| v.split(",").map(String::from).collect::<Vec<String>>())
-            .map(|keywords| KeywordFilter { keywords });
-        let interval_filter = trace_opts
-            .interval_filter
-            .map(|interval| IntervalFilter { interval, cnt: 0 });
+        let TraceOpts {
+            mode,
+            keyword_filter,
+            interval_filter,
+            path_prefix_filter,
+            parquet_output,
+        } = trace_opts;
+        let mode = mode?;
 
-        let filter = match (keyword_filter, interval_filter) {
-            (Some(a), Some(b)) => Some(a.or(b).boxed()),
-            (Some(a), _) => Some(a.boxed()),
-            (_, Some(b)) => Some(b.boxed()),
-            (None, None) => None,
+        let filter = build_trace_filter(keyword_filter, interval_filter, path_prefix_filter);
+        let backend: Box<dyn nockvm::trace::TraceBackend> = match mode {
+            TraceMode::Tracing => Box::new(TracingBackend::new()),
+            TraceMode::CaptureParquet => {
+                let output_path =
+                    parquet_output.unwrap_or_else(|| "nock-trace.parquet".to_string());
+                match ParquetBackend::new(&output_path) {
+                    Ok(backend) => Box::new(backend),
+                    Err(err) => {
+                        eprintln!(
+                            "failed to initialize parquet trace backend at {output_path}: {err}"
+                        );
+                        return None;
+                    }
+                }
+            }
         };
 
-        trace_opts.mode.map(|_mode| TraceInfo {
-            backend: Box::new(TracingBackend::new()),
-            filter,
-        })
+        Some(TraceInfo { backend, filter })
     }
 }
 

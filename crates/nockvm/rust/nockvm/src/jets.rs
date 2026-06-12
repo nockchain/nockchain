@@ -374,6 +374,7 @@ pub mod util {
 
             Context {
                 stack,
+                op_budget: None,
                 slogger,
                 cold,
                 warm,

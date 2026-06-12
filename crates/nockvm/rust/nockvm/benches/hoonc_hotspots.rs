@@ -34,6 +34,7 @@ fn bench_context() -> Context {
 
     Context {
         stack,
+        op_budget: None,
         slogger,
         cold,
         warm,

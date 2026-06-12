@@ -1,6 +1,0 @@
-package(default_visibility = ["//visibility:public"])
-
-exports_files([
-    "note_data_fixtures.jam",
-    "withdrawal_tx_fixtures.jam",
-])

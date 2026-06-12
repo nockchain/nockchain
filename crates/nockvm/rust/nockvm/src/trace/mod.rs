@@ -19,6 +19,9 @@ use crate::noun::{Atom, DirectAtom, IndirectAtom, Noun};
 mod tracing_backend;
 pub use tracing_backend::*;
 
+mod parquet_backend;
+pub use parquet_backend::*;
+
 mod filter;
 pub use filter::*;
 
@@ -38,6 +41,17 @@ pub trait TraceBackend: Send {
     }
 
     fn write_metadata(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn write_behavior_event(
+        &mut self,
+        _engine: &str,
+        _phase: &str,
+        _location: Option<&str>,
+        _trace_path: Option<&str>,
+        _detail: Option<&str>,
+    ) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -125,6 +139,29 @@ pub fn write_serf_trace_safe(context: &mut Context, name: &str, start: Instant) 
 
 pub fn write_serf_trace(info: &mut TraceInfo, name: &str, start: Instant) -> Result<(), Error> {
     info.backend.write_serf_trace(name, start)
+}
+
+/// Abort writing to trace file if an error is encountered.
+///
+/// This should result in a well-formed partial trace file.
+pub fn write_behavior_event_safe(
+    context: &mut Context,
+    engine: &str,
+    phase: &str,
+    location: Option<&str>,
+    trace_path: Option<&str>,
+    detail: Option<&str>,
+) {
+    let Some(info) = context.trace_info.as_mut() else {
+        return;
+    };
+    if let Err(e) = info
+        .backend
+        .write_behavior_event(engine, phase, location, trace_path, detail)
+    {
+        flog!(context, "\rserf: error writing behavior trace event: {:?}", e);
+        context.trace_info = None;
+    }
 }
 
 pub unsafe fn write_nock_trace(

@@ -27,12 +27,11 @@ use crate::shared::ingress::proto::{
     WithdrawalProposalStatusResponse, WithdrawalSnapshot as ProtoWithdrawalSnapshot,
 };
 use crate::shared::signing::{verify_bridge_signature, BridgeSigner};
-use crate::shared::types::{keccak256, BaseEventId, Tip5Hash};
+use crate::shared::types::{keccak256, AtomBytes, Tip5Hash};
 use crate::withdrawal::proposals::{
     reconstruct_withdrawal_proposal, TrackedWithdrawalRequest, WithdrawalProposalRegistry,
     WithdrawalProposalValidationError, WithdrawalProposalValidationOutcome,
 };
-use crate::withdrawal::snapshot::BridgeNoteSnapshotService;
 use crate::withdrawal::state::{LiveWithdrawalView, WithdrawalFallbackPolicy, WithdrawalState};
 use crate::withdrawal::submission::{
     register_withdrawal_or_alert, sequenced_withdrawal_released,
@@ -62,7 +61,6 @@ pub struct WithdrawalProposalTransport {
     commit_signer: Arc<BridgeSigner>,
     registry: Arc<WithdrawalProposalRegistry>,
     sequencer: Option<Arc<dyn WithdrawalSequencerPort>>,
-    confirmed_snapshot_service: Option<Arc<BridgeNoteSnapshotService>>,
     bridge_status: Option<BridgeStatus>,
     _fallback_policy: WithdrawalFallbackPolicy,
     acceptances: Arc<Mutex<HashMap<ProposalCommitKey, HashSet<u64>>>>,
@@ -200,7 +198,6 @@ impl WithdrawalProposalTransport {
             commit_signer,
             registry,
             sequencer: None,
-            confirmed_snapshot_service: None,
             bridge_status: None,
             _fallback_policy: fallback_policy,
             acceptances: Arc::new(Mutex::new(HashMap::new())),
@@ -211,16 +208,6 @@ impl WithdrawalProposalTransport {
     /// before authorization begins.
     pub fn with_sequencer(mut self, sequencer: Arc<dyn WithdrawalSequencerPort>) -> Self {
         self.sequencer = Some(sequencer);
-        self
-    }
-
-    /// Attaches the local confirmed note snapshot used to require peer proposals
-    /// to spend only inputs this node sees at its configured safe Nockchain tip.
-    pub fn with_confirmed_snapshot_service(
-        mut self,
-        snapshot_service: Arc<BridgeNoteSnapshotService>,
-    ) -> Self {
-        self.confirmed_snapshot_service = Some(snapshot_service);
         self
     }
 
@@ -1022,33 +1009,6 @@ impl WithdrawalProposalTransport {
                 received_node_id: sender_node_id,
             });
         }
-        let tracked = self
-            .registry
-            .load_sorted_tracked_withdrawal_requests()
-            .await?
-            .into_iter()
-            .find(|tracked| tracked.id == proposal.id)
-            .ok_or_else(|| WithdrawalProposalValidationError::UnknownWithdrawal {
-                id: proposal.id.clone(),
-            })?;
-        if tracked.recipient != proposal.recipient {
-            return Err(WithdrawalProposalValidationError::WithdrawalMismatch {
-                id: proposal.id.clone(),
-                field: "recipient",
-            });
-        }
-        if tracked.amount != proposal.burned_amount {
-            return Err(WithdrawalProposalValidationError::WithdrawalMismatch {
-                id: proposal.id.clone(),
-                field: "burned_amount",
-            });
-        }
-        if tracked.base_batch_end != proposal.base_batch_end {
-            return Err(WithdrawalProposalValidationError::WithdrawalMismatch {
-                id: proposal.id.clone(),
-                field: "base_batch_end",
-            });
-        }
         if let Some(existing) = self.registry.fetch_live_withdrawal(&proposal.id).await? {
             if proposal.epoch > existing.current_epoch {
                 return Err(WithdrawalProposalValidationError::LiveAttemptExists {
@@ -1059,15 +1019,6 @@ impl WithdrawalProposalTransport {
                 });
             }
         }
-        let current_epoch = self.registry.next_expected_epoch(&proposal.id).await?;
-        if proposal.epoch != current_epoch {
-            return Err(WithdrawalProposalValidationError::NonContiguousEpoch {
-                id: proposal.id.clone(),
-                expected_epoch: current_epoch,
-                received_epoch: proposal.epoch,
-            });
-        }
-        self.ensure_selected_inputs_safe(proposal).await?;
         let outcome = self.registry.validate_and_cache_prepared(proposal).await?;
         for node_id in node_ids {
             let _ = self
@@ -1075,34 +1026,6 @@ impl WithdrawalProposalTransport {
                 .await;
         }
         Ok((proposal_hash, outcome))
-    }
-
-    async fn ensure_selected_inputs_safe(
-        &self,
-        proposal: &WithdrawalProposalData,
-    ) -> Result<(), WithdrawalProposalValidationError> {
-        let Some(snapshot_service) = self.confirmed_snapshot_service.as_ref() else {
-            return Ok(());
-        };
-        snapshot_service
-            .refresh_if_stale(SystemTime::now())
-            .await
-            .map_err(
-                |err| WithdrawalProposalValidationError::SelectedInputsNotSafe {
-                    id: proposal.id.clone(),
-                    epoch: proposal.epoch,
-                    reason: format!("failed to refresh local bridge note snapshot: {err}"),
-                },
-            )?;
-        snapshot_service
-            .validate_selected_inputs_safe(&proposal.selected_inputs)
-            .map_err(
-                |err| WithdrawalProposalValidationError::SelectedInputsNotSafe {
-                    id: proposal.id.clone(),
-                    epoch: proposal.epoch,
-                    reason: err.to_string(),
-                },
-            )
     }
 
     async fn expected_assembler_node_id(
@@ -1425,16 +1348,9 @@ pub fn withdrawal_id_to_proto(id: &WithdrawalId) -> ProtoWithdrawalId {
 
 /// Converts a protobuf withdrawal id into the domain type.
 pub fn withdrawal_id_from_proto(id: &ProtoWithdrawalId) -> Result<WithdrawalId, BridgeError> {
-    if id.base_event_id.len() != 32 {
-        return Err(BridgeError::ValueConversion(format!(
-            "withdrawal id base_event_id must be 32 bytes, got {}",
-            id.base_event_id.len()
-        )));
-    }
-
     Ok(WithdrawalId {
         as_of: tip5_from_bytes(&id.as_of)?,
-        base_event_id: BaseEventId(id.base_event_id.clone()),
+        base_event_id: AtomBytes(id.base_event_id.clone()),
     })
 }
 
@@ -1851,9 +1767,6 @@ fn validation_error_status(err: &WithdrawalProposalValidationError) -> &'static 
         WithdrawalProposalValidationError::InvalidTransactionBody { .. } => {
             "invalid_transaction_body"
         }
-        WithdrawalProposalValidationError::SelectedInputsNotSafe { .. } => {
-            "selected_inputs_not_safe"
-        }
         WithdrawalProposalValidationError::NonContiguousEpoch { .. } => "non_contiguous_epoch",
         WithdrawalProposalValidationError::LiveAttemptExists { .. } => "live_attempt_exists",
         WithdrawalProposalValidationError::WrongAssembler { .. } => "wrong_assembler",
@@ -1873,17 +1786,12 @@ fn validation_outcome_status(outcome: WithdrawalProposalValidationOutcome) -> &'
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
 
     use nockchain_math::belt::Belt;
     use nockchain_math::crypto::cheetah::{ch_scal_big, trunc_g_order, A_GEN, G_ORDER};
-    use nockchain_math::owned_based_noun::OwnedBasedNoun;
     use nockchain_math::tip5::hash::hash_varlen;
     use nockchain_math::zoon::zset::ZSet;
-    use nockchain_types::tx_engine::common::{BlockHeight, Hash as Tip5Hash, Nicks};
-    use nockchain_types::tx_engine::v1::note::{
-        Balance, BalanceUpdate, Note, NoteData, NoteDataEntry, NoteV1,
-    };
+    use nockchain_types::tx_engine::common::Hash as Tip5Hash;
     use nockchain_types::v1::{
         LockPrimitive, Name, PkhSignatureEntry, SchnorrPubkey, SchnorrSignature,
     };
@@ -1906,9 +1814,6 @@ mod tests {
     use crate::shared::stop::StopController;
     use crate::withdrawal::proposals::{TrackedWithdrawalRequest, WithdrawalProjectionStore};
     use crate::withdrawal::sequencer::store::WithdrawalSequencerStore;
-    use crate::withdrawal::snapshot::{
-        BridgeNoteSnapshotService, BridgeNoteSnapshotSource, BridgeOwnedNoteSelectors,
-    };
     use crate::withdrawal::submission::{
         NextPendingWithdrawalOrdering, WithdrawalSequencerCanonicalizationError,
         WithdrawalSequencerPort, WithdrawalSequencerSubmitOutcome,
@@ -1928,21 +1833,6 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct RegistrationFailingSequencerPort;
-
-    #[derive(Clone, Debug)]
-    struct StaticSnapshotSource {
-        pages: Vec<BalanceUpdate>,
-    }
-
-    #[async_trait]
-    impl BridgeNoteSnapshotSource for StaticSnapshotSource {
-        async fn fetch_pages(
-            &self,
-            _selectors: &BridgeOwnedNoteSelectors,
-        ) -> Result<Vec<BalanceUpdate>, BridgeError> {
-            Ok(self.pages.clone())
-        }
-    }
 
     #[async_trait]
     impl WithdrawalSequencerPort for LocalCanonicalSequencerPort {
@@ -2358,68 +2248,6 @@ mod tests {
         BridgeStatus::new(health)
     }
 
-    fn snapshot_note(name: Name, origin_page: u64) -> Note {
-        let note_data = NoteData::new(vec![NoteDataEntry::new(
-            "bridge-test".to_string(),
-            OwnedBasedNoun::try_atom(origin_page)
-                .expect("fixture note-data value should fit in an atom"),
-        )]);
-        Note::V1(NoteV1::new(
-            BlockHeight(Belt(origin_page)),
-            name,
-            note_data,
-            Nicks(1),
-        ))
-    }
-
-    fn snapshot_page(height: u64, block_id: u64, notes: Vec<(Name, Note)>) -> BalanceUpdate {
-        BalanceUpdate {
-            height: BlockHeight(Belt(height)),
-            block_id: Tip5Hash([Belt(block_id), Belt(0), Belt(0), Belt(0), Belt(0)]),
-            notes: Balance(notes),
-        }
-    }
-
-    fn snapshot_service_for_notes(
-        height: u64,
-        depth: u64,
-        notes: Vec<(Name, Note)>,
-    ) -> Arc<BridgeNoteSnapshotService> {
-        Arc::new(
-            BridgeNoteSnapshotService::new(
-                Arc::new(StaticSnapshotSource {
-                    pages: vec![snapshot_page(height, 9000 + height, notes)],
-                }),
-                BridgeOwnedNoteSelectors {
-                    first_names: vec!["bridge-test".to_string()],
-                },
-                Duration::from_secs(300),
-            )
-            .with_nockchain_confirmation_depth(depth),
-        )
-    }
-
-    fn snapshot_service_for_proposal_inputs(
-        proposal: &WithdrawalProposalData,
-        height: u64,
-        origin_page: u64,
-        depth: u64,
-    ) -> Arc<BridgeNoteSnapshotService> {
-        snapshot_service_for_notes(
-            height,
-            depth,
-            proposal
-                .selected_inputs
-                .iter()
-                .cloned()
-                .map(|name| {
-                    let note = snapshot_note(name.clone(), origin_page);
-                    (name, note)
-                })
-                .collect(),
-        )
-    }
-
     fn test_signer() -> Arc<BridgeSigner> {
         Arc::new(
             BridgeSigner::new(
@@ -2504,61 +2332,6 @@ mod tests {
             .with_sequencer(Arc::new(LocalCanonicalSequencerPort {
                 store: withdrawal_state_store.clone(),
             })),
-        );
-        let (runtime_task, runtime) = make_runtime();
-        (
-            transport, withdrawal_state_store, runtime_task, runtime, dir,
-        )
-    }
-
-    async fn open_transport_with_snapshot(
-        node_id: u64,
-        min_signers: usize,
-        node_pkhs: Vec<Tip5Hash>,
-        fallback_policy: WithdrawalFallbackPolicy,
-        snapshot_service: Arc<BridgeNoteSnapshotService>,
-    ) -> (
-        Arc<WithdrawalProposalTransport>,
-        Arc<WithdrawalSequencerStore>,
-        tokio::task::JoinHandle<Result<(), BridgeError>>,
-        Arc<BridgeRuntimeHandle>,
-        tempfile::TempDir,
-    ) {
-        let dir = tempdir().expect("tempdir");
-        let projection_store = Arc::new(
-            WithdrawalProjectionStore::open(
-                dir.path()
-                    .join(format!("withdrawal-local-state-{node_id}.sqlite")),
-            )
-            .await
-            .expect("withdrawal projection store"),
-        );
-        let registry = Arc::new(
-            WithdrawalProposalRegistry::new_without_transaction_body_validator_for_tests(
-                projection_store,
-            ),
-        );
-        let withdrawal_state_store = Arc::new(
-            WithdrawalSequencerStore::open(
-                dir.path().join(format!("state-store-{node_id}.sqlite")),
-            )
-            .await
-            .expect("withdrawal state store"),
-        );
-        let transport = Arc::new(
-            WithdrawalProposalTransport::new(
-                node_id,
-                node_pkhs,
-                test_node_eth_addresses(5),
-                min_signers,
-                test_withdrawal_signer(node_id),
-                registry,
-                fallback_policy,
-            )
-            .with_sequencer(Arc::new(LocalCanonicalSequencerPort {
-                store: withdrawal_state_store.clone(),
-            }))
-            .with_confirmed_snapshot_service(snapshot_service),
         );
         let (runtime_task, runtime) = make_runtime();
         (
@@ -2681,14 +2454,8 @@ mod tests {
         }
     }
 
-    fn sample_base_event_id(start: u8) -> BaseEventId {
-        BaseEventId((0..32).map(|offset| start.wrapping_add(offset)).collect())
-    }
-
-    fn sample_base_event_id_ending_in_zero(start: u8) -> BaseEventId {
-        let mut bytes: Vec<u8> = (0..32).map(|offset| start.wrapping_add(offset)).collect();
-        bytes[31] = 0;
-        BaseEventId(bytes)
+    fn sample_base_event_id(start: u8) -> AtomBytes {
+        AtomBytes((0..32).map(|offset| start.wrapping_add(offset)).collect())
     }
 
     fn sample_request() -> NockWithdrawalRequestKernelData {
@@ -2699,35 +2466,6 @@ mod tests {
             base_batch_end: 777,
             as_of: Tip5Hash([Belt(11), Belt(22), Belt(33), Belt(44), Belt(55)]),
         }
-    }
-
-    #[test]
-    fn withdrawal_id_proto_roundtrip_preserves_trailing_zero_base_event_id() {
-        let id = WithdrawalId {
-            as_of: Tip5Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
-            base_event_id: sample_base_event_id_ending_in_zero(0x42),
-        };
-
-        let proto = withdrawal_id_to_proto(&id);
-        let decoded = withdrawal_id_from_proto(&proto).expect("valid withdrawal id proto");
-
-        assert_eq!(decoded.base_event_id.0.len(), 32);
-        assert_eq!(decoded, id);
-    }
-
-    #[test]
-    fn withdrawal_id_from_proto_rejects_short_base_event_id() {
-        let proto = ProtoWithdrawalId {
-            as_of: tip5_to_bytes(&Tip5Hash([Belt(1); 5])),
-            base_event_id: vec![0x11; 31],
-        };
-
-        let err = withdrawal_id_from_proto(&proto).expect_err("short base_event_id should fail");
-
-        assert!(
-            err.to_string().contains("base_event_id must be 32 bytes"),
-            "unexpected error: {err}"
-        );
     }
 
     #[tokio::test]
@@ -4467,161 +4205,6 @@ mod tests {
 
         assert!(!response.accepted);
         assert_eq!(response.status, "wrong_assembler");
-    }
-
-    #[tokio::test]
-    async fn accepts_peer_proposal_when_selected_inputs_are_local_safe() {
-        let request = sample_request();
-        let proposal = sample_proposal(0);
-        let node_pkhs = sample_node_pkhs();
-        let sender_node_id = scheduled_assembler_node_id(&proposal.id, proposal.epoch, &node_pkhs)
-            .expect("scheduled assembler");
-        let local_node_id = (sender_node_id + 1) % (node_pkhs.len() as u64);
-        let snapshot_height = 100;
-        let confirmation_depth = 5;
-        let safe_tip = snapshot_height - confirmation_depth;
-        let input_origin_page = safe_tip;
-        // Safe tip is the local snapshot height minus confirmation depth:
-        // 100 - 5 = 95. The proposal inputs originate at page 95, so they are safe.
-        let snapshot_service = snapshot_service_for_proposal_inputs(
-            &proposal, snapshot_height, input_origin_page, confirmation_depth,
-        );
-
-        let (transport, _withdrawal_state_store, runtime_task, _runtime, _dir) =
-            open_transport_with_snapshot(
-                local_node_id,
-                1,
-                node_pkhs,
-                WithdrawalFallbackPolicy::default(),
-                snapshot_service,
-            )
-            .await;
-        transport
-            .registry()
-            .track_withdrawal_request(&request)
-            .await
-            .expect("track request");
-
-        let response = transport
-            .ingest_peer_proposal(sender_node_id, &proposal)
-            .await
-            .expect("ingest safe proposal");
-
-        assert!(response.accepted, "response: {response:?}");
-        assert_eq!(response.status, "inserted");
-        assert!(response.commit_signature.is_some());
-
-        runtime_task.abort();
-    }
-
-    #[tokio::test]
-    async fn rejects_peer_proposal_with_input_missing_from_local_snapshot() {
-        let request = sample_request();
-        let proposal = sample_proposal(0);
-        let node_pkhs = sample_node_pkhs();
-        let sender_node_id = scheduled_assembler_node_id(&proposal.id, proposal.epoch, &node_pkhs)
-            .expect("scheduled assembler");
-        let local_node_id = (sender_node_id + 1) % (node_pkhs.len() as u64);
-        let snapshot_height = 100;
-        let confirmation_depth = 5;
-        let safe_tip = snapshot_height - confirmation_depth;
-        // Safe tip would be 95, but the local snapshot has no copy of the selected
-        // proposal inputs at any origin page, so the node must reject before signing.
-        assert_eq!(safe_tip, 95);
-        let snapshot_service =
-            snapshot_service_for_notes(snapshot_height, confirmation_depth, Vec::new());
-
-        let (transport, _withdrawal_state_store, runtime_task, _runtime, _dir) =
-            open_transport_with_snapshot(
-                local_node_id,
-                1,
-                node_pkhs,
-                WithdrawalFallbackPolicy::default(),
-                snapshot_service,
-            )
-            .await;
-        transport
-            .registry()
-            .track_withdrawal_request(&request)
-            .await
-            .expect("track request");
-
-        let response = transport
-            .ingest_peer_proposal(sender_node_id, &proposal)
-            .await
-            .expect("ingest missing-input proposal");
-
-        assert!(!response.accepted, "response: {response:?}");
-        assert_eq!(response.status, "selected_inputs_not_safe");
-        assert!(response
-            .error
-            .contains("not in the local bridge-owned note snapshot"));
-        assert!(response.error.contains("height 100"));
-        assert!(response.commit_signature.is_none());
-        assert!(transport
-            .registry()
-            .fetch_cached_proposal(proposal.id.clone(), proposal.epoch)
-            .await
-            .expect("fetch cached proposal")
-            .is_none());
-
-        runtime_task.abort();
-    }
-
-    #[tokio::test]
-    async fn rejects_peer_proposal_with_input_newer_than_local_safe_tip() {
-        let request = sample_request();
-        let proposal = sample_proposal(0);
-        let node_pkhs = sample_node_pkhs();
-        let sender_node_id = scheduled_assembler_node_id(&proposal.id, proposal.epoch, &node_pkhs)
-            .expect("scheduled assembler");
-        let local_node_id = (sender_node_id + 1) % (node_pkhs.len() as u64);
-        let snapshot_height = 100;
-        let confirmation_depth = 5;
-        let safe_tip = snapshot_height - confirmation_depth;
-        let input_origin_page = safe_tip + 1;
-        // Safe tip is 100 - 5 = 95. These proposal inputs originate at page 96,
-        // which is newer than the local safe tip and must not be signed.
-        let snapshot_service = snapshot_service_for_proposal_inputs(
-            &proposal, snapshot_height, input_origin_page, confirmation_depth,
-        );
-
-        let (transport, _withdrawal_state_store, runtime_task, _runtime, _dir) =
-            open_transport_with_snapshot(
-                local_node_id,
-                1,
-                node_pkhs,
-                WithdrawalFallbackPolicy::default(),
-                snapshot_service,
-            )
-            .await;
-        transport
-            .registry()
-            .track_withdrawal_request(&request)
-            .await
-            .expect("track request");
-
-        let response = transport
-            .ingest_peer_proposal(sender_node_id, &proposal)
-            .await
-            .expect("ingest unsafe proposal");
-
-        assert!(!response.accepted, "response: {response:?}");
-        assert_eq!(response.status, "selected_inputs_not_safe");
-        assert!(response.error.contains("above local safe tip"));
-        assert!(response.error.contains("Nockchain height 96"));
-        assert!(response.error.contains("safe tip 95"));
-        assert!(response.error.contains("snapshot height 100"));
-        assert!(response.error.contains("confirmation depth 5"));
-        assert!(response.commit_signature.is_none());
-        assert!(transport
-            .registry()
-            .fetch_cached_proposal(proposal.id.clone(), proposal.epoch)
-            .await
-            .expect("fetch cached proposal")
-            .is_none());
-
-        runtime_task.abort();
     }
 
     #[tokio::test]

@@ -1,6 +1,0 @@
-package(default_visibility = ["//visibility:public"])
-
-exports_files([
-    "cue-test.jam",
-    "test-ker.jam",
-])

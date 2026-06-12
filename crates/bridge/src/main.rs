@@ -798,10 +798,7 @@ async fn main() -> Result<(), BridgeError> {
     )?;
     let withdrawal_registry = Arc::new(WithdrawalProposalRegistry::new(
         withdrawal_projection_store,
-        WithdrawalTransactionBodyValidator::new(
-            active_bridge_lock_root.clone(),
-            bridge_constants.nicks_fee_per_nock,
-        ),
+        WithdrawalTransactionBodyValidator::new(active_bridge_lock_root.clone()),
     ));
 
     let ingress_addr_raw = if let Some(address) = config_toml.ingress_listen_address() {
@@ -860,7 +857,6 @@ async fn main() -> Result<(), BridgeError> {
             WithdrawalFallbackPolicy::default(),
         )
         .with_sequencer(withdrawal_sequencer_client.clone())
-        .with_confirmed_snapshot_service(confirmed_snapshot_service.clone())
         .with_bridge_status(bridge_status.clone()),
     );
 

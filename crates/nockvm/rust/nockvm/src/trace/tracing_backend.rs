@@ -1,6 +1,4 @@
-use std::cmp::{Eq, PartialEq};
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use either::Either;
@@ -32,25 +30,25 @@ static NOCK_METADATA: Metadata<'static> = Metadata::new(
 
 static NOCK_CALLSITE: DefaultCallsite = DefaultCallsite::new(&NOCK_METADATA);
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct TraceKey {
+    path: String,
+    chum: String,
+}
+
+#[derive(Clone)]
 struct TraceEntry {
     id: Id,
-    metadata: &'static Metadata<'static>,
-    path: &'static str,
-    chum: &'static str,
 }
 
 impl TraceEntry {
-    fn new(
-        chum: impl Into<Box<str>>,
-        path: impl Into<Box<str>>,
-        dispatch: &Dispatch,
-        level: Level,
-    ) -> Self {
-        let path: &'static str = Box::leak(path.into());
-        let chum: &'static str = Box::leak(chum.into());
+    fn new(chum: &str, path: &str, dispatch: &Dispatch, level: Level) -> Self {
+        let path: &'static str = Box::leak(path.to_string().into_boxed_str());
+        let chum: &'static str = Box::leak(chum.to_string().into_boxed_str());
+        let span_name: &'static str = Box::leak(format!("{chum}::{path}").into_boxed_str());
 
         let metadata = Box::leak(Box::new(Metadata::new(
-            path,
+            span_name,
             "nockcode",
             level,
             None,
@@ -59,45 +57,18 @@ impl TraceEntry {
             FieldSet::new(&[], identify_callsite!(&NOCK_CALLSITE)),
             Kind::SPAN,
         )));
-
         let values = metadata.fields().value_set(&[]);
-
         let attrs = Attributes::new(metadata, &values);
         let id = dispatch.new_span(&attrs);
-        Self {
-            id,
-            metadata,
-            path,
-            chum,
-        }
-    }
-}
-
-impl Hash for TraceEntry {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.chum.hash(state)
-    }
-}
-
-impl Eq for TraceEntry {}
-
-impl PartialEq for TraceEntry {
-    fn eq(&self, other: &TraceEntry) -> bool {
-        (*self.chum).eq(other.chum)
-    }
-}
-
-impl std::borrow::Borrow<str> for TraceEntry {
-    fn borrow(&self) -> &str {
-        self.chum
+        Self { id }
     }
 }
 
 // In case we reinitialize Serf (we probably won't), cache old entries.
-static GLOBAL_ENTRIES: Mutex<Option<HashSet<TraceEntry>>> = Mutex::new(None);
+static GLOBAL_ENTRIES: Mutex<Option<HashMap<TraceKey, TraceEntry>>> = Mutex::new(None);
 
 pub struct TracingBackend {
-    entries: HashSet<TraceEntry>,
+    entries: HashMap<TraceKey, TraceEntry>,
     subscriber: Option<Dispatch>,
 }
 
@@ -145,7 +116,6 @@ impl TraceBackend for TracingBackend {
         let Ok(chum) = std::str::from_utf8(chum_handle.as_ne_bytes()) else {
             return;
         };
-
         let chum = chum.trim_end_matches('\0');
 
         let path = path_to_cord(stack, path);
@@ -155,20 +125,22 @@ impl TraceBackend for TracingBackend {
         if self.subscriber.is_none() {
             self.subscriber = Some(dispatcher::get_default(Clone::clone));
         }
-
         let subscriber = self.subscriber.as_ref().expect("subscriber should be set");
 
-        let id = if let Some(entry) = self.entries.get(chum) {
+        let key = TraceKey {
+            path: path.to_string(),
+            chum: chum.to_string(),
+        };
+        let id = if let Some(entry) = self.entries.get(&key) {
             entry.id.clone()
         } else {
             let entry = TraceEntry::new(chum, path, subscriber, Level::DEBUG);
             let id = entry.id.clone();
-            self.entries.insert(entry);
+            self.entries.insert(key, entry);
             id
         };
 
         subscriber.enter(&id);
-
         TraceStack::push_on_stack(
             stack,
             TraceData {
@@ -183,7 +155,6 @@ impl TraceBackend for TracingBackend {
         trace_stack: *const TraceStack,
     ) -> Result<(), Error> {
         let mut trace_stack = trace_stack as *const TraceStack<TraceData>;
-
         if trace_stack.is_null() {
             return Ok(());
         }
@@ -195,11 +166,8 @@ impl TraceBackend for TracingBackend {
 
         loop {
             let id = Id::from_u64((&*trace_stack).span_id);
-
             subscriber.exit(&id);
-
             trace_stack = (&*trace_stack).next;
-
             if trace_stack.is_null() {
                 break Ok(());
             }

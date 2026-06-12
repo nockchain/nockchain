@@ -118,12 +118,12 @@ mod tests {
 
     use super::*;
     use crate::shared::proposer::withdrawal_active_proposer;
-    use crate::shared::types::{zero_tip5_hash, Tip5Hash};
+    use crate::shared::types::{zero_tip5_hash, AtomBytes, Tip5Hash};
 
     fn sample_id(seed: u64) -> WithdrawalId {
         WithdrawalId {
             as_of: zero_tip5_hash(),
-            base_event_id: crate::shared::types::BaseEventId(vec![seed as u8; 32]),
+            base_event_id: AtomBytes(vec![seed as u8; 32]),
         }
     }
 

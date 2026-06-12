@@ -14,12 +14,9 @@ use tracing::{info, info_span, warn, Instrument};
 use crate::core::loop_policy::BaseObserverLoopPolicy;
 use crate::shared::base::{
     burn_for_withdrawal_signature_hash, compute_base_event_id,
-    decode_burn_for_withdrawal_log_with_calldata, fetch_base_block_info,
-    is_explicitly_refunded_withdrawal_burn, validate_base_log_block_hash,
-    BurnForWithdrawalDecodeError,
+    decode_burn_for_withdrawal_log_with_calldata, BurnForWithdrawalDecodeError,
 };
 use crate::shared::errors::BridgeError;
-use crate::shared::types::BaseEventId;
 use crate::withdrawal::proposals::TrackedWithdrawalRequest;
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
 
@@ -34,9 +31,6 @@ pub enum SequencerBaseWithdrawalRejection {
         base_event_id_hex: String,
         batch_start: u64,
         batch_end: u64,
-    },
-    ExplicitlyRefunded {
-        base_event_id_hex: String,
     },
     EventOutsideClaimedBatchWindow {
         event_block: u64,
@@ -91,10 +85,6 @@ impl fmt::Display for SequencerBaseWithdrawalRejection {
                 f,
                 "withdrawal burn base_event_id {base_event_id_hex} was not found in confirmed Base batch {batch_start}..={batch_end}"
             ),
-            Self::ExplicitlyRefunded { base_event_id_hex } => write!(
-                f,
-                "withdrawal burn base_event_id {base_event_id_hex} was explicitly refunded and is ignored"
-            ),
             Self::EventOutsideClaimedBatchWindow {
                 event_block,
                 batch_start,
@@ -139,10 +129,6 @@ impl fmt::Display for SequencerBaseWithdrawalRejection {
 }
 
 impl std::error::Error for SequencerBaseWithdrawalRejection {}
-
-pub(crate) fn sequencer_base_event_id_hex(base_event_id: &BaseEventId) -> String {
-    format!("0x{}", hex::encode(&base_event_id.0))
-}
 
 #[async_trait]
 pub trait SequencerBaseWithdrawalVerifier: Send + Sync {
@@ -279,13 +265,6 @@ impl SequencerBaseWithdrawalVerifier for SequencerBaseRpcWithdrawalVerifier {
             if base_event_id != tracked.id.base_event_id {
                 continue;
             }
-            if is_explicitly_refunded_withdrawal_burn(
-                &base_event_id, &log.transaction_hash, log.log_index,
-            ) {
-                return Err(SequencerBaseWithdrawalRejection::ExplicitlyRefunded {
-                    base_event_id_hex: sequencer_base_event_id_hex(&base_event_id),
-                });
-            }
             if log.raw.address != self.nock_contract_address {
                 return Err(SequencerBaseWithdrawalRejection::WrongContractAddress {
                     expected: self.nock_contract_address,
@@ -328,7 +307,7 @@ impl SequencerBaseWithdrawalVerifier for SequencerBaseRpcWithdrawalVerifier {
         }
 
         Err(SequencerBaseWithdrawalRejection::MissingBaseEventId {
-            base_event_id_hex: sequencer_base_event_id_hex(&tracked.id.base_event_id),
+            base_event_id_hex: format!("0x{}", hex::encode(&tracked.id.base_event_id.0)),
             batch_start,
             batch_end,
         })
@@ -386,15 +365,11 @@ impl SequencerBaseLogSource for RpcSequencerBaseLogSource {
             .get_logs(&filter)
             .await
             .map_err(|err| BridgeError::BaseBridgeMonitoring(err.to_string()))?;
-        let block_info = fetch_base_block_info(&self.provider, batch_start, batch_end).await?;
         let mut out = Vec::with_capacity(logs.len());
         for log in logs {
             let block_number = log.block_number.ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring("Base burn log missing block number".into())
             })?;
-            validate_base_log_block_hash(
-                &block_info, batch_start, batch_end, block_number, log.block_hash,
-            )?;
             let transaction_hash = log.transaction_hash.ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring("Base burn log missing transaction hash".into())
             })?;
@@ -434,7 +409,7 @@ mod tests {
     use crate::shared::base::{
         encode_withdrawal_burn_calldata, NOCK_BASE_PER_NICK, WITHDRAWAL_BURN_BASE_CALLDATA_LEN,
     };
-    use crate::shared::types::{BaseEventId, Tip5Hash};
+    use crate::shared::types::{AtomBytes, Tip5Hash};
     use crate::withdrawal::types::WithdrawalId;
 
     struct MockLogSource {
@@ -552,37 +527,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verifier_rejects_explicitly_refunded_withdrawal_burn() {
-        let lock_root = b256_from_u64(0x1234);
-        let mut log = burn_log(
-            105,
-            U256::from(42u64) * U256::from(NOCK_BASE_PER_NICK),
-            lock_root,
-        );
-        log.transaction_hash = B256::from_slice(
-            &hex::decode("fa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f")
-                .expect("refunded tx hash hex"),
-        );
-        log.log_index = Some(243);
-        let tracked = tracked_for(&log, 42, lock_root);
-        assert_eq!(
-            sequencer_base_event_id_hex(&tracked.id.base_event_id),
-            "0x45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"
-        );
-        let verifier = verifier_with_logs(109, 10, vec![log]);
-
-        let err = verifier
-            .verify(&tracked)
-            .await
-            .expect_err("refunded burn should be ignored");
-        assert!(matches!(
-            err,
-            SequencerBaseWithdrawalRejection::ExplicitlyRefunded { .. }
-        ));
-        assert!(err.to_string().contains("explicitly refunded"));
-    }
-
-    #[tokio::test]
     async fn verifier_rejects_matching_event_from_wrong_contract_address() {
         let lock_root = b256_from_u64(0x1234);
         let mut log = burn_log(
@@ -636,7 +580,7 @@ mod tests {
             lock_root,
         );
         let mut tracked = tracked_for(&log, 42, lock_root);
-        tracked.id.base_event_id = BaseEventId(vec![0xff; 32]);
+        tracked.id.base_event_id = AtomBytes(vec![0xff; 32]);
         let verifier = verifier_with_logs(109, 10, vec![log]);
 
         let err = verifier.verify(&tracked).await.expect_err("missing event");

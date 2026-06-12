@@ -1530,6 +1530,7 @@ mod tests {
 
     use super::*;
     use crate::observability::tui::types::AlertSeverity;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::proposals::{WithdrawalProjectionStore, WithdrawalProposalRegistry};
     use crate::withdrawal::sequencer::schema::sequencer_withdrawals;
     use crate::withdrawal::transport::withdrawal_id_to_proto;
@@ -1981,10 +1982,8 @@ mod tests {
         );
     }
 
-    fn sample_base_event_id(start: u8) -> crate::shared::types::BaseEventId {
-        crate::shared::types::BaseEventId(
-            (0..32).map(|offset| start.wrapping_add(offset)).collect(),
-        )
+    fn sample_base_event_id(start: u8) -> AtomBytes {
+        AtomBytes((0..32).map(|offset| start.wrapping_add(offset)).collect())
     }
 
     fn sample_request() -> NockWithdrawalRequestKernelData {

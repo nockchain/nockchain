@@ -23,6 +23,8 @@ use thiserror::Error;
 
 const CELL_MEM_WORD_SIZE: usize = (size_of::<CellMemory>() + 7) >> 3;
 
+const CACHED_MUG_METADATA_MASK: u64 = 0x7fff_ffff;
+
 /// A self-contained arena for allocating nouns.
 pub struct NounSlab<J = NockJammer> {
     root: Noun,
@@ -303,7 +305,20 @@ impl<J> NounAllocator for NounSlab<J> {
     }
 
     fn noun_space(&self) -> NounSpace {
-        NounSpace::empty().with_extra_ptr_ranges(self.ptr_ranges())
+        // In release builds, spaces with no PMA resolve pointer-form nouns as
+        // identity without consulting the range list (see
+        // NounSpace::resolve_stack_ptr), so don't pay to build it — this is
+        // called per helper invocation in native-compiler hot paths, and the
+        // per-call Vec construction dominated hoon-138 compilation. Debug
+        // builds keep the ranges so resolution can validate pointers.
+        #[cfg(debug_assertions)]
+        {
+            NounSpace::empty().with_extra_ptr_ranges(self.ptr_ranges())
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            NounSpace::empty()
+        }
     }
 }
 
@@ -381,7 +396,8 @@ impl<J> NounSlab<J> {
                             self.alloc_indirect(indirect.as_atom().in_space(space).size())
                         };
                         unsafe {
-                            copy_nonoverlapping(indirect_ptr, indirect_new_mem, indirect_mem_size)
+                            copy_nonoverlapping(indirect_ptr, indirect_new_mem, indirect_mem_size);
+                            *indirect_new_mem &= CACHED_MUG_METADATA_MASK;
                         };
                         let copied_noun = unsafe {
                             IndirectAtom::from_raw_pointer(indirect_new_mem)
@@ -398,7 +414,10 @@ impl<J> NounSlab<J> {
                             continue;
                         }
                         let cell_new_mem = unsafe { self.alloc_cell() };
-                        unsafe { copy_nonoverlapping(cell_ptr, cell_new_mem, 1) };
+                        unsafe {
+                            copy_nonoverlapping(cell_ptr, cell_new_mem, 1);
+                            (*cell_new_mem).metadata &= CACHED_MUG_METADATA_MASK;
+                        };
                         let copied_noun = unsafe { Cell::from_raw_pointer(cell_new_mem).as_noun() };
                         copied.insert(cell_ptr as u64, copied_noun);
                         unsafe { *dest = copied_noun };
@@ -484,7 +503,11 @@ impl<J> NounSlab<J> {
         res
     }
 
-    fn ptr_ranges(&self) -> Vec<(usize, usize)> {
+    pub fn noun_space_with_stack(&self, stack: &NockStack) -> NounSpace {
+        stack.noun_space().with_extra_ptr_ranges(self.ptr_ranges())
+    }
+
+    pub fn ptr_ranges(&self) -> Vec<(usize, usize)> {
         let mut ranges = Vec::with_capacity(self.slabs.len());
         for (base, layout) in &self.slabs {
             if base.is_null() || layout.size() == 0 {
@@ -1283,6 +1306,53 @@ mod tests {
         let mut copy_slab: NounSlab = NounSlab::new();
         let space = slab.noun_space();
         copy_slab.copy_into(test_noun, &space);
+    }
+
+    #[test]
+    fn copy_into_preserves_source_cached_mugs() {
+        let mut slab: NounSlab = NounSlab::new();
+        let cell = T(&mut slab, &[D(5), D(23)]);
+        let atom = Atom::from_bytes(&mut slab, &Bytes::from_static(b"large-indirect-atom"));
+        let atom_noun = atom.as_noun();
+        let space = slab.noun_space();
+        let atom_mug = calc_atom_mug_u32(atom, &space);
+        let cell_mug = {
+            let cell_handle = cell
+                .in_space(&space)
+                .as_cell()
+                .expect("source cell should be allocated");
+            let head_mug = get_mug(cell_handle.head().noun(), &space).expect("head mug");
+            let tail_mug = get_mug(cell_handle.tail().noun(), &space).expect("tail mug");
+            unsafe { calc_cell_mug_u32(head_mug, tail_mug, &space) }
+        };
+
+        unsafe {
+            let mut cell_allocated = cell.as_allocated().expect("cell should be allocated");
+            set_mug(&mut cell_allocated, cell_mug, &space);
+            let mut atom_allocated = atom_noun
+                .as_allocated()
+                .expect("indirect atom should be allocated");
+            set_mug(&mut atom_allocated, atom_mug, &space);
+        }
+
+        let root = T(&mut slab, &[cell, atom_noun]);
+        let space = slab.noun_space();
+        let mut copy_slab: NounSlab = NounSlab::new();
+        let copied = copy_slab.copy_into(root, &space);
+        let copied_space = copy_slab.noun_space();
+        let copied_cell = copied
+            .in_space(&copied_space)
+            .as_cell()
+            .expect("copied root should be a cell");
+
+        assert_eq!(
+            get_mug(copied_cell.head().noun(), &copied_space),
+            Some(cell_mug)
+        );
+        assert_eq!(
+            get_mug(copied_cell.tail().noun(), &copied_space),
+            Some(atom_mug)
+        );
     }
 
     #[test]

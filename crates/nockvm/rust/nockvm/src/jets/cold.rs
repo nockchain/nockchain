@@ -1,6 +1,7 @@
 use std::ptr::{copy_nonoverlapping, null_mut};
 
 use intmap::IntMap;
+use nockvm_macros::tas;
 use tracing::debug;
 
 use crate::hamt::Hamt;
@@ -217,6 +218,283 @@ impl Iterator for Batteries {
     }
 }
 
+#[inline(always)]
+fn noun_unifying_equality(stack: &mut NockStack, left: Noun, right: Noun) -> bool {
+    let mut left = left;
+    let mut right = right;
+    unsafe { unifying_equality(stack, &mut left, &mut right) }
+}
+
+#[inline(always)]
+fn direct_atom_is(noun: Noun, value: u64, space: &NounSpace) -> bool {
+    noun.in_space(space)
+        .as_atom()
+        .ok()
+        .and_then(|atom| atom.as_u64().ok())
+        == Some(value)
+}
+
+#[inline(always)]
+fn transparent_hint_tag(hint: Noun, space: &NounSpace) -> Option<u64> {
+    let tag = if let Ok(cell) = hint.in_space(space).as_cell() {
+        cell.head().noun()
+    } else {
+        hint
+    };
+    tag.as_direct().ok().map(|direct| direct.data())
+}
+
+#[inline(always)]
+fn is_transparent_hint_tag(tag: u64) -> bool {
+    matches!(
+        tag,
+        tas!(b"hand") | tas!(b"hunk") | tas!(b"lose") | tas!(b"mean") | tas!(b"spot")
+    )
+}
+
+#[inline(always)]
+fn transparent_hint_body(formula: Noun, space: &NounSpace) -> Option<Noun> {
+    let cell = formula.in_space(space).as_cell().ok()?;
+    if !direct_atom_is(cell.head().noun(), 11, space) {
+        return None;
+    }
+    let args = cell.tail().as_cell().ok()?;
+    let tag = transparent_hint_tag(args.head().noun(), space)?;
+    if is_transparent_hint_tag(tag) {
+        Some(args.tail().noun())
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn strip_transparent_hints(mut formula: Noun, space: &NounSpace) -> Noun {
+    while let Some(body) = transparent_hint_body(formula, space) {
+        formula = body;
+    }
+    formula
+}
+
+fn nock_formula_eq_ignoring_transparent_hints(
+    stack: &mut NockStack,
+    left: Noun,
+    right: Noun,
+    space: &NounSpace,
+) -> bool {
+    let left = strip_transparent_hints(left, space);
+    let right = strip_transparent_hints(right, space);
+    if noun_unifying_equality(stack, left, right) {
+        return true;
+    }
+
+    let (Ok(left_cell), Ok(right_cell)) = (
+        left.in_space(space).as_cell(),
+        right.in_space(space).as_cell(),
+    ) else {
+        return false;
+    };
+    let left_head = left_cell.head().noun();
+    let right_head = right_cell.head().noun();
+    let left_tail = left_cell.tail().noun();
+    let right_tail = right_cell.tail().noun();
+
+    match (
+        left_head.in_space(space).as_cell(),
+        right_head.in_space(space).as_cell(),
+    ) {
+        (Ok(_), Ok(_)) => {
+            return nock_formula_eq_ignoring_transparent_hints(stack, left_head, right_head, space)
+                && nock_formula_eq_ignoring_transparent_hints(stack, left_tail, right_tail, space);
+        }
+        (Ok(_), Err(_)) | (Err(_), Ok(_)) => return false,
+        (Err(_), Err(_)) => {}
+    }
+
+    let (Some(left_op), Some(right_op)) = (
+        left_head
+            .in_space(space)
+            .as_atom()
+            .ok()
+            .and_then(|atom| atom.as_u64().ok()),
+        right_head
+            .in_space(space)
+            .as_atom()
+            .ok()
+            .and_then(|atom| atom.as_u64().ok()),
+    ) else {
+        return false;
+    };
+    if left_op != right_op {
+        return false;
+    }
+
+    match left_op {
+        0 | 1 => false,
+        2 | 5 | 7 | 8 => {
+            let (Ok(left_args), Ok(right_args)) = (
+                left_tail.in_space(space).as_cell(),
+                right_tail.in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            nock_formula_eq_ignoring_transparent_hints(
+                stack,
+                left_args.head().noun(),
+                right_args.head().noun(),
+                space,
+            ) && nock_formula_eq_ignoring_transparent_hints(
+                stack,
+                left_args.tail().noun(),
+                right_args.tail().noun(),
+                space,
+            )
+        }
+        3 | 4 => nock_formula_eq_ignoring_transparent_hints(stack, left_tail, right_tail, space),
+        6 => {
+            let (Ok(left_args), Ok(right_args)) = (
+                left_tail.in_space(space).as_cell(),
+                right_tail.in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            let (Ok(left_rest), Ok(right_rest)) = (
+                left_args.tail().noun().in_space(space).as_cell(),
+                right_args.tail().noun().in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            nock_formula_eq_ignoring_transparent_hints(
+                stack,
+                left_args.head().noun(),
+                right_args.head().noun(),
+                space,
+            ) && nock_formula_eq_ignoring_transparent_hints(
+                stack,
+                left_rest.head().noun(),
+                right_rest.head().noun(),
+                space,
+            ) && nock_formula_eq_ignoring_transparent_hints(
+                stack,
+                left_rest.tail().noun(),
+                right_rest.tail().noun(),
+                space,
+            )
+        }
+        9 => {
+            let (Ok(left_args), Ok(right_args)) = (
+                left_tail.in_space(space).as_cell(),
+                right_tail.in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            noun_unifying_equality(stack, left_args.head().noun(), right_args.head().noun())
+                && nock_formula_eq_ignoring_transparent_hints(
+                    stack,
+                    left_args.tail().noun(),
+                    right_args.tail().noun(),
+                    space,
+                )
+        }
+        10 => {
+            let (Ok(left_args), Ok(right_args)) = (
+                left_tail.in_space(space).as_cell(),
+                right_tail.in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            let (Ok(left_edit), Ok(right_edit)) = (
+                left_args.head().noun().in_space(space).as_cell(),
+                right_args.head().noun().in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            noun_unifying_equality(stack, left_edit.head().noun(), right_edit.head().noun())
+                && nock_formula_eq_ignoring_transparent_hints(
+                    stack,
+                    left_edit.tail().noun(),
+                    right_edit.tail().noun(),
+                    space,
+                )
+                && nock_formula_eq_ignoring_transparent_hints(
+                    stack,
+                    left_args.tail().noun(),
+                    right_args.tail().noun(),
+                    space,
+                )
+        }
+        11 => {
+            let (Ok(left_args), Ok(right_args)) = (
+                left_tail.in_space(space).as_cell(),
+                right_tail.in_space(space).as_cell(),
+            ) else {
+                return false;
+            };
+            let left_hint = left_args.head().noun();
+            let right_hint = right_args.head().noun();
+            let hints_match = match (
+                left_hint.in_space(space).as_cell(),
+                right_hint.in_space(space).as_cell(),
+            ) {
+                (Ok(left_hint_cell), Ok(right_hint_cell)) => {
+                    noun_unifying_equality(
+                        stack,
+                        left_hint_cell.head().noun(),
+                        right_hint_cell.head().noun(),
+                    ) && nock_formula_eq_ignoring_transparent_hints(
+                        stack,
+                        left_hint_cell.tail().noun(),
+                        right_hint_cell.tail().noun(),
+                        space,
+                    )
+                }
+                _ => noun_unifying_equality(stack, left_hint, right_hint),
+            };
+            hints_match
+                && nock_formula_eq_ignoring_transparent_hints(
+                    stack,
+                    left_args.tail().noun(),
+                    right_args.tail().noun(),
+                    space,
+                )
+        }
+        _ => false,
+    }
+}
+
+fn core_eq_ignoring_battery_hints(
+    stack: &mut NockStack,
+    left: Noun,
+    right: Noun,
+    space: &NounSpace,
+) -> bool {
+    if noun_unifying_equality(stack, left, right) {
+        return true;
+    }
+    let (Ok(left_cell), Ok(right_cell)) = (
+        left.in_space(space).as_cell(),
+        right.in_space(space).as_cell(),
+    ) else {
+        return false;
+    };
+    nock_formula_eq_ignoring_transparent_hints(
+        stack,
+        left_cell.head().noun(),
+        right_cell.head().noun(),
+        space,
+    ) && noun_unifying_equality(stack, left_cell.tail().noun(), right_cell.tail().noun())
+}
+
+#[inline(always)]
+fn battery_eq_ignoring_hints(
+    stack: &mut NockStack,
+    left: Noun,
+    right: Noun,
+    space: &NounSpace,
+) -> bool {
+    noun_unifying_equality(stack, left, right)
+        || nock_formula_eq_ignoring_transparent_hints(stack, left, right, space)
+}
+
 impl Batteries {
     pub(crate) fn new(ptr: *mut BatteriesMem) -> Self {
         Batteries(ptr)
@@ -230,20 +508,20 @@ impl Batteries {
                 panic!("cold: core matched to root, but more data remains in path");
             }
 
+            let expected = unsafe { *battery };
             if let Ok(d) = parent_axis.as_direct() {
                 if d.data() == 0 {
-                    if unsafe { unifying_equality(stack, &mut core, battery) } {
+                    if core_eq_ignoring_battery_hints(stack, core, expected, space) {
                         root_found = true;
                         continue;
-                    } else {
-                        return false;
-                    };
-                };
-            };
-            if let Ok(mut core_battery) = core.slot(2, space) {
-                if unsafe { !unifying_equality(stack, &mut core_battery, battery) } {
+                    }
                     return false;
-                };
+                }
+            }
+            if let Ok(core_battery) = core.slot(2, space) {
+                if !battery_eq_ignoring_hints(stack, core_battery, expected, space) {
+                    return false;
+                }
                 if let Ok(core_parent) = core.slot_atom(parent_axis, space) {
                     core = core_parent;
                     continue;
@@ -550,7 +828,8 @@ impl Iterator for NounList {
 #[derive(Copy, Clone)]
 pub struct Cold(*mut ColdMem);
 
-struct ColdMem {
+#[derive(Copy, Clone)]
+pub(crate) struct ColdMem {
     /// key: outermost battery (e.g. furthest battery from root for a core)
     /// value: possible registered paths for core
     ///
@@ -641,6 +920,14 @@ impl Preserve for Cold {
 }
 
 impl Cold {
+    pub(crate) fn save(&self) -> ColdMem {
+        unsafe { *self.0 }
+    }
+    pub(crate) fn restore(&mut self, saved: ColdMem) {
+        unsafe {
+            *self.0 = saved;
+        }
+    }
     pub fn is_null(&self) -> bool {
         unsafe {
             (*self.0).battery_to_paths.is_null()
@@ -1462,11 +1749,13 @@ impl Nounable for Cold {
 pub(crate) mod test {
     use std::iter::FromIterator;
 
+    use nockvm_macros::tas;
+
     use super::*;
     use crate::ext::noun_equality;
     use crate::hamt::Hamt;
     use crate::mem::{NockStack, NOCK_STACK_SIZE_TINY};
-    use crate::noun::{AllocLocation, Cell, Noun, NounSpace, D};
+    use crate::noun::{AllocLocation, Cell, Noun, NounSpace, D, T};
     /// Default stack size for tests where you aren't intending to run out of space
     pub(crate) const DEFAULT_STACK_SIZE: usize = NOCK_STACK_SIZE_TINY;
     pub(crate) fn make_test_stack(size: usize) -> NockStack {
@@ -1515,6 +1804,7 @@ pub(crate) mod test {
 
         // battery_to_paths
         let old_battery_to_paths = unsafe { &(*cold.0).battery_to_paths };
+
         let new_battery_to_paths = new_cold.0.clone();
         for (a, b) in old_battery_to_paths
             .iter()
@@ -1787,6 +2077,69 @@ pub(crate) mod test {
                 b_atom.in_space(&space).as_u64()
             );
         }
+    }
+
+    fn hinted_formula(stack: &mut NockStack, tag: u64, clue: Noun, body: Noun) -> Noun {
+        let hint = T(stack, &[D(tag), clue]);
+        T(stack, &[D(11), hint, body])
+    }
+
+    fn batteries_with_root(
+        stack: &mut NockStack,
+        battery: Noun,
+        parent_axis: u64,
+        root: Noun,
+    ) -> Batteries {
+        let root_mem: *mut BatteriesMem = unsafe { stack.alloc_struct(1) };
+        unsafe {
+            root_mem.write(BatteriesMem {
+                battery: root,
+                parent_axis: D(0).as_atom().expect("0 is a valid atom"),
+                parent_batteries: NO_BATTERIES,
+            });
+        }
+
+        let child_mem: *mut BatteriesMem = unsafe { stack.alloc_struct(1) };
+        unsafe {
+            child_mem.write(BatteriesMem {
+                battery,
+                parent_axis: D(parent_axis).as_atom().expect("axis is a valid atom"),
+                parent_batteries: Batteries(root_mem),
+            });
+        }
+        Batteries(child_mem)
+    }
+
+    #[test]
+    fn batteries_match_ignores_transparent_hints_in_battery_formulas() {
+        let mut stack = make_test_stack(DEFAULT_STACK_SIZE);
+        let root_battery = T(&mut stack, &[D(0), D(1)]);
+        let root = T(&mut stack, &[root_battery, D(99)]);
+        let slot_three = T(&mut stack, &[D(0), D(3)]);
+        let slot_four = T(&mut stack, &[D(0), D(4)]);
+        let registered_battery = T(&mut stack, &[D(2), slot_three, slot_four]);
+        let hinted_slot_three = hinted_formula(&mut stack, tas!(b"spot"), D(1), slot_three);
+        let query_battery = T(&mut stack, &[D(2), hinted_slot_three, slot_four]);
+        let query_core = T(&mut stack, &[query_battery, root]);
+        let batteries = batteries_with_root(&mut stack, registered_battery, 3, root);
+        let space = stack.noun_space();
+
+        assert!(batteries.matches(&mut stack, query_core, &space));
+    }
+
+    #[test]
+    fn batteries_match_preserves_constant_hint_data() {
+        let mut stack = make_test_stack(DEFAULT_STACK_SIZE);
+        let root_battery = T(&mut stack, &[D(0), D(1)]);
+        let root = T(&mut stack, &[root_battery, D(99)]);
+        let hinted_data = hinted_formula(&mut stack, tas!(b"spot"), D(1), D(100));
+        let registered_battery = T(&mut stack, &[D(1), hinted_data]);
+        let query_battery = T(&mut stack, &[D(1), D(100)]);
+        let query_core = T(&mut stack, &[query_battery, root]);
+        let batteries = batteries_with_root(&mut stack, registered_battery, 3, root);
+        let space = stack.noun_space();
+
+        assert!(!batteries.matches(&mut stack, query_core, &space));
     }
 
     #[test]

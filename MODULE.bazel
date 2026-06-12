@@ -1,13 +1,6 @@
 """
-Bazel module definition for the nockchain workspace.
-
-This file is the root MODULE.bazel when this directory is the repository
-root; every //... label below refers to that layout.
-
-Build with the pinned Bazel version from .bazelversion (bazelisk reads it):
-
-    bazel build //...
-    bazel test //...
+Bazel module definition for the 'nada' project.
+Sets up Rust toolchain and dependencies using rules_rust.
 """
 
 module(
@@ -15,149 +8,31 @@ module(
     version = "0.1.0",
 )
 
-bazel_dep(name = "rules_cc", version = "0.2.14")
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
-bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "protobuf", version = "33.4")
-bazel_dep(name = "rules_rust", version = "0.67.0")
+bazel_dep(name = "rules_rust", version = "0.60.0")
+bazel_dep(name = "rules_shell", version = "0.4.0")
+bazel_dep(name = "toolchains_llvm", version = "1.4.0")
 
-#
-# Rust toolchain. The version matches rust-toolchain.toml; rules_rust
-# downloads it, so no preinstalled Rust is required.
-#
+# `rustc --version --verbose` generally
+# leave a comment if you have a reason for doing otherwise.
+# Configure and register the toolchain.
+llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
+llvm.toolchain(
+    llvm_version = "20.1.0",
+)
+use_repo(llvm, "llvm_toolchain")
+
+register_toolchains("@llvm_toolchain//:all")
+
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2021",
-    versions = ["nightly/2025-11-26"],
+    versions = ["nightly/2025-04-26"],
 )
 use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-#
-# Prebuilt protoc toolchains (protobuf 33.4+), used by the gRPC proto
-# code generation genrules via //tools/protoc.
-#
-prebuilt_protoc = use_extension(
-    "@protobuf//bazel/private:prebuilt_protoc_extension.bzl",
-    "protoc",
-)
-use_repo(
-    prebuilt_protoc,
-    "prebuilt_protoc.linux_aarch_64",
-    "prebuilt_protoc.linux_ppcle_64",
-    "prebuilt_protoc.linux_s390_64",
-    "prebuilt_protoc.linux_x86_32",
-    "prebuilt_protoc.linux_x86_64",
-    "prebuilt_protoc.osx_aarch_64",
-    "prebuilt_protoc.osx_x86_64",
-    "prebuilt_protoc.win32",
-    "prebuilt_protoc.win64",
-)
-
-register_toolchains(
-    "@protobuf//bazel/private/toolchains/prebuilt:all",
-    "@protobuf//bazel/private/toolchains:all",
-)
-
-#
-# Foundry binaries (forge) and Solidity dependencies for the bridge
-# contracts genrules.
-#
-
-http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-http_archive(
-    name = "foundry_linux_amd64",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-exports_files(["forge", "cast", "anvil", "chisel"])
-""",
-    integrity = "sha256-c2QLAb2e0p/bSWUIUJk3H4zw277D4ghs9UVk78Tc/og=",
-    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_linux_amd64.tar.gz"],
-)
-
-http_archive(
-    name = "foundry_darwin_arm64",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-exports_files(["forge", "cast", "anvil", "chisel"])
-""",
-    integrity = "sha256-s78XUr4Gbgh3kRch4GJAWBcciPxWFuIok3/kYgtBxA0=",
-    urls = ["https://github.com/foundry-rs/foundry/releases/download/v1.5.1/foundry_v1.5.1_darwin_arm64.tar.gz"],
-)
-
-http_archive(
-    name = "forge_std",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-filegroup(
-    name = "root_marker",
-    srcs = ["README.md"],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(["**/*"]),
-)
-""",
-    integrity = "sha256-27Ay+VitKw40sW3qHX+Cek+abOeVBw97Pp6uhQAy7bI=",
-    strip_prefix = "forge-std-1.12.0",
-    urls = ["https://github.com/foundry-rs/forge-std/archive/refs/tags/v1.12.0.tar.gz"],
-)
-
-http_archive(
-    name = "openzeppelin_contracts",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-filegroup(
-    name = "root_marker",
-    srcs = ["README.md"],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(["**/*"]),
-)
-""",
-    integrity = "sha256-laTh/3oB2n2HXnhythYDN1Ye/X+wqHUd526DehDZDL8=",
-    strip_prefix = "openzeppelin-contracts-5.5.0",
-    urls = ["https://github.com/OpenZeppelin/openzeppelin-contracts/archive/refs/tags/v5.5.0.tar.gz"],
-)
-
-http_archive(
-    name = "openzeppelin_contracts_upgradeable",
-    build_file_content = """
-package(default_visibility = ["//visibility:public"])
-
-filegroup(
-    name = "root_marker",
-    srcs = ["README.md"],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(["**/*"]),
-)
-""",
-    integrity = "sha256-8WGJjHaD2PQ5X8pxvCNjCthFzq8QWr9IilAmr2jZ200=",
-    strip_prefix = "openzeppelin-contracts-upgradeable-5.5.0",
-    urls = ["https://github.com/OpenZeppelin/openzeppelin-contracts-upgradeable/archive/refs/tags/v5.5.0.tar.gz"],
-)
-
-register_toolchains(
-    "//tools/foundry:foundry_toolchain_linux_amd64",
-    "//tools/foundry:foundry_toolchain_darwin_arm64",
-)
-
-#
-# Rust crate dependencies via crate_universe, resolved from the committed
-# Cargo.toml / Cargo.lock pair.
-#
+# Set up crate_universe for managing dependencies
 crates = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crates.from_cargo(
     name = "crates",
@@ -165,6 +40,25 @@ crates.from_cargo(
     generate_binaries = True,
     manifests = [
         "//:Cargo.toml",
+        "//crates/equix-latency:Cargo.toml",
+        "//crates/kernels/bridge:Cargo.toml",
+        "//crates/kernels/dumb:Cargo.toml",
+        "//crates/kernels/miner:Cargo.toml",
+        "//crates/kernels/nockchain-peek:Cargo.toml",
+        "//crates/kernels/wallet:Cargo.toml",
+        "//crates/nockapp:Cargo.toml",
+        "//crates/hoonc:Cargo.toml",
+        "//crates/nockchain:Cargo.toml",
+        "//crates/nockchain-libp2p-io:Cargo.toml",
+        "//crates/nockchain-math:Cargo.toml",
+        "//crates/nockchain/utilities:Cargo.toml",
+        "//crates/nockvm/rust/nockvm:Cargo.toml",
+        "//crates/nockvm/rust/nockvm_crypto:Cargo.toml",
+        "//crates/nockvm/rust/nockvm_macros:Cargo.toml",
+        "//crates/nockvm/rust/ibig:Cargo.toml",
+        "//crates/nockvm/rust/murmur3:Cargo.toml",
+        "//crates/nockvm/rust/assert_no_alloc:Cargo.toml",
+        "//crates/zkvm-jetpack:Cargo.toml",
     ],
 )
 use_repo(crates, "crates")

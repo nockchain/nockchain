@@ -11,7 +11,6 @@ use tonic_reflection::server::Builder as ReflectionBuilder;
 
 use crate::core::loop_policy::RetryPolicy;
 use crate::observability::metrics;
-use crate::shared::base::is_explicitly_refunded_withdrawal_base_event_id;
 use crate::shared::errors::BridgeError;
 use crate::shared::ingress::proto::withdrawal_sequencer_server::{
     WithdrawalSequencer, WithdrawalSequencerServer,
@@ -29,16 +28,13 @@ use crate::shared::ingress::proto::{
     SequencerUpdateResponse,
 };
 use crate::shared::proposer::withdrawal_turn_proposer;
-use crate::shared::types::{zero_tip5_hash, BaseEventId, Tip5Hash};
+use crate::shared::types::{zero_tip5_hash, AtomBytes, Tip5Hash};
 use crate::withdrawal::proposals::TrackedWithdrawalRequest;
 use crate::withdrawal::sequencer::approval::{
     check_manual_submit_approval, ManualSubmitApprovalConfig, ManualSubmitApprovalDecision,
 };
 use crate::withdrawal::sequencer::base_height::SequencerBaseHeightTracker;
-use crate::withdrawal::sequencer::base_verifier::{
-    sequencer_base_event_id_hex, SequencerBaseWithdrawalRejection as BaseWithdrawalRejection,
-    SequencerBaseWithdrawalVerifier,
-};
+use crate::withdrawal::sequencer::base_verifier::SequencerBaseWithdrawalVerifier;
 use crate::withdrawal::sequencer::store::{
     jam_transaction, validate_canonical_proposal_tx_inputs, SequencerDecision,
     WithdrawalSequencerStore,
@@ -87,14 +83,14 @@ fn registered_withdrawal_matches_tracked(
         && existing.base_batch_end == Some(tracked.base_batch_end)
 }
 
-fn base_event_id_from_proto(bytes: &[u8], context: &str) -> Result<BaseEventId, Status> {
+fn base_event_id_from_proto(bytes: &[u8], context: &str) -> Result<AtomBytes, Status> {
     if bytes.len() != 32 {
         return Err(Status::invalid_argument(format!(
             "{context} base_event_id must be 32 bytes, got {}",
             bytes.len()
         )));
     }
-    Ok(BaseEventId(bytes.to_vec()))
+    Ok(AtomBytes(bytes.to_vec()))
 }
 
 impl WithdrawalSequencerRpcService {
@@ -799,26 +795,6 @@ impl WithdrawalSequencer for WithdrawalSequencerRpcService {
             .increment();
         let inner = request.into_inner();
         let base_event_id = base_event_id_from_proto(&inner.base_event_id, "registration")?;
-        if is_explicitly_refunded_withdrawal_base_event_id(&base_event_id) {
-            let base_event_id_hex = sequencer_base_event_id_hex(&base_event_id);
-            let err = BaseWithdrawalRejection::ExplicitlyRefunded {
-                base_event_id_hex: base_event_id_hex.clone(),
-            };
-            metrics::init_metrics()
-                .sequencer_withdrawal_registration_rejected
-                .increment();
-            tracing::warn!(
-                target: "bridge.withdrawal.sequencer",
-                withdrawal_nonce = inner.withdrawal_nonce,
-                base_batch_end = inner.base_batch_end,
-                base_event_id = %base_event_id_hex,
-                "ignored explicitly refunded withdrawal registration"
-            );
-            return Ok(Response::new(SequencerUpdateResponse {
-                request_accepted: false,
-                error: err.to_string(),
-            }));
-        }
         let id = crate::withdrawal::types::WithdrawalId {
             // Registration is sequencer ordering over the globally unique Base
             // event id. The kernel `as_of` becomes authoritative only when a
@@ -1567,7 +1543,7 @@ mod tests {
         WithdrawalCommitCertificate, WithdrawalCommitSignature,
     };
     use crate::shared::signing::BridgeSigner;
-    use crate::shared::types::BaseEventId;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::sequencer::approval::{
         approval_file_path, render_approval_record, write_approval_record_atomic,
     };
@@ -1844,15 +1820,8 @@ mod tests {
         )
     }
 
-    fn sample_base_event_id(start: u8) -> BaseEventId {
-        BaseEventId((0..32).map(|offset| start.wrapping_add(offset)).collect())
-    }
-
-    fn refunded_withdrawal_base_event_id() -> BaseEventId {
-        BaseEventId(
-            hex::decode("45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd")
-                .expect("refunded base event id hex"),
-        )
+    fn sample_base_event_id(start: u8) -> AtomBytes {
+        AtomBytes((0..32).map(|offset| start.wrapping_add(offset)).collect())
     }
 
     fn sample_request() -> NockWithdrawalRequestKernelData {
@@ -2161,30 +2130,6 @@ mod tests {
             .expect("sequenced withdrawal exists");
         assert_eq!(row.state, WithdrawalState::Pending);
         assert_eq!(row.withdrawal_nonce, Some(1));
-    }
-
-    #[tokio::test]
-    async fn sequencer_rpc_service_ignores_explicitly_refunded_withdrawal_registration() {
-        let (rpc, withdrawal_state_store, _base_height_tracker, _submitter, _dir) =
-            open_rpc_service().await;
-        let verifier = Arc::new(ScriptedBaseWithdrawalVerifier::accepting());
-        let rpc = rpc.with_base_withdrawal_verifier(verifier.clone());
-        let mut proposal = sample_proposal(0);
-        proposal.id.base_event_id = refunded_withdrawal_base_event_id();
-
-        let response = register_withdrawal_request(&rpc, &proposal, 1).await;
-
-        assert!(!response.request_accepted);
-        assert!(response.error.contains("explicitly refunded"));
-        assert!(response
-            .error
-            .contains("45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"));
-        assert_eq!(verifier.calls().len(), 0);
-        assert!(withdrawal_state_store
-            .fetch_sequenced_withdrawal(&proposal.id)
-            .await
-            .expect("fetch sequenced withdrawal")
-            .is_none());
     }
 
     #[tokio::test]

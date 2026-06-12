@@ -239,7 +239,7 @@ mod tests {
 
     use super::*;
     use crate::shared::kernel_projection::{KernelProjectionCursor, KernelProjectionPosition};
-    use crate::shared::types::{BaseBlockCommitAck, PendingBaseBlockCommit, Tip5Hash};
+    use crate::shared::types::{AtomBytes, BaseBlockCommitAck, PendingBaseBlockCommit, Tip5Hash};
     use crate::withdrawal::proposals::WithdrawalProjectionStore;
     use crate::withdrawal::types::{
         CreateWithdrawalTxData, NockWithdrawalRequestKernelData, WithdrawalProposalData,
@@ -313,9 +313,7 @@ mod tests {
 
     fn sample_request() -> NockWithdrawalRequestKernelData {
         NockWithdrawalRequestKernelData {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 1).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
             recipient: Tip5Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
             amount: 11,
             base_batch_end: 57_600,

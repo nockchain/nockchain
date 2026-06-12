@@ -37,7 +37,7 @@ mod tests {
     fn sample_id() -> WithdrawalId {
         WithdrawalId {
             as_of: crate::shared::types::zero_tip5_hash(),
-            base_event_id: crate::shared::types::BaseEventId(vec![1, 2, 3]),
+            base_event_id: crate::shared::types::AtomBytes(vec![1, 2, 3]),
         }
     }
 

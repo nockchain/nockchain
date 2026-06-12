@@ -1377,6 +1377,7 @@ mod tests {
     use nockchain_types::tx_engine::common::Hash as Tip5Hash;
 
     use super::*;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::state::WithdrawalState;
     use crate::withdrawal::types::WithdrawalId;
 
@@ -1480,7 +1481,7 @@ mod tests {
                     Belt(14),
                     Belt(15),
                 ]),
-                base_event_id: crate::shared::types::BaseEventId(vec![0xaa; 32]),
+                base_event_id: AtomBytes(vec![0xaa; 32]),
             },
             recipient: Some(crate::shared::types::Tip5Hash([
                 Belt(21),

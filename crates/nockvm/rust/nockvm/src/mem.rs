@@ -37,6 +37,8 @@ pub const NOCK_STACK_SIZE_MEDIUM: usize = (NOCK_STACK_1KB << 10 << 10) * 16; // 
 pub const NOCK_STACK_SIZE_LARGE: usize = (NOCK_STACK_1KB << 10 << 10) * 32; // 32GB
 pub const NOCK_STACK_SIZE_HUGE: usize = (NOCK_STACK_1KB << 10 << 10) * 64; // 64GB
 
+static NEXT_STACK_ID: AtomicU64 = AtomicU64::new(1);
+
 /** Number of reserved slots for alloc_pointer and frame_pointer in each frame */
 pub(crate) const RESERVED: usize = 3;
 
@@ -641,6 +643,15 @@ fn page_align_len(len: usize) -> Result<usize, NewStackError> {
         .ok_or(NewStackError::StackTooSmall)
 }
 
+/// Positional snapshot of a NockStack; see [`NockStack::checkpoint`].
+#[derive(Clone, Copy, Debug)]
+pub struct NockStackCheckpoint {
+    frame_offset: usize,
+    stack_offset: usize,
+    alloc_offset: usize,
+    pc: bool,
+}
+
 /// A stack for Nock computation, which supports stack allocation and delimited copying collection
 /// for returned nouns
 pub struct NockStack {
@@ -660,10 +671,17 @@ pub struct NockStack {
     arena: Arc<Arena>,
     /// Optional PMA arena for offset noun resolution
     pma: Option<Arc<Arena>>,
+    /// Extra pointer-form noun ranges that should be considered valid for transient evaluation.
+    extra_noun_ptr_ranges: Vec<(usize, usize)>,
     /// Epoch that increments on reset/flip to invalidate stack-pointer nouns.
     stack_epoch: Arc<AtomicU64>,
+    /// Process-unique identity for caches that store nouns in this stack's arena.
+    identity: u64,
     /// Whether or not [`Self::pre_copy()`] has been called on the current stack frame.
     pc: bool,
+    /// Optional floor (in words of remaining frame/alloc gap) below which
+    /// allocation panics as out-of-memory; see [`Self::set_alloc_floor_budget`].
+    alloc_budget_floor: Option<usize>,
 }
 
 impl NockStack {
@@ -719,14 +737,65 @@ impl NockStack {
         &self.arena
     }
 
+    /// Bound the additional stack consumption of a delimited computation:
+    /// while a budget is set, any allocation that would shrink the
+    /// frame/alloc gap below `current least gap - budget_words` raises the
+    /// same out-of-memory panic as true exhaustion. Used by honk's musk
+    /// `mack` so that crash-destined interpretations (e.g. unjetted
+    /// divergent loops, which hoonc's jets would bail out of immediately)
+    /// fail in bounded time instead of filling the whole eval stack.
+    /// Pass `None` to clear.
+    pub fn set_alloc_floor_budget(&mut self, budget_words: Option<usize>) {
+        self.alloc_budget_floor = budget_words.map(|budget| {
+            let gap = self.alloc_offset.abs_diff(self.stack_offset);
+            gap.saturating_sub(budget)
+        });
+    }
+
+    /// Raw positional checkpoint of the stack, for unwinding past a panic
+    /// (e.g. allocation exhaustion mid-interpretation). Restoring discards
+    /// every frame pushed after the checkpoint wholesale; any nouns or
+    /// interpreter state allocated since are dangling and must not be used.
+    pub fn checkpoint(&self) -> NockStackCheckpoint {
+        NockStackCheckpoint {
+            frame_offset: self.frame_offset,
+            stack_offset: self.stack_offset,
+            alloc_offset: self.alloc_offset,
+            pc: self.pc,
+        }
+    }
+
+    /// Restore a positional checkpoint taken by [`Self::checkpoint`].
+    ///
+    /// # Safety
+    ///
+    /// Only sound when every reference into the discarded region is dropped;
+    /// intended for recovering an eval stack after a caught panic.
+    pub unsafe fn restore_checkpoint(&mut self, checkpoint: &NockStackCheckpoint) {
+        self.frame_offset = checkpoint.frame_offset;
+        self.stack_offset = checkpoint.stack_offset;
+        self.alloc_offset = checkpoint.alloc_offset;
+        self.pc = checkpoint.pc;
+    }
+
     #[inline]
     pub fn noun_space(&self) -> NounSpace {
-        NounSpace::from_stack(self, self.pma.clone())
+        let space = NounSpace::from_stack(self, self.pma.clone());
+        if self.extra_noun_ptr_ranges.is_empty() {
+            space
+        } else {
+            space.with_readonly_extra_ptr_ranges(self.extra_noun_ptr_ranges.clone())
+        }
     }
 
     #[inline]
     pub(crate) fn fast_noun_space(&self) -> NounSpace {
-        NounSpace::from_stack_ephemeral(self)
+        let space = NounSpace::from_stack_ephemeral(self);
+        if self.extra_noun_ptr_ranges.is_empty() {
+            space
+        } else {
+            space.with_readonly_extra_ptr_ranges(self.extra_noun_ptr_ranges.clone())
+        }
     }
 
     #[inline]
@@ -757,6 +826,32 @@ impl NockStack {
     #[inline]
     pub fn clear_pma_arena(&mut self) {
         self.pma = None;
+    }
+
+    #[inline]
+    pub fn identity(&self) -> u64 {
+        self.identity
+    }
+
+    #[inline]
+    pub fn frame_identity(&self) -> u64 {
+        self.identity ^ (self.frame_offset as u64).rotate_left(32)
+    }
+    #[inline]
+    pub fn current_frame_is_root(&self) -> bool {
+        unsafe {
+            let prev_frame_ptr = *self.prev_frame_pointer_pointer();
+            let prev_stack_ptr = *self.prev_stack_pointer_pointer();
+            prev_frame_ptr.is_null() && prev_stack_ptr.is_null()
+        }
+    }
+
+    #[inline]
+    pub fn replace_extra_noun_ptr_ranges(
+        &mut self,
+        ranges: Vec<(usize, usize)>,
+    ) -> Vec<(usize, usize)> {
+        std::mem::replace(&mut self.extra_noun_ptr_ranges, ranges)
     }
 
     #[inline]
@@ -840,7 +935,10 @@ impl NockStack {
                 arena,
                 pma: None,
                 stack_epoch: Arc::new(AtomicU64::new(0)),
+                identity: NEXT_STACK_ID.fetch_add(1, Ordering::Relaxed),
+                extra_noun_ptr_ranges: Vec::new(),
                 pc: false,
+                alloc_budget_floor: None,
             },
             free,
         ))
@@ -1342,19 +1440,14 @@ impl NockStack {
         }
         // Calculate the pointer offset from the base in words
         let ptr_u64 = ptr as *const u64;
-        // We need to permit alloc here for panic reasons
-        debug_assert!(
-            ptr_u64 >= self.start,
-            "is_in_frame: {} >= {}",
-            ptr_u64 as usize,
-            self.start as usize,
-        );
-        debug_assert!(
-            ptr_u64 < self.start.add(self.size),
-            "is_in_frame: {} < {}",
-            ptr_u64 as usize,
-            self.start.add(self.size) as usize,
-        );
+        // Foreign pointers — resolved PMA pointers and slab/extra-noun-range
+        // pointers — are never in any stack frame. They previously relied on
+        // the offset arithmetic below deterministically falling outside the
+        // frame bounds (and tripped debug assertions in dev builds); reject
+        // them explicitly instead.
+        if ptr_u64 < self.start || ptr_u64 >= self.start.add(self.size) {
+            return false;
+        }
 
         let ptr_offset = (ptr_u64 as usize - self.start as usize) / 8;
 
@@ -1614,6 +1707,11 @@ impl NockStack {
 
         let new_space = new_alloc_offset - self.stack_offset;
         self.least_space = new_space.min(self.least_space);
+        if let Some(floor) = self.alloc_budget_floor {
+            if new_space < floor {
+                self.panic_out_of_memory_for(AllocationType::Alloc, words);
+            }
+        }
 
         let alloc_ptr = self.derive_ptr(new_alloc_offset);
         self.alloc_offset = new_alloc_offset;
@@ -1638,6 +1736,11 @@ impl NockStack {
 
         let new_space = self.stack_offset - new_alloc_offset;
         self.least_space = new_space.min(self.least_space);
+        if let Some(floor) = self.alloc_budget_floor {
+            if new_space < floor {
+                self.panic_out_of_memory_for(AllocationType::Alloc, words);
+            }
+        }
         self.alloc_offset = new_alloc_offset;
         alloc_ptr
     }
@@ -2713,7 +2816,48 @@ mod test {
     use crate::jets::cold::test::{make_noun_list, make_test_stack};
     use crate::jets::cold::{NounList, Nounable};
     use crate::mem::NockStack;
-    use crate::noun::{Noun, D};
+    use crate::noun::{Cell, CellMemory, Noun, D};
+
+    /// Foreign (extra-noun-range) nouns — e.g. slab-resident subjects under
+    /// the zero-copy mack path — are never in any stack frame: `is_in_frame`
+    /// must reject them outright (it previously tripped debug assertions on
+    /// any out-of-arena pointer), and `preserve` must reference them in place
+    /// without copying or writing forwarding pointers into them.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn preserve_leaves_foreign_extra_range_nouns_in_place() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
+        unsafe {
+            let foreign_ptr = Box::into_raw(Box::new(CellMemory {
+                metadata: 0,
+                head: D(1),
+                tail: D(2),
+            }));
+            let start = foreign_ptr as usize;
+            let ranges = vec![(start, start + std::mem::size_of::<CellMemory>())];
+            let foreign_noun = Cell::from_raw_pointer(foreign_ptr).as_noun();
+            let original_foreign = *foreign_ptr;
+            let previous_ranges = stack.replace_extra_noun_ptr_ranges(ranges);
+
+            stack.frame_push(0);
+            assert!(!stack.is_in_frame(foreign_ptr));
+
+            let mut noun = Cell::new(&mut stack, foreign_noun, D(3)).as_noun();
+            stack.preserve(&mut noun);
+            stack.frame_pop();
+
+            let space = stack.noun_space();
+            let cell = noun.in_space(&space).as_cell().expect("preserved cell");
+            assert!(cell.head().noun().raw_equals(&foreign_noun));
+            assert!(cell.tail().noun().raw_equals(&D(3)));
+            assert_eq!((*foreign_ptr).head.as_raw(), original_foreign.head.as_raw());
+            assert_eq!((*foreign_ptr).tail.as_raw(), original_foreign.tail.as_raw());
+            assert_eq!((*foreign_ptr).metadata, original_foreign.metadata);
+
+            stack.replace_extra_noun_ptr_ranges(previous_ranges);
+            drop(Box::from_raw(foreign_ptr));
+        }
+    }
 
     fn test_noun_list_alloc_fn(
         stack_size: usize,

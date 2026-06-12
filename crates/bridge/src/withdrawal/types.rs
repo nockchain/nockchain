@@ -4,7 +4,7 @@ use nockchain_types::v1::Name;
 use noun_serde::{NounDecode, NounEncode};
 
 use crate::shared::errors::BridgeError;
-use crate::shared::types::{AtomBytes, BaseEventId};
+use crate::shared::types::AtomBytes;
 
 /// Full kernel/proposal withdrawal reference.
 ///
@@ -14,7 +14,7 @@ use crate::shared::types::{AtomBytes, BaseEventId};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, NounEncode, NounDecode)]
 pub struct WithdrawalId {
     pub as_of: Tip5Hash,
-    pub base_event_id: BaseEventId,
+    pub base_event_id: AtomBytes,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
@@ -147,7 +147,7 @@ pub struct Withdrawal {
 /// `[=base-event-id recipient=nock-lock-root amount=@ base-batch-end=@ as-of=base-hash]`
 #[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
 pub struct NockWithdrawalRequestKernelData {
-    pub base_event_id: BaseEventId,
+    pub base_event_id: AtomBytes,
     pub recipient: Tip5Hash,
     pub amount: u64,
     pub base_batch_end: u64,

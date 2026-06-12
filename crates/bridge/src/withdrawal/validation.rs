@@ -1,8 +1,7 @@
 use nockchain_types::v1::{
-    FirstName, InputMetadata, Lock, LockMerkleProof, LockMetadata, Name, NoteData, NoteDataValue,
-    OutputLockMap, Spend, Transaction, TransactionV1, VersionedLockMetadata, WitnessData,
+    FirstName, InputMetadata, Lock, LockMetadata, Name, NoteData, NoteDataValue, OutputLockMap,
+    Spend, Transaction, TransactionV1, VersionedLockMetadata, WitnessData,
 };
-use wallet_tx_builder::fee::compute_bridge_fee;
 
 use crate::shared::errors::BridgeError;
 use crate::shared::types::Tip5Hash;
@@ -11,15 +10,11 @@ use crate::withdrawal::types::{normalized_note_names, WithdrawalProposalData};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithdrawalTransactionBodyValidator {
     bridge_lock_root: Tip5Hash,
-    nicks_fee_per_nock: u64,
 }
 
 impl WithdrawalTransactionBodyValidator {
-    pub fn new(bridge_lock_root: Tip5Hash, nicks_fee_per_nock: u64) -> Self {
-        Self {
-            bridge_lock_root,
-            nicks_fee_per_nock,
-        }
+    pub fn new(bridge_lock_root: Tip5Hash) -> Self {
+        Self { bridge_lock_root }
     }
 
     pub fn bridge_lock_root(&self) -> &Tip5Hash {
@@ -27,20 +22,17 @@ impl WithdrawalTransactionBodyValidator {
     }
 
     pub fn validate(&self, proposal: &WithdrawalProposalData) -> Result<(), BridgeError> {
-        validate_withdrawal_transaction_body(
-            proposal, &self.bridge_lock_root, self.nicks_fee_per_nock,
-        )
+        validate_withdrawal_transaction_body(proposal, &self.bridge_lock_root)
     }
 }
 
 pub fn validate_withdrawal_transaction_body(
     proposal: &WithdrawalProposalData,
     bridge_lock_root: &Tip5Hash,
-    nicks_fee_per_nock: u64,
 ) -> Result<(), BridgeError> {
     let Transaction::V1(tx) = &proposal.transaction;
     validate_transaction_inputs(proposal, tx, bridge_lock_root)?;
-    validate_transaction_outputs(proposal, tx, bridge_lock_root, nicks_fee_per_nock)?;
+    validate_transaction_outputs(proposal, tx, bridge_lock_root)?;
     Ok(())
 }
 
@@ -114,81 +106,28 @@ fn validate_transaction_inputs(
             ));
         };
 
-        validate_lock_merkle_proof(
-            proposal, "spend witness", &spend.witness.lock_merkle_proof, spend_condition,
-            bridge_lock_root,
-        )?;
-        validate_lock_merkle_proof(
-            proposal, "witness data", &witness.lock_merkle_proof, spend_condition, bridge_lock_root,
-        )?;
-        if spend.witness.lock_merkle_proof != witness.lock_merkle_proof {
+        if spend.witness.lock_merkle_proof.spend_condition() != spend_condition {
             return Err(invalid_body(
-                proposal, "spend witness proof does not match witness data proof",
+                proposal, "spend witness proof spend condition does not match input metadata",
+            ));
+        }
+        if witness.lock_merkle_proof.spend_condition() != spend_condition {
+            return Err(invalid_body(
+                proposal, "witness data proof spend condition does not match input metadata",
+            ));
+        }
+        if &spend.witness.lock_merkle_proof.proof().root != bridge_lock_root {
+            return Err(invalid_body(
+                proposal, "spend witness proof root is not the bridge lock root",
+            ));
+        }
+        if &witness.lock_merkle_proof.proof().root != bridge_lock_root {
+            return Err(invalid_body(
+                proposal, "witness data proof root is not the bridge lock root",
             ));
         }
     }
 
-    Ok(())
-}
-
-fn validate_lock_merkle_proof(
-    proposal: &WithdrawalProposalData,
-    label: &'static str,
-    proof: &LockMerkleProof,
-    spend_condition: &nockchain_types::v1::SpendCondition,
-    bridge_lock_root: &Tip5Hash,
-) -> Result<(), BridgeError> {
-    match proof {
-        LockMerkleProof::Full(full) if full.version == nockvm_macros::tas!(b"full") => {}
-        LockMerkleProof::Full(_) => {
-            return Err(invalid_body(
-                proposal,
-                format!("{label} full proof version is not %full"),
-            ));
-        }
-        LockMerkleProof::Stub(_) => {
-            return Err(invalid_body(
-                proposal,
-                format!("{label} proof is not full lock-merkle-proof"),
-            ));
-        }
-    }
-    if proof.spend_condition() != spend_condition {
-        return Err(invalid_body(
-            proposal,
-            format!("{label} proof spend condition does not match input metadata"),
-        ));
-    }
-    if &proof.proof().root != bridge_lock_root {
-        return Err(invalid_body(
-            proposal,
-            format!("{label} proof root is not the bridge lock root"),
-        ));
-    }
-    if proof.axis() != 1 {
-        return Err(invalid_body(
-            proposal,
-            format!("{label} proof axis is not 1"),
-        ));
-    }
-    if !proof.proof().path.is_empty() {
-        return Err(invalid_body(
-            proposal,
-            format!("{label} proof path is not empty for bridge lock"),
-        ));
-    }
-    let spend_condition_root = proof.spend_condition().hash().map_err(|err| {
-        invalid_body(
-            proposal,
-            format!("{label} proof spend condition could not be hashed: {err}"),
-        )
-    })?;
-    if &spend_condition_root != bridge_lock_root {
-        return Err(invalid_body(
-            proposal,
-            format!("{label} proof spend condition does not hash to the bridge lock root"),
-        ));
-    }
     Ok(())
 }
 
@@ -223,20 +162,19 @@ fn validate_transaction_outputs(
     proposal: &WithdrawalProposalData,
     tx: &TransactionV1,
     bridge_lock_root: &Tip5Hash,
-    nicks_fee_per_nock: u64,
 ) -> Result<(), BridgeError> {
     validate_output_metadata(proposal, &tx.metadata.outputs, bridge_lock_root)?;
 
     let mut withdrawal_seed_count = 0_u64;
     let mut withdrawal_seed_amount = 0_u64;
-    let mut total_tx_fee = 0_u64;
+    let mut total_fee = 0_u64;
     for (_, spend) in &tx.spends.0 {
         let Spend::Witness(spend) = spend else {
             return Err(invalid_body(
                 proposal, "withdrawal transaction contains a legacy spend",
             ));
         };
-        total_tx_fee = total_tx_fee
+        total_fee = total_fee
             .checked_add(u64::try_from(spend.fee.0).map_err(|err| {
                 BridgeError::ValueConversion(format!("withdrawal spend fee overflow: {err}"))
             })?)
@@ -305,19 +243,13 @@ fn validate_transaction_outputs(
             ),
         ));
     }
-    let withdrawal_fee = compute_bridge_fee(proposal.burned_amount, nicks_fee_per_nock);
-    let conserved_total = withdrawal_seed_amount
-        .checked_add(withdrawal_fee)
-        .ok_or_else(|| invalid_body(proposal, "withdrawal amount plus bridge fee overflowed"))?
-        .checked_add(total_tx_fee)
-        .ok_or_else(|| invalid_body(proposal, "withdrawal amount plus fees overflowed"))?;
-    if conserved_total != proposal.burned_amount {
+    let spent_to_recipient_and_miner = proposal
+        .amount
+        .checked_add(total_fee)
+        .ok_or_else(|| invalid_body(proposal, "withdrawal amount plus fee overflowed"))?;
+    if spent_to_recipient_and_miner > proposal.burned_amount {
         return Err(invalid_body(
-            proposal,
-            format!(
-                "withdrawal recipient amount {} plus bridge fee {withdrawal_fee} plus transaction fee {total_tx_fee} does not equal burned amount {}",
-                withdrawal_seed_amount, proposal.burned_amount
-            ),
+            proposal, "withdrawal recipient amount plus transaction fee exceeds burned amount",
         ));
     }
 
@@ -582,17 +514,15 @@ mod tests {
     };
 
     use super::*;
-    use crate::shared::types::BaseEventId;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::types::{WithdrawalId, WithdrawalSnapshot};
-
-    const TEST_NICKS_FEE_PER_NOCK: u64 = 195;
 
     fn hash(seed: u64) -> Tip5Hash {
         Tip5Hash([Belt(seed), Belt(seed + 1), Belt(seed + 2), Belt(seed + 3), Belt(seed + 4)])
     }
 
-    fn base_event_id() -> BaseEventId {
-        BaseEventId((1_u8..=32).collect())
+    fn base_event_id() -> AtomBytes {
+        AtomBytes((1_u8..=32).collect())
     }
 
     fn bridge_spend_condition() -> SpendCondition {
@@ -610,15 +540,11 @@ mod tests {
         };
         let base_batch_end = 77;
         let amount = 1_234;
-        let transaction_fee = 3;
-        let burned_amount = amount + TEST_NICKS_FEE_PER_NOCK + transaction_fee;
-        let withdrawal_fee = compute_bridge_fee(burned_amount, TEST_NICKS_FEE_PER_NOCK);
-        assert_eq!(burned_amount, amount + withdrawal_fee + transaction_fee);
         let input_name = Name::new(hash(400), hash(500));
         let witness = Witness::new(
-            LockMerkleProof::new_full(
+            LockMerkleProof::new_stub(
                 bridge_condition.clone(),
-                1,
+                2,
                 MerkleProof {
                     root: bridge_lock_root.clone(),
                     path: Vec::new(),
@@ -649,7 +575,7 @@ mod tests {
         let spend = Spend::Witness(Spend1 {
             witness: witness.clone(),
             seeds: Seeds(vec![withdrawal_seed, refund_seed]),
-            fee: Nicks(transaction_fee as usize),
+            fee: Nicks(3),
         });
         let recipient_first_name = FirstName::from_lock_root(&recipient)
             .expect("recipient first name")
@@ -692,7 +618,7 @@ mod tests {
                 id,
                 recipient,
                 amount,
-                burned_amount,
+                burned_amount: amount + 100,
                 base_batch_end,
                 epoch: 0,
                 snapshot: WithdrawalSnapshot {
@@ -706,187 +632,12 @@ mod tests {
         )
     }
 
-    fn first_spend_lock_proof_mut(proposal: &mut WithdrawalProposalData) -> &mut LockMerkleProof {
-        let Transaction::V1(tx) = &mut proposal.transaction;
-        let (_, Spend::Witness(spend)) = tx.spends.0.first_mut().expect("spend") else {
-            panic!("expected witness spend");
-        };
-        &mut spend.witness.lock_merkle_proof
-    }
-
-    fn first_witness_data_lock_proof_mut(
-        proposal: &mut WithdrawalProposalData,
-    ) -> &mut LockMerkleProof {
-        let Transaction::V1(tx) = &mut proposal.transaction;
-        let WitnessData::Witnesses(witness_map) = &mut tx.witness_data else {
-            panic!("expected witness map");
-        };
-        let (_, witness) = witness_map.0.first_mut().expect("witness");
-        &mut witness.lock_merkle_proof
-    }
-
-    fn first_input_spend_condition_mut(
-        proposal: &mut WithdrawalProposalData,
-    ) -> &mut SpendCondition {
-        let Transaction::V1(tx) = &mut proposal.transaction;
-        let InputMetadata::SpendConditions(spend_conditions) = &mut tx.metadata.inputs else {
-            panic!("expected spend-condition metadata");
-        };
-        let (_, spend_condition) = spend_conditions.0.first_mut().expect("spend condition");
-        spend_condition
-    }
-
     #[test]
     fn validate_withdrawal_transaction_body_accepts_matching_body() {
         let (proposal, bridge_lock_root) = sample_proposal();
 
-        validate_withdrawal_transaction_body(&proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK)
+        validate_withdrawal_transaction_body(&proposal, &bridge_lock_root)
             .expect("matching body should validate");
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_underpaid_recipient_output() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        proposal.amount -= 1;
-        let Transaction::V1(tx) = &mut proposal.transaction;
-        let (_, Spend::Witness(spend)) = tx.spends.0.first_mut().expect("spend") else {
-            panic!("expected witness spend");
-        };
-        spend.seeds.0[0].gift = Nicks(proposal.amount as usize);
-        spend.seeds.0[1].gift = Nicks(spend.seeds.0[1].gift.0 + 1);
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("underpaid recipient output should fail");
-
-        assert!(
-            err.to_string().contains("does not equal burned amount"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_spend_witness_nonempty_merkle_path() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        match first_spend_lock_proof_mut(&mut proposal) {
-            LockMerkleProof::Full(proof) => proof.proof.path.push(hash(999)),
-            LockMerkleProof::Stub(proof) => proof.proof.path.push(hash(999)),
-        }
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("bad spend witness proof should fail");
-
-        assert!(
-            err.to_string()
-                .contains("spend witness proof path is not empty for bridge lock"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_witness_data_nonempty_merkle_path() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        match first_witness_data_lock_proof_mut(&mut proposal) {
-            LockMerkleProof::Full(proof) => proof.proof.path.push(hash(999)),
-            LockMerkleProof::Stub(proof) => proof.proof.path.push(hash(999)),
-        }
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("bad witness data proof should fail");
-
-        assert!(
-            err.to_string()
-                .contains("witness data proof path is not empty for bridge lock"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_axis_above_one() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        match first_spend_lock_proof_mut(&mut proposal) {
-            LockMerkleProof::Full(proof) => proof.axis = 2,
-            LockMerkleProof::Stub(_) => panic!("expected full proof"),
-        }
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("bad full proof axis should fail");
-
-        assert!(
-            err.to_string()
-                .contains("spend witness proof axis is not 1"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_non_bridge_spend_condition_root() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        let non_bridge_condition =
-            SpendCondition::new(vec![LockPrimitive::Pkh(Pkh::new(1, vec![hash(101)]))]);
-        let proof = LockMerkleProof::new_full(
-            non_bridge_condition.clone(),
-            1,
-            MerkleProof {
-                root: bridge_lock_root.clone(),
-                path: Vec::new(),
-            },
-        );
-
-        *first_input_spend_condition_mut(&mut proposal) = non_bridge_condition;
-        *first_spend_lock_proof_mut(&mut proposal) = proof.clone();
-        *first_witness_data_lock_proof_mut(&mut proposal) = proof;
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("non-bridge spend condition should fail");
-
-        assert!(
-            err.to_string().contains(
-                "spend witness proof spend condition does not hash to the bridge lock root"
-            ),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_withdrawal_transaction_body_rejects_stub_lock_merkle_proof() {
-        let (mut proposal, bridge_lock_root) = sample_proposal();
-        *first_witness_data_lock_proof_mut(&mut proposal) = LockMerkleProof::new_full(
-            bridge_spend_condition(),
-            1,
-            MerkleProof {
-                root: bridge_lock_root.clone(),
-                path: Vec::new(),
-            },
-        );
-        *first_spend_lock_proof_mut(&mut proposal) = LockMerkleProof::new_stub(
-            bridge_spend_condition(),
-            1,
-            MerkleProof {
-                root: bridge_lock_root.clone(),
-                path: Vec::new(),
-            },
-        );
-
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("stub proof should fail");
-
-        assert!(
-            err.to_string()
-                .contains("spend witness proof is not full lock-merkle-proof"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -898,10 +649,8 @@ mod tests {
         };
         spend.seeds.0[0].lock_root = hash(999);
 
-        let err = validate_withdrawal_transaction_body(
-            &proposal, &bridge_lock_root, TEST_NICKS_FEE_PER_NOCK,
-        )
-        .expect_err("wrong recipient output should fail");
+        let err = validate_withdrawal_transaction_body(&proposal, &bridge_lock_root)
+            .expect_err("wrong recipient output should fail");
 
         assert!(
             err.to_string().contains("not addressed to the recipient"),

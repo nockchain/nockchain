@@ -39,6 +39,7 @@ pub mod util {
 
     use either::{Left, Right};
 
+    use crate::ext::noun_equality;
     use crate::jets::math::util::lth;
     use crate::jets::util::slot;
     use crate::mem::NockStack;
@@ -82,7 +83,9 @@ pub mod util {
                             option_env!("GIT_SHA")
                         )
                     });
-                    if unsafe { a_head.raw_equals(&b_head) } {
+                    if unsafe { a_head.raw_equals(&b_head) }
+                        || noun_equality(a_head.in_space(space), b_head.in_space(space))
+                    {
                         dor(stack, a_tail, b_tail, space)
                     } else {
                         dor(stack, a_head, b_head, space)
@@ -141,6 +144,13 @@ mod tests {
         let a = A(&mut c.stack, &ubig!(_0x3fffffffffffffff));
         let sam = T(&mut c.stack, &[a, a]);
         assert_jet(c, jet_dor, sam, YES);
+
+        let head_a = T(&mut c.stack, &[D(1), D(2)]);
+        let head_b = T(&mut c.stack, &[D(1), D(2)]);
+        let a = T(&mut c.stack, &[head_a, D(4)]);
+        let b = T(&mut c.stack, &[head_b, D(3)]);
+        let sam = T(&mut c.stack, &[a, b]);
+        assert_jet(c, jet_dor, sam, NO);
     }
 
     #[test]

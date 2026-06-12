@@ -25,6 +25,8 @@ pma-assert = []
 
 # Please keep these alphabetized
 [dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 
 assert_no_alloc = { path = "../assert_no_alloc", optional = true, features = ["warn_debug"] }
 bincode = { workspace = true, features = ["serde"] }
@@ -41,6 +43,7 @@ nockvm_crypto = { workspace = true }
 nockvm_macros.workspace = true
 num-derive = { workspace = true }
 num-traits = { workspace = true }
+parquet = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 slotmap = { workspace = true }

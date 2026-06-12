@@ -30,9 +30,9 @@ NOCKAPP_BOOT_PMA_TESTS = [
 ]
 
 _NOCKAPP_TEST_COMPILE_DATA = [
-    "//assets:dumb",
-    "//crates/nockapp/test-jams:cue-test.jam",
-    "//crates/nockapp/test-jams:test-ker.jam",
+    "//open/assets:dumb",
+    "//open/crates/nockapp/test-jams:cue-test.jam",
+    "//open/crates/nockapp/test-jams:test-ker.jam",
 ]
 
 def nockapp_boot_pma_skip_args():
@@ -77,21 +77,21 @@ def nockapp_unit_rust_test(name, args = None, size = "medium", timeout = "modera
         data = _NOCKAPP_TEST_COMPILE_DATA,
         edition = "2021",
         proc_macro_deps = [
-            "//crates/nockvm/rust/nockvm_macros",
+            "//open/crates/nockvm/rust/nockvm_macros",
         ] + all_crate_deps(proc_macro = True),
         rustc_env = {
             # rust_test compiles from bazel-out; point Diesel's embed_migrations!
             # at the compile_data tree instead of the source-tree manifest dir.
-            "CARGO_MANIFEST_DIR": "$(BINDIR)/crates/nockapp",
-            "DUMB_JAM_PATH": "$(location //assets:dumb)",
+            "CARGO_MANIFEST_DIR": "$(BINDIR)/open/crates/nockapp",
+            "DUMB_JAM_PATH": "$(location //open/assets:dumb)",
         },
         deps = all_crate_deps(
             normal = True,
             normal_dev = True,
         ) + [
-            "//crates/nockvm/rust/ibig",
-            "//crates/nockvm/rust/nockvm",
-            "//crates/noun-serde",
+            "//open/crates/nockvm/rust/ibig",
+            "//open/crates/nockvm/rust/nockvm",
+            "//open/crates/noun-serde",
         ],
     )
 

@@ -1,7 +1,0 @@
-load(":protoc_toolchain.bzl", "protoc_from_toolchain")
-
-package(default_visibility = ["//visibility:public"])
-
-protoc_from_toolchain(
-    name = "protoc",
-)

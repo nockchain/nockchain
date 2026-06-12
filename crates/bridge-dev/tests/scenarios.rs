@@ -18,7 +18,6 @@ use tempfile::{Builder as TempDirBuilder, TempDir};
 
 const E2E_ENABLE_ENV: &str = "BRIDGE_DEV_RUN_E2E";
 const E2E_PORT_OFFSET_ENV: &str = "BRIDGE_DEV_E2E_PORT_OFFSET";
-const KEEP_RUN_ROOT_ENV: &str = "BRIDGE_DEV_KEEP_RUN_ROOT";
 const TEST_RUN_ROOT_ENV: &str = "BRIDGE_DEV_TEST_RUN_ROOT";
 const PORT_OFFSET_ENV: &str = "BRIDGE_DEV_PORT_OFFSET";
 const FAKENET_GENESIS_JAM_ENV: &str = "BRIDGE_DEV_FAKENET_GENESIS_JAM";
@@ -67,7 +66,7 @@ const ALL_BRIDGE_NODES: &[usize] = &[0, 1, 2, 3, 4];
 static E2E_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct BridgeDevScenario {
-    tempdir: Option<TempDir>,
+    _tempdir: TempDir,
     workspace_root: PathBuf,
     bridge_dev_bin: PathBuf,
     run_root: PathBuf,
@@ -357,7 +356,7 @@ impl BridgeDevScenario {
             up_stdout: log_dir.join("up.stdout.log"),
             up_stderr: log_dir.join("up.stderr.log"),
             env_overrides: Vec::new(),
-            tempdir: Some(tempdir),
+            _tempdir: tempdir,
         })
     }
 
@@ -998,14 +997,6 @@ impl BridgeDevScenario {
 impl Drop for BridgeDevScenario {
     fn drop(&mut self) {
         self.stop();
-        if env::var(KEEP_RUN_ROOT_ENV).ok().as_deref() == Some("1") {
-            if let Some(tempdir) = self.tempdir.take() {
-                eprintln!(
-                    "preserving bridge-dev scenario tempdir at {} because {KEEP_RUN_ROOT_ENV}=1",
-                    tempdir.keep().display()
-                );
-            }
-        }
     }
 }
 

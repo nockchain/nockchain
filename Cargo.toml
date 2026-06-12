@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hatch", "crates/honc-cold-138", "crates/honk", "crates/honk-tools", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zkvm-jetpack"]
 resolver = "2"
 
 [workspace.package]
@@ -29,6 +29,8 @@ alloy = "=1.8.2"
 anyhow = "1.0"
 argon2 = "0.5.3"
 arrayref = "0.3.7"
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
 askama = "0.12.1"
 assert_cmd = "2.0"
 async-trait = "0.1"
@@ -112,6 +114,7 @@ opentelemetry-otlp = { version = "0.30.0", features = [
 ] }
 opentelemetry_sdk = { version = "0.30.0", features = ["rt-tokio"] }
 parking_lot = "0.12.4"
+parquet = { version = "56.2.0", features = ["arrow", "zstd"] }
 pin-project-lite = "0.2.16"
 predicates = "3.0"
 proc-macro2 = "1.0.91"

@@ -44,8 +44,8 @@ fn is_rate_limit_error<E: std::fmt::Display>(e: &E) -> bool {
 
 use crate::deposit::types::{BaseDepositSettlementEntry, DepositSettlement, DepositSettlementData};
 use crate::shared::types::{
-    zero_tip5_hash, AtomBytes, BaseBlockRef, BaseEvent, BaseEventContent, BaseEventId, EthAddress,
-    NullTag, Tip5Hash,
+    zero_tip5_hash, AtomBytes, BaseBlockRef, BaseEvent, BaseEventContent, EthAddress, NullTag,
+    Tip5Hash,
 };
 use crate::withdrawal::types::{BaseWithdrawalEntry, Withdrawal};
 
@@ -111,37 +111,12 @@ pub const WITHDRAWAL_BURN_CALLDATA_LEN: usize =
     WITHDRAWAL_BURN_BASE_CALLDATA_LEN + WITHDRAWAL_BURN_TRAILER_LEN;
 const WITHDRAWAL_BURN_COMMITMENT_DOMAIN: &[u8] = b"nock-withdrawal-calldata-v1";
 
-// Refunded operator recovery: keep this exact historical burn out of withdrawal ordering.
-const REFUNDED_WITHDRAWAL_BURN_TX_HASH: [u8; 32] = [
-    0xfa, 0x0b, 0x8e, 0x41, 0x34, 0xa3, 0x87, 0x44, 0x0a, 0x99, 0x54, 0x41, 0x14, 0x57, 0x83, 0x97,
-    0xd5, 0x25, 0x42, 0xce, 0xa3, 0x06, 0xd6, 0xb9, 0xad, 0xea, 0x80, 0x14, 0x07, 0xe3, 0x12, 0x3f,
-];
-const REFUNDED_WITHDRAWAL_BURN_LOG_INDEX: u64 = 243;
-const REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID: [u8; 32] = [
-    0x45, 0xcf, 0xbf, 0x83, 0x1f, 0x2a, 0xbf, 0x37, 0x71, 0x64, 0xf8, 0x57, 0xa2, 0xbc, 0x47, 0x33,
-    0x8f, 0xca, 0xa8, 0xf4, 0xf1, 0x2a, 0x59, 0x86, 0xa3, 0xba, 0x9b, 0xef, 0x35, 0xaf, 0xea, 0xbd,
-];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedBurnForWithdrawalLog {
-    pub base_event_id: BaseEventId,
+    pub base_event_id: AtomBytes,
     pub burner: EthAddress,
     pub amount: u64,
     pub lock_root: Tip5Hash,
-}
-
-pub(crate) fn is_explicitly_refunded_withdrawal_base_event_id(base_event_id: &BaseEventId) -> bool {
-    base_event_id.0.as_slice() == REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID
-}
-
-pub(crate) fn is_explicitly_refunded_withdrawal_burn(
-    base_event_id: &BaseEventId,
-    tx_hash: &B256,
-    log_index: Option<u64>,
-) -> bool {
-    is_explicitly_refunded_withdrawal_base_event_id(base_event_id)
-        && tx_hash.as_slice() == REFUNDED_WITHDRAWAL_BURN_TX_HASH
-        && log_index == Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -680,12 +655,70 @@ impl BaseBridge {
             "fetched logs for batch"
         );
 
-        let block_info = fetch_base_block_info(&self.deps.provider, batch_start, batch_end).await?;
+        // Use batch RPC to fetch all block headers in chunks of 20
+        // This reduces 100 individual RPC calls to ~5 batched requests
+        let mut block_info: HashMap<u64, (B256, B256)> = HashMap::new();
+        let heights: Vec<u64> = (batch_start..=batch_end).collect();
+
+        for chunk in heights.chunks(20) {
+            let mut batch = BatchRequest::new(self.deps.provider.client());
+            let mut futures = Vec::new();
+
+            for &height in chunk {
+                // eth_getBlockByNumber with false = don't include transactions
+                let fut = batch
+                    .add_call::<_, Option<alloy::rpc::types::Block>>(
+                        "eth_getBlockByNumber",
+                        &(BlockNumberOrTag::Number(height), false),
+                    )
+                    .map_err(|e| {
+                        BridgeError::BaseBridgeMonitoring(format!(
+                            "failed to add batch call for block {}: {}",
+                            height, e
+                        ))
+                    })?;
+                futures.push((height, fut));
+            }
+
+            // Send the batch
+            batch.send().await.map_err(|e| {
+                BridgeError::BaseBridgeMonitoring(format!("batch RPC failed: {}", e))
+            })?;
+
+            // Collect results
+            for (height, fut) in futures {
+                let block_opt: Option<alloy::rpc::types::Block> = fut.await.map_err(|e| {
+                    BridgeError::BaseBridgeMonitoring(format!(
+                        "failed to get block {}: {}",
+                        height, e
+                    ))
+                })?;
+                let block = block_opt.ok_or_else(|| {
+                    BridgeError::BaseBridgeMonitoring(format!(
+                        "block {} unavailable during batch fetch",
+                        height
+                    ))
+                })?;
+                block_info.insert(height, (block.header.hash, block.header.inner.parent_hash));
+            }
+        }
+
         let mut blocks = Vec::new();
+        let mut prev_hash: Option<B256> = None;
         for height in batch_start..=batch_end {
             let (block_hash, parent_hash) = block_info.get(&height).ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring(format!("missing block info for {}", height))
             })?;
+
+            if let Some(expected_parent) = prev_hash {
+                if *parent_hash != expected_parent {
+                    return Err(BridgeError::BaseBridgeMonitoring(format!(
+                        "base reorg detected at height {} (expected parent {:?}, got {:?})",
+                        height, expected_parent, parent_hash
+                    )));
+                }
+            }
+            prev_hash = Some(*block_hash);
 
             blocks.push(BaseBlockRef {
                 height,
@@ -710,9 +743,6 @@ impl BaseBridge {
             let block_number = log.block_number.ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring("log missing block number".into())
             })?;
-            validate_base_log_block_hash(
-                &block_info, batch_start, batch_end, block_number, log.block_hash,
-            )?;
             let tx_hash = log.transaction_hash.ok_or_else(|| {
                 BridgeError::BaseBridgeMonitoring("log missing transaction hash".into())
             })?;
@@ -957,20 +987,6 @@ impl BaseBridge {
             raw, tx_hash, log_index, self.contracts.nock_contract_address, tx_input,
         ) {
             Ok(decoded) => {
-                if is_explicitly_refunded_withdrawal_burn(
-                    &decoded.base_event_id, tx_hash, log_index,
-                ) {
-                    info!(
-                        target: "bridge.base.observer",
-                        tx_hash = %format!("0x{}", hex_encode(tx_hash.as_slice())),
-                        log_index = ?log_index,
-                        base_event_id = %format!("0x{}", hex_encode(&decoded.base_event_id.0)),
-                        amount = %decoded.amount,
-                        "skipping explicitly refunded withdrawal burn"
-                    );
-                    return Ok(None);
-                }
-
                 let base_tx_id = AtomBytes(tx_hash.as_slice().to_vec());
                 let withdrawal = Withdrawal {
                     base_tx_id: base_tx_id.clone(),
@@ -1068,108 +1084,6 @@ fn atom_bytes_from_b256(value: B256) -> AtomBytes {
     AtomBytes(value.as_slice().to_vec())
 }
 
-pub(crate) type BaseBlockInfo = HashMap<u64, (B256, B256)>;
-const BASE_HEADER_RPC_BATCH_SIZE: usize = 20;
-
-pub(crate) async fn fetch_base_block_info(
-    provider: &DynProvider<Optimism>,
-    batch_start: u64,
-    batch_end: u64,
-) -> Result<BaseBlockInfo, BridgeError> {
-    let mut block_info = BaseBlockInfo::new();
-    let heights: Vec<u64> = (batch_start..=batch_end).collect();
-
-    // Fetch block headers in bounded JSON-RPC batches, then verify the batch is one chain.
-    for chunk in heights.chunks(BASE_HEADER_RPC_BATCH_SIZE) {
-        let mut batch = BatchRequest::new(provider.client());
-        let mut futures = Vec::new();
-
-        for &height in chunk {
-            let fut = batch
-                .add_call::<_, Option<alloy::rpc::types::Block>>(
-                    "eth_getBlockByNumber",
-                    &(BlockNumberOrTag::Number(height), false),
-                )
-                .map_err(|err| {
-                    BridgeError::BaseBridgeMonitoring(format!(
-                        "failed to add Base block header batch call for {height}: {err}"
-                    ))
-                })?;
-            futures.push((height, fut));
-        }
-
-        batch.send().await.map_err(|err| {
-            BridgeError::BaseBridgeMonitoring(format!("Base block header batch RPC failed: {err}"))
-        })?;
-
-        for (height, fut) in futures {
-            let block_opt: Option<alloy::rpc::types::Block> = fut.await.map_err(|err| {
-                BridgeError::BaseBridgeMonitoring(format!(
-                    "failed to fetch Base block header {height}: {err}"
-                ))
-            })?;
-            let block = block_opt.ok_or_else(|| {
-                BridgeError::BaseBridgeMonitoring(format!(
-                    "Base block header {height} unavailable during batch fetch"
-                ))
-            })?;
-            block_info.insert(height, (block.header.hash, block.header.inner.parent_hash));
-        }
-    }
-
-    validate_base_block_parent_chain(&block_info, batch_start, batch_end)?;
-    Ok(block_info)
-}
-
-pub(crate) fn validate_base_block_parent_chain(
-    block_info: &BaseBlockInfo,
-    batch_start: u64,
-    batch_end: u64,
-) -> Result<(), BridgeError> {
-    let mut prev_hash = None;
-    for height in batch_start..=batch_end {
-        let (block_hash, parent_hash) = block_info.get(&height).ok_or_else(|| {
-            BridgeError::BaseBridgeMonitoring(format!(
-                "missing Base block header for height {height}"
-            ))
-        })?;
-        if let Some(expected_parent) = prev_hash {
-            if *parent_hash != expected_parent {
-                return Err(BridgeError::BaseBridgeMonitoring(format!(
-                    "base reorg detected at height {height} (expected parent {:?}, got {:?})",
-                    expected_parent, parent_hash
-                )));
-            }
-        }
-        prev_hash = Some(*block_hash);
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_base_log_block_hash(
-    block_info: &BaseBlockInfo,
-    batch_start: u64,
-    batch_end: u64,
-    block_number: u64,
-    log_block_hash: Option<B256>,
-) -> Result<(), BridgeError> {
-    let log_block_hash = log_block_hash.ok_or_else(|| {
-        BridgeError::BaseBridgeMonitoring(format!("log at block {block_number} missing block hash"))
-    })?;
-    let (expected_block_hash, _) = block_info.get(&block_number).ok_or_else(|| {
-        BridgeError::BaseBridgeMonitoring(format!(
-            "log block {block_number} is outside fetched batch {batch_start}..={batch_end}"
-        ))
-    })?;
-    if log_block_hash != *expected_block_hash {
-        return Err(BridgeError::BaseBridgeMonitoring(format!(
-            "log block hash mismatch at height {block_number}: expected {:?}, got {:?}",
-            expected_block_hash, log_block_hash
-        )));
-    }
-    Ok(())
-}
-
 fn eth_address_from_alloy(addr: Address) -> EthAddress {
     EthAddress::from(addr)
 }
@@ -1178,7 +1092,7 @@ fn tip5_from_limbs(limbs: &[u64; 5]) -> Tip5Hash {
     Tip5Hash::from_limbs(limbs)
 }
 
-pub(crate) fn compute_base_event_id(tx_hash: &B256, log_index: Option<u64>) -> BaseEventId {
+pub(crate) fn compute_base_event_id(tx_hash: &B256, log_index: Option<u64>) -> AtomBytes {
     // This is the EVM log coordinate for a Base event: transaction hashes are
     // chain-unique for practical purposes, and `log_index` distinguishes
     // multiple logs emitted by the same transaction.
@@ -1187,7 +1101,7 @@ pub(crate) fn compute_base_event_id(tx_hash: &B256, log_index: Option<u64>) -> B
     hash_input.extend_from_slice(tx_hash.as_slice());
     let log_index_bytes = log_index.to_be_bytes::<32>();
     hash_input.extend_from_slice(&log_index_bytes);
-    BaseEventId(keccak256(&hash_input).as_slice().to_vec())
+    AtomBytes(keccak256(&hash_input).as_slice().to_vec())
 }
 
 pub(crate) fn burn_for_withdrawal_signature_hash() -> B256 {
@@ -1366,14 +1280,7 @@ fn b256_to_array(value: B256) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::{bail, Context, Result};
-    use serde_json::Value;
-
     use super::*;
-
-    const REFUNDED_WITHDRAWAL_BURN_BASE_RPC_URL_ENV: &str =
-        "BRIDGE_REFUNDED_WITHDRAWAL_BASE_RPC_URL";
-    const BASE_RPC_URL_ENV: &str = "BASE_RPC_URL";
 
     fn b256_from_u64(value: u64) -> B256 {
         let mut bytes = [0u8; 32];
@@ -1408,178 +1315,6 @@ mod tests {
             ],
             data: Bytes::from(amount_raw.to_be_bytes::<32>().to_vec()),
         }
-    }
-
-    fn refunded_withdrawal_burn_base_rpc_url() -> Option<String> {
-        [REFUNDED_WITHDRAWAL_BURN_BASE_RPC_URL_ENV, BASE_RPC_URL_ENV]
-            .into_iter()
-            .find_map(|name| {
-                std::env::var(name)
-                    .ok()
-                    .map(|value| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
-            })
-    }
-
-    async fn base_rpc_call(
-        client: &reqwest::Client,
-        rpc_url: &str,
-        method: &str,
-        params: Value,
-    ) -> Result<Value> {
-        let response: Value = client
-            .post(rpc_url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": method,
-                "params": params,
-            }))
-            .send()
-            .await
-            .with_context(|| format!("calling Base RPC method {method}"))?
-            .error_for_status()
-            .with_context(|| format!("Base RPC method {method} returned HTTP error"))?
-            .json()
-            .await
-            .with_context(|| format!("decoding Base RPC method {method} response"))?;
-
-        if let Some(error) = response.get("error") {
-            bail!("Base RPC method {method} failed: {error}");
-        }
-
-        response
-            .get("result")
-            .cloned()
-            .filter(|result| !result.is_null())
-            .with_context(|| format!("Base RPC method {method} returned no result"))
-    }
-
-    fn json_field_str<'a>(value: &'a Value, field: &str) -> Result<&'a str> {
-        value
-            .get(field)
-            .and_then(Value::as_str)
-            .with_context(|| format!("missing string field {field}"))
-    }
-
-    fn hex_body(value: &str) -> &str {
-        value.strip_prefix("0x").unwrap_or(value)
-    }
-
-    fn parse_hex_bytes(value: &str, field: &str) -> Result<Vec<u8>> {
-        hex::decode(hex_body(value)).with_context(|| format!("invalid hex in field {field}"))
-    }
-
-    fn parse_fixed_hex<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
-        let bytes = parse_hex_bytes(value, field)?;
-        bytes.try_into().map_err(|bytes: Vec<u8>| {
-            anyhow::anyhow!("field {field} has {} bytes, expected {N}", bytes.len())
-        })
-    }
-
-    fn parse_b256_field(value: &Value, field: &str) -> Result<B256> {
-        Ok(B256::from(parse_fixed_hex::<32>(
-            json_field_str(value, field)?,
-            field,
-        )?))
-    }
-
-    fn parse_address_field(value: &Value, field: &str) -> Result<Address> {
-        Ok(Address::from(parse_fixed_hex::<20>(
-            json_field_str(value, field)?,
-            field,
-        )?))
-    }
-
-    fn parse_bytes_field(value: &Value, field: &str) -> Result<Bytes> {
-        Ok(Bytes::from(parse_hex_bytes(
-            json_field_str(value, field)?,
-            field,
-        )?))
-    }
-
-    fn parse_u64_hex_field(value: &Value, field: &str) -> Result<u64> {
-        let raw = json_field_str(value, field)?;
-        let digits = hex_body(raw);
-        if digits.is_empty() {
-            return Ok(0);
-        }
-        u64::from_str_radix(digits, 16).with_context(|| format!("invalid u64 hex in field {field}"))
-    }
-
-    fn parse_topics_field(value: &Value) -> Result<Vec<B256>> {
-        let topics = value
-            .get("topics")
-            .and_then(Value::as_array)
-            .context("missing topics array")?;
-        topics
-            .iter()
-            .enumerate()
-            .map(|(index, topic)| {
-                Ok(B256::from(parse_fixed_hex::<32>(
-                    topic
-                        .as_str()
-                        .with_context(|| format!("topic {index} is not a string"))?,
-                    "topics",
-                )?))
-            })
-            .collect()
-    }
-
-    fn hex_eq(lhs: &str, rhs: &str) -> bool {
-        hex_body(lhs).eq_ignore_ascii_case(hex_body(rhs))
-    }
-
-    fn format_tx_hash_hex(tx_hash: &B256) -> String {
-        format!("0x{}", hex_encode(tx_hash.as_slice()))
-    }
-
-    #[test]
-    fn validate_base_log_block_hash_accepts_matching_header() {
-        let mut block_info = HashMap::new();
-        let block_hash = b256_from_u64(0xabc);
-        block_info.insert(42, (block_hash, b256_from_u64(0xdef)));
-
-        validate_base_log_block_hash(&block_info, 40, 50, 42, Some(block_hash))
-            .expect("matching log block hash should be accepted");
-    }
-
-    #[test]
-    fn validate_base_log_block_hash_rejects_missing_hash() {
-        let mut block_info = HashMap::new();
-        block_info.insert(42, (b256_from_u64(0xabc), b256_from_u64(0xdef)));
-
-        let err = validate_base_log_block_hash(&block_info, 40, 50, 42, None)
-            .expect_err("missing log block hash should fail closed");
-        assert!(
-            err.to_string().contains("missing block hash"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_base_log_block_hash_rejects_mismatched_header() {
-        let mut block_info = HashMap::new();
-        block_info.insert(42, (b256_from_u64(0xabc), b256_from_u64(0xdef)));
-
-        let err = validate_base_log_block_hash(&block_info, 40, 50, 42, Some(b256_from_u64(0x123)))
-            .expect_err("mismatched log block hash should fail closed");
-        assert!(
-            err.to_string().contains("block hash mismatch"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_base_log_block_hash_rejects_outside_batch_height() {
-        let block_info = HashMap::new();
-
-        let err = validate_base_log_block_hash(&block_info, 40, 50, 60, Some(b256_from_u64(0x123)))
-            .expect_err("outside-window log should fail closed");
-        assert!(
-            err.to_string().contains("outside fetched batch"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -1709,173 +1444,6 @@ mod tests {
             keccak256(&buf)
         };
         assert_eq!(id.0, expected.as_slice());
-    }
-
-    #[test]
-    fn refunded_withdrawal_burn_identity_matches_known_base_event_id() {
-        let tx_hash = B256::from(REFUNDED_WITHDRAWAL_BURN_TX_HASH);
-        let id = compute_base_event_id(&tx_hash, Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX));
-
-        assert_eq!(id.0, REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID);
-        assert!(is_explicitly_refunded_withdrawal_base_event_id(&id));
-        assert!(is_explicitly_refunded_withdrawal_burn(
-            &id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
-    }
-
-    #[test]
-    fn refunded_withdrawal_burn_constants_match_incident_hex() {
-        let tx_hash = B256::from(REFUNDED_WITHDRAWAL_BURN_TX_HASH);
-        let base_event_id = BaseEventId(REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID.to_vec());
-
-        assert_eq!(
-            format!("0x{}", hex_encode(tx_hash.as_slice())),
-            "0xfa0b8e4134a387440a99544114578397d52542cea306d6b9adea801407e3123f"
-        );
-        assert_eq!(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX, 0xf3);
-        assert_eq!(
-            format!("0x{}", hex_encode(&base_event_id.0)),
-            "0x45cfbf831f2abf377164f857a2bc47338fcaa8f4f12a5986a3ba9bef35afeabd"
-        );
-
-        let recomputed_id =
-            compute_base_event_id(&tx_hash, Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX));
-        assert_eq!(recomputed_id, base_event_id);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires a Base RPC URL with historical access"]
-    async fn ignored_refunded_withdrawal_burn_matches_live_base_block() -> Result<()> {
-        let Some(rpc_url) = refunded_withdrawal_burn_base_rpc_url() else {
-            eprintln!(
-                "skipping live Base RPC test; set {REFUNDED_WITHDRAWAL_BURN_BASE_RPC_URL_ENV} or {BASE_RPC_URL_ENV}"
-            );
-            return Ok(());
-        };
-
-        let client = reqwest::Client::new();
-        let tx_hash = B256::from(REFUNDED_WITHDRAWAL_BURN_TX_HASH);
-        let tx_hash_hex = format_tx_hash_hex(&tx_hash);
-
-        let receipt = base_rpc_call(
-            &client,
-            &rpc_url,
-            "eth_getTransactionReceipt",
-            serde_json::json!([tx_hash_hex.clone()]),
-        )
-        .await?;
-        let block_number = parse_u64_hex_field(&receipt, "blockNumber")?;
-        let receipt_block_hash = parse_b256_field(&receipt, "blockHash")?;
-
-        let block_number_hex = format!("0x{block_number:x}");
-        let block = base_rpc_call(
-            &client,
-            &rpc_url,
-            "eth_getBlockByNumber",
-            serde_json::json!([block_number_hex, true]),
-        )
-        .await?;
-        assert_eq!(parse_u64_hex_field(&block, "number")?, block_number);
-        assert_eq!(parse_b256_field(&block, "hash")?, receipt_block_hash);
-
-        let transactions = block
-            .get("transactions")
-            .and_then(Value::as_array)
-            .context("exact Base block did not include full transactions")?;
-        let transaction = transactions
-            .iter()
-            .find(|transaction| {
-                json_field_str(transaction, "hash")
-                    .map(|hash| hex_eq(hash, &tx_hash_hex))
-                    .unwrap_or(false)
-            })
-            .context("refunded burn transaction missing from exact Base block")?;
-        let tx_input = parse_bytes_field(transaction, "input")?;
-        let nock_contract_address = parse_address_field(transaction, "to")?;
-
-        let receipt_logs = receipt
-            .get("logs")
-            .and_then(Value::as_array)
-            .context("receipt did not include logs")?;
-        let burn_log = receipt_logs
-            .iter()
-            .find(|log| {
-                let matches_transaction = json_field_str(log, "transactionHash")
-                    .map(|hash| hex_eq(hash, &tx_hash_hex))
-                    .unwrap_or(false);
-                let matches_index = parse_u64_hex_field(log, "logIndex").ok()
-                    == Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX);
-                matches_transaction && matches_index
-            })
-            .context("refunded burn log missing from transaction receipt")?;
-
-        let raw = RawLog {
-            address: parse_address_field(burn_log, "address")?,
-            topics: parse_topics_field(burn_log)?,
-            data: parse_bytes_field(burn_log, "data")?,
-        };
-        assert_eq!(raw.address, nock_contract_address);
-        assert_eq!(
-            raw.topics.first(),
-            Some(&Nock::BurnForWithdrawal::SIGNATURE_HASH)
-        );
-
-        let decoded = decode_burn_for_withdrawal_log_with_calldata(
-            &raw,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-            nock_contract_address,
-            tx_input.as_ref(),
-        )
-        .context("live refunded burn log should decode with the live calldata trailer")?;
-
-        assert_eq!(
-            decoded.base_event_id.0,
-            REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID
-        );
-        assert!(is_explicitly_refunded_withdrawal_burn(
-            &decoded.base_event_id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
-
-        Ok(())
-    }
-
-    #[test]
-    fn refunded_withdrawal_burn_skip_requires_exact_identity() {
-        let tx_hash = B256::from(REFUNDED_WITHDRAWAL_BURN_TX_HASH);
-        let base_event_id = BaseEventId(REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID.to_vec());
-
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id,
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX - 1),
-        ));
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id, &tx_hash, None,
-        ));
-
-        let mut other_tx_hash = REFUNDED_WITHDRAWAL_BURN_TX_HASH;
-        other_tx_hash[31] ^= 1;
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &base_event_id,
-            &B256::from(other_tx_hash),
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
-
-        let mut other_base_event_id = REFUNDED_WITHDRAWAL_BURN_BASE_EVENT_ID.to_vec();
-        other_base_event_id[31] ^= 1;
-        assert!(!is_explicitly_refunded_withdrawal_base_event_id(
-            &BaseEventId(other_base_event_id.clone()),
-        ));
-        assert!(!is_explicitly_refunded_withdrawal_burn(
-            &BaseEventId(other_base_event_id),
-            &tx_hash,
-            Some(REFUNDED_WITHDRAWAL_BURN_LOG_INDEX),
-        ));
     }
 
     const TEST_BATCH_SIZE: u64 = 1000;

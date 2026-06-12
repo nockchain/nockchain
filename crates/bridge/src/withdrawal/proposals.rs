@@ -182,15 +182,6 @@ pub enum WithdrawalProposalValidationError {
     },
 
     #[error(
-        "selected inputs for withdrawal {id:?} epoch {epoch} are not spendable at the local safe tip: {reason}"
-    )]
-    SelectedInputsNotSafe {
-        id: WithdrawalId,
-        epoch: u64,
-        reason: String,
-    },
-
-    #[error(
         "non-contiguous epoch for withdrawal {id:?}: expected {expected_epoch}, got {received_epoch}"
     )]
     NonContiguousEpoch {
@@ -607,7 +598,7 @@ impl WithdrawalProjectionStore {
             CREATE TABLE IF NOT EXISTS withdrawals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 base_as_of BLOB NOT NULL CHECK(length(base_as_of) = 40),
-                base_event_id BLOB NOT NULL CHECK(length(base_event_id) = 32),
+                base_event_id BLOB NOT NULL,
                 recipient BLOB NOT NULL CHECK(length(recipient) = 40),
                 gross_burned_amount INTEGER NOT NULL,
                 base_batch_end INTEGER NOT NULL,
@@ -2367,6 +2358,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::shared::types::AtomBytes;
     use crate::withdrawal::types::WithdrawalSnapshot;
 
     async fn open_registry() -> (tempfile::TempDir, WithdrawalProposalRegistry) {
@@ -2382,10 +2374,8 @@ mod tests {
         )
     }
 
-    fn sample_base_event_id(start: u8) -> crate::shared::types::BaseEventId {
-        crate::shared::types::BaseEventId(
-            (0..32).map(|offset| start.wrapping_add(offset)).collect(),
-        )
+    fn sample_base_event_id(start: u8) -> AtomBytes {
+        AtomBytes((0..32).map(|offset| start.wrapping_add(offset)).collect())
     }
 
     fn sample_request() -> NockWithdrawalRequestKernelData {

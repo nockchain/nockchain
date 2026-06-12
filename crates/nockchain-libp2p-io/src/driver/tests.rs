@@ -1813,10 +1813,7 @@ async fn route_response_fact_seen_block_without_kernel_request_stays_gated() {
     };
     {
         let mut state_guard = state_arc.lock().await;
-        // Place the block below the frontier (already validated). The
-        // frontier block itself always replays; see
-        // `route_response_fact_seen_block_at_frontier_replays_to_kernel`.
-        state_guard.first_negative = height + 1;
+        state_guard.first_negative = height;
         state_guard.finish_processing_block_seen(&block_id);
     }
 
@@ -1829,7 +1826,7 @@ async fn route_response_fact_seen_block_without_kernel_request_stays_gated() {
     assert_eq!(
         scripted_traffic.poke_count.load(Ordering::SeqCst),
         0,
-        "seen block below the frontier without kernel demand should not reach the kernel"
+        "seen block without kernel demand should not reach the kernel"
     );
     assert_eq!(
         metrics.block_seen_cache_hits.fetch_add(0),
@@ -1844,61 +1841,6 @@ async fn route_response_fact_seen_block_without_kernel_request_stays_gated() {
     assert!(
         state_guard.seen_blocks.contains(&block_id),
         "gated seen block should remain in seen-block dedupe"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_response_fact_seen_block_at_frontier_replays_to_kernel() {
-    let transcript = DriverTranscript::default();
-    let scripted_traffic =
-        build_scripted_traffic_cop(transcript, Vec::new(), vec![PokeResult::Ack]).await;
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::new(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-    )));
-    let (swarm_tx, _swarm_rx) = tokio::sync::mpsc::channel(8);
-    let peer = PeerId::random();
-    let height = 42u64;
-    let (response, _) = heard_block_fact_with_tx_ids(height, &[]);
-    let block_id = match &response {
-        NockchainFact::HeardBlock(block_id, _) => block_id.clone(),
-        other => panic!("expected heard-block fact, got {other:?}"),
-    };
-    {
-        let mut state_guard = state_arc.lock().await;
-        // The block sits exactly at the frontier: it is the next block the
-        // kernel needs but it was marked seen by a null-height `%seen
-        // %block` (pending on missing txs). Gating it here with no kernel
-        // by-height request armed freezes the frontier permanently.
-        state_guard.first_negative = height;
-        state_guard.finish_processing_block_seen(&block_id);
-    }
-
-    route_response_fact(
-        peer, response, &scripted_traffic.traffic, &metrics, &state_arc, &swarm_tx,
-    )
-    .await
-    .expect("frontier-height seen block should replay");
-
-    assert_eq!(
-        scripted_traffic.poke_count.load(Ordering::SeqCst),
-        1,
-        "seen block at the frontier must replay to the kernel even without a kernel request"
-    );
-    assert_eq!(
-        metrics.block_seen_cache_hits.fetch_add(0),
-        0,
-        "frontier replay should bypass the seen gate"
-    );
-    let state_guard = state_arc.lock().await;
-    assert!(
-        !state_guard.is_processing_block(&block_id),
-        "acked frontier replay should release its processing claim"
-    );
-    assert!(
-        state_guard.seen_blocks.contains(&block_id),
-        "frontier replay should keep seen-block dedupe intact"
     );
 }
 
@@ -2042,14 +1984,11 @@ async fn route_response_fact_block_nack_releases_processing_for_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn route_response_fact_heard_tx_ack_without_seen_releases_processing_for_replay() {
+async fn route_response_fact_duplicate_current_heard_tx_gates_while_processing_then_seen_releases()
+{
     let transcript = DriverTranscript::default();
-    let scripted_traffic = build_scripted_traffic_cop(
-        transcript,
-        Vec::new(),
-        vec![PokeResult::Ack, PokeResult::Ack],
-    )
-    .await;
+    let scripted_traffic =
+        build_scripted_traffic_cop(transcript, Vec::new(), vec![PokeResult::Ack]).await;
     let metrics = isolated_test_metrics();
     let state_arc = Arc::new(Mutex::new(P2PState::new(
         metrics.clone(),
@@ -2074,52 +2013,31 @@ async fn route_response_fact_heard_tx_ack_without_seen_releases_processing_for_r
     )
     .await
     .expect("first heard-tx should route");
-    {
-        let state_guard = state_arc.lock().await;
-        // The kernel acks a heard-tx with no `%seen %tx` when it discards
-        // the tx (inputs not in heaviest balance, inputs spent,
-        // context-invalid). Holding the claim past the ack would gate the
-        // tx forever and starve any pending block that later needs it.
-        assert!(
-            !state_guard.is_processing_tx(&tx_id),
-            "acked heard-tx should release its processing claim"
-        );
-        assert!(
-            !state_guard.seen_txs.contains(&tx_id),
-            "ack without %seen must leave seen-tx dedupe untouched"
-        );
-    }
-
     route_response_fact(
-        peer,
-        response.clone(),
-        &scripted_traffic.traffic,
-        &metrics,
-        &state_arc,
-        &swarm_tx,
+        peer, response, &scripted_traffic.traffic, &metrics, &state_arc, &swarm_tx,
     )
     .await
-    .expect("replay after ack without %seen should route");
+    .expect("duplicate heard-tx should gate cleanly");
 
     assert_eq!(
         scripted_traffic.poke_count.load(Ordering::SeqCst),
-        2,
-        "ack without %seen should not permanently gate a tx replay"
+        1,
+        "duplicate heard-tx should not repoke before %seen arrives"
     );
     assert_eq!(
         metrics.tx_seen_cache_hits.fetch_add(0),
-        0,
-        "ack-released tx replay should not count as a cache gate hit"
+        1,
+        "duplicate heard-tx should be counted as a gate hit"
     );
     {
         let state_guard = state_arc.lock().await;
         assert!(
-            !state_guard.is_processing_tx(&tx_id),
-            "second ack should also release the tx processing claim"
+            state_guard.is_processing_tx(&tx_id),
+            "successful first poke should retain an in-flight tx processing claim until %seen"
         );
         assert!(
             !state_guard.seen_txs.contains(&tx_id),
-            "driver must not mark a tx seen without the kernel %seen effect"
+            "driver must not treat an acked tx poke as seen before the kernel emits %seen"
         );
     }
 
@@ -2132,12 +2050,12 @@ async fn route_response_fact_heard_tx_ack_without_seen_releases_processing_for_r
         metrics,
     )
     .await
-    .expect("seen tx effect should mark the tx seen");
+    .expect("seen tx effect should release tx processing");
 
     let state_guard = state_arc.lock().await;
     assert!(
         !state_guard.is_processing_tx(&tx_id),
-        "%seen should leave no tx processing claim"
+        "%seen should release the tx processing claim"
     );
     assert!(
         state_guard.seen_txs.contains(&tx_id),
@@ -2234,10 +2152,9 @@ async fn raw_tx_request_replay_clears_processing_without_seen_effect() {
     {
         let state_guard = state_arc.lock().await;
         assert!(
-            !state_guard.is_processing_tx(&tx_id),
-            "acked heard-tx should release its processing claim; the kernel may have discarded \
-             the tx without emitting %seen and it must stay redeliverable"
-        );
+                state_guard.is_processing_tx(&tx_id),
+                "acked heard-tx should retain its processing claim until the kernel confirms completion"
+            );
         assert!(
             !state_guard.seen_txs.contains(&tx_id),
             "driver must not mark the tx seen before a %seen effect arrives"

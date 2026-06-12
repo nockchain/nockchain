@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
@@ -65,28 +65,6 @@ impl ConfirmedBridgeNoteSnapshot {
     pub fn matches_confirmed_block(&self, height: u64, block_id: &Tip5Hash) -> bool {
         self.height() == height && self.block_id() == block_id
     }
-}
-
-#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
-pub enum SpendableInputValidationError {
-    #[error("local bridge note snapshot is unavailable")]
-    SnapshotUnavailable,
-
-    #[error(
-        "selected input {name:?} is not in the local bridge-owned note snapshot at height {snapshot_height}"
-    )]
-    InputMissing { name: Name, snapshot_height: u64 },
-
-    #[error(
-        "selected input {name:?} originates at Nockchain height {origin_page}, above local safe tip {safe_tip} (snapshot height {snapshot_height}, confirmation depth {confirmation_depth})"
-    )]
-    InputNotSafe {
-        name: Name,
-        origin_page: u64,
-        safe_tip: u64,
-        snapshot_height: u64,
-        confirmation_depth: u64,
-    },
 }
 
 #[async_trait]
@@ -276,18 +254,6 @@ impl BridgeNoteSnapshotService {
         })
     }
 
-    pub fn validate_selected_inputs_safe(
-        &self,
-        selected_inputs: &[Name],
-    ) -> Result<(), SpendableInputValidationError> {
-        let snapshot = self
-            .snapshot()
-            .ok_or(SpendableInputValidationError::SnapshotUnavailable)?;
-        validate_selected_inputs_safe_in_snapshot(
-            &snapshot.normalized, selected_inputs, self.nockchain_confirmation_depth,
-        )
-    }
-
     fn replace_snapshot(&self, snapshot: Option<ConfirmedBridgeNoteSnapshot>) {
         if let Ok(mut guard) = self.cache.write() {
             *guard = snapshot;
@@ -327,47 +293,6 @@ pub fn filter_spendable_inputs(
         metadata: snapshot.metadata.clone(),
         candidates,
     }
-}
-
-fn validate_selected_inputs_safe_in_snapshot(
-    snapshot: &NormalizedSnapshot,
-    selected_inputs: &[Name],
-    nockchain_confirmation_depth: u64,
-) -> Result<(), SpendableInputValidationError> {
-    let snapshot_height = (snapshot.metadata.height.0).0;
-    let safe_tip = snapshot_height.saturating_sub(nockchain_confirmation_depth);
-    let candidates = snapshot
-        .candidates
-        .iter()
-        .map(|candidate| {
-            let identity = candidate.identity();
-            (note_name_key(&identity.name), identity.origin_page.clone())
-        })
-        .collect::<BTreeMap<_, _>>();
-    let mut selected_inputs = selected_inputs.to_vec();
-    selected_inputs.sort_by_key(note_name_key);
-    selected_inputs.dedup_by(|left, right| left == right);
-
-    for input in selected_inputs {
-        let Some(origin_page) = candidates.get(&note_name_key(&input)) else {
-            return Err(SpendableInputValidationError::InputMissing {
-                name: input,
-                snapshot_height,
-            });
-        };
-        let origin_page = (origin_page.0).0;
-        if origin_page > safe_tip {
-            return Err(SpendableInputValidationError::InputNotSafe {
-                name: input,
-                origin_page,
-                safe_tip,
-                snapshot_height,
-                confirmation_depth: nockchain_confirmation_depth,
-            });
-        }
-    }
-
-    Ok(())
 }
 
 async fn fetch_private_balance_page(
@@ -669,73 +594,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(spendable_names, vec![confirmed_note, edge_note]);
-    }
-
-    #[tokio::test]
-    async fn selected_input_safe_validation_rejects_missing_and_unsafe_inputs() {
-        let safe_note = name(25);
-        let unsafe_note = name(26);
-        let missing_note = name(27);
-        let snapshot_height = 100;
-        let confirmation_depth = 5;
-        let safe_tip = snapshot_height - confirmation_depth;
-        let safe_note_origin_page = safe_tip;
-        let unsafe_note_origin_page = safe_tip + 1;
-        // Safe tip is the validator's local snapshot height minus the configured
-        // Nockchain confirmation depth. Here: 100 - 5 = 95.
-        let source = Arc::new(FakeSnapshotSource::new(vec![Ok(vec![page(
-            snapshot_height,
-            1000,
-            vec![
-                (
-                    safe_note.clone(),
-                    // Origin page 95 is exactly at the safe tip, so this input is safe.
-                    note_v1(safe_note.clone(), safe_note_origin_page, 10, "k", 25),
-                ),
-                (
-                    unsafe_note.clone(),
-                    // Origin page 96 is above the safe tip, so this input is too new.
-                    note_v1(unsafe_note.clone(), unsafe_note_origin_page, 11, "k", 26),
-                ),
-            ],
-        )])]));
-        let service = BridgeNoteSnapshotService::new(source, selectors(), Duration::from_secs(300))
-            .with_nockchain_confirmation_depth(confirmation_depth);
-        service.refresh().await.expect("refresh").expect("snapshot");
-
-        service
-            .validate_selected_inputs_safe(std::slice::from_ref(&safe_note))
-            .expect("safe note should validate");
-
-        let err = service
-            .validate_selected_inputs_safe(std::slice::from_ref(&unsafe_note))
-            .expect_err("unsafe note should fail");
-        match err {
-            SpendableInputValidationError::InputNotSafe {
-                origin_page,
-                safe_tip: reported_safe_tip,
-                snapshot_height: reported_snapshot_height,
-                confirmation_depth: reported_confirmation_depth,
-                ..
-            } => {
-                assert_eq!(origin_page, unsafe_note_origin_page);
-                assert_eq!(reported_safe_tip, safe_tip);
-                assert_eq!(reported_snapshot_height, snapshot_height);
-                assert_eq!(reported_confirmation_depth, confirmation_depth);
-            }
-            other => panic!("expected unsafe input error, got {other:?}"),
-        }
-
-        let err = service
-            .validate_selected_inputs_safe(std::slice::from_ref(&missing_note))
-            .expect_err("missing note should fail");
-        match err {
-            SpendableInputValidationError::InputMissing {
-                snapshot_height: reported_snapshot_height,
-                ..
-            } => assert_eq!(reported_snapshot_height, snapshot_height),
-            other => panic!("expected missing input error, got {other:?}"),
-        }
     }
 
     #[tokio::test]

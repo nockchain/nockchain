@@ -272,84 +272,6 @@ impl NounDecode for AtomBytes {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct BaseEventId(pub Vec<u8>);
-
-impl BaseEventId {
-    pub const LEN: usize = 32;
-
-    pub fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-
-    pub fn to_belt_digits(&self) -> Vec<Belt> {
-        AtomBytes(self.0.clone()).to_belt_digits()
-    }
-}
-
-impl std::ops::Deref for BaseEventId {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl AsRef<[u8]> for BaseEventId {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl From<Vec<u8>> for BaseEventId {
-    fn from(value: Vec<u8>) -> Self {
-        Self(value)
-    }
-}
-
-impl From<[u8; 32]> for BaseEventId {
-    fn from(value: [u8; 32]) -> Self {
-        Self(value.to_vec())
-    }
-}
-
-impl From<AtomBytes> for BaseEventId {
-    fn from(value: AtomBytes) -> Self {
-        Self(value.0)
-    }
-}
-
-impl From<BaseEventId> for AtomBytes {
-    fn from(value: BaseEventId) -> Self {
-        Self(value.0)
-    }
-}
-
-impl NounEncode for BaseEventId {
-    fn to_noun<A: nockvm::noun::NounAllocator>(&self, allocator: &mut A) -> nockvm::noun::Noun {
-        AtomBytes(self.0.clone()).to_noun(allocator)
-    }
-}
-
-impl NounDecode for BaseEventId {
-    fn from_noun(
-        noun: &nockvm::noun::Noun,
-        space: &NounSpace,
-    ) -> Result<Self, noun_serde::NounDecodeError> {
-        let mut bytes = AtomBytes::from_noun(noun, space)?.0;
-        if bytes.len() > Self::LEN {
-            return Err(noun_serde::NounDecodeError::Custom(format!(
-                "expected base_event_id atom to fit in {} bytes, got {significant_len}",
-                Self::LEN,
-                significant_len = bytes.len()
-            )));
-        }
-
-        bytes.resize(Self::LEN, 0);
-        Ok(Self(bytes))
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SchnorrSecretKey(pub [Belt; 8]);
 
@@ -407,7 +329,7 @@ pub struct BridgeConstants {
     pub min_signers: u64,
     /// Total number of bridge nodes (default: 5)
     pub total_signers: u64,
-    /// Minimum nocks for a bridge event (default: 100_000)
+    /// Minimum nocks for a bridge event (default: 1_000_000)
     pub minimum_event_nocks: u64,
     /// Fee per nock in nicks (default: 195)
     pub nicks_fee_per_nock: u64,
@@ -425,7 +347,7 @@ impl Default for BridgeConstants {
             version: 0,
             min_signers: 3,
             total_signers: 5,
-            minimum_event_nocks: 100_000,
+            minimum_event_nocks: 1_000_000,
             nicks_fee_per_nock: 195,
             base_blocks_chunk: 100,
             base_start_height: 39_694_000,
@@ -816,7 +738,7 @@ pub struct BaseBlockRef {
 
 #[derive(Debug, Clone, NounEncode, NounDecode)]
 pub struct BaseEvent {
-    pub base_event_id: BaseEventId,
+    pub base_event_id: AtomBytes,
     pub content: BaseEventContent,
 }
 
@@ -1125,7 +1047,7 @@ mod tests {
             first_height: 100,
             last_height: 199,
             withdrawals: vec![NockWithdrawalRequestKernelData {
-                base_event_id: BaseEventId(
+                base_event_id: AtomBytes(
                     (0..32).map(|offset| 0x44_u8.wrapping_add(offset)).collect(),
                 ),
                 recipient: Tip5Hash([Belt(51), Belt(52), Belt(53), Belt(54), Belt(55)]),
@@ -1134,12 +1056,6 @@ mod tests {
                 as_of: Tip5Hash([Belt(41), Belt(42), Belt(43), Belt(44), Belt(45)]),
             }],
         }
-    }
-
-    fn sample_base_event_id_ending_in_zero(start: u8) -> BaseEventId {
-        let mut bytes: Vec<u8> = (0..32).map(|offset| start.wrapping_add(offset)).collect();
-        bytes[31] = 0;
-        BaseEventId(bytes)
     }
 
     #[test]
@@ -1161,35 +1077,6 @@ mod tests {
     fn atom_bytes_to_belt_digits_keeps_zero_as_single_digit() {
         assert_eq!(AtomBytes(Vec::new()).to_belt_digits(), vec![Belt(0)]);
         assert_eq!(AtomBytes(vec![0, 0, 0]).to_belt_digits(), vec![Belt(0)]);
-    }
-
-    #[test]
-    fn base_event_id_roundtrip_preserves_trailing_zero() {
-        let original = sample_base_event_id_ending_in_zero(0x61);
-        let mut allocator: NounSlab<NockJammer> = NounSlab::new();
-
-        let encoded = original.to_noun(&mut allocator);
-        let decoded = BaseEventId::from_noun(&encoded, &allocator.noun_space())
-            .expect("base_event_id should decode with padded trailing zero");
-
-        assert_eq!(decoded.0.len(), 32);
-        assert_eq!(decoded, original);
-    }
-
-    #[test]
-    fn withdrawal_id_roundtrip_preserves_trailing_zero_base_event_id() {
-        let id = WithdrawalId {
-            as_of: Tip5Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
-            base_event_id: sample_base_event_id_ending_in_zero(0x71),
-        };
-        let mut allocator: NounSlab<NockJammer> = NounSlab::new();
-
-        let encoded = id.to_noun(&mut allocator);
-        let decoded = WithdrawalId::from_noun(&encoded, &allocator.noun_space())
-            .expect("withdrawal id should decode fixed-width base_event_id");
-
-        assert_eq!(decoded.base_event_id.0.len(), 32);
-        assert_eq!(decoded, id);
     }
 
     fn sample_base_blocks_cause() -> RawBaseBlocks {
@@ -1228,9 +1115,7 @@ mod tests {
     fn sample_withdrawal_id() -> WithdrawalId {
         WithdrawalId {
             as_of: Tip5Hash([Belt(11), Belt(22), Belt(33), Belt(44), Belt(55)]),
-            base_event_id: BaseEventId(
-                (0..32).map(|offset| 0xfa_u8.wrapping_add(offset)).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| 0xfa_u8.wrapping_add(offset)).collect()),
         }
     }
 
@@ -1873,16 +1758,14 @@ mod tests {
         let mut allocator: NounSlab<NockJammer> = NounSlab::new();
 
         let req1 = NockWithdrawalRequestKernelData {
-            base_event_id: sample_base_event_id_ending_in_zero(0xde),
+            base_event_id: AtomBytes((0..32).map(|offset| 0xde_u8.wrapping_add(offset)).collect()),
             recipient: Tip5Hash([Belt(1); 5]),
             amount: 1000,
             base_batch_end: 42,
             as_of: Tip5Hash([Belt(2); 5]),
         };
         let req2 = NockWithdrawalRequestKernelData {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| 0xbe_u8.wrapping_add(offset)).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| 0xbe_u8.wrapping_add(offset)).collect()),
             recipient: Tip5Hash([Belt(3); 5]),
             amount: 2000,
             base_batch_end: 43,
@@ -2607,9 +2490,7 @@ mod tests {
         let mut allocator: NounSlab<NockJammer> = NounSlab::new();
 
         let event = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| 0x12_u8.wrapping_add(offset)).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| 0x12_u8.wrapping_add(offset)).collect()),
             content: BaseEventContent::DepositProcessed {
                 nock_tx_id: Tip5Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]),
                 note_name: Name::new(
@@ -2678,7 +2559,7 @@ mod tests {
         let mut allocator: NounSlab<NockJammer> = NounSlab::new();
 
         let event = BaseEvent {
-            base_event_id: sample_base_event_id_ending_in_zero(0xab),
+            base_event_id: AtomBytes((0..32).map(|offset| 0xab_u8.wrapping_add(offset)).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xbb; 20]),
                 amount: 131072, // 2 NOCK in internal units
@@ -2728,9 +2609,7 @@ mod tests {
         let mut allocator: NounSlab<NockJammer> = NounSlab::new();
 
         let deposit_event = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| 0x01_u8.wrapping_add(offset)).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| 0x01_u8.wrapping_add(offset)).collect()),
             content: BaseEventContent::DepositProcessed {
                 nock_tx_id: Tip5Hash([Belt(1); 5]),
                 note_name: Name::new(Tip5Hash([Belt(2); 5]), Tip5Hash([Belt(3); 5])),
@@ -2743,9 +2622,7 @@ mod tests {
         };
 
         let withdrawal_event = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| 0x03_u8.wrapping_add(offset)).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| 0x03_u8.wrapping_add(offset)).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xdd; 20]),
                 amount: 131072,

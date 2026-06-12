@@ -5,14 +5,16 @@
 +$  state-0  [%0 *]
 +$  state-1  [%1 *]
 +$  state-2  [%2 cached-hoon=(unit (trap vase)) *]
-+$  state-3  [%3 cached-hoon=(unit (trap vase)) bc=build-cache pc=parse-cache]
++$  state-3  [%3 cached-hoon=(unit (trap vase)) bc=build-cache pc=parse-cache-3]
++$  state-4  [%4 cached-hoon=(unit (trap vase)) bc=build-cache pc=parse-cache]
 +$  versioned-state
   $%  state-0
       state-1
       state-2
       state-3
+      state-4
   ==
-+$  choo-state  state-3
++$  choo-state  state-4
 ::
 ++  empty-trap-vase
   ^-  (trap vase)
@@ -26,7 +28,31 @@
           tex=cord
           directory=(list [cord cord])
           arbitrary=?
+          dynock=?
           out=cord
+      ==
+      $:  %parse
+          pat=cord
+          tex=cord
+          directory=(list [cord cord])
+      ==
+      [%file %write path=@t contents=@ success=?]
+      [%boot hoon-txt=cord]
+      [%clear ~]
+  ==
+::  backward-compatible %build payload shape used by older bootstrap kernels
++$  cause-legacy
+  $%  $:  %build
+          pat=cord
+          tex=cord
+          directory=(list [cord cord])
+          arbitrary=?
+          out=cord
+      ==
+      $:  %parse
+          pat=cord
+          tex=cord
+          directory=(list [cord cord])
       ==
       [%file %write path=@t contents=@ success=?]
       [%boot hoon-txt=cord]
@@ -37,6 +63,26 @@
       [%exit id=@]
   ==
 ::
+++  cause-from-legacy
+  |=  legacy=cause-legacy
+  ^-  cause
+  ?-    -.legacy
+      %build
+    [%build pat.legacy tex.legacy directory.legacy arbitrary.legacy %.n out.legacy]
+  ::
+      %parse
+    [%parse pat.legacy tex.legacy directory.legacy]
+  ::
+      %file
+    [%file %write path.legacy contents.legacy success.legacy]
+  ::
+      %boot
+    [%boot hoon-txt.legacy]
+  ::
+      %clear
+    [%clear ~]
+  ==
+::
 ::
 ::  hash of file contents
 +$  file-hash  @uvI
@@ -45,8 +91,12 @@
 +$  merk-hash  @uvI
 +$  build-cache  (map merk-hash (trap vase))
 ::
-::  $parse-cache: hash addressed map of preprocessed hoon files.
-+$  parse-cache  (map file-hash [=path pil=pile deps=(list raut)])
+::  $parse-cache-3: hash addressed map of preprocessed hoon files (v3 state)
++$  parse-cache-3  (map file-hash [=path pil=pile deps=(list raut)])
+::  $parse-cache-entry: parse cache bucket entry (v4 state)
++$  parse-cache-entry  [=path fil=cord pil=pile deps=(list raut)]
+::  $parse-cache: hash addressed map with collision buckets (v4 state)
++$  parse-cache  (map file-hash (list parse-cache-entry))
 ::
 ::  $taut: file import from /lib or /sur
 +$  taut  [face=(unit term) pax=term]
@@ -137,6 +187,12 @@
     ==
   ::
       %3
+    ~>  %slog.[0 leaf+"update 3-to-4, erasing caches but keeping honc"]
+    %*  .  *choo-state
+      cached-hoon  cached-hoon.old
+    ==
+  ::
+      %4
     ~>  %slog.[0 leaf+"no upgrade"]
     old
   ==
@@ -156,11 +212,15 @@
 ++  poke
   |=  [=wire eny=@ our=@ux now=@da dat=*]
   ^-  [(list effect) choo-state]
-  =/  cause=(unit cause)  ((soft cause) dat)
-  ?~  cause
-    ~&  "hoonc: warning: input is not a proper cause"
-    !!
-  =/  cause  u.cause
+  =/  maybe-cause=(unit cause)  ((soft cause) dat)
+  =/  cause=cause
+    ?~  maybe-cause
+      =/  legacy=(unit cause-legacy)  ((soft cause-legacy) dat)
+      ?~  legacy
+        ~&  "hoonc: warning: input is not a proper cause"
+        !!
+      (cause-from-legacy u.legacy)
+    u.maybe-cause
   ?-    -.cause
       %file
     ?:  success.cause
@@ -190,13 +250,25 @@
     ?>  ?=(^ cached-hoon.k)
     =/  [compiled=(unit *) new-bc=build-cache new-pc=parse-cache]
       %-  ~(create builder u.cached-hoon.k bc.k pc.k)
-      [target-path dir arbitrary.cause]
+      [target-path dir arbitrary.cause dynock.cause]
     :_  k(bc new-bc, pc new-pc)
     ?~  compiled
       ~&  "hoonc: build failed, skipping write and exiting"
       [%exit 1]~
     ~&  "hoonc: build succeeded, sending out write effect"
     [%file %write path=out.cause contents=(jam u.compiled)]~
+  ::
+      %parse
+    =/  target-path=path  (parse-file-path pat.cause)
+    ::
+    ::  Create map of dep directory, includes target
+    =/  dir
+      %-  ~(gas by *(map path cord))
+      :-  [target-path tex.cause]
+      (turn directory.cause |=((pair @t @t) [(stab p) q]))
+    =/  parse-res  (parse-dir dir)
+    =/  new-pc=parse-cache  +.parse-res
+    [~ k(pc new-pc)]
   ==
 --
 =>
@@ -416,26 +488,38 @@
 ::    .tar: the path to build
 ::    .dir: the directory to get dependencies from
 ::    .arb: arbitrary flag
+::    .dyn: dynock flag
 ::
 ::    If arb is true, we are building a noun of arbitrary shape.
+::
+::    If dyn is true, we emit minimal dynock [type (trap nock)].
+::
+::    If both arb and dyn are true, emit typed dynock [inferred-type (trap nock)].
 ::
 ::    If arb is false,we are building a kernel gate that takes a hash
 ::    of the dependency directory.
 ::
-::    returns a trap, a build-cache, and a parse-cache
+::    returns a noun, a build-cache, and a parse-cache
 ++  create
   ~/  %create
-  |=  [tar=path dir=(map path cord) arb=?]
-  ^-  [(unit (trap)) build-cache parse-cache]
+  |=  [tar=path dir=(map path cord) arb=? dyn=?]
+  ^-  [(unit *) build-cache parse-cache]
   =/  dir-hash  `@uvI`(mug dir)
   ~&  >>  dir-hash+dir-hash
+  =/  typed=?  ?:(dyn arb |)
   =/  [tase=(unit (trap vase)) =build-cache =parse-cache]
-    (create-target tar dir)
+    (create-target tar dir dyn typed)
   :_  [build-cache parse-cache]
   ::  build failure, just return the bunted trap
   ?~  tase
     ~
   %-  some
+  ::
+  ::  If dynock mode, return the dynock noun directly.
+  ?:  dyn
+    =>  [swetted=u.tase vase=vase]
+    =/  dyn-vase=vase  $:swetted
+    dyn-vase
   ::
   ::  If arbitrary, return the trap.
   ?:  arb
@@ -453,11 +537,13 @@
 ::
 ::    .path: the path to build
 ::    .dir: the directory to get dependencies from
+::    .dyn: dynock flag
+::    .typed: typed dynock flag
 ::
-::    returns a trap with the compiled hoon/jock file and the updated caches
+::    returns a noun with the compiled hoon/jock file and the updated caches
 ++  create-target
   ~/  %create-target
-  |=  [tar=path dir=(map path cord)]
+  |=  [tar=path dir=(map path cord) dyn=? typed=?]
   ^-  [(unit (trap vase)) build-cache parse-cache]
   =^  all-nodes=(map path node)  pc
     (parse-dir dir)
@@ -473,11 +559,54 @@
     (~(del by bc) merk-hash)
   ::
   =^  res=(unit (trap vase))  bc
+    ?:  dyn
+      (~(dynock bil [all-nodes dag]) [tar typed])
     (~(try bil [all-nodes dag]) tar)
   ::
   [res bc pc]
 ::
 ::
+::  $parse-cache-find: locate entry by hash and file contents
+::
+::    .file-hash: hash of file contents
+::    .fil: file contents
+::    .pc: parse-cache
+::
+::    returns a cache entry if contents match
+++  parse-cache-find
+  |=  [file-hash=@ fil=cord pc=parse-cache]
+  ^-  (unit [path pile (list raut)])
+  =/  entries=(list parse-cache-entry)
+    ?~  e=(~(get by pc) file-hash)
+      ~
+    u.e
+  |-
+  ?~  entries
+    ~
+  =/  entry=parse-cache-entry  i.entries
+  ?:  =(fil fil.entry)
+    `[path.entry pil.entry deps.entry]
+  $(entries t.entries)
+::  $parse-cache-upsert: replace or append an entry in a bucket
+++  parse-cache-upsert
+  |=  [pat=path fil=cord pil=pile deps=(list raut) entries=(list parse-cache-entry)]
+  ^-  (list parse-cache-entry)
+  ?~  entries
+    [[pat fil pil deps] ~]
+  =/  entry=parse-cache-entry  i.entries
+  ?:  =(fil fil.entry)
+    [[pat fil pil deps] t.entries]
+  [entry $(entries t.entries)]
+::  $parse-cache-put: insert a cache entry using hash bucket + content equality
+++  parse-cache-put
+  |=  [file-hash=@ pat=path fil=cord pil=pile deps=(list raut) pc=parse-cache]
+  ^-  parse-cache
+  =/  entries=(list parse-cache-entry)
+    ?~  e=(~(get by pc) file-hash)
+      ~
+    u.e
+  =/  entries  (parse-cache-upsert pat fil pil deps entries)
+  (~(put by pc) file-hash entries)
 ::  $parse-dir: create nodes from dir
 ::
 ::    .dir: directory of deps, includes build target
@@ -515,13 +644,14 @@
           %.n                                           ::  no kick
       ==
     =/  tex=tape  (trip fil)
+    =/  cached=(unit [path pile (list raut)])  (parse-cache-find file-hash fil pc)
     =/  [pil=pile deps=(list raut)]
-      ?~  e=(~(get by pc) file-hash)
+      ?~  cached
         ~&  "parsing {<pat>}"
         (process-pile pat tex dir)
       ~&  "reusing parse cache entry for {<pat>}"
-      [pil deps]:u.e
-    :_  (~(put by new-pc) file-hash [pat pil deps])
+      +.u.cached
+    :_  (parse-cache-put file-hash pat fil pil deps new-pc)
     :*  pat                                              ::  path
         file-hash                                        ::  hash
         deps                                             ::  deps
@@ -535,6 +665,20 @@
     =/  pil  (parse-pile pax tex)
     [pil (resolve-pile pil dir)]
   --
+::
+::  +strip-dbug: remove %dbug nodes from hoon ASTs
+++  strip-dbug
+  |=  gen=*
+  ^-  *
+  ?@  gen  gen
+  =/  head  -.gen
+  =/  tail  +.gen
+  ?:  ?=(%dbug head)
+    ?@  tail  gen
+    $(gen +.tail)
+  :*  $(gen head)
+      $(gen tail)
+  ==
 ::
 ::  $build-merk-dag: builds a merkle DAG out dependencies + target
 ::
@@ -697,6 +841,34 @@
     =/  =merk-hash  (~(got by file.dag) hash.nod)
     [target-vaz (~(put by bc) merk-hash u.target-vaz)]
   ::
+  ++  dynock
+    ~/  %dynock
+    |=  [tar=path typed=?]
+    ^-  [(unit (trap vase)) build-cache]
+    ~+
+    =/  nod=node  (~(got by nodes) tar)
+    ::
+    ::  recursively build dependencies in normal mode so import values are available
+    =^  dep-vaz=(unit (trap vase))  bc
+      =+  [dep-vaz=empty-trap-vase deps=`(list raut)`deps.nod]
+      |-
+      ?~  deps
+        [`dep-vaz bc]
+      =^  vaz=(unit (trap vase))  bc
+        (try pax.i.deps)
+      ?~  vaz
+        [~ bc]
+      %=  $
+        dep-vaz  (slat dep-vaz (label-vase u.vaz face.i.deps))
+        bc       bc
+        deps     t.deps
+      ==
+    ?~  dep-vaz
+      [~ bc]
+    ?~  target-dynock=(compiledynock nod u.dep-vaz typed)
+      [~ bc]
+    [target-dynock bc]
+  ::
   ++  compile
     ~/  %compile
     |=  [nod=node dep-vaz=(trap vase)]
@@ -727,6 +899,28 @@
     =/  vaz=vase  $:swetted
     =>  vaz=vaz
     |.(vaz)
+ ::
+  ++  compiledynock
+    ~/  %compiledynock
+    |=  [nod=node dep-vaz=(trap vase) typed=?]
+    ^-  (unit (trap vase))
+    =;  result=(each (trap vase) tang)
+      ?-  -.result
+        %&  `p.result
+        %|  ((slog p.result) ~)
+      ==
+    %-  mule
+    |.
+    ?.  ?=(%hoon -.leaf.nod)
+      ~&  "dynock mode only supports %hoon nodes: {<path.nod>}"
+      !!
+    ~>  %bout
+    ~&  "dynock compiling {<path.nod>}"
+    =/  dyn=vase
+      ?:  typed
+        (swyt (slat dep-vaz honc) hoon.leaf.nod)
+      (swyn (slat dep-vaz honc) hoon.leaf.nod)
+    |.(dyn)
  ::
   ++  grab
     |=  =file-hash
@@ -796,6 +990,26 @@
   =>  [gun=gun tap=tap]
   |.  ~+
   [p.gun .*(q:$:tap q.gun)]
+::
+::  +swyn: mint-only dynock output
+::
+::    returns [type (trap nock)] without evaluating q.gun in the build subject.
+++  swyn
+  ~/  %swyn
+  |=  [tap=(trap vase) gen=hoon]
+  ^-  vase
+  =/  gun  (~(mint ut p:$:tap) %noun gen)
+  [%noun [[1 q.gun] 0]]
+::
+::  +swyt: mint-only typed dynock output
+::
+::    returns [inferred-type (trap nock)] without evaluating q.gun in the build subject.
+++  swyt
+  ~/  %swyt
+  |=  [tap=(trap vase) gen=hoon]
+  ^-  vase
+  =/  gun  (~(mint ut p:$:tap) %noun gen)
+  [p.gun [[1 q.gun] 0]]
 ::
 ++  is-hoon
   |=  pax=path

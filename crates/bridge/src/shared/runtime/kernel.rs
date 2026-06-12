@@ -1173,7 +1173,7 @@ mod tests {
 
     use super::*;
     use crate::shared::types::{
-        zero_tip5_hash, AtomBytes, BaseEventContent, BaseEventId, BridgeConstants, EthAddress,
+        zero_tip5_hash, AtomBytes, BaseEventContent, BridgeConstants, EthAddress,
     };
     use crate::withdrawal::types::{
         CreateWithdrawalTxData, SelectedWithdrawalNoteData, Withdrawal, WithdrawalId,
@@ -1275,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_records_withdrawal_events() -> Result<(), BridgeError> {
-        let base_event_id = BaseEventId((0..32).map(|offset| offset + 1).collect());
+        let base_event_id = AtomBytes((0..32).map(|offset| offset + 1).collect());
         let events = Arc::new(Mutex::new(Vec::new()));
         let builder = Arc::new(RecordingEventBuilder {
             events: events.clone(),
@@ -1606,9 +1606,7 @@ mod tests {
         CreateWithdrawalTxData {
             id: WithdrawalId {
                 as_of: Tip5Hash([Belt(11), Belt(12), Belt(13), Belt(14), Belt(15)]),
-                base_event_id: crate::shared::types::BaseEventId(
-                    (0..32).map(|offset| offset + 1).collect(),
-                ),
+                base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
             },
             recipient: Tip5Hash([Belt(21), Belt(22), Belt(23), Belt(24), Belt(25)]),
             amount: 6_534_088_928,
@@ -1727,9 +1725,7 @@ mod tests {
                 );
                 let bytes = jam_withdrawal_requests_peek(NockWithdrawalRequestsPeek {
                     inner: Some(Some(vec![NockWithdrawalRequestKernelData {
-                        base_event_id: crate::shared::types::BaseEventId(
-                            (0..32).map(|offset| offset + 1).collect(),
-                        ),
+                        base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
                         recipient: Tip5Hash([Belt(11), Belt(12), Belt(13), Belt(14), Belt(15)]),
                         amount: 5,
                         base_batch_end: 42,
@@ -1884,9 +1880,7 @@ mod tests {
             first_height: 40,
             last_height: 41,
             withdrawals: vec![NockWithdrawalRequestKernelData {
-                base_event_id: crate::shared::types::BaseEventId(
-                    (0..32).map(|offset| offset + 7).collect(),
-                ),
+                base_event_id: AtomBytes((0..32).map(|offset| offset + 7).collect()),
                 recipient: Tip5Hash([Belt(11), Belt(12), Belt(13), Belt(14), Belt(15)]),
                 amount: 5,
                 base_batch_end: 41,
@@ -2074,9 +2068,7 @@ mod tests {
         .await?;
 
         let older_event = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 1).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xaa; 20]),
                 amount: NICKS_PER_NOCK + 5,
@@ -2084,9 +2076,7 @@ mod tests {
             },
         };
         let newer_event_1 = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 41).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 41).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xbb; 20]),
                 amount: NICKS_PER_NOCK + 7,
@@ -2094,9 +2084,7 @@ mod tests {
             },
         };
         let newer_event_2 = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 81).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 81).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xcc; 20]),
                 amount: NICKS_PER_NOCK + 9,
@@ -2196,9 +2184,7 @@ mod tests {
         .await?;
 
         let event = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 1).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xdd; 20]),
                 amount: NICKS_PER_NOCK + 11,
@@ -2225,39 +2211,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_kernel_black_box_accepts_100_000_burn_rejects_99_999() -> Result<(), BridgeError>
-    {
-        const MINIMUM_EVENT_NOCKS: u64 = 100_000;
-        const BELOW_MINIMUM_EVENT_NOCKS: u64 = 99_999;
-
+    async fn bridge_kernel_black_box_filters_withdrawal_burns_at_nick_floor(
+    ) -> Result<(), BridgeError> {
         let (_temp, mut app) = setup_bridge_nockapp().await?;
-        let mut constants = sample_bridge_constants(40);
-        constants.minimum_event_nocks = MINIMUM_EVENT_NOCKS;
-        poke_cause_async(&mut app, BridgeCause::set_constants(constants)).await?;
+        poke_cause_async(
+            &mut app,
+            BridgeCause::set_constants(sample_bridge_constants(40)),
+        )
+        .await?;
 
         let below_floor = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 1).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 1).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xaa; 20]),
-                amount: BELOW_MINIMUM_EVENT_NOCKS * NICKS_PER_NOCK,
+                amount: 1,
                 lock_root: Tip5Hash([Belt(11), Belt(12), Belt(13), Belt(14), Belt(15)]),
             },
         };
         let exact_floor = BaseEvent {
-            base_event_id: crate::shared::types::BaseEventId(
-                (0..32).map(|offset| offset + 41).collect(),
-            ),
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 41).collect()),
             content: BaseEventContent::BurnForWithdrawal {
                 burner: EthAddress([0xbb; 20]),
-                amount: MINIMUM_EVENT_NOCKS * NICKS_PER_NOCK,
+                amount: NICKS_PER_NOCK,
                 lock_root: Tip5Hash([Belt(21), Belt(22), Belt(23), Belt(24), Belt(25)]),
             },
         };
+        let above_floor = BaseEvent {
+            base_event_id: AtomBytes((0..32).map(|offset| offset + 81).collect()),
+            content: BaseEventContent::BurnForWithdrawal {
+                burner: EthAddress([0xcc; 20]),
+                amount: NICKS_PER_NOCK + 1,
+                lock_root: Tip5Hash([Belt(31), Belt(32), Belt(33), Belt(34), Belt(35)]),
+            },
+        };
 
-        let batch =
-            sample_base_burn_batch(40, vec![0x40], vec![0x00], vec![below_floor, exact_floor]);
+        let batch = sample_base_burn_batch(
+            40,
+            vec![0x40],
+            vec![0x00],
+            vec![below_floor, exact_floor, above_floor],
+        );
         poke_cause_async(
             &mut app,
             BridgeCause(0, BridgeCauseVariant::BaseBlocks(batch.into())),
@@ -2265,12 +2258,11 @@ mod tests {
         .await?;
         let pending = ack_pending_base_block_commit_black_box(&mut app).await?;
 
-        let withdrawals = pending.withdrawals;
-        assert_eq!(withdrawals.len(), 1);
-        assert_eq!(withdrawals[0].amount, MINIMUM_EVENT_NOCKS * NICKS_PER_NOCK);
+        assert_eq!(pending.withdrawals.len(), 1);
+        assert_eq!(pending.withdrawals[0].amount, NICKS_PER_NOCK + 1);
         assert_eq!(
-            withdrawals[0].recipient,
-            Tip5Hash([Belt(21), Belt(22), Belt(23), Belt(24), Belt(25)])
+            pending.withdrawals[0].recipient,
+            Tip5Hash([Belt(31), Belt(32), Belt(33), Belt(34), Belt(35)])
         );
 
         Ok(())

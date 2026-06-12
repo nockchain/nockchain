@@ -6,13 +6,9 @@ test-follower
 .nockchain_identity
 .nockchain_identity.peerid
 target
-bazel-bin
-bazel-out
-bazel-testlogs
-bazel-nockchain
-.bazelrc.local
 assets/*.jam
 !crates/nockapp/test-jams
 keys.export
 replay-checkpoints-51094
 nockchain-api-checkpoints-backup
+hoonc-octs-type-138.jam

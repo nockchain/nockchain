@@ -83,6 +83,12 @@ const MASK_OUT_MUG: u64 = !(u32::MAX as u64);
  *
  * Ensure the calculated mug is correct or this will result in incorrect mugs being returned.
  * This could cause jet mismatches.
+ *
+ * Note: this writes through to nouns in *readonly* extra pointer ranges as
+ * well. Readonly ranges forbid semantic mutation (unification rewrites,
+ * forwarding pointers), but a correct cached mug is a benign cache fill that
+ * the owning allocator (e.g. `NounSlab`) uses with the same low-31-bit
+ * metadata convention. See `NounSpace::with_readonly_extra_ptr_ranges`.
  */
 pub unsafe fn set_mug(allocated: &mut Allocated, mug: u32, space: &NounSpace) {
     let metadata = allocated.get_metadata(space);

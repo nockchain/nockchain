@@ -722,145 +722,190 @@ impl<C: SerfCheckpoint + Send + 'static> SerfThread<C> {
             .name("serf".to_string())
             .stack_size(SERF_THREAD_STACK_SIZE)
             .spawn(move || {
-                let diagnostics = SerfInitDiagnostics::new(nock_stack_size);
-                let ker_hash = {
-                    let mut hasher = Hasher::new();
-                    hasher.update(&kernel_bytes);
-                    hasher.finalize()
-                };
-                let diagnostics = diagnostics.with_current_ker_hash(ker_hash);
-                let mut pma_meta_load = false;
-                let (
-                    pma,
-                    pma_meta_path,
-                    pma_gc_state,
-                    create_snapshots,
-                    rotating_snapshot_interval_event_time,
-                    restore_manifest,
-                ) = match pma {
-                    Some(config) => {
-                        let PmaConfig {
-                            path_0,
-                            path_1,
-                            words,
-                            reserved_words,
-                            open_existing,
-                            create_snapshots,
-                            rotating_snapshot_interval_event_time,
-                            restore_manifest,
-                            gc_interval,
-                        } = config;
-                        let paths = PmaSlabPaths { path_0, path_1 };
-                        let active = if open_existing {
-                            select_active_pma_slab(&paths)
-                        } else {
-                            PmaSlab::Slab0
-                        };
-                        let active_path = paths.path(active).clone();
-                        let pma_meta_path = pma_meta_path(&active_path);
-                        let pma_result = if open_existing && active_path.exists() {
-                            pma_meta_load = true;
-                            match reserved_words {
-                                Some(reserved_words) => Pma::open_with_min_and_reserved(
-                                    active_path.clone(),
-                                    words,
-                                    reserved_words,
-                                ),
-                                None => Pma::open_with_min(active_path.clone(), words),
-                            }
-                        } else {
-                            pma_meta_load = false;
-                            match reserved_words {
-                                Some(reserved_words) => Pma::new_with_reserved(
-                                    words,
-                                    reserved_words,
-                                    active_path.clone(),
-                                ),
-                                None => Pma::new(words, active_path.clone()),
-                            }
-                        };
-                        match pma_result {
-                            Ok(pma) => (
-                                Some(pma),
-                                Some(pma_meta_path),
-                                gc_interval.map(|interval| {
-                                    PmaGcState::new(paths, active, interval, words, reserved_words)
-                                }),
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let diagnostics = SerfInitDiagnostics::new(nock_stack_size);
+                    let ker_hash = {
+                        let mut hasher = Hasher::new();
+                        hasher.update(&kernel_bytes);
+                        hasher.finalize()
+                    };
+                    let diagnostics = diagnostics.with_current_ker_hash(ker_hash);
+                    let mut pma_meta_load = false;
+                    let (
+                        pma,
+                        pma_meta_path,
+                        pma_gc_state,
+                        create_snapshots,
+                        rotating_snapshot_interval_event_time,
+                        restore_manifest,
+                    ) = match pma {
+                        Some(config) => {
+                            let PmaConfig {
+                                path_0,
+                                path_1,
+                                words,
+                                reserved_words,
+                                open_existing,
                                 create_snapshots,
                                 rotating_snapshot_interval_event_time,
                                 restore_manifest,
-                            ),
+                                gc_interval,
+                            } = config;
+                            let paths = PmaSlabPaths { path_0, path_1 };
+                            let active = if open_existing {
+                                select_active_pma_slab(&paths)
+                            } else {
+                                PmaSlab::Slab0
+                            };
+                            let active_path = paths.path(active).clone();
+                            let pma_meta_path = pma_meta_path(&active_path);
+                            let pma_result = if open_existing && active_path.exists() {
+                                pma_meta_load = true;
+                                match reserved_words {
+                                    Some(reserved_words) => Pma::open_with_min_and_reserved(
+                                        active_path.clone(),
+                                        words,
+                                        reserved_words,
+                                    ),
+                                    None => Pma::open_with_min(active_path.clone(), words),
+                                }
+                            } else {
+                                pma_meta_load = false;
+                                match reserved_words {
+                                    Some(reserved_words) => Pma::new_with_reserved(
+                                        words,
+                                        reserved_words,
+                                        active_path.clone(),
+                                    ),
+                                    None => Pma::new(words, active_path.clone()),
+                                }
+                            };
+                            match pma_result {
+                                Ok(pma) => (
+                                    Some(pma),
+                                    Some(pma_meta_path),
+                                    gc_interval.map(|interval| {
+                                        PmaGcState::new(
+                                            paths,
+                                            active,
+                                            interval,
+                                            words,
+                                            reserved_words,
+                                        )
+                                    }),
+                                    create_snapshots,
+                                    rotating_snapshot_interval_event_time,
+                                    restore_manifest,
+                                ),
+                                Err(err) => {
+                                    let _ = init_sender.send(Err(CrownError::Unknown(err.to_string())));
+                                    return;
+                                }
+                            }
+                        }
+                        None => (None, None, None, false, None, None),
+                    };
+                    let event_log = if let Some(config) = event_log {
+                        match EventLog::open(config.clone()) {
+                            Ok(log) => Some(log),
                             Err(err) => {
-                                let _ = init_sender.send(Err(CrownError::Unknown(err.to_string())));
+                                let _ = init_sender.send(Err(CrownError::Unknown(format!(
+                                    "failed to open event log at {}: {err}",
+                                    config.path.display()
+                                ))));
                                 return;
                             }
                         }
-                    }
-                    None => (None, None, None, false, None, None),
-                };
-                let event_log = if let Some(config) = event_log {
-                    match EventLog::open(config.clone()) {
-                        Ok(log) => Some(log),
-                        Err(err) => {
+                    } else {
+                        None
+                    };
+                    if let (Some(pma), Some(meta_path), Some(manifest)) = (
+                        pma.as_ref(),
+                        pma_meta_path.as_ref(),
+                        restore_manifest.as_ref(),
+                    ) {
+                        let pma_reserved_words = match u64::try_from(pma.reserved_words()) {
+                            Ok(words) => words,
+                            Err(_) => {
+                                let _ = init_sender.send(Err(CrownError::Unknown(
+                                    "PMA reservation exceeds u64 while synthesizing metadata"
+                                        .to_string(),
+                                )));
+                                return;
+                            }
+                        };
+                        let synthesized = PmaPersistMetadata::new(
+                            ker_hash,
+                            manifest.event_num,
+                            manifest.kernel_root_raw,
+                            pma_reserved_words,
+                        );
+                        if let Err(err) = synthesized.save_to_path(meta_path) {
                             let _ = init_sender.send(Err(CrownError::Unknown(format!(
-                                "failed to open event log at {}: {err}",
-                                config.path.display()
+                                "failed to synthesize PMA metadata from snapshot manifest at {}: {err}",
+                                meta_path.display()
                             ))));
                             return;
                         }
                     }
-                } else {
-                    None
-                };
-                if let (Some(pma), Some(meta_path), Some(manifest)) = (
-                    pma.as_ref(),
-                    pma_meta_path.as_ref(),
-                    restore_manifest.as_ref(),
-                ) {
-                    let pma_reserved_words = match u64::try_from(pma.reserved_words()) {
-                        Ok(words) => words,
-                        Err(_) => {
-                            let _ = init_sender.send(Err(CrownError::Unknown(
-                                "PMA reservation exceeds u64 while synthesizing metadata"
-                                    .to_string(),
-                            )));
+                    let stack = match run_serf_init_phase(&diagnostics, "allocate Nock stack", || {
+                        NockStack::new(nock_stack_size, 0)
+                    }) {
+                        Ok(stack) => stack,
+                        Err(err) => {
+                            let _ = init_sender.send(Err(err));
                             return;
                         }
                     };
-                    let synthesized = PmaPersistMetadata::new(
-                        ker_hash, manifest.event_num, manifest.kernel_root_raw, pma_reserved_words,
+                    let serf = Serf::new(
+                        stack,
+                        pma,
+                        pma_meta_path,
+                        pma_meta_load,
+                        pma_gc_state,
+                        create_snapshots,
+                        rotating_snapshot_interval_event_time,
+                        event_log,
+                        checkpoint,
+                        &kernel_bytes,
+                        &constant_hot_state,
+                        test_jets,
+                        trace,
+                        nock_stack_size,
                     );
-                    if let Err(err) = synthesized.save_to_path(meta_path) {
-                        let _ = init_sender.send(Err(CrownError::Unknown(format!(
-                            "failed to synthesize PMA metadata from snapshot manifest at {}: {err}",
-                            meta_path.display()
-                        ))));
+                    let serf = match serf {
+                        Ok(serf) => serf,
+                        Err(err) => {
+                            let _ = init_sender.send(Err(err));
+                            return;
+                        }
+                    };
+                    let event_number = serf.event_num.clone();
+                    let cancel_token = serf.context.cancel_token();
+                    if init_sender.send(Ok((event_number, cancel_token))).is_err() {
                         return;
                     }
+                    serf_loop(serf, action_receiver, inhibit_clone, pma_timing_thread);
+                }));
+
+                if let Err(payload) = res {
+                    // Panic payloads are frequently `AllocationError` from nockvm, which are
+                    // otherwise printed as `Box<dyn Any>`. Make the diagnostics explicit.
+                    if std::env::var_os("NOCKAPP_PANIC_DIAGNOSTICS").is_some() {
+                        eprintln!(
+                            "serf: panic diagnostics nock_stack_size_words={nock_stack_size} nock_stack_size_bytes={}",
+                            nock_stack_size.saturating_mul(8)
+                        );
+                        if let Some(err) = payload.downcast_ref::<nockvm::mem::AllocationError>() {
+                            eprintln!("serf: panic payload AllocationError: {err:?}");
+                        } else if let Some(err) =
+                            payload.downcast_ref::<nockvm::mem::NewStackError>()
+                        {
+                            eprintln!("serf: panic payload NewStackError: {err:?}");
+                        }
+                    }
+                    std::panic::resume_unwind(payload);
                 }
-                let stack = match run_serf_init_phase(&diagnostics, "allocate Nock stack", || {
-                    NockStack::new(nock_stack_size, 0)
-                }) {
-                    Ok(stack) => stack,
-                    Err(err) => {
-                        let _ = init_sender.send(Err(err));
-                        return;
-                    }
-                };
-                let serf = Serf::new(
-                    stack, pma, pma_meta_path, pma_meta_load, pma_gc_state, create_snapshots,
-                    rotating_snapshot_interval_event_time, event_log, checkpoint, &kernel_bytes,
-                    &constant_hot_state, test_jets, trace, nock_stack_size,
-                );
-                let serf = match serf {
-                    Ok(serf) => serf,
-                    Err(err) => {
-                        let _ = init_sender.send(Err(err));
-                        return;
-                    }
-                };
-                let _ = init_sender.send(Ok((serf.event_num.clone(), serf.context.cancel_token())));
-                serf_loop(serf, action_receiver, inhibit_clone, pma_timing_thread);
             })?;
         let (event_number, cancel_token) = init_receiver
             .await

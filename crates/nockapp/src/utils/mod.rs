@@ -167,6 +167,7 @@ pub fn create_context(
 
     interpreter::Context {
         stack,
+        op_budget: None,
         slogger,
         cold,
         warm,
