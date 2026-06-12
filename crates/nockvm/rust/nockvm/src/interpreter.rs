@@ -16,7 +16,7 @@ use crate::jets::cold::Cold;
 use crate::jets::hot::Hot;
 use crate::jets::list::util::weld;
 use crate::jets::warm::Warm;
-use crate::jets::{cold, JetErr};
+use crate::jets::{cold, JetDispatchMode, JetErr};
 use crate::mem::{Arena, NockStack, Preserve};
 use crate::noun::{Atom, Cell, CellHandle, IndirectAtom, Noun, NounSpace, Slots, D, T};
 use crate::trace::{write_nock_trace, TraceInfo, TraceStack};
@@ -424,12 +424,23 @@ where
 
 pub struct ContextSnapshot {
     cold: Cold,
+    cold_mem: crate::jets::cold::ColdMem,
     warm: Warm,
     cache: Hamt<Noun>,
 }
 
 pub struct Context {
     pub stack: NockStack,
+    /// Optional work-item budget for `interpret`: when set, evaluation
+    /// fails with a non-deterministic %fuel bail once exhausted. Used by
+    /// honk's musk `mack` to bound divergent constant-fold interpretations
+    /// (matching hoonc's behavior of abandoning infeasible folds) without
+    /// affecting any other evaluation.
+    pub op_budget: Option<u64>,
+    /// How jet matching compares formulas and batteries; `Exact` for
+    /// runtimes whose cores and registrations come from the same compile
+    /// (hoonc, nockchain), `HintBlind` for honk. See [`JetDispatchMode`].
+    pub jet_dispatch: JetDispatchMode,
     pub slogger: Pin<Box<dyn Slogger + Unpin>>,
     pub cold: Cold,
     pub warm: Warm,
@@ -477,13 +488,14 @@ impl Context {
     pub fn save(&self) -> ContextSnapshot {
         ContextSnapshot {
             cold: self.cold,
+            cold_mem: self.cold.save(),
             warm: self.warm,
             cache: self.cache,
         }
     }
-
     pub fn restore(&mut self, saved: &ContextSnapshot) {
         self.cold = saved.cold;
+        self.cold.restore(saved.cold_mem);
         self.warm = saved.warm;
         self.cache = saved.cache;
     }
@@ -521,6 +533,24 @@ impl Context {
         self.cache.preserve(&mut self.stack);
         self.cold.preserve(&mut self.stack);
         self.warm.preserve(&mut self.stack);
+        self.stack.frame_pop();
+        ret
+    }
+
+    /**
+     * For callers that allocate temporary interpreter work and return only
+     * host-owned data, not nouns or interpreter state from the frame.
+     *
+     * This intentionally does not preserve the return value, memo cache, cold
+     * state, or warm state. Callers must restore any context fields that might
+     * point into the transient frame before the closure returns.
+     */
+    pub unsafe fn with_transient_stack_frame<F, O>(&mut self, slots: usize, f: F) -> O
+    where
+        F: FnOnce(&mut Context) -> O,
+    {
+        self.stack.frame_push(slots);
+        let ret = f(self);
         self.stack.frame_pop();
         ret
     }
@@ -701,6 +731,12 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
         ));
 
         loop {
+            if let Some(budget) = context.op_budget.as_mut() {
+                if *budget == 0 {
+                    break BAIL_FAIL;
+                }
+                *budget -= 1;
+            }
             let work_ptr = context.stack.top::<NockWork>();
             match &mut *work_ptr {
                 NockWork::Work0(zero) => {
@@ -824,36 +860,33 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                             opcode_tick!(WORK9);
                             let formula = res.slot_atom_trusted_or_checked(kale.axis, &space);
                             if let Ok(mut formula) = formula {
-                                if !cfg!(feature = "sham_hints") {
-                                    if let Some((jet, _path, test)) = context
-                                        .warm
-                                        .find_jet(&mut context.stack, &mut res, &mut formula)
-                                        .next()
-                                    {
-                                        match jet(context, res) {
-                                            Ok(mut jet_res) => {
-                                                if test {
-                                                    let mut test_res = try_or_bail!(interpret(
-                                                        context, res, formula
-                                                    ));
-                                                    if !unifying_equality(
-                                                        &mut context.stack, &mut test_res,
-                                                        &mut jet_res,
-                                                    ) {
-                                                        break BAIL_JEST;
-                                                    }
+                                let dispatch = context.jet_dispatch;
+                                if let Some((jet, _path, test)) = context
+                                    .warm
+                                    .find_jet(&mut context.stack, &mut res, &mut formula, dispatch)
+                                    .next()
+                                {
+                                    match jet(context, res) {
+                                        Ok(mut jet_res) => {
+                                            if test {
+                                                let mut test_res =
+                                                    try_or_bail!(interpret(context, res, formula));
+                                                if !unifying_equality(
+                                                    &mut context.stack, &mut test_res, &mut jet_res,
+                                                ) {
+                                                    break BAIL_JEST;
                                                 }
-                                                res = jet_res;
-                                                context.stack.pop::<NockWork>();
-                                                continue;
                                             }
-                                            Err(JetErr::Punt) => {}
-                                            Err(err) => {
-                                                break Err(err.into());
-                                            }
+                                            res = jet_res;
+                                            context.stack.pop::<NockWork>();
+                                            continue;
+                                        }
+                                        Err(JetErr::Punt) => {}
+                                        Err(err) => {
+                                            break Err(err.into());
                                         }
                                     }
-                                };
+                                }
 
                                 let stack = &mut context.stack;
                                 if kale.tail {
@@ -864,7 +897,10 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                                     // jetted code.
                                     if let Some((path, trace_info)) =
                                         context.trace_info.as_mut().and_then(|v| {
-                                            context.cold.matches(stack, &mut res).zip(Some(v))
+                                            context
+                                                .cold
+                                                .matches(stack, &mut res, dispatch)
+                                                .zip(Some(v))
                                         })
                                     {
                                         trace_info.append_trace(stack, path);
@@ -894,7 +930,10 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                                     // jetted code.
                                     if let Some((path, trace_info)) =
                                         context.trace_info.as_mut().and_then(|v| {
-                                            context.cold.matches(stack, &mut res).zip(Some(v))
+                                            context
+                                                .cold
+                                                .matches(stack, &mut res, dispatch)
+                                                .zip(Some(v))
                                         })
                                     {
                                         trace_info.append_trace(stack, path);
@@ -1891,14 +1930,28 @@ mod hint {
         hint: Noun,
         body: Noun,
     ) -> Option<Result> {
+        fn sham_jet_name(mut formula: Noun, space: &NounSpace) -> Option<Noun> {
+            loop {
+                let cell = formula.in_space(space).cell()?;
+                let opcode = cell.head().noun().direct()?.data();
+                match opcode {
+                    1 => return Some(cell.tail().noun()),
+                    11 => {
+                        let arg = cell.tail().cell()?;
+                        // Peel [%hint clue formula] wrappers (eg, %spot in debug mode)
+                        formula = arg.tail().noun();
+                    }
+                    _ => return None,
+                }
+            }
+        }
+
         //  XX: handle IndirectAtom tags
         match tag.direct()?.data() {
             tas!(b"sham") => {
                 if cfg!(feature = "sham_hints") {
-                    let jet_formula = hint.cell()?;
-                    // XX: what is the head here?
                     let space = context.stack.fast_noun_space();
-                    let jet_name = jet_formula.in_space(&space).tail().noun();
+                    let jet_name = sham_jet_name(hint, &space)?;
 
                     if let Some(jet) = jets::get_jet(context, jet_name) {
                         match jet(context, subject) {
@@ -2077,6 +2130,7 @@ mod hint {
         body: Noun,
         res: Noun,
     ) -> Option<Noun> {
+        let dispatch = context.jet_dispatch;
         let stack = &mut context.stack;
         let slogger = &mut context.slogger;
         let cold = &mut context.cold;
@@ -2094,75 +2148,68 @@ mod hint {
                 mean_pop(stack);
             }
             tas!(b"fast") => {
-                if !cfg!(feature = "sham_hints") {
-                    if let Some(clue) = hint {
-                        let chum = clue.slot(2, &space).ok()?;
-                        let mut parent = clue.slot(6, &space).ok()?;
-                        loop {
-                            if let Ok(parent_cell) = parent.in_space(&space).as_cell() {
-                                if unsafe { parent_cell.head().noun().raw_equals(&D(11)) } {
-                                    match parent.slot(7, &space) {
-                                        Ok(noun) => {
-                                            parent = noun;
-                                        }
-                                        Err(_) => {
-                                            return None;
-                                        }
+                if let Some(clue) = hint {
+                    let chum = clue.slot(2, &space).ok()?;
+                    let mut parent = clue.slot(6, &space).ok()?;
+                    loop {
+                        if let Ok(parent_cell) = parent.in_space(&space).as_cell() {
+                            if unsafe { parent_cell.head().noun().raw_equals(&D(11)) } {
+                                match parent.slot(7, &space) {
+                                    Ok(noun) => {
+                                        parent = noun;
                                     }
-                                } else {
-                                    break;
+                                    Err(_) => {
+                                        return None;
+                                    }
                                 }
                             } else {
-                                return None;
+                                break;
                             }
+                        } else {
+                            return None;
                         }
-                        let parent_formula_op = parent.slot(2, &space).ok()?.atom()?.direct()?;
-                        let parent_formula_ax = parent.slot(3, &space).ok()?.atom()?;
-
-                        let cold_res: cold::Result = {
-                            if parent_formula_op.data() == 1 {
-                                if parent_formula_ax.direct()?.data() == 0 {
-                                    cold.register(stack, res, parent_formula_ax, chum)
-                                } else {
-                                    //  XX: flog! is ideal, but it runs afoul of the borrow checker
-                                    // flog!(context, "invalid root parent formula: {} {}", chum, parent);
-                                    let tape = tape(
-                                        stack, "serf: cold: register: invalid root parent axis",
-                                    );
-                                    slog_leaf(stack, slogger, tape);
-                                    Ok(false)
-                                }
-                            } else {
-                                cold.register(stack, res, parent_formula_ax, chum)
-                            }
-                        };
-
-                        match cold_res {
-                            Ok(true) => {
-                                context.warm = Warm::init(stack, cold, hot, &context.test_jets)
-                            }
-                            Err(cold::Error::NoParent) => {
-                                let Ok(chum_atom) = chum.in_space(&space).as_atom() else {
-                                    flog!(context, "serf: cold: register: cell chum");
-                                    return None;
-                                };
-                                let chum_bytes = Vec::from(chum_atom.as_ne_bytes());
-                                let Ok(chum_str) = String::from_utf8(chum_bytes) else {
-                                    flog!(context, "serf: cold: register: unprintable chum");
-                                    return None;
-                                };
-                                flog!(context, "serf: cold: register: could not match parent battery at given axis: {} {:?}", chum_str, parent_formula_ax);
-                            }
-                            Err(cold::Error::BadNock) => {
-                                flog!(
-                                    context, "serf: cold: register: bad clue formula: {:?}", clue
-                                );
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        flog!(context, "serf: cold: register: no clue for %fast");
                     }
+                    let parent_formula_op = parent.slot(2, &space).ok()?.atom()?.direct()?;
+                    let parent_formula_ax = parent.slot(3, &space).ok()?.atom()?;
+
+                    let cold_res: cold::Result = {
+                        if parent_formula_op.data() == 1 {
+                            if parent_formula_ax.direct()?.data() == 0 {
+                                cold.register(stack, res, parent_formula_ax, chum, dispatch)
+                            } else {
+                                //  XX: flog! is ideal, but it runs afoul of the borrow checker
+                                // flog!(context, "invalid root parent formula: {} {}", chum, parent);
+                                let tape =
+                                    tape(stack, "serf: cold: register: invalid root parent axis");
+                                slog_leaf(stack, slogger, tape);
+                                Ok(false)
+                            }
+                        } else {
+                            cold.register(stack, res, parent_formula_ax, chum, dispatch)
+                        }
+                    };
+
+                    match cold_res {
+                        Ok(true) => context.warm = Warm::init(stack, cold, hot, &context.test_jets, dispatch),
+                        Err(cold::Error::NoParent) => {
+                            let Ok(chum_atom) = chum.in_space(&space).as_atom() else {
+                                flog!(context, "serf: cold: register: cell chum");
+                                return None;
+                            };
+                            let chum_bytes = Vec::from(chum_atom.as_ne_bytes());
+                            let Ok(chum_str) = String::from_utf8(chum_bytes) else {
+                                flog!(context, "serf: cold: register: unprintable chum");
+                                return None;
+                            };
+                            flog!(context, "serf: cold: register: could not match parent battery at given axis: {} {:?}", chum_str, parent_formula_ax);
+                        }
+                        Err(cold::Error::BadNock) => {
+                            flog!(context, "serf: cold: register: bad clue formula: {:?}", clue);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    flog!(context, "serf: cold: register: no clue for %fast");
                 }
             }
             _ => {}

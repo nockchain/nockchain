@@ -9,6 +9,7 @@ Canonical/Legacy: Canonical (quickstart lane; protocol authority routes through 
 
 Nockchain is a ZK-Proof of Work blockchain that combines sound money incentives with modern research into data availability, app-rollups, and intent-based composability.
 
+For a guide to the open Rust crates, see [open/TOC.md](./TOC.md).
 
 *Nockchain is entirely experimental and many parts are unaudited. We make no representations or guarantees as to the behavior of this software.*
 
@@ -65,23 +66,6 @@ sudo sysctl --system
 # or:
 sudo sysctl -p /etc/sysctl.d/99-overcommit.conf
 ```
-
-## Building with Bazel
-
-The repository also ships a Bazel build covering the Rust workspace and the
-Hoon kernel jams. [Bazelisk](https://github.com/bazelbuild/bazelisk) (invoked
-as `bazel`) picks the pinned Bazel version from `.bazelversion`; the Rust
-toolchain is downloaded by `rules_rust`, and crate dependencies resolve from
-the committed `Cargo.lock`, so no preinstalled Rust is required:
-
-```
-make bazel-build   # bazel build //...
-make bazel-test    # bazel test //...
-```
-
-Useful entry points: `//:nockchain`, `//:nockchain-wallet`, `//:hoonc`, and
-`//:kernels` (compiles all Hoon kernel jams with the in-tree `hoonc`).
-Opt-in lint pass: `bazel build --config=clippy //...`.
 
 ## Install Hoon Compiler
 

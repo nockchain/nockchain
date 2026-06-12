@@ -1321,7 +1321,6 @@ async fn handle_effect_with_dispatcher(
             let mut preferred_peers = Vec::new();
             let mut requested_block_height = None;
             let mut raw_tx_reopen_id = None;
-            let mut elders_cooldown_key = None;
             let mut request_desc: String;
 
             let target_peers = {
@@ -1345,16 +1344,9 @@ async fn handle_effect_with_dispatcher(
                         request_desc = String::from("block/elders");
                         // Extract peer ID from elders request
                         let elders_cell = block_cell.tail().as_cell()?;
-                        let elders_block_id_noun = elders_cell.head().noun();
                         let peer_id_atom = elders_cell.tail().as_atom()?;
                         if let Ok(bytes) = peer_id_atom.to_bytes_until_nul() {
                             if let Ok(peer_id) = PeerId::from_bytes(&bytes) {
-                                if let Ok(block_id) = tip5_hash_to_base58_stack(
-                                    &mut noun_slab, elders_block_id_noun, &space,
-                                ) {
-                                    elders_cooldown_key =
-                                        Some(format!("{block_id}:{}", peer_id.to_base58()));
-                                }
                                 vec![peer_id]
                             } else {
                                 is_limited_request = true;
@@ -1399,22 +1391,6 @@ async fn handle_effect_with_dispatcher(
                 }
                 target_peers
             };
-
-            if let Some(cooldown_key) = elders_cooldown_key.as_deref() {
-                let mut state_guard = driver_state.lock().await;
-                if !state_guard.should_send_elders_request(
-                    cooldown_key,
-                    std::time::Instant::now(),
-                    crate::p2p_state::ELDERS_REQUEST_COOLDOWN,
-                ) {
-                    drop(state_guard);
-                    debug!(
-                        cooldown_key,
-                        "Suppressing duplicate elders request inside cooldown window"
-                    );
-                    return Ok(());
-                }
-            }
 
             if let Some(tx_id) = raw_tx_reopen_id {
                 let mut state_guard = driver_state.clone().lock_owned().await;

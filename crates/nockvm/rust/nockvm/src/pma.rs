@@ -46,6 +46,8 @@ const NOCK_PMA_RESIZE_FAIL_AT_ENV: &str = "NOCK_PMA_RESIZE_FAIL_AT";
 const NOCK_PMA_MIGRATION_FAIL_AT_ENV: &str = "NOCK_PMA_MIGRATION_FAIL_AT";
 const NOCK_PMA_DISABLE_RESIZE_ENV: &str = "NOCK_PMA_DISABLE_RESIZE_FOR_REGRESSION";
 
+const CACHED_MUG_METADATA_MASK: u64 = 0x7fff_ffff;
+
 #[cfg(test)]
 thread_local! {
     static TEST_GROWTH_FAILURE_POINT: std::cell::RefCell<Option<&'static str>> =
@@ -1759,6 +1761,7 @@ impl PmaCopy for Noun {
 
                             let pma_ptr = pma.raw_alloc(raw_size);
                             copy_nonoverlapping(src_ptr, pma_ptr, raw_size);
+                            *pma_ptr &= CACHED_MUG_METADATA_MASK;
 
                             indirect.set_forwarding_pointer(pma_ptr, &space);
 
@@ -1775,7 +1778,7 @@ impl PmaCopy for Noun {
 
                             let pma_ptr = pma.raw_alloc(word_size_of::<CellMemory>());
                             let pma_cell = pma_ptr as *mut CellMemory;
-                            (*pma_cell).metadata = (*src_cell).metadata;
+                            (*pma_cell).metadata = (*src_cell).metadata & CACHED_MUG_METADATA_MASK;
 
                             cell.set_forwarding_pointer(pma_cell, &space);
 
@@ -1879,6 +1882,7 @@ impl PmaCopyFrom for Noun {
                             let src_ptr = indirect.to_raw_pointer(&space);
                             let pma_ptr = to_pma.raw_alloc(raw_size);
                             copy_nonoverlapping(src_ptr, pma_ptr, raw_size);
+                            *pma_ptr &= CACHED_MUG_METADATA_MASK;
 
                             indirect.set_forwarding_pointer(pma_ptr, &space);
 
@@ -1892,7 +1896,7 @@ impl PmaCopyFrom for Noun {
 
                             let pma_ptr = to_pma.raw_alloc(word_size_of::<CellMemory>());
                             let pma_cell = pma_ptr as *mut CellMemory;
-                            (*pma_cell).metadata = (*src_cell).metadata;
+                            (*pma_cell).metadata = (*src_cell).metadata & CACHED_MUG_METADATA_MASK;
 
                             cell.set_forwarding_pointer(pma_cell, &space);
 
@@ -3516,6 +3520,110 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "memfd_create unsupported in Miri")]
+    fn test_pma_copy_preserves_cached_mugs_without_metadata_flags() {
+        use crate::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
+        use crate::noun::{Cell, IndirectAtom};
+
+        const METADATA_FLAG: u64 = 1 << 32;
+
+        let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
+        let mut pma = test_pma(10000);
+        let stack_space = NounSpace::new(&stack, &pma);
+
+        let data: [u64; 2] = [0xDEADBEEF_CAFEBABE, 0x12345678_9ABCDEF0];
+        let atom = unsafe { IndirectAtom::new_raw(&mut stack, 2, data.as_ptr()) }.as_atom();
+        let atom_noun = atom.as_noun();
+        let cell = Cell::new(&mut stack, D(5), D(23)).as_noun();
+
+        let atom_mug = calc_atom_mug_u32(atom, &stack_space);
+        let cell_mug = {
+            let cell_handle = cell
+                .in_space(&stack_space)
+                .as_cell()
+                .expect("source cell should be allocated");
+            let head_mug = get_mug(cell_handle.head().noun(), &stack_space).expect("head mug");
+            let tail_mug = get_mug(cell_handle.tail().noun(), &stack_space).expect("tail mug");
+            unsafe { calc_cell_mug_u32(head_mug, tail_mug, &stack_space) }
+        };
+
+        unsafe {
+            let mut atom_allocated = atom_noun
+                .as_allocated()
+                .expect("indirect atom should be allocated");
+            set_mug(&mut atom_allocated, atom_mug, &stack_space);
+            atom_allocated.set_metadata(
+                atom_allocated.get_metadata(&stack_space) | METADATA_FLAG,
+                &stack_space,
+            );
+
+            let mut cell_allocated = cell.as_allocated().expect("cell should be allocated");
+            set_mug(&mut cell_allocated, cell_mug, &stack_space);
+            cell_allocated.set_metadata(
+                cell_allocated.get_metadata(&stack_space) | METADATA_FLAG,
+                &stack_space,
+            );
+        }
+
+        let mut root = Cell::new(&mut stack, cell, atom_noun).as_noun();
+        unsafe { root.copy_to_pma(&stack, &mut pma) };
+
+        let pma_space = NounSpace::new(&stack, &pma);
+        let pma_root = root
+            .in_space(&pma_space)
+            .as_cell()
+            .expect("PMA root should be a cell");
+        let copied_cell = pma_root.head().noun();
+        let copied_atom = pma_root.tail().noun();
+
+        assert_eq!(get_mug(copied_cell, &pma_space), Some(cell_mug));
+        assert_eq!(get_mug(copied_atom, &pma_space), Some(atom_mug));
+        for copied in [copied_cell, copied_atom] {
+            let allocated = copied
+                .as_allocated()
+                .expect("copied noun should be allocated");
+            assert_eq!(
+                unsafe { allocated.get_metadata(&pma_space) } & !CACHED_MUG_METADATA_MASK,
+                0
+            );
+        }
+
+        let mut pma_two = test_pma(10000);
+        unsafe {
+            for copied in [copied_cell, copied_atom] {
+                let mut allocated = copied
+                    .as_allocated()
+                    .expect("copied noun should be allocated");
+                allocated.set_metadata(
+                    allocated.get_metadata(&pma_space) | METADATA_FLAG,
+                    &pma_space,
+                );
+            }
+            root.copy_from_pma(&pma, &mut pma_two);
+        }
+
+        let pma_two_space = NounSpace::pma_only(&pma_two);
+        let pma_two_root = root
+            .in_space(&pma_two_space)
+            .as_cell()
+            .expect("copied PMA root should be a cell");
+        let pma_two_cell = pma_two_root.head().noun();
+        let pma_two_atom = pma_two_root.tail().noun();
+
+        assert_eq!(get_mug(pma_two_cell, &pma_two_space), Some(cell_mug));
+        assert_eq!(get_mug(pma_two_atom, &pma_two_space), Some(atom_mug));
+        for copied in [pma_two_cell, pma_two_atom] {
+            let allocated = copied
+                .as_allocated()
+                .expect("copied noun should be allocated");
+            assert_eq!(
+                unsafe { allocated.get_metadata(&pma_two_space) } & !CACHED_MUG_METADATA_MASK,
+                0
+            );
         }
     }
 

@@ -83,6 +83,13 @@ const MASK_OUT_MUG: u64 = !(u32::MAX as u64);
  *
  * Ensure the calculated mug is correct or this will result in incorrect mugs being returned.
  * This could cause jet mismatches.
+ *
+ * Note: this writes through to nouns in extra pointer ranges (e.g. slab
+ * memory registered via `NounSpace::with_extra_ptr_ranges`) as well. A
+ * correct cached mug is a benign cache fill that the owning allocator
+ * (e.g. `NounSlab`) uses with the same low-31-bit metadata convention,
+ * but it is sound only while the backing memory is private, writable,
+ * and accessed from a single thread.
  */
 pub unsafe fn set_mug(allocated: &mut Allocated, mug: u32, space: &NounSpace) {
     let metadata = allocated.get_metadata(space);

@@ -1,0 +1,17 @@
+[package]
+name = "honk-tools"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "extract-hoonc-octs-type"
+path = "src/bin/extract_hoonc_octs_type.rs"
+
+[[bin]]
+name = "jam-diff"
+path = "src/bin/jam_diff.rs"
+
+[dependencies]
+nockapp = { path = "../nockapp" }
+nockvm = { path = "../nockvm/rust/nockvm" }

@@ -5,10 +5,6 @@ on:
     branches:
       - staging
 
-permissions:
-  contents: read
-  pull-requests: write
-
 jobs:
   create-pr:
     runs-on: ubuntu-latest
@@ -21,12 +17,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          EXISTING_PR=$(gh pr list --repo nockchain/nockchain-staging --head staging --base master --json number --jq '.[0].number')
+          EXISTING_PR=$(gh pr list --head staging --base master --json number --jq '.[0].number')
           if [ -n "$EXISTING_PR" ]; then
             echo "PR #$EXISTING_PR already exists"
           else
             gh pr create \
-              --repo nockchain/nockchain-staging \
               --head staging \
               --base master \
               --title "sync: update from upstream" \

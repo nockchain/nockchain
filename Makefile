@@ -52,6 +52,12 @@ GENESIS_SYNC_DATA_DIR_ON ?= $(CURDIR)/.data.nockchain-sync-fsync-on
 GENESIS_SYNC_DATA_DIR_OFF ?= $(CURDIR)/.data.nockchain-sync-fsync-off
 GENESIS_SYNC_BIND_PORT_ON ?= 31000
 GENESIS_SYNC_BIND_PORT_OFF ?= 31001
+ifneq (,$(wildcard ../Cargo.toml))
+HONK_BIN ?= ../target/release/honk
+else
+HONK_BIN ?= target/release/honk
+endif
+HONK_RUN_ENV ?= RUST_LOG=warn
 
 .PHONY: build
 build: build-hoon-all build-rust
@@ -78,20 +84,6 @@ build-nockchain-bridge-tui:
 .PHONY: test
 test:
 	cargo test --release
-
-## Build the full workspace with Bazel. Run from the repository root, where
-## MODULE.bazel and Cargo.toml live; bazelisk reads the pinned version from
-## .bazelversion and rules_rust downloads the Rust toolchain.
-.PHONY: bazel-build
-bazel-build:
-	@test -f Cargo.toml || { echo "bazel-build must run at the workspace root (Cargo.toml not found here)." >&2; exit 1; }
-	bazel build //...
-
-## Run the full Bazel test suite (see bazel-build).
-.PHONY: bazel-test
-bazel-test:
-	@test -f Cargo.toml || { echo "bazel-test must run at the workspace root (Cargo.toml not found here)." >&2; exit 1; }
-	bazel test //...
 
 .PHONY: bench-nockchain-kernel
 bench-nockchain-kernel:
@@ -248,6 +240,7 @@ hoonc_data_flag = $(if $(HOONC_PMA_ROOT),--data-dir $(HOONC_PMA_ROOT)/$(1))
 ensure-dirs:
 	mkdir -p hoon
 	mkdir -p assets
+	mkdir -p assets/native
 
 .PHONY: build-trivial
 build-trivial: ensure-dirs
@@ -256,6 +249,65 @@ build-trivial: ensure-dirs
 	$(HOONC) $(HOONC_FLAGS) --arbitrary hoon/trivial.hoon
 
 HOON_TARGETS=assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
+HONK_HOON_TARGETS=assets/native/dumb.jam assets/native/wal.jam assets/native/miner.jam assets/native/peek.jam assets/native/bridge.jam
+
+
+HOON_SRCS := $(find hoon -type file -name '*.hoon')
+
+HONK_ASSET_WORKDIR=target/honk-assets
+HONK_WRAPPER_ASSET_DIR=$(HONK_ASSET_WORKDIR)/wrapper-assets
+HONK_HOONC_OCTS_TYPED_DYNOCK=$(HONK_ASSET_WORKDIR)/data-import-typed-dynock.jam
+HONK_HOONC ?= cargo run --release -p hoonc --bin hoonc --
+HONK_ASSET_TARGETS=assets/honc-cold-138.jam crates/honk/assets/hoonc-octs-type-138.jam
+
+.PHONY: build-honk-assets
+build-honk-assets: $(HONK_ASSET_TARGETS) ## Build cached honk compiler assets
+
+assets/honc-cold-138.jam: ensure-dirs honk-cargo-build hoon/common/hoon.hoon $(HOON_SRCS)
+	$(call show_env_vars)
+	rm -rf $(HONK_WRAPPER_ASSET_DIR)
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --dump-wrapper-assets $(HONK_WRAPPER_ASSET_DIR) --prelude hoon/common/hoon.hoon hoon
+	cp $(HONK_WRAPPER_ASSET_DIR)/honc-cold-138.jam $@
+
+crates/honk/assets/hoonc-octs-type-138.jam: ensure-dirs hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon/jams/small-blocks.jam $(HOON_SRCS)
+	$(call show_env_vars)
+	mkdir -p crates/honk/assets $(HONK_ASSET_WORKDIR)
+	rm -f data-import-typed-dynock.jam $(HONK_HOONC_OCTS_TYPED_DYNOCK)
+	$(HONK_HOONC) $(HOONC_FLAGS) --dynock-typed --output data-import-typed-dynock.jam hoon/probes/hoon-compiler/hoonc_octs_type_probe.hoon hoon
+	mv data-import-typed-dynock.jam $(HONK_HOONC_OCTS_TYPED_DYNOCK)
+	cargo run --release -p honk-tools --bin extract-hoonc-octs-type -- $(HONK_HOONC_OCTS_TYPED_DYNOCK) $@
+
+.PHONY: honk-cargo-build
+honk-cargo-build:
+	@if [ -x "$(HONK_BIN)" ] || command -v "$(HONK_BIN)" >/dev/null 2>&1; then \
+		echo "Using honk at $(HONK_BIN)"; \
+	elif [ -f ../Cargo.toml ]; then \
+		$(MAKE) -C .. honk-cargo-build; \
+	elif [ -f Cargo.toml ]; then \
+		HONC_COLD_138_ALLOW_MISSING=1 HONK_HOONC_OCTS_TYPE_138_ALLOW_MISSING=1 cargo build --release -p honk --bin honk; \
+	else \
+		echo "No honk binary at $(HONK_BIN). Set HONK_BIN=/path/to/honk, or run from the full workspace so ../Cargo.toml exists." >&2; \
+		exit 1; \
+	fi
+
+.PHONY: build-hoon-honk build-hoon-honk-cached build-honk-kernel-assets nuke-honk-assets
+build-hoon-honk: ## Build open kernel JAM artifacts with honk into assets/native from scratch
+	$(MAKE) nuke-honk-assets
+	$(MAKE) build-hoon-honk-cached
+
+build-hoon-honk-cached: ensure-dirs honk-cargo-build ## Build open kernel JAM artifacts with honk into assets/native without nuking existing native assets
+	$(call show_env_vars)
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --output assets/native/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --output assets/native/miner.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/miner.hoon hoon
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --output assets/native/peek.jam --prelude hoon/common/hoon.hoon hoon/apps/peek/peek.hoon hoon
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --output assets/native/wal.jam --prelude hoon/common/hoon.hoon hoon/apps/wallet/wallet.hoon hoon
+	$(HONK_RUN_ENV) $(HONK_BIN) --new --output assets/native/bridge.jam --prelude hoon/common/hoon.hoon hoon/apps/bridge/bridge.hoon hoon
+	@ls -alh $(HONK_HOON_TARGETS)
+
+build-honk-kernel-assets: build-hoon-honk ## Alias for building open kernel JAM artifacts with honk into assets/native
+
+nuke-honk-assets: ## Remove honk-built open kernel JAM artifacts from assets/native only
+	rm -f assets/native/*.jam
 
 .PHONY: nuke-hoonc-data
 nuke-hoonc-data:
@@ -294,7 +346,6 @@ build-kernels-ci: ensure-dirs
 		HOONC_PMA_ROOT="$(CURDIR)/.hoonc-pma" \
 		$(HOON_TARGETS)
 
-HOON_SRCS := $(find hoon -type file -name '*.hoon')
 
 ## Build dumb.jam with hoonc
 assets/dumb.jam: ensure-dirs hoon/apps/dumbnet/outer.hoon $(HOON_SRCS)

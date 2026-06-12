@@ -1,0 +1,3 @@
+# Regenerable end-to-end goldens (run regen_goldens.sh). Not committed:
+# ~564KB each (carry the prelude via --arbitrary) and deterministic.
+*.jam

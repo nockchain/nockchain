@@ -1,11 +1,9 @@
 #![allow(dead_code)]
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 
 fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=PROTOC");
-    println!("cargo:rerun-if-env-changed=PATH");
     if let Some(protoc) = env::var_os("PROTOC") {
         let path = PathBuf::from(protoc);
         if !path.is_file() {
@@ -13,24 +11,11 @@ fn ensure_protoc() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    match Command::new("protoc").arg("--version").status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(status) => Err(format!(
-            "protoc from PATH exited with status {status}; set PROTOC to a valid binary path"
-        )
-        .into()),
-        Err(_) => Err(
-            "protoc is required to build nockapp-grpc-proto but was not found.\n\n\
-             Install protoc via one of:\n\
-             \x20 nix develop             (recommended — uses the project flake)\n\
-             \x20 apt install protobuf-compiler  (Debian/Ubuntu)\n\
-             \x20 brew install protobuf          (macOS)\n\
-             \x20 PROTOC=/path/to/protoc         (manual override)\n\n\
-             The Docker build installs protobuf-compiler automatically.\n\
-             See also: flake.nix (Nix), tools/protoc (Bazel)."
-                .into(),
-        ),
-    }
+
+    let protoc = protoc_bin_vendored::protoc_bin_path()?;
+    env::set_var("PROTOC", &protoc);
+    println!("cargo:rustc-env=PROTOC={}", protoc.display());
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

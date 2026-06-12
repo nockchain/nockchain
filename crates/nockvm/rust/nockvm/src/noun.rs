@@ -398,6 +398,16 @@ impl NounSpace {
         .expect("stack pointer payload exceeds usize addressable range")
             as *const u8;
         let addr = ptr as usize;
+        // Identity fast path: in a space with no PMA there are no offset-form
+        // nouns, so a pointer-form payload already is the absolute pointer and
+        // range membership is purely a validity check (pre-PMA semantics had
+        // no such check). Skip it in release builds — it would otherwise run
+        // on every noun dereference in slab-heavy code like the native Hoon
+        // compiler. Debug builds keep full validation and the epoch check.
+        #[cfg(not(debug_assertions))]
+        if self.pma_base.is_none() {
+            return ptr;
+        }
         if let (Some(base), Some(end)) = (self.stack_base, self.stack_end) {
             if addr >= base && addr < end {
                 self.assert_stack_epoch();
@@ -422,6 +432,13 @@ impl NounSpace {
 
     fn classify_ptr(&self, ptr: *const u8) -> AllocLocation {
         let addr = ptr as usize;
+        // Identity fast path; see resolve_stack_ptr. With no PMA every
+        // pointer-form location classifies as Stack (extra ranges do too), so
+        // this returns the same answer without the range search.
+        #[cfg(not(debug_assertions))]
+        if self.pma_base.is_none() {
+            return AllocLocation::Stack;
+        }
         if let (Some(base), Some(end)) = (self.stack_base, self.stack_end) {
             if addr >= base && addr < end {
                 self.assert_stack_epoch();
@@ -654,6 +671,20 @@ impl<'space, 'id> BrandedNounHandle<'space, 'id> {
 
     pub fn slot(self, axis: u64) -> Result<Self> {
         self.handle.slot(axis).map(Self::from_unbranded)
+    }
+
+    /// Discard the generative brand, yielding the underlying space-scoped
+    /// handle (from which the raw `Noun` and its `NounSpace` are reachable).
+    ///
+    /// This is the single deliberate exit from the branded world. The write
+    /// side of the boundary — the `copy_in` / branded `interpret` extensions
+    /// in `nockapp` — uses it to reach the raw `Noun` they must hand to
+    /// `NounAllocatorExt::copy_into` and `interpret`. Ordinary traversal reads
+    /// through the branded handle and never needs this. Unwrapping drops the
+    /// cross-arena guarantee, so the result must be reasoned about manually,
+    /// exactly as raw nouns are today.
+    pub fn unbranded(self) -> NounHandle<'space> {
+        self.handle
     }
 }
 
