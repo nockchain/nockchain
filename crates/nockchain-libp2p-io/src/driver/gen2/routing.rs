@@ -244,9 +244,16 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
     let response_gate = ResponseProcessingGate::from(&response);
     let response_gate_name = response_processing_gate_name(&response_gate);
     let response_gate_for_enable = response_gate.clone();
+    // A seen block may be replayed to the kernel when the kernel has asked
+    // for its height, or when it sits exactly at the driver's frontier
+    // (`first_negative` is the next height the kernel has not validated).
+    // The frontier block is the one the kernel needs to make progress; if
+    // it was marked seen by a null-height `%seen %block` (pending on
+    // missing txs) and the kernel went idle, gating it permanently freezes
+    // the frontier and defers every later block.
     let allow_seen_block_replay = if let Some(height) = received_block_height {
         let state_guard = driver_state.lock().await;
-        state_guard.has_kernel_block_height_request(height)
+        state_guard.has_kernel_block_height_request(height) || height == state_guard.first_negative
     } else {
         false
     };
@@ -353,9 +360,15 @@ pub(crate) async fn route_response_fact_with_source_with_dispatcher(
 
     match poke_result {
         Ok(PokeResult::Ack) => {
-            if matches!(response_gate, ResponseProcessingGate::HeardBlock(_))
-                && processing_started.load(Ordering::Relaxed)
-            {
+            // Release the processing claim for heard-tx as well as
+            // heard-block. The kernel acks a heard-tx without emitting
+            // `%seen %tx` whenever it discards the tx (inputs not in
+            // heaviest balance, inputs spent, context-invalid). Holding the
+            // claim past the ack turns any such discard into a permanent
+            // gate: the tx can never be redelivered, and a pending block
+            // waiting on it can never complete.
+            // Seen dedupe stays driven by `%seen` effects only.
+            if processing_started.load(Ordering::Relaxed) {
                 cancel_response_processing_gate(driver_state, &response_gate).await;
             }
             trace!(

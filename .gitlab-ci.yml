@@ -19,10 +19,21 @@ variables:
   RUST_LOG: "warn,slogger=off"
   GIT_CLEAN_FLAGS: "-ffdx -e .bazel/"
 
+open-sync-merge-train-gate:
+  stage: test
+  needs: []
+  rules:
+    - &open_sync_merge_train_rule
+      if: '$CI_MERGE_REQUEST_EVENT_TYPE == "merge_train" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "open" && $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^ci\/open-sync(-.*)?$/'
+  script:
+    - echo "Automated open-sync MR was already validated by the merged-result pipeline."
+
 docs-check:
   stage: docs
   needs: []
   rules:
+    - <<: *open_sync_merge_train_rule
+      when: never
     - if: '$CI_MERGE_REQUEST_ID'
       changes:
         - "**/*.md"
@@ -55,6 +66,8 @@ build-kernels:
   # required pre-merge check). Re-running them on the post-merge `open`
   # push only delays sync-to-staging by ~2h, so skip them there.
   rules:
+    - <<: *open_sync_merge_train_rule
+      when: never
     - if: '$CI_COMMIT_BRANCH == "open"'
       when: never
     - when: on_success
@@ -80,6 +93,8 @@ cargo-test:
       artifacts: true
   # See build-kernels: validated on the MR into `open`, skipped on push.
   rules:
+    - <<: *open_sync_merge_train_rule
+      when: never
     - if: '$CI_COMMIT_BRANCH == "open"'
       when: never
     - when: on_success
@@ -101,6 +116,8 @@ cargo-clippy:
       artifacts: true
   # See build-kernels: validated on the MR into `open`, skipped on push.
   rules:
+    - <<: *open_sync_merge_train_rule
+      when: never
     - if: '$CI_COMMIT_BRANCH == "open"'
       when: never
     - when: on_success
@@ -148,7 +165,14 @@ sync-to-staging:
           exit 1
         fi
 
-        cargo generate-lockfile
+        # The committed Cargo.lock is derived from the monorepo lockfile by
+        # prepare_open_repo.rs (same dependency versions) and is required by
+        # the Bazel crate_universe; do not regenerate it here, that would
+        # re-resolve to different versions. Just verify it shipped.
+        if [ ! -f Cargo.lock ]; then
+          echo "Cargo.lock missing from open branch checkout; refusing to sync" >&2
+          exit 1
+        fi
 
         echo "https://bitemyapp:${GITHUB_NOCKCHAIN_STAGING_TOKEN}@github.com" > ~/.git-credentials
         git config --global credential.helper store

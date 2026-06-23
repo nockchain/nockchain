@@ -461,6 +461,20 @@ pub(super) async fn handle_inbound_request(
                     }
                     match poke_result {
                         Ok(PokeResult::Ack) => {
+                            // Release the processing claim on ack, matching
+                            // the req-res routing path. The kernel acks
+                            // gossip without emitting `%seen` whenever it
+                            // discards the item (missing-parent blocks
+                            // during a fork race, txs whose inputs are not
+                            // in the heaviest balance). Holding the claim
+                            // past the ack gates every future delivery of
+                            // the same item and freezes the catch-up
+                            // frontier (livenet wedge, 2026-06-11). Seen
+                            // dedupe stays driven by `%seen` effects only.
+                            if processing_started.load(Ordering::Relaxed) {
+                                cancel_response_processing_gate(&track_state_arc, &response_gate)
+                                    .await;
+                            }
                             match gossip {
                                 NockchainFact::HeardBlock(..) => {
                                     metrics.gossip_acked_heard_block.increment();
