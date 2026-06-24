@@ -342,6 +342,23 @@ You can also add this to your `.env` file if you're running with the Makefile:
 RUST_LOG=info
 ```
 
+### How do I change the HTTP port?
+
+When the HTTP driver runs in local mode (i.e. `HTTPS_DOMAIN` is unset or set to a
+local domain such as `localhost`, `127.*`, `192.168.*`, or `*.local`), it binds to
+`127.0.0.1:8080` by default. You can override the port with the `HTTP_PORT`
+environment variable:
+
+```bash
+# Serve the local HTTP interface on port 3000 instead of 8080
+HTTP_PORT=3000 nockchain
+```
+
+`HTTP_PORT` must be a valid port number (0–65535); an invalid value causes the
+driver to fail at startup. In production mode (a non-local `HTTPS_DOMAIN`), the
+driver continues to use the standard ports 80 (for ACME challenges) and 443 (for
+HTTPS), which are not affected by `HTTP_PORT`.
+
 ### How do profile for performance?
 
 Here's a demo video for the Tracy integration in Nockchain: https://x.com/nockchain/status/1948109668171051363

@@ -57,6 +57,8 @@ pub enum HttpError {
     AcmeError(#[from] anyhow::Error),
     #[error("Environment variable error: {0}")]
     EnvError(#[from] env::VarError),
+    #[error("Invalid HTTP_PORT value: {0}")]
+    InvalidPort(String),
     #[error("Noun processing error: {0}")]
     NounError(#[from] nockvm::noun::Error),
 }
@@ -179,6 +181,11 @@ pub fn http() -> IODriverFn {
         let domain = env::var("HTTPS_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
         // Directory to serve static files from
         let web_dir = env::var("WEB_DIR").ok();
+        // Port to bind to in local mode (production uses the standard 80/443).
+        let local_port = match env::var("HTTP_PORT") {
+            Ok(s) => s.parse::<u16>().map_err(|_| HttpError::InvalidPort(s))?,
+            Err(_) => 8080,
+        };
 
         // Check if we're running locally
         let is_local = domain == "localhost"
@@ -266,10 +273,11 @@ pub fn http() -> IODriverFn {
         };
 
         if is_local {
-            // Local development: just run HTTP on port 8080
-            let http_listener = tokio::net::TcpListener::bind("127.0.0.1:8080")
-                .await
-                .map_err(HttpError::BindError)?;
+            // Local development: run HTTP on 127.0.0.1, port from HTTP_PORT (default 8080)
+            let http_listener =
+                tokio::net::TcpListener::bind(("127.0.0.1", local_port))
+                    .await
+                    .map_err(HttpError::BindError)?;
             let http_addr = http_listener
                 .local_addr()
                 .map_err(|_| HttpError::LocalAddrError)?;
