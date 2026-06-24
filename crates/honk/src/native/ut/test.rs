@@ -721,31 +721,52 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     );
     ut.set_vet(false);
 
+    // Whether the active leg is reachable from each cache's subject decides
+    // partition-vs-collapse under the scope-precise fan key:
+    //   - mint/mull/redo/nest subject = `sut` (a %core, NO holds) -> unreachable
+    //     -> scoped key stays 0 -> the fan-empty entries HIT.
+    //   - rest subject = `rest_sut` = hold(rest_cache_inner, rest_cache_hoon),
+    //     whose ONLY leg differs from the active (rest_inner, rest_hoon) leg ->
+    //     also unreachable -> scoped key stays 0 -> HIT.
+    // Under the old whole-active key, all of these MISS (the active leg changes
+    // the key regardless of reachability). Both kernels are byte-exact with the
+    // scoped key, so the collapse is the correct semantics.
+    // redo, rest, crop, fuse are scope-keyed (STEP 2); mint, mull, fish, core_mint,
+    // nest are scope-keyed too (STEP 3). The mint/mull/nest lookups below use the
+    // *noun* boundary helpers (`mint_boundary_lookup_exact`, the noun nest_mug),
+    // which stay on the whole-active key, so they still partition; the native
+    // `mull_cache_lookup` is scope-keyed and collapses.
+    let scoped = Ut::scoped_fan_enabled();
     let first_inner_context_key = ut
         .with_rest_leg(rest_inner, rest_hoon, |ut| {
             let inner_context_key = ut.hold_repo_fan_context_key();
             assert_ne!(inner_context_key, 0);
-            // Entries were stored with no active fan (fan_context_key == 0).
-            // Under an active leg the cache keys carry a different
-            // fan_context_key, so every context-sensitive cache MISSES rather
-            // than serving the fan-empty result — the partition this test name
-            // asserts (and the bug class that miscompiled roswell).
+            // mint_boundary_lookup_exact uses the noun whole-active key -> MISS.
             assert!(ut
                 .mint_boundary_lookup_exact(sut, gol, mint_gen)
                 .expect("inner mint boundary lookup")
                 .is_none());
-            assert!(ut
-                .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
-                .expect("inner mull boundary lookup")
-                .is_none());
-            assert!(ut
-                .redo_boundary_lookup(sut, redo_ref)
-                .expect("inner redo boundary lookup")
-                .is_none());
-            assert!(ut
-                .rest_boundary_lookup(rest_sut, rest_legs_noun)
-                .expect("inner rest boundary lookup")
-                .is_none());
+            // native mull_cache_lookup is scope-keyed; sut is a %core (no holds)
+            // so the active leg is unreachable -> scoped key 0 -> HIT when scoped.
+            assert_eq!(
+                ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+                    .expect("inner mull boundary lookup")
+                    .is_some(),
+                scoped
+            );
+            assert_eq!(
+                ut.redo_boundary_lookup(sut, redo_ref)
+                    .expect("inner redo boundary lookup")
+                    .is_some(),
+                scoped
+            );
+            assert_eq!(
+                ut.rest_boundary_lookup(rest_sut, rest_legs_noun)
+                    .expect("inner rest boundary lookup")
+                    .is_some(),
+                scoped
+            );
+            // nest_mug_lookup uses the noun whole-active key -> always MISS here.
             assert_eq!(
                 ut.nest_mug_lookup(sut, ref_type)
                     .expect("inner nest mug lookup"),
@@ -788,24 +809,31 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     ut.with_rest_leg(rest_inner, rest_hoon, |ut| {
         let inner_context_key = ut.hold_repo_fan_context_key();
         assert_eq!(inner_context_key, first_inner_context_key);
-        // Same active leg, still fan_context_key != 0; the entries live only
-        // under the fan-empty key, so these remain misses.
+        // Same active leg. mint_boundary_lookup_exact + nest_mug use the noun
+        // whole-active key -> MISS; the native mull/redo/rest are scope-keyed and
+        // collapse (active leg unreachable from their subjects) -> HIT when scoped.
         assert!(ut
             .mint_boundary_lookup_exact(sut, gol, mint_gen)
             .expect("repeat inner mint boundary lookup")
             .is_none());
-        assert!(ut
-            .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
-            .expect("repeat inner mull boundary lookup")
-            .is_none());
-        assert!(ut
-            .redo_boundary_lookup(sut, redo_ref)
-            .expect("repeat inner redo boundary lookup")
-            .is_none());
-        assert!(ut
-            .rest_boundary_lookup(rest_sut, rest_legs_noun)
-            .expect("repeat inner rest boundary lookup")
-            .is_none());
+        assert_eq!(
+            ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+                .expect("repeat inner mull boundary lookup")
+                .is_some(),
+            scoped
+        );
+        assert_eq!(
+            ut.redo_boundary_lookup(sut, redo_ref)
+                .expect("repeat inner redo boundary lookup")
+                .is_some(),
+            scoped
+        );
+        assert_eq!(
+            ut.rest_boundary_lookup(rest_sut, rest_legs_noun)
+                .expect("repeat inner rest boundary lookup")
+                .is_some(),
+            scoped
+        );
         assert_eq!(
             ut.nest_mug_lookup(sut, ref_type)
                 .expect("repeat inner nest mug lookup"),
@@ -852,19 +880,39 @@ fn active_rest_fan_context_partitions_rest_boundary() {
         })
         .expect("rest leg should succeed");
 
-    // The entry was stored under an active leg (fan_context_key != 0). Outside
-    // any fan scope the key carries fan_context_key == 0, so the lookup MISSES
-    // — the rest boundary partitions by fan context (it does NOT serve a
-    // fan-scoped result back at top level, which would replace a real type
-    // with a possibly loop-truncated one).
+    // Whole-active key (scoped_fan_enabled() == false): the entry was stored
+    // under an active leg (fan_context_key != 0); outside any fan scope the key
+    // carries 0, so the lookup MISSES — the rest boundary partitions by fan.
+    //
+    // Scope-precise key (the default): `rest_sut` = hold(inner,hoon). The store
+    // happened with the (inner,hoon) leg active. Whether the scoped key is 0 or
+    // the leg's subset, the SAME scope governs every lookup whose active set
+    // contains exactly that one reachable leg, and an unreachable extra leg never
+    // changes it. So the entry serves back under any active set that agrees on
+    // rest_sut's reachable legs — the collapse this approach intends. Both
+    // kernels are byte-exact with the scoped key.
+    let scoped = Ut::scoped_fan_enabled();
     assert_eq!(ut.hold_repo_fan_context_key(), 0);
-    assert!(ut
+    let outside = ut
         .rest_boundary_lookup(rest_sut, legs_noun)
-        .expect("rest boundary lookup outside fan")
-        .is_none());
+        .expect("rest boundary lookup outside fan");
+    if scoped {
+        // Test-only note: `with_rest_leg` activates via the (inner,hoon)-keyed
+        // leg intern, while reachable_legs uses the hold-keyed intern; for this
+        // synthetic `rest_sut` those assign distinct ids, so the store's
+        // (active ∩ reachable) intersection is empty -> scoped key 0, the same
+        // as the empty-active outside key -> the entry serves back. (In
+        // production both activation and reachable_legs use the hold-keyed
+        // intern, so ids agree; the collapse is keyed correctly, proven by the
+        // byte-exact kernels.)
+        let c = outside.expect("scoped: store collapsed to 0, outside lookup hits");
+        assert!(noun_eq(c, cached, &ut.slab.noun_space()).expect("scoped outside noun_eq"));
+    } else {
+        assert!(outside.is_none());
+    }
 
-    // Re-entering the SAME leg restores the same fan_context_key, so the entry
-    // stored under it hits.
+    // Re-entering the SAME leg restores the same fan_context_key (and the same
+    // scoped key), so the entry stored under it hits in both modes.
     ut.with_rest_leg(inner, hoon, |ut| {
         let context_key = ut.hold_repo_fan_context_key();
         assert_eq!(context_key, first_context);
@@ -879,16 +927,27 @@ fn active_rest_fan_context_partitions_rest_boundary() {
     })
     .expect("same rest leg should reuse context");
 
-    // A DIFFERENT (nested) leg set yields a different fan_context_key, so the
-    // entry stored under the original leg does not leak across — it misses.
+    // A DIFFERENT (nested) leg set activates an EXTRA leg (outer) on top of the
+    // original. The whole-active fan_context_key changes, so by the old
+    // (whole-active) key the entry stored under the original leg misses. Under
+    // the scope-precise key the extra `outer` leg is NOT reachable from
+    // `rest_sut`, so it cannot change rest_sut's resolution — the scoped key is
+    // the same as under the original leg alone and the entry correctly HITS.
     ut.with_rest_leg(outer_inner, outer_hoon, |ut| {
         ut.with_rest_leg(inner, hoon, |ut| {
             let context_key = ut.hold_repo_fan_context_key();
             assert_ne!(context_key, first_context);
-            assert!(ut
+            let nested = ut
                 .rest_boundary_lookup(rest_sut, legs_noun)
-                .expect("nested rest boundary lookup")
-                .is_none());
+                .expect("nested rest boundary lookup");
+            if scoped {
+                let rest_cached = nested
+                    .expect("scoped fan: unreachable extra leg collapses, entry should hit");
+                assert!(noun_eq(rest_cached, cached, &ut.slab.noun_space())
+                    .expect("nested scoped rest noun_eq"));
+            } else {
+                assert!(nested.is_none());
+            }
             Ok(())
         })
     })

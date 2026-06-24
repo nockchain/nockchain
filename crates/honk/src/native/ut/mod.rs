@@ -209,6 +209,17 @@ pub struct Ut<'a> {
     pub hold_repo_fan_context_id: u64,
     pub hold_repo_fan_context_next_id: u64,
     hold_repo_fan_leg_next_id: u64,
+    // Scope-precise fan key: per-Rc-ptr leg-id memo for %hold types, so
+    // `reachable_legs` resolves a hold's leg-id in O(1) amortized (reusing the
+    // existing noun-path leg intern once per distinct hold pointer). Persists for
+    // the whole compile (leg-ids are compile-stable); cleared in clear_build_memos
+    // alongside the fan/lazy state.
+    hold_repo_fan_leg_id_by_ptr: FastHashMap<usize, u64>,
+    // Memoized intersection ids for scoped fan subsets: maps a (active-context-id,
+    // legset-id) pair to its interned subset id, avoiding re-interning the same
+    // (active ∩ legset) Vec across calls. Reuses the same dedup discipline as
+    // refresh_hold_repo_fan_context_id over arbitrary sorted subsets.
+    hold_repo_fan_subset_by_signature: FastHashMap<(u64, u64, usize), Vec<(Vec<u64>, u64)>>,
     // Canonical-boundary memoization surface. These are the first caches being
     // consolidated around Vere-style ut boundaries (`mint`, `mull`, `rest`,
     // `nest`, `redo`, etc.) instead of helper-local policy tables.
@@ -1885,6 +1896,8 @@ impl<'a> Ut<'a> {
             hold_repo_fan_context_id: 0,
             hold_repo_fan_context_next_id: 1,
             hold_repo_fan_leg_next_id: 1,
+            hold_repo_fan_leg_id_by_ptr: Default::default(),
+            hold_repo_fan_subset_by_signature: Default::default(),
             boundary_memo: Default::default(),
             bran_semi_memo: Default::default(),
             lookup_memo: Default::default(),
@@ -2049,6 +2062,7 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_signature_sum = 0;
         self.hold_repo_fan_signature_xor = 0;
         self.hold_repo_fan_context_id = 0;
+        self.hold_repo_fan_subset_by_signature.clear();
         self.bran_semi_memo = Default::default();
         self.musk.mack_cache_raw.clear();
     }
@@ -2267,6 +2281,265 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_leg_id_by_hold_raw_store(hold_raw, leg_id);
         self.hold_repo_fan_leg_id_by_hold_mug_store(hold, leg_id)?;
         Ok(leg_id)
+    }
+
+    /// Per-`Rc`-ptr leg-id for a `%hold` native type (scope-precise fan key).
+    /// Reuses the existing noun-path leg intern ONCE per distinct hold pointer
+    /// (`hold_repo_fan_leg_id_for_hold_type`), then memoizes ptr -> leg-id, so
+    /// `reachable_legs` resolves a hold's leg-id O(1) amortized. Byte-neutral:
+    /// returns the SAME id `redo_subject_hold_in_fan` would (same intern path).
+    fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<u64> {
+        let ptr = NRc::as_ptr(hold) as usize;
+        if let Some(id) = self.hold_repo_fan_leg_id_by_ptr.get(&ptr).copied() {
+            return Ok(id);
+        }
+        let NTy::Hold { subject, gene } = &**hold else {
+            return Err(CompilerError::Noun(
+                "scoped fan: leg-id of non-hold".to_string(),
+            ));
+        };
+        let subject = subject.clone();
+        let gene = gene.clone();
+        let inner = live_to_noun(&mut self.cx, &subject, self.slab);
+        let hoon = live_leaf_to_noun(&mut self.cx, &gene, self.slab);
+        let hold_noun = live_to_noun(&mut self.cx, hold, self.slab);
+        let leg_id = self.hold_repo_fan_leg_id_for_hold_type(hold_noun, inner, hoon)?;
+        self.hold_repo_fan_leg_id_by_ptr.insert(ptr, leg_id);
+        Ok(leg_id)
+    }
+
+    /// The set of `%hold` leg-ids reachable from `t`, sorted and deduped, memoized
+    /// per interned `Rc` pointer (sound because `intern_node` hash-conses, so
+    /// ptr == structural identity). Bottom-up over the Rc DAG (acyclic: a node's
+    /// hash depends on already-interned children), so each distinct node is
+    /// visited at most once and the closure is O(1) amortized per node. See the
+    /// linearity proof in the design memo. The `Fork` case decodes options once
+    /// per fork ptr (also memoized) and unions their legsets.
+    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
+        let ptr = NRc::as_ptr(t) as usize;
+        if let Some(legs) = legset_memo_lookup(&self.cx, ptr) {
+            return Ok(legs);
+        }
+        let legs = self.with_stack_guard(|ut| ut.reachable_legs_node(t))?;
+        legset_memo_store(&mut self.cx, ptr, legs.clone());
+        Ok(legs)
+    }
+
+    /// One node of `reachable_legs`' memoized recursion (the `with_stack_guard`
+    /// wraps each level for deep DAGs). See `reachable_legs`.
+    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
+        let legs: Vec<u64> = match &**t {
+            NTy::Void | NTy::Noun | NTy::Atom { .. } => Vec::new(),
+            NTy::Cell(h, tl) => {
+                let h = h.clone();
+                let tl = tl.clone();
+                let lh = self.reachable_legs(&h)?;
+                let lt = self.reachable_legs(&tl)?;
+                Self::merge_sorted_legs(&lh, &lt)
+            }
+            NTy::Core { payload, context, .. } => {
+                let payload = payload.clone();
+                let context = context.clone();
+                let lp = self.reachable_legs(&payload)?;
+                let lc = self.reachable_legs(&context)?;
+                Self::merge_sorted_legs(&lp, &lc)
+            }
+            NTy::Face { inner, .. } => {
+                let inner = inner.clone();
+                return self.reachable_legs(&inner);
+            }
+            NTy::Hint { payload, .. } => {
+                let payload = payload.clone();
+                return self.reachable_legs(&payload);
+            }
+            NTy::Fork { .. } => {
+                // The fork's options are not Rc children; decode (memoized per
+                // fork ptr inside fork_options_native via native_of's mug memo)
+                // and union the option legsets.
+                let options = self.fork_options_native(t)?;
+                let mut acc: Vec<u64> = Vec::new();
+                for opt in options {
+                    let lo = self.reachable_legs(&opt)?;
+                    acc = Self::merge_sorted_legs(&acc, &lo);
+                }
+                acc
+            }
+            NTy::Hold { subject, .. } => {
+                // legset(Hold) = {leg_id(self)} ∪ legset(subject). NOT the
+                // repo-expansion: the expansion's holds are reached at the next
+                // descent level (which keys on its own scope). See the
+                // correctness argument §1 (redo_subject_hold_in_fan tests only
+                // leg_id(self); recursion keys per level).
+                let subject = subject.clone();
+                let self_leg = self.hold_repo_fan_leg_id_for_hold_native(t)?;
+                let ls = self.reachable_legs(&subject)?;
+                Self::merge_sorted_legs(&ls, std::slice::from_ref(&self_leg))
+            }
+        };
+        Ok(NRc::from(legs.into_boxed_slice()))
+    }
+
+    /// Sorted-merge-dedup union of two sorted leg-id slices (mirrors the
+    /// NestSeenSet binary-search insert discipline; here a linear merge).
+    fn merge_sorted_legs(a: &[u64], b: &[u64]) -> Vec<u64> {
+        if a.is_empty() {
+            return b.to_vec();
+        }
+        if b.is_empty() {
+            return a.to_vec();
+        }
+        let mut out = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => {
+                    out.push(a[i]);
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    out.push(b[j]);
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    out.push(a[i]);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        out.extend_from_slice(&a[i..]);
+        out.extend_from_slice(&b[j..]);
+        out
+    }
+
+    /// Intersection of two sorted leg-id slices (both already sorted+deduped).
+    fn intersect_sorted_legs(a: &[u64], b: &[u64]) -> Vec<u64> {
+        if a.is_empty() || b.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() && j < b.len() {
+            match a[i].cmp(&b[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    out.push(a[i]);
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        out
+    }
+
+    /// Canonicalize an arbitrary sorted-deduped leg-id subset to a stable id,
+    /// reusing the same (sum, xor, len)-bucketed dedup discipline as
+    /// `refresh_hold_repo_fan_context_id` so equal subsets map to one id
+    /// deterministically. Shares the `hold_repo_fan_context_next_id` id space and
+    /// the same id-assignment order, so no new id semantics are introduced.
+    /// Empty subset is the sentinel 0 (identical to today's empty-fan key).
+    fn intern_fan_subset_id(&mut self, subset: &[u64]) -> u64 {
+        if subset.is_empty() {
+            return 0;
+        }
+        let mut sum: u64 = 0;
+        let mut xor: u64 = 0;
+        for leg_id in subset {
+            let component = Self::hold_repo_fan_leg_signature_component(*leg_id);
+            sum = sum.wrapping_add(component);
+            xor ^= component;
+        }
+        let key = (sum, xor, subset.len());
+        if let Some(entries) = self.hold_repo_fan_subset_by_signature.get(&key) {
+            for (legs, id) in entries.iter().rev() {
+                if legs.as_slice() == subset {
+                    return *id;
+                }
+            }
+        }
+        let id = self.hold_repo_fan_context_next_id.max(1);
+        self.hold_repo_fan_context_next_id = self.hold_repo_fan_context_next_id.wrapping_add(1);
+        if self.hold_repo_fan_context_next_id == 0 {
+            self.hold_repo_fan_context_next_id = 1;
+        }
+        self.hold_repo_fan_subset_by_signature
+            .entry(key)
+            .or_default()
+            .push((subset.to_vec(), id));
+        id
+    }
+
+    /// The scope-precise fan key is the DEFAULT (STEP 5): it is byte-exact on
+    /// both kernels (dumb 6894a41d…, roswell fea818a1…) and is what lets the
+    /// native hoon-138 arbitrary self-mint COMPLETE (bounded ~13 GB / ~46 s vs
+    /// the old never-completing 38-46 GB). Kept as a single source of truth so the
+    /// cache helpers and the partition tests share one switch.
+    fn scoped_fan_enabled() -> bool {
+        true
+    }
+
+    /// Scope-precise fan key for a descent op on `scope` (the deepening subject).
+    /// Projects the active leg-set onto `reachable_legs(scope)`: legs not reachable
+    /// from `scope` can never be tested during its resolution, so they cannot
+    /// change the result (correctness §1-2). Collapses to 0 (the empty-fan key
+    /// shape, already proven by every kernel) for the ~97% of resolutions whose
+    /// intersection is empty. Falls back to the whole-active key when the flag is
+    /// off, so the change is inert until enabled.
+    fn fan_context_key_scoped(&mut self, scope: &NRc<NTy>) -> Result<u64> {
+        if !Self::scoped_fan_enabled() {
+            return Ok(self.hold_repo_fan_context_key());
+        }
+        if self.hold_repo_fan_active_leg_ids.is_empty() {
+            return Ok(0);
+        }
+        let legs = self.reachable_legs(scope)?;
+        let inter = Self::intersect_sorted_legs(&self.hold_repo_fan_active_leg_ids, &legs);
+        if inter.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.intern_fan_subset_id(&inter))
+    }
+
+    /// Scope-precise fan key over the UNION of two scopes' reachable legs (used
+    /// by dual-perspective ops like mull, where the fan can be consulted from
+    /// either the sut or the dox descent). Byte-safe: any leg that could change
+    /// the result is reachable from at least one of the two scopes.
+    fn fan_context_key_scoped_pair(
+        &mut self,
+        a: &NRc<NTy>,
+        b: &NRc<NTy>,
+    ) -> Result<u64> {
+        if !Self::scoped_fan_enabled() {
+            return Ok(self.hold_repo_fan_context_key());
+        }
+        if self.hold_repo_fan_active_leg_ids.is_empty() {
+            return Ok(0);
+        }
+        let la = self.reachable_legs(a)?;
+        let lb = self.reachable_legs(b)?;
+        let legs = Self::merge_sorted_legs(&la, &lb);
+        let inter = Self::intersect_sorted_legs(&self.hold_repo_fan_active_leg_ids, &legs);
+        if inter.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.intern_fan_subset_id(&inter))
+    }
+
+    /// `fan_context_key_scoped` for a noun-keyed cache surface (redo/rest): when
+    /// the flag is on and the active set is non-empty, lift the noun subject to
+    /// native (content-keyed `native_of_cached`) ONCE and scope on it. Flag-off
+    /// and empty-active short-circuit before any conversion, so the noun path is
+    /// unchanged when the feature is inert.
+    fn fan_context_key_scoped_noun(&mut self, sut: Noun) -> Result<u64> {
+        if !Self::scoped_fan_enabled() {
+            return Ok(self.hold_repo_fan_context_key());
+        }
+        if self.hold_repo_fan_active_leg_ids.is_empty() {
+            return Ok(0);
+        }
+        let sut_native = self.native_of_cached(sut)?;
+        self.fan_context_key_scoped(&sut_native)
     }
 
     fn refresh_hold_repo_fan_context_id(&mut self) {
@@ -2895,6 +3168,7 @@ impl<'a> Ut<'a> {
         poly: Poly,
     ) -> Result<Option<(NRc<NTy>, Noun)>> {
         let context = self.cache_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let poly_key = match poly {
@@ -2908,7 +3182,7 @@ impl<'a> Ut<'a> {
             tomes_sig,
             context.semantic.vet_key,
             poly_key,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
         ))
@@ -2926,6 +3200,7 @@ impl<'a> Ut<'a> {
         formula: Noun,
     ) -> Result<()> {
         let context = self.cache_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let poly_key = match poly {
@@ -2939,7 +3214,7 @@ impl<'a> Ut<'a> {
             tomes_sig,
             context.semantic.vet_key,
             poly_key,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
             core_type,
@@ -3025,13 +3300,14 @@ impl<'a> Ut<'a> {
         gen_sig: u64,
     ) -> Result<Option<(NRc<NTy>, Noun)>> {
         let context = self.cache_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_mint_cache_lookup(
             &self.cx,
             sut,
             gol,
             context.semantic.vet_key,
             gen_sig,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
         ))
@@ -3046,13 +3322,14 @@ impl<'a> Ut<'a> {
         formula: Noun,
     ) -> Result<()> {
         let context = self.cache_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         native_mint_cache_store(
             &mut self.cx,
             sut,
             gol,
             context.semantic.vet_key,
             gen_sig,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
             ty,
@@ -3159,6 +3436,10 @@ impl<'a> Ut<'a> {
         gen: Noun,
     ) -> Result<Option<(NRc<NTy>, NRc<NTy>)>> {
         let context = self.cache_context_key();
+        // mull is dual-perspective (sut + dox). The active fan can be consulted
+        // from EITHER perspective's %hold descent, so scope on the union of both
+        // legsets (legset(sut) ∪ legset(dox)) to stay byte-safe.
+        let fan = self.fan_context_key_scoped_pair(sut, dox)?;
         let gen_sig = self.noun_mug_cached(gen) as u64;
         Ok(native_mull_cache_lookup(
             &self.cx,
@@ -3167,7 +3448,7 @@ impl<'a> Ut<'a> {
             dox,
             context.semantic.vet_key,
             gen_sig,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
         ))
@@ -3184,6 +3465,7 @@ impl<'a> Ut<'a> {
         q_ty: NRc<NTy>,
     ) -> Result<()> {
         let context = self.cache_context_key();
+        let fan = self.fan_context_key_scoped_pair(sut, dox)?;
         let gen_sig = self.noun_mug_cached(gen) as u64;
         native_mull_cache_store(
             &mut self.cx,
@@ -3192,7 +3474,7 @@ impl<'a> Ut<'a> {
             dox,
             context.semantic.vet_key,
             gen_sig,
-            context.semantic.fan_context_key,
+            fan,
             context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
             p_ty,
@@ -3224,12 +3506,13 @@ impl<'a> Ut<'a> {
         ref_: &NRc<NTy>,
     ) -> Result<Option<NRc<NTy>>> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_crop_cache_lookup(
             &self.cx,
             sut,
             ref_,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         ))
     }
 
@@ -3240,12 +3523,13 @@ impl<'a> Ut<'a> {
         result: NRc<NTy>,
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         native_crop_cache_store(
             &mut self.cx,
             sut,
             ref_,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
             result,
         );
         Ok(())
@@ -3260,12 +3544,13 @@ impl<'a> Ut<'a> {
         ref_: &NRc<NTy>,
     ) -> Result<Option<NRc<NTy>>> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fuse_cache_lookup(
             &self.cx,
             sut,
             ref_,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         ))
     }
 
@@ -3276,12 +3561,13 @@ impl<'a> Ut<'a> {
         result: NRc<NTy>,
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         native_fuse_cache_store(
             &mut self.cx,
             sut,
             ref_,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
             result,
         );
         Ok(())
@@ -3289,11 +3575,12 @@ impl<'a> Ut<'a> {
 
     pub(super) fn redo_boundary_lookup(&mut self, sut: Noun, ref_: Noun) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped_noun(sut)?;
         let key = (
             self.noun_mug_cached(sut),
             self.noun_mug_cached(ref_),
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         );
         let Some(bucket) = self.boundary_memo.redo.get(&key) else {
             return Ok(None);
@@ -3319,11 +3606,12 @@ impl<'a> Ut<'a> {
         result: Noun,
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped_noun(sut)?;
         let key = (
             self.noun_mug_cached(sut),
             self.noun_mug_cached(ref_),
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         );
         let bucket = self
             .boundary_memo
@@ -3357,11 +3645,12 @@ impl<'a> Ut<'a> {
 
     pub(super) fn rest_boundary_lookup(&mut self, sut: Noun, legs: Noun) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped_noun(sut)?;
         let key = (
             self.noun_mug_cached(sut),
             self.noun_mug_cached(legs),
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         );
         let Some(bucket) = self.boundary_memo.rest.get(&key) else {
             return Ok(None);
@@ -3387,11 +3676,12 @@ impl<'a> Ut<'a> {
         result: Noun,
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped_noun(sut)?;
         let key = (
             self.noun_mug_cached(sut),
             self.noun_mug_cached(legs),
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         );
         let bucket = self
             .boundary_memo
@@ -3421,23 +3711,25 @@ impl<'a> Ut<'a> {
     /// a noun, no `live_to_noun` of the deepening type for the key.
     fn fish_boundary_lookup(&mut self, sut: &NRc<NTy>, axis: u64) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fish_cache_lookup(
             &self.cx,
             sut,
             axis,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
         ))
     }
 
     fn fish_boundary_store(&mut self, sut: &NRc<NTy>, axis: u64, result: Noun) -> Result<()> {
         let semantic = self.semantic_context_key();
+        let fan = self.fan_context_key_scoped(sut)?;
         native_fish_cache_store(
             &mut self.cx,
             sut,
             axis,
             semantic.vet_key,
-            semantic.fan_context_key,
+            fan,
             result,
         );
         Ok(())
@@ -8009,8 +8301,11 @@ impl<'a> Ut<'a> {
         // (intern.rs) — keying on noun mugs would force lowering the deepening
         // subject per call, which is O(N^2) over the deepening chain.
         let semantic = self.semantic_context_key();
+        // nest descends and repos %hold on BOTH sut and ref, so scope the fan on
+        // the union of both legsets (legset(sut) ∪ legset(ref)).
+        let fan = self.fan_context_key_scoped_pair(&sut, &ref_)?;
         if let Some(cached) =
-            nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, semantic.fan_context_key)
+            nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan)
         {
             return Ok(cached);
         }
@@ -8037,7 +8332,7 @@ impl<'a> Ut<'a> {
                 &sut,
                 &ref_,
                 semantic.vet_key,
-                semantic.fan_context_key,
+                fan,
                 result,
             );
         }
@@ -12476,7 +12771,8 @@ use crate::native::ir::intern::{
     fuse_cache_lookup as native_fuse_cache_lookup, fuse_cache_store as native_fuse_cache_store,
     live_intern, live_leaf_to_noun, live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
     mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
-    fork_cache_lookup, fork_cache_store, mull_cache_store as native_mull_cache_store, native_of,
+    fork_cache_lookup, fork_cache_store, legset_memo_lookup, legset_memo_store,
+    mull_cache_store as native_mull_cache_store, native_of,
     native_of_mug_candidates, native_of_mug_insert, nest_cache_lookup, nest_cache_store,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
@@ -12762,6 +13058,61 @@ mod native_ctor_tests {
         let (n, t) = ut.fork_from_options_n(vec![]).unwrap();
         assert_native_eq(n, &t, &ut.slab.noun_space());
         assert!(matches!(&*t, NTy::Void), "empty fork must collapse to Void");
+    }
+
+    // STEP 1 unit: reachable_legs of a Hold-over-Cell DAG returns exactly the
+    // hold's leg-id; non-hold types return ∅; and the scoped-fan intersection is 0
+    // when the active set is disjoint from the legset (collapses to the empty-fan
+    // key). Also checks the legset/intern are pure (memoized) per pointer.
+    #[test]
+    fn reachable_legs_and_scoped_fan_intersection() {
+        let mut slab: NounSlab = NounSlab::new();
+        let mut ut = Ut::new(&mut slab);
+
+        // A plain cell type has no holds.
+        let a = ty_atom(ut.slab, "ud", None);
+        let b = ty_atom(ut.slab, "t", None);
+        let cell_noun = ty_cell(ut.slab, a, b);
+        let cell = ut.native_of_cached(cell_noun).unwrap();
+        let legs = ut.reachable_legs(&cell).unwrap();
+        assert!(legs.is_empty(), "cell of atoms has no reachable legs");
+
+        // Build [%hold cell gen] over the cell above; legset = {leg_id(hold)}.
+        let gen = T(ut.slab, &[D(1), D(2)]); // a trivial gene noun
+        let hold_noun = ty_hold(ut.slab, cell_noun, gen);
+        let hold = ut.native_of_cached(hold_noun).unwrap();
+        let hold_legs = ut.reachable_legs(&hold).unwrap();
+        assert_eq!(hold_legs.len(), 1, "single hold has exactly one reachable leg");
+        let leg_id = ut.hold_repo_fan_leg_id_for_hold_native(&hold).unwrap();
+        assert_eq!(hold_legs[0], leg_id, "legset is the hold's own leg-id");
+
+        // Wrap the hold in a cell; legset is still {leg_id}.
+        let other = ty_noun(ut.slab);
+        let outer_noun = ty_cell(ut.slab, hold_noun, other);
+        let outer = ut.native_of_cached(outer_noun).unwrap();
+        let outer_legs = ut.reachable_legs(&outer).unwrap();
+        assert_eq!(outer_legs.as_ref(), &[leg_id], "cell-wrapped hold keeps the leg");
+
+        // Memoized: second call returns the same Rc-shared slice content.
+        let outer_legs2 = ut.reachable_legs(&outer).unwrap();
+        assert_eq!(outer_legs.as_ref(), outer_legs2.as_ref());
+
+        // intersect-empty -> intern_fan_subset_id returns the empty sentinel 0.
+        assert_eq!(ut.intern_fan_subset_id(&[]), 0);
+        let inter = Ut::intersect_sorted_legs(&[leg_id + 7, leg_id + 9], &outer_legs);
+        assert!(inter.is_empty(), "disjoint active set -> empty intersection");
+
+        // intersect-nonempty -> a stable nonzero id, deterministic across calls.
+        let inter2 = Ut::intersect_sorted_legs(&[leg_id], &outer_legs);
+        assert_eq!(inter2, vec![leg_id]);
+        let id1 = ut.intern_fan_subset_id(&inter2);
+        let id2 = ut.intern_fan_subset_id(&inter2);
+        assert_ne!(id1, 0);
+        assert_eq!(id1, id2, "equal subsets map to one stable id");
+
+        // merge/intersect helper sanity.
+        assert_eq!(Ut::merge_sorted_legs(&[1, 3], &[2, 3, 4]), vec![1, 2, 3, 4]);
+        assert_eq!(Ut::intersect_sorted_legs(&[1, 3, 5], &[3, 5, 7]), vec![3, 5]);
     }
 }
 

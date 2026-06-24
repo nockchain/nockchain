@@ -224,6 +224,14 @@ pub struct Context {
     // --- native_of content-keyed decode cache + fork cache ---
     native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
     fork_cache: HashMap<Vec<usize>, Rc<Type>>,       // FORK_CACHE
+
+    // --- scope-precise fan key support (reachable %hold legs per type) ---
+    // `legset_memo` maps an interned `Rc<Type>` pointer to the sorted-deduped set
+    // of %hold leg-ids reachable from that type (`reachable_legs` in ut/mod.rs).
+    // Sound because `intern_node` hash-conses (ptr == structural identity), so the
+    // legset is a pure function of the pointer; computed bottom-up over the Rc DAG
+    // and memoized so each distinct node is visited once (O(1) amortized).
+    legset_memo: HashMap<usize, Rc<[u64]>>,
 }
 
 impl Context {
@@ -241,6 +249,7 @@ impl Context {
             fish_cache: HashMap::new(),
             native_of_mug_memo: HashMap::new(),
             fork_cache: HashMap::new(),
+            legset_memo: HashMap::new(),
         }
     }
 
@@ -279,6 +288,18 @@ pub fn fork_cache_lookup(cx: &Context, key: &[usize]) -> Option<Rc<Type>> {
 /// Store a `cons_fork` result keyed by its canonical option-pointer key.
 pub fn fork_cache_store(cx: &mut Context, key: Vec<usize>, fork: Rc<Type>) {
     cx.fork_cache.insert(key, fork);
+}
+
+/// Look up the memoized reachable-leg set for an interned type pointer.
+/// `ptr` is `Rc::as_ptr(t) as usize`; the value is the sorted-deduped set of
+/// %hold leg-ids reachable from `t`. See `reachable_legs` in ut/mod.rs.
+pub fn legset_memo_lookup(cx: &Context, ptr: usize) -> Option<Rc<[u64]>> {
+    cx.legset_memo.get(&ptr).cloned()
+}
+
+/// Store a memoized reachable-leg set for an interned type pointer.
+pub fn legset_memo_store(cx: &mut Context, ptr: usize, legs: Rc<[u64]>) {
+    cx.legset_memo.insert(ptr, legs);
 }
 
 /// Content-keyed `native_of` fast path (see `Context::native_of_mug_memo`).
