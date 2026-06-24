@@ -274,10 +274,9 @@ pub fn http() -> IODriverFn {
 
         if is_local {
             // Local development: run HTTP on 127.0.0.1, port from HTTP_PORT (default 8080)
-            let http_listener =
-                tokio::net::TcpListener::bind(("127.0.0.1", local_port))
-                    .await
-                    .map_err(HttpError::BindError)?;
+            let http_listener = tokio::net::TcpListener::bind(("127.0.0.1", local_port))
+                .await
+                .map_err(HttpError::BindError)?;
             let http_addr = http_listener
                 .local_addr()
                 .map_err(|_| HttpError::LocalAddrError)?;
