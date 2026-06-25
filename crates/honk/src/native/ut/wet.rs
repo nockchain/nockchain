@@ -277,7 +277,8 @@ impl<'a> Ut<'a> {
 
         match &*sut {
             NTy::Noun | NTy::Void | NTy::Atom { .. } | NTy::Core { .. } => {
-                let (_reduced_ref, next_state) = self.redo_sint(sut.clone(), reference, true, state)?;
+                let (_reduced_ref, next_state) =
+                    self.redo_sint(sut.clone(), reference, true, state)?;
                 self.redo_done(sut, &next_state)
             }
             NTy::Cell(sut_head, sut_tail) => {
@@ -315,7 +316,8 @@ impl<'a> Ut<'a> {
                 self.cons_fork(rebuilt)
             }
             NTy::Hold { .. } => {
-                let (reduced_ref, next_state) = self.redo_sint(sut.clone(), reference.clone(), false, state)?;
+                let (reduced_ref, next_state) =
+                    self.redo_sint(sut.clone(), reference.clone(), false, state)?;
                 if self.redo_subject_hold_in_fan(&sut)? {
                     let (_expanded_ref, fan_state) =
                         self.redo_sint(sut.clone(), reduced_ref, true, next_state)?;

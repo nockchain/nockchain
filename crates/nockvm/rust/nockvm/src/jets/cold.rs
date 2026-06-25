@@ -1186,7 +1186,9 @@ impl Cold {
                     let battery_list = path_to_batteries
                         .lookup(stack, &mut *a_path)
                         .unwrap_or(BATTERIES_LIST_NIL);
-                    if let Some(parent_batteries) = battery_list.matches(stack, parent, &space, dispatch) {
+                    if let Some(parent_batteries) =
+                        battery_list.matches(stack, parent, &space, dispatch)
+                    {
                         let mut my_path = T(stack, &[chum, *a_path]);
 
                         let batteries_mem_ptr: *mut BatteriesMem = stack.struct_alloc(1);
@@ -1235,7 +1237,9 @@ impl Cold {
                     let battery_list = path_to_batteries
                         .lookup(stack, &mut *a_path)
                         .unwrap_or(BATTERIES_LIST_NIL);
-                    if let Some(parent_batteries) = battery_list.matches(stack, parent, &space, dispatch) {
+                    if let Some(parent_batteries) =
+                        battery_list.matches(stack, parent, &space, dispatch)
+                    {
                         let mut my_path = T(stack, &[chum, *a_path]);
 
                         let batteries_mem_ptr: *mut BatteriesMem = stack.struct_alloc(1);
@@ -1316,74 +1320,108 @@ impl<'a> Iterator for NounListIterator<'a> {
     }
 }
 
+const COPY_NOUN_SCRATCH_INITIAL_WORK_CAP: usize = 4_096;
+// Keep the hoon-138 large-copy fast path warm, but do not let one unusually
+// large copy pin an unbounded IntMap/Vec for the rest of the worker thread.
+// intmap::IntMap::clear() walks every retained slot, so this also bounds the
+// per-call clear cost paid by later small decodes.
+const COPY_NOUN_SCRATCH_RETAINED_SLOT_CAP: usize = 262_144;
+const COPY_NOUN_SCRATCH_RETAINED_WORK_CAP: usize = 262_144;
+
 fn copy_noun_into_allocator<A: NounAllocator>(
     stack: &mut A,
     noun: Noun,
     space: &NounSpace,
 ) -> Noun {
-    let mut copied: IntMap<u64, Noun> = IntMap::new();
-    let mut result = D(0);
-    let mut copy_stack = vec![(noun, std::ptr::addr_of_mut!(result))];
-
-    while let Some((noun, dest)) = copy_stack.pop() {
-        match noun.as_either_direct_allocated() {
-            either::Either::Left(direct) => unsafe {
-                *dest = direct.as_noun();
-            },
-            either::Either::Right(allocated) => match allocated.as_either() {
-                either::Either::Left(indirect) => {
-                    let atom_handle = indirect.as_atom().in_space(space);
-                    let raw_pointer = unsafe { atom_handle.raw_pointer() };
-                    let raw_size = atom_handle.raw_size();
-                    if let Some(copied_noun) = copied.get(raw_pointer as u64) {
-                        unsafe { *dest = *copied_noun };
-                        continue;
-                    }
-
-                    let indirect_mem = unsafe { stack.alloc_indirect(atom_handle.size()) };
-                    unsafe {
-                        copy_nonoverlapping(raw_pointer, indirect_mem, raw_size);
-                    }
-                    let copied_noun = unsafe {
-                        IndirectAtom::from_raw_pointer(indirect_mem)
-                            .as_atom()
-                            .as_noun()
-                    };
-                    copied.insert(raw_pointer as u64, copied_noun);
-                    unsafe { *dest = copied_noun };
-                }
-                either::Either::Right(cell) => {
-                    let cell_handle = cell.in_space(space);
-                    let raw_pointer = unsafe { cell_handle.raw_pointer() };
-                    if let Some(copied_noun) = copied.get(raw_pointer as u64) {
-                        unsafe { *dest = *copied_noun };
-                        continue;
-                    }
-
-                    let cell_mem = unsafe { stack.alloc_cell() };
-                    unsafe {
-                        copy_nonoverlapping(raw_pointer, cell_mem, 1);
-                    }
-                    let copied_noun =
-                        unsafe { crate::noun::Cell::from_raw_pointer(cell_mem).as_noun() };
-                    copied.insert(raw_pointer as u64, copied_noun);
-                    unsafe {
-                        *dest = copied_noun;
-                        copy_stack.push((
-                            cell_handle.tail().noun(),
-                            std::ptr::addr_of_mut!((*cell_mem).tail),
-                        ));
-                        copy_stack.push((
-                            cell_handle.head().noun(),
-                            std::ptr::addr_of_mut!((*cell_mem).head),
-                        ));
-                    }
-                }
-            },
-        }
+    if noun.is_direct() {
+        return noun;
     }
 
-    result
+    // Reuse a per-thread scratch dedup map and worklist across calls. The map
+    // can reach ~150K entries when copying a large core (e.g. honk's `^~`
+    // folds); retaining that grown map avoids repeated rehash growth on the hot
+    // large-copy path. If an outlier grows beyond the retained cap, replace it
+    // instead of paying a huge `clear()` scan and pinned RSS on every later copy.
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<(IntMap<u64, Noun>, Vec<(Noun, *mut Noun)>)> =
+            std::cell::RefCell::new((IntMap::new(), Vec::with_capacity(COPY_NOUN_SCRATCH_INITIAL_WORK_CAP)));
+    }
+    SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        let (copied, copy_stack) = &mut *scratch;
+        if copied.capacity() > COPY_NOUN_SCRATCH_RETAINED_SLOT_CAP {
+            *copied = IntMap::new();
+        } else {
+            copied.clear();
+        }
+        if copy_stack.capacity() > COPY_NOUN_SCRATCH_RETAINED_WORK_CAP {
+            *copy_stack = Vec::with_capacity(COPY_NOUN_SCRATCH_INITIAL_WORK_CAP);
+        } else {
+            copy_stack.clear();
+        }
+        let mut result = D(0);
+        copy_stack.push((noun, std::ptr::addr_of_mut!(result)));
+
+        while let Some((noun, dest)) = copy_stack.pop() {
+            match noun.as_either_direct_allocated() {
+                either::Either::Left(direct) => unsafe {
+                    *dest = direct.as_noun();
+                },
+                either::Either::Right(allocated) => match allocated.as_either() {
+                    either::Either::Left(indirect) => {
+                        let atom_handle = indirect.as_atom().in_space(space);
+                        let raw_pointer = unsafe { atom_handle.raw_pointer() };
+                        let raw_size = atom_handle.raw_size();
+                        if let Some(copied_noun) = copied.get(raw_pointer as u64) {
+                            unsafe { *dest = *copied_noun };
+                            continue;
+                        }
+
+                        let indirect_mem = unsafe { stack.alloc_indirect(atom_handle.size()) };
+                        unsafe {
+                            copy_nonoverlapping(raw_pointer, indirect_mem, raw_size);
+                        }
+                        let copied_noun = unsafe {
+                            IndirectAtom::from_raw_pointer(indirect_mem)
+                                .as_atom()
+                                .as_noun()
+                        };
+                        copied.insert(raw_pointer as u64, copied_noun);
+                        unsafe { *dest = copied_noun };
+                    }
+                    either::Either::Right(cell) => {
+                        let cell_handle = cell.in_space(space);
+                        let raw_pointer = unsafe { cell_handle.raw_pointer() };
+                        if let Some(copied_noun) = copied.get(raw_pointer as u64) {
+                            unsafe { *dest = *copied_noun };
+                            continue;
+                        }
+
+                        let cell_mem = unsafe { stack.alloc_cell() };
+                        unsafe {
+                            copy_nonoverlapping(raw_pointer, cell_mem, 1);
+                        }
+                        let copied_noun =
+                            unsafe { crate::noun::Cell::from_raw_pointer(cell_mem).as_noun() };
+                        copied.insert(raw_pointer as u64, copied_noun);
+                        unsafe {
+                            *dest = copied_noun;
+                            copy_stack.push((
+                                cell_handle.tail().noun(),
+                                std::ptr::addr_of_mut!((*cell_mem).tail),
+                            ));
+                            copy_stack.push((
+                                cell_handle.head().noun(),
+                                std::ptr::addr_of_mut!((*cell_mem).head),
+                            ));
+                        }
+                    }
+                },
+            }
+        }
+
+        result
+    })
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1777,7 +1815,7 @@ impl Nounable for Cold {
         // iterate over battery_to_paths_noun
         for item in NounListIterator::new(battery_to_paths_noun, space) {
             let cell = item.in_space(space).as_cell()?;
-            let key = cell.head().noun();
+            let key = <Noun as Nounable>::from_noun(stack, &cell.head().noun(), space)?;
             let value = NounList::from_noun(stack, &cell.tail().noun(), space)?;
             battery_to_paths.push((key, value));
         }
@@ -1785,7 +1823,7 @@ impl Nounable for Cold {
         // iterate over root_to_paths_noun
         for item in NounListIterator::new(root_to_paths_noun, space) {
             let cell = item.in_space(space).as_cell()?;
-            let key = cell.head().noun();
+            let key = <Noun as Nounable>::from_noun(stack, &cell.head().noun(), space)?;
             let value = NounList::from_noun(stack, &cell.tail().noun(), space)?;
             root_to_paths.push((key, value));
         }
@@ -1793,7 +1831,7 @@ impl Nounable for Cold {
         // iterate over path_to_batteries_noun
         for item in NounListIterator::new(path_to_batteries_noun, space) {
             let cell = item.in_space(space).as_cell()?;
-            let key = cell.head().noun();
+            let key = <Noun as Nounable>::from_noun(stack, &cell.head().noun(), space)?;
             let value = BatteriesList::from_noun(stack, &cell.tail().noun(), space)?;
             path_to_batteries.push((key, value));
         }
@@ -1945,6 +1983,52 @@ pub(crate) mod test {
                 value_b_noun
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn cold_from_noun_rehomes_foreign_hamt_keys() {
+        let mut source = make_test_stack(DEFAULT_STACK_SIZE);
+        let source_space = source.noun_space();
+        let foreign_battery_key = T(&mut source, &[D(20), D(21)]);
+        let foreign_root_key = T(&mut source, &[D(22), D(23)]);
+        let foreign_path_key = T(&mut source, &[D(24), D(25)]);
+        let battery_paths = make_noun_list(&mut source, &[1]);
+        let root_paths = make_noun_list(&mut source, &[2]);
+        let path_batteries = make_batteries_list(&mut source, &[3]);
+        let cold = Cold::from_vecs(
+            &mut source,
+            vec![(foreign_battery_key, battery_paths)],
+            vec![(foreign_root_key, root_paths)],
+            vec![(foreign_path_key, path_batteries)],
+        );
+        let noun = cold.into_noun(&mut source);
+
+        let mut dest = make_test_stack(DEFAULT_STACK_SIZE);
+        let (battery_to_paths, root_to_paths, path_to_batteries) =
+            Cold::from_noun(&mut dest, &noun, &source_space)
+                .expect("decode cold from foreign stack");
+
+        let dest_space = dest.noun_space();
+        let decoded_battery_key = battery_to_paths[0].0;
+        let decoded_root_key = root_to_paths[0].0;
+        let decoded_path_key = path_to_batteries[0].0;
+
+        assert!(
+            !unsafe { decoded_battery_key.raw_equals(&foreign_battery_key) },
+            "decoded battery_to_paths key should not retain the foreign pointer"
+        );
+        assert!(
+            !unsafe { decoded_root_key.raw_equals(&foreign_root_key) },
+            "decoded root_to_paths key should not retain the foreign pointer"
+        );
+        assert!(
+            !unsafe { decoded_path_key.raw_equals(&foreign_path_key) },
+            "decoded path_to_batteries key should not retain the foreign pointer"
+        );
+        verify_noun_stack_allocated(decoded_battery_key, &dest_space, "decoded battery key");
+        verify_noun_stack_allocated(decoded_root_key, &dest_space, "decoded root key");
+        verify_noun_stack_allocated(decoded_path_key, &dest_space, "decoded path key");
     }
 
     #[test]

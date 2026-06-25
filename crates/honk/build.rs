@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ))
                 .into());
             }
-            path
+            path.canonicalize()?
         } else if hoonc_octs_type_asset.is_file()
             && fs::metadata(&hoonc_octs_type_asset)?.len() > 0
         {
@@ -44,7 +44,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into());
         };
 
-    for path in [&hoon_source, &honc_type_asset, &honc_formula_asset, &hoonc_octs_type_asset] {
+    for path in [
+        &hoon_source,
+        &honc_type_asset,
+        &honc_formula_asset,
+        &hoonc_octs_type_asset_path,
+    ] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!(

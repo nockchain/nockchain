@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::rc::Rc as NRc;
 use std::sync::Arc;
 
 use hatch::ast::hoon::WingType;
@@ -10,7 +11,6 @@ use num_bigint::BigUint;
 use crate::errors::Result;
 use crate::native::ir::ty::Type as NTy;
 use crate::native::ut::{noun_eq, Ut};
-use std::rc::Rc as NRc;
 
 // Compiler inputs are not attacker-controlled; prefer a fast, non-cryptographic hasher for
 // hot-path internal caches (notably `find`/`cool` on large molds like hoon-138).
@@ -915,7 +915,10 @@ pub struct Palo {
 #[derive(Clone, Debug)]
 pub enum Opal {
     Leg(NRc<NTy>),
-    Arm { axis: u64, arms: Vec<(NRc<NTy>, Noun)> },
+    Arm {
+        axis: u64,
+        arms: Vec<(NRc<NTy>, Noun)>,
+    },
 }
 
 #[derive(Clone, Debug)]

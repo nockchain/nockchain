@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
-use std::rc::Rc as NRc;
+use std::rc::{Rc, Rc as NRc};
 
 use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
 use nockapp::noun::slab::NounSlab;
@@ -10,13 +9,12 @@ use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
 
 use super::{
     cell_type, coil_from_parts, coil_parts, find_face_axis_skip, hoon_to_noun,
-    is_const_bool_formula, map_to_noun, noun_eq, term_to_noun, ty_atom, ty_cell, ty_core, ty_face,
-    ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
-    type_face_name_if_atom, type_face_tool, type_tag, CompilerError, Limb, NestPairSet,
+    is_const_bool_formula, map_to_noun, native_of, noun_eq, term_to_noun, ty_atom, ty_cell,
+    ty_core, ty_face, ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
+    type_face_name_if_atom, type_face_tool, type_tag, CompilerError, Limb, NTy, NestPairSet,
     NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet, StructNounSet, Ut,
     Way,
 };
-use super::{native_of, NTy};
 use crate::native::ut::wet::RedoState;
 
 #[test]
@@ -305,13 +303,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
 
     let ok = ut
         .nest_inner(
-            sut_n,
-            ref_n,
-            0,
-            &mut seen_sut_holds,
-            &mut seen_ref_holds,
-            &mut gil,
-            &mut memo,
+            sut_n, ref_n, 0, &mut seen_sut_holds, &mut seen_ref_holds, &mut gil, &mut memo,
         )
         .expect("nest cell");
     assert!(
@@ -562,8 +554,7 @@ fn type_algebra_fuse_and_crop_preserve_subtyping_and_exact_crop_disjointness() {
                 .crop(left_n.clone(), right_n.clone())
                 .unwrap_or_else(|err| panic!("crop({left_name}, {right_name}) errored: {err:?}"));
             assert!(
-                ut.nest(left_n, cropped.clone())
-                    .expect("cropped fits left"),
+                ut.nest(left_n, cropped.clone()).expect("cropped fits left"),
                 "crop({left_name}, {right_name}) should still fit left"
             );
             // `crop` is conservative for shapes the type system cannot represent exactly
@@ -603,7 +594,8 @@ fn type_algebra_gain_and_lose_partition_base_skins() {
                 .lose_skin(sut.clone(), typ_n.clone(), skin)
                 .unwrap_or_else(|err| panic!("lose({type_name}, {skin_name}) errored: {err:?}"));
             assert!(
-                ut.nest(typ_n.clone(), gained.clone()).expect("gain subtype"),
+                ut.nest(typ_n.clone(), gained.clone())
+                    .expect("gain subtype"),
                 "gain({type_name}, {skin_name}) should fit original type"
             );
             assert!(
@@ -678,7 +670,8 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let space = ut.slab.noun_space();
     let sut_n = crate::native::ir::intern::native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = crate::native::ir::intern::native_of(&mut ut.cx, gol, &space).expect("native gol");
-    let ref_n = crate::native::ir::intern::native_of(&mut ut.cx, ref_type, &space).expect("native ref");
+    let ref_n =
+        crate::native::ir::intern::native_of(&mut ut.cx, ref_type, &space).expect("native ref");
     let ty_n = crate::native::ir::intern::native_of(&mut ut.cx, ty, &space).expect("native ty");
     let inner_ty_n =
         crate::native::ir::intern::native_of(&mut ut.cx, inner_ty, &space).expect("native inner");
@@ -941,8 +934,8 @@ fn active_rest_fan_context_partitions_rest_boundary() {
                 .rest_boundary_lookup(rest_sut, legs_noun)
                 .expect("nested rest boundary lookup");
             if scoped {
-                let rest_cached = nested
-                    .expect("scoped fan: unreachable extra leg collapses, entry should hit");
+                let rest_cached =
+                    nested.expect("scoped fan: unreachable extra leg collapses, entry should hit");
                 assert!(noun_eq(rest_cached, cached, &ut.slab.noun_space())
                     .expect("nested scoped rest noun_eq"));
             } else {
@@ -1282,9 +1275,12 @@ fn toss_mismatched_axes_errors_mate() {
     let left_n = native_of(&mut ut.cx, left, &ut.slab.noun_space()).expect("native left");
     let right_n = native_of(&mut ut.cx, right, &ut.slab.noun_space()).expect("native right");
 
-    let (left_axis, _left_new) = ut.tack(left_n.clone(), &wing, mur.clone()).expect("left tack");
-    let (right_axis, _right_new) =
-        ut.tack(right_n.clone(), &wing, mur.clone()).expect("right tack");
+    let (left_axis, _left_new) = ut
+        .tack(left_n.clone(), &wing, mur.clone())
+        .expect("left tack");
+    let (right_axis, _right_new) = ut
+        .tack(right_n.clone(), &wing, mur.clone())
+        .expect("right tack");
     assert_ne!(
         left_axis, right_axis,
         "test setup should produce distinct edit axes for canonical mate failure"
@@ -1425,6 +1421,79 @@ fn kttr_buccab_example_folds_memoized_gate_arm_call() {
     assert!(
         noun_eq(formula, expected, &slab.noun_space()).expect("noun_eq should not fail"),
         "$_ examples must fold memoized arm calls through sibling gates",
+    );
+}
+
+fn dump_type_noun(slab: &NounSlab, n: Noun) -> String {
+    use super::atom_to_string;
+
+    fn go(space: &nockvm::noun::NounSpace, n: Noun, out: &mut String) {
+        match n.in_space(space).as_cell() {
+            Ok(c) => {
+                let (h, t) = (c.head().noun(), c.tail().noun());
+                out.push('[');
+                go(space, h, out);
+                out.push(' ');
+                go(space, t, out);
+                out.push(']');
+            }
+            Err(_) => match n.in_space(space).as_atom() {
+                Ok(a) => match atom_to_string(a) {
+                    Ok(s) if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic()) => {
+                        out.push('%');
+                        out.push_str(&s);
+                    }
+                    _ => {
+                        if let Ok(v) = a.as_u64() {
+                            out.push_str(&v.to_string());
+                        } else {
+                            out.push_str("BIG");
+                        }
+                    }
+                },
+                Err(_) => out.push('?'),
+            },
+        }
+    }
+
+    let space = slab.noun_space();
+    let mut out = String::new();
+    go(&space, n, &mut out);
+    out
+}
+
+#[test]
+fn wet_gate_sample_preserves_cell_of_faces_type() {
+    // ++nice's wet-gate sample `[typ=* gud=?]` lowers (|*) to `^*([typ=* gud=?])`.
+    // hoonc infers a cell-of-faces; honk must not collapse it to the null atom.
+    let mut slab = NounSlab::new();
+    let sut = ty_noun(&mut slab);
+    let gol = ty_noun(&mut slab);
+
+    let typ_spec = Spec::BucTis(
+        Skin::Term("typ".to_string()),
+        Box::new(Spec::Base(BaseType::NounExpr)),
+    );
+    let gud_spec = Spec::BucTis(
+        Skin::Term("gud".to_string()),
+        Box::new(Spec::Base(BaseType::Flag)),
+    );
+    let spec = Spec::BucCol(Box::new(typ_spec), vec![gud_spec]);
+
+    let mut ut = Ut::new(&mut slab);
+    let (ty, _) = ut
+        .mint_noun(sut, gol, &Hoon::KetTar(Box::new(spec)))
+        .expect("^*([typ=* gud=?]) mint");
+    let ty_s = dump_type_noun(&slab, ty);
+    // `%flag` specs canonicalize to the boolean fork in minted types; this
+    // regression guard is about preserving the cell shape and face names.
+    assert!(
+        ty_s.contains("%cell")
+            && ty_s.contains("[%face [%typ %noun]]")
+            && ty_s.contains("[%face [%gud ")
+            && ty_s.contains("%fork")
+            && ty_s.contains("%atom [%f"),
+        "expected sample type to preserve named cell faces and boolean sample, got {ty_s}"
     );
 }
 
@@ -2270,7 +2339,12 @@ fn redo_sint_reference_hold_respects_hod_flag() {
     let reference_n = native_of(&mut ut.cx, reference, &space).expect("native reference");
 
     let (opaque_ref, _opaque_state) = ut
-        .redo_sint(payload_n.clone(), reference_n.clone(), false, RedoState::default())
+        .redo_sint(
+            payload_n.clone(),
+            reference_n.clone(),
+            false,
+            RedoState::default(),
+        )
         .expect("redo_sint(false)");
     assert!(
         matches!(&*opaque_ref, NTy::Hold { .. }),
@@ -2642,7 +2716,9 @@ fn wet_gate_function_sample_mint_deterministic() {
         let mut ut = Ut::new(&mut slab);
         let sut = super::ty_noun(&mut *ut.slab);
         let gol = super::ty_noun(&mut *ut.slab);
-        let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("mint synthetic wet gate");
+        let (_ty, formula) = ut
+            .mint_noun(sut, gol, &gen)
+            .expect("mint synthetic wet gate");
         drop(ut);
         slab.set_root(formula);
         slab.jam().to_vec()

@@ -781,9 +781,25 @@ impl NockStack {
         NounSpace::from_stack(self, self.pma.clone())
     }
 
+    /// Ephemeral `NounSpace` over this stack's current extents WITHOUT cloning the
+    /// arena/pma `Arc`s — valid only for transient, within-call range/metadata ops
+    /// (e.g. `get_mug`/`set_mug`) that never retain the space. `mug.rs` uses this on
+    /// its hot path. Crate-local callers can use the raw value directly; external
+    /// callers must use [`Self::with_fast_noun_space`] so the ephemeral space cannot
+    /// escape safe code.
     #[inline]
     pub(crate) fn fast_noun_space(&self) -> NounSpace {
         NounSpace::from_stack_ephemeral(self)
+    }
+
+    /// Run `f` with an ephemeral `NounSpace` over this stack's current extents
+    /// without cloning arena/pma `Arc`s. The borrowed space is valid only for the
+    /// duration of `f`; do not store raw noun handles derived from it beyond the
+    /// call unless they are independently rooted by the stack.
+    #[inline]
+    pub fn with_fast_noun_space<R>(&self, f: impl FnOnce(&NounSpace) -> R) -> R {
+        let space = self.fast_noun_space();
+        f(&space)
     }
 
     #[inline]

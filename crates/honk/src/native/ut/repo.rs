@@ -97,7 +97,10 @@ impl<'a> Ut<'a> {
         // native_of in rest_inner exactly).
         let mut native_legs = Vec::with_capacity(legs.len());
         for (inner, hoon_noun) in legs {
-            native_legs.push((native_of(&mut self.cx, *inner, &self.slab.noun_space())?, *hoon_noun));
+            native_legs.push((
+                native_of(&mut self.cx, *inner, &self.slab.noun_space())?,
+                *hoon_noun,
+            ));
         }
         self.with_rest_legs(legs, |ut| {
             if let Some(cached) = ut.rest_boundary_lookup(sut, legs_noun)? {

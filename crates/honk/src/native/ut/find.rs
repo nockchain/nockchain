@@ -435,12 +435,11 @@ impl<'a> Ut<'a> {
                             );
                         }
                         let space = ut.slab.noun_space();
-                        let bridge_cell =
-                            bridges.in_space(&space).as_cell().map_err(|err| {
-                                CompilerError::Decode(format!(
-                                    "face tune bridge list not cell in find: {err}"
-                                ))
-                            })?;
+                        let bridge_cell = bridges.in_space(&space).as_cell().map_err(|err| {
+                            CompilerError::Decode(format!(
+                                "face tune bridge list not cell in find: {err}"
+                            ))
+                        })?;
                         let bridge_hoon_noun = bridge_cell.head().noun();
                         bridges = bridge_cell.tail().noun();
                         let bridge_hoon_ast =
@@ -520,7 +519,10 @@ impl<'a> Ut<'a> {
                     Ok(acc)
                 }
                 NTy::Core {
-                    payload, garb, rest, ..
+                    payload,
+                    garb,
+                    rest,
+                    ..
                 } => {
                     let Some(name_str) = name else {
                         return Ok(here(sut.clone(), &axe, skip, lon));
@@ -607,11 +609,7 @@ impl<'a> Ut<'a> {
     }
 
     /// Noun-bridged `resolve_wing_axis` for still-noun callers.
-    pub(super) fn resolve_wing_axis_noun(
-        &mut self,
-        sut: Noun,
-        wing: &WingType,
-    ) -> Result<u64> {
+    pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<u64> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.resolve_wing_axis(sut_n, wing)
     }

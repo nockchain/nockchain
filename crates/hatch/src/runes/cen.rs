@@ -1,4 +1,5 @@
 use std::collections::*;
+use std::sync::Arc;
 
 use chumsky::input::{Stream, ValueInput};
 use chumsky::prelude::*;
@@ -8,13 +9,14 @@ use crate::utils::*;
 
 pub fn cen_runes_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just('_').ignore_then(cencab(hoon.clone())),
         just('.').ignore_then(cendot(hoon.clone())),
         just('^').ignore_then(cenket(hoon.clone())),
-        just("+").ignore_then(cenlus(hoon.clone())),
-        just('-').ignore_then(cenhep(hoon.clone())),
+        just("+").ignore_then(cenlus(hoon.clone(), linemap.clone())),
+        just('-').ignore_then(cenhep(hoon.clone(), linemap.clone())),
         just(':').ignore_then(cencol(hoon.clone())),
         just('~').ignore_then(censig(hoon.clone())),
         just('*').ignore_then(centar(hoon.clone())),
@@ -118,11 +120,32 @@ pub fn cencol_wide<'src>(
         .map(|(p, q)| Hoon::CenCol(Box::new(p), q.unwrap_or_default()))
 }
 
+fn documented_rune_body<'src>(
+    hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+    hoon.map_with(|hoon: Hoon, e| (hoon, e.span().start(), e.span().end()))
+        .map(move |(hoon, start, end)| attach_rune_help(hoon, start, end, linemap.as_ref()))
+}
+
+fn attach_rune_help(hoon: Hoon, start: usize, end: usize, linemap: &LineMap) -> Hoon {
+    if let Some(help) = linemap.help_after_rune(start, end) {
+        if hoon_tail_has_help(&hoon, &help) {
+            hoon
+        } else {
+            Hoon::Note(Note::Help(help), Box::new(hoon))
+        }
+    } else {
+        hoon
+    }
+}
+
 pub fn cenhep<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(hoon.clone())
+        .ignore_then(documented_rune_body(hoon.clone(), linemap))
         .then_ignore(gap())
         .then(hoon.clone())
         .map(|(p, q)| Hoon::CenHep(Box::new(p), Box::new(q)))
@@ -151,13 +174,14 @@ pub fn cendot<'src>(
 
 pub fn cenlus<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(hoon.clone())
         .then_ignore(gap())
         .then(hoon.clone())
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(documented_rune_body(hoon.clone(), linemap))
         .map(|((p, q), r)| Hoon::CenLus(Box::new(p), Box::new(q), Box::new(r)))
 }
 

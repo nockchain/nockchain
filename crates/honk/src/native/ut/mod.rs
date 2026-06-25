@@ -16,12 +16,12 @@ use hatch::utils::{
 use nockapp::noun::slab::NounSlab;
 use nockapp::noun::NounAllocatorExt;
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
-use nockvm::jets::JetDispatchMode;
 use nockvm::ext::{AtomExt, NounExt};
 use nockvm::interpreter::{interpret, Context as NockContext};
 use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::warm::Warm;
+use nockvm::jets::JetDispatchMode;
 use nockvm::mem::NockStack;
 use nockvm::mug::{get_mug, set_mug};
 use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
@@ -1927,11 +1927,31 @@ impl<'a> Ut<'a> {
         self.musk.clear_context_dependent_caches();
     }
 
+    /// Upper bound on the cell-level eval-stack copy cache. The cache remembers
+    /// every cell copied into the eval stack keyed by its *source* slab address,
+    /// so structurally-shared subtrees within and across `^~` folds copy once.
+    /// Over a full hoon-138 self-mint it accreted ~59M entries (~1.6 GB RSS):
+    /// each freshly-minted (deepening) core copies ~150K cells at fresh
+    /// addresses, almost all of which are never queried again once that core's
+    /// copy completes. Capping it is byte-safe — the values are live nouns on
+    /// the long-lived (virtual, non-resident) eval stack, so forgetting them only
+    /// causes a later structurally-identical copy to be re-materialized on the
+    /// eval stack rather than shared; the folded *result* is unchanged.
+    const MUSK_CORE_CACHE_CAP: usize = 4_000_000;
+
     fn ensure_musk_mack_core_cache_context(&mut self, context: &NockContext) {
         let context_id = context.stack.frame_identity();
         if self.musk.mack_core_cache_context != Some(context_id) {
             self.musk.mack_core_cache_raw.clear();
             self.musk.mack_core_cache_context = Some(context_id);
+        } else if self.musk.mack_core_cache_raw.len() > Self::MUSK_CORE_CACHE_CAP {
+            // Bound RSS: drop the cell-dedup entries accumulated by prior folds.
+            // The current fold re-warms what it needs. Measured on the hoon-138
+            // self-mint: the uncapped map reaches ~59M entries (~13.0 GB peak
+            // RSS); capping at 4M holds peak RSS to ~9.0 GB and *lowers* CPU time
+            // (45.9s vs 47.6s) — the entries past the cap are overwhelmingly
+            // stale, and the smaller hashmap has markedly better cache locality.
+            self.musk.mack_core_cache_raw.clear();
         }
     }
 
@@ -1983,8 +2003,9 @@ impl<'a> Ut<'a> {
             let copied = context.stack.copy_into(noun, space);
             if let Some(mug) = get_mug(noun, space) {
                 if let Ok(mut allocated) = copied.as_allocated() {
-                    let eval_space = context.stack.noun_space();
-                    set_mug(&mut allocated, mug, &eval_space);
+                    context.stack.with_fast_noun_space(|eval_space| {
+                        set_mug(&mut allocated, mug, eval_space)
+                    });
                 }
             }
             self.musk.mack_core_cache_raw.insert(raw, copied);
@@ -1999,8 +2020,9 @@ impl<'a> Ut<'a> {
         let copied = T(&mut context.stack, &[head, tail]);
         if let Some(mug) = get_mug(noun, space) {
             if let Ok(mut allocated) = copied.as_allocated() {
-                let eval_space = context.stack.noun_space();
-                set_mug(&mut allocated, mug, &eval_space);
+                context
+                    .stack
+                    .with_fast_noun_space(|eval_space| set_mug(&mut allocated, mug, eval_space));
             }
         }
         self.musk.mack_core_cache_raw.insert(raw, copied);
@@ -2169,11 +2191,7 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_leg_ids
             .entry(key)
             .or_default()
-            .push(HoldRepoFanLegIdEntry {
-                id,
-                inner,
-                hoon,
-            });
+            .push(HoldRepoFanLegIdEntry { id, inner, hoon });
         Ok(id)
     }
 
@@ -2253,10 +2271,7 @@ impl<'a> Ut<'a> {
         }
         // `hold` lives in the single compile slab; later cross-arm lookups
         // (noun_eq) stay valid without any relocation.
-        bucket.push_back(HoldRepoFanHoldIdEntry {
-            hold,
-            id: leg_id,
-        });
+        bucket.push_back(HoldRepoFanHoldIdEntry { hold, id: leg_id });
         Ok(())
     }
 
@@ -2337,7 +2352,9 @@ impl<'a> Ut<'a> {
                 let lt = self.reachable_legs(&tl)?;
                 Self::merge_sorted_legs(&lh, &lt)
             }
-            NTy::Core { payload, context, .. } => {
+            NTy::Core {
+                payload, context, ..
+            } => {
                 let payload = payload.clone();
                 let context = context.clone();
                 let lp = self.reachable_legs(&payload)?;
@@ -2505,11 +2522,7 @@ impl<'a> Ut<'a> {
     /// by dual-perspective ops like mull, where the fan can be consulted from
     /// either the sut or the dox descent). Byte-safe: any leg that could change
     /// the result is reachable from at least one of the two scopes.
-    fn fan_context_key_scoped_pair(
-        &mut self,
-        a: &NRc<NTy>,
-        b: &NRc<NTy>,
-    ) -> Result<u64> {
+    fn fan_context_key_scoped_pair(&mut self, a: &NRc<NTy>, b: &NRc<NTy>) -> Result<u64> {
         if !Self::scoped_fan_enabled() {
             return Ok(self.hold_repo_fan_context_key());
         }
@@ -3176,15 +3189,8 @@ impl<'a> Ut<'a> {
             Poly::Wet => 1u8,
         };
         Ok(native_core_mint_cache_lookup(
-            &self.cx,
-            sut,
-            gol,
-            tomes_sig,
-            context.semantic.vet_key,
-            poly_key,
-            fan,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
+            &self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key,
         ))
     }
 
@@ -3208,17 +3214,8 @@ impl<'a> Ut<'a> {
             Poly::Wet => 1u8,
         };
         native_core_mint_cache_store(
-            &mut self.cx,
-            sut,
-            gol,
-            tomes_sig,
-            context.semantic.vet_key,
-            poly_key,
-            fan,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-            core_type,
-            formula,
+            &mut self.cx, sut, gol, tomes_sig, context.semantic.vet_key, poly_key, fan,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key, core_type, formula,
         );
         Ok(())
     }
@@ -3302,13 +3299,7 @@ impl<'a> Ut<'a> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_mint_cache_lookup(
-            &self.cx,
-            sut,
-            gol,
-            context.semantic.vet_key,
-            gen_sig,
-            fan,
-            context.memo.arm_epoch_key,
+            &self.cx, sut, gol, context.semantic.vet_key, gen_sig, fan, context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
         ))
     }
@@ -3324,16 +3315,8 @@ impl<'a> Ut<'a> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         native_mint_cache_store(
-            &mut self.cx,
-            sut,
-            gol,
-            context.semantic.vet_key,
-            gen_sig,
-            fan,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-            ty,
-            formula,
+            &mut self.cx, sut, gol, context.semantic.vet_key, gen_sig, fan,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key, ty, formula,
         );
         Ok(())
     }
@@ -3442,15 +3425,8 @@ impl<'a> Ut<'a> {
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
         let gen_sig = self.noun_mug_cached(gen) as u64;
         Ok(native_mull_cache_lookup(
-            &self.cx,
-            sut,
-            gol,
-            dox,
-            context.semantic.vet_key,
-            gen_sig,
-            fan,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
+            &self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key,
         ))
     }
 
@@ -3468,17 +3444,8 @@ impl<'a> Ut<'a> {
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
         let gen_sig = self.noun_mug_cached(gen) as u64;
         native_mull_cache_store(
-            &mut self.cx,
-            sut,
-            gol,
-            dox,
-            context.semantic.vet_key,
-            gen_sig,
-            fan,
-            context.memo.arm_epoch_key,
-            context.memo.placeholder_context_key,
-            p_ty,
-            q_ty,
+            &mut self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
+            context.memo.arm_epoch_key, context.memo.placeholder_context_key, p_ty, q_ty,
         );
         Ok(())
     }
@@ -3508,11 +3475,7 @@ impl<'a> Ut<'a> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_crop_cache_lookup(
-            &self.cx,
-            sut,
-            ref_,
-            semantic.vet_key,
-            fan,
+            &self.cx, sut, ref_, semantic.vet_key, fan,
         ))
     }
 
@@ -3524,14 +3487,7 @@ impl<'a> Ut<'a> {
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
-        native_crop_cache_store(
-            &mut self.cx,
-            sut,
-            ref_,
-            semantic.vet_key,
-            fan,
-            result,
-        );
+        native_crop_cache_store(&mut self.cx, sut, ref_, semantic.vet_key, fan, result);
         Ok(())
     }
 
@@ -3546,11 +3502,7 @@ impl<'a> Ut<'a> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fuse_cache_lookup(
-            &self.cx,
-            sut,
-            ref_,
-            semantic.vet_key,
-            fan,
+            &self.cx, sut, ref_, semantic.vet_key, fan,
         ))
     }
 
@@ -3562,14 +3514,7 @@ impl<'a> Ut<'a> {
     ) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
-        native_fuse_cache_store(
-            &mut self.cx,
-            sut,
-            ref_,
-            semantic.vet_key,
-            fan,
-            result,
-        );
+        native_fuse_cache_store(&mut self.cx, sut, ref_, semantic.vet_key, fan, result);
         Ok(())
     }
 
@@ -3713,28 +3658,16 @@ impl<'a> Ut<'a> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fish_cache_lookup(
-            &self.cx,
-            sut,
-            axis,
-            semantic.vet_key,
-            fan,
+            &self.cx, sut, axis, semantic.vet_key, fan,
         ))
     }
 
     fn fish_boundary_store(&mut self, sut: &NRc<NTy>, axis: u64, result: Noun) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
-        native_fish_cache_store(
-            &mut self.cx,
-            sut,
-            axis,
-            semantic.vet_key,
-            fan,
-            result,
-        );
+        native_fish_cache_store(&mut self.cx, sut, axis, semantic.vet_key, fan, result);
         Ok(())
     }
-
 
     fn noun_mug_cached(&self, noun: Noun) -> u32 {
         // Prefer the mug cached on allocated nouns. This avoids building an ever-growing Rust
@@ -3782,12 +3715,7 @@ impl<'a> Ut<'a> {
         bucket.push_back(NestCacheEntry { sut, ref_, result });
     }
 
-    pub fn mint(
-        &mut self,
-        sut: NRc<NTy>,
-        gol: NRc<NTy>,
-        gen: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    pub fn mint(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
         match self.mint_inner(sut, gol, gen) {
             Ok(value) => Ok(value),
             Err(err) => Err(self.decorate_error(err)),
@@ -3807,12 +3735,7 @@ impl<'a> Ut<'a> {
         Ok((ty_noun, formula))
     }
 
-    fn mint_inner(
-        &mut self,
-        sut: NRc<NTy>,
-        gol: NRc<NTy>,
-        gen: &Hoon,
-    ) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_inner(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
         // ATOMIC FLIP (C-final.1a): mint reads/returns the native enum (type slot;
         // the formula slot stays Noun). C-final.1b: the mint boundary cache is now
         // native-re-keyed on the interned (sut, gol) `Rc` pointers, so we no
@@ -4416,7 +4339,13 @@ impl<'a> Ut<'a> {
         result
     }
 
-    fn mint_tsgr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_tsgr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let goal = cons_noun(&mut self.cx);
         let (p_ty, p_formula) = self.mint(sut, goal, p)?;
         let (q_ty, q_formula) = self.mint(p_ty, gol, q)?;
@@ -4424,7 +4353,13 @@ impl<'a> Ut<'a> {
         Ok((q_ty, formula))
     }
 
-    fn mint_brtis(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_brtis(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let lowered = Self::lower_brtis(spec, q);
         self.mint(sut, gol, &lowered)
     }
@@ -4449,7 +4384,12 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &lowered)
     }
 
-    fn mint_colsig(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, items: &[Hoon]) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_colsig(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        items: &[Hoon],
+    ) -> Result<(NRc<NTy>, Noun)> {
         match items {
             [] => {
                 let zero = D(0);
@@ -4592,7 +4532,13 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn mint_tscm(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_tscm(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // busk is native now (C-final.2): the subject threads through as a shared
         // native Rc inside the new %face — no lowering.
         let busked = self.busk(sut, p);
@@ -4610,12 +4556,22 @@ impl<'a> Ut<'a> {
         cons_face(&mut self.cx, tool_leaf, sut)
     }
 
-    fn mint_wtpm(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, list: &[Hoon]) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wtpm(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        list: &[Hoon],
+    ) -> Result<(NRc<NTy>, Noun)> {
         let lowered = Self::lower_wtpm(list);
         self.mint(sut, gol, &lowered)
     }
 
-    fn mint_wtbr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, list: &[Hoon]) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wtbr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        list: &[Hoon],
+    ) -> Result<(NRc<NTy>, Noun)> {
         let lowered = Self::lower_wtbr(list);
         self.mint(sut, gol, &lowered)
     }
@@ -4644,7 +4600,13 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    fn mint_wtgl(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wtgl(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // Match hoon-138 open() lowering: wtgl -> wtcl(p, zpzp, q)
         let expanded = Hoon::WutCol(
             Box::new((*p).clone()),
@@ -4654,7 +4616,13 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    fn mint_wtgr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wtgr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // Match hoon-138 open() lowering: wtgr -> wtcl(p, q, zpzp)
         let expanded = Hoon::WutCol(
             Box::new((*p).clone()),
@@ -5049,14 +5017,26 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    fn mint_ktsl(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_ktsl(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let played = self.play(sut.clone(), p)?;
         let hif = self.nice(sut.clone(), gol, played)?;
         let (_q_ty, q_formula) = self.mint(sut, hif.clone(), q)?;
         Ok((hif, q_formula))
     }
 
-    fn mint_kthp(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_kthp(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // Canonical hoon-138 open() lowering:
         //   [%kthp p q] => [%ktls ~(example ax p) q]
         let example = self.spec_example_cached(spec);
@@ -6260,8 +6240,7 @@ impl<'a> Ut<'a> {
     // deepening subject). The OUTPUT stays a seminoun (semi_* algebra is noun).
     fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<Noun> {
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
-        let mut seen_raw: HashSet<usize> = HashSet::new();
-        self.bran_canonical_semi_inner(sut, &mut seen_holds, &mut seen_raw)
+        self.bran_canonical_semi_inner(sut, &mut seen_holds)
     }
 
     fn bran_seen_holds_signature(seen_holds: &[NRc<NTy>]) -> (u64, u64, usize) {
@@ -6293,7 +6272,9 @@ impl<'a> Ut<'a> {
         if left.len() != right.len() {
             return false;
         }
-        left.iter().zip(right.iter()).all(|(l, r)| NRc::ptr_eq(l, r))
+        left.iter()
+            .zip(right.iter())
+            .all(|(l, r)| NRc::ptr_eq(l, r))
     }
 
     fn bran_seen_holds_contains(seen_holds: &[NRc<NTy>], sut: &NRc<NTy>) -> bool {
@@ -6341,18 +6322,20 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-        seen_raw: &mut HashSet<usize>,
     ) -> Result<Noun> {
-        // The canonical bran/seminoun projection is called repeatedly while
-        // compiling `^*`/`^+` casts against large subject types.  Results are
-        // context-independent only outside an active `%hold` expansion: once a
-        // hold is on `seen_holds`, encountering the same hold must collapse to
-        // blocked for that particular path.  Cache only the empty-hold-context
-        // cases, and never bypass the raw recursion guard.
-        let sut_id = NRc::as_ptr(&sut) as usize;
-        if seen_raw.contains(&sut_id) {
-            return self.bran_canonical_semi_inner_impl(sut, seen_holds, seen_raw);
-        }
+        // Matches hoon-138 `++bran` exactly: cycles are broken ONLY at `%hold`
+        // (via `seen_holds` == hoon's `gil`); every other (shared, non-hold)
+        // subtree is re-descended and the result memoized (`bran_semi_cache` ==
+        // hoon's `~+`). An earlier global ancestor guard (`seen_raw`) over-blocked
+        // here: when a non-hold subtree was re-encountered as an ancestor through
+        // a `%hold` expansion, `++bran` re-descends it (blocking only at the inner
+        // hold, so the result is a *partial* seminoun), whereas the ancestor guard
+        // collapsed the whole subtree to fully-blocked. That produced
+        // `[%full [~ ~ ~]]` (the `*seminoun` bunt) where hoonc computes the actual
+        // `[%full ~]` complete stencil — the first divergence in the native
+        // hoon-138 self-mint vs hoonc. Termination is preserved: the Rc type DAG
+        // is acyclic, and the only logical cycles run through `%hold` (whose repo
+        // is the lazy back-edge), which `seen_holds` still guards.
         if Self::bran_seen_holds_contains(seen_holds, &sut) {
             return Ok(self.semi_full_blocked());
         }
@@ -6360,7 +6343,7 @@ impl<'a> Ut<'a> {
             return Ok(cached);
         }
 
-        let out = self.bran_canonical_semi_inner_impl(sut.clone(), seen_holds, seen_raw)?;
+        let out = self.bran_canonical_semi_inner_impl(sut.clone(), seen_holds)?;
         self.bran_semi_cache_store(&sut, seen_holds, out);
         Ok(out)
     }
@@ -6369,13 +6352,8 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-        seen_raw: &mut HashSet<usize>,
     ) -> Result<Noun> {
-        let sut_id = NRc::as_ptr(&sut) as usize;
-        if !seen_raw.insert(sut_id) {
-            return Ok(self.semi_full_blocked());
-        }
-        let out = match &*sut {
+        match &*sut {
             NTy::Noun | NTy::Void => Ok(self.semi_full_blocked()),
             NTy::Atom { .. } => {
                 // Atoms are leaf-only (no deepening): lower the small atom type
@@ -6390,13 +6368,11 @@ impl<'a> Ut<'a> {
             NTy::Cell(head, tail) => {
                 let head = head.clone();
                 let tail = tail.clone();
-                let hed = self.bran_canonical_semi_inner(head, seen_holds, seen_raw)?;
-                let tal = self.bran_canonical_semi_inner(tail, seen_holds, seen_raw)?;
+                let hed = self.bran_canonical_semi_inner(head, seen_holds)?;
+                let tal = self.bran_canonical_semi_inner(tail, seen_holds)?;
                 self.semi_combine(hed, tal)
             }
-            NTy::Core {
-                payload, rest, ..
-            } => {
+            NTy::Core { payload, rest, .. } => {
                 // payload + context are native (recurse native); only the bounded
                 // `rest` leaf (battery seminoun + tomes) is lowered to read the
                 // coil's seminoun head.
@@ -6407,12 +6383,12 @@ impl<'a> Ut<'a> {
                     CompilerError::Decode(format!("bran core rest not cell: {err}"))
                 })?;
                 let coil_semi = rest_cell.head().noun();
-                let payload_semi = self.bran_canonical_semi_inner(payload, seen_holds, seen_raw)?;
+                let payload_semi = self.bran_canonical_semi_inner(payload, seen_holds)?;
                 let _ = self.semi_parts(coil_semi)?;
                 self.semi_combine(coil_semi, payload_semi)
             }
             NTy::Face { .. } | NTy::Hint { .. } => match self.repo(sut.clone()) {
-                Ok(inner) => self.bran_canonical_semi_inner(inner, seen_holds, seen_raw),
+                Ok(inner) => self.bran_canonical_semi_inner(inner, seen_holds),
                 Err(_) => Ok(self.semi_full_blocked()),
             },
             NTy::Fork { .. } => Ok(self.semi_full_blocked()),
@@ -6422,25 +6398,35 @@ impl<'a> Ut<'a> {
                 }
                 seen_holds.push(sut.clone());
                 let out = match self.repo(sut.clone()) {
-                    Ok(inner) => self.bran_canonical_semi_inner(inner, seen_holds, seen_raw),
+                    Ok(inner) => self.bran_canonical_semi_inner(inner, seen_holds),
                     Err(_) => Ok(self.semi_full_blocked()),
                 };
                 seen_holds.pop();
                 out
             }
-        };
-        seen_raw.remove(&sut_id);
-        out
+        }
     }
 
-    fn mint_ketvar(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, vair: Vair) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_ketvar(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        vair: Vair,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let (p_ty, p_formula) = self.mint(sut.clone(), gol.clone(), p)?;
         let wrapped = self.wrap_type(p_ty, vair)?;
         let ty = self.nice(sut, gol, wrapped)?;
         Ok((ty, p_formula))
     }
 
-    fn mint_dtkt(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_dtkt(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         const HOON_VERSION: u64 = 138;
         let (ty, _formula) = self.mint(sut.clone(), gol, &Hoon::KetTar(Box::new(spec.clone())))?;
         // The minted type is embedded in a nock %12 hint formula (noun): lower it.
@@ -6461,7 +6447,13 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn mint_dttr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_dttr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty.clone(), p)?;
         let (_q_ty, q_formula) = self.mint(sut.clone(), noun_ty.clone(), q)?;
@@ -6470,7 +6462,13 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn mint_dtts(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_dtts(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let noun_ty = cons_noun(&mut self.cx);
         let (_p_ty, p_formula) = self.mint(sut.clone(), noun_ty.clone(), p)?;
         let (_q_ty, q_formula) = self.mint(sut.clone(), noun_ty, q)?;
@@ -6723,7 +6721,12 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn epla(&mut self, sut: NRc<NTy>, hyp: &WingType, rig: &[(WingType, Hoon)]) -> Result<NRc<NTy>> {
+    fn epla(
+        &mut self,
+        sut: NRc<NTy>,
+        hyp: &WingType,
+        rig: &[(WingType, Hoon)],
+    ) -> Result<NRc<NTy>> {
         self.play_cnts(sut, hyp, rig)
     }
 
@@ -6771,12 +6774,24 @@ impl<'a> Ut<'a> {
         Ok((q_ty, formula))
     }
 
-    fn mint_sigzap(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_sigzap(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let _ = self.play(sut.clone(), p)?;
         self.mint(sut, gol, q)
     }
 
-    fn mint_zpcom(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_zpcom(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let ty = self.play(sut.clone(), p)?;
         let ty = self.nice(sut, gol, ty)?;
         let q_noun = hoon_to_noun(self.slab, q);
@@ -6784,7 +6799,13 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn mint_zpmc(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, p: &Hoon, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_zpmc(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        p: &Hoon,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let goal = cons_noun(&mut self.cx);
         let (vos_ty, vos_formula) = self.mint(sut.clone(), goal.clone(), q)?;
         let (ref_ty, _ref_formula) = self.mint(sut.clone(), goal, p)?;
@@ -6798,7 +6819,13 @@ impl<'a> Ut<'a> {
         Ok((ty, formula))
     }
 
-    fn mint_zpgl(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_zpgl(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let typ_expr = Hoon::KetTar(Box::new(spec.clone()));
         let typ = self.play(sut.clone(), &typ_expr)?;
         let typ = self.nice(sut.clone(), gol, typ)?;
@@ -6849,7 +6876,13 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn mint_tsbr(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, spec: &Spec, q: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_tsbr(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        spec: &Spec,
+        q: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // Canonical hoon-138 open() lowering:
         //   [%tsbr *] => [%tsls ~(example ax p.gen) q.gen]
         // This is NOT `=+ *spec ...`; using `%kttr` would inject `%ktsg` folding that the
@@ -6886,7 +6919,12 @@ impl<'a> Ut<'a> {
         self.mint(sut, gol, &expanded)
     }
 
-    fn mint_wing(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, wing: &WingType) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_wing(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        wing: &WingType,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // find + fine are native (C9 / C-final): fine returns the typ directly.
         let port = self.find(sut.clone(), Way::Read, wing)?;
         let (ty, formula) = self.fine(&port)?;
@@ -7047,7 +7085,12 @@ impl<'a> Ut<'a> {
         self.emin(sut, gol, &wing, &[])
     }
 
-    fn mint_tune(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, tune: &TermOrTune) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_tune(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        tune: &TermOrTune,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let tool = term_or_tune_to_noun(self.slab, tune)?;
         // %face over the native subject (collapse-aware cons_face).
         let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
@@ -7313,7 +7356,8 @@ impl<'a> Ut<'a> {
         let core_native_lazy = {
             let space = self.slab.noun_space();
             let rest_leaf = NLeaf::from_noun_raw(lazy_rest, &space);
-            cons_core(&mut self.cx,
+            cons_core(
+                &mut self.cx,
                 sut.clone(),
                 garb.clone(),
                 sut.clone(),
@@ -7354,7 +7398,8 @@ impl<'a> Ut<'a> {
         let core_native = {
             let space = self.slab.noun_space();
             let rest_leaf = NLeaf::from_noun_raw(rest, &space);
-            cons_core(&mut self.cx,
+            cons_core(
+                &mut self.cx,
                 sut.clone(),
                 garb.clone(),
                 sut.clone(),
@@ -7732,7 +7777,11 @@ impl<'a> Ut<'a> {
             }
         }
         let chapter_battery = self.build_arms_battery_from_map(
-            arms_map, core_type.clone(), poly, goal_for_arms, expected_arms_map,
+            arms_map,
+            core_type.clone(),
+            poly,
+            goal_for_arms,
+            expected_arms_map,
         )?;
 
         let left_empty = noun_is_zero(left);
@@ -7755,7 +7804,11 @@ impl<'a> Ut<'a> {
         }
 
         let left_bat = self.build_tomes_battery_from_maps(
-            left, core_type.clone(), poly, goal_for_arms, expected_tomes_map,
+            left,
+            core_type.clone(),
+            poly,
+            goal_for_arms,
+            expected_tomes_map,
         )?;
         let right_bat = self.build_tomes_battery_from_maps(
             right, core_type, poly, goal_for_arms, expected_tomes_map,
@@ -7910,8 +7963,13 @@ impl<'a> Ut<'a> {
             return Ok(T(self.slab, &[formula, left_bat]));
         }
 
-        let left_bat = self
-            .build_arms_battery_from_map(left, core_type.clone(), poly, goal, expected_arms_map)?;
+        let left_bat = self.build_arms_battery_from_map(
+            left,
+            core_type.clone(),
+            poly,
+            goal,
+            expected_arms_map,
+        )?;
         let right_bat =
             self.build_arms_battery_from_map(right, core_type, poly, goal, expected_arms_map)?;
         Ok(T(self.slab, &[formula, left_bat, right_bat]))
@@ -7932,7 +7990,12 @@ impl<'a> Ut<'a> {
         self.semi_full_blocked()
     }
 
-    fn mint_opened(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_opened(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let opened = self.open_cached(gen);
         if let Some(opened) = opened {
             return self.mint(sut, gol, opened.as_ref());
@@ -8073,12 +8136,7 @@ impl<'a> Ut<'a> {
         Err(CompilerError::Noun("mint-nice".to_string()))
     }
 
-    fn hint_type(
-        &mut self,
-        inner: NRc<NTy>,
-        note: Noun,
-        payload: NRc<NTy>,
-    ) -> Result<NRc<NTy>> {
+    fn hint_type(&mut self, inner: NRc<NTy>, note: Noun, payload: NRc<NTy>) -> Result<NRc<NTy>> {
         // ATOMIC FLIP (C-final.1a): hint_type reads/returns native. The hint head
         // is the noun pair `[inner_noun note]`; collapse void/noun -> payload.
         match &*payload {
@@ -8304,9 +8362,7 @@ impl<'a> Ut<'a> {
         // nest descends and repos %hold on BOTH sut and ref, so scope the fan on
         // the union of both legsets (legset(sut) ∪ legset(ref)).
         let fan = self.fan_context_key_scoped_pair(&sut, &ref_)?;
-        if let Some(cached) =
-            nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan)
-        {
+        if let Some(cached) = nest_cache_lookup(&self.cx, &sut, &ref_, semantic.vet_key, fan) {
             return Ok(cached);
         }
         let mut seen_sut_holds = NestSeenSet::new();
@@ -8327,14 +8383,7 @@ impl<'a> Ut<'a> {
         let reg_empty = true;
         let cacheable = (result && reg_empty) || (!result && seg_empty);
         if cacheable {
-            nest_cache_store(
-                &mut self.cx,
-                &sut,
-                &ref_,
-                semantic.vet_key,
-                fan,
-                result,
-            );
+            nest_cache_store(&mut self.cx, &sut, &ref_, semantic.vet_key, fan, result);
         }
         Ok(result)
     }
@@ -8376,7 +8425,8 @@ impl<'a> Ut<'a> {
         rest: &NLeaf,
     ) -> Result<NRc<NTy>> {
         let new_garb = garb.with_vair(Vair::Gold);
-        Ok(cons_core(&mut self.cx, 
+        Ok(cons_core(
+            &mut self.cx,
             context.clone(),
             new_garb,
             context.clone(),
@@ -8456,26 +8506,16 @@ impl<'a> Ut<'a> {
                         let mut branch_sut_holds = NestSeenSet::new();
                         let mut branch_ref_holds = NestSeenSet::new();
                         if !self.nest_inner(
-                            s_head,
-                            r_head,
-                            next_depth,
-                            &mut branch_sut_holds,
-                            &mut branch_ref_holds,
-                            gil,
-                            memo,
+                            s_head, r_head, next_depth, &mut branch_sut_holds,
+                            &mut branch_ref_holds, gil, memo,
                         )? {
                             return Ok(false);
                         }
                         branch_sut_holds.clear();
                         branch_ref_holds.clear();
                         self.nest_inner(
-                            s_tail,
-                            r_tail,
-                            next_depth,
-                            &mut branch_sut_holds,
-                            &mut branch_ref_holds,
-                            gil,
-                            memo,
+                            s_tail, r_tail, next_depth, &mut branch_sut_holds,
+                            &mut branch_ref_holds, gil, memo,
                         )
                     }
                     _ => self.nest_sint(
@@ -8616,13 +8656,7 @@ impl<'a> Ut<'a> {
             NTy::Core { .. } => {
                 let repo_ref = self.repo(ref_.clone())?;
                 self.nest_inner(
-                    sut,
-                    repo_ref,
-                    depth,
-                    seen_sut_holds,
-                    seen_ref_holds,
-                    gil,
-                    memo,
+                    sut, repo_ref, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
             }
             NTy::Face { inner, .. } => {
@@ -8716,13 +8750,7 @@ impl<'a> Ut<'a> {
             && sut_rest == ref_rest
         {
             return self.nest_inner(
-                sut_payload,
-                ref_payload,
-                depth,
-                seen_sut_holds,
-                seen_ref_holds,
-                gil,
-                memo,
+                sut_payload, ref_payload, depth, seen_sut_holds, seen_ref_holds, gil, memo,
             );
         }
         // PHASE 2: garb is native (direct field access); rest is tiny/bounded —
@@ -8790,14 +8818,7 @@ impl<'a> Ut<'a> {
             let sut_dox = self.core_dox_native(&sut_garb, &sut_context_n, &sut_rest)?;
             let ref_dox = self.core_dox_native(&ref_garb, &ref_context_n, &ref_rest)?;
             self.nest_deep_tomes(
-                sut_tomes,
-                ref_tomes,
-                sut_dox,
-                ref_dox,
-                depth,
-                seen_sut_holds,
-                seen_ref_holds,
-                gil,
+                sut_tomes, ref_tomes, sut_dox, ref_dox, depth, seen_sut_holds, seen_ref_holds, gil,
                 memo,
             )
         })();
@@ -8824,39 +8845,21 @@ impl<'a> Ut<'a> {
         match sut_vair {
             Vair::Lead => Ok(true),
             Vair::Gold => self.nest_meet(
-                sut_ctx,
-                ref_ctx,
-                depth,
-                seen_sut_holds,
-                seen_ref_holds,
-                gil,
-                memo,
+                sut_ctx, ref_ctx, depth, seen_sut_holds, seen_ref_holds, gil, memo,
             ),
             Vair::Iron => {
                 // Bootstrap `+nest` compares `%iron` in this orientation.
                 let sut_peek = self.peek(ref_ctx, Way::Rite, 2)?;
                 let ref_peek = self.peek(sut_ctx, Way::Rite, 2)?;
                 self.nest_inner(
-                    sut_peek,
-                    ref_peek,
-                    depth,
-                    seen_sut_holds,
-                    seen_ref_holds,
-                    gil,
-                    memo,
+                    sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
             }
             Vair::Zinc => {
                 let sut_peek = self.peek(sut_ctx, Way::Read, 2)?;
                 let ref_peek = self.peek(ref_ctx, Way::Read, 2)?;
                 self.nest_inner(
-                    sut_peek,
-                    ref_peek,
-                    depth,
-                    seen_sut_holds,
-                    seen_ref_holds,
-                    gil,
-                    memo,
+                    sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
             }
         }
@@ -8957,15 +8960,7 @@ impl<'a> Ut<'a> {
         let dom_arms = dom_tome_cell.tail().noun();
         let vim_arms = vim_tome_cell.tail().noun();
         self.nest_deep_arms(
-            dom_arms,
-            vim_arms,
-            sut_dox,
-            ref_dox,
-            depth,
-            seen_sut_holds,
-            seen_ref_holds,
-            gil,
-            memo,
+            dom_arms, vim_arms, sut_dox, ref_dox, depth, seen_sut_holds, seen_ref_holds, gil, memo,
         )
     }
 
@@ -9030,15 +9025,15 @@ impl<'a> Ut<'a> {
         let dab_hoon_noun = dab_node_cell.tail().noun();
         let hem_hoon_noun = hem_node_cell.tail().noun();
         let dab_hoon = self.hoon_ast_lookup_result(dab_hoon_noun).map_err(|err| {
-            let tag =
-                Self::hoon_noun_tag(dab_hoon_noun, &space).unwrap_or_else(|| "<unknown>".to_string());
+            let tag = Self::hoon_noun_tag(dab_hoon_noun, &space)
+                .unwrap_or_else(|| "<unknown>".to_string());
             CompilerError::Noun(format!(
                 "native nest deep: arm ast missing tag={tag} decode_err={err}"
             ))
         })?;
         let hem_hoon = self.hoon_ast_lookup_result(hem_hoon_noun).map_err(|err| {
-            let tag =
-                Self::hoon_noun_tag(hem_hoon_noun, &space).unwrap_or_else(|| "<unknown>".to_string());
+            let tag = Self::hoon_noun_tag(hem_hoon_noun, &space)
+                .unwrap_or_else(|| "<unknown>".to_string());
             CompilerError::Noun(format!(
                 "native nest deep: arm ast missing tag={tag} decode_err={err}"
             ))
@@ -9046,13 +9041,7 @@ impl<'a> Ut<'a> {
         let dab_ty = self.play(sut_dox.clone(), dab_hoon.as_ref())?;
         let hem_ty = self.play(ref_dox.clone(), hem_hoon.as_ref())?;
         self.nest_inner(
-            dab_ty,
-            hem_ty,
-            depth,
-            seen_sut_holds,
-            seen_ref_holds,
-            gil,
-            memo,
+            dab_ty, hem_ty, depth, seen_sut_holds, seen_ref_holds, gil, memo,
         )
     }
 
@@ -9168,6 +9157,17 @@ impl<'a> Ut<'a> {
                 let semi = rest_cell.head().noun();
                 let tomes = rest_cell.tail().noun();
                 let semi = if self.semi_is_full_complete(semi)? {
+                    // Canonical hoon-138 `++burp`: keep a `[%full ~]`-complete coil
+                    // seminoun as-is. (The earlier fragment-`%spot` strip here was a
+                    // NET REGRESSION: hoonc's seminoun spotting is context-dependent —
+                    // it KEEPS the spot on cores embedded in type specs/mold samples
+                    // like the `++map` `$|` validator's `(tree (pair))` sample (self-mint
+                    // divergence byte 881767) and BARES it on the top-level output coil
+                    // cores (byte 1776224). Stripping all moved the first divergence
+                    // BACKWARD (881767 < 1776224). honk's natural mint emits all spotted,
+                    // which is correct for the type-embedded cores; the remaining bug #2
+                    // is honk over-spotting the OUTPUT-coil cores. Apps have no such
+                    // cores, so kernels are byte-exact either way.)
                     semi
                 } else {
                     // Canonical hoon-138 `++burp` replaces any unresolved seminoun state
@@ -9259,7 +9259,12 @@ impl<'a> Ut<'a> {
         self.feel(sut_n, wings)
     }
 
-    fn take<F>(&mut self, sut: NRc<NTy>, vein: &[Option<BigUint>], duz: &F) -> Result<(u64, NRc<NTy>)>
+    fn take<F>(
+        &mut self,
+        sut: NRc<NTy>,
+        vein: &[Option<BigUint>],
+        duz: &F,
+    ) -> Result<(u64, NRc<NTy>)>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
@@ -10162,7 +10167,6 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    #[inline]
     fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> (u64, u64, u8) {
         (
             NRc::as_ptr(sut) as u64,
@@ -10907,7 +10911,14 @@ impl<'a> Ut<'a> {
         let result =
             self.with_stack_guard(|ut| ut.mull_inner(sut.clone(), gol.clone(), dox.clone(), gen))?;
         // C-final.1b: store the native (p, q) types directly (no lowering).
-        self.mull_cache_store(&sut, &gol, &dox, gen_noun, result.0.clone(), result.1.clone())?;
+        self.mull_cache_store(
+            &sut,
+            &gol,
+            &dox,
+            gen_noun,
+            result.0.clone(),
+            result.1.clone(),
+        )?;
         Ok(result)
     }
 
@@ -11185,7 +11196,8 @@ impl<'a> Ut<'a> {
                 // Mint the wing from both to get axes (via cove); take the formula.
                 let noun_gol = cons_noun(&mut self.cx);
                 let wing_hoon = Hoon::Wing(wing.clone());
-                let (_sut_ty, sut_formula) = self.mint(sut.clone(), noun_gol.clone(), &wing_hoon)?;
+                let (_sut_ty, sut_formula) =
+                    self.mint(sut.clone(), noun_gol.clone(), &wing_hoon)?;
                 let syx_p = self.cove(sut_formula)?;
                 let (_dox_ty, dox_formula) = self.mint(dox.clone(), noun_gol, &wing_hoon)?;
                 let syx_q = self.cove(dox_formula)?;
@@ -11455,7 +11467,8 @@ impl<'a> Ut<'a> {
         let yet = {
             let space = self.slab.noun_space();
             let rest_leaf = NLeaf::from_noun_raw(rest, &space);
-            cons_core(&mut self.cx,
+            cons_core(
+                &mut self.cx,
                 sut.clone(),
                 garb.clone(),
                 sut.clone(),
@@ -11468,12 +11481,7 @@ impl<'a> Ut<'a> {
         let hum = {
             let space = self.slab.noun_space();
             let rest_leaf = NLeaf::from_noun_raw(rest, &space);
-            cons_core(&mut self.cx,
-                dox.clone(),
-                garb_hum,
-                dox.clone(),
-                rest_leaf,
-            )
+            cons_core(&mut self.cx, dox.clone(), garb_hum, dox.clone(), rest_leaf)
         };
 
         // Validate arms: balk(sut=yet) hum hud dom
@@ -11576,7 +11584,8 @@ impl<'a> Ut<'a> {
             }
             // Both natural: delegate to mull_endo
             (Port::Palo(palo_p), Port::Palo(palo_q)) => {
-                let result = self.mull_endo(sut.clone(), gol.clone(), dox, palo_p, palo_q, pairs)?;
+                let result =
+                    self.mull_endo(sut.clone(), gol.clone(), dox, palo_p, palo_q, pairs)?;
                 // Apply nice check on sut-side result
                 if self.vet {
                     let _ = self.mull_nice(sut, gol, result.0.clone())?;
@@ -11754,10 +11763,7 @@ fn install_musk_cold_state(context: &mut NockContext, raw: &[u8], label: &str) -
         &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
     );
     context.warm = Warm::init(
-        &mut context.stack,
-        &mut context.cold,
-        &context.hot,
-        &context.test_jets,
+        &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
         context.jet_dispatch,
     );
     Ok(())
@@ -12763,17 +12769,17 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 use std::rc::Rc as NRc;
 
 use crate::native::ir::intern::{
-    cons_cell, cons_core, cons_face, cons_hint, cons_noun, cons_void, Context,
+    cons_cell, cons_core, cons_face, cons_hint, cons_noun, cons_void,
     core_mint_cache_lookup as native_core_mint_cache_lookup,
     core_mint_cache_store as native_core_mint_cache_store,
     crop_cache_lookup as native_crop_cache_lookup, crop_cache_store as native_crop_cache_store,
     fish_cache_lookup as native_fish_cache_lookup, fish_cache_store as native_fish_cache_store,
-    fuse_cache_lookup as native_fuse_cache_lookup, fuse_cache_store as native_fuse_cache_store,
+    fork_cache_lookup, fork_cache_store, fuse_cache_lookup as native_fuse_cache_lookup,
+    fuse_cache_store as native_fuse_cache_store, legset_memo_lookup, legset_memo_store,
     live_intern, live_leaf_to_noun, live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
     mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
-    fork_cache_lookup, fork_cache_store, legset_memo_lookup, legset_memo_store,
-    mull_cache_store as native_mull_cache_store, native_of,
-    native_of_mug_candidates, native_of_mug_insert, nest_cache_lookup, nest_cache_store,
+    mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
+    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, Garb as NGarb, Type as NTy};
@@ -12789,44 +12795,73 @@ fn ty_void_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
 }
 
 #[allow(dead_code)]
-fn ty_atom_n(cx: &mut Context, slab: &mut NounSlab, aura: &str, value: Option<Noun>) -> (Noun, NRc<NTy>) {
+fn ty_atom_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    aura: &str,
+    value: Option<Noun>,
+) -> (Noun, NRc<NTy>) {
     let noun = ty_atom(slab, aura, value);
     let native = native_of(cx, noun, &slab.noun_space()).expect("ty_atom_n native");
     (noun, native)
 }
 
 #[allow(dead_code)]
-fn ty_cell_n(cx: &mut Context, slab: &mut NounSlab, head: (Noun, NRc<NTy>), tail: (Noun, NRc<NTy>)) -> (Noun, NRc<NTy>) {
+fn ty_cell_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    head: (Noun, NRc<NTy>),
+    tail: (Noun, NRc<NTy>),
+) -> (Noun, NRc<NTy>) {
     let noun = ty_cell(slab, head.0, tail.0);
     let native = live_intern(cx, NTy::Cell(head.1, tail.1));
     (noun, native)
 }
 
 #[allow(dead_code)]
-fn ty_face_tool_n(cx: &mut Context, slab: &mut NounSlab, tool: Noun, inner: (Noun, NRc<NTy>)) -> (Noun, NRc<NTy>) {
+fn ty_face_tool_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    tool: Noun,
+    inner: (Noun, NRc<NTy>),
+) -> (Noun, NRc<NTy>) {
     let noun = ty_face_tool(slab, tool, inner.0);
     let kind = type_tag_kind(noun, &slab.noun_space());
     let native = match kind {
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         _ => {
             let tool_leaf = NLeaf::from_noun_raw(tool, &slab.noun_space());
-            live_intern(cx, NTy::Face {
-                tool: tool_leaf,
-                inner: inner.1,
-            })
+            live_intern(
+                cx,
+                NTy::Face {
+                    tool: tool_leaf,
+                    inner: inner.1,
+                },
+            )
         }
     };
     (noun, native)
 }
 
 #[allow(dead_code)]
-fn ty_face_n(cx: &mut Context, slab: &mut NounSlab, name: &str, inner: (Noun, NRc<NTy>)) -> (Noun, NRc<NTy>) {
+fn ty_face_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    name: &str,
+    inner: (Noun, NRc<NTy>),
+) -> (Noun, NRc<NTy>) {
     let name_noun = term_to_noun(slab, name);
     ty_face_tool_n(cx, slab, name_noun, inner)
 }
 
 #[allow(dead_code)]
-fn ty_hint_n(cx: &mut Context, slab: &mut NounSlab, inner: Noun, note: Noun, payload: (Noun, NRc<NTy>)) -> (Noun, NRc<NTy>) {
+fn ty_hint_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    inner: Noun,
+    note: Noun,
+    payload: (Noun, NRc<NTy>),
+) -> (Noun, NRc<NTy>) {
     let noun = ty_hint(slab, inner, note, payload.0);
     let space = slab.noun_space();
     let native = match type_tag_kind(noun, &space) {
@@ -12842,23 +12877,34 @@ fn ty_hint_n(cx: &mut Context, slab: &mut NounSlab, inner: Noun, note: Noun, pay
                 .map(|c| c.head().noun())
                 .expect("ty_hint_n: hint noun shape");
             let head_leaf = NLeaf::from_noun_raw(head, &space);
-            live_intern(cx, NTy::Hint {
-                head: head_leaf,
-                payload: payload.1,
-            })
+            live_intern(
+                cx,
+                NTy::Hint {
+                    head: head_leaf,
+                    payload: payload.1,
+                },
+            )
         }
     };
     (noun, native)
 }
 
 #[allow(dead_code)]
-fn ty_hold_n(cx: &mut Context, slab: &mut NounSlab, inner: (Noun, NRc<NTy>), hoon: Noun) -> (Noun, NRc<NTy>) {
+fn ty_hold_n(
+    cx: &mut Context,
+    slab: &mut NounSlab,
+    inner: (Noun, NRc<NTy>),
+    hoon: Noun,
+) -> (Noun, NRc<NTy>) {
     let noun = ty_hold(slab, inner.0, hoon);
     let gene = NLeaf::from_noun_raw(hoon, &slab.noun_space());
-    let native = live_intern(cx, NTy::Hold {
-        subject: inner.1,
-        gene,
-    });
+    let native = live_intern(
+        cx,
+        NTy::Hold {
+            subject: inner.1,
+            gene,
+        },
+    );
     (noun, native)
 }
 
@@ -12879,12 +12925,15 @@ fn ty_core_n(
         _ => {
             let garb_native = NGarb::from_noun(garb, &slab.noun_space()).expect("ty_core_n garb");
             let rest_leaf = NLeaf::from_noun_raw(rest, &slab.noun_space());
-            live_intern(cx, NTy::Core {
-                payload: payload.1,
-                garb: garb_native,
-                context: context.1,
-                rest: rest_leaf,
-            })
+            live_intern(
+                cx,
+                NTy::Core {
+                    payload: payload.1,
+                    garb: garb_native,
+                    context: context.1,
+                    rest: rest_leaf,
+                },
+            )
         }
     };
     (noun, native)
@@ -12947,7 +12996,10 @@ mod native_ctor_tests {
         let vc = ty_void_n(&mut cx, &mut slab);
         let (n, t) = ty_face_n(&mut cx, &mut slab, "x", vc);
         check(&slab, n, &t);
-        assert!(matches!(&*t, NTy::Void), "face(_,void) must collapse to Void");
+        assert!(
+            matches!(&*t, NTy::Void),
+            "face(_,void) must collapse to Void"
+        );
 
         // hint non-collapse
         let payload = ty_atom_n(&mut cx, &mut slab, "ud", None);
@@ -13018,12 +13070,18 @@ mod native_ctor_tests {
         let tl2 = ty_noun_n(&mut cx, &mut slab);
         let (n, t) = cell_type_n(&mut cx, &mut slab, hv, tl2).unwrap();
         check(&slab, n, &t);
-        assert!(matches!(&*t, NTy::Void), "cell(void,_) must collapse to Void");
+        assert!(
+            matches!(&*t, NTy::Void),
+            "cell(void,_) must collapse to Void"
+        );
         let h2 = ty_noun_n(&mut cx, &mut slab);
         let tv = ty_void_n(&mut cx, &mut slab);
         let (n, t) = cell_type_n(&mut cx, &mut slab, h2, tv).unwrap();
         check(&slab, n, &t);
-        assert!(matches!(&*t, NTy::Void), "cell(_,void) must collapse to Void");
+        assert!(
+            matches!(&*t, NTy::Void),
+            "cell(_,void) must collapse to Void"
+        );
     }
 
     #[test]
@@ -13082,7 +13140,11 @@ mod native_ctor_tests {
         let hold_noun = ty_hold(ut.slab, cell_noun, gen);
         let hold = ut.native_of_cached(hold_noun).unwrap();
         let hold_legs = ut.reachable_legs(&hold).unwrap();
-        assert_eq!(hold_legs.len(), 1, "single hold has exactly one reachable leg");
+        assert_eq!(
+            hold_legs.len(),
+            1,
+            "single hold has exactly one reachable leg"
+        );
         let leg_id = ut.hold_repo_fan_leg_id_for_hold_native(&hold).unwrap();
         assert_eq!(hold_legs[0], leg_id, "legset is the hold's own leg-id");
 
@@ -13091,7 +13153,11 @@ mod native_ctor_tests {
         let outer_noun = ty_cell(ut.slab, hold_noun, other);
         let outer = ut.native_of_cached(outer_noun).unwrap();
         let outer_legs = ut.reachable_legs(&outer).unwrap();
-        assert_eq!(outer_legs.as_ref(), &[leg_id], "cell-wrapped hold keeps the leg");
+        assert_eq!(
+            outer_legs.as_ref(),
+            &[leg_id],
+            "cell-wrapped hold keeps the leg"
+        );
 
         // Memoized: second call returns the same Rc-shared slice content.
         let outer_legs2 = ut.reachable_legs(&outer).unwrap();
@@ -13100,7 +13166,10 @@ mod native_ctor_tests {
         // intersect-empty -> intern_fan_subset_id returns the empty sentinel 0.
         assert_eq!(ut.intern_fan_subset_id(&[]), 0);
         let inter = Ut::intersect_sorted_legs(&[leg_id + 7, leg_id + 9], &outer_legs);
-        assert!(inter.is_empty(), "disjoint active set -> empty intersection");
+        assert!(
+            inter.is_empty(),
+            "disjoint active set -> empty intersection"
+        );
 
         // intersect-nonempty -> a stable nonzero id, deterministic across calls.
         let inter2 = Ut::intersect_sorted_legs(&[leg_id], &outer_legs);
@@ -13112,7 +13181,10 @@ mod native_ctor_tests {
 
         // merge/intersect helper sanity.
         assert_eq!(Ut::merge_sorted_legs(&[1, 3], &[2, 3, 4]), vec![1, 2, 3, 4]);
-        assert_eq!(Ut::intersect_sorted_legs(&[1, 3, 5], &[3, 5, 7]), vec![3, 5]);
+        assert_eq!(
+            Ut::intersect_sorted_legs(&[1, 3, 5], &[3, 5, 7]),
+            vec![3, 5]
+        );
     }
 }
 

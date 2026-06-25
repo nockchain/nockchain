@@ -9,16 +9,15 @@ use std::{cmp, env, fs, process};
 
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
+use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
-use honk::native::formula::comb;
 use honk::native::ut::{ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
 use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::noun::{BrandedEvalExt, BrandedNounSpaceExt, NounAllocatorExt};
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
-use nockvm::jets::JetDispatchMode;
 use nockapp::AtomExt;
 use nockvm::ext::NounExt;
 use nockvm::hamt::Hamt;
@@ -27,6 +26,7 @@ use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::nock::util::mook;
 use nockvm::jets::warm::Warm;
+use nockvm::jets::JetDispatchMode;
 use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
 use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, T};
@@ -113,7 +113,6 @@ impl CompileMode {
             other => Err(format!("unknown batch compile mode: {other}")),
         }
     }
-
 }
 
 #[derive(Debug)]
@@ -126,10 +125,12 @@ struct BatchEntry {
 
 fn usage(program: &str) -> String {
     format!(
-        "Usage: {program} [--arbitrary|--dynock|--dynock-typed] --output <file> --prelude <hoon.hoon> [--sut-jam <file>] <entry> <deps_dir>\n\
-         Usage: {program} --batch-manifest <file> --prelude <hoon.hoon> [--sut-jam <file>] <deps_dir>\n\
-         Vet checking is enabled by default. Pass --no-vet to disable strict/nice type-checking for the entry expression.\n\
-         Example: {program} --output out.jam --prelude open/hoon/common/hoon.hoon open/hoon/apps/peek/peek.hoon open/hoon"
+        "Usage: {program} [--new] [--arbitrary|--dynock|--dynock-typed] --output <file> --prelude <hoon.hoon> [--sut-jam <file>] [--dbug|--no-dbug] [--vet|--no-vet] <entry> <deps_dir>\n\
+         Usage: {program} [--new] --batch-manifest <file> --prelude <hoon.hoon> [--sut-jam <file>] <deps_dir>\n\
+         Usage: {program} --dump-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
+         Usage: {program} --dump-native-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
+         --new is accepted for hoonc-script compatibility and has no effect. Vet checking is enabled by default; pass --no-vet to disable strict/nice type-checking for the entry expression.\n\
+         Example: {program} --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon"
     )
 }
 
@@ -550,11 +551,26 @@ fn main() {
 
 async fn run(cli: Cli) -> Result<()> {
     let prelude_source = fs::read_to_string(&cli.prelude)?;
-    let prelude_expr = parse_prelude_hoon(&cli.prelude, cli.dbug)?;
+    // hoonc compiles DEPENDENCY files (the prelude) with debug OFF: no `%spot`
+    // anywhere in the prelude's formula, coil seminouns, or stored arm ASTs (only
+    // the ENTRY file and the build wrapper keep spots). The native-parity self-mint
+    // takes hoon.hoon as both prelude and entry; parsing the prelude leg debug-off
+    // reproduces hoonc's bare-dependency artifact (the entry leg, parsed in
+    // `parse_build_leaf` with `self.dbug`, stays spotted). Non-parity builds keep
+    // the embedded hoonc prelude TYPE, so this only affects native-parity output.
+    //
+    // Docs stay ON for the prelude: honk's prelude-with-docs help anchoring
+    // partially matches hoonc (the divergence sits at 1781402, a doc honk's
+    // anchoring misses), and flipping docs to the entry leg is worse (honk's
+    // entry-doc anchoring diverges at byte ~212). The remaining gap is honk's
+    // doc-anchoring COMPLETENESS (it captures ~609 help nodes vs hoonc's 1335) —
+    // a hatch LineMap parity follow-up, not a prelude/entry flag choice.
+    let prelude_dbug = cli.dbug && !native_parity_enabled();
+    let prelude_expr = parse_prelude_hoon(&cli.prelude, prelude_dbug, true)?;
     let subject_type_jam = cli.sut_jam.as_ref().map(fs::read).transpose()?;
 
     if let Some(out_dir) = &cli.wrapper_asset_dump {
-        let prelude_eval_subject = parse_prelude_hoon(&cli.prelude, false)?;
+        let prelude_eval_subject = parse_prelude_hoon(&cli.prelude, false, true)?;
         let mut builder = build_context_with_dynamic_wrapper_prelude(
             &cli,
             &prelude_expr,
@@ -606,22 +622,32 @@ async fn run(cli: Cli) -> Result<()> {
     let mut jam = builder.jam_product(&mut product, cli.mode, entry, None)?;
     pad_hoonc_jam_atom_bytes(&mut jam);
 
-    if let Some(parent) = output.parent() {
+    if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
     fs::write(output, jam)?;
     Ok(())
 }
 
-fn parse_prelude_hoon(path: &Path, dbug: bool) -> Result<Hoon> {
+
+fn parse_prelude_hoon(path: &Path, dbug: bool, docs: bool) -> Result<Hoon> {
     let _parse_log = TimedHoonPathLog::new(path, HoonLogOperation::Parse);
     let source = fs::read_to_string(path)?;
-    Ok(pipeline::parse_native_hoon_source(
-        path,
-        source.as_str(),
-        Vec::new(),
-        dbug,
-    )?)
+    if docs {
+        Ok(pipeline::parse_native_hoon_source(
+            path,
+            source.as_str(),
+            Vec::new(),
+            dbug,
+        )?)
+    } else {
+        Ok(pipeline::parse_native_hoon_source_without_docs(
+            path,
+            source.as_str(),
+            Vec::new(),
+            dbug,
+        )?)
+    }
 }
 
 fn parse_inline_wrapper(name: &str, source: &str, wer: Vec<String>, dbug: bool) -> Result<Hoon> {
@@ -652,6 +678,13 @@ fn parse_build_leaf(
     // (structural `%help`/`%hint` shape mismatches vs the hoonc references);
     // disabling docs reproduces hoonc's artifact spots exactly. (Note: this is
     // the build-leaf parse only; the public parser paths keep docs enabled.)
+    //
+    // Native-parity self-mint: enabling entry docs here is WORSE (regresses the
+    // divergence to byte ~212 and still only yields ~609 help nodes vs hoonc's
+    // 1335) because honk's doc-anchoring captures ~half of hoonc's docs and
+    // anchors them differently — a hatch LineMap completeness/position parity
+    // follow-up, tracked separately. The prelude leg (docs ON) carries the docs
+    // that currently match.
     Ok(pipeline::parse_native_hoon_source_without_docs(
         path,
         source.as_str(),
@@ -880,8 +913,13 @@ fn build_context_with_shared_prelude(
     // The seed play's only product is the returned prelude type. On the
     // embedded / supplied-subject-type path that type is overwritten below by a
     // cued subject type, so the full-prelude play is pure waste — skip it.
-    let skip_prelude_play =
-        subject_type_jam.is_some() || (canonical_hoon_138 && !native_parity_enabled());
+    // Native-parity now overwrites this type with the MINTED prelude type
+    // (complete coils; see the parity fix below), so the seed play is pure waste
+    // in every mode — skip it. (Native-parity used to pay the O(N^2) prelude play
+    // here AND mint it again for the formula.)
+    let skip_prelude_play = subject_type_jam.is_some()
+        || (canonical_hoon_138 && !native_parity_enabled())
+        || native_parity_enabled();
     let mut prelude_vase = trace_timed("seeding shared honc type", || {
         seed_honc_type_with_ut(&mut ut, &mut eval_context, prelude, skip_prelude_play)
     })?;
@@ -902,9 +940,20 @@ fn build_context_with_shared_prelude(
             cue_honc_formula_to_slab(&mut *ut.slab, EMBEDDED_HONC_FORMULA_138_JAM)
         })?
     } else {
-        trace_timed("minting shared honc formula", || {
+        let (minted_ty, formula) = trace_timed("minting shared honc formula", || {
             mint_honc_formula_with_ut(&mut ut, &mut eval_context, prelude)
-        })?
+        })?;
+        // PARITY FIX (native self-mint): use the MINTED prelude type as the subject
+        // type, NOT the play-seeded one. `++play` (seed_honc_type_with_ut) builds
+        // core types with the blocked `*seminoun`; `++mint` (here) computes the
+        // actual battery seminoun (`[%full ~]` complete). The `!>`-vase output runs
+        // `++burp`, which KEEPS complete coils but BLANKS everything else to blocked
+        // — so the played subject left every stdlib core blocked where hoonc (which
+        // mints) has them complete, the root of the native≠hoonc divergence. The
+        // mint already runs for the formula, so this reuses its type (no extra work;
+        // the now-redundant seed play is left intact to preserve cache/memo setup).
+        prelude_vase.ty = minted_ty;
+        formula
     };
     // Native-types migration Phase 1: flag-gated IR-completeness invariant on the
     // largest real formula honk has — the entire compiled hoon-138 prelude.
@@ -935,8 +984,14 @@ fn build_context_with_shared_prelude(
             honk::native::ir::type_roundtrip_check(subject_ty, &space)?;
             if env::var_os("NATIVE_HOON_TRACE").is_some() {
                 eprintln!("[ir-roundtrip] prelude TYPE OK (native type IR represents the compiled hoon-138 subject type byte-exact)");
-                if let Ok((total, distinct)) = honk::native::ir::type_intern_stats(subject_ty, &space) {
-                    let ratio = if distinct > 0 { total as f64 / distinct as f64 } else { 0.0 };
+                if let Ok((total, distinct)) =
+                    honk::native::ir::type_intern_stats(subject_ty, &space)
+                {
+                    let ratio = if distinct > 0 {
+                        total as f64 / distinct as f64
+                    } else {
+                        0.0
+                    };
                     eprintln!("[ir-intern] prelude TYPE hash-cons: {total} unshared nodes -> {distinct} distinct ({ratio:.1}x dedup)");
                 }
             }
@@ -1038,8 +1093,14 @@ fn build_context_with_dynamic_wrapper_prelude(
             honk::native::ir::type_roundtrip_check(subject_ty, &space)?;
             if env::var_os("NATIVE_HOON_TRACE").is_some() {
                 eprintln!("[ir-roundtrip] prelude TYPE OK (native type IR represents the compiled hoon-138 subject type byte-exact)");
-                if let Ok((total, distinct)) = honk::native::ir::type_intern_stats(subject_ty, &space) {
-                    let ratio = if distinct > 0 { total as f64 / distinct as f64 } else { 0.0 };
+                if let Ok((total, distinct)) =
+                    honk::native::ir::type_intern_stats(subject_ty, &space)
+                {
+                    let ratio = if distinct > 0 {
+                        total as f64 / distinct as f64
+                    } else {
+                        0.0
+                    };
                     eprintln!("[ir-intern] prelude TYPE hash-cons: {total} unshared nodes -> {distinct} distinct ({ratio:.1}x dedup)");
                 }
             }
@@ -1079,8 +1140,8 @@ fn build_context_with_dynamic_wrapper_prelude(
         .canonicalize()
         .unwrap_or_else(|_| cli.directory.clone());
     let mut builder = NativeBuildContext::new(
-        directory, prelude_vase, prelude_eval.value, wrapper_subject_ty,
-        wrapper_subject_value, canonical_data_octs_ty, cli.dbug, cli.vet, ut, eval_context,
+        directory, prelude_vase, prelude_eval.value, wrapper_subject_ty, wrapper_subject_value,
+        canonical_data_octs_ty, cli.dbug, cli.vet, ut, eval_context,
     );
     trace_timed("building exact hoonc wrapper traps", || {
         builder.initialize_exact_wrappers(prelude_eval.formula, prelude_source)
@@ -1098,10 +1159,10 @@ async fn compile_batch_with_shared_prelude(
     let mut builder =
         build_context_with_shared_prelude(cli, prelude, prelude_source, subject_type_jam)?;
     for entry in entries {
-        // Native-types: each entry compiles through a fresh `Ut` (per-`Ut`
-        // `cx: Context::new()`), so the per-compile native intern table is reset
-        // per entry — a dropped entry's slab address reused by the next entry can
-        // never alias a stale interned Rc.
+        // Batch entries intentionally share this builder/Ut so dependency and native
+        // IR caches can be reused. The build slab is leaked for the builder lifetime,
+        // so native Rc keys never point at a dropped entry arena; semantic cache keys
+        // still carry vet/fan/arm context for parity-sensitive misses.
         let label = format!("{}", entry.entry.display());
         trace_native(format!("batch compiling {label}"));
         let mut product = builder.compile_entry(&entry.entry)?;
@@ -1112,7 +1173,11 @@ async fn compile_batch_with_shared_prelude(
             entry.directory_files.as_deref(),
         )?;
         pad_hoonc_jam_atom_bytes(&mut jam);
-        if let Some(parent) = entry.output.parent() {
+        if let Some(parent) = entry
+            .output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
             fs::create_dir_all(parent)?;
         }
         fs::write(&entry.output, jam)?;
@@ -1289,13 +1354,12 @@ impl<'a> NativeBuildContext<'a> {
         // hoonc arbitrary artifacts serialize the exact +build-honc formula produced by hoon.hoon.
         // Keep canonical hoon-138 artifacts byte-identical while preserving the native fallback for
         // non-canonical preludes (and for the HONK_NATIVE_PARITY audit, which mints natively).
-        let prelude_eval_formula = if prelude_source.as_bytes() == EMBEDDED_HOON_138_SOURCE
-            && !native_parity_enabled()
-        {
-            cue_honc_formula_to_slab(&mut *self.ut.slab, EMBEDDED_HONC_FORMULA_138_JAM)?
-        } else {
-            prelude_eval_formula
-        };
+        let prelude_eval_formula =
+            if prelude_source.as_bytes() == EMBEDDED_HOON_138_SOURCE && !native_parity_enabled() {
+                cue_honc_formula_to_slab(&mut *self.ut.slab, EMBEDDED_HONC_FORMULA_138_JAM)?
+            } else {
+                prelude_eval_formula
+            };
 
         let prelude_gun = T(
             &mut *self.ut.slab,
@@ -1817,9 +1881,7 @@ impl<'a> NativeBuildContext<'a> {
         let imports_need_eval = evaluate_value || needs_subject;
         for import in imports {
             let imported = match import.kind {
-                NativeImportKind::Hoon => {
-                    self.compile_path(&import.path, imports_need_eval)?
-                }
+                NativeImportKind::Hoon => self.compile_path(&import.path, imports_need_eval)?,
                 NativeImportKind::Data => self.data_vase(&import.path, imports_need_eval)?,
             };
             let imported = match import.face.as_deref() {
@@ -2580,7 +2642,10 @@ fn prelude_variant_name(hoon: &Hoon) -> &'static str {
     }
 }
 
-fn mint_honc_prelude_chunked(out_slab: &mut NounSlab<NockJammer>, prelude: &Hoon) -> Result<Noun> {
+fn mint_honc_prelude_chunked(
+    out_slab: &mut NounSlab<NockJammer>,
+    prelude: &Hoon,
+) -> Result<(Noun, Noun)> {
     let Hoon::TisGal(ride, stdlib) = peel_transparent(prelude) else {
         return Err("chunked prelude mint: root is not =<".into());
     };
@@ -2605,6 +2670,12 @@ fn mint_honc_prelude_chunked(out_slab: &mut NounSlab<NockJammer>, prelude: &Hoon
     let mut subject = empty_subject_type(&mut subject_slab);
     let total = layers.len() + 1; // layers + ride
     let mut formulas: Vec<Noun> = Vec::with_capacity(total);
+    // The ride (last) layer's product type IS the prelude's subject type — the
+    // type the `--arbitrary` build mints against. Captured from `mint` (not
+    // `play`) so its core coil seminouns are COMPLETE (`[%full ~]`), matching
+    // hoonc; the play-seeded type left them blocked, which `++burp` then blanked,
+    // diverging from hoonc's output by ~38%.
+    let mut prelude_type_out: Option<Noun> = None;
 
     for (i, expr) in layers
         .iter()
@@ -2628,6 +2699,8 @@ fn mint_honc_prelude_chunked(out_slab: &mut NounSlab<NockJammer>, prelude: &Hoon
             formula_out = out_slab.copy_into(formula, &ut_space);
             if i + 1 < total {
                 subject = next_subject_slab.copy_into(ty, &ut_space);
+            } else {
+                prelude_type_out = Some(out_slab.copy_into(ty, &ut_space));
             }
         }
         formulas.push(formula_out);
@@ -2646,14 +2719,18 @@ fn mint_honc_prelude_chunked(out_slab: &mut NounSlab<NockJammer>, prelude: &Hoon
     while let Some(head) = formulas.pop() {
         stdlib_formula = comb(out_slab, head, stdlib_formula)?;
     }
-    Ok(comb(out_slab, stdlib_formula, ride_formula)?)
+    let formula = comb(out_slab, stdlib_formula, ride_formula)?;
+    Ok((
+        prelude_type_out.expect("chunked prelude ride type"),
+        formula,
+    ))
 }
 
 fn mint_honc_formula_with_ut(
     ut: &mut Ut<'_>,
     _context: &mut Context,
     prelude: &Hoon,
-) -> Result<Noun> {
+) -> Result<(Noun, Noun)> {
     // The canonical prelude is `=< …`; mint it chunked to bound memory (Step 2).
     let dbg = format!("{:?}", prelude);
     eprintln!(
@@ -2671,8 +2748,8 @@ fn mint_honc_formula_with_ut(
     ut.set_miss_memo_persistence(true);
     let result = ut.mint_noun(sut, gol, prelude);
     ut.set_miss_memo_persistence(false);
-    let (_ty, formula) = result?;
-    Ok(formula)
+    let (ty, formula) = result?;
+    Ok((ty, formula))
 }
 
 fn evaluate_honc_isolated(
@@ -2739,13 +2816,21 @@ fn native_value_override(
 
 fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()> {
     let checks = [
-        (path.to_path_buf(), SOFTED_CONSTRAINTS_SOURCE_B3, "softed-constraints.hoon source"),
+        (
+            path.to_path_buf(),
+            SOFTED_CONSTRAINTS_SOURCE_B3,
+            "softed-constraints.hoon source",
+        ),
         (
             directory.join("jams/constraints-0-1.jam"),
             CONSTRAINTS_0_1_JAM_B3,
             "jams/constraints-0-1.jam",
         ),
-        (directory.join("jams/constraints-2.jam"), CONSTRAINTS_2_JAM_B3, "jams/constraints-2.jam"),
+        (
+            directory.join("jams/constraints-2.jam"),
+            CONSTRAINTS_2_JAM_B3,
+            "jams/constraints-2.jam",
+        ),
     ];
     let mut stale = Vec::new();
     for (file, expected, label) in checks {
@@ -3183,10 +3268,7 @@ fn load_cold_state(context: &mut Context, raw: &[u8], label: &str) -> Result<()>
         &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
     );
     context.warm = Warm::init(
-        &mut context.stack,
-        &mut context.cold,
-        &context.hot,
-        &context.test_jets,
+        &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
         context.jet_dispatch,
     );
     Ok(())
@@ -4088,4 +4170,5 @@ mod tests {
 
         fs::remove_dir_all(temp_dir).expect("cleanup");
     }
+
 }

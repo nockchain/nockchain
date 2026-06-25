@@ -1,4 +1,5 @@
 use std::collections::*;
+use std::sync::Arc;
 
 use chumsky::input::{Stream, ValueInput};
 use chumsky::prelude::*;
@@ -9,12 +10,13 @@ use crate::utils::*;
 pub fn buc_runes_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just('@').ignore_then(bucpat(spec.clone())),
         just('_').ignore_then(buccab(hoon.clone())),
-        just(':').ignore_then(buccol(spec.clone())),
-        just("%").ignore_then(buccen(spec.clone())),
+        just(':').ignore_then(buccol(spec.clone(), linemap.clone())),
+        just("%").ignore_then(buccen(spec.clone(), linemap.clone())),
         just("<").ignore_then(bucgal(spec.clone())),
         just(">").ignore_then(bucgar(spec.clone())),
         just("|").ignore_then(bucbar(hoon.clone(), spec.clone())),
@@ -24,7 +26,7 @@ pub fn buc_runes_tall<'src>(
         just('-').ignore_then(buchep(spec.clone())),
         just('=').ignore_then(buctis(spec.clone())),
         just('?').ignore_then(bucwut(spec.clone())),
-        just("+").ignore_then(buclus(spec.clone())),
+        just("+").ignore_then(buclus(spec.clone(), linemap.clone())),
         just('.').ignore_then(bucdot(spec.clone())),
         just(",").ignore_then(buccom(spec.clone())),
     ))
@@ -62,10 +64,11 @@ pub fn buc_runes_wide<'src>(
 pub fn buc_spec_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> + Clone {
     choice((
-        just(':').ignore_then(buccol_spec(spec.clone())),
-        just("%").ignore_then(buccen_spec(spec.clone())),
+        just(':').ignore_then(buccol_spec(spec.clone(), linemap.clone())),
+        just("%").ignore_then(buccen_spec(spec.clone(), linemap.clone())),
         just("<").ignore_then(bucgal_spec(spec.clone())),
         just(">").ignore_then(bucgar_spec(spec.clone())),
         just('^').ignore_then(bucket_spec(spec.clone())),
@@ -174,8 +177,27 @@ pub fn bucpam_spec<'src>(
 
 pub fn buclus<'src>(
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    name_spec_tall(spec.clone()).map(|(p, q)| Hoon::KetCol(Box::new(Spec::BucLus(p, Box::new(q)))))
+    gap()
+        .ignore_then(symbol())
+        .then_ignore(gap())
+        .then(
+            spec.clone()
+                .map_with(|q: Spec, e| (q, e.span().start(), e.span().end())),
+        )
+        .map(move |(p, (q, q_start, q_end))| {
+            let q = if let Some(help) = linemap.help_after_rune(q_start, q_end) {
+                if matches!(&q, Spec::Gist(existing, _) if existing == &help) {
+                    q
+                } else {
+                    Spec::Gist(help, Box::new(q))
+                }
+            } else {
+                q
+            };
+            Hoon::KetCol(Box::new(Spec::BucLus(p, Box::new(q))))
+        })
 }
 
 pub fn buclus_wide<'src>(
@@ -329,14 +351,9 @@ pub fn bucpam_wide<'src>(
 
 pub fn buccol<'src>(
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    list_spec_closed_tall(spec.clone()).map(|specs| {
-        let (first, rest) = split_nonempty_spec_list(&specs);
-        Hoon::KetCol(Box::new(Spec::BucCol(
-            Box::new(first.clone()),
-            rest.to_vec(),
-        )))
-    })
+    buccol_spec(spec.clone(), linemap).map(|s| Hoon::KetCol(Box::new(s)))
 }
 
 pub fn buccol_wide<'src>(
@@ -364,8 +381,9 @@ pub fn bucsig<'src>(
 
 pub fn buccen<'src>(
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    buccen_spec(spec.clone()).map(|s| Hoon::KetCol(Box::new(s)))
+    buccen_spec(spec.clone(), linemap).map(|s| Hoon::KetCol(Box::new(s)))
 }
 
 pub fn buccen_wide<'src>(
@@ -575,6 +593,7 @@ pub fn bucwut_spec_wide<'src>(
 
 pub fn buctis_irregular<'src>(
     spec_wide: impl ParserExt<'src, Spec>,
+    _linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
     let symbol_tis_spec = symbol()
         .then_ignore(just('='))
@@ -595,22 +614,20 @@ pub fn buctis_irregular<'src>(
                 tis_symbol_tis_spec, // =foo=bar
                 tis_spec,            // =bar
             )))
-            .try_map(|(name, spec), span| {
-                match name {
-                    Some(n) => {
-                        // no autoname needed
-                        let term = n;
-                        Ok(Spec::BucTis(Skin::Term(term), Box::new(spec)))
-                    }
-                    None => {
-                        // need autoname
-                        match autoname(spec.clone()) {
-                            None => Err(Rich::custom(span, "cannot name spec")),
-                            Some(auto_term) => Ok(Spec::BucTis(
-                                Skin::Term(auto_term.to_string()),
-                                Box::new(spec),
-                            )),
-                        }
+            .try_map(|(name, spec), span| match name {
+                Some(n) => {
+                    // no autoname needed
+                    let term = n;
+                    Ok(Spec::BucTis(Skin::Term(term), Box::new(spec)))
+                }
+                None => {
+                    // need autoname
+                    match autoname(spec.clone()) {
+                        None => Err(Rich::custom(span, "cannot name spec")),
+                        Some(auto_term) => Ok(Spec::BucTis(
+                            Skin::Term(auto_term.to_string()),
+                            Box::new(spec),
+                        )),
                     }
                 }
             }),
@@ -669,19 +686,30 @@ pub fn bucpat_spec<'src>(
 
 pub fn buccol_spec<'src>(
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
     gap()
         .ignore_then(
             spec.clone()
+                .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end()))
                 .separated_by(gap())
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
         .then_ignore(gap())
         .then_ignore(just("=="))
-        .map(|specs| {
-            let (first, rest) = split_nonempty_spec_list(&specs);
-            Spec::BucCol(Box::new(first.clone()), rest.to_vec())
+        .map(move |specs| {
+            let mut specs = specs.into_iter().enumerate().map(|(idx, (spec, start, end))| {
+                if idx == 0 {
+                    spec
+                } else if let Some(help) = linemap.help_after_rune(start, end) {
+                    Spec::Gist(help, Box::new(spec))
+                } else {
+                    spec
+                }
+            });
+            let first = specs.next().expect("$: requires at least one spec");
+            Spec::BucCol(Box::new(first), specs.collect())
         })
 }
 
@@ -709,11 +737,31 @@ pub fn buccen_spec_wide<'src>(
 
 pub fn buccen_spec<'src>(
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
-    list_spec_closed_tall(spec.clone()).map(|specs| {
-        let (first, rest) = split_nonempty_spec_list(&specs);
-        Spec::BucCen(Box::new(first.clone()), rest.to_vec())
-    })
+    gap()
+        .ignore_then(
+            spec.clone()
+                .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end()))
+                .separated_by(gap())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(gap())
+        .then_ignore(just("=="))
+        .map(move |specs| {
+            let mut specs = specs.into_iter().enumerate().map(|(idx, (spec, start, end))| {
+                if idx == 0 {
+                    spec
+                } else if let Some(help) = linemap.help_after_rune(start, end) {
+                    Spec::Gist(help, Box::new(spec))
+                } else {
+                    spec
+                }
+            });
+            let first = specs.next().expect("$% requires at least one spec");
+            Spec::BucCen(Box::new(first), specs.collect())
+        })
 }
 
 pub fn bucpat_spec_wide<'src>(

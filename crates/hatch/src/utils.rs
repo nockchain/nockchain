@@ -4357,6 +4357,46 @@ pub fn tiki_tall<'src>(
         .or(hoon_tall.clone().map(|h| Tiki::Hoon((None, Box::new(h)))))
 }
 
+pub(crate) fn hoon_tail_has_help(node: &Hoon, help: &NounExpr) -> bool {
+    match node {
+        Hoon::Note(Note::Help(existing), _) if existing == help => true,
+        Hoon::Note(_, inner)
+        | Hoon::Dbug(_, inner)
+        | Hoon::BarHep(inner)
+        | Hoon::BarTis(_, inner)
+        | Hoon::KetHep(_, inner)
+        | Hoon::KetTis(_, inner) => hoon_tail_has_help(inner, help),
+        Hoon::TisGar(_, tail) => hoon_tail_has_help(tail, help),
+        Hoon::CenHep(p, q) | Hoon::CenDot(p, q) | Hoon::TisLus(p, q) => {
+            hoon_tail_has_help(p, help) || hoon_tail_has_help(q, help)
+        }
+        Hoon::CenLus(p, q, r) | Hoon::WutDot(p, q, r) | Hoon::WutCol(p, q, r) => {
+            hoon_tail_has_help(p, help)
+                || hoon_tail_has_help(q, help)
+                || hoon_tail_has_help(r, help)
+        }
+        _ => false,
+    }
+}
+
+fn attach_help_to_bartis_tail(node: Hoon, help: NounExpr) -> Hoon {
+    match node {
+        Hoon::BarTis(spec, inner) => {
+            Hoon::BarTis(spec, Box::new(attach_help_to_kethep_tail(*inner, help)))
+        }
+        other => attach_help_to_hoon(other, help),
+    }
+}
+
+fn attach_help_to_kethep_tail(node: Hoon, help: NounExpr) -> Hoon {
+    match node {
+        Hoon::KetHep(spec, inner) => {
+            Hoon::KetHep(spec, Box::new(attach_help_to_hoon(*inner, help)))
+        }
+        other => attach_help_to_hoon(other, help),
+    }
+}
+
 ///  Parses arms of a Core (grouped by chapters).
 ///     chapters can be unamed or named with +$
 ///     arms can be named with ++ or +$
@@ -4376,10 +4416,41 @@ pub fn chapters<'src>(
                 .map_with(|name: String, e| (name, e.span().start(), e.span().end())),
         )
         .then_ignore(gap())
-        .then(hoon.clone())
-        .map(move |((name, start, end), hoon)| {
+        .then(hoon.clone().map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())))
+        .map(move |((name, start, end), (hoon, body_start, body_end))| {
+            // Postfix doc on the arm. `arm_postfix_help` (keyed on the NAME span)
+            // catches `++  foo  :: doc` (a trailing `::` right after the name) as
+            // a linked "funk" help. For a single-line arm whose body sits between
+            // the name and the `::` (e.g. `++  sum  |=(...)  :: wrapping add`),
+            // hoonc anchors the line-trailing `::` to the arm BODY as a plain crib
+            // `[%note [%help [0 [summary 0]]] body]` — so anchor `help_after` over
+            // the name-start..body-end span (prefix is the `++` rune, `::` follows
+            // the body). Docs-off parses (the kernels) short-circuit inside.
+            // A `|$` body already self-anchors its postfix `::` doc onto the body
+            // spec (see `barbuc`), so the arm-body note must not double-wrap it.
+            let body_is_barbuc = matches!(&hoon, Hoon::BarBuc(..));
+            let body_tail_owns_postfix = matches!(&hoon, Hoon::BarTis(_, inner) if matches!(inner.as_ref(), Hoon::KetHep(..)));
             let hoon =
                 if let Some(help) = luslus_linemap.arm_postfix_help("funk", &name, start, end) {
+                    Hoon::Note(Note::Help(help), Box::new(hoon))
+                } else if let Some(help) =
+                    luslus_linemap.arm_scye_help_after_name(end, body_start)
+                {
+                    Hoon::Note(Note::Help(help), Box::new(hoon))
+                } else if let Some(help) = (!body_is_barbuc)
+                    .then(|| luslus_linemap.help_after(start, body_end))
+                    .flatten()
+                {
+                    if body_tail_owns_postfix {
+                        attach_help_to_bartis_tail(hoon, help)
+                    } else if hoon_tail_has_help(&hoon, &help) {
+                        hoon
+                    } else {
+                        Hoon::Note(Note::Help(help), Box::new(hoon))
+                    }
+                } else if let Some(help) = luslus_linemap.help_before_arm(start) {
+                    // Prefix doc block above `++ name` (e.g. `::  +aor: …`), which
+                    // the body's own help_before cannot reach across the `++` line.
                     Hoon::Note(Note::Help(help), Box::new(hoon))
                 } else {
                     hoon
@@ -4397,15 +4468,25 @@ pub fn chapters<'src>(
             spec.clone()
                 .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end())),
         )
-        .map(move |((name, start, end), (spec, spec_start, _spec_end))| {
+        .map(move |((name, start, end), (spec, spec_start, spec_end))| {
+            let spec = Spec::Name(name.clone(), Box::new(spec));
             let spec = if let Some(help) = lusbuc_linemap.help_before_spec(spec_start) {
+                Spec::Gist(help, Box::new(spec))
+            } else if let Some(help) = lusbuc_linemap.help_after_rune(spec_start, spec_end) {
                 Spec::Gist(help, Box::new(spec))
             } else {
                 spec
             };
-            let hoon = Hoon::KetCol(Box::new(Spec::Name(name.clone(), Box::new(spec))));
+            let hoon = Hoon::KetCol(Box::new(spec));
+            let hoon = if let Some(help) = lusbuc_linemap.help_before_plan_tail(start) {
+                Hoon::Note(Note::Help(help), Box::new(hoon))
+            } else {
+                hoon
+            };
             let hoon =
                 if let Some(help) = lusbuc_linemap.arm_postfix_help("plan", &name, start, end) {
+                    Hoon::Note(Note::Help(help), Box::new(hoon))
+                } else if let Some(help) = lusbuc_linemap.help_before_arm(start) {
                     Hoon::Note(Note::Help(help), Box::new(hoon))
                 } else {
                     hoon
@@ -6008,6 +6089,10 @@ impl LineMap {
             return None;
         }
 
+        Self::build_doc_help_from_lines(&docs)
+    }
+
+    fn build_doc_help_from_lines(docs: &[(usize, String)]) -> Option<NounExpr> {
         let summary_raw = &docs[0].1;
         let summary_indent = leading_spaces(summary_raw.as_bytes());
         let (summary_strip, detail_strip) = if summary_indent >= 4 {
@@ -6025,6 +6110,8 @@ impl LineMap {
             return None;
         };
         let summary = strip_doc_spaces(summary_raw, summary_strip);
+        let stop_plan_details_at_code =
+            summary.starts_with('$') && summary.split_once(": ").is_some();
         if summary.is_empty() {
             return None;
         }
@@ -6046,6 +6133,9 @@ impl LineMap {
 
             let indent = leading_spaces(raw.as_bytes());
             let is_code = indent >= detail_strip + 2;
+            if stop_plan_details_at_code && is_code {
+                break;
+            }
             let text = strip_doc_spaces(
                 raw,
                 if is_code {
@@ -6066,8 +6156,143 @@ impl LineMap {
             sections.push(Self::doc_list(section));
         }
 
+        // A doc summary beginning `+name: ` or `$name: ` is a cross-reference to
+        // an arm or mold: hoonc strips the marker and records a `[%funk name]` or
+        // `[%plan name]` link in the cuff.
+        let (cuff, summary) = Self::parse_doc_link(&summary);
+        // A bare `+name`/`$name` cross-ref uses the following detail block as the
+        // body with a null summary (`0`), not a literal empty cord.
+        if summary.is_empty() {
+            if cuff != Self::doc_atom(0) && !sections.is_empty() {
+                let crib = Self::doc_cell(Self::doc_atom(0), Self::doc_list(sections));
+                return Some(Self::doc_cell(cuff, crib));
+            }
+            return None;
+        }
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_list(sections));
-        Some(Self::doc_cell(Self::doc_atom(0), crib))
+        Some(Self::doc_cell(cuff, crib))
+    }
+
+    /// Split a leading `+name`/`$name` cross-reference off a doc summary, returning
+    /// the cuff (`[[%funk name] 0]`, `[[%plan name] 0]`, or `~`) and the residual
+    /// summary text. `+name: text` and `$name: text` keep `text` as the summary; a
+    /// bare cross-ref returns an empty summary so the caller skips it.
+    fn parse_doc_link(summary: &str) -> (NounExpr, String) {
+        let name_ok = |name: &str| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        };
+
+        for (prefix, tag) in [('+', "funk"), ('$', "plan")] {
+            let Some(rest) = summary.strip_prefix(prefix) else {
+                continue;
+            };
+            if let Some((name, after)) = rest.split_once(": ") {
+                if name_ok(name) && !after.is_empty() {
+                    let link = Self::doc_cell(Self::doc_cord(tag), Self::doc_cord(name));
+                    return (Self::doc_list(vec![link]), after.to_string());
+                }
+            } else if name_ok(rest) {
+                let link = Self::doc_cell(Self::doc_cord(tag), Self::doc_cord(rest));
+                return (Self::doc_list(vec![link]), String::new());
+            }
+        }
+
+        (Self::doc_atom(0), summary.to_string())
+    }
+
+    /// Doc block immediately preceding a `++`/`+$` arm (the `:: …` lines above the
+    /// `++ name` line). The arm line is always a valid anchor, so the target test
+    /// is unconditional; `parse_doc_funk_link` turns a `+name:` summary into the
+    /// `[%funk name]` cuff (e.g. `::  +aor: alphabetical order` above `++ aor`).
+    fn help_before_arm(&self, name_byte: usize) -> Option<NounExpr> {
+        self.help_before_with_target(name_byte, |_, _, _| true)
+    }
+
+    fn help_before_plan_tail(&self, byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+
+        let line = self.line_index(byte.min(self.source.len()));
+        if line == 0 {
+            return None;
+        }
+        let target_indent = self.line_indent(line)?;
+
+        let mut docs = Vec::new();
+        let mut idx = line - 1;
+        loop {
+            let Some((indent, content)) = self.doc_comment(idx) else {
+                break;
+            };
+            docs.push((indent, content));
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+
+        docs.reverse();
+        while docs.first().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.remove(0);
+        }
+        while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.pop();
+        }
+        if docs.is_empty() {
+            return None;
+        }
+        let doc_indent = docs[0].0;
+        if target_indent > doc_indent {
+            return None;
+        }
+
+        let summary_raw = &docs[0].1;
+        let summary_indent = leading_spaces(summary_raw.as_bytes());
+        let (summary_strip, detail_strip) = if summary_indent >= 4 {
+            (4, 2)
+        } else if summary_indent >= 2 {
+            (2, 4)
+        } else {
+            return None;
+        };
+        let summary = strip_doc_spaces(summary_raw, summary_strip);
+        if !(summary.starts_with('$') && summary.split_once(": ").is_some()) {
+            return None;
+        }
+
+        let mut in_details = false;
+        let mut saw_code_detail = false;
+        for (_, raw) in docs.iter().skip(1) {
+            if raw.trim().is_empty() {
+                in_details = true;
+                continue;
+            }
+            if !in_details {
+                continue;
+            }
+
+            let indent = leading_spaces(raw.as_bytes());
+            if indent >= detail_strip + 2 {
+                saw_code_detail = true;
+                continue;
+            }
+            if !saw_code_detail {
+                continue;
+            }
+
+            let text = strip_doc_spaces(raw, detail_strip);
+            if text.is_empty() {
+                continue;
+            }
+            let crib = Self::doc_cell(Self::doc_cord(&text), Self::doc_atom(0));
+            return Some(Self::doc_cell(Self::doc_atom(0), crib));
+        }
+
+        None
     }
 
     fn help_before_spec(&self, byte: usize) -> Option<NounExpr> {
@@ -6086,7 +6311,13 @@ impl LineMap {
         self.help_before_with_target_options(byte, Self::line_starts_like_hoon_target, true)
     }
 
-    fn postfix_doc_summary(&self, start_byte: usize, end_byte: usize) -> Option<String> {
+    fn postfix_doc_summary(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+        preceding_token_prefix: bool,
+        require_prefix: bool,
+    ) -> Option<String> {
         if !self.docs_enabled {
             return None;
         }
@@ -6101,26 +6332,54 @@ impl LineMap {
         let (line_start, line_end) = self.line_bounds(end_line)?;
         let line = &self.source.as_bytes()[line_start..line_end];
         let start_offset = start_byte.saturating_sub(line_start).min(line.len());
-        let mut prefix_start = 0usize;
-        while prefix_start < start_offset
-            && (line[prefix_start] == b' ' || line[prefix_start] == b'\t')
-        {
-            prefix_start += 1;
-        }
-        let mut prefix_end = start_offset;
-        while prefix_end > prefix_start
-            && (line[prefix_end - 1] == b' ' || line[prefix_end - 1] == b'\t')
-        {
-            prefix_end -= 1;
-        }
+        // The prefix is the rune/token guarding a trailing `::  ` doc. Hoon callers
+        // use the whole line head (the node must begin right after a 2-char rune at
+        // the line start). Spec callers use the IMMEDIATELY PRECEDING token so a
+        // mid-line cast spec (`^- @  :: roll right` → prefix `^-`) anchors while a
+        // faced bind spec (`=| a=(tree)  :: doc` → prefix `a=`, alphanumeric) does
+        // not (its doc belongs to the enclosing hoon, matching hoonc's `++vast`).
+        let (prefix_start, prefix_end) = if preceding_token_prefix {
+            let mut end = start_offset;
+            while end > 0 && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
+                end -= 1;
+            }
+            let mut start = end;
+            while start > 0 && line[start - 1] != b' ' && line[start - 1] != b'\t' {
+                start -= 1;
+            }
+            (start, end)
+        } else {
+            let mut start = 0usize;
+            while start < start_offset && (line[start] == b' ' || line[start] == b'\t') {
+                start += 1;
+            }
+            let mut end = start_offset;
+            while end > start && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
+                end -= 1;
+            }
+            (start, end)
+        };
         let prefix = &line[prefix_start..prefix_end];
-        if prefix.is_empty()
-            || !(prefix.len() == 2
+        let prefix_ok = if !require_prefix {
+            // Rune-level caller (e.g. `|$` body spec) guarantees the doc context;
+            // the line-head/preceding-token guard does not apply.
+            true
+        } else if prefix.is_empty() {
+            // A node beginning at the line start (after indent) is the line-local
+            // production; hoonc anchors the trailing `::  ` doc to it (e.g. a
+            // standalone `(bind b a)  :: bind`). Only the line-start (hoon) mode
+            // allows this — the preceding-token (spec) mode still needs a real
+            // 2-char rune before the spec, since a bare line-start spec's doc
+            // belongs to its enclosing hoon.
+            !preceding_token_prefix
+        } else {
+            prefix.len() == 2
                 && prefix
                     .iter()
                     .copied()
-                    .all(|byte| !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b' '))
-        {
+                    .all(|byte| !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b' ')
+        };
+        if !prefix_ok {
             return None;
         }
 
@@ -6162,7 +6421,25 @@ impl LineMap {
     }
 
     fn help_after(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte)?;
+        let summary = self.postfix_doc_summary(start_byte, end_byte, false, true)?;
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    /// Postfix-doc anchoring for SPECS: the prefix is the immediately preceding
+    /// token, so a mid-line cast spec (`^- @  :: roll right`) anchors while a
+    /// faced bind spec (`=| a=(tree)  :: doc`) does not. See `postfix_doc_summary`.
+    fn help_after_spec(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+        let summary = self.postfix_doc_summary(start_byte, end_byte, true, true)?;
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    /// Postfix-doc anchoring at a RUNE-guaranteed position (e.g. the `|$` body
+    /// spec), bypassing the line-head/preceding-token guard. The caller is a
+    /// specific rune parser that knows this span owns a trailing `::  ` doc.
+    pub fn help_after_rune(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+        let summary = self.postfix_doc_summary(start_byte, end_byte, false, false)?;
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some(Self::doc_cell(Self::doc_atom(0), crib))
     }
@@ -6174,7 +6451,7 @@ impl LineMap {
         start_byte: usize,
         end_byte: usize,
     ) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte)?;
+        let summary = self.postfix_doc_summary(start_byte, end_byte, false, true)?;
         let link_name = if arm_name == "$" {
             Self::doc_atom(0)
         } else {
@@ -6184,6 +6461,82 @@ impl LineMap {
         let cuff = Self::doc_list(vec![link]);
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some(Self::doc_cell(cuff, crib))
+    }
+
+    /// Prefix-doccord (`++scye`) anchored on an arm body after a `++ name` header:
+    /// `++  foo  ::    summary` followed by optional `::` detail lines belongs to
+    /// the body, not to the `++` arm name. Keep this arm-local to avoid treating
+    /// arbitrary inline four-space comments as generic prefix docs.
+    fn arm_scye_help_after_name(
+        &self,
+        name_end_byte: usize,
+        body_start_byte: usize,
+    ) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+
+        let len = self.source.len();
+        let name_line = self.line_index(name_end_byte.min(len));
+        let body_line = self.line_index(body_start_byte.min(len));
+        if body_line <= name_line {
+            return None;
+        }
+
+        let target_indent = self.line_indent(body_line)?;
+        let (line_start, line_end) = self.line_bounds(name_line)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let mut cursor = name_end_byte.saturating_sub(line_start).min(line.len());
+        while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
+            cursor += 1;
+        }
+        if line.get(cursor) != Some(&b':') || line.get(cursor + 1) != Some(&b':') {
+            return None;
+        }
+
+        let doc_indent = cursor;
+        if target_indent > doc_indent {
+            return None;
+        }
+
+        let mut trimmed_end = line.len();
+        while trimmed_end > cursor
+            && (line[trimmed_end - 1] == b' ' || line[trimmed_end - 1] == b'\t')
+        {
+            trimmed_end -= 1;
+        }
+        if trimmed_end - cursor > 2
+            && line.get(trimmed_end - 2) == Some(&b':')
+            && line.get(trimmed_end - 1) == Some(&b':')
+        {
+            return None;
+        }
+
+        let mut content_start = cursor + 2;
+        let mut spaces = 0usize;
+        while content_start < trimmed_end && line[content_start] == b' ' {
+            spaces += 1;
+            content_start += 1;
+        }
+        if spaces != 4 || content_start >= trimmed_end {
+            return None;
+        }
+        if matches!(line.get(content_start), Some(b' ' | b'\t' | b':')) {
+            return None;
+        }
+
+        let mut docs = vec![(
+            doc_indent,
+            String::from_utf8_lossy(&line[cursor + 2..trimmed_end]).into_owned(),
+        )];
+        for idx in (name_line + 1)..body_line {
+            let Some(doc) = self.doc_comment(idx) else {
+                return None;
+            };
+            docs.push(doc);
+        }
+
+        Self::build_doc_help_from_lines(&docs)
     }
 
     #[inline(always)]
@@ -6299,8 +6652,12 @@ impl LineMap {
             return Self::line_starts_like_spec_doc_target(self, idx, byte);
         }
 
-        self.doc_summary_before_line(idx)
-            .is_some_and(|summary| summary != "tree mold generator")
+        // A `$`-headed `|$`/`+$` body spec with a preceding doc block is a
+        // doc-anchor target — hoonc emits the `%gist` there (e.g. `++tree`'s
+        // "tree mold generator" on its `$@(~ ...)` body). An earlier import
+        // hardcoded `summary != "tree mold generator"` to drop exactly that doc,
+        // which diverged from hoonc's self-mint artifact.
+        self.doc_summary_before_line(idx).is_some()
     }
 
     fn doc_summary_before_line(&self, idx: usize) -> Option<String> {
@@ -12514,7 +12871,9 @@ fn apply_hoon_trace(node: Hoon, spot: Spot) -> Hoon {
 
 fn apply_hoon_docs(mut node: Hoon, span: (usize, usize), linemap: &LineMap) -> Hoon {
     if let Some(help) = linemap.help_after(span.0, span.1) {
-        node = attach_help_to_hoon(node, help);
+        if !hoon_tail_has_help(&node, &help) {
+            node = attach_help_to_hoon(node, help);
+        }
     }
     if let Some(help) = linemap.help_before_hoon(span.0) {
         node = attach_help_to_hoon(node, help);
@@ -12523,7 +12882,7 @@ fn apply_hoon_docs(mut node: Hoon, span: (usize, usize), linemap: &LineMap) -> H
 }
 
 fn apply_spec_docs(mut node: Spec, span: (usize, usize), linemap: &LineMap) -> Spec {
-    if let Some(help) = linemap.help_after(span.0, span.1) {
+    if let Some(help) = linemap.help_after_spec(span.0, span.1) {
         node = attach_help_to_spec(node, help);
     }
     if let Some(help) = linemap.help_before_spec(span.0) {
@@ -12533,7 +12892,7 @@ fn apply_spec_docs(mut node: Spec, span: (usize, usize), linemap: &LineMap) -> S
 }
 
 fn apply_spec_postfix_docs(mut node: Spec, span: (usize, usize), linemap: &LineMap) -> Spec {
-    if let Some(help) = linemap.help_after(span.0, span.1) {
+    if let Some(help) = linemap.help_after_spec(span.0, span.1) {
         node = attach_help_to_spec(node, help);
     }
     node
@@ -16586,7 +16945,7 @@ mod tests {
         chumsky_spot_to_hoon_spot, flay, gor_mug, limb_to_noun, map_to_noun, mor_mug, open,
         rent_co, slab_mug, string_to_atom, term_to_noun, Limb, LineMap,
     };
-    use crate::ast::hoon::{BaseType, Coin, Hoon, ParsedAtom, Skin, Spec};
+    use crate::ast::hoon::{BaseType, Coin, Hoon, Note, ParsedAtom, Skin, Spec};
 
     fn noun_is_zero(noun: Noun) -> bool {
         unsafe { noun.raw_equals(&D(0)) }
@@ -16648,6 +17007,499 @@ mod tests {
             matches!(spec.as_ref(), Spec::Gist(_, _)),
             "postfix doc should decorate the named sample spec"
         );
+    }
+
+    #[test]
+    fn parser_attaches_tisfas_postfix_doc_to_value_hoon() {
+        let src = "=/  nblocks  (div len 4)  ::  intentionally off-by-one\n0\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "bind.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("=/ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::TisFas(_, value, _)] = items.as_slice() else {
+            panic!("expected one =/ expression");
+        };
+        let Hoon::Note(Note::Help(_), inner) = value.as_ref() else {
+            panic!("expected trailing =/ doc to decorate the value hoon");
+        };
+        assert!(
+            matches!(inner.as_ref(), Hoon::CenCol(_, _)),
+            "doc should wrap the parsed value expression"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_wutlus_postfix_doc_to_default_hoon() {
+        let src = "?+  tlen  h1  ::  fallthrough switch\n  @  h2\n==\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "switch.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("?+ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::WutLus(_, default, _)] = items.as_slice() else {
+            panic!("expected one ?+ expression");
+        };
+        let Hoon::Note(Note::Help(_), inner) = default.as_ref() else {
+            panic!("expected trailing ?+ doc to decorate the default hoon");
+        };
+        assert!(
+            matches!(inner.as_ref(), Hoon::Wing(_)),
+            "doc should wrap the parsed default expression"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_buclus_postfix_doc_to_named_spec_wrapper() {
+        let src = concat!("|%\n", "+$  path  (list knot)  ::  like unix path\n", "--\n");
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "type.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("+$ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("path"))
+            .expect("expected +$ path arm");
+        let Hoon::KetCol(spec) = arm else {
+            panic!("expected +$ mold arm");
+        };
+        let Spec::Gist(_, named) = spec.as_ref() else {
+            panic!("expected +$ postfix doc to wrap the named spec");
+        };
+        assert!(
+            matches!(named.as_ref(), Spec::Name(_, _)),
+            "postfix +$ doc should preserve the named spec"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_postfix_doc_to_faced_wide_spec() {
+        fn has_gist(spec: &Spec) -> bool {
+            match spec {
+                Spec::Gist(_, _) => true,
+                Spec::Name(_, inner) | Spec::BucTis(_, inner) => has_gist(inner),
+                Spec::BucCol(head, tail) => has_gist(head) || tail.iter().any(has_gist),
+                _ => false,
+            }
+        }
+
+        let src = concat!(
+            "|%\n", "+$  stud\n", "  $:  auth=@tas\n", "      type=path  ::  standard label\n",
+            "  ==\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "face.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("faced tuple should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("stud"))
+            .expect("expected +$ stud arm");
+        let Hoon::KetCol(spec) = arm else {
+            panic!("expected +$ mold arm");
+        };
+        assert!(
+            has_gist(spec),
+            "postfix doc should decorate the faced wide spec"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_postfix_doc_to_bracket_wide_spec() {
+        fn has_gist(spec: &Spec) -> bool {
+            match spec {
+                Spec::Gist(_, _) => true,
+                Spec::Name(_, inner) | Spec::BucTis(_, inner) => has_gist(inner),
+                Spec::BucCol(head, tail) | Spec::BucCen(head, tail) => {
+                    has_gist(head) || tail.iter().any(has_gist)
+                }
+                _ => false,
+            }
+        }
+
+        let src = concat!(
+            "|%\n", "+$  tank\n", "  $%  [%t @t]  [%ta @ta]  ::  @tas\n", "  ==\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "branch.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("branch spec should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("tank"))
+            .expect("expected +$ tank arm");
+        let Hoon::KetCol(spec) = arm else {
+            panic!("expected +$ mold arm");
+        };
+        assert!(
+            has_gist(spec),
+            "postfix doc should decorate the bracket wide spec"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_prefix_plan_doc_to_buclus_arm() {
+        let src = concat!(
+            "|%\n", "::\n", "::  $tank: formatted print tree\n", "::\n", "::    just a cord, or\n",
+            "::    %palm: backstep list\n", "::           flat-mid, open, flat-open, flat-close\n",
+            "::    %rose: flat list\n", "+$  tank\n", "  @\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "type.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("+$ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("tank"))
+            .expect("expected +$ tank arm");
+        let Hoon::Note(Note::Help(help), inner) = arm else {
+            panic!("prefix $name doc should decorate the +$ arm");
+        };
+        let Hoon::Note(Note::Help(tail_help), _) = inner.as_ref() else {
+            panic!("prefix $name doc should keep the post-code detail as an inner note");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_list(vec![LineMap::doc_cell(
+                LineMap::doc_cord("plan"),
+                LineMap::doc_cord("tank"),
+            )]),
+            LineMap::doc_cell(
+                LineMap::doc_cord("formatted print tree"),
+                LineMap::doc_list(vec![LineMap::doc_list(vec![
+                    LineMap::doc_cell(LineMap::doc_atom(0), LineMap::doc_cord("just a cord, or")),
+                    LineMap::doc_cell(
+                        LineMap::doc_atom(0),
+                        LineMap::doc_cord("%palm: backstep list"),
+                    ),
+                ])]),
+            ),
+        );
+        assert_eq!(
+            help, &expected,
+            "prefix $name doc should match hoonc detail boundaries"
+        );
+        let expected_tail = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(LineMap::doc_cord("%rose: flat list"), LineMap::doc_atom(0)),
+        );
+        assert_eq!(
+            tail_help, &expected_tail,
+            "post-code plan detail should anchor separately"
+        );
+    }
+
+    #[test]
+    fn parser_leaves_single_line_arm_doc_on_tail_when_tail_owns_it() {
+        let src = concat!(
+            "|%\n", "++  grd  |=  [a=dn]  ^-  @rq  (grd:ma a)  ::  decimal float to @rq\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "arm.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("arm should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("grd"))
+            .expect("expected ++grd arm");
+        let Hoon::BarTis(_, tail) = arm else {
+            panic!("arm body should not be wrapped when the tail expression owns the doc");
+        };
+        let Hoon::KetHep(_, tail) = tail.as_ref() else {
+            panic!("expected return cast inside gate");
+        };
+        assert!(
+            matches!(tail.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "tail expression should keep the postfix doc"
+        );
+    }
+
+    #[test]
+    fn parser_wraps_single_line_gate_doc_when_gate_body_owns_it() {
+        let src = concat!("|%\n", "++  sum  |=  [a=@ b=@]  (add a b)  ::  wrapping add\n", "--\n",);
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "arm.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("arm should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("sum"))
+            .expect("expected ++sum arm");
+        assert!(
+            matches!(arm, Hoon::Note(Note::Help(_), inner) if matches!(inner.as_ref(), Hoon::BarTis(..))),
+            "single-line gate doc should wrap the gate when no cast tail owns it"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_bare_funk_prefix_doc_with_detail_body() {
+        let src = concat!(
+            "|%\n", "  ::\n", "  ::  +uni\n", "  ::\n",
+            "  ::    change to a representation where a.a is odd\n", "  ++  uni\n",
+            "    |=  [a=@]\n", "    a\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "arm.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("arm should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("uni"))
+            .expect("expected ++uni arm");
+        assert!(
+            matches!(arm, Hoon::Note(Note::Help(_), _)),
+            "bare +name prefix doc should decorate the arm"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_wutpam_close_postfix_doc() {
+        let src = "?&  =(a b)\n    =(c d)\n==  ::  tighten lower bound\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "and.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("?& should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::Note(Note::Help(_), inner)] = items.as_slice() else {
+            panic!("expected close doc to decorate ?&");
+        };
+        assert!(
+            matches!(inner.as_ref(), Hoon::WutPam(_)),
+            "close doc should wrap the ?& expression"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_wutdot_tail_postfix_doc() {
+        let src = "?.  &  0  1  ::  a has larger exp\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "cond.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("?. should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        match items.as_slice() {
+            [Hoon::WutDot(_, _, tail)] => assert!(
+                matches!(tail.as_ref(), Hoon::Note(Note::Help(_), _)),
+                "postfix doc should decorate the ?. tail"
+            ),
+            [Hoon::Note(Note::Help(_), inner)] => assert!(
+                matches!(inner.as_ref(), Hoon::WutDot(..)),
+                "postfix doc should be associated with the ?. expression"
+            ),
+            other => panic!("expected documented ?. expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_attaches_cenhep_callee_postfix_doc() {
+        let src = "%-  sun:si  ::  expanded exp of a\n0\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "call.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("%- should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::CenHep(callee, _)] = items.as_slice() else {
+            panic!("expected %- expression");
+        };
+        assert!(
+            matches!(callee.as_ref(), Hoon::Note(Note::Help(_), inner) if matches!(inner.as_ref(), Hoon::TisGal(..))),
+            "postfix doc should decorate the %- callee"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_cenlus_tail_postfix_doc() {
+        let src = "%+  sum:si  e.b  (sun:si mb)  ::  highest exp for b\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "call.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("%+ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::CenLus(_, _, tail)] = items.as_slice() else {
+            panic!("expected %+ expression");
+        };
+        assert!(
+            matches!(tail.as_ref(), Hoon::Note(Note::Help(_), inner) if matches!(inner.as_ref(), Hoon::CenCol(callee, _) if matches!(callee.as_ref(), Hoon::TisGal(..)))),
+            "postfix doc should decorate the %+ tail"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_kettis_postfix_doc_to_skin() {
+        let src = "^=  h  ::  in upper bound\n0\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "skin.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("^= should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::KetTis(skin, _)] = items.as_slice() else {
+            panic!("expected ^= expression");
+        };
+        assert!(
+            matches!(skin, Skin::Help(_, inner) if matches!(inner.as_ref(), Skin::Term(term) if term == "h")),
+            "postfix doc should decorate the ^= skin, got {skin:?}"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_barhep_body_postfix_doc() {
+        let src = "|-  0  ::  a has larger exp\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "loop.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("|- should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        match items.as_slice() {
+            [Hoon::BarHep(inner)] => assert!(
+                matches!(inner.as_ref(), Hoon::Note(Note::Help(_), _)),
+                "postfix doc should decorate the |- body"
+            ),
+            [Hoon::Note(Note::Help(_), inner)] => assert!(
+                matches!(inner.as_ref(), Hoon::BarHep(_)),
+                "postfix doc should be associated with the |- expression"
+            ),
+            other => panic!("expected documented |- expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parser_does_not_attach_postfix_doc_from_cord_text_inside_rune_body() {
+        let src = "|-  'a::  b'\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "literal.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("|- with cord text should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarHep(inner)] = items.as_slice() else {
+            panic!("expected one |- expression");
+        };
+        assert!(
+            !matches!(inner.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "cord text containing `::  ` should not synthesize a postfix doc"
+        );
+    }
+    #[test]
+    fn parser_attaches_inline_scye_docs_to_arm_body() {
+        let src = concat!(
+            "|%\n", "++  fn  ::    float, infinity, or NaN\n", "        ::\n",
+            "        ::  s=sign, e=exponent, a=arithmetic form\n",
+            "        ::  (-1)^s * a * 2^e\n", "        $%  [%f s=? e=@s a=@u]\n",
+            "            [%i s=?]\n", "            [%n ~]\n", "        ==\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "core.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("core should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("fn"))
+            .expect("expected ++fn arm");
+
+        let Hoon::Note(Note::Help(_), _) = arm else {
+            panic!("expected inline scye doc to decorate arm body");
+        };
     }
 
     #[test]

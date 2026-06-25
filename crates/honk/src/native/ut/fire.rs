@@ -88,7 +88,13 @@ impl<'a> Ut<'a> {
         let redone_payload = self.native_of_cached(redone_payload_noun)?;
         // Rebuild the redone core natively via cons_core (mirrors
         // coil_from_parts + ty_core: same garb/context/rest leaves, new payload).
-        let redone_core = cons_core(&mut self.cx, redone_payload, garb.clone(), context.clone(), rest.clone());
+        let redone_core = cons_core(
+            &mut self.cx,
+            redone_payload,
+            garb.clone(),
+            context.clone(),
+            rest.clone(),
+        );
         let dox = self.core_dox_native(&garb, &context, &rest)?;
         self.mull_check_wet(redone_core.clone(), dox, hoon)?;
         // hold = [%hold redone_core hoon], interned identically to the old
@@ -144,10 +150,13 @@ impl<'a> Ut<'a> {
     /// `ty_hold_cached` was only a perf cache; the interned RESULT is what matters.
     fn cons_hold(&mut self, inner: NRc<NTy>, hoon: Noun) -> NRc<NTy> {
         let gene = NLeaf::from_noun_raw(hoon, &self.slab.noun_space());
-        live_intern(&mut self.cx, NTy::Hold {
-            subject: inner,
-            gene,
-        })
+        live_intern(
+            &mut self.cx,
+            NTy::Hold {
+                subject: inner,
+                gene,
+            },
+        )
     }
 
     // Noun `core_dox`: superseded by `core_dox_native` on the live fire path

@@ -1,4 +1,5 @@
 use std::collections::*;
+use std::sync::Arc;
 
 use chumsky::input::{Stream, ValueInput};
 use chumsky::prelude::*;
@@ -9,6 +10,7 @@ use crate::utils::*;
 pub fn ket_runes_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just("|").ignore_then(ketbar(hoon.clone())),
@@ -18,7 +20,7 @@ pub fn ket_runes_tall<'src>(
         just("+").ignore_then(ketlus(hoon.clone())),
         just("&").ignore_then(ketpam(hoon.clone())),
         just('~').ignore_then(ketsig(hoon.clone())),
-        just('=').ignore_then(kettis(hoon.clone())),
+        just('=').ignore_then(kettis(hoon.clone(), linemap.clone())),
         just('?').ignore_then(ketwut(hoon.clone())),
         just('*').ignore_then(kettar(spec.clone())),
     ))
@@ -124,12 +126,33 @@ pub fn ketwut_wide<'src>(
 
 pub fn kettis<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(hoon.clone())
+        .ignore_then(
+            hoon.clone()
+                .map_with(|p: Hoon, e| (p, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .validate(|(p, q), e, emit| {
+        .validate(move |((p, p_start, p_end), q), e, emit| {
+            let doc_end = match &p {
+                Hoon::Limb(term) => p_start + term.len(),
+                Hoon::Wing(w) => match w.as_slice() {
+                    [Limb::Term(term)] => p_start + term.len(),
+                    _ => p_end,
+                },
+                _ => p_end,
+            };
+            let p = if let Some(help) = linemap.help_after_rune(p_start, doc_end) {
+                if matches!(&p, Hoon::Note(Note::Help(existing), _) if existing == &help) {
+                    p
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(p))
+                }
+            } else {
+                p
+            };
             let maybe_skin = flay(p);
             match maybe_skin {
                 Some(s) => Hoon::KetTis(s, Box::new(q)),

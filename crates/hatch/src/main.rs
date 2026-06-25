@@ -67,11 +67,12 @@ fn spec_parser<'src>(
     hoon_wide: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
     spec_wide: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> + Clone {
     choice((
         rune_branch_pair!(
             "$",
-            buc_spec_tall(hoon.clone(), spec.clone()),
+            buc_spec_tall(hoon.clone(), spec.clone(), linemap.clone()),
             buc_spec_wide(hoon_wide.clone(), spec_wide.clone())
         ),
         rune_branch_pair!(
@@ -95,7 +96,7 @@ fn spec_wide_parser<'src>(
             .boxed(),
         buccab_spec_irregular(hoon_wide.clone()).boxed(), //  _p
         bucmic_spec_irregular(hoon_wide.clone()).boxed(), //  ,p0
-        buctis_irregular(spec_wide.clone()).boxed(),      // foo=bar, =bar,  =foo=bar
+        buctis_irregular(spec_wide.clone(), linemap.clone()).boxed(), // foo=bar, =bar,  =foo=bar
         buccol_irregular(spec_wide.clone()).boxed(),      // [foo=bar foo=bar]
         reference_spec(spec_wide.clone()).boxed(),        // foo or foo:bar
         bucwut_irregular_spec(spec_wide.clone()).boxed(), // ?(foo bar)
@@ -305,7 +306,12 @@ pub fn hoon_parser<'src>(
         ),
         rune_branch_pair!(
             '=',
-            tis_runes_tall(hoon.clone(), spec.clone(), spec_wide.clone()),
+            tis_runes_tall(
+                hoon.clone(),
+                spec.clone(),
+                spec_wide.clone(),
+                linemap.clone()
+            ),
             tis_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
         just('?')
@@ -315,6 +321,7 @@ pub fn hoon_parser<'src>(
                     hoon_wide.clone(),
                     spec.clone(),
                     spec_wide.clone(),
+                    linemap.clone(),
                 )
                 .boxed(),
                 wut_runes_wide(hoon_wide.clone(), spec_wide.clone()).boxed(),
@@ -325,7 +332,7 @@ pub fn hoon_parser<'src>(
             .boxed(),
         rune_branch_pair!(
             '%',
-            cen_runes_tall(hoon.clone()),
+            cen_runes_tall(hoon.clone(), linemap.clone()),
             cen_runes_wide(hoon_wide.clone())
         ),
         rune_branch_pair!(
@@ -340,12 +347,12 @@ pub fn hoon_parser<'src>(
         ),
         rune_branch_pair!(
             '$',
-            buc_runes_tall(hoon.clone(), spec.clone()),
+            buc_runes_tall(hoon.clone(), spec.clone(), linemap.clone()),
             buc_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
         rune_branch_pair!(
             '^',
-            ket_runes_tall(hoon.clone(), spec.clone()),
+            ket_runes_tall(hoon.clone(), spec.clone(), linemap.clone()),
             ket_runes_wide(hoon_wide.clone(), spec_wide.clone())
         ),
         rune_branch_pair!(
@@ -414,6 +421,7 @@ pub fn parser<'src>(
         hoon_wide.clone(),
         spec.clone(),
         spec_wide.clone(),
+        linemap.clone(),
     )
     .map_with(wrap_spec_with_trace(wer.clone(), linemap.clone()))
     .labelled("Spec")
@@ -499,6 +507,7 @@ pub fn parser<'src>(
         hoon_wide_no_trace.clone(),
         spec_no_trace.clone(),
         spec_wide_no_trace.clone(),
+        linemap.clone(),
     )
     .map_with(wrap_spec_with_docs(linemap.clone()))
     .labelled("Spec")

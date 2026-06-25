@@ -444,11 +444,12 @@ fn structural_diff(
 }
 
 fn axis_at(noun: Noun, axis: &str, space: &NounSpace) -> Option<Noun> {
-    if axis == "1" {
-        return Some(noun);
+    let mut parts = axis.split('.');
+    if parts.next()? != "1" {
+        return None;
     }
     let mut cur = noun;
-    for part in axis.split('.').skip(1) {
+    for part in parts {
         cur = match part {
             "2" => noun_head(cur, space)?,
             "3" => noun_tail(cur, space)?,
@@ -679,11 +680,7 @@ fn kernel_parity(reference_path: &str, candidate_path: &str) -> i32 {
     let candidate_space = candidate_stack.noun_space();
 
     let diffs = match collect_atom_diffs(
-        reference_noun,
-        candidate_noun,
-        &reference_space,
-        &candidate_space,
-        16,
+        reference_noun, candidate_noun, &reference_space, &candidate_space, 16,
     ) {
         Ok(diffs) => diffs,
         Err(err) => {
@@ -699,9 +696,7 @@ fn kernel_parity(reference_path: &str, candidate_path: &str) -> i32 {
             let reference_rejam = rejam(&reference, "reference");
             let candidate_rejam = rejam(&candidate, "candidate");
             if reference_rejam == candidate_rejam {
-                println!(
-                    "PASS (rejam): {candidate_path} == {reference_path} modulo encoding"
-                );
+                println!("PASS (rejam): {candidate_path} == {reference_path} modulo encoding");
                 0
             } else {
                 eprintln!(
@@ -775,9 +770,205 @@ fn kernel_parity(reference_path: &str, candidate_path: &str) -> i32 {
     }
 }
 
+fn scan_semi(jam_path: &str) {
+    let jam = fs::read(jam_path).unwrap_or_else(|e| {
+        eprintln!("read {jam_path}: {e}");
+        process::exit(1);
+    });
+    let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
+    let root = cue(&mut stack, &jam, "scan");
+    let space = stack.noun_space();
+    // Walk: find seminoun cells `[[%full 0] data]`; classify data as bare fragment
+    // `[0 X]`, spotted fragment `[11 [%spot] [0 X]]`, or other. Report fragment axis
+    // X + tree depth to derive hoonc's strip rule.
+    let mut bare: Vec<(u64, usize)> = Vec::new();
+    let mut spotted: Vec<(u64, usize)> = Vec::new();
+    let mut stackv: Vec<(Noun, usize)> = vec![(root, 0)];
+    let mut seen = 0usize;
+    let mut truncated = false;
+    while let Some((n, depth)) = stackv.pop() {
+        seen += 1;
+        if seen > 8_000_000 {
+            truncated = true;
+            break;
+        }
+        let Some(head) = noun_head(n, &space) else {
+            continue;
+        };
+        let Some(tail) = noun_tail(n, &space) else {
+            continue;
+        };
+        // is head == [%full 0]?
+        let is_full = noun_head(head, &space)
+            .and_then(|h| atom_string(h, &space))
+            .map(|s| s == "full")
+            .unwrap_or(false)
+            && noun_tail(head, &space).and_then(|t| atom_u64(t, &space)) == Some(0);
+        if is_full {
+            // tail is the seminoun data
+            if let Some(dh) = noun_head(tail, &space) {
+                if atom_u64(dh, &space) == Some(0) {
+                    if let Some(ax) = noun_tail(tail, &space).and_then(|t| atom_u64(t, &space)) {
+                        bare.push((ax, depth));
+                    }
+                } else if atom_u64(dh, &space) == Some(11) {
+                    // [11 [hint inner]] ; hint=[%spot ..]; inner=[0 X]
+                    if let Some(rest) = noun_tail(tail, &space) {
+                        let hint = noun_head(rest, &space);
+                        let inner = noun_tail(rest, &space);
+                        let is_spot = hint
+                            .and_then(|h| noun_head(h, &space))
+                            .and_then(|h| atom_string(h, &space))
+                            .map(|s| s == "spot")
+                            .unwrap_or(false);
+                        if is_spot {
+                            if let Some(inner) = inner {
+                                if noun_head(inner, &space).and_then(|h| atom_u64(h, &space))
+                                    == Some(0)
+                                {
+                                    if let Some(ax) =
+                                        noun_tail(inner, &space).and_then(|t| atom_u64(t, &space))
+                                    {
+                                        spotted.push((ax, depth));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        stackv.push((head, depth + 1));
+        stackv.push((tail, depth + 1));
+    }
+    let axes = |v: &[(u64, usize)]| {
+        let mut a: Vec<u64> = v.iter().map(|x| x.0).collect();
+        a.sort();
+        a.dedup();
+        a
+    };
+    let depths = |v: &[(u64, usize)]| -> Option<(usize, usize)> {
+        let mut depths = v.iter().map(|(_, depth)| *depth);
+        let first = depths.next()?;
+        Some(depths.fold((first, first), |(mn, mx), depth| {
+            (mn.min(depth), mx.max(depth))
+        }))
+    };
+    if truncated {
+        println!("(truncated at {seen} nodes)");
+    }
+    println!(
+        "bare-fragment seminouns: {} | axes={:?} | depth-range={:?}",
+        bare.len(),
+        axes(&bare),
+        depths(&bare)
+    );
+    println!(
+        "spotted-fragment seminouns: {} | axes={:?} | depth-range={:?}",
+        spotted.len(),
+        axes(&spotted),
+        depths(&spotted)
+    );
+    println!(
+        "bare samples (axis,depth): {:?}",
+        bare.iter().take(20).collect::<Vec<_>>()
+    );
+    println!(
+        "spotted samples (axis,depth): {:?}",
+        spotted.iter().take(20).collect::<Vec<_>>()
+    );
+}
+
+fn count_tags(jam_path: &str) {
+    let jam = fs::read(jam_path).unwrap_or_else(|e| {
+        eprintln!("read {jam_path}: {e}");
+        process::exit(1);
+    });
+    let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
+    let root = cue(&mut stack, &jam, "count");
+    let space = stack.noun_space();
+    use std::collections::{HashMap, HashSet};
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut visited = HashSet::new();
+    let mut stackv: Vec<Noun> = vec![root];
+    let mut seen = 0usize;
+    let tags = ["hold", "cell", "atom", "core", "face", "fork", "hint", "void", "noun"];
+    while let Some(n) = stackv.pop() {
+        let raw = unsafe { n.as_raw() };
+        if !visited.insert(raw) {
+            continue;
+        }
+        seen += 1;
+        if seen > 30_000_000 {
+            println!("(truncated at {seen} nodes)");
+            break;
+        }
+        let Some(head) = noun_head(n, &space) else {
+            continue;
+        };
+        if let Some(s) = atom_string(head, &space) {
+            if tags.contains(&s.as_str()) {
+                *counts.entry(s).or_insert(0) += 1;
+            }
+        }
+        if let Some(tail) = noun_tail(n, &space) {
+            stackv.push(tail);
+        }
+        if let Some(head) = noun_head(n, &space) {
+            stackv.push(head);
+        }
+    }
+    println!("nodes walked: {seen}");
+    let mut sorted: Vec<_> = counts.into_iter().collect();
+    sorted.sort();
+    for (k, v) in sorted {
+        println!("  %{k}: {v}");
+    }
+}
+
+fn preview_axis(jam_path: &str, axis: &str, depth: usize) {
+    let jam = fs::read(jam_path).unwrap_or_else(|e| {
+        eprintln!("read {jam_path}: {e}");
+        process::exit(1);
+    });
+    let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
+    let root = cue(&mut stack, &jam, "preview");
+    let space = stack.noun_space();
+    let Some(node) = axis_at(root, axis, &space) else {
+        eprintln!("axis {axis} not found");
+        process::exit(1);
+    };
+    println!("{}", preview_with_depth(node, depth, &space));
+}
+
 fn main() {
     let program = env::args().next().unwrap_or_else(|| "jam-diff".to_string());
     let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().map(String::as_str) == Some("--preview") {
+        if args.len() < 3 {
+            eprintln!("usage: {program} --preview <jam> <axis> [depth]");
+            process::exit(2);
+        }
+        let depth = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
+        preview_axis(&args[1], &args[2], depth);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--count-tags") {
+        if args.len() != 2 {
+            eprintln!("usage: {program} --count-tags <jam>");
+            process::exit(2);
+        }
+        count_tags(&args[1]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--scan-semi") {
+        if args.len() != 2 {
+            eprintln!("usage: {program} --scan-semi <jam>");
+            process::exit(2);
+        }
+        scan_semi(&args[1]);
+        return;
+    }
     if args.first().map(String::as_str) == Some("--kernel-parity") {
         if args.len() != 3 {
             eprintln!("usage: {program} --kernel-parity <reference.jam> <candidate.jam>");

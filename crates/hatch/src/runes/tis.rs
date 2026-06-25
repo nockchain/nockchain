@@ -1,4 +1,5 @@
 use std::collections::*;
+use std::sync::Arc;
 
 use chumsky::input::Stream;
 use chumsky::prelude::*;
@@ -10,6 +11,7 @@ pub fn tis_runes_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
     spec_wide: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just("|").ignore_then(tisbar(hoon.clone(), spec.clone())),
@@ -17,7 +19,7 @@ pub fn tis_runes_tall<'src>(
         just('?').ignore_then(tiswut(hoon.clone())),
         just('^').ignore_then(tisket(hoon.clone(), spec_wide.clone())),
         just(':').ignore_then(tiscol(hoon.clone())),
-        just("/").ignore_then(tisfas(hoon.clone(), spec_wide.clone())),
+        just("/").ignore_then(tisfas(hoon.clone(), spec_wide.clone(), linemap.clone())),
         just(";").ignore_then(tismic(hoon.clone(), spec_wide.clone())),
         just("<").ignore_then(tisgal(hoon.clone())),
         just(">").ignore_then(tisgar(hoon.clone())),
@@ -161,14 +163,29 @@ pub fn tisket_wide<'src>(
 pub fn tisfas<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec_wide: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(variable_name_and_type(spec_wide.clone()))
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(
+            hoon.clone()
+                .map_with(|q: Hoon, e| (q, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(|((p, q), r)| Hoon::TisFas(p, Box::new(q), Box::new(r)))
+        .map(move |((p, (q, q_start, q_end)), r)| {
+            let q = if let Some(help) = linemap.help_after_rune(q_start, q_end) {
+                if hoon_tail_has_help(&q, &help) {
+                    q
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(q))
+                }
+            } else {
+                q
+            };
+            Hoon::TisFas(p, Box::new(q), Box::new(r))
+        })
 }
 
 pub fn tisfas_wide<'src>(

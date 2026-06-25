@@ -20,7 +20,7 @@ pub fn bar_runes_tall<'src>(
         just('@').ignore_then(barpat(hoon.clone(), spec.clone(), linemap.clone())),
         just('=').ignore_then(bartis(hoon.clone(), spec.clone())),
         just('~').ignore_then(barsig(hoon.clone(), spec.clone())),
-        just('-').ignore_then(barhep(hoon.clone())),
+        just('-').ignore_then(barhep(hoon.clone(), linemap.clone())),
         just('^').ignore_then(barket(hoon.clone(), spec.clone(), linemap.clone())),
         just(':').ignore_then(barcol(hoon.clone())),
         just('$').ignore_then(barbuc(spec.clone(), linemap.clone())),
@@ -153,10 +153,14 @@ pub fn barbuc<'src>(
         .then_ignore(gap())
         .then(
             spec.clone()
-                .map_with(|body: Spec, e| (body, e.span().start())),
+                .map_with(|body: Spec, e| (body, e.span().start(), e.span().end())),
         )
-        .map(move |(list, (body, body_start))| {
+        .map(move |(list, (body, body_start, body_end))| {
             let body = if let Some(help) = linemap.help_before_body_spec(body_start) {
+                Spec::Gist(help, Box::new(body))
+            } else if let Some(help) = linemap.help_after_rune(body_start, body_end) {
+                // Postfix `::` on a one-line `|$ sample body  :: doc` anchors to
+                // the body spec (hoonc emits the `%gist` there, e.g. `++ jar`).
                 Spec::Gist(help, Box::new(body))
             } else {
                 body
@@ -211,10 +215,25 @@ pub fn barcol<'src>(
 
 pub fn barhep<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(hoon.clone())
-        .map(|h| Hoon::BarHep(Box::new(h)))
+        .ignore_then(
+            hoon.clone()
+                .map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())),
+        )
+        .map(move |(h, h_start, h_end)| {
+            let h = if let Some(help) = linemap.help_after_rune(h_start, h_end) {
+                if hoon_tail_has_help(&h, &help) {
+                    h
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(h))
+                }
+            } else {
+                h
+            };
+            Hoon::BarHep(Box::new(h))
+        })
 }
 
 pub fn barhep_wide<'src>(
