@@ -54,5 +54,12 @@ fn init_context(extra_hot_state: Option<&[HotEntry]>, trace_info: Option<TraceIn
         [URBIT_HOT_STATE].concat()
     };
     let cold = Cold::new(&mut stack);
-    nockapp::utils::create_context(stack, &constant_hot_state, cold, trace_info, vec![])
+    nockapp::utils::create_context(
+        stack,
+        &constant_hot_state,
+        cold,
+        trace_info,
+        vec![],
+        nockvm::jets::JetDispatchMode::Exact,
+    )
 }

@@ -1,5 +1,5 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test", "rust_test_suite")
 load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
 
 # load("//:rules_rust_ext/pgo.bzl", "rust_pgo_binary_instrument", "rust_pgo_binary_run", "rust_pgo_binary_optimize")
@@ -106,8 +106,11 @@ rust_test_with_miri(
     ),
 )
 
-# Integration tests for hoonc
-rust_test(
+# Integration tests for hoonc. Each file in tests/ is its own cargo integration
+# test crate, so use rust_test_suite (one rust_test per file) — a single
+# rust_test cannot resolve a crate root across multiple files. Matches the
+# convention used in crates/bridge/BUILD.bazel etc.
+rust_test_suite(
     name = "hoonc_integration_tests",
     size = "small",
     srcs = glob(

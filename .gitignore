@@ -6,11 +6,6 @@ test-follower
 .nockchain_identity
 .nockchain_identity.peerid
 target
-bazel-bin
-bazel-out
-bazel-testlogs
-bazel-nockchain
-.bazelrc.local
 assets/*.jam
 !crates/nockapp/test-jams
 keys.export
@@ -19,3 +14,6 @@ nockchain-api-checkpoints-backup
 **/.DS_Store
 notes-*.csv
 /txs
+hoonc-octs-type-138.jam
+assets/native
+bazel-*

@@ -1,0 +1,34 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+# Native Hoon parser/AST. honk depends on this as a library. The lib pulls in
+# src/main.rs as a module (`#[path = "main.rs"] mod parser_main;`), so main.rs
+# stays in srcs; the standalone CLI entry point is not wired up as a separate
+# Bazel binary because the kernel pipeline does not need it.
+rust_library(
+    name = "hatch",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    # main.rs embeds this via include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"),
+    # "/test/parsed-hoon138.jam")); rules_rust sets CARGO_MANIFEST_DIR, so the
+    # file just needs to be present in the sandbox.
+    compile_data = ["test/parsed-hoon138.jam"],
+    crate_name = "hatch",
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True),
+    deps = [
+        "//crates/hoonc:hoonc_lib",
+        "//crates/nockapp",
+        "//crates/nockvm/rust/ibig",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(),
+)

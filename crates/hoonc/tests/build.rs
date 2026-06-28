@@ -35,7 +35,8 @@ mod test {
         info!("Entry file: {:?}", entry);
 
         let (nockapp, out_path) =
-            hoonc::initialize_with_default_cli(entry, deps_dir, None, false, true).await?;
+            hoonc::initialize_with_default_cli(entry, deps_dir, None, false, false, false, true)
+                .await?;
 
         let result = hoonc::run_build(nockapp, Some(out_path.clone())).await;
         assert!(result.is_ok());

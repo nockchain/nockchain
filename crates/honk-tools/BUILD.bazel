@@ -1,0 +1,38 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+# jam-diff: kernel-parity comparator used by the honk-parity recipe.
+rust_binary(
+    name = "jam-diff",
+    srcs = ["src/bin/jam_diff.rs"],
+    aliases = aliases(),
+    crate_name = "jam_diff",
+    crate_root = "src/bin/jam_diff.rs",
+    edition = "2021",
+    deps = [
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(),
+)
+
+# extract-hoonc-octs-type: pulls hoonc's canonical $octs type out of a typed
+# dynock jam for the honk build assets.
+rust_binary(
+    name = "extract-hoonc-octs-type",
+    srcs = ["src/bin/extract_hoonc_octs_type.rs"],
+    aliases = aliases(),
+    crate_name = "extract_hoonc_octs_type",
+    crate_root = "src/bin/extract_hoonc_octs_type.rs",
+    edition = "2021",
+    deps = [
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(),
+)
