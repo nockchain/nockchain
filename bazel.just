@@ -55,3 +55,12 @@ honk-parity:
     bazel-bin/crates/honk-tools/jam-diff --kernel-parity assets/peek.jam assets/native/peek.jam
     bazel-bin/crates/honk-tools/jam-diff --kernel-parity assets/bridge.jam assets/native/bridge.jam
     bazel-bin/crates/honk-tools/jam-diff --kernel-parity assets/roswell.jam assets/native/roswell.jam
+
+# Run honk's parity gates that are exposed as Bazel test targets:
+#   //crates/honk:compiler_mint      -> 69-test in-process metamorphic mint suite
+#   //crates/honk:native_parity_138  -> hoon-138 self-mint byte parity (honk native
+#                                       mint == hoonc; heavy, 'exclusive' tag)
+# (The 6-kernel jam-diff parity is driven by `just bazel honk-parity` above; it is
+# not yet a bazel *_test target — see the comment in crates/honk/BUILD.bazel.)
+honk-parity-tests:
+    bazel test //crates/honk:compiler_mint //crates/honk:native_parity_138

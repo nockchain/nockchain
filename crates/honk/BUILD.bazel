@@ -1,5 +1,5 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
 
 package(default_visibility = ["//visibility:public"])
@@ -68,4 +68,70 @@ rust_binary(
         "//crates/nockvm/rust/nockvm",
         "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
+)
+
+# ============================== PARITY TESTS ==============================
+# honk's parity gates, exposed as `bazel test` targets. Mirror the cargo
+# tests in crates/honk/tests/. (The 6-kernel jam-diff parity is NOT here yet:
+# it needs the hoonc-under-Bazel reference kernels //assets:* + a new
+# assets/native package; deferred until that infra is verified — see the
+# `just bazel honk-parity` recipe, which drives it via shell today.)
+
+# compiler_mint: the 69-test in-process metamorphic mint suite. It is an
+# INTEGRATION test (a separate crate using honk's PUBLIC API — it compiles
+# under `cargo test --test compiler_mint`), so it wires through `deps`, NOT
+# `crate=`. Already TEST_SRCDIR/runfiles-aware (repo_path()), so the .rs needs
+# no change; it reads hoon/tests/hoon-compiler/**.hoon via //hoon/tests:files.
+rust_test(
+    name = "compiler_mint",
+    size = "large",
+    timeout = "long",
+    srcs = ["tests/compiler_mint.rs"],
+    aliases = aliases(),
+    compile_data = [
+        "//hoon/tests:files",
+    ],
+    data = [
+        "//hoon/tests:files",
+    ],
+    edition = "2021",
+    proc_macro_deps = [
+        "//crates/nockvm/rust/nockvm_macros",
+    ] + all_crate_deps(proc_macro = True, proc_macro_dev = True),
+    deps = [
+        ":honk_lib",
+        "//crates/hatch",
+        "//crates/nockapp",
+        "//crates/nockvm/rust/nockvm",
+    ] + all_crate_deps(normal = True, normal_dev = True),
+)
+
+# native_parity_138: spawns the Bazel-built honk binary twice (default-embedded
+# vs HONK_NATIVE_PARITY=1) on the hoon-138 prelude and byte-compares the jams —
+# i.e. honk's native ++ut mint == hoonc. Heavy (~78s, mints the prelude twice,
+# RAM-hungry): size=enormous/timeout=eternal, and `exclusive` so it doesn't run
+# concurrently with other tests (RAM safety). std-only test crate -> empty deps.
+# data wires:
+#   :honk                      -> the binary, resolved via CARGO_BIN_EXE_honk
+#                                 = $(rootpath :honk) (rustc_env, runfiles path).
+#   //hoon:files               -> the prelude + dep tree honk reads at runtime.
+#   //crates/hoonc/hoon:files  -> hoon/common/hoon.hoon is a SYMLINK into
+#                                 crates/hoonc/hoon/, so the target must be in
+#                                 the runfiles for honk to read it.
+rust_test(
+    name = "native_parity_138",
+    size = "enormous",
+    timeout = "eternal",
+    srcs = ["tests/native_parity_138.rs"],
+    data = [
+        ":honk",
+        "//crates/hoonc/hoon:files",
+        "//hoon:files",
+    ],
+    edition = "2021",
+    rustc_env = {
+        "CARGO_BIN_EXE_honk": "$(rootpath :honk)",
+    },
+    tags = ["exclusive"],
+    deps = [],
 )

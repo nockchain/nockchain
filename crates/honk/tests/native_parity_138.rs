@@ -30,8 +30,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-/// Repo root, derived from this crate's manifest dir (`<repo>/crates/honk`).
+/// Repo root: under cargo, derived from this crate's manifest dir
+/// (`<repo>/crates/honk`); under Bazel, the runfiles root
+/// (`TEST_SRCDIR/TEST_WORKSPACE`) where `hoon/` lives alongside the honk binary
+/// (mirrors `compiler_mint.rs`'s `repo_path()`).
 fn repo_root() -> PathBuf {
+    if let Ok(test_srcdir) = std::env::var("TEST_SRCDIR") {
+        let workspace = std::env::var("TEST_WORKSPACE").unwrap_or_else(|_| "_main".to_string());
+        let runfiles_root = PathBuf::from(test_srcdir).join(workspace);
+        if runfiles_root.join("hoon").exists() {
+            return runfiles_root;
+        }
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -42,11 +52,16 @@ fn repo_root() -> PathBuf {
 /// Run `honk --arbitrary` on the canonical hoon-138 prelude (as its own entry),
 /// optionally with `HONK_NATIVE_PARITY=1`, writing the jam to `out`.
 fn arbitrary_build(out: &Path, native_parity: bool) -> std::time::Duration {
-    let honk = env!("CARGO_BIN_EXE_honk");
     let root = repo_root();
+    // `env!("CARGO_BIN_EXE_honk")` is an ABSOLUTE path under cargo, and the
+    // Bazel runfiles-relative `$(rootpath :honk)` (set via rustc_env) under
+    // bazel. Joining onto the repo/runfiles root yields an absolute, spawnable
+    // path in BOTH cases (PathBuf::join with an absolute arg returns that arg),
+    // so we avoid the relative-program-path-vs-current_dir ambiguity.
+    let honk = root.join(env!("CARGO_BIN_EXE_honk"));
     let entry = "hoon/common/hoon.hoon";
 
-    let mut cmd = Command::new(honk);
+    let mut cmd = Command::new(&honk);
     cmd.current_dir(&root)
         .arg("--arbitrary")
         .arg("--output")

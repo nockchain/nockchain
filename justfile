@@ -98,12 +98,19 @@ honk-parity:
 
 # Run every honk parity gate in one shot: the cargo gates (compiler_mint +
 # native_parity_138 full hoon-138 self-mint byte parity) AND the 6-kernel
-# byte/dir-hash parity vs hoonc. Builds hoonc + honk, the hoonc reference kernel
-# jams (assets/*.jam), and honk's native kernel jams (assets/native/*.jam) first
-# — so this is a long run (hoonc compiles 6 kernels). hatch's parser-oracle
-# parity is separate: it needs Bazel fixtures (`make build-hatch-test-assets`),
-# then `cargo nextest run --release -p hatch`.
-honk-parity-all: build-kernel-assets honk-kernel-jams
+# byte/dir-hash parity vs hoonc. Builds ONLY the compilers (hoonc + honk +
+# honk-tools), then the hoonc reference kernel jams (assets/*.jam) and honk's
+# native kernel jams (assets/native/*.jam) — a long run (hoonc compiles 6
+# kernels). NOTE: it deliberately does NOT run `build` / `build-kernel-assets`,
+# because the full `cargo build --release` compiles the kernel-asset crates
+# (crates/kernels/*) whose build.rs hard-requires assets/*.jam to PRE-EXIST —
+# a clean-tree chicken-and-egg. Generating the jams with hoonc first avoids it.
+# hatch's parser-oracle parity is separate (Bazel fixtures):
+# `cargo nextest run --release -p hatch`.
+honk-parity-all:
+    cargo build --release -p hoonc -p honk -p honk-tools
+    just dumb-jam wal-jam miner-jam peek-jam bridge-jam roswell-jam
+    just honk-kernel-jams
     cargo nextest run --release -p honk
     just honk-parity
 
