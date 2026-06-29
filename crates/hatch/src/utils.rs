@@ -7352,6 +7352,48 @@ impl LineMap {
             .fold(Self::doc_atom(0), |tail, item| Self::doc_cell(item, tail))
     }
 
+    /// Does the contiguous comment block immediately preceding `start`'s line
+    /// contain a bare `::` (a comment line with nothing but whitespace after the
+    /// `::`)? Walks backward over leading `::` comment lines, stopping at the
+    /// first non-comment line. Used to detect that hoonc would NOT anchor the
+    /// block to the following hoon (see the docs-OFF guard in
+    /// [`Self::expand_gap_start`]).
+    fn preceding_comment_block_has_bare_colon(&self, start: usize) -> bool {
+        let bytes = self.source.as_bytes();
+        let mut line_start = start.min(bytes.len());
+        while line_start > 0 && bytes[line_start - 1] != b'\n' {
+            line_start -= 1;
+        }
+        // `prev_end` is the exclusive end of the line above `line_start` (its
+        // trailing '\n' sits at `line_start - 1`).
+        let mut prev_end = line_start;
+        while prev_end > 0 {
+            prev_end -= 1; // step onto the preceding line's '\n' / last byte
+            let mut prev_start = prev_end;
+            while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
+                prev_start -= 1;
+            }
+            let mut cursor = prev_start;
+            while cursor < prev_end && matches!(bytes[cursor], b' ' | b'\t') {
+                cursor += 1;
+            }
+            // Stop at the first line that is not a `::` comment.
+            if bytes.get(cursor) != Some(&b':') || bytes.get(cursor + 1) != Some(&b':') {
+                return false;
+            }
+            // A bare `::`: only whitespace follows the `::` to end-of-line.
+            let mut after = cursor + 2;
+            while after < prev_end && matches!(bytes[after], b' ' | b'\t') {
+                after += 1;
+            }
+            if after >= prev_end {
+                return true;
+            }
+            prev_end = prev_start;
+        }
+        false
+    }
+
     #[inline]
     fn expand_gap_start(&self, start: usize) -> usize {
         let bytes = self.source.as_bytes();
@@ -7396,6 +7438,20 @@ impl LineMap {
             } else {
                 return start;
             }
+        }
+
+        // docs-OFF (hoonc's `vang [& |]` pile parse) doc-block anchoring guard.
+        // hoonc only anchors a CONTIGUOUS doc-comment block to the hoon that
+        // follows it; a bare `::` (empty comment line) breaks the block, so hoonc
+        // leaves the spot at the token. The backward doc-block walk below would
+        // otherwise expand the spot across the entire comment run, mis-dating it to
+        // the first comment line — the dumb-kernel parity regression caused by a
+        // bare `::` before a spotted hoon. Detect a bare `::` in the immediately
+        // preceding comment block and keep the spot at the token. Gated to docs-OFF
+        // so the docs-ON self-mint (which matches hoonc's `ream` anchoring exactly)
+        // is left untouched.
+        if !self.docs_enabled && self.preceding_comment_block_has_bare_colon(start) {
+            return start;
         }
 
         let doccord_info = |line: &[u8], idx: usize, min_spaces: usize| -> Option<(bool, usize)> {

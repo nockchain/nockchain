@@ -523,7 +523,13 @@ fn normalize_hint_formula(
     }
 }
 
-fn normalize_transparent_hints(
+/// Deep, formula-aware strip of TRANSPARENT hints (`%spot`/`%hand`/`%hunk`/
+/// `%lose`/`%mean`) from a nock formula, recursing per-opcode so op-1 quoted data
+/// is never mangled and active (`%fast` etc.) hints are preserved. Returns the
+/// stripped formula and whether anything changed. `pub` so honk can bare a fold
+/// core's battery before cold-state registration (making fold-eval spot-invariant
+/// without touching the emitted, spotted formula).
+pub fn normalize_transparent_hints(
     stack: &mut NockStack,
     formula: Noun,
     space: &NounSpace,

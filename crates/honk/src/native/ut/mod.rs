@@ -20,7 +20,7 @@ use nockvm::ext::{AtomExt, NounExt};
 use nockvm::interpreter::{interpret, Context as NockContext};
 use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
-use nockvm::jets::warm::Warm;
+use nockvm::jets::warm::{normalize_transparent_hints, Warm};
 use nockvm::jets::JetDispatchMode;
 use nockvm::mem::NockStack;
 use nockvm::mug::{get_mug, set_mug};
@@ -1973,8 +1973,41 @@ impl<'a> Ut<'a> {
         // whole battery structures per call.
         self.noun_mug_cached(core);
         let cached = self.copy_into_eval_stack_shared(context, core, core_space);
+        // Make fold-eval SPOT-INVARIANT: strip transparent hints (%spot/%dbug etc.)
+        // from the eval-stack core's BATTERY before it is interpreted. The fold's
+        // `interpret` registers batteries into the PERSISTENT cold state, and
+        // `unifying_equality` is bitwise — so two batteries that differ ONLY in
+        // %spot line numbers would not unify, letting a source spot perturb cold
+        // state and flip a later (non-local) fold/type outcome. %spot is a pure
+        // no-op for the fold result (it only push/pops the mean trace stack), and
+        // honk already matches jets hint-blind, so baring the battery here is
+        // result-preserving and makes registration+unification spot-invariant.
+        // The EMITTED kernel formula is built independently on the mint side and
+        // stays spotted (byte-identical to hoonc); only this internal eval core is
+        // bared. Cached on the original core's raw, so it is paid once per core.
+        let cached = self.bare_eval_core_battery(context, cached);
         self.musk.mack_core_cache_raw.insert(raw, cached);
         cached
+    }
+
+    /// Strip transparent hints (the `%spot`/`%hand`/`%hunk`/`%lose`/`%mean` set)
+    /// from the BATTERY (head) of an eval-stack core, leaving the payload (subject
+    /// data) untouched. Deep + formula-aware (op-1 quoted data is preserved; active
+    /// `%fast` hints are preserved). See the call site in
+    /// `musk_mack_cached_core_in_context` for why fold-eval must be spot-invariant.
+    unsafe fn bare_eval_core_battery(&mut self, context: &mut NockContext, core: Noun) -> Noun {
+        let eval_space = context.stack.noun_space();
+        let Ok(cell) = core.in_space(&eval_space).as_cell() else {
+            return core;
+        };
+        let battery = cell.head().noun();
+        let payload = cell.tail().noun();
+        let (bare_battery, changed) =
+            normalize_transparent_hints(&mut context.stack, battery, &eval_space);
+        if !changed {
+            return core;
+        }
+        T(&mut context.stack, &[bare_battery, payload])
     }
 
     /// Copy a slab noun onto the musk eval stack with structural sharing:
