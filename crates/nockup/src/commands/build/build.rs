@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -148,6 +149,13 @@ pub async fn run(project: &str) -> Result<()> {
 
         println!("{} Compiling Hoon app...", "📦".green());
 
+        let out_jam = project_dir.join("out.jam");
+        let target_jam = target_jam_path(project_dir, bin_path, binaries.len() > 1);
+        remove_stale_build_file(&out_jam).await?;
+        if let Some(target_jam) = &target_jam {
+            remove_stale_build_file(target_jam).await?;
+        }
+
         // Run hoonc command from project directory
         let mut hoonc_command = Command::new("hoonc");
         hoonc_command
@@ -171,16 +179,11 @@ pub async fn run(project: &str) -> Result<()> {
             ));
         }
 
+        ensure_hoonc_output_exists(&out_jam).await?;
+
         // move out.jam to {bin_name}.jam if the program has multiple names
-        if binaries.len() > 1 {
-            let target_jam = project_dir.join(format!(
-                "{}.jam",
-                bin_path
-                    .file_stem()
-                    .expect("bin_path should have a file stem")
-                    .to_string_lossy()
-            ));
-            tokio::fs::rename(project_dir.join("out.jam"), &target_jam)
+        if let Some(target_jam) = target_jam {
+            tokio::fs::rename(&out_jam, &target_jam)
                 .await
                 .context(format!(
                     "Failed to rename out.jam to {}",
@@ -195,6 +198,63 @@ pub async fn run(project: &str) -> Result<()> {
     }
 
     println!("{} Hoon compilation completed successfully!", "✓".green());
+
+    Ok(())
+}
+
+fn target_jam_path(project_dir: &Path, bin_path: &Path, multi_bin: bool) -> Option<PathBuf> {
+    multi_bin.then(|| {
+        project_dir.join(format!(
+            "{}.jam",
+            bin_path
+                .file_stem()
+                .expect("bin_path should have a file stem")
+                .to_string_lossy()
+        ))
+    })
+}
+
+async fn remove_stale_build_file(path: &Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata.is_file() || metadata.file_type().is_symlink() {
+                tokio::fs::remove_file(path).await.with_context(|| {
+                    format!("Failed to remove stale build output '{}'", path.display())
+                })?;
+            }
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("Failed to inspect stale build output '{}'", path.display())
+            });
+        }
+    }
+
+    Ok(())
+}
+
+async fn ensure_hoonc_output_exists(output_path: &Path) -> Result<()> {
+    let metadata = tokio::fs::metadata(output_path).await.with_context(|| {
+        format!(
+            "hoonc did not produce expected output file '{}'",
+            output_path.display()
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(anyhow::anyhow!(
+            "hoonc output '{}' is not a regular file",
+            output_path.display()
+        ));
+    }
+
+    if metadata.len() == 0 {
+        return Err(anyhow::anyhow!(
+            "hoonc produced empty output file '{}'",
+            output_path.display()
+        ));
+    }
 
     Ok(())
 }
@@ -268,4 +328,91 @@ async fn should_install_dependencies(project_dir: &Path) -> Result<bool> {
     }
 
     Ok(false) // Everything looks good, no install needed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_hoonc_output_exists, remove_stale_build_file};
+
+    #[tokio::test]
+    async fn accepts_non_empty_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::write(&output_path, b"jam")
+            .await
+            .expect("write output");
+
+        ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect("non-empty output should be accepted");
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+
+        let err = ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect_err("missing output should fail");
+
+        assert!(
+            err.to_string().contains("did not produce expected output"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::write(&output_path, b"")
+            .await
+            .expect("write output");
+
+        let err = ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect_err("empty output should fail");
+
+        assert!(
+            err.to_string().contains("produced empty output"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_directory_hoonc_output() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::create_dir(&output_path)
+            .await
+            .expect("create output directory");
+
+        let err = ensure_hoonc_output_exists(&output_path)
+            .await
+            .expect_err("directory output should fail");
+
+        assert!(
+            err.to_string().contains("regular file"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn removes_stale_regular_output_before_hoonc_runs() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let output_path = temp_dir.path().join("out.jam");
+        tokio::fs::write(&output_path, b"stale")
+            .await
+            .expect("write stale output");
+
+        remove_stale_build_file(&output_path)
+            .await
+            .expect("stale output should be removed");
+
+        assert!(
+            !output_path.exists(),
+            "stale hoonc output should be removed before compile"
+        );
+    }
 }

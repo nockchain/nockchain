@@ -4,8 +4,8 @@ use std::fs;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::wire::{SystemWire, Wire};
-use nockapp::{exit_driver, http_driver, AtomExt, NockApp};
-use nockvm::noun::{Atom, D, T};
+use nockapp::NockApp;
+use nockvm::noun::{D, NounAllocator, T};
 use nockvm_macros::tas;
 
 #[tokio::main]
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let kernel = fs::read("out.jam").map_err(|e| format!("Failed to read out.jam: {}", e))?;
 
     let mut nockapp: NockApp =
-        boot::setup(&kernel, Some(cli), &[], "{{project_name}}", None).await?;
+        boot::setup(&kernel, cli, &[], "{{project_name}}", None).await?;
 
     let mut poke_slab = NounSlab::new();
     let command_noun = T(&mut poke_slab, &[D(tas!(b"cause")), D(0x0)]);
@@ -26,7 +26,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(effects) => {
             let mut results = Vec::new();
             for (_i, effect) in effects.iter().enumerate() {
-                let effect_noun = unsafe { effect.root() };
+                let space = effect.noun_space();
+                let effect_noun = unsafe { effect.root().in_space(&space) };
                 if let Ok(cell) = effect_noun.as_cell() {
                     let Ok(tail_atom) = cell.tail().as_atom() else {
                         continue;

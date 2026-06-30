@@ -1,24 +1,17 @@
 use std::error::Error;
 use std::fs;
-use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::time::Duration;
 
-use grpc::string_to_atom;
-use nockapp::driver::{make_driver, IODriverFn, NockAppHandle, Operation};
+use {{rust_crate_name}}::string_to_atom;
+use {{rust_crate_name}}::GRPC_PORT;
+use nockapp::driver::Operation;
 use nockapp::kernel::boot;
 use nockapp::noun::slab::NounSlab;
 use nockapp::utils::make_tas;
-use nockapp::wire::{SystemWire, Wire, WireRepr, WireTag as AppWireTag};
-use nockapp::{exit_driver, file_driver, AtomExt, Bytes, NockApp, NockAppError, Noun};
-use nockapp_grpc::client::NockAppGrpcClient;
-use nockapp_grpc::driver::{grpc_listener_driver, grpc_server_driver, GrpcEffect};
-use nockapp_grpc::wire_conversion::{create_grpc_wire, grpc_wire_to_nockapp};
-use nockapp_grpc::NockAppGrpcServer;
-use nockvm::noun::{Atom, D, T};
-use nockvm_macros::tas;
-use noun_serde::{NounDecode, NounDecodeError, NounEncode};
-use tracing::{error, info};
+use nockapp::NockApp;
+use nockapp_grpc::services::private_nockapp::grpc_listener_driver;
+use nockvm::noun::T;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -31,7 +24,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let kernel = fs::read("out.jam")
         .or_else(|_| fs::read(&fallback_filename))
         .map_err(|e| format!("Failed to read kernel file: {}", e))?;
-    let mut nockapp: NockApp = boot::setup(&kernel, Some(cli), &[], source_filename, None)
+    let mut nockapp: NockApp = boot::setup(&kernel, cli, &[], source_filename, None)
         .await
         .map_err(|e| format!("Kernel setup failed: {}", e))?;
 
@@ -49,12 +42,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     nockapp
         .add_io_driver(grpc_listener_driver(format!(
             "http://127.0.0.1:{}",
-            grpc::GRPC_PORT.to_string()
+            GRPC_PORT.to_string()
         )))
         .await;
-    nockapp.add_io_driver(exit_driver()).await;
 
-    nockapp.run().await;
+    match tokio::time::timeout(Duration::from_secs(2), nockapp.run()).await {
+        Ok(result) => result.expect("Failed to run app"),
+        Err(_) => println!("Finished gRPC demo request window"),
+    }
 
     Ok(())
 }

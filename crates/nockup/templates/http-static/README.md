@@ -24,7 +24,3 @@ cargo build --release
 hoonc hoon/app/app.hoon
 cargo run --release
 ```
-
-## Note
-
-The template `Cargo.toml` currently names the package/bin `http-server`. Rename it if you want `http-static` naming in Cargo artifacts.

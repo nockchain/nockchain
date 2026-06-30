@@ -1,0 +1,45 @@
+[package]
+name = "{{project_name}}"
+version = {{toml_version}}
+edition = "2021"
+authors = {{toml_authors}}
+description = {{toml_description}}
+
+[[bin]]
+name = "listen"
+path = "src/listen.rs"
+
+[[bin]]
+name = "talk"
+path = "src/talk.rs"
+
+[dependencies]
+# NockVM dependency
+nockapp = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+nockvm = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+nockvm_macros = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+noun-serde = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+noun-serde-derive = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+nockapp-grpc = { git = "https://github.com/nockchain/nockchain.git", rev = "{{nockchain_rev}}" }
+
+# Common dependencies for NockApps
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+anyhow = "1.0"
+bytes = "1.5.0"
+clap = "4.4.4"
+tokio = { version = "1.32", features = [
+  "fs",
+  "io-util",
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "rt",
+  "signal",
+  "time",
+] }
+tokio-util = "0.7.11"
+tracing = "0.1.41"
+
+[build-dependencies]
+# Build script dependencies if needed
