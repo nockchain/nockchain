@@ -15,5 +15,5 @@ nockchain-api-checkpoints-backup
 notes-*.csv
 /txs
 hoonc-octs-type-138.jam
-assets/native
+assets/native/*.jam
 bazel-*

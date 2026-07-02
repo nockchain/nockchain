@@ -5,16 +5,40 @@ package(default_visibility = ["//visibility:public"])
 # Arbitrary-build parity for the hoon-138 prelude, under Bazel: hoonc's
 # arbitrary build of hoon-138 vs honk's NATIVE self-mint
 # (HONK_NATIVE_PARITY=1, no embedded prelude), byte-compared with `cmp`.
-# Both sides compile inside the sandbox from the same full `//hoon:files`
-# tree, so the artifacts are directly comparable with no waiver. This is the
+# Both sides compile inside the sandbox from the same full hoon source tree
+# (ALL_HOON_FILES below), so the artifacts are directly comparable with no
+# waiver. This is the
 # Bazel twin of `just honk-138-parity` (which builds the same pair locally).
+
+ALL_HOON_FILES = [
+    # An --arbitrary build scans the entire deps tree, and Bazel globs do not
+    # cross package boundaries — `//hoon:files` alone omits every subpackage.
+    # Both sides of the pairing MUST use this same list: the artifact embeds a
+    # hash of the directory tree the compiler sees.
+    "//hoon:files",
+    "//hoon/apps/bridge:files",
+    "//hoon/apps/dumbnet:files",
+    "//hoon/apps/dumbnet/lib:files",
+    "//hoon/apps/hoonc:files",
+    "//hoon/apps/peek:files",
+    "//hoon/apps/roswell:files",
+    "//hoon/apps/wallet:files",
+    "//hoon/apps/wallet/lib:files",
+    "//hoon/common:files",
+    "//hoon/common/markdown:files",
+    "//hoon/common/stark:files",
+    "//hoon/common/ztd:files",
+    "//hoon/dat:files",
+    "//hoon/jams:files",
+    "//hoon/tests:files",
+]
 
 hoon_library(
     name = "hoon_138_ref",
     src = "//hoon/common:hoon.hoon",
     arbitrary = True,
     output = True,
-    deps = ["//hoon:files"],
+    deps = ALL_HOON_FILES,
 )
 
 honk_library(
@@ -22,12 +46,13 @@ honk_library(
     src = "//hoon/common:hoon.hoon",
     arbitrary = True,
     native_parity = True,
-    deps = ["//hoon:files"],
+    deps = ALL_HOON_FILES,
 )
 
 sh_test(
     name = "hoon_138_arbitrary_parity_test",
     srcs = ["//assets/native:kernel_parity_test.sh"],
+    size = "small",
     args = [
         "$(rootpath :hoon_138_ref)",
         "$(rootpath :hoon_138_native)",
