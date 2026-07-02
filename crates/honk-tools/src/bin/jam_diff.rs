@@ -941,6 +941,43 @@ fn preview_axis(jam_path: &str, axis: &str, depth: usize) {
     println!("{}", preview_with_depth(node, depth, &space));
 }
 
+fn set_keys(jam_path: &str, depth: usize) {
+    let jam = fs::read(jam_path).unwrap_or_else(|e| {
+        eprintln!("read {jam_path}: {e}");
+        process::exit(1);
+    });
+    let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
+    let root = cue(&mut stack, &jam, "set-keys");
+    let space = stack.noun_space();
+    let mut stackv: Vec<(Noun, String)> = Vec::new();
+    let mut current = root;
+    let mut current_axis = "1".to_string();
+    let mut idx = 0usize;
+    loop {
+        while unsafe { !current.raw_equals(&nockvm::noun::D(0)) } {
+            let cell = current.in_space(&space).as_cell().unwrap();
+            let branches = cell.tail().as_cell().unwrap();
+            stackv.push((current, current_axis.clone()));
+            current = branches.tail().noun();
+            current_axis = format!("{current_axis}.3.3");
+        }
+        let Some((node, node_axis)) = stackv.pop() else { break };
+        let cell = node.in_space(&space).as_cell().unwrap();
+        let key = cell.head().noun();
+        let mug = nockvm::mug::mug_u32(&mut stack, key);
+        let mor = nockvm::mug::mug_u32(&mut stack, nockvm::noun::D(mug as u64));
+        println!(
+            "{idx}: axis={}.2 mug={mug:08x} mor={mor:08x} {}",
+            node_axis,
+            preview_with_depth(key, depth, &space)
+        );
+        idx += 1;
+        let branches = cell.tail().as_cell().unwrap();
+        current = branches.head().noun();
+        current_axis = format!("{node_axis}.3.2");
+    }
+}
+
 fn main() {
     let program = env::args().next().unwrap_or_else(|| "jam-diff".to_string());
     let args = env::args().skip(1).collect::<Vec<_>>();
@@ -959,6 +996,15 @@ fn main() {
             process::exit(2);
         }
         count_tags(&args[1]);
+        return;
+    }
+    if args.first().map(String::as_str) == Some("--set-keys") {
+        if args.len() < 2 {
+            eprintln!("usage: {program} --set-keys <jam> [depth]");
+            process::exit(2);
+        }
+        let depth = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
+        set_keys(&args[1], depth);
         return;
     }
     if args.first().map(String::as_str) == Some("--scan-semi") {

@@ -77,7 +77,7 @@ fn spec_parser<'src>(
         ),
         rune_branch_pair!(
             "%",
-            cen_spec_tall(hoon.clone(), spec.clone()),
+            cen_spec_tall(hoon.clone(), spec.clone(), linemap.clone()),
             cen_spec_wide(hoon_wide.clone(), spec_wide.clone())
         ),
         spec_wide.clone(),
@@ -152,7 +152,7 @@ fn hoon_wide_parser<'src>(
             .boxed(),
         just('?')
             .ignore_then(choice((
-                wut_runes_wide(hoon_wide.clone(), spec_wide.clone()),
+                wut_runes_wide(hoon_wide.clone(), spec_wide.clone(), linemap.clone()),
                 bucwut_irregular(spec_wide.clone()).boxed(), // ?(foo bar)
                 just('?').to(Hoon::Base(BaseType::Flag)).boxed(),
                 empty().to(Hoon::Base(BaseType::Flag)).boxed(),
@@ -324,7 +324,7 @@ pub fn hoon_parser<'src>(
                     linemap.clone(),
                 )
                 .boxed(),
-                wut_runes_wide(hoon_wide.clone(), spec_wide.clone()).boxed(),
+                wut_runes_wide(hoon_wide.clone(), spec_wide.clone(), linemap.clone()).boxed(),
                 bucwut_irregular(spec_wide.clone()).boxed(), // ?(foo bar)
                 just('?').to(Hoon::Base(BaseType::Flag)).boxed(),
                 empty().to(Hoon::Base(BaseType::Flag)).boxed(),
@@ -337,7 +337,7 @@ pub fn hoon_parser<'src>(
         ),
         rune_branch_pair!(
             ':',
-            col_runes_tall(hoon.clone()),
+            col_runes_tall(hoon.clone(), linemap.clone()),
             col_runes_wide(hoon_wide.clone())
         ),
         rune_branch_pair!(

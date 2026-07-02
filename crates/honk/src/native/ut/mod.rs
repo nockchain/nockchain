@@ -238,7 +238,14 @@ pub struct Ut<'a> {
     musk: MuskRuntime,
     // Cross-call persistence for the `miss` memo; only enabled during the
     // isolated prelude (hoon-138) mint. See miss().
-    miss_memo_persist: Option<FastHashMap<(u64, u64, u8), bool>>,
+    /// Cross-call `miss` memo (prelude mint only), retained for a single
+    /// semantic epoch: `(vet, active fan, arm epoch, placeholder context)`.
+    /// `miss` reaches `repo`/`rest`/`redo`, whose state evolves during a
+    /// build; a verdict memoized under one hold-expansion state can flip
+    /// under another (observed: ++dish's `~|` vase constant kept a `%hint`
+    /// fork member hoonc resolves away). Clearing on any epoch change keeps
+    /// within-arm reuse (the perf case) while never reusing across state.
+    miss_memo_persist: Option<((u8, u64, u64, u64), FastHashMap<(u64, u64, u8), bool>)>,
     // `^~` fold outcomes keyed by (bran, formula). Folding is a pure
     // function of these two nouns: arm resolution through the persistent
     // lazy resolvers is time-invariant, so both successes and failures are
@@ -2795,6 +2802,8 @@ impl<'a> Ut<'a> {
     }
 
     fn lower_brtis(spec: &Spec, q: &Hoon) -> Hoon {
+        // hoon-138 `++open` %brts (hoon-138.hoon:8425): `|=` lowers to `|_`
+        // with the spec (including any %gist annotations) preserved in place.
         let mut arms = HashMap::new();
         arms.insert("$".to_string(), q.clone());
         let mut tomes = HashMap::new();
@@ -3181,7 +3190,10 @@ impl<'a> Ut<'a> {
         poly: Poly,
     ) -> Result<Option<(NRc<NTy>, Noun)>> {
         let context = self.cache_context_key();
-        let fan = self.fan_context_key_scoped(sut)?;
+        // `mint_core` validates the produced core against `gol` through
+        // `nice`/`nest`, so `%hold` fan reachability is a property of the
+        // subject-goal pair, not just the deepening subject.
+        let fan = self.fan_context_key_scoped_pair(sut, gol)?;
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let poly_key = match poly {
@@ -3206,7 +3218,7 @@ impl<'a> Ut<'a> {
         formula: Noun,
     ) -> Result<()> {
         let context = self.cache_context_key();
-        let fan = self.fan_context_key_scoped(sut)?;
+        let fan = self.fan_context_key_scoped_pair(sut, gol)?;
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let poly_key = match poly {
@@ -3297,7 +3309,10 @@ impl<'a> Ut<'a> {
         gen_sig: u64,
     ) -> Result<Option<(NRc<NTy>, Noun)>> {
         let context = self.cache_context_key();
-        let fan = self.fan_context_key_scoped(sut)?;
+        // `mint` cache hits bypass the fresh `nice(sut, gol, typ)` check; include
+        // goal-reachable `%hold` legs in the scoped fan key so cached success is
+        // only reused in a semantically equivalent rest/fan context.
+        let fan = self.fan_context_key_scoped_pair(sut, gol)?;
         Ok(native_mint_cache_lookup(
             &self.cx, sut, gol, context.semantic.vet_key, gen_sig, fan, context.memo.arm_epoch_key,
             context.memo.placeholder_context_key,
@@ -3313,7 +3328,7 @@ impl<'a> Ut<'a> {
         formula: Noun,
     ) -> Result<()> {
         let context = self.cache_context_key();
-        let fan = self.fan_context_key_scoped(sut)?;
+        let fan = self.fan_context_key_scoped_pair(sut, gol)?;
         native_mint_cache_store(
             &mut self.cx, sut, gol, context.semantic.vet_key, gen_sig, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key, ty, formula,
@@ -4481,12 +4496,10 @@ impl<'a> Ut<'a> {
         let wux = self.lose(sut, p)?;
         let mut options = Vec::with_capacity(2);
         if !matches!(&*fex, NTy::Void) {
-            let q_ty = self.play(fex, q)?;
-            options.push(q_ty);
+            options.push(self.play(fex, q)?);
         }
         if !matches!(&*wux, NTy::Void) {
-            let r_ty = self.play(wux, r)?;
-            options.push(r_ty);
+            options.push(self.play(wux, r)?);
         }
         self.cons_fork(options)
     }
@@ -4504,7 +4517,7 @@ impl<'a> Ut<'a> {
         let (_cond_ty, cond_formula) = self.mint(sut.clone(), bool_ty, p)?;
         // gain/lose are native now (C6); thread the native subject directly.
         let fex = self.gain(sut.clone(), p)?;
-        let wux = self.lose(sut, p)?;
+        let wux = self.lose(sut.clone(), p)?;
         let fex_void = matches!(&*fex, NTy::Void);
         let wux_void = matches!(&*wux, NTy::Void);
         let (ned, duy) = if fex_void && wux_void {
@@ -9130,7 +9143,7 @@ impl<'a> Ut<'a> {
         Ok(out)
     }
 
-    fn burp_type(&mut self, typ: Noun) -> Result<Noun> {
+    pub fn burp_type(&mut self, typ: Noun) -> Result<Noun> {
         let space = self.slab.noun_space();
         let raw = unsafe { typ.as_raw() };
         if let Some(cached) = self.burp_type_cache.get(&raw) {
@@ -9683,8 +9696,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.gain_atom_skin(sut, inner, aura, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.gain_atom_skin(sut, inner, aura, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -9767,8 +9783,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.gain_cell_skin(sut, inner, head, tail, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.gain_cell_skin(sut, inner, head, tail, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -9846,8 +9865,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.gain_leaf_skin(sut, inner, aura, atom, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.gain_leaf_skin(sut, inner, aura, atom, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -9966,8 +9988,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.lose_atom_skin(sut, inner, _aura, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.lose_atom_skin(sut, inner, _aura, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -10053,8 +10078,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.lose_cell_skin(sut, inner, head, tail, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.lose_cell_skin(sut, inner, head, tail, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -10109,8 +10137,11 @@ impl<'a> Ut<'a> {
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
-                let inner = self.repo(ref_.clone())?;
-                self.lose_leaf_skin(sut, inner, _aura, atom, seen)
+                let result = self
+                    .repo(ref_.clone())
+                    .and_then(|inner| self.lose_leaf_skin(sut, inner, _aura, atom, seen));
+                seen.remove(&ref_id);
+                result
             }
         }
     }
@@ -10139,9 +10170,19 @@ impl<'a> Ut<'a> {
     fn miss(&mut self, sut: NRc<NTy>, ref_: NRc<NTy>) -> Result<bool> {
         // ATOMIC FLIP (consumer C5b): native. seen/memo keyed by native pointer.
         let mut seen: Vec<(u64, u64)> = Vec::new();
-        if let Some(mut memo) = self.miss_memo_persist.take() {
+        if let Some((stored_epoch, mut memo)) = self.miss_memo_persist.take() {
+            let context = self.cache_context_key();
+            let epoch = (
+                context.semantic.vet_key,
+                context.semantic.fan_context_key,
+                context.memo.arm_epoch_key,
+                context.memo.placeholder_context_key,
+            );
+            if stored_epoch != epoch {
+                memo.clear();
+            }
             let result = self.miss_dext(sut, ref_, &mut seen, &mut memo);
-            self.miss_memo_persist = Some(memo);
+            self.miss_memo_persist = Some((epoch, memo));
             return result;
         }
         let mut memo: FastHashMap<(u64, u64, u8), bool> = Default::default();
@@ -10159,7 +10200,9 @@ impl<'a> Ut<'a> {
     pub fn set_miss_memo_persistence(&mut self, enabled: bool) -> bool {
         let was_enabled = self.miss_memo_persist.is_some();
         if enabled && !was_enabled {
-            self.miss_memo_persist = Some(Default::default());
+            // Sentinel epoch (vet_key is only ever 0/1): the first `miss`
+            // call stamps the real epoch over an empty map.
+            self.miss_memo_persist = Some(((u8::MAX, 0, 0, 0), Default::default()));
         } else if !enabled {
             self.miss_memo_persist = None;
         }
@@ -10702,19 +10745,12 @@ impl<'a> Ut<'a> {
         // determine the result. Skips the mug-treap rebuild + decode/jam for the
         // forks that recur throughout the recursive-type elaboration. Byte-exact:
         // a hit returns the same interned `Rc` the rebuild would.
-        let mut key: Vec<usize> = options.iter().map(|o| NRc::as_ptr(o) as usize).collect();
-        key.sort_unstable();
-        key.dedup();
-        if let Some(cached) = fork_cache_lookup(&self.cx, &key) {
-            return Ok(cached);
-        }
         let mut noun_opts = Vec::with_capacity(options.len());
         for opt in &options {
             noun_opts.push(live_to_noun(&mut self.cx, opt, self.slab));
         }
         let fork_noun = self.fork_from_options(noun_opts)?;
         let result = self.native_of_cached(fork_noun)?;
-        fork_cache_store(&mut self.cx, key, result.clone());
         Ok(result)
     }
 
@@ -10765,6 +10801,31 @@ impl<'a> Ut<'a> {
             }
             seen.entry(mug).or_default().push((hold, axis));
             Ok(false)
+        }
+
+        fn unsee_hold(
+            ut: &mut Ut<'_>,
+            seen: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            hold: Noun,
+            axis: u64,
+        ) -> Result<()> {
+            let axis_noun = noun_u64(ut.slab, axis);
+            let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
+            if let Some(bucket) = seen.get_mut(&mug) {
+                let space = ut.slab.noun_space();
+                let mut idx = 0;
+                while idx < bucket.len() {
+                    if bucket[idx].1 == axis && noun_eq(bucket[idx].0, hold, &space)? {
+                        bucket.swap_remove(idx);
+                        break;
+                    }
+                    idx += 1;
+                }
+                if bucket.is_empty() {
+                    seen.remove(&mug);
+                }
+            }
+            Ok(())
         }
 
         fn go(
@@ -10830,7 +10891,9 @@ impl<'a> Ut<'a> {
                         return Ok(cons_void(&mut ut.cx));
                     }
                     let expanded = ut.repo(sut.clone())?;
-                    go(ut, expanded, way, axis, seen_holds)
+                    let result = go(ut, expanded, way, axis, seen_holds);
+                    unsee_hold(ut, seen_holds, hold_noun, axis)?;
+                    result
                 }
                 NTy::Fork { set } => {
                     let set_noun = live_leaf_to_noun(&mut ut.cx, set, ut.slab);
@@ -11917,8 +11980,15 @@ fn fork_set_insert(slab: &mut NounSlab, set: Noun, option: Noun) -> Result<Noun>
 }
 
 fn set_uni_mug(slab: &mut NounSlab, a: Noun, b: Noun) -> Result<Noun> {
+    // Direct translation of hoon-138 `++uni` for `%set` treaps.
+    //
+    // `++fork` does not rebuild nested forks by tapping their keys back through
+    // `++put`; it calls `~(uni in set)`, whose split-and-merge recursion fixes the
+    // exact treap shape. Re-inserting every key preserves membership but not bytes:
+    // large named-type forks can move a `%hint` key to a different branch and then
+    // diverge in `~|`/`^~` embedded type artifacts.
     let space = slab.noun_space();
-    if noun_eq(a, b, &space)? {
+    if unsafe { a.raw_equals(&b) } || noun_eq(a, b, &space)? {
         return Ok(a);
     }
     if noun_is_zero(b) {
@@ -11928,37 +11998,37 @@ fn set_uni_mug(slab: &mut NounSlab, a: Noun, b: Noun) -> Result<Noun> {
         return Ok(b);
     }
 
-    let (n_a, l_a, r_a) = set_parts(a, &space)?;
-    let (n_b, l_b, r_b) = set_parts(b, &space)?;
+    let (a_key, a_left, a_right) = set_parts(a, &space)?;
+    let (b_key, b_left, b_right) = set_parts(b, &space)?;
 
-    if noun_eq(n_b, n_a, &space)? {
-        let left = set_uni_mug(slab, l_a, l_b)?;
-        let right = set_uni_mug(slab, r_a, r_b)?;
-        return Ok(set_node(slab, n_b, left, right));
+    if noun_eq(b_key, a_key, &space)? {
+        let left = set_uni_mug(slab, a_left, b_left)?;
+        let right = set_uni_mug(slab, a_right, b_right)?;
+        return Ok(set_node(slab, b_key, left, right));
     }
 
-    if mor_mug(slab, n_a, n_b) {
-        if gor_mug(slab, n_b, n_a) {
-            let b_without_right = set_node(slab, n_b, l_b, D(0));
-            let left = set_uni_mug(slab, l_a, b_without_right)?;
-            let a_with_left = set_node(slab, n_a, left, r_a);
-            set_uni_mug(slab, a_with_left, r_b)
+    if mor_mug(slab, a_key, b_key) {
+        if gor_mug(slab, b_key, a_key) {
+            let b_without_right = set_node(slab, b_key, b_left, D(0));
+            let left = set_uni_mug(slab, a_left, b_without_right)?;
+            let merged_a = set_node(slab, a_key, left, a_right);
+            set_uni_mug(slab, merged_a, b_right)
         } else {
-            let b_without_left = set_node(slab, n_b, D(0), r_b);
-            let right = set_uni_mug(slab, r_a, b_without_left)?;
-            let a_with_right = set_node(slab, n_a, l_a, right);
-            set_uni_mug(slab, a_with_right, l_b)
+            let b_without_left = set_node(slab, b_key, D(0), b_right);
+            let right = set_uni_mug(slab, a_right, b_without_left)?;
+            let merged_a = set_node(slab, a_key, a_left, right);
+            set_uni_mug(slab, merged_a, b_left)
         }
-    } else if gor_mug(slab, n_a, n_b) {
-        let a_without_right = set_node(slab, n_a, l_a, D(0));
-        let left = set_uni_mug(slab, a_without_right, l_b)?;
-        let b_with_left = set_node(slab, n_b, left, r_b);
-        set_uni_mug(slab, r_a, b_with_left)
+    } else if gor_mug(slab, a_key, b_key) {
+        let a_without_right = set_node(slab, a_key, a_left, D(0));
+        let left = set_uni_mug(slab, a_without_right, b_left)?;
+        let merged_b = set_node(slab, b_key, left, b_right);
+        set_uni_mug(slab, a_right, merged_b)
     } else {
-        let a_without_left = set_node(slab, n_a, D(0), r_a);
-        let right = set_uni_mug(slab, a_without_left, r_b)?;
-        let b_with_right = set_node(slab, n_b, l_b, right);
-        set_uni_mug(slab, l_a, b_with_right)
+        let a_without_left = set_node(slab, a_key, D(0), a_right);
+        let right = set_uni_mug(slab, a_without_left, b_right)?;
+        let merged_b = set_node(slab, b_key, b_left, right);
+        set_uni_mug(slab, a_left, merged_b)
     }
 }
 
@@ -12774,7 +12844,7 @@ use crate::native::ir::intern::{
     core_mint_cache_store as native_core_mint_cache_store,
     crop_cache_lookup as native_crop_cache_lookup, crop_cache_store as native_crop_cache_store,
     fish_cache_lookup as native_fish_cache_lookup, fish_cache_store as native_fish_cache_store,
-    fork_cache_lookup, fork_cache_store, fuse_cache_lookup as native_fuse_cache_lookup,
+    fuse_cache_lookup as native_fuse_cache_lookup,
     fuse_cache_store as native_fuse_cache_store, legset_memo_lookup, legset_memo_store,
     live_intern, live_leaf_to_noun, live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
     mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,

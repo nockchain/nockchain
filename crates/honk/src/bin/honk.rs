@@ -671,20 +671,9 @@ fn parse_build_leaf(
     } else {
         build_import_wer(path, deps_dir)
     };
-    // Docs MUST be disabled here for byte-for-byte artifact parity: with docs
-    // enabled, honk anchors doc-comment blocks into the AST and emits %help/
-    // %hint nodes that hoonc's build artifacts do not contain. Enabling docs
-    // was tested against the kernel-parity harness and broke all six kernels
-    // (structural `%help`/`%hint` shape mismatches vs the hoonc references);
-    // disabling docs reproduces hoonc's artifact spots exactly. (Note: this is
-    // the build-leaf parse only; the public parser paths keep docs enabled.)
-    //
-    // Native-parity self-mint: enabling entry docs here is WORSE (regresses the
-    // divergence to byte ~212 and still only yields ~609 help nodes vs hoonc's
-    // 1335) because honk's doc-anchoring captures ~half of hoonc's docs and
-    // anchors them differently — a hatch LineMap completeness/position parity
-    // follow-up, tracked separately. The prelude leg (docs ON) carries the docs
-    // that currently match.
+    // Build-leaf docs remain off for byte parity. The hoon-138 self-mint keeps
+    // docs on the shared prelude leg; enabling them on the entry leg reparses the
+    // whole source with duplicate doc-bearing ASTs and regresses compile time.
     Ok(pipeline::parse_native_hoon_source_without_docs(
         path,
         source.as_str(),
@@ -952,6 +941,11 @@ fn build_context_with_shared_prelude(
         // mints) has them complete, the root of the native≠hoonc divergence. The
         // mint already runs for the formula, so this reuses its type (no extra work;
         // the now-redundant seed play is left intact to preserve cache/memo setup).
+        let minted_ty = if std::env::var_os("NATIVE_HOON_SKIP_BURP").is_some() {
+            minted_ty
+        } else {
+            ut.burp_type(minted_ty)?
+        };
         prelude_vase.ty = minted_ty;
         formula
     };
@@ -2688,6 +2682,7 @@ fn mint_honc_prelude_chunked(
         let formula_out;
         {
             let mut ut = Ut::new(&mut work);
+            ut.exact_hoon_ast_lookup_enabled = true;
             ut.load_musk_cold_state(EMBEDDED_HONC_COLD_138_JAM, "chunk layer")
                 .map_err(|err| -> DynError { Box::new(err) })?;
             ut.set_vet(true);
@@ -2695,6 +2690,7 @@ fn mint_honc_prelude_chunked(
             let sub_in = ut.slab.copy_into(subject, &subject_slab.noun_space());
             let goal = ty_noun(&mut *ut.slab);
             let (ty, formula) = ut.mint_noun(sub_in, goal, expr)?;
+            let ty = ut.burp_type(ty)?;
             let ut_space = ut.slab.noun_space();
             formula_out = out_slab.copy_into(formula, &ut_space);
             if i + 1 < total {
@@ -2738,7 +2734,9 @@ fn mint_honc_formula_with_ut(
         prelude_variant_name(prelude),
         &dbg[..dbg.len().min(200)]
     );
-    if matches!(peel_transparent(prelude), Hoon::TisGal(_, _)) {
+    if std::env::var_os("NATIVE_HOON_NO_CHUNK").is_none()
+        && matches!(peel_transparent(prelude), Hoon::TisGal(_, _))
+    {
         return mint_honc_prelude_chunked(&mut *ut.slab, prelude);
     }
     let sut = empty_subject_type(&mut *ut.slab);

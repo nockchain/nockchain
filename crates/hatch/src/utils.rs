@@ -4295,6 +4295,35 @@ pub fn list_spec_closed_tall<'src>(
         .then_ignore(just("=="))
 }
 
+pub fn list_spec_closed_tall_with_docs<'src>(
+    spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, Vec<Spec>, Err<'src>> {
+    let item_linemap = linemap.clone();
+    let documented_spec = spec
+        .clone()
+        .map_with(move |spec: Spec, e| {
+            let span = (e.span().start(), e.span().end());
+            let help = item_linemap
+                .help_after_choice_spec_item(span.0, span.1)
+                .or_else(|| item_linemap.help_before_choice_spec_item(span.0));
+            if let Some(help) = help {
+                attach_help_to_spec(spec, help)
+            } else {
+                spec
+            }
+        });
+    gap()
+        .ignore_then(
+            documented_spec
+                .separated_by(gap())
+                .at_least(1)
+                .collect::<Vec<_>>(),
+        )
+        .then_ignore(gap())
+        .then_ignore(just("=="))
+}
+
 pub fn list_wing_hoon_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
 ) -> impl Parser<'src, &'src str, Vec<(WingType, Hoon)>, Err<'src>> {
@@ -4302,6 +4331,32 @@ pub fn list_wing_hoon_tall<'src>(
         .then_ignore(gap())
         .then(hoon.clone())
         .then_ignore(gap());
+
+    pair.repeated()
+        .at_least(1)
+        .collect::<Vec<(WingType, Hoon)>>()
+}
+
+pub fn list_wing_hoon_tall_with_docs<'src>(
+    hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, Vec<(WingType, Hoon)>, Err<'src>> {
+    let pair_linemap = linemap.clone();
+    let pair = winglist()
+        .then_ignore(gap())
+        .then(
+            hoon.clone()
+                .map_with(|hoon: Hoon, e| (hoon, e.span().start(), e.span().end())),
+        )
+        .then_ignore(gap())
+        .map(move |(wing, (hoon, start, end))| {
+            let hoon = if let Some(help) = pair_linemap.help_after_rune(start, end) {
+                attach_help_to_hoon(hoon, help)
+            } else {
+                hoon
+            };
+            (wing, hoon)
+        });
 
     pair.repeated()
         .at_least(1)
@@ -4401,10 +4456,18 @@ fn attach_help_to_kethep_tail(node: Hoon, help: NounExpr) -> Hoon {
 ///     chapters can be unamed or named with +$
 ///     arms can be named with ++ or +$
 ///
+fn doc_help_has_nonzero_cuff(help: &NounExpr) -> bool {
+    matches!(
+        help,
+        NounExpr::Cell(cuff, _) if !matches!(cuff.as_ref(), NounExpr::ParsedAtom(atom) if atom.is_zero())
+    )
+}
+
 pub fn chapters<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
     linemap: Arc<LineMap>,
+    attach_single_named_prefix_docs: bool,
 ) -> impl Parser<'src, &'src str, HashMap<String, Tome>, Err<'src>> {
     let luslus_linemap = linemap.clone();
     let luslus = just("++")
@@ -4429,16 +4492,55 @@ pub fn chapters<'src>(
             // A `|$` body already self-anchors its postfix `::` doc onto the body
             // spec (see `barbuc`), so the arm-body note must not double-wrap it.
             let body_is_barbuc = matches!(&hoon, Hoon::BarBuc(..));
-            let body_tail_owns_postfix = matches!(&hoon, Hoon::BarTis(_, inner) if matches!(inner.as_ref(), Hoon::KetHep(..)));
-            let hoon =
-                if let Some(help) = luslus_linemap.arm_postfix_help("funk", &name, start, end) {
+            let body_tail_owns_postfix = matches!(&hoon, Hoon::BarTis(_, _))
+                && !matches!(
+                    luslus_linemap.source.as_bytes().get(body_start + 2),
+                    Some(b'(')
+                );
+            let hoon = if let Some(help) = luslus_linemap.help_before_arm_tail(start) {
+                if hoon_tail_has_help(&hoon, &help) {
+                    hoon
+                } else {
                     Hoon::Note(Note::Help(help), Box::new(hoon))
-                } else if let Some(help) =
-                    luslus_linemap.arm_scye_help_after_name(end, body_start)
-                {
+                }
+            } else {
+                hoon
+            };
+            let prefix_help = luslus_linemap
+                .help_before_named_arm_list_entry(&name, start)
+                .or_else(|| {
+                    let single_named =
+                        luslus_linemap.doc_block_is_single_named_summary_for(&name, start);
+                    ((attach_single_named_prefix_docs || !single_named)
+                        && !(single_named && luslus_linemap.doc_block_follows_barcab_opener(start)))
+                    .then(|| luslus_linemap.help_before_arm(start))
+                    .flatten()
+                });
+            let postfix_help = luslus_linemap.arm_postfix_help("funk", &name, start, end);
+            let scye_after_name_help = luslus_linemap.arm_scye_help_after_name(end, body_start);
+            let prefix_help_has_link = prefix_help.as_ref().is_some_and(doc_help_has_nonzero_cuff);
+            let hoon = if (postfix_help.is_some() || scye_after_name_help.is_some())
+                && !prefix_help_has_link
+            {
+                if let Some(help) = prefix_help.clone() {
+                    if hoon_tail_has_help(&hoon, &help) {
+                        hoon
+                    } else {
+                        Hoon::Note(Note::Help(help), Box::new(hoon))
+                    }
+                } else {
+                    hoon
+                }
+            } else {
+                hoon
+            };
+            let hoon =
+                if let Some(help) = postfix_help {
+                    Hoon::Note(Note::Help(help), Box::new(hoon))
+                } else if let Some(help) = scye_after_name_help {
                     Hoon::Note(Note::Help(help), Box::new(hoon))
                 } else if let Some(help) = (!body_is_barbuc)
-                    .then(|| luslus_linemap.help_after(start, body_end))
+                    .then(|| luslus_linemap.help_after_arm_body(start, body_end))
                     .flatten()
                 {
                     if body_tail_owns_postfix {
@@ -4448,13 +4550,29 @@ pub fn chapters<'src>(
                     } else {
                         Hoon::Note(Note::Help(help), Box::new(hoon))
                     }
-                } else if let Some(help) = luslus_linemap.help_before_arm(start) {
+                } else if let Some(help) = prefix_help
+                    .clone()
+                    .filter(|_| !prefix_help_has_link)
+                {
                     // Prefix doc block above `++ name` (e.g. `::  +aor: …`), which
                     // the body's own help_before cannot reach across the `++` line.
                     Hoon::Note(Note::Help(help), Box::new(hoon))
                 } else {
                     hoon
                 };
+            let hoon = if prefix_help_has_link {
+                if let Some(help) = prefix_help {
+                    if hoon_tail_has_help(&hoon, &help) {
+                        hoon
+                    } else {
+                        Hoon::Note(Note::Help(help), Box::new(hoon))
+                    }
+                } else {
+                    hoon
+                }
+            } else {
+                hoon
+            };
             (name, hoon)
         })
         .labelled("Arm ++");
@@ -4469,7 +4587,24 @@ pub fn chapters<'src>(
                 .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end())),
         )
         .map(move |((name, start, end), (spec, spec_start, spec_end))| {
-            let spec = Spec::Name(name.clone(), Box::new(spec));
+            let spec = match spec {
+                Spec::BucSig(default, rest) => {
+                    let help = if matches!(
+                        lusbuc_linemap.source.as_bytes().get(spec_start + 2),
+                        Some(b'(')
+                    ) {
+                        None
+                    } else {
+                        lusbuc_linemap.help_after_current_line_expr(spec_start)
+                    };
+                    if let Some(help) = help {
+                        Spec::BucSig(Hoon::Note(Note::Help(help), Box::new(default)), rest)
+                    } else {
+                        Spec::BucSig(default, rest)
+                    }
+                }
+                other => other,
+            };
             let spec = if let Some(help) = lusbuc_linemap.help_before_spec(spec_start) {
                 Spec::Gist(help, Box::new(spec))
             } else if let Some(help) = lusbuc_linemap.help_after_rune(spec_start, spec_end) {
@@ -4477,6 +4612,7 @@ pub fn chapters<'src>(
             } else {
                 spec
             };
+            let spec = Spec::Name(name.clone(), Box::new(spec));
             let hoon = Hoon::KetCol(Box::new(spec));
             let hoon = if let Some(help) = lusbuc_linemap.help_before_plan_tail(start) {
                 Hoon::Note(Note::Help(help), Box::new(hoon))
@@ -4486,7 +4622,10 @@ pub fn chapters<'src>(
             let hoon =
                 if let Some(help) = lusbuc_linemap.arm_postfix_help("plan", &name, start, end) {
                     Hoon::Note(Note::Help(help), Box::new(hoon))
-                } else if let Some(help) = lusbuc_linemap.help_before_arm(start) {
+                } else if let Some(help) = lusbuc_linemap
+                    .help_before_named_arm_summary(&name, start)
+                    .or_else(|| lusbuc_linemap.help_before_arm(start))
+                {
                     Hoon::Note(Note::Help(help), Box::new(hoon))
                 } else {
                     hoon
@@ -6089,7 +6228,7 @@ impl LineMap {
             return None;
         }
 
-        Self::build_doc_help_from_lines(&docs)
+        Self::build_doc_help_from_lines(&docs).or_else(|| Self::build_last_larg_doc_help_from_lines(&docs))
     }
 
     fn build_doc_help_from_lines(docs: &[(usize, String)]) -> Option<NounExpr> {
@@ -6112,6 +6251,7 @@ impl LineMap {
         let summary = strip_doc_spaces(summary_raw, summary_strip);
         let stop_plan_details_at_code =
             summary.starts_with('$') && summary.split_once(": ").is_some();
+        let smol_detail_lines = summary_indent < 4;
         if summary.is_empty() {
             return None;
         }
@@ -6119,8 +6259,13 @@ impl LineMap {
         let mut sections: Vec<NounExpr> = Vec::new();
         let mut section: Vec<NounExpr> = Vec::new();
         let mut in_details = false;
+        let mut saw_pre_detail_line = false;
+        let mut last_smol_detail_was_bullet = false;
         for (_, raw) in docs.iter().skip(1) {
             if raw.trim().is_empty() {
+                if smol_detail_lines && saw_pre_detail_line {
+                    break;
+                }
                 if !section.is_empty() {
                     sections.push(Self::doc_list(std::mem::take(&mut section)));
                 }
@@ -6128,10 +6273,29 @@ impl LineMap {
                 continue;
             }
             if !in_details {
+                saw_pre_detail_line = true;
                 continue;
             }
 
             let indent = leading_spaces(raw.as_bytes());
+            if smol_detail_lines {
+                let is_continuation = indent == detail_strip + 2 && last_smol_detail_was_bullet;
+                if indent != detail_strip && !is_continuation {
+                    break;
+                }
+                let text = strip_doc_spaces(raw, if is_continuation { detail_strip + 2 } else { detail_strip });
+                if text.is_empty() {
+                    continue;
+                }
+                section.push(Self::doc_cell(
+                    Self::doc_atom(is_continuation as u128),
+                    Self::doc_cord(&text),
+                ));
+                if !is_continuation {
+                    last_smol_detail_was_bullet = text.starts_with("- ");
+                }
+                continue;
+            }
             let is_code = indent >= detail_strip + 2;
             if stop_plan_details_at_code && is_code {
                 break;
@@ -6159,9 +6323,7 @@ impl LineMap {
         // A doc summary beginning `+name: ` or `$name: ` is a cross-reference to
         // an arm or mold: hoonc strips the marker and records a `[%funk name]` or
         // `[%plan name]` link in the cuff.
-        let (cuff, summary) = Self::parse_doc_link(&summary);
-        // A bare `+name`/`$name` cross-ref uses the following detail block as the
-        // body with a null summary (`0`), not a literal empty cord.
+        let (cuff, summary) = Self::parse_doc_link(&summary, summary_indent < 4);
         if summary.is_empty() {
             if cuff != Self::doc_atom(0) && !sections.is_empty() {
                 let crib = Self::doc_cell(Self::doc_atom(0), Self::doc_list(sections));
@@ -6173,11 +6335,28 @@ impl LineMap {
         Some(Self::doc_cell(cuff, crib))
     }
 
-    /// Split a leading `+name`/`$name` cross-reference off a doc summary, returning
-    /// the cuff (`[[%funk name] 0]`, `[[%plan name] 0]`, or `~`) and the residual
-    /// summary text. `+name: text` and `$name: text` keep `text` as the summary; a
-    /// bare cross-ref returns an empty summary so the caller skips it.
-    fn parse_doc_link(summary: &str) -> (NounExpr, String) {
+    fn build_last_larg_doc_help_from_lines(docs: &[(usize, String)]) -> Option<NounExpr> {
+        let summary = docs.iter().rev().find_map(|(_, raw)| {
+            let indent = leading_spaces(raw.as_bytes());
+            if indent < 4 {
+                return None;
+            }
+            let summary = strip_doc_spaces(raw, 4);
+            if summary.is_empty() || summary.as_bytes().first().is_some_and(|byte| *byte == b' ') {
+                None
+            } else {
+                Some(summary)
+            }
+        })?;
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    /// Split a leading `+name: ` or `$name: ` cross-reference off a doc summary,
+    /// returning the cuff (`[[%funk name] 0]`, `[[%plan name] 0]`, or `~`) and the
+    /// residual summary text. Bare `+name`/`$name` summaries link only in smol
+    /// (two-space summary) docs; hoon-138 treats larg bare names as literal text.
+    fn parse_doc_link(summary: &str, link_bare: bool) -> (NounExpr, String) {
         let name_ok = |name: &str| {
             !name.is_empty()
                 && name
@@ -6194,13 +6373,378 @@ impl LineMap {
                     let link = Self::doc_cell(Self::doc_cord(tag), Self::doc_cord(name));
                     return (Self::doc_list(vec![link]), after.to_string());
                 }
-            } else if name_ok(rest) {
+            } else if let Some(name) = rest.strip_suffix(':') {
+                if name_ok(name) {
+                    let link = Self::doc_cell(Self::doc_cord(tag), Self::doc_cord(name));
+                    return (Self::doc_list(vec![link]), String::new());
+                }
+            } else if link_bare && name_ok(rest) {
                 let link = Self::doc_cell(Self::doc_cord(tag), Self::doc_cord(rest));
                 return (Self::doc_list(vec![link]), String::new());
             }
         }
-
         (Self::doc_atom(0), summary.to_string())
+    }
+
+    fn named_arm_list_doc_from_docs(
+        docs: &[(usize, String)],
+        target_indent: usize,
+        arm_name: &str,
+    ) -> Option<NounExpr> {
+        let mut named_count = 0usize;
+        let mut matched = None;
+        for (indent, raw) in docs {
+            if target_indent > *indent {
+                continue;
+            }
+            let raw_indent = leading_spaces(raw.as_bytes());
+            let strip = if raw_indent >= 4 {
+                4
+            } else if raw_indent >= 2 {
+                2
+            } else {
+                continue;
+            };
+            let summary = strip_doc_spaces(raw, strip);
+            let Some(rest) = summary.strip_prefix('+') else {
+                continue;
+            };
+            let Some((name, after)) = rest.split_once(": ") else {
+                continue;
+            };
+            if after.is_empty() {
+                continue;
+            }
+            named_count += 1;
+            if name == arm_name {
+                matched = Some(after.to_string());
+            }
+        }
+        if named_count < 2 {
+            return None;
+        }
+        let summary = matched?;
+        let link = Self::doc_cell(Self::doc_cord("funk"), Self::doc_cord(arm_name));
+        let cuff = Self::doc_list(vec![link]);
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(cuff, crib))
+    }
+
+    fn help_before_named_arm_summary(&self, arm_name: &str, name_byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+        let line = self.line_index(name_byte.min(self.source.len()));
+        if line == 0 {
+            return None;
+        }
+        let target_indent = self.line_indent(line)?;
+        let mut idx = line - 1;
+        let mut docs = Vec::new();
+        loop {
+            let Some((indent, content)) = self.doc_comment(idx) else {
+                break;
+            };
+            docs.push((indent, content));
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+        docs.reverse();
+        while docs.first().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.remove(0);
+        }
+        while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.pop();
+        }
+        let summary = docs.into_iter().find_map(|(indent, raw)| {
+            if target_indent > indent {
+                return None;
+            }
+            let raw_indent = leading_spaces(raw.as_bytes());
+            let strip = if raw_indent >= 4 {
+                4
+            } else if raw_indent >= 2 {
+                2
+            } else {
+                return None;
+            };
+            let summary = strip_doc_spaces(&raw, strip);
+            let rest = summary.strip_prefix('+')?;
+            let (name, after) = rest.split_once(": ")?;
+            (name == arm_name && !after.is_empty()).then(|| after.to_string())
+        })?;
+        let link = Self::doc_cell(Self::doc_cord("funk"), Self::doc_cord(arm_name));
+        let cuff = Self::doc_list(vec![link]);
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(cuff, crib))
+    }
+
+    fn doc_block_is_single_named_summary_for(&self, arm_name: &str, name_byte: usize) -> bool {
+        let line = self.line_index(name_byte.min(self.source.len()));
+        if line == 0 {
+            return false;
+        }
+        let mut idx = line - 1;
+        let mut docs = Vec::new();
+        loop {
+            let Some((indent, content)) = self.doc_comment(idx) else {
+                break;
+            };
+            docs.push((indent, content));
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+        docs.reverse();
+        while docs.first().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.remove(0);
+        }
+        while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.pop();
+        }
+        let mut named_count = 0usize;
+        let mut matched = false;
+        let mut has_detail = false;
+        for (_, raw) in docs {
+            let raw_indent = leading_spaces(raw.as_bytes());
+            let strip = if raw_indent >= 4 {
+                4
+            } else if raw_indent >= 2 {
+                2
+            } else {
+                continue;
+            };
+            let summary = strip_doc_spaces(&raw, strip);
+            if summary.is_empty() {
+                continue;
+            }
+            let Some(rest) = summary.strip_prefix('+') else {
+                has_detail = true;
+                continue;
+            };
+            let Some((name, after)) = rest.split_once(": ") else {
+                has_detail = true;
+                continue;
+            };
+            if after.is_empty() {
+                has_detail = true;
+                continue;
+            }
+            named_count += 1;
+            matched |= name == arm_name;
+        }
+        named_count == 1 && matched && !has_detail
+    }
+
+    fn doc_block_follows_barcab_opener(&self, name_byte: usize) -> bool {
+        let line = self.line_index(name_byte.min(self.source.len()));
+        if line == 0 {
+            return false;
+        }
+
+        let mut idx = line - 1;
+        loop {
+            if self.doc_comment(idx).is_none() {
+                let Some((start, end)) = self.line_bounds(idx) else {
+                    return false;
+                };
+                let trimmed = self.source.as_bytes()[start..end]
+                    .iter()
+                    .copied()
+                    .skip_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .collect::<Vec<_>>();
+                return trimmed.starts_with(b"|_");
+            }
+            if idx == 0 {
+                return false;
+            }
+            idx -= 1;
+        }
+    }
+
+    fn help_before_named_arm_list_entry(&self, arm_name: &str, name_byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+        let line = self.line_index(name_byte.min(self.source.len()));
+        if line == 0 {
+            return None;
+        }
+        let target_indent = self.line_indent(line)?;
+        let mut idx = line - 1;
+        loop {
+            if let Some(_) = self.doc_comment(idx) {
+                let mut docs = Vec::new();
+                loop {
+                    let Some((indent, content)) = self.doc_comment(idx) else {
+                        break;
+                    };
+                    docs.push((indent, content));
+                    if idx == 0 {
+                        break;
+                    }
+                    idx -= 1;
+                }
+                docs.reverse();
+                while docs.first().is_some_and(|(_, line)| line.trim().is_empty()) {
+                    docs.remove(0);
+                }
+                while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+                    docs.pop();
+                }
+                if let Some(help) = Self::named_arm_list_doc_from_docs(&docs, target_indent, arm_name) {
+                    return Some(help);
+                }
+            } else {
+                let (start, end) = self.line_bounds(idx)?;
+                let line_bytes = &self.source.as_bytes()[start..end];
+                let is_blank = line_bytes.iter().all(|b| matches!(b, b' ' | b'\t'));
+                if !is_blank && self.line_indent(idx).is_some_and(|indent| indent < target_indent) {
+                    break;
+                }
+                if idx == 0 {
+                    break;
+                }
+                idx -= 1;
+            }
+            if idx == 0 {
+                break;
+            }
+        }
+        None
+    }
+
+    fn coltar_opener_inline_doc_comment(&self, idx: usize) -> Option<(usize, String)> {
+        let (start, end) = self.line_bounds(idx)?;
+        let line = &self.source.as_bytes()[start..end];
+        let mut cursor = 0usize;
+        while cursor + 1 < line.len() {
+            if line[cursor] == b':' && line[cursor + 1] == b':' {
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor + 1 >= line.len() {
+            return None;
+        }
+        if !line[..cursor].windows(2).any(|token| token == b":*") {
+            return None;
+        }
+        if line.get(cursor + 2) == Some(&b':') {
+            return None;
+        }
+        let mut trimmed_end = line.len();
+        while trimmed_end > cursor
+            && (line[trimmed_end - 1] == b' ' || line[trimmed_end - 1] == b'\t')
+        {
+            trimmed_end -= 1;
+        }
+        if trimmed_end - cursor > 2
+            && line.get(trimmed_end - 2) == Some(&b':')
+            && line.get(trimmed_end - 1) == Some(&b':')
+        {
+            return None;
+        }
+        Some((
+            cursor,
+            String::from_utf8_lossy(&line[cursor + 2..trimmed_end]).into_owned(),
+        ))
+    }
+
+    /// The `.name: text` frag-link doccord block directly above a `:*` list
+    /// entry, in SOURCE order. hoon-138's grammar makes the block the entry's
+    /// `++clad` prefix whit (the parent `mush`/`jump` stops at the first smol
+    /// line; `apex` consumes the block as bat-map items), so the block anchors
+    /// the FIRST entry after it — the collection stops at any code line
+    /// (a sibling entry owns only the lines directly above itself). A trailing
+    /// doc on the `:*` opener line belongs to the block (leap stops there).
+    pub fn frag_block_doc_entries(&self, name_byte: usize) -> Vec<(NounExpr, NounExpr)> {
+        if !self.docs_enabled {
+            return Vec::new();
+        }
+        let Some(line) = Some(self.line_index(name_byte.min(self.source.len()))) else {
+            return Vec::new();
+        };
+        if line == 0 {
+            return Vec::new();
+        }
+        let Some(target_indent) = self.line_indent(line) else {
+            return Vec::new();
+        };
+        let mut docs = Vec::new();
+        let mut idx = line - 1;
+        loop {
+            if let Some((indent, content)) = self.doc_comment(idx) {
+                docs.push((indent, content));
+            } else {
+                let Some((start, end)) = self.line_bounds(idx) else {
+                    break;
+                };
+                let line_bytes = &self.source.as_bytes()[start..end];
+                let is_blank = line_bytes.iter().all(|b| matches!(b, b' ' | b'\t'));
+                if !is_blank {
+                    if let Some((indent, content)) = self.coltar_opener_inline_doc_comment(idx) {
+                        docs.push((indent, content));
+                    }
+                    break;
+                }
+            }
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+        docs.reverse();
+        Self::frag_doc_entries_from_docs(&docs, target_indent)
+    }
+
+    /// Parse a collected doc block into `[cuff crib]` bat entries (frag links),
+    /// source order. Requires 2+ named lines so single stray `.name:` comments keep flowing through
+    /// the generic doc paths.
+    fn frag_doc_entries_from_docs(
+        docs: &[(usize, String)],
+        target_indent: usize,
+    ) -> Vec<(NounExpr, NounExpr)> {
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for (indent, raw) in docs {
+            if target_indent > *indent {
+                continue;
+            }
+            let raw_indent = leading_spaces(raw.as_bytes());
+            let strip = if raw_indent >= 4 {
+                4
+            } else if raw_indent >= 2 {
+                2
+            } else {
+                continue;
+            };
+            let summary = strip_doc_spaces(raw, strip);
+            let Some(rest) = summary.strip_prefix('.') else {
+                continue;
+            };
+            let Some((name, after)) = rest.split_once(": ") else {
+                continue;
+            };
+            if after.is_empty() {
+                continue;
+            }
+            entries.push((name.to_string(), after.to_string()));
+        }
+        if entries.len() < 2 {
+            return Vec::new();
+        }
+        entries
+            .into_iter()
+            .map(|(name, summary)| {
+                let link = Self::doc_cell(Self::doc_cord("frag"), Self::doc_cord(&name));
+                let cuff = Self::doc_list(vec![link]);
+                let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+                (cuff, crib)
+            })
+            .collect()
     }
 
     /// Doc block immediately preceding a `++`/`+$` arm (the `:: …` lines above the
@@ -6295,6 +6839,101 @@ impl LineMap {
         None
     }
 
+    fn help_before_arm_tail(&self, byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+
+        let line = self.line_index(byte.min(self.source.len()));
+        if line == 0 {
+            return None;
+        }
+        let target_indent = self.line_indent(line)?;
+
+        let mut docs = Vec::new();
+        let mut idx = line - 1;
+        loop {
+            let Some((indent, content)) = self.doc_comment(idx) else {
+                break;
+            };
+            docs.push((indent, content));
+            if idx == 0 {
+                break;
+            }
+            idx -= 1;
+        }
+
+        docs.reverse();
+        while docs.first().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.remove(0);
+        }
+        while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
+            docs.pop();
+        }
+        if docs.is_empty() {
+            return None;
+        }
+        let doc_indent = docs[0].0;
+        if target_indent > doc_indent {
+            return None;
+        }
+
+        let summary_raw = &docs[0].1;
+        let summary_indent = leading_spaces(summary_raw.as_bytes());
+        let (summary_strip, detail_strip) = if summary_indent >= 4 {
+            (4, 2)
+        } else if summary_indent >= 2 {
+            (2, 4)
+        } else {
+            return None;
+        };
+        let summary = strip_doc_spaces(summary_raw, summary_strip);
+        if !(summary.starts_with('+') && summary.split_once(": ").is_some()) {
+            return None;
+        }
+
+        let mut in_details = false;
+        let mut saw_overindented_detail = false;
+        let mut saw_pre_detail_line = false;
+        let mut last_detail_was_bullet = false;
+        for (_, raw) in docs.iter().skip(1) {
+            if raw.trim().is_empty() {
+                in_details = true;
+                continue;
+            }
+            if !in_details {
+                saw_pre_detail_line = true;
+                continue;
+            }
+
+            let indent = leading_spaces(raw.as_bytes());
+            if indent > detail_strip {
+                if !last_detail_was_bullet {
+                    saw_overindented_detail = true;
+                }
+                continue;
+            }
+
+            let text = strip_doc_spaces(raw, detail_strip);
+            if text.is_empty() {
+                continue;
+            }
+            if saw_pre_detail_line && indent == detail_strip {
+                let crib = Self::doc_cell(Self::doc_cord(&text), Self::doc_atom(0));
+                return Some(Self::doc_cell(Self::doc_atom(0), crib));
+            }
+            if !saw_overindented_detail || indent != detail_strip {
+                last_detail_was_bullet = text.starts_with("- ");
+                continue;
+            }
+
+            let crib = Self::doc_cell(Self::doc_cord(&text), Self::doc_atom(0));
+            return Some(Self::doc_cell(Self::doc_atom(0), crib));
+        }
+
+        None
+    }
+
     fn help_before_spec(&self, byte: usize) -> Option<NounExpr> {
         self.help_before_with_target(byte, Self::line_starts_like_spec_doc_target)
     }
@@ -6311,13 +6950,14 @@ impl LineMap {
         self.help_before_with_target_options(byte, Self::line_starts_like_hoon_target, true)
     }
 
-    fn postfix_doc_summary(
+
+    fn postfix_doc_summary_parts(
         &self,
         start_byte: usize,
         end_byte: usize,
         preceding_token_prefix: bool,
         require_prefix: bool,
-    ) -> Option<String> {
+    ) -> Option<(usize, String)> {
         if !self.docs_enabled {
             return None;
         }
@@ -6410,27 +7050,141 @@ impl LineMap {
             spaces += 1;
             content_start += 1;
         }
-        if spaces != 2 || content_start >= trimmed_end {
+        if !(2..=4).contains(&spaces) || content_start >= trimmed_end {
             return None;
         }
-        if matches!(line.get(content_start), Some(b' ' | b'\t' | b':')) {
+        if matches!(line.get(content_start), Some(b' ' | b'\t'))
+            || (line.get(content_start) == Some(&b':')
+                && line.get(content_start + 1) == Some(&b':'))
+        {
             return None;
         }
 
-        Some(String::from_utf8_lossy(&line[content_start..trimmed_end]).to_string())
+        Some((
+            spaces,
+            String::from_utf8_lossy(&line[content_start..trimmed_end]).to_string(),
+        ))
+    }
+
+    fn postfix_doc_summary(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+        preceding_token_prefix: bool,
+        require_prefix: bool,
+    ) -> Option<String> {
+        self.postfix_doc_summary_parts(
+            start_byte,
+            end_byte,
+            preceding_token_prefix,
+            require_prefix,
+        )
+        .map(|(_, summary)| summary)
     }
 
     fn help_after(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte, false, true)?;
+        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
+        if spaces != 2 {
+            return None;
+        }
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    fn help_after_arm_body(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+        let summary = self.postfix_doc_summary(start_byte, end_byte, true, true)?;
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    fn help_after_current_line_expr(&self, start_byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+        let line_idx = self.line_index(start_byte.min(self.source.len()));
+        let (line_start, line_end) = self.line_bounds(line_idx)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let start_offset = start_byte.saturating_sub(line_start).min(line.len());
+        let mut cursor = start_offset;
+        while cursor + 1 < line.len() {
+            if line[cursor] == b':' && line[cursor + 1] == b':' {
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor + 1 >= line.len() {
+            return None;
+        }
+        let mut expr_end = cursor;
+        while expr_end > start_offset && matches!(line[expr_end - 1], b' ' | b'\t') {
+            expr_end -= 1;
+        }
+        let (spaces, summary) =
+            self.postfix_doc_summary_parts(start_byte, line_start + expr_end, false, false)?;
+        if spaces != 2 {
+            return None;
+        }
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    fn postfix_doc_token_count_after(&self, start_byte: usize, skip: usize) -> Option<usize> {
+        let line_idx = self.line_index(start_byte.min(self.source.len()));
+        let (line_start, line_end) = self.line_bounds(line_idx)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let cursor = start_byte
+            .saturating_sub(line_start)
+            .saturating_add(skip)
+            .min(line.len());
+        let mut doc_start = cursor;
+        while doc_start + 1 < line.len() {
+            if line[doc_start] == b':' && line[doc_start + 1] == b':' {
+                break;
+            }
+            doc_start += 1;
+        }
+        if doc_start + 1 >= line.len() {
+            return None;
+        }
+        let segment = &line[cursor..doc_start];
+        let mut tokens = 0usize;
+        let mut in_token = false;
+        let mut depth = 0usize;
+        for byte in segment {
+            match *byte {
+                b'(' | b'[' | b'{' => {
+                    if !in_token {
+                        tokens += 1;
+                        in_token = true;
+                    }
+                    depth += 1;
+                }
+                b')' | b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                }
+                b' ' | b'\t' if depth == 0 => {
+                    in_token = false;
+                }
+                _ => {
+                    if !in_token {
+                        tokens += 1;
+                        in_token = true;
+                    }
+                }
+            }
+        }
+        (tokens > 0).then_some(tokens)
     }
 
     /// Postfix-doc anchoring for SPECS: the prefix is the immediately preceding
     /// token, so a mid-line cast spec (`^- @  :: roll right`) anchors while a
     /// faced bind spec (`=| a=(tree)  :: doc`) does not. See `postfix_doc_summary`.
     fn help_after_spec(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte, true, true)?;
+        let (spaces, summary) =
+            self.postfix_doc_summary_parts(start_byte, end_byte, true, true)?;
+        if spaces != 2 {
+            return None;
+        }
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some(Self::doc_cell(Self::doc_atom(0), crib))
     }
@@ -6438,10 +7192,143 @@ impl LineMap {
     /// Postfix-doc anchoring at a RUNE-guaranteed position (e.g. the `|$` body
     /// spec), bypassing the line-head/preceding-token guard. The caller is a
     /// specific rune parser that knows this span owns a trailing `::  ` doc.
+    pub fn help_after_rune_with_spaces(&self, start_byte: usize, end_byte: usize) -> Option<(usize, NounExpr)> {
+        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, false)?;
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some((spaces, Self::doc_cell(Self::doc_atom(0), crib)))
+    }
+
     pub fn help_after_rune(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte, false, false)?;
+        self.help_after_rune_with_spaces(start_byte, end_byte)
+            .map(|(_, help)| help)
+    }
+
+    pub(crate) fn help_after_choice_spec_item(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+        let end_line = self.line_index(end_byte.min(self.source.len()));
+        let start_byte = if self.line_index(start_byte.min(self.source.len())) == end_line {
+            start_byte
+        } else {
+            let (line_start, line_end) = self.line_bounds(end_line)?;
+            let line = &self.source.as_bytes()[line_start..line_end];
+            let first_token = line
+                .iter()
+                .position(|byte| !matches!(byte, b' ' | b'\t'))
+                .unwrap_or(0);
+            line_start + first_token
+        };
+        let (line_start, line_end) = self.line_bounds(end_line)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let cursor = start_byte.saturating_sub(line_start).min(line.len());
+        let doc_start = line[cursor..]
+            .windows(2)
+            .position(|pair| pair == b"::")
+            .map(|offset| cursor + offset)?;
+        let mut trimmed_end = line.len();
+        while trimmed_end > doc_start && matches!(line[trimmed_end - 1], b' ' | b'\t') {
+            trimmed_end -= 1;
+        }
+        let mut content_start = doc_start + 2;
+        let mut spaces = 0usize;
+        while content_start < trimmed_end && line[content_start] == b' ' {
+            spaces += 1;
+            content_start += 1;
+        }
+        if spaces != 2 || content_start >= trimmed_end {
+            return None;
+        }
+        let summary = String::from_utf8_lossy(&line[content_start..trimmed_end]).to_string();
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    pub(crate) fn help_before_choice_spec_item(&self, start_byte: usize) -> Option<NounExpr> {
+        if !self.docs_enabled {
+            return None;
+        }
+        let line = self.line_index(start_byte.min(self.source.len()));
+        let prev_line = line.checked_sub(1)?;
+        let (line_start, line_end) = self.line_bounds(prev_line)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let token_start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
+        if line.get(token_start) == Some(&b':') {
+            return None;
+        }
+        let doc_start = line
+            .windows(2)
+            .position(|pair| pair == b"::")?;
+        let mut expr_end = doc_start;
+        while expr_end > token_start && matches!(line[expr_end - 1], b' ' | b'\t') {
+            expr_end -= 1;
+        }
+        if expr_end <= token_start {
+            return None;
+        }
+        let (spaces, summary) = self.postfix_doc_summary_parts(
+            line_start + token_start,
+            line_start + expr_end,
+            false,
+            false,
+        )?;
+        if spaces != 4 {
+            return None;
+        }
+        let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
+        Some(Self::doc_cell(Self::doc_atom(0), crib))
+    }
+
+    pub fn help_after_line_start_rune(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+        let line_idx = self.line_index(start_byte.min(self.source.len()));
+        let (line_start, line_end) = self.line_bounds(line_idx)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let start_offset = start_byte.saturating_sub(line_start).min(line.len());
+        if line[..start_offset]
+            .iter()
+            .any(|byte| !matches!(byte, b' ' | b'\t'))
+        {
+            return None;
+        }
+        self.help_after_rune(start_byte, end_byte)
+    }
+
+    pub fn help_after_line_start_expr(&self, start_byte: usize) -> Option<NounExpr> {
+        let line_idx = self.line_index(start_byte.min(self.source.len()));
+        let (line_start, line_end) = self.line_bounds(line_idx)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let start_offset = start_byte.saturating_sub(line_start).min(line.len());
+        if line[..start_offset]
+            .iter()
+            .any(|byte| !matches!(byte, b' ' | b'\t'))
+        {
+            return None;
+        }
+        if self.postfix_doc_token_count_after(start_byte, 0) != Some(1) {
+            return None;
+        }
+        self.help_after_current_line_expr(start_byte)
+    }
+
+    pub fn help_after_line_expr_ending_at(&self, end_byte: usize) -> Option<NounExpr> {
+        if end_byte == 0 {
+            return None;
+        }
+        let line_idx = self.line_index(end_byte.saturating_sub(1).min(self.source.len()));
+        let (line_start, line_end) = self.line_bounds(line_idx)?;
+        let line = &self.source.as_bytes()[line_start..line_end];
+        let mut expr_start = 0usize;
+        while expr_start < line.len() && matches!(line[expr_start], b' ' | b'\t') {
+            expr_start += 1;
+        }
+        if line.get(expr_start) == Some(&b':') {
+            return None;
+        }
+        let start_byte = line_start + expr_start;
+        if self.postfix_doc_token_count_after(start_byte, 0) != Some(1) {
+            return None;
+        }
+        self.help_after_current_line_expr(start_byte)
     }
 
     fn arm_postfix_help(
@@ -6451,7 +7338,10 @@ impl LineMap {
         start_byte: usize,
         end_byte: usize,
     ) -> Option<NounExpr> {
-        let summary = self.postfix_doc_summary(start_byte, end_byte, false, true)?;
+        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
+        if spaces != 2 {
+            return None;
+        }
         let link_name = if arm_name == "$" {
             Self::doc_atom(0)
         } else {
@@ -6587,18 +7477,26 @@ impl LineMap {
         {
             trimmed_end -= 1;
         }
-        if trimmed_end - cursor > 2
+        let marker_len = if line.get(cursor + 2) == Some(&b':') {
+            if line.get(cursor + 3) == Some(&b':') {
+                return None;
+            }
+            3
+        } else {
+            2
+        };
+        if trimmed_end - cursor > marker_len
             && line.get(trimmed_end - 2) == Some(&b':')
             && line.get(trimmed_end - 1) == Some(&b':')
         {
             return None;
         }
-        let content = &line[cursor + 2..trimmed_end];
+        let content = &line[cursor + marker_len..trimmed_end];
         let mut content_start = 0;
         while content_start < content.len() && content[content_start] == b' ' {
             content_start += 1;
         }
-        if content.get(content_start) == Some(&b':') {
+        if marker_len == 2 && content.get(content_start) == Some(&b':') {
             return None;
         }
         Some((cursor, String::from_utf8_lossy(content).into_owned()))
@@ -6725,6 +7623,21 @@ impl LineMap {
     }
 
     #[inline]
+    /// Span-start rule from hoon-138 `++vast` (crates/hoonc/hoon/hoon-138.hoon).
+    ///
+    /// The separator before a tall production is `jump = ;~(pose leap:docs gap)`
+    /// (hoon-138:13594). `leap` (11581-11590) consumes newlines, spaces, and
+    /// plain (`++skip`-shaped) comments, but cannot consume a doccord-shaped
+    /// line (`++larg`: `::` + exactly 4 spaces + text, 11608; `++smol`: `::` +
+    /// exactly 2 spaces + en-links, 11592). The production's `wart`/`wert`
+    /// therefore opens the %dbug span at the `::` of the FIRST larg/smol-shaped
+    /// comment in the gap; the block itself is consumed inside the wrapped rule
+    /// (`apex:docs` docs-on, plain `gap` docs-off — the span start is identical
+    /// in both modes). A file's leading gap is consumed by `gay` in `++vest`
+    /// and never anchors. Verified against `hoonc --parse-only-ast-jam` probes:
+    /// 2-space prose and bare `::` do not anchor; 4-space text and 2-space
+    /// `+link:` lines do; a trailing larg-shaped comment on the previous code
+    /// line anchors the next production's span at that `::`.
     fn expand_gap_start(&self, start: usize) -> usize {
         let bytes = self.source.as_bytes();
         let mut start = start.min(bytes.len());
@@ -6738,3068 +7651,196 @@ impl LineMap {
         while line_start > 0 && bytes[line_start - 1] != b'\n' {
             line_start -= 1;
         }
-        #[cfg(test)]
-        let debug_expand = std::env::var("DEBUG_EXPAND_GAP_START").is_ok();
-        #[cfg(test)]
-        if debug_expand {
-            let (line_no, col_no) = self.line_col(start);
-            eprintln!(
-                "expand-gap start={} line_start={} line={} col={}",
-                start, line_start, line_no, col_no
-            );
-        }
-        let mut saw_non_space = None;
+        let mut saw_non_space = false;
         for idx in line_start..start {
-            match bytes[idx] {
-                b' ' | b'\t' => {}
-                _ => {
-                    saw_non_space = Some(idx);
-                    break;
-                }
+            if !matches!(bytes[idx], b' ' | b'\t') {
+                saw_non_space = true;
+                break;
             }
         }
-        if saw_non_space.is_some() {
+        if saw_non_space {
+            // Content precedes the token on its own line: the separator was an
+            // `ace`, not a `jump`, so there is no gap to anchor into. Keep the
+            // historical snap for spans that begin inside a comment lead.
             let mut cursor = line_start;
-            while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+            while cursor < bytes.len() && matches!(bytes[cursor], b' ' | b'\t') {
                 cursor += 1;
             }
             if bytes.get(cursor) == Some(&b':') && bytes.get(cursor + 1) == Some(&b':') {
-                start = cursor;
-            } else {
-                return start;
+                return cursor;
             }
-        }
-
-        let doccord_info = |line: &[u8], idx: usize, min_spaces: usize| -> Option<(bool, usize)> {
-            if idx + 1 >= line.len() || line[idx] != b':' || line[idx + 1] != b':' {
-                return None;
-            }
-            let after = idx + 2;
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if end - idx > 2 && line[end - 2] == b':' && line[end - 1] == b':' {
-                return None;
-            }
-            let mut spaces = 0;
-            let mut pos = after;
-            while pos < line.len() && line[pos] == b' ' {
-                spaces += 1;
-                pos += 1;
-            }
-            let mut content_start = pos;
-            while content_start < line.len() && line[content_start] == b' ' {
-                content_start += 1;
-            }
-            let has_content = content_start < line.len();
-            if has_content
-                && line.get(content_start) == Some(&b'~')
-                && line.get(content_start + 1) == Some(&b'_')
-            {
-                return None;
-            }
-            let mut compact_doc = false;
-            if has_content && spaces < min_spaces {
-                if spaces == 0 {
-                    let ch = line[content_start];
-                    if ch != b':' && !ch.is_ascii_alphanumeric() {
-                        compact_doc = true;
-                    } else {
-                        return None;
-                    }
-                } else {
-                    return None;
-                }
-            }
-            if has_content
-                && line[content_start] == b':'
-                && line.get(content_start + 1) == Some(&b':')
-            {
-                return None;
-            }
-            Some((has_content && !compact_doc, idx))
-        };
-        let doc_comment_offset = |line: &[u8], idx: usize| -> Option<usize> {
-            if idx + 1 >= line.len() || line[idx] != b':' || line[idx + 1] != b':' {
-                return None;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if end - idx > 2 && line[end - 2] == b':' && line[end - 1] == b':' {
-                return None;
-            }
-            Some(idx)
-        };
-
-        let inline_doc_offset = |line: &[u8]| -> Option<(bool, usize)> {
-            let mut has_code = false;
-            for (idx, ch) in line.iter().enumerate() {
-                if *ch == b':' && idx + 1 < line.len() && line[idx + 1] == b':' {
-                    if idx > 0 && (line[idx - 1] == b' ' || line[idx - 1] == b'\t') {
-                        if has_code {
-                            if let Some((has_content, doc_offset)) = doccord_info(line, idx, 1) {
-                                return Some((has_content, doc_offset));
-                            }
-                        }
-                    }
-                }
-                if *ch != b' ' && *ch != b'\t' {
-                    has_code = true;
-                }
-            }
-            None
-        };
-        let doc_line_is_label = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if idx >= end {
-                return false;
-            }
-            let content = &line[idx..end];
-            let mut word_end = 0;
-            while word_end < content.len() {
-                let b = content[word_end];
-                if b.is_ascii_alphanumeric() || b == b'-' {
-                    word_end += 1;
-                } else {
-                    break;
-                }
-            }
-            word_end > 0 && content.get(word_end) == Some(&b':')
-        };
-        let doc_line_is_simple_heading = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if idx >= end {
-                return false;
-            }
-            let mut saw_letter = false;
-            for &b in &line[idx..end] {
-                if b == b' ' {
-                    continue;
-                }
-                if b.is_ascii_lowercase() {
-                    saw_letter = true;
-                    continue;
-                }
-                return false;
-            }
-            saw_letter
-        };
-        let doc_line_is_single_word_heading = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if idx >= end {
-                return false;
-            }
-            let mut saw_letter = false;
-            for &b in &line[idx..end] {
-                if b == b' ' || b == b'\t' {
-                    return false;
-                }
-                if b.is_ascii_lowercase() || b == b'-' {
-                    saw_letter = true;
-                    continue;
-                }
-                return false;
-            }
-            saw_letter
-        };
-        let doc_line_anchorable = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            if idx >= end {
-                return false;
-            }
-            let content = &line[idx..end];
-            if content.starts_with(b"XX")
-                && matches!(content.get(2), None | Some(b' ') | Some(b'\t') | Some(b':'))
-            {
-                return false;
-            }
-            if content[0] == b':' {
-                return false;
-            }
-            let mut has_upper = false;
-            let mut has_lower = false;
-            let mut has_other = false;
-            for &b in content {
-                if b.is_ascii_lowercase() {
-                    has_lower = true;
-                    break;
-                }
-                if b.is_ascii_uppercase() {
-                    has_upper = true;
-                } else if b != b' ' && b != b'\t' {
-                    has_other = true;
-                }
-            }
-            if !has_lower && has_upper && !has_other {
-                return false;
-            }
-            true
-        };
-        let doc_line_starts_with_rune_like = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            match line.get(idx) {
-                Some(b'?') => true,
-                Some(b'=') => true,
-                Some(b'|') => matches!(
-                    line.get(idx + 1),
-                    Some(b'=' | b'*' | b'%' | b'$' | b'+' | b'-' | b'_' | b':')
-                ),
-                Some(b'~') => matches!(
-                    line.get(idx + 1),
-                    Some(b'>' | b'/' | b'%' | b'+' | b'-' | b'&' | b'|')
-                ),
-                _ => false,
-            }
-        };
-        let doc_line_is_compact_plus_payload = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let mut end = line.len();
-            while end > idx && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
-                end -= 1;
-            }
-            idx < end
-                && line[idx..end].iter().any(|b| *b == b'+')
-                && line[idx..end].iter().all(|b| *b != b' ' && *b != b'\t')
-        };
-        let doc_line_mentions_name = |line: &[u8], doc_offset: usize, name: &[u8]| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            if idx >= line.len() {
-                return false;
-            }
-            let content = &line[idx..];
-            let content = if matches!(content.get(0), Some(b'+' | b'-')) {
-                &content[1..]
-            } else {
-                content
-            };
-            if !content.starts_with(name) {
-                return false;
-            }
-            match content.get(name.len()) {
-                None | Some(b' ') | Some(b'\t') | Some(b':') => true,
-                _ => false,
-            }
-        };
-        let doc_line_starts_with_triple_quote = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            line.get(idx..idx + 3) == Some(b"\"\"\"")
-        };
-        let doc_line_starts_with_tilde = |line: &[u8], doc_offset: usize| -> bool {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            line.get(idx) == Some(&b'~')
-        };
-        let is_tilde_header_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'~')
-                && matches!(line.get(cursor + 1), Some(b'%') | Some(b'/'))
-        };
-        let doc_line_is_trailing_comment = |line_start: usize, cursor: usize| -> bool {
-            if line_start == 0 {
-                return false;
-            }
-            let line_end = bytes[line_start..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(bytes.len(), |idx| line_start + idx);
-            if line_start > 0 {
-                let mut prev_end = line_start.saturating_sub(1);
-                let mut prev_start = prev_end;
-                while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
-                    prev_start -= 1;
-                }
-                let prev_line = &bytes[prev_start..prev_end];
-                let mut prev_cursor = 0;
-                while prev_cursor < prev_line.len()
-                    && (prev_line[prev_cursor] == b' ' || prev_line[prev_cursor] == b'\t')
-                {
-                    prev_cursor += 1;
-                }
-                if prev_cursor < prev_line.len()
-                    && prev_cursor == cursor
-                    && (doccord_info(prev_line, prev_cursor, 2).is_some()
-                        || doc_comment_offset(prev_line, prev_cursor).is_some())
-                {
-                    return false;
-                }
-            }
-            let next_start = line_end + 1;
-            if next_start < bytes.len() {
-                let next_end = bytes[next_start..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |idx| next_start + idx);
-                let next_line = &bytes[next_start..next_end];
-                let mut next_cursor = 0;
-                while next_cursor < next_line.len()
-                    && (next_line[next_cursor] == b' ' || next_line[next_cursor] == b'\t')
-                {
-                    next_cursor += 1;
-                }
-                if next_cursor < next_line.len()
-                    && next_cursor == cursor
-                    && (doccord_info(next_line, next_cursor, 2).is_some()
-                        || doc_comment_offset(next_line, next_cursor).is_some())
-                {
-                    return false;
-                }
-            }
-
-            let mut prev_end = line_start.saturating_sub(1);
-            let mut prev_cursor_opt = None;
-            while prev_end > 0 {
-                let mut prev_start = prev_end;
-                while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
-                    prev_start -= 1;
-                }
-                let prev_line = &bytes[prev_start..prev_end];
-                let mut prev_cursor = 0;
-                while prev_cursor < prev_line.len()
-                    && (prev_line[prev_cursor] == b' ' || prev_line[prev_cursor] == b'\t')
-                {
-                    prev_cursor += 1;
-                }
-                if prev_cursor == prev_line.len() {
-                    return false;
-                }
-                if doccord_info(prev_line, prev_cursor, 2).is_some()
-                    || doc_comment_offset(prev_line, prev_cursor).is_some()
-                {
-                    prev_end = prev_start.saturating_sub(1);
-                    continue;
-                }
-                if matches!(inline_doc_offset(prev_line), Some((true, _))) {
-                    return false;
-                }
-                if matches!(prev_line.get(prev_cursor), Some(b'^'))
-                    && matches!(prev_line.get(prev_cursor + 1), Some(b'|'))
-                {
-                    return false;
-                }
-                if prev_line.get(prev_cursor) == Some(&b'=')
-                    && prev_line.get(prev_cursor + 1) == Some(&b'>')
-                {
-                    let mut idx = prev_cursor + 2;
-                    while idx < prev_line.len()
-                        && (prev_line[idx] == b' ' || prev_line[idx] == b'\t')
-                    {
-                        idx += 1;
-                    }
-                    if idx == prev_line.len() {
-                        return false;
-                    }
-                }
-                prev_cursor_opt = Some(prev_cursor);
-                break;
-            }
-            let Some(prev_cursor) = prev_cursor_opt else {
-                return false;
-            };
-
-            let mut next_start = line_end + 1;
-            let mut next_cursor_opt = None;
-            while next_start < bytes.len() {
-                let next_end = bytes[next_start..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |idx| next_start + idx);
-                let next_line = &bytes[next_start..next_end];
-                let mut next_cursor = 0;
-                while next_cursor < next_line.len()
-                    && (next_line[next_cursor] == b' ' || next_line[next_cursor] == b'\t')
-                {
-                    next_cursor += 1;
-                }
-                if next_cursor == next_line.len() {
-                    return false;
-                }
-                if doccord_info(next_line, next_cursor, 2).is_some()
-                    || doc_comment_offset(next_line, next_cursor).is_some()
-                {
-                    next_start = next_end + 1;
-                    continue;
-                }
-                if matches!(next_line.get(next_cursor), Some(b'^'))
-                    && matches!(next_line.get(next_cursor + 1), Some(b'|'))
-                {
-                    return false;
-                }
-                if next_line.get(next_cursor) == Some(&b'=')
-                    && next_line.get(next_cursor + 1) == Some(&b'>')
-                {
-                    let mut idx = next_cursor + 2;
-                    while idx < next_line.len()
-                        && (next_line[idx] == b' ' || next_line[idx] == b'\t')
-                    {
-                        idx += 1;
-                    }
-                    if idx == next_line.len() {
-                        return false;
-                    }
-                }
-                next_cursor_opt = Some(next_cursor);
-                break;
-            }
-
-            let Some(next_cursor) = next_cursor_opt else {
-                return false;
-            };
-
-            prev_cursor == cursor && next_cursor == cursor
-        };
-        let next_non_doc_line_start = |line_start: usize| -> Option<usize> {
-            let mut next_start = bytes[line_start..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map_or(bytes.len(), |idx| line_start + idx + 1);
-            while next_start < bytes.len() {
-                let next_end = bytes[next_start..]
-                    .iter()
-                    .position(|&b| b == b'\n')
-                    .map_or(bytes.len(), |idx| next_start + idx);
-                let next_line = &bytes[next_start..next_end];
-                let mut next_cursor = 0;
-                while next_cursor < next_line.len()
-                    && (next_line[next_cursor] == b' ' || next_line[next_cursor] == b'\t')
-                {
-                    next_cursor += 1;
-                }
-                if next_cursor == next_line.len() {
-                    next_start = next_end + 1;
-                    continue;
-                }
-                if doccord_info(next_line, next_cursor, 2).is_some()
-                    || doc_comment_offset(next_line, next_cursor).is_some()
-                {
-                    next_start = next_end + 1;
-                    continue;
-                }
-                return Some(next_start + next_cursor);
-            }
-            None
-        };
-        let is_terminator_line = |line: &[u8], cursor: usize| -> bool {
-            let mut idx = cursor;
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            if idx + 1 >= line.len() {
-                return false;
-            }
-            let first = line[idx];
-            let second = line[idx + 1];
-            if !(first == b'=' && second == b'=') && !(first == b'-' && second == b'-') {
-                return false;
-            }
-            idx += 2;
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            idx == line.len()
-        };
-        let prev_non_doc_line = |line_start: usize| -> Option<(usize, &[u8])> {
-            if line_start == 0 {
-                return None;
-            }
-            let mut prev_end = line_start.saturating_sub(1);
-            while prev_end > 0 {
-                let mut prev_start = prev_end;
-                while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
-                    prev_start -= 1;
-                }
-                let prev_line = &bytes[prev_start..prev_end];
-                let mut prev_cursor = 0;
-                while prev_cursor < prev_line.len()
-                    && (prev_line[prev_cursor] == b' ' || prev_line[prev_cursor] == b'\t')
-                {
-                    prev_cursor += 1;
-                }
-                if prev_cursor == prev_line.len() {
-                    prev_end = prev_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(prev_line, prev_cursor, 2).is_some()
-                    || doc_comment_offset(prev_line, prev_cursor).is_some()
-                {
-                    prev_end = prev_start.saturating_sub(1);
-                    continue;
-                }
-                return Some((prev_cursor, prev_line));
-            }
-            None
-        };
-        let doc_line_preceded_by_outdent_terminator = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor <= cursor {
-                return false;
-            }
-            is_terminator_line(prev_line, prev_cursor)
-        };
-        let doc_line_preceded_by_equals_slash = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor != cursor {
-                return false;
-            }
-            prev_line.get(prev_cursor) == Some(&b'=')
-                && prev_line.get(prev_cursor + 1) == Some(&b'/')
-        };
-        let doc_line_preceded_by_question_greater = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor != cursor {
-                return false;
-            }
-            prev_line.get(prev_cursor) == Some(&b'?')
-                && prev_line.get(prev_cursor + 1) == Some(&b'>')
-        };
-        let doc_line_preceded_by_bar_dollar = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor != cursor {
-                return false;
-            }
-            prev_line.get(prev_cursor) == Some(&b'|')
-                && prev_line.get(prev_cursor + 1) == Some(&b'$')
-        };
-        let doc_content_indent = |line: &[u8], doc_offset: usize| -> usize {
-            let mut idx = doc_offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            idx - (doc_offset + 2)
-        };
-        let is_bar_gate_sample_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'|')
-                && matches!(line.get(cursor + 1), Some(b':') | Some(b'='))
-        };
-        let inline_doc_starts_with_bar = |line: &[u8], offset: usize| -> bool {
-            let mut idx = offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            matches!(line.get(idx), Some(b'|'))
-        };
-        let inline_doc_starts_with_branch_marker = |line: &[u8], offset: usize| -> bool {
-            let mut idx = offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            let start = idx;
-            let first = match line.get(start) {
-                Some(&b) => b,
-                None => return false,
-            };
-            if !matches!(first, b'.' | b'+' | b'$') {
-                return false;
-            }
-            while idx < line.len() && line[idx] != b' ' && line[idx] != b'\t' {
-                idx += 1;
-            }
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            if idx >= line.len() {
-                return true;
-            }
-            line.get(idx) == Some(&b':') && line.get(idx + 1) == Some(&b':')
-        };
-        let is_face_line = |line: &[u8], cursor: usize| -> bool {
-            let Some(&first) = line.get(cursor) else {
-                return false;
-            };
-            if !first.is_ascii_lowercase() {
-                return false;
-            }
-            let mut idx = cursor;
-            while idx < line.len() {
-                let b = line[idx];
-                if b.is_ascii_alphanumeric() || b == b'-' {
-                    idx += 1;
-                } else {
-                    break;
-                }
-            }
-            idx < line.len() && line[idx] == b':' && line.get(idx + 1) != Some(&b':')
-        };
-        let is_face_bind_line = |line: &[u8], cursor: usize| -> bool {
-            let Some(&first) = line.get(cursor) else {
-                return false;
-            };
-            if !first.is_ascii_lowercase() {
-                return false;
-            }
-            let mut idx = cursor;
-            while idx < line.len() {
-                let b = line[idx];
-                if b.is_ascii_alphanumeric() || b == b'-' {
-                    idx += 1;
-                } else {
-                    break;
-                }
-            }
-            line.get(idx) == Some(&b'=')
-        };
-        let inline_doc_is_heading = |line: &[u8], offset: usize| -> bool {
-            let mut idx = offset + 2;
-            while idx < line.len() && line[idx] == b' ' {
-                idx += 1;
-            }
-            match line.get(idx) {
-                Some(b'.' | b'|' | b'=' | b'-' | b'+' | b'`') => true,
-                Some(b) if b.is_ascii_alphanumeric() => false,
-                Some(_) => false,
-                None => false,
-            }
-        };
-        let is_plus_header_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'+')
-                && matches!(line.get(cursor + 1), Some(b'+') | Some(b'$'))
-        };
-        let doc_line_under_plus_header = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                return is_plus_header_line(scan_line, scan_cursor);
-            }
-            false
-        };
-        let is_type_header_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'+') && line.get(cursor + 1) == Some(&b'$')
-        };
-        let is_tilde_percent_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'~') && line.get(cursor + 1) == Some(&b'%')
-        };
-        let doc_line_preceded_by_tilde_percent = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor != cursor {
-                return false;
-            }
-            is_tilde_percent_line(prev_line, prev_cursor)
-        };
-        let doc_line_preceded_by_tilde_slash = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor != cursor {
-                return false;
-            }
-            prev_line.get(prev_cursor) == Some(&b'~')
-                && prev_line.get(prev_cursor + 1) == Some(&b'/')
-        };
-        let doc_line_under_type_header = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                return is_type_header_line(scan_line, scan_cursor);
-            }
-            false
-        };
-        let doc_line_under_dollar_colon_header = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor >= cursor {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                return scan_line.get(scan_cursor) == Some(&b'$')
-                    && scan_line.get(scan_cursor + 1) == Some(&b':');
-            }
-            false
-        };
-        let doc_line_under_tilde_percent_in_arm = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            let mut tilde_start = None;
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                if is_tilde_percent_line(scan_line, scan_cursor) {
-                    tilde_start = Some(scan_start);
-                }
-                break;
-            }
-            let Some(tilde_start) = tilde_start else {
-                return false;
-            };
-            let mut scan_end = tilde_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                return is_plus_header_line(scan_line, scan_cursor);
-            }
-            false
-        };
-        let doc_line_plus_header_has_doc_content = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            let mut header_start = None;
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                if is_plus_header_line(scan_line, scan_cursor) {
-                    header_start = Some(scan_start);
-                }
-                break;
-            }
-            let Some(header_start) = header_start else {
-                return false;
-            };
-            let mut header_prev_end = header_start.saturating_sub(1);
-            while header_prev_end > 0 {
-                let mut header_prev_start = header_prev_end;
-                while header_prev_start > 0 && bytes[header_prev_start - 1] != b'\n' {
-                    header_prev_start -= 1;
-                }
-                let header_prev_line = &bytes[header_prev_start..header_prev_end];
-                let mut header_prev_cursor = 0;
-                while header_prev_cursor < header_prev_line.len()
-                    && (header_prev_line[header_prev_cursor] == b' '
-                        || header_prev_line[header_prev_cursor] == b'\t')
-                {
-                    header_prev_cursor += 1;
-                }
-                if header_prev_cursor == header_prev_line.len() {
-                    header_prev_end = header_prev_start.saturating_sub(1);
-                    continue;
-                }
-                if let Some((has_content, _)) =
-                    doccord_info(header_prev_line, header_prev_cursor, 2)
-                {
-                    if has_content {
-                        return true;
-                    }
-                    header_prev_end = header_prev_start.saturating_sub(1);
-                    continue;
-                }
-                break;
-            }
-            false
-        };
-        let doc_line_plus_header_has_inline_doc = |line_start: usize, cursor: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_line.get(scan_cursor) == Some(&b'~')
-                    && scan_line.get(scan_cursor + 1) == Some(&b'/')
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > cursor {
-                    return false;
-                }
-                if scan_cursor < cursor && cursor.saturating_sub(scan_cursor) != 2 {
-                    return false;
-                }
-                if is_plus_header_line(scan_line, scan_cursor) {
-                    return matches!(inline_doc_offset(scan_line), Some((true, _)));
-                }
-                return false;
-            }
-            false
-        };
-        let is_arm_header_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'+') && line.get(cursor + 1) == Some(&b'+')
-        };
-        let is_question_header_line =
-            |line: &[u8], cursor: usize| -> bool { line.get(cursor) == Some(&b'?') };
-        let doc_line_under_question_header = |line_start: usize, cursor: usize| -> bool {
-            let Some((prev_cursor, prev_line)) = prev_non_doc_line(line_start) else {
-                return false;
-            };
-            if prev_cursor >= cursor {
-                return false;
-            }
-            if !is_question_header_line(prev_line, prev_cursor) {
-                return false;
-            }
-            matches!(prev_line.get(prev_cursor + 1), Some(b'&') | Some(b'|'))
-        };
-        let doc_block_between_question_branches = |line_start: usize, doc_indent: usize| -> bool {
-            let mut scan_end = line_start.saturating_sub(1);
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some()
-                    || doc_comment_offset(scan_line, scan_cursor).is_some()
-                {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor > doc_indent {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if scan_cursor < doc_indent {
-                    return false;
-                }
-                return is_question_header_line(scan_line, scan_cursor)
-                    && scan_line.get(scan_cursor + 1) == Some(&b':');
-            }
-            false
-        };
-        let is_colon_caret_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b':') && line.get(cursor + 1) == Some(&b'^')
-        };
-        let is_colon_tilde_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b':') && line.get(cursor + 1) == Some(&b'~')
-        };
-        let is_dollar_header_line =
-            |line: &[u8], cursor: usize| -> bool { line.get(cursor) == Some(&b'$') };
-        let is_dollar_question_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'$') && line.get(cursor + 1) == Some(&b'?')
-        };
-        let is_dollar_percent_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'$') && line.get(cursor + 1) == Some(&b'%')
-        };
-        let is_dollar_paren_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'$') && line.get(cursor + 1) == Some(&b'(')
-        };
-        let is_percent_header_line =
-            |line: &[u8], cursor: usize| -> bool { line.get(cursor) == Some(&b'%') };
-        let is_equals_header_line =
-            |line: &[u8], cursor: usize| -> bool { line.get(cursor) == Some(&b'=') };
-        let is_equals_plus_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'=') && line.get(cursor + 1) == Some(&b'+')
-        };
-        let equals_plus_has_colon_star = |line: &[u8], cursor: usize, doc_offset: usize| -> bool {
-            let end = doc_offset.min(line.len());
-            let mut idx = cursor + 2;
-            while idx + 1 < end {
-                if line[idx] == b':' && line[idx + 1] == b'*' {
-                    return true;
-                }
-                idx += 1;
-            }
-            false
-        };
-        let is_caret_hep_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'^') && line.get(cursor + 1) == Some(&b'-')
-        };
-        let is_caret_bar_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'^') && line.get(cursor + 1) == Some(&b'|')
-        };
-        let is_tilde_hint_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'~') && line.get(cursor + 1) == Some(&b'_')
-        };
-        let is_tilde_slash_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'~') && line.get(cursor + 1) == Some(&b'/')
-        };
-        let is_fas_import_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'/')
-                && matches!(line.get(cursor + 1), Some(b'=') | Some(b'#'))
-        };
-        let is_branch_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b'[') && line.get(cursor + 1) == Some(&b'%')
-        };
-        let is_branch_tag_line = |line: &[u8], cursor: usize| -> bool {
-            if line.get(cursor) != Some(&b'%') {
-                return false;
-            }
-            let mut idx = cursor + 1;
-            while idx < line.len() {
-                let b = line[idx];
-                if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' {
-                    idx += 1;
-                } else {
-                    break;
-                }
-            }
-            if idx == cursor + 1 {
-                return false;
-            }
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            if idx >= line.len() {
-                return true;
-            }
-            line.get(idx) == Some(&b':') && line.get(idx + 1) == Some(&b':')
-        };
-        let branch_line_has_multiple_tags =
-            |line: &[u8], cursor: usize, doc_offset: usize| -> bool {
-                let mut idx = cursor;
-                let mut count = 0;
-                let end = doc_offset.min(line.len());
-                while idx + 1 < end {
-                    if line[idx] == b'[' && line[idx + 1] == b'%' {
-                        count += 1;
-                        if count > 1 {
-                            return true;
-                        }
-                        idx += 2;
-                        continue;
-                    }
-                    idx += 1;
-                }
-                false
-            };
-        let branch_line_parent_header_char =
-            |line_start: usize, cursor: usize, start_cursor: usize| -> Option<u8> {
-                let mut scan_end = line_start.saturating_sub(1);
-                while scan_end > 0 {
-                    let mut scan_start = scan_end;
-                    while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                        scan_start -= 1;
-                    }
-                    let scan_line = &bytes[scan_start..scan_end];
-                    let mut scan_cursor = 0;
-                    while scan_cursor < scan_line.len()
-                        && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                    {
-                        scan_cursor += 1;
-                    }
-                    if scan_cursor == scan_line.len() {
-                        scan_end = scan_start.saturating_sub(1);
-                        continue;
-                    }
-                    if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                        scan_end = scan_start.saturating_sub(1);
-                        continue;
-                    }
-                    if scan_cursor >= cursor {
-                        scan_end = scan_start.saturating_sub(1);
-                        continue;
-                    }
-                    if scan_cursor != start_cursor {
-                        return None;
-                    }
-                    match scan_line.get(scan_cursor) {
-                        Some(b':') if scan_line.get(scan_cursor + 1) != Some(&b':') => {
-                            return scan_line.get(scan_cursor + 1).copied();
-                        }
-                        Some(b'?') => return Some(b'?'),
-                        _ => return None,
-                    }
-                }
-                None
-            };
-
-        let mut lead = line_start;
-        while lead < bytes.len()
-            && bytes[lead] != b'\n'
-            && (bytes[lead] == b' ' || bytes[lead] == b'\t')
-        {
-            lead += 1;
-        }
-        if lead >= bytes.len() || bytes[lead] == b'\n' {
             return start;
         }
-        let start_line_end = bytes[line_start..]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(bytes.len(), |idx| line_start + idx);
-        let start_line = &bytes[line_start..start_line_end];
-        let mut start_cursor = 0;
-        while start_cursor < start_line.len()
-            && (start_line[start_cursor] == b' ' || start_line[start_cursor] == b'\t')
-        {
-            start_cursor += 1;
-        }
-        if doccord_info(start_line, start_cursor, 2).is_none() {
-            let mut scan_end = line_start.saturating_sub(1);
-            let mut doc_lines: Vec<(usize, usize, usize)> = Vec::new();
-            let mut doc_min_indent: Option<usize> = None;
-            let mut doc_max_indent: Option<usize> = None;
-            let mut saw_doc = false;
-            let mut doc_block_has_text = false;
-            let mut prev_non_doc_cursor = None;
-            let mut prev_non_doc_start = None;
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let line = &bytes[scan_start..scan_end];
-                let mut cursor = 0;
-                while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
-                    cursor += 1;
-                }
-                if cursor == line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if cursor != start_cursor {
-                    prev_non_doc_cursor = Some(cursor);
-                    prev_non_doc_start = Some(scan_start);
-                    break;
-                }
-                if let Some((has_content, doc_offset)) = doccord_info(line, cursor, 2) {
-                    saw_doc = true;
-                    if has_content && !doc_line_starts_with_rune_like(line, doc_offset) {
-                        doc_block_has_text = true;
-                        let content_indent = doc_content_indent(line, doc_offset);
-                        doc_lines.push((scan_start, doc_offset, content_indent));
-                        doc_min_indent =
-                            Some(doc_min_indent.map_or(content_indent, |v| v.min(content_indent)));
-                        doc_max_indent =
-                            Some(doc_max_indent.map_or(content_indent, |v| v.max(content_indent)));
-                    }
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                break;
-            }
-            if saw_doc && doc_block_has_text {
-                if let (Some(min_indent), Some(max_indent)) = (doc_min_indent, doc_max_indent) {
-                    if max_indent > min_indent {
-                        if let (Some(prev_cursor), Some(prev_start)) =
-                            (prev_non_doc_cursor, prev_non_doc_start)
-                        {
-                            if prev_cursor > start_cursor
-                                && doc_block_between_question_branches(prev_start, start_cursor)
-                            {
-                                if let Some((line_start, doc_offset, _)) = doc_lines
-                                    .iter()
-                                    .rfind(|(_, _, indent)| *indent == max_indent)
-                                {
-                                    return line_start + doc_offset;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if doccord_info(start_line, start_cursor, 2).is_some()
-            && doc_line_is_trailing_comment(line_start, start_cursor)
-        {
-            if let Some(next_start) = next_non_doc_line_start(line_start) {
-                return next_start;
-            }
-        }
-        let start_is_term_line = start_line
-            .get(start_cursor)
-            .map(|b| b.is_ascii_lowercase())
-            .unwrap_or(false);
-        let start_is_face_line = is_face_line(start_line, start_cursor);
-        let start_is_face_binding = is_face_bind_line(start_line, start_cursor);
-        let start_equals_has_inline_body = if start_line.get(start_cursor) == Some(&b'=') {
-            let mut idx = start_cursor;
-            let mut tokens = 0;
-            while idx < start_line.len() {
-                while idx < start_line.len()
-                    && (start_line[idx] == b' ' || start_line[idx] == b'\t')
-                {
-                    idx += 1;
-                }
-                if idx >= start_line.len() {
-                    break;
-                }
-                tokens += 1;
-                while idx < start_line.len() && start_line[idx] != b' ' && start_line[idx] != b'\t'
-                {
-                    idx += 1;
-                }
-            }
-            tokens > 2
-        } else {
-            false
-        };
-        let plus_header_has_inline_body = |line: &[u8], cursor: usize, doc_offset: usize| -> bool {
-            let end = doc_offset.min(line.len());
-            let mut idx = cursor;
-            let mut tokens = 0;
-            while idx < end {
-                while idx < end && (line[idx] == b' ' || line[idx] == b'\t') {
-                    idx += 1;
-                }
-                if idx >= end {
-                    break;
-                }
-                tokens += 1;
-                while idx < end && line[idx] != b' ' && line[idx] != b'\t' {
-                    idx += 1;
-                }
-            }
-            tokens > 2
-        };
-        let is_bare_dollar_colon_header = |line: &[u8], cursor: usize, doc_offset: usize| -> bool {
-            if line.get(cursor) != Some(&b'$') || line.get(cursor + 1) != Some(&b':') {
-                return false;
-            }
-            let end = doc_offset.min(line.len());
-            let mut idx = cursor + 2;
-            while idx < end {
-                let b = line[idx];
-                if b != b' ' && b != b'\t' {
-                    return false;
-                }
-                idx += 1;
-            }
-            true
-        };
-        let dollar_colon_line_has_inline_field = |line: &[u8], cursor: usize| -> bool {
-            if line.get(cursor) != Some(&b'$') || line.get(cursor + 1) != Some(&b':') {
-                return false;
-            }
-            let mut idx = cursor + 2;
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            if idx >= line.len() {
-                return false;
-            }
-            !(line.get(idx) == Some(&b':') && line.get(idx + 1) == Some(&b':'))
-        };
-        let dollar_percent_line_has_inline_branch = |line: &[u8], cursor: usize| -> bool {
-            if line.get(cursor) != Some(&b'$') || line.get(cursor + 1) != Some(&b'%') {
-                return false;
-            }
-            let mut idx = cursor + 2;
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            if idx >= line.len() {
-                return false;
-            }
-            !(line.get(idx) == Some(&b':') && line.get(idx + 1) == Some(&b':'))
-        };
-        let dollar_colon_line_has_nested_header = |line: &[u8], cursor: usize| -> bool {
-            if line.get(cursor) != Some(&b'$') || line.get(cursor + 1) != Some(&b':') {
-                return false;
-            }
-            let mut idx = cursor + 2;
-            while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
-                idx += 1;
-            }
-            line.get(idx) == Some(&b'$') && line.get(idx + 1) == Some(&b':')
-        };
-        let is_semicolon_tilde_line = |line: &[u8], cursor: usize| -> bool {
-            line.get(cursor) == Some(&b';') && line.get(cursor + 1) == Some(&b'~')
-        };
-        let start_has_same_indent_continuation = {
-            if start_line_end >= bytes.len() {
-                false
-            } else {
-                let mut next_start = start_line_end + 1;
-                let mut same_indent = false;
-                while next_start < bytes.len() {
-                    let next_end = bytes[next_start..]
-                        .iter()
-                        .position(|&b| b == b'\n')
-                        .map_or(bytes.len(), |idx| next_start + idx);
-                    let next_line = &bytes[next_start..next_end];
-                    let mut next_cursor = 0;
-                    while next_cursor < next_line.len()
-                        && (next_line[next_cursor] == b' ' || next_line[next_cursor] == b'\t')
-                    {
-                        next_cursor += 1;
-                    }
-                    if next_cursor == next_line.len() {
-                        next_start = next_end + 1;
-                        continue;
-                    }
-                    if doccord_info(next_line, next_cursor, 2).is_some() {
-                        next_start = next_end + 1;
-                        continue;
-                    }
-                    same_indent = next_cursor == start_cursor;
-                    break;
-                }
-                same_indent
-            }
-        };
-        let start_is_doc_line = doccord_info(start_line, start_cursor, 2).is_some();
-        let start_is_tilde = bytes.get(lead) == Some(&b'~');
-        let start_is_dollar = bytes.get(lead) == Some(&b'$');
-        let start_is_tilde_hint =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'_'));
-        let start_is_tilde_slog =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'>'));
-        let start_is_tilde_print =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'&'));
-        let start_is_tilde_plus =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'+'));
-        let start_is_tilde_percent =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'%'));
-        let start_is_tilde_slash =
-            matches!(bytes.get(lead), Some(b'~')) && matches!(bytes.get(lead + 1), Some(b'/'));
-        let start_is_caret = bytes.get(lead) == Some(&b'^');
-        let start_is_caret_plus = start_is_caret && start_line.get(start_cursor + 1) == Some(&b'+');
-        let start_is_question = bytes.get(lead) == Some(&b'?');
-        let start_is_question_tilde = start_is_question && bytes.get(lead + 1) == Some(&b'~');
-        let start_is_equals = bytes.get(lead) == Some(&b'=');
-        let start_is_percent_caret =
-            bytes.get(lead) == Some(&b'%') && bytes.get(lead + 1) == Some(&b'^');
-        let start_is_equals_slash =
-            start_is_equals && start_line.get(start_cursor + 1) == Some(&b'/');
-        let start_is_equals_dot =
-            start_is_equals && start_line.get(start_cursor + 1) == Some(&b'.');
-        let start_is_equals_caret =
-            start_is_equals && start_line.get(start_cursor + 1) == Some(&b'^');
-        let start_is_bar_percent =
-            bytes.get(lead) == Some(&b'|') && bytes.get(lead + 1) == Some(&b'%');
-        let start_is_colon_hep =
-            bytes.get(lead) == Some(&b':') && bytes.get(lead + 1) == Some(&b'-');
-        let start_is_colon_rune =
-            bytes.get(lead) == Some(&b':') && bytes.get(lead + 1) != Some(&b':');
-        let start_is_dollar_percent =
-            bytes.get(lead) == Some(&b'$') && bytes.get(lead + 1) == Some(&b'%');
-        let start_is_dollar_plus =
-            bytes.get(lead) == Some(&b'$') && bytes.get(lead + 1) == Some(&b'+');
-        let start_is_dollar_paren =
-            bytes.get(lead) == Some(&b'$') && bytes.get(lead + 1) == Some(&b'(');
-        let start_is_dollar_colon =
-            bytes.get(lead) == Some(&b'$') && bytes.get(lead + 1) == Some(&b':');
-        let start_is_equals_bar = start_is_equals && bytes.get(lead + 1) == Some(&b'|');
-        let start_inline_doc_offset = inline_doc_offset(start_line)
-            .and_then(|(has_content, offset)| has_content.then_some(offset));
-        let start_has_inline_doc = start_inline_doc_offset.is_some();
-        let start_inline_doc_is_heading = start_inline_doc_offset
-            .map(|offset| inline_doc_is_heading(start_line, offset))
-            .unwrap_or(false);
-        let start_is_branch_tag = is_branch_tag_line(start_line, start_cursor);
-        let start_is_bar = start_line.get(start_cursor) == Some(&b'|');
-        let start_is_bar_cab = start_is_bar && start_line.get(start_cursor + 1) == Some(&b'_');
-        let start_is_plus_header = is_plus_header_line(start_line, start_cursor);
-        let start_is_bar_gate_sample = is_bar_gate_sample_line(start_line, start_cursor);
-        let start_is_bar_equals = start_is_bar && start_line.get(start_cursor + 1) == Some(&b'=');
-        let start_is_bar_star = start_is_bar && start_line.get(start_cursor + 1) == Some(&b'*');
-        let start_is_bar_hep = start_is_bar && start_line.get(start_cursor + 1) == Some(&b'-');
-        let start_is_underscore = bytes.get(lead) == Some(&b'_');
-        let start_is_backtick = bytes.get(lead) == Some(&b'`');
-        let start_under_dollar_colon = doc_line_under_dollar_colon_header(line_start, start_cursor);
-        let start_equals_slash_name = if start_is_equals_slash {
-            let mut idx = start_cursor + 2;
-            while idx < start_line.len() && (start_line[idx] == b' ' || start_line[idx] == b'\t') {
-                idx += 1;
-            }
-            let start_idx = idx;
-            while idx < start_line.len() {
-                let b = start_line[idx];
-                if b.is_ascii_alphanumeric() || b == b'-' {
-                    idx += 1;
-                } else {
-                    break;
-                }
-            }
-            if idx > start_idx {
-                Some(&start_line[start_idx..idx])
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        if start_is_caret && start_has_inline_doc && line_start > 0 {
-            let prev_end = line_start.saturating_sub(1);
+
+        // Gap top: walk back over comment-only and blank lines to the previous
+        // code line (the parent's `jump` began right after it) or the file top.
+        let mut gap_top = line_start;
+        let mut boundary: Option<(usize, usize)> = None;
+        while gap_top > 0 {
+            let prev_end = gap_top - 1;
             let mut prev_start = prev_end;
             while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
                 prev_start -= 1;
             }
-            let prev_line = &bytes[prev_start..prev_end];
-            let mut prev_cursor = 0;
-            while prev_cursor < prev_line.len()
-                && (prev_line[prev_cursor] == b' ' || prev_line[prev_cursor] == b'\t')
+            let line = &bytes[prev_start..prev_end];
+            if comment_only_line_offset(line).is_some()
+                || line.iter().all(|c| matches!(c, b' ' | b'\t' | b'\r'))
             {
-                prev_cursor += 1;
+                gap_top = prev_start;
+                continue;
             }
-            if prev_cursor == start_cursor
-                && is_bar_gate_sample_line(prev_line, prev_cursor)
-                && matches!(inline_doc_offset(prev_line), Some((true, _)))
-            {
-                if let Some((_has_content, doc_offset)) = inline_doc_offset(prev_line) {
-                    return prev_start + doc_offset;
-                }
-            }
+            boundary = Some((prev_start, prev_end));
+            break;
         }
-        let start_question_header_context =
-            if start_is_question && line_start > 0 && start_cursor > 0 {
-                let mut scan_end = line_start.saturating_sub(1);
-                let mut found = false;
-                while scan_end > 0 {
-                    let mut scan_start = scan_end;
-                    while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                        scan_start -= 1;
-                    }
-                    let scan_line = &bytes[scan_start..scan_end];
-                    let mut scan_cursor = 0;
-                    while scan_cursor < scan_line.len()
-                        && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                    {
-                        scan_cursor += 1;
-                    }
-                    if scan_cursor == scan_line.len() {
-                        scan_end = scan_start.saturating_sub(1);
-                        continue;
-                    }
-                    if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                        scan_end = scan_start.saturating_sub(1);
-                        continue;
-                    }
-                    found = scan_cursor == start_cursor
-                        && is_question_header_line(scan_line, scan_cursor);
-                    break;
-                }
-                found
-            } else {
-                false
-            };
-        let bar_hep_has_header_context = if start_is_bar_hep && line_start > 0 && start_cursor > 0 {
-            let mut scan_end = line_start.saturating_sub(1);
-            let mut found = false;
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let scan_line = &bytes[scan_start..scan_end];
-                let mut scan_cursor = 0;
-                while scan_cursor < scan_line.len()
-                    && (scan_line[scan_cursor] == b' ' || scan_line[scan_cursor] == b'\t')
-                {
-                    scan_cursor += 1;
-                }
-                if scan_cursor == scan_line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if doccord_info(scan_line, scan_cursor, 2).is_some() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                found = scan_cursor < start_cursor && is_plus_header_line(scan_line, scan_cursor);
-                break;
-            }
-            found
-        } else {
-            false
-        };
-        let allow_doc = match bytes[lead] {
-            b'|' => {
-                let next = bytes.get(lead + 1).copied().unwrap_or(0);
-                if next == b'-' {
-                    bar_hep_has_header_context
-                } else {
-                    !matches!(next, b'(')
-                }
-            }
-            b':' => true,
-            b'=' => {
-                matches!(start_line.get(start_cursor + 1), Some(b'/') | Some(b'.'))
-                    || start_under_dollar_colon
-            }
-            b'$' => true,
-            b'%' => !matches!(bytes.get(lead + 1), Some(b'=')),
-            _ => true,
-        };
-        if !allow_doc {
+        if boundary.is_none() {
             return start;
         }
-        if start_is_face_line {
-            return start;
-        }
-        if start_is_doc_line && line_start > 0 {
-            let prev_end = line_start.saturating_sub(1);
-            let mut prev_start = prev_end;
-            while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
-                prev_start -= 1;
-            }
-            let prev_line = &bytes[prev_start..prev_end];
-            if let Some((_has_content, doc_offset)) = inline_doc_offset(prev_line) {
-                return prev_start + doc_offset;
-            }
-        }
-
-        let mut idx = line_start;
-        let start_line_start = line_start;
-        let mut saw_doc = false;
-        let mut saw_non_doc_comment_before_doc = false;
-        let mut saw_doc_content = false;
-        let mut doc_anchor_inline = false;
-        let mut last_non_inline_blank = false;
-        let mut doc_top_blank = false;
-        let mut doc_start = None;
-        let mut doc_start_by_indent: Vec<(usize, usize)> = Vec::new();
-        let mut doc_label_start_by_indent: Vec<(usize, usize)> = Vec::new();
-        let mut doc_indent = None;
-        let mut doc_min_content_indent: Option<usize> = None;
-        let mut doc_second_min_content_indent: Option<usize> = None;
-        let mut doc_max_content_indent: Option<usize> = None;
-        let mut doc_deep_indent = false;
-        let mut suppress_doc_block = false;
-        let mut doc_content_lines = 0usize;
-        let mut doc_any_content = false;
-        let mut doc_blank_after_content = false;
-        let mut doc_blank_after_content_lines = 0usize;
-        let mut doc_content_after_blank = false;
-        let mut doc_simple_heading = false;
-        let mut doc_single_word_heading = false;
-        let mut doc_heading_block = false;
-        let mut doc_block_has_rune_like = false;
-        let mut doc_block_has_non_gate_rune_like = false;
-        let mut doc_block_has_label = false;
-        let mut doc_block_has_non_label = false;
-        let mut doc_block_has_non_label_after_blank = false;
-        let mut doc_under_plus_header_block = false;
-        let mut doc_under_caret_bar_block = false;
-        let mut saw_tilde_slash = false;
-        let mut doc_has_triple_quote = false;
-        let mut doc_mentions_start_binding = false;
-        let mut doc_under_dollar_colon = false;
-        let mut doc_under_equals_slash = false;
-        let doc_block_has_text = {
-            let mut scan_end = line_start.saturating_sub(1);
-            let mut has_text = false;
-            while scan_end > 0 {
-                let mut scan_start = scan_end;
-                while scan_start > 0 && bytes[scan_start - 1] != b'\n' {
-                    scan_start -= 1;
-                }
-                let line = &bytes[scan_start..scan_end];
-                let mut cursor = 0;
-                while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
-                    cursor += 1;
-                }
-                if cursor == line.len() {
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                if let Some((has_content, doc_offset)) = doccord_info(line, cursor, 2) {
-                    if has_content && !doc_line_starts_with_rune_like(line, doc_offset) {
-                        has_text = true;
-                    }
-                    scan_end = scan_start.saturating_sub(1);
-                    continue;
-                }
-                break;
-            }
-            has_text
-        };
-        loop {
-            if idx == 0 {
-                if start_is_backtick || start_is_tilde_slog || start_is_tilde_print {
-                    return start;
-                }
-                if start_is_tilde_plus
-                    && doc_content_lines <= 1
-                    && !doc_blank_after_content
-                    && !doc_top_blank
-                {
-                    return start;
-                }
-                if saw_doc && !doc_anchor_inline {
-                    let has_leading_blank_doc = doc_blank_after_content && !doc_content_after_blank;
-                    let start_allows_blank_doc = (start_is_dollar && !start_is_dollar_colon)
-                        || start_is_bar_percent
-                        || start_is_underscore
-                        || doc_under_dollar_colon;
-                    let doc_has_mixed_indent = matches!(
-                        (doc_min_content_indent, doc_max_content_indent),
-                        (Some(min_indent), Some(max_indent)) if max_indent > min_indent
-                    );
-                    if (doc_top_blank || has_leading_blank_doc)
-                        && !start_allows_blank_doc
-                        && !doc_has_mixed_indent
-                    {
-                        return start;
-                    }
-                }
-                if saw_doc_content {
-                    if let Some(indent) = doc_indent {
-                        if indent > 0 && indent == start_cursor {
-                            if doc_top_blank && doc_content_lines <= 1 {
-                                return start;
-                            }
-                            if start_is_question_tilde
-                                || (start_is_question && start_question_header_context)
-                            {
-                                return start;
-                            }
-                            if start_is_equals && doc_top_blank && doc_content_lines <= 1 {
-                                return start;
-                            }
-                            if start_is_equals_bar {
-                                return start;
-                            }
-                            return doc_start.unwrap_or(start);
-                        }
-                    }
-                    if doc_anchor_inline {
-                        return doc_start.unwrap_or(start);
-                    }
-                }
+        if let Some((code_start, _)) = boundary {
+            // A `/`-directive (import) line: the build wrapper strips these
+            // before the body reaches ++vest, so everything between the last
+            // directive and the first body token is the file-leading gap that
+            // `gay` consumes — no span ever anchors into it.
+            if bytes.get(code_start) == Some(&b'/') {
                 return start;
             }
-            if bytes[idx - 1] != b'\n' {
-                #[cfg(test)]
-                if debug_expand {
-                    eprintln!(
-                        "expand-gap return saw_doc_content={} doc_start={:?} doc_content_lines={} blank_after_content={} content_after_blank={} labels={} non_labels={} non_labels_after_blank={}",
-                        saw_doc_content,
-                        doc_start,
-                        doc_content_lines,
-                        doc_blank_after_content,
-                        doc_content_after_blank,
-                        doc_block_has_label,
-                        doc_block_has_non_label,
-                        doc_block_has_non_label_after_blank
-                    );
+        }
+
+        // A trailing comment on the boundary code line is inside the gap:
+        // `leap` stops at it when it is doccord-shaped (`%stet  ::    doc`).
+        if let Some((code_start, code_end)) = boundary {
+            if let Some(off) = trailing_comment_offset(&bytes[code_start..code_end]) {
+                let abs = code_start + off;
+                if doccord_comment_anchors(&bytes[abs..code_end]) {
+                    return abs;
                 }
-                return if saw_doc_content {
-                    doc_start.unwrap_or(idx)
-                } else {
-                    start
-                };
             }
+        }
 
-            let line_end = idx - 1;
-            let mut prev_start = line_end;
-            while prev_start > 0 && bytes[prev_start - 1] != b'\n' {
-                prev_start -= 1;
+        // The first larg/smol-shaped comment line in the gap anchors the span.
+        let mut cursor = gap_top;
+        while cursor < line_start {
+            let mut line_end = cursor;
+            while line_end < bytes.len() && bytes[line_end] != b'\n' {
+                line_end += 1;
             }
-            let line = &bytes[prev_start..line_end];
+            if let Some(off) = comment_only_line_offset(&bytes[cursor..line_end]) {
+                let abs = cursor + off;
+                if doccord_comment_anchors(&bytes[abs..line_end]) {
+                    return abs;
+                }
+            }
+            cursor = line_end + 1;
+        }
+        start
+    }
+}
 
-            let mut cursor = 0;
-            while cursor < line.len() && (line[cursor] == b' ' || line[cursor] == b'\t') {
+/// Offset of `::` on a line containing only spaces before it (`++into`,
+/// hoon-138:11648: `;~(plug (star ace) col col)`).
+fn comment_only_line_offset(line: &[u8]) -> Option<usize> {
+    let mut pos = 0;
+    while line.get(pos) == Some(&b' ') {
+        pos += 1;
+    }
+    (line.get(pos) == Some(&b':') && line.get(pos + 1) == Some(&b':')).then_some(pos)
+}
+
+/// Offset of a `::` comment following code on a line, skipping cord/tape
+/// literals (`++vul` accepts a comment wherever gap-space is legal).
+fn trailing_comment_offset(line: &[u8]) -> Option<usize> {
+    let mut in_cord = false;
+    let mut in_tape = false;
+    let mut pos = 0;
+    while pos < line.len() {
+        match line[pos] {
+            b'\'' if !in_tape => in_cord = !in_cord,
+            b'"' if !in_cord => in_tape = !in_tape,
+            b':' if !in_cord && !in_tape && line.get(pos + 1) == Some(&b':') => {
+                return Some(pos);
+            }
+            _ => {}
+        }
+        pos += 1;
+    }
+    None
+}
+
+/// Does a comment (`comment` starts at its `::`) have the larg or smol doccord
+/// shape (hoon-138:11592-11625)? Only these anchor a %dbug span; everything
+/// else is `++skip` — plain whitespace to the parser.
+fn doccord_comment_anchors(comment: &[u8]) -> bool {
+    let mut aces = 0;
+    while comment.get(2 + aces) == Some(&b' ') {
+        aces += 1;
+    }
+    let content = 2 + aces;
+    match aces {
+        // ++larg: exactly four aces, then a non-empty summary. (The optional
+        // `+link: ` prefix parses as summary text when the link shape fails,
+        // so any non-empty, non-space-led content qualifies.)
+        4 => content < comment.len(),
+        // ++smol: exactly two aces, then one or more en-links, then either
+        // `: summary` (col-ace + at least one char) or spaces to end-of-line.
+        2 => {
+            let mut cursor = content;
+            let mut links = 0usize;
+            while let Some(end) = match_en_link(comment, cursor) {
+                links += 1;
+                cursor = end;
+            }
+            if links == 0 {
+                return false;
+            }
+            if comment.get(cursor) == Some(&b':')
+                && comment.get(cursor + 1) == Some(&b' ')
+                && cursor + 2 < comment.len()
+            {
+                return true;
+            }
+            while comment.get(cursor) == Some(&b' ') {
                 cursor += 1;
             }
-            if cursor == line.len() {
-                return if saw_doc_content {
-                    doc_start.unwrap_or(idx)
-                } else {
-                    start
-                };
-            }
-            if cursor == start_cursor && is_tilde_slash_line(line, cursor) {
-                saw_tilde_slash = true;
-            }
-
-            let allow_inline = start_is_doc_line
-                || (saw_doc && doc_indent == Some(start_cursor))
-                || start_cursor > cursor
-                || (start_cursor == cursor
-                    && (is_branch_line(line, cursor)
-                        || is_branch_tag_line(line, cursor)
-                        || (start_is_branch_tag && is_dollar_question_line(line, cursor))
-                        || (start_is_caret && is_bar_gate_sample_line(line, cursor))
-                        || (start_is_question_tilde && is_caret_hep_line(line, cursor))))
-                || (start_cursor < cursor && start_is_colon_rune && is_branch_line(line, cursor))
-                || (start_cursor < cursor
-                    && start_is_dollar_paren
-                    && is_question_header_line(line, cursor));
-            let parent_header_char =
-                if start_cursor < cursor && start_is_colon_rune && is_branch_line(line, cursor) {
-                    branch_line_parent_header_char(prev_start, cursor, start_cursor)
-                } else {
-                    None
-                };
-            let allow_compact_doc =
-                doc_under_dollar_colon || doc_line_under_dollar_colon_header(prev_start, cursor);
-            let doc_line_info = doccord_info(line, cursor, 2).or_else(|| {
-                allow_compact_doc
-                    .then(|| doccord_info(line, cursor, 0))
-                    .flatten()
-            });
-            if doc_line_info.is_none() && doc_comment_offset(line, cursor).is_some() {
-                if !saw_doc {
-                    saw_non_doc_comment_before_doc = true;
-                } else if doc_indent == Some(cursor) {
-                    saw_doc = false;
-                    saw_doc_content = false;
-                    doc_any_content = false;
-                    doc_content_lines = 0;
-                    doc_blank_after_content = false;
-                    doc_blank_after_content_lines = 0;
-                    doc_content_after_blank = false;
-                    doc_top_blank = false;
-                    doc_indent = None;
-                    doc_anchor_inline = false;
-                    doc_start = None;
-                    doc_deep_indent = false;
-                    doc_simple_heading = false;
-                    doc_single_word_heading = false;
-                    doc_heading_block = false;
-                    doc_block_has_rune_like = false;
-                    doc_block_has_non_gate_rune_like = false;
-                    doc_block_has_label = false;
-                    doc_block_has_non_label = false;
-                    doc_block_has_non_label_after_blank = false;
-                    doc_under_plus_header_block = false;
-                    doc_under_caret_bar_block = false;
-                    doc_start_by_indent.clear();
-                    doc_label_start_by_indent.clear();
-                }
-                idx = prev_start;
-                continue;
-            }
-            let doc_kind = if let Some((has_content, doc_offset)) = doc_line_info {
-                Some((false, has_content, doc_offset))
-            } else if allow_inline {
-                inline_doc_offset(line).and_then(|(has_content, offset)| {
-                    if !has_content && !(start_is_doc_line || saw_doc) {
-                        None
-                    } else if start_cursor > cursor
-                        && start_cursor - cursor > 4
-                        && !is_plus_header_line(line, cursor)
-                        && !(is_equals_plus_line(line, cursor)
-                            && equals_plus_has_colon_star(line, cursor, offset))
-                    {
-                        None
-                    } else if start_cursor > cursor
-                        && is_equals_header_line(line, cursor)
-                        && !(is_equals_plus_line(line, cursor)
-                            && equals_plus_has_colon_star(line, cursor, offset))
-                    {
-                        None
-                    } else if start_cursor > cursor && is_question_header_line(line, cursor) {
-                        None
-                    } else if start_is_colon_hep && start_cursor > cursor {
-                        None
-                    } else if start_cursor > cursor && is_colon_caret_line(line, cursor) {
-                        None
-                    } else if start_cursor > cursor && is_colon_tilde_line(line, cursor) {
-                        None
-                    } else if start_cursor > cursor
-                        && line.get(cursor) == Some(&b':')
-                        && line.get(cursor + 1) != Some(&b':')
-                        && start_has_inline_doc
-                        && !start_inline_doc_is_heading
-                    {
-                        None
-                    } else if parent_header_char == Some(b'?') {
-                        None
-                    } else if parent_header_char.is_some() && parent_header_char != Some(b'^') {
-                        None
-                    } else if parent_header_char == Some(b'^')
-                        && !branch_line_has_multiple_tags(line, cursor, offset)
-                    {
-                        None
-                    } else if start_cursor > cursor && is_percent_header_line(line, cursor) {
-                        None
-                    } else if start_cursor > cursor && is_plus_header_line(line, cursor) && !saw_doc
-                    {
-                        None
-                    } else if start_cursor > cursor
-                        && is_dollar_percent_line(line, cursor)
-                        && dollar_percent_line_has_inline_branch(line, cursor)
-                        && !inline_doc_is_heading(line, offset)
-                    {
-                        None
-                    } else if start_cursor > cursor
-                        && is_dollar_header_line(line, cursor)
-                        && dollar_colon_line_has_inline_field(line, cursor)
-                        && !inline_doc_is_heading(line, offset)
-                    {
-                        None
-                    } else if start_cursor > cursor
-                        && is_dollar_header_line(line, cursor)
-                        && !inline_doc_is_heading(line, offset)
-                        && !is_bare_dollar_colon_header(line, cursor, offset)
-                    {
-                        None
-                    } else if start_cursor > cursor && is_semicolon_tilde_line(line, cursor) {
-                        None
-                    } else if start_is_question
-                        && start_cursor == cursor
-                        && is_equals_header_line(line, cursor)
-                    {
-                        None
-                    } else if start_has_inline_doc
-                        && start_cursor == cursor
-                        && !is_branch_line(line, cursor)
-                        && !is_branch_tag_line(line, cursor)
-                        && !(start_is_caret && is_bar_gate_sample_line(line, cursor))
-                        && !(start_is_question_tilde && is_caret_hep_line(line, cursor))
-                    {
-                        None
-                    } else if start_cursor == cursor
-                        && is_branch_line(line, cursor)
-                        && branch_line_has_multiple_tags(line, cursor, offset)
-                        && !start_is_colon_rune
-                    {
-                        None
-                    } else if start_cursor == cursor
-                        && is_branch_line(line, cursor)
-                        && !start_is_colon_rune
-                        && !inline_doc_starts_with_branch_marker(line, offset)
-                    {
-                        None
-                    } else if start_cursor > cursor
-                        && is_plus_header_line(line, cursor)
-                        && (plus_header_has_inline_body(line, cursor, offset)
-                            || start_is_bar
-                            || start_is_question
-                            || start_is_equals
-                            || !start_is_dollar_percent
-                            || is_type_header_line(line, cursor))
-                        && !start_is_doc_line
-                        && !start_is_tilde
-                    {
-                        None
-                    } else {
-                        Some((true, has_content, offset))
-                    }
-                })
-            } else {
-                None
-            };
-
-            if let Some((is_inline, has_content, doc_offset)) = doc_kind {
-                if start_is_question && is_inline && saw_doc && cursor > start_cursor {
-                    return start;
-                }
-                if !is_inline {
-                    if let Some((prev_cursor, prev_line)) = prev_non_doc_line(prev_start) {
-                        if prev_cursor <= cursor
-                            && prev_line.get(prev_cursor) == Some(&b'=')
-                            && prev_line.get(prev_cursor + 1) == Some(&b'/')
-                        {
-                            doc_under_equals_slash = true;
-                        }
-                    }
-                }
-                if !is_inline && start_has_inline_doc && start_cursor == cursor {
-                    if !doc_line_under_plus_header(prev_start, cursor)
-                        && !doc_line_preceded_by_tilde_percent(prev_start, cursor)
-                    {
-                        return start;
-                    }
-                }
-                let mut current_content_indent = None;
-                let mut line_is_label = false;
-                let mut line_simple_heading = false;
-                let mut line_single_word_heading = false;
-                if has_content {
-                    if !is_inline {
-                        line_is_label = doc_line_is_label(line, doc_offset);
-                        if line_is_label && doc_content_indent(line, doc_offset) >= 4 {
-                            line_is_label = false;
-                        }
-                    }
-                    if let Some(name) = start_equals_slash_name {
-                        if doc_line_mentions_name(line, doc_offset, name) {
-                            doc_mentions_start_binding = true;
-                        }
-                    }
-                }
-                if !is_inline && has_content {
-                    if line_is_label {
-                        doc_block_has_label = true;
-                    } else {
-                        doc_block_has_non_label = true;
-                    }
-                    if doc_blank_after_content && !line_is_label {
-                        doc_block_has_non_label_after_blank = true;
-                    }
-                }
-                if !is_inline && has_content {
-                    line_simple_heading = doc_line_is_simple_heading(line, doc_offset);
-                    line_single_word_heading = doc_line_is_single_word_heading(line, doc_offset);
-                    doc_content_lines += 1;
-                    if doc_content_lines == 1 {
-                        doc_simple_heading = line_simple_heading;
-                        doc_single_word_heading = line_single_word_heading;
-                    } else {
-                        doc_simple_heading = false;
-                        doc_single_word_heading = false;
-                    }
-                    doc_any_content = true;
-                    if doc_blank_after_content {
-                        doc_content_after_blank = true;
-                    }
-                    if (doc_under_dollar_colon || start_under_dollar_colon)
-                        && line_simple_heading
-                        && doc_blank_after_content
-                    {
-                        doc_heading_block = true;
-                        saw_doc_content = false;
-                        doc_anchor_inline = false;
-                        doc_start = None;
-                        doc_start_by_indent.clear();
-                        doc_label_start_by_indent.clear();
-                    }
-                    let content_indent = doc_content_indent(line, doc_offset);
-                    current_content_indent = Some(content_indent);
-                    if let Some(min_indent) = doc_min_content_indent {
-                        if content_indent < min_indent {
-                            doc_second_min_content_indent = Some(min_indent);
-                            doc_min_content_indent = Some(content_indent);
-                        } else if content_indent > min_indent {
-                            doc_second_min_content_indent = Some(
-                                doc_second_min_content_indent
-                                    .map_or(content_indent, |v| v.min(content_indent)),
-                            );
-                        }
-                    } else {
-                        doc_min_content_indent = Some(content_indent);
-                    }
-                    doc_max_content_indent = Some(
-                        doc_max_content_indent.map_or(content_indent, |v| v.max(content_indent)),
-                    );
-                    if let (Some(min_indent), Some(max_indent)) =
-                        (doc_min_content_indent, doc_max_content_indent)
-                    {
-                        if max_indent.saturating_sub(min_indent) >= 8 {
-                            doc_deep_indent = true;
-                        }
-                    }
-                    if doc_line_starts_with_triple_quote(line, doc_offset) {
-                        doc_has_triple_quote = true;
-                    }
-                }
-                if !has_content && !is_inline && doc_any_content {
-                    doc_blank_after_content = true;
-                    doc_blank_after_content_lines += 1;
-                    if (doc_under_dollar_colon || start_under_dollar_colon)
-                        && doc_single_word_heading
-                        && doc_content_lines <= 1
-                    {
-                        saw_doc_content = false;
-                        doc_anchor_inline = false;
-                        doc_start = None;
-                        doc_start_by_indent.clear();
-                        doc_label_start_by_indent.clear();
-                    }
-                    if (doc_under_dollar_colon || start_under_dollar_colon)
-                        && doc_blank_after_content_lines >= 1
-                        && !doc_content_after_blank
-                        && matches!(doc_max_content_indent, Some(indent) if indent < 4)
-                    {
-                        saw_doc_content = false;
-                        doc_anchor_inline = false;
-                        doc_start = None;
-                        doc_start_by_indent.clear();
-                        doc_label_start_by_indent.clear();
-                    }
-                    if (doc_under_dollar_colon || start_under_dollar_colon)
-                        && doc_blank_after_content_lines >= 2
-                        && !doc_content_after_blank
-                    {
-                        saw_doc_content = false;
-                        doc_anchor_inline = false;
-                        doc_start = None;
-                        doc_start_by_indent.clear();
-                        doc_label_start_by_indent.clear();
-                    }
-                }
-                let doc_line_content_indent = if !is_inline && has_content {
-                    Some(doc_content_indent(line, doc_offset))
-                } else {
-                    None
-                };
-                let mut anchorable = if is_inline {
-                    has_content
-                } else {
-                    has_content && doc_line_anchorable(line, doc_offset)
-                };
-                if !is_inline
-                    && (doc_under_dollar_colon || start_under_dollar_colon)
-                    && matches!(doc_max_content_indent, Some(indent) if indent < 4)
-                {
-                    anchorable = false;
-                }
-                if doc_heading_block {
-                    anchorable = false;
-                }
-                if is_inline
-                    && anchorable
-                    && is_bare_dollar_colon_header(line, cursor, doc_offset)
-                    && !inline_doc_is_heading(line, doc_offset)
-                    && !doc_indent.map_or(false, |indent| indent > cursor)
-                {
-                    anchorable = false;
-                }
-                if is_inline
-                    && anchorable
-                    && has_content
-                    && start_is_branch_tag
-                    && start_cursor == cursor
-                    && is_branch_tag_line(line, cursor)
-                    && !inline_doc_is_heading(line, doc_offset)
-                    && prev_start != start_line_start
-                {
-                    anchorable = false;
-                }
-                let doc_line_is_question_greater = if !is_inline && has_content {
-                    let content_indent = doc_content_indent(line, doc_offset);
-                    let content_start = doc_offset + 2 + content_indent;
-                    line.get(content_start) == Some(&b'?')
-                        && line.get(content_start + 1) == Some(&b'>')
-                } else {
-                    false
-                };
-                let line_is_indented_heading = if !is_inline && has_content && !line_is_label {
-                    match (current_content_indent, doc_min_content_indent) {
-                        (Some(current_indent), Some(min_indent)) => current_indent > min_indent,
-                        _ => false,
-                    }
-                } else {
-                    false
-                };
-                if doc_line_is_question_greater {
-                    anchorable = false;
-                }
-                let doc_line_is_rune_like =
-                    !is_inline && has_content && doc_line_starts_with_rune_like(line, doc_offset);
-                let doc_line_is_bar_gate_rune_like = if !is_inline && has_content {
-                    let content_start =
-                        doc_offset + 2 + doc_line_content_indent.unwrap_or_default();
-                    line.get(content_start) == Some(&b'|')
-                        && matches!(line.get(content_start + 1), Some(b':' | b'='))
-                } else {
-                    false
-                };
-                if doc_line_is_rune_like && !doc_block_has_text {
-                    anchorable = false;
-                }
-                if doc_line_is_rune_like {
-                    doc_block_has_rune_like = true;
-                    if !doc_line_is_bar_gate_rune_like {
-                        doc_block_has_non_gate_rune_like = true;
-                    }
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_block_has_rune_like
-                    && !doc_line_is_rune_like
-                    && doc_line_is_compact_plus_payload(line, doc_offset)
-                {
-                    anchorable = false;
-                }
-                #[cfg(test)]
-                if debug_expand {
-                    let (line_no, _) = self.line_col(prev_start);
-                    let line_str = String::from_utf8_lossy(line);
-                    eprintln!(
-                        "expand-gap doc line {} {:?} inline={} content={} rune_like={} block_has_text={} anchorable={}",
-                        line_no,
-                        line_str,
-                        is_inline,
-                        has_content,
-                        doc_line_is_rune_like,
-                        doc_block_has_text,
-                        anchorable
-                    );
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_line_preceded_by_question_greater(prev_start, cursor)
-                    && matches!(doc_line_content_indent, Some(indent) if indent < 4)
-                {
-                    anchorable = false;
-                }
-                let doc_under_plus_header =
-                    !is_inline && doc_line_under_plus_header(prev_start, cursor);
-                let doc_under_type_header =
-                    !is_inline && doc_line_under_type_header(prev_start, cursor);
-                let doc_under_dollar_colon_header =
-                    !is_inline && doc_line_under_dollar_colon_header(prev_start, cursor);
-                let doc_under_tilde_percent_in_arm =
-                    !is_inline && doc_line_under_tilde_percent_in_arm(prev_start, cursor);
-                let doc_under_question_header =
-                    !is_inline && doc_line_under_question_header(prev_start, cursor);
-                let plus_header_has_doc_content =
-                    !is_inline && doc_line_plus_header_has_doc_content(prev_start, cursor);
-                let plus_header_has_inline_doc =
-                    !is_inline && doc_line_plus_header_has_inline_doc(prev_start, cursor);
-                if doc_under_plus_header {
-                    doc_under_plus_header_block = true;
-                }
-                let doc_under_caret_bar = !is_inline
-                    && prev_non_doc_line(prev_start).map_or(false, |(prev_cursor, prev_line)| {
-                        prev_cursor == cursor && is_caret_bar_line(prev_line, prev_cursor)
-                    });
-                if doc_under_caret_bar {
-                    doc_under_caret_bar_block = true;
-                }
-                if doc_under_plus_header
-                    && start_is_bar_gate_sample
-                    && doc_block_has_label
-                    && !doc_block_has_non_label
-                {
-                    anchorable = false;
-                }
-                if doc_under_plus_header
-                    && start_is_bar_gate_sample
-                    && doc_block_has_label
-                    && doc_content_after_blank
-                    && !doc_block_has_non_label_after_blank
-                    && !doc_block_has_non_label
-                {
-                    anchorable = false;
-                }
-                if doc_deep_indent
-                    && start_is_bar_gate_sample
-                    && !doc_under_plus_header
-                    && !doc_under_type_header
-                    && !doc_under_question_header
-                {
-                    suppress_doc_block = true;
-                }
-                if doc_under_dollar_colon_header {
-                    doc_under_dollar_colon = true;
-                }
-                if (doc_under_dollar_colon_header || start_under_dollar_colon)
-                    && doc_simple_heading
-                    && doc_content_lines <= 1
-                    && doc_top_blank
-                {
-                    anchorable = false;
-                }
-                if suppress_doc_block {
-                    saw_doc = false;
-                    saw_doc_content = false;
-                    doc_any_content = false;
-                    doc_content_lines = 0;
-                    doc_blank_after_content = false;
-                    doc_blank_after_content_lines = 0;
-                    doc_content_after_blank = false;
-                    doc_top_blank = false;
-                    doc_indent = None;
-                    doc_anchor_inline = false;
-                    doc_start = None;
-                    doc_deep_indent = false;
-                    doc_simple_heading = false;
-                    doc_single_word_heading = false;
-                    doc_heading_block = false;
-                    doc_block_has_rune_like = false;
-                    doc_block_has_non_gate_rune_like = false;
-                    doc_block_has_label = false;
-                    doc_block_has_non_label = false;
-                    doc_block_has_non_label_after_blank = false;
-                    doc_under_plus_header_block = false;
-                    doc_under_caret_bar_block = false;
-                    suppress_doc_block = false;
-                    doc_start_by_indent.clear();
-                    doc_label_start_by_indent.clear();
-                    idx = prev_start;
-                    continue;
-                }
-                if !is_inline && saw_non_doc_comment_before_doc {
-                    anchorable = false;
-                }
-                let mut allow_trailing_doc = false;
-                if start_is_equals_slash && doc_line_preceded_by_equals_slash(prev_start, cursor) {
-                    allow_trailing_doc = true;
-                }
-                if start_is_underscore && doc_line_preceded_by_bar_dollar(prev_start, cursor) {
-                    allow_trailing_doc = true;
-                }
-                if doc_line_preceded_by_bar_dollar(prev_start, cursor) {
-                    allow_trailing_doc = true;
-                }
-                if doc_block_between_question_branches(prev_start, cursor) {
-                    allow_trailing_doc = true;
-                }
-                if doc_line_preceded_by_tilde_percent(prev_start, cursor) {
-                    if !doc_line_under_tilde_percent_in_arm(prev_start, cursor)
-                        || matches!(doc_line_content_indent, Some(indent) if indent >= 4)
-                    {
-                        allow_trailing_doc = true;
-                    }
-                }
-                if doc_line_preceded_by_tilde_slash(prev_start, cursor) {
-                    allow_trailing_doc = true;
-                }
-                if start_is_face_binding && doc_under_dollar_colon_header {
-                    allow_trailing_doc = true;
-                }
-                if start_is_question {
-                    let content_indent = doc_content_indent(line, doc_offset);
-                    let content_start = doc_offset + 2 + content_indent;
-                    if line.get(content_start) == Some(&b'[') {
-                        allow_trailing_doc = true;
-                    }
-                }
-                if start_is_bar_gate_sample {
-                    if let Some((prev_cursor, _)) = prev_non_doc_line(prev_start) {
-                        if prev_cursor < cursor {
-                            allow_trailing_doc = true;
-                        }
-                    }
-                }
-                if let Some((prev_cursor, prev_line)) = prev_non_doc_line(prev_start) {
-                    if prev_cursor == cursor
-                        && prev_line.get(prev_cursor) == Some(&b'?')
-                        && prev_line.get(prev_cursor + 1) == Some(&b'>')
-                    {
-                        allow_trailing_doc = true;
-                    }
-                }
-                if start_is_term_line {
-                    if let Some((prev_cursor, prev_line)) = prev_non_doc_line(prev_start) {
-                        if prev_cursor == cursor && is_caret_hep_line(prev_line, prev_cursor) {
-                            allow_trailing_doc = true;
-                        }
-                    }
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_line_is_trailing_comment(prev_start, cursor)
-                    && !allow_trailing_doc
-                {
-                    anchorable = false;
-                }
-                if doc_under_plus_header && start_is_bar_star {
-                    anchorable = false;
-                }
-                if doc_under_plus_header && start_is_bar_equals {
-                    if doc_content_after_blank {
-                        let tilde_slash_header =
-                            doc_line_preceded_by_tilde_slash(prev_start, cursor);
-                        if doc_block_has_label && !tilde_slash_header && !plus_header_has_inline_doc
-                        {
-                            anchorable = false;
-                        } else if doc_block_has_non_label_after_blank
-                            && !tilde_slash_header
-                            && !plus_header_has_inline_doc
-                        {
-                            anchorable = false;
-                        }
-                    } else if !doc_blank_after_content && !doc_content_after_blank && !doc_top_blank
-                    {
-                        let tilde_slash_header =
-                            doc_line_preceded_by_tilde_slash(prev_start, cursor);
-                        if doc_content_lines <= 1
-                            && !plus_header_has_inline_doc
-                            && !tilde_slash_header
-                        {
-                            anchorable = false;
-                        }
-                    }
-                }
-                if doc_under_plus_header
-                    && start_is_tilde_slash
-                    && matches!(doc_line_content_indent, Some(indent) if indent < 4)
-                {
-                    anchorable = false;
-                }
-                if doc_under_type_header && start_is_dollar_colon {
-                    anchorable = false;
-                }
-                if doc_under_type_header
-                    && doc_content_lines <= 1
-                    && !doc_blank_after_content
-                    && !doc_top_blank
-                    && !(start_is_dollar && !start_is_dollar_colon)
-                {
-                    anchorable = false;
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_line_preceded_by_question_greater(prev_start, cursor)
-                    && start_is_question
-                {
-                    anchorable = false;
-                }
-                if doc_under_tilde_percent_in_arm && start_is_bar_percent {
-                    if matches!(doc_line_content_indent, Some(indent) if indent < 4) {
-                        anchorable = false;
-                    }
-                }
-                if doc_under_question_header {
-                    anchorable = false;
-                }
-                if start_is_dollar_plus {
-                    anchorable = false;
-                }
-                if !is_inline
-                    && anchorable
-                    && line_is_label
-                    && (start_is_equals || start_is_face_binding)
-                {
-                    if let Some(min_indent) = doc_min_content_indent {
-                        if current_content_indent == Some(min_indent) {
-                            anchorable = false;
-                        }
-                    } else {
-                        anchorable = false;
-                    }
-                }
-                if !is_inline && has_content && line_is_label {
-                    if let Some(content_indent) = current_content_indent {
-                        if let Some(pos) = doc_label_start_by_indent
-                            .iter()
-                            .position(|(indent, _)| *indent == content_indent)
-                        {
-                            doc_label_start_by_indent[pos].1 = prev_start + doc_offset;
-                        } else {
-                            doc_label_start_by_indent
-                                .push((content_indent, prev_start + doc_offset));
-                        }
-                    }
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_line_preceded_by_outdent_terminator(prev_start, cursor)
-                {
-                    if !(start_is_bar_percent || start_is_plus_header) {
-                        anchorable = false;
-                    }
-                }
-                if !is_inline
-                    && anchorable
-                    && doc_deep_indent
-                    && start_is_bar_gate_sample
-                    && !doc_under_plus_header
-                    && !doc_under_type_header
-                    && !doc_under_question_header
-                {
-                    anchorable = false;
-                }
-                if start_is_equals_slash
-                    && !is_inline
-                    && has_content
-                    && start_equals_slash_name.is_none()
-                {
-                    anchorable = false;
-                }
-                if is_inline
-                    && has_content
-                    && start_has_inline_doc
-                    && start_is_branch_tag
-                    && start_cursor == cursor
-                    && is_branch_tag_line(line, cursor)
-                    && !inline_doc_is_heading(line, doc_offset)
-                {
-                    return start;
-                }
-                let was_saw_doc = saw_doc;
-                if start_is_caret && is_inline && is_plus_header_line(line, cursor) {
-                    return start;
-                }
-                if start_is_caret_plus && is_inline && is_bar_gate_sample_line(line, cursor) {
-                    return start;
-                }
-                if start_is_tilde_hint {
-                    return start;
-                }
-                if !has_content && !is_inline && !doc_any_content && !doc_anchor_inline {
-                    if !saw_doc {
-                        doc_top_blank = true;
-                    }
-                    saw_doc = true;
-                    last_non_inline_blank = true;
-                    if doc_indent.is_none() {
-                        doc_indent = Some(cursor);
-                    }
-                    idx = prev_start;
-                    continue;
-                }
-                if is_inline && !has_content && doc_anchor_inline {
-                    idx = prev_start;
-                    continue;
-                }
-                let allow_plus_header_inline_doc = start_cursor > cursor
-                    && is_arm_header_line(line, cursor)
-                    && !plus_header_has_inline_body(line, cursor, doc_offset)
-                    && !start_is_bar
-                    && !start_is_question
-                    && !start_is_equals
-                    && start_is_dollar_percent;
-                let allow_equals_plus_tuple_inline_doc = start_cursor > cursor
-                    && is_equals_plus_line(line, cursor)
-                    && equals_plus_has_colon_star(line, cursor, doc_offset);
-                if saw_doc && !doc_anchor_inline && is_inline {
-                    if !has_content {
-                        return start;
-                    }
-                    let inline_header_indented_block = (is_arm_header_line(line, cursor)
-                        && doc_indent.map_or(false, |indent| indent > cursor))
-                        || (is_bare_dollar_colon_header(line, cursor, doc_offset)
-                            && doc_indent.map_or(false, |indent| indent > cursor));
-                    if last_non_inline_blank
-                        && doc_indent.map_or(false, |indent| indent <= start_cursor)
-                        && !allow_plus_header_inline_doc
-                        && !allow_equals_plus_tuple_inline_doc
-                        && !inline_header_indented_block
-                    {
-                        return start;
-                    }
-                    if !last_non_inline_blank
-                        && !allow_plus_header_inline_doc
-                        && !allow_equals_plus_tuple_inline_doc
-                        && !inline_header_indented_block
-                    {
-                        return if saw_doc_content {
-                            doc_start.unwrap_or(idx)
-                        } else {
-                            start
-                        };
-                    }
-                }
-                if start_is_tilde && is_inline && has_content {
-                    return start;
-                }
-                if !has_content && !is_inline && doc_anchor_inline {
-                    return if saw_doc_content {
-                        doc_start.unwrap_or(idx)
-                    } else {
-                        start
-                    };
-                }
-                if !is_inline {
-                    last_non_inline_blank = !has_content;
-                    if !was_saw_doc {
-                        doc_top_blank = !has_content;
-                    }
-                    if doc_indent.is_none() {
-                        doc_indent = Some(cursor);
-                    }
-                }
-                #[cfg(test)]
-                if debug_expand {
-                    let line_str = String::from_utf8_lossy(line);
-                    eprintln!(
-                        "expand-gap doc line final {:?} anchorable={} has_content={} line_is_label={} doc_content_after_blank={} doc_block_has_non_label_after_blank={}",
-                        line_str,
-                        anchorable,
-                        has_content,
-                        line_is_label,
-                        doc_content_after_blank,
-                        doc_block_has_non_label_after_blank
-                    );
-                }
-                if anchorable {
-                    saw_doc_content = true;
-                    doc_anchor_inline = is_inline;
-                }
-                saw_doc = true;
-                if anchorable {
-                    if let Some(content_indent) = current_content_indent {
-                        if let Some(pos) = doc_start_by_indent
-                            .iter()
-                            .position(|(indent, _)| *indent == content_indent)
-                        {
-                            doc_start_by_indent[pos].1 = prev_start + doc_offset;
-                        } else {
-                            doc_start_by_indent.push((content_indent, prev_start + doc_offset));
-                        }
-                        if let (Some(min_indent), Some(max_indent)) =
-                            (doc_min_content_indent, doc_max_content_indent)
-                        {
-                            if max_indent > min_indent {
-                                let preferred_indent =
-                                    doc_second_min_content_indent.unwrap_or(max_indent);
-                                if let Some((_, offset)) = doc_start_by_indent
-                                    .iter()
-                                    .find(|(indent, _)| *indent == preferred_indent)
-                                {
-                                    doc_start = Some(*offset);
-                                } else if let Some((_, offset)) = doc_label_start_by_indent
-                                    .iter()
-                                    .find(|(indent, _)| *indent == preferred_indent)
-                                {
-                                    doc_start = Some(*offset);
-                                }
-                            } else {
-                                doc_start = Some(prev_start + doc_offset);
-                            }
-                        } else {
-                            doc_start = Some(prev_start + doc_offset);
-                        }
-                    } else {
-                        doc_start = Some(prev_start + doc_offset);
-                    }
-                }
-                if !doc_anchor_inline {
-                    if let (Some(min_indent), Some(max_indent)) =
-                        (doc_min_content_indent, doc_max_content_indent)
-                    {
-                        if max_indent > min_indent {
-                            let preferred_indent =
-                                doc_second_min_content_indent.unwrap_or(max_indent);
-                            if let Some((_, offset)) = doc_start_by_indent
-                                .iter()
-                                .find(|(indent, _)| *indent == preferred_indent)
-                            {
-                                doc_start = Some(*offset);
-                            } else if let Some((_, offset)) = doc_label_start_by_indent
-                                .iter()
-                                .find(|(indent, _)| *indent == preferred_indent)
-                            {
-                                doc_start = Some(*offset);
-                            }
-                        }
-                    }
-                }
-                if is_inline && has_content && start_cursor < cursor && is_branch_line(line, cursor)
-                {
-                    return doc_start.unwrap_or(start);
-                }
-                if is_inline
-                    && has_content
-                    && start_cursor == cursor
-                    && is_branch_line(line, cursor)
-                    && inline_doc_starts_with_branch_marker(line, doc_offset)
-                {
-                    return doc_start.unwrap_or(start);
-                }
-                if is_inline
-                    && has_content
-                    && start_cursor == cursor
-                    && start_is_branch_tag
-                    && is_branch_tag_line(line, cursor)
-                    && inline_doc_is_heading(line, doc_offset)
-                {
-                    return doc_start.unwrap_or(start);
-                }
-                if is_inline && !was_saw_doc && start_cursor > cursor {
-                    return doc_start.unwrap_or(start);
-                }
-                idx = prev_start;
-                continue;
-            }
-
-            if saw_doc {
-                #[cfg(test)]
-                if debug_expand {
-                    let line_str = String::from_utf8_lossy(line);
-                    eprintln!(
-                        "expand-gap saw_doc line={} cursor={} start_cursor={} saw_doc_content={} doc_start={:?} saw_tilde_slash={}",
-                        self.line_col(prev_start).0,
-                        cursor + 1,
-                        start_cursor + 1,
-                        saw_doc_content,
-                        doc_start,
-                        saw_tilde_slash
-                    );
-                    eprintln!("expand-gap saw_doc line text={:?}", line_str);
-                }
-                if start_is_bar_cab
-                    && !doc_anchor_inline
-                    && !doc_under_plus_header_block
-                    && !doc_under_caret_bar_block
-                    && !matches!(doc_min_content_indent, Some(indent) if indent >= 4)
-                {
-                    return start;
-                }
-                if start_is_bar_percent && is_fas_import_line(line, cursor) {
-                    return start;
-                }
-                if start_is_bar_gate_sample
-                    && !doc_anchor_inline
-                    && !saw_tilde_slash
-                    && doc_top_blank
-                {
-                    if !(start_cursor > cursor && is_plus_header_line(line, cursor)) {
-                        return start;
-                    }
-                }
-                if start_is_equals
-                    && start_cursor > cursor
-                    && is_plus_header_line(line, cursor)
-                    && !doc_top_blank
-                    && !saw_tilde_slash
-                    && !matches!(doc_min_content_indent, Some(indent) if indent >= 4)
-                {
-                    return start;
-                }
-                if start_is_caret
-                    && !start_is_caret_plus
-                    && start_cursor > cursor
-                    && is_plus_header_line(line, cursor)
-                    && !saw_tilde_slash
-                {
-                    let plus_header_has_inline_doc = inline_doc_offset(line)
-                        .map(|(has_content, _)| has_content)
-                        .unwrap_or(false);
-                    if !plus_header_has_inline_doc
-                        && start_cursor == cursor + 2
-                        && doc_top_blank
-                        && !doc_content_after_blank
-                        && doc_min_content_indent.map_or(false, |indent| indent >= 4)
-                    {
-                        return if saw_doc_content {
-                            doc_start.unwrap_or(start)
-                        } else {
-                            start
-                        };
-                    }
-                    return start;
-                }
-                if !doc_anchor_inline {
-                    let has_leading_blank_doc = doc_blank_after_content && !doc_content_after_blank;
-                    let header_allows_blank_doc = is_plus_header_line(line, cursor);
-                    let doc_has_mixed_indent = matches!(
-                        (doc_min_content_indent, doc_max_content_indent),
-                        (Some(min_indent), Some(max_indent)) if max_indent > min_indent
-                    );
-                    if start_is_equals_slash
-                        && doc_under_equals_slash
-                        && !doc_has_mixed_indent
-                        && !doc_mentions_start_binding
-                    {
-                        return start;
-                    }
-                    let start_allows_blank_doc = (start_is_dollar && !start_is_dollar_colon)
-                        || start_is_bar_percent
-                        || start_is_underscore
-                        || header_allows_blank_doc
-                        || doc_under_dollar_colon
-                        || (start_is_equals_slash && doc_has_mixed_indent);
-                    let has_blank_after_content = doc_blank_after_content || doc_top_blank;
-                    let has_internal_blank_doc = doc_blank_after_content && doc_content_after_blank;
-                    if start_is_colon_rune {
-                        return start;
-                    }
-                    if start_is_backtick {
-                        return start;
-                    }
-                    if start_is_tilde_slog || start_is_tilde_print {
-                        return start;
-                    }
-                    if start_is_tilde_plus
-                        && doc_content_lines <= 1
-                        && !doc_blank_after_content
-                        && !doc_top_blank
-                    {
-                        return start;
-                    }
-                    if start_is_equals_dot && doc_under_plus_header_block {
-                        return start;
-                    }
-                    if start_is_bar_star && has_internal_blank_doc {
-                        return start;
-                    }
-                    if doc_under_dollar_colon
-                        && !doc_top_blank
-                        && !has_leading_blank_doc
-                        && dollar_colon_line_has_inline_field(line, cursor)
-                        && !dollar_colon_line_has_nested_header(line, cursor)
-                    {
-                        return start;
-                    }
-                    if start_cursor > cursor
-                        && line.get(cursor) == Some(&b'?')
-                        && line.get(cursor + 1) == Some(&b'.')
-                    {
-                        return start;
-                    }
-                    if start_cursor > cursor
-                        && line.get(cursor) == Some(&b'?')
-                        && line.get(cursor + 1) == Some(&b'~')
-                        && !doc_has_triple_quote
-                        && doc_min_content_indent == doc_max_content_indent
-                    {
-                        return start;
-                    }
-                    if start_cursor > cursor
-                        && line.get(cursor) == Some(&b'?')
-                        && line.get(cursor + 1) == Some(&b':')
-                        && !doc_has_triple_quote
-                        && doc_min_content_indent == doc_max_content_indent
-                    {
-                        return start;
-                    }
-                    if start_is_question
-                        && doc_indent == Some(start_cursor)
-                        && doc_min_content_indent.is_some()
-                        && doc_min_content_indent == doc_max_content_indent
-                    {
-                        return start;
-                    }
-                    if start_cursor > cursor && is_plus_header_line(line, cursor) {
-                        if let Some((has_content, doc_offset)) = inline_doc_offset(line) {
-                            if has_content && plus_header_has_inline_body(line, cursor, doc_offset)
-                            {
-                                return start;
-                            }
-                        }
-                        if start_is_equals
-                            && doc_content_lines <= 1
-                            && !doc_blank_after_content
-                            && !doc_top_blank
-                        {
-                            return start;
-                        }
-                    }
-                    let same_or_deeper_indent = cursor >= start_cursor;
-                    let top_blank_disallowed = same_or_deeper_indent
-                        && doc_top_blank
-                        && !start_allows_blank_doc
-                        && !doc_has_mixed_indent
-                        && (doc_content_lines <= 1
-                            || (start_is_equals
-                                && !(start_is_equals_slash && doc_mentions_start_binding)));
-                    let leading_blank_disallowed = same_or_deeper_indent
-                        && has_leading_blank_doc
-                        && !start_allows_blank_doc
-                        && !doc_has_mixed_indent;
-                    if top_blank_disallowed || leading_blank_disallowed {
-                        let is_bar_dollar_line =
-                            line.get(cursor) == Some(&b'|') && line.get(cursor + 1) == Some(&b'$');
-                        let is_tilde_line = is_tilde_header_line(line, cursor);
-                        if !is_bar_dollar_line && !is_tilde_line {
-                            return start;
-                        }
-                    }
-                    if let Some(indent) = doc_indent {
-                        if indent != start_cursor {
-                            return start;
-                        }
-                        if start_is_question_tilde
-                            || (start_is_question && start_question_header_context)
-                        {
-                            return start;
-                        }
-                        if start_is_equals_bar {
-                            return start;
-                        }
-                        if cursor == start_cursor {
-                            if line.get(cursor) == Some(&b'~')
-                                && line.get(cursor + 1) == Some(&b'+')
-                            {
-                                return start;
-                            }
-                            match line.get(cursor) {
-                                Some(b'?') if line.get(cursor + 1) != Some(&b'>') => return start,
-                                Some(b'=')
-                                    if start_equals_has_inline_body
-                                        && !(start_is_equals_slash && doc_has_mixed_indent) =>
-                                {
-                                    return start
-                                }
-                                _ => {}
-                            }
-                            let prev_is_question_gt = line.get(cursor) == Some(&b'?')
-                                && line.get(cursor + 1) == Some(&b'>');
-                            let prev_is_caret_hep = line.get(cursor) == Some(&b'^')
-                                && line.get(cursor + 1) == Some(&b'-');
-                            let prev_is_caret_bar = line.get(cursor) == Some(&b'^')
-                                && line.get(cursor + 1) == Some(&b'|');
-                            let prev_is_equals_slash = line.get(cursor) == Some(&b'=')
-                                && line.get(cursor + 1) == Some(&b'/');
-                            let prev_is_equals_dot = line.get(cursor) == Some(&b'=')
-                                && line.get(cursor + 1) == Some(&b'.');
-                            let prev_is_tilde_percent = line.get(cursor) == Some(&b'~')
-                                && line.get(cursor + 1) == Some(&b'%');
-                            let prev_is_tilde_slash = line.get(cursor) == Some(&b'~')
-                                && line.get(cursor + 1) == Some(&b'/');
-                            let prev_is_bar_dollar = line.get(cursor) == Some(&b'|')
-                                && line.get(cursor + 1) == Some(&b'$');
-                            let prev_is_question = line.get(cursor) == Some(&b'?');
-                            let doc_has_mixed_indent = matches!(
-                                (doc_min_content_indent, doc_max_content_indent),
-                                (Some(min_indent), Some(max_indent)) if max_indent > min_indent
-                            );
-                            let doc_block_has_blank = doc_blank_after_content || doc_top_blank;
-                            let prev_allows_equals_slash_doc = prev_is_equals_slash
-                                || prev_is_question_gt
-                                || (prev_is_equals_dot && doc_has_mixed_indent);
-                            if start_is_equals_slash
-                                && doc_block_has_blank
-                                && (!doc_has_mixed_indent || start_equals_has_inline_body)
-                                && !prev_allows_equals_slash_doc
-                            {
-                                return start;
-                            }
-                            let allow_blank_between_code_lines = doc_block_has_blank
-                                && doc_content_lines > 1
-                                && !start_is_question
-                                && !start_is_percent_caret
-                                && !(doc_block_has_rune_like && !doc_has_mixed_indent);
-                            let allow_mixed_indent_between_code_lines =
-                                doc_has_mixed_indent && (!start_is_question || !prev_is_question);
-                            let allow_between_code_lines = prev_is_question_gt
-                                || (prev_is_caret_hep
-                                    && ((doc_content_lines <= 1 && !doc_blank_after_content)
-                                        || doc_has_mixed_indent))
-                                || prev_is_caret_bar
-                                || (prev_is_equals_slash
-                                    && start_is_equals
-                                    && !start_equals_has_inline_body
-                                    && !doc_block_has_blank
-                                    && (!start_is_equals_slash || doc_mentions_start_binding));
-                            let allow_tilde_percent_arm_heading = prev_is_tilde_percent
-                                && doc_max_content_indent.map_or(false, |indent| indent >= 4);
-                            let allow_between_code_lines = allow_between_code_lines
-                                || (prev_is_tilde_percent
-                                    && cursor == 0
-                                    && !doc_line_under_tilde_percent_in_arm(prev_start, cursor))
-                                || allow_tilde_percent_arm_heading
-                                || start_is_tilde_percent
-                                || allow_blank_between_code_lines
-                                || allow_mixed_indent_between_code_lines;
-                            let allow_tilde_slash_between = prev_is_tilde_slash
-                                && !(doc_under_plus_header_block && doc_content_lines > 1);
-                            let allow_between_code_lines = allow_between_code_lines
-                                || allow_tilde_slash_between
-                                || prev_is_bar_dollar;
-                            let allow_dollar_colon_between = doc_under_dollar_colon
-                                && doc_max_content_indent.map_or(false, |indent| indent >= 4);
-                            let allow_between_code_lines =
-                                allow_between_code_lines || allow_dollar_colon_between;
-                            if !allow_between_code_lines {
-                                return start;
-                            }
-                        }
-                        if start_is_caret
-                            && indent == cursor
-                            && is_bar_gate_sample_line(line, cursor)
-                        {
-                            return start;
-                        }
-                        if start_is_caret && indent == cursor && is_tilde_hint_line(line, cursor) {
-                            idx = prev_start;
-                            continue;
-                        }
-                        if start_is_caret && indent == cursor && line.get(cursor) != Some(&b'+') {
-                            return start;
-                        }
-                        if indent == cursor && line.get(cursor) == Some(&b'^') {
-                            if start_is_equals {
-                                return start;
-                            }
-                            if start_is_question_tilde {
-                                return start;
-                            }
-                            if start_is_question && line.get(cursor + 1) == Some(&b'+') {
-                                return start;
-                            }
-                        }
-                        if indent == cursor && line.get(cursor) == Some(&b'[') {
-                            return start;
-                        }
-                        if indent != cursor {
-                            let lead = line.get(cursor).copied();
-                            let mut end = line.len();
-                            while end > cursor && (line[end - 1] == b' ' || line[end - 1] == b'\t')
-                            {
-                                end -= 1;
-                            }
-                            let trimmed = &line[cursor..end];
-                            let is_tall_terminator = trimmed == b"==";
-                            if start_is_caret && is_tall_terminator {
-                                return start;
-                            }
-                            if indent > cursor
-                                && doc_simple_heading
-                                && doc_blank_after_content
-                                && matches!(lead, Some(b'|'))
-                            {
-                                return start;
-                            }
-                            if indent < cursor && !is_tall_terminator {
-                                if start_is_question && !doc_has_mixed_indent {
-                                    return start;
-                                }
-                                let is_branch = is_branch_line(line, cursor)
-                                    || is_branch_tag_line(line, cursor);
-                                if is_branch {
-                                    match (doc_min_content_indent, doc_max_content_indent) {
-                                        (Some(min_indent), Some(max_indent))
-                                            if max_indent > min_indent => {}
-                                        _ => return start,
-                                    }
-                                } else if !(start_is_equals_slash && doc_has_mixed_indent)
-                                    && !(doc_block_between_question_branches(prev_start, indent)
-                                        && doc_has_mixed_indent)
-                                    && !(doc_has_mixed_indent && indent == start_cursor)
-                                {
-                                    return start;
-                                }
-                            }
-                            if indent > cursor {
-                                let allow_dollar_colon = doc_under_dollar_colon
-                                    && lead == Some(b'$')
-                                    && line.get(cursor + 1) == Some(&b':');
-                                let allow_equals_slash = start_is_equals_slash
-                                    && lead == Some(b'=')
-                                    && line.get(cursor + 1) == Some(&b'/');
-                                let allow = matches!(lead, Some(b'|') | Some(b'+') | Some(b'?'))
-                                    || allow_dollar_colon
-                                    || allow_equals_slash;
-                                if !allow {
-                                    return start;
-                                }
-                                if doc_under_plus_header_block
-                                    && doc_block_has_rune_like
-                                    && doc_block_has_non_gate_rune_like
-                                    && !doc_has_mixed_indent
-                                {
-                                    return start;
-                                }
-                                if start_is_question && lead == Some(b'?') {
-                                    return start;
-                                }
-                                if start_is_caret
-                                    && lead == Some(b'+')
-                                    && is_plus_header_line(line, cursor)
-                                {
-                                    if let Some((has_content, _)) = inline_doc_offset(line) {
-                                        if has_content {
-                                            return start;
-                                        }
-                                    }
-                                }
-                                if lead == Some(b'+')
-                                    && line.get(cursor + 1) == Some(&b'$')
-                                    && start_has_same_indent_continuation
-                                    && !doc_under_dollar_colon
-                                {
-                                    return start;
-                                }
-                            }
-                        }
-                        if indent == cursor && is_tilde_hint_line(line, cursor) {
-                            return start;
-                        }
-                    }
-                }
-                return if saw_doc_content {
-                    doc_start.unwrap_or(idx)
-                } else {
-                    start
-                };
-            }
-            return start;
+            cursor == comment.len()
         }
+        _ => false,
+    }
+}
+
+/// `++en-link` (hoon-138:11651-11661): `|chat`, `.frag`, `+funk`, `$plan`
+/// (each a `++sym`) or `%cone` (a `bisk:so` numeric literal).
+fn match_en_link(bytes: &[u8], pos: usize) -> Option<usize> {
+    let sigil = *bytes.get(pos)?;
+    let start = pos + 1;
+    match sigil {
+        b'|' | b'.' | b'+' | b'$' => {
+            if !bytes.get(start)?.is_ascii_lowercase() {
+                return None;
+            }
+            let mut end = start + 1;
+            while let Some(c) = bytes.get(end) {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(end)
+        }
+        b'%' => {
+            if !bytes.get(start)?.is_ascii_digit() {
+                return None;
+            }
+            let mut end = start + 1;
+            while let Some(c) = bytes.get(end) {
+                if c.is_ascii_alphanumeric() || *c == b'.' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            Some(end)
+        }
+        _ => None,
     }
 }
 
@@ -12740,6 +10781,31 @@ pub fn two_specs_tall<'src>(
         .then(spec.clone())
 }
 
+pub fn two_specs_tall_with_docs<'src>(
+    spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, (Spec, Spec), Err<'src>> {
+    let left_linemap = linemap.clone();
+    let left = spec.clone().map_with(move |spec: Spec, e| {
+        let span = (e.span().start(), e.span().end());
+        if let Some(help) = left_linemap.help_after_rune(span.0, span.1) {
+            attach_help_to_spec(spec, help)
+        } else {
+            spec
+        }
+    });
+    let right_linemap = linemap.clone();
+    let right = spec.clone().map_with(move |spec: Spec, e| {
+        let span = (e.span().start(), e.span().end());
+        if let Some(help) = right_linemap.help_after_rune(span.0, span.1) {
+            attach_help_to_spec(spec, help)
+        } else {
+            spec
+        }
+    });
+    gap().ignore_then(left).then_ignore(gap()).then(right)
+}
+
 pub fn two_specs_closed_tall<'src>(
     spec: impl ParserExt<'src, Spec>,
 ) -> impl Parser<'src, &'src str, (Spec, Spec), Err<'src>> {
@@ -12870,13 +10936,42 @@ fn apply_hoon_trace(node: Hoon, spot: Spot) -> Hoon {
 }
 
 fn apply_hoon_docs(mut node: Hoon, span: (usize, usize), linemap: &LineMap) -> Hoon {
+    if let Hoon::MicSig(func, mut args) = node {
+        let tall_micsig = matches!(
+            linemap.source.as_bytes().get(span.0 + 2),
+            Some(b' ' | b'\t')
+        );
+        node = if tall_micsig {
+            if let (Some(help), Some(token_count)) = (
+                linemap.help_after_current_line_expr(span.0),
+                linemap.postfix_doc_token_count_after(span.0, 2),
+            ) {
+                if token_count <= 1 {
+                    Hoon::MicSig(Box::new(attach_help_to_hoon(*func, help)), args)
+                } else {
+                    let arg_idx = token_count - 2;
+                    if let Some(arg) = args.get_mut(arg_idx) {
+                        let old = arg.clone();
+                        *arg = attach_help_to_hoon(old, help);
+                    }
+                    Hoon::MicSig(func, args)
+                }
+            } else {
+                Hoon::MicSig(func, args)
+            }
+        } else {
+            Hoon::MicSig(func, args)
+        };
+    }
     if let Some(help) = linemap.help_after(span.0, span.1) {
         if !hoon_tail_has_help(&node, &help) {
             node = attach_help_to_hoon(node, help);
         }
     }
     if let Some(help) = linemap.help_before_hoon(span.0) {
-        node = attach_help_to_hoon(node, help);
+        if !hoon_tail_has_help(&node, &help) {
+            node = attach_help_to_hoon(node, help);
+        }
     }
     node
 }
@@ -12898,19 +10993,73 @@ fn apply_spec_postfix_docs(mut node: Spec, span: (usize, usize), linemap: &LineM
     node
 }
 
-fn attach_help_to_hoon(node: Hoon, help: NounExpr) -> Hoon {
+/// hoon-138 `++clad` (hoon-138.hoon:11664-11673): a prefix doccord block wraps
+/// the following production in one `%note` per bat-map entry, emitted in
+/// `~(tap by bat)` order — the hoon map treap's in-order walk over the CUFF
+/// keys, not source order. The first tapped entry is the OUTERMOST note.
+/// Duplicate cuffs dedup map-style (the later entry wins).
+pub(crate) fn stack_block_docs_clad(node: Hoon, entries: Vec<(NounExpr, NounExpr)>) -> Hoon {
+    if entries.is_empty() {
+        return node;
+    }
+    let mut slab = NounSlab::new();
+    let pairs: Vec<(Noun, Noun)> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, (cuff, _))| {
+            let key = noun_expr_to_noun(&mut slab, cuff);
+            (key, D(idx as u64))
+        })
+        .collect();
+    let bat = map_to_noun(&mut slab, pairs);
+    let space = slab.noun_space();
+    // In-order walk of the map treap = ~(tap by bat) element order.
+    fn walk(node: Noun, space: &NounSpace, out: &mut Vec<usize>) {
+        if noun_is_zero(node) {
+            return;
+        }
+        let Ok(cell) = node.in_space(space).as_cell() else {
+            return;
+        };
+        let Ok(kv) = cell.head().noun().in_space(space).as_cell() else {
+            return;
+        };
+        let Ok(branches) = cell.tail().noun().in_space(space).as_cell() else {
+            return;
+        };
+        walk(branches.head().noun(), space, out);
+        if let Ok(atom) = kv.tail().noun().in_space(space).as_atom() {
+            if let Some(idx) = atom.as_u64().ok() {
+                out.push(idx as usize);
+            }
+        }
+        walk(branches.tail().noun(), space, out);
+    }
+    let mut tapped: Vec<usize> = Vec::with_capacity(entries.len());
+    walk(bat, &space, &mut tapped);
+    let mut node = node;
+    for idx in tapped.into_iter().rev() {
+        let (cuff, crib) = &entries[idx];
+        let help = LineMap::doc_cell(cuff.clone(), crib.clone());
+        node = Hoon::Note(Note::Help(help), Box::new(node));
+    }
+    node
+}
+
+pub(crate) fn attach_help_to_hoon(node: Hoon, help: NounExpr) -> Hoon {
     if matches!(&node, Hoon::Note(Note::Help(existing), _) if existing == &help) {
         return node;
     }
     Hoon::Note(Note::Help(help), Box::new(node))
 }
 
-fn attach_help_to_spec(node: Spec, help: NounExpr) -> Spec {
+pub(crate) fn attach_help_to_spec(node: Spec, help: NounExpr) -> Spec {
     if matches!(&node, Spec::Gist(existing, _) if existing == &help) {
         return node;
     }
     Spec::Gist(help, Box::new(node))
 }
+
 
 pub fn hoon_with_span(
     node: Hoon,
@@ -12922,6 +11071,120 @@ pub fn hoon_with_span(
     apply_hoon_trace(node, spot)
 }
 
+/// hoon-138 gap-glued argument positions. Most tall separators are the
+/// doc-aware `jump` (`++toad` arg1, `goop`/`mush`/`muss`/`hank`/`hunk`), which
+/// stops at a doccord-shaped comment so the child's %dbug span anchors there —
+/// hatch's default walk-back in `expand_gap_start`. But a few runes glue later
+/// arguments with plain `gap` (`gunk`/`muck`/`mash` — ++vast 13590-13602): the
+/// PARENT consumes any doccord lines, so those children's spans start at their
+/// first token. This undoes the default walk-back on exactly those children:
+/// `?^`/`?@`/`?~` branches (tkkt/tkvt/tksg), `?-`'s first clause and `?+`'s
+/// default + first clause (txhp/txls; later clauses are `muss` = jump), `%~`'s
+/// hoons (expn), `%*`'s base hoon (expm), `=^`/`=*` hoons (expt/expg), `.^`'s
+/// first path arg (exqn), `~%`'s subject + jet-hint values (hind/bonz), the
+/// `~>`/`~<` tall hint value (bont), and `|_` alias values (wasp).
+/// (Not covered: tall bracket `lute` items — hatch folds them into the same
+/// `%cltr` node as `:*`, whose items ARE jump-glued; distinguishing them needs
+/// a marker at `noun_tall` if a corpus divergence ever shows up there.)
+/// Idempotent: spans already at a token are untouched, so wide forms are no-ops.
+fn unanchor_gap_glued_children(node: &mut Hoon, linemap: &LineMap) {
+    match node {
+        Hoon::WutKet(_, q, r) | Hoon::WutPat(_, q, r) | Hoon::WutSig(_, q, r) => {
+            unanchor_hoon_spot(q, linemap);
+            unanchor_hoon_spot(r, linemap);
+        }
+        Hoon::WutHep(_, clauses) => {
+            if let Some((spec, _)) = clauses.first_mut() {
+                unanchor_spec_spot(spec, linemap);
+            }
+        }
+        Hoon::WutLus(_, default, clauses) => {
+            unanchor_hoon_spot(default, linemap);
+            if let Some((spec, _)) = clauses.first_mut() {
+                unanchor_spec_spot(spec, linemap);
+            }
+        }
+        Hoon::CenSig(_, gate, args) => {
+            unanchor_hoon_spot(gate, linemap);
+            for arg in args {
+                unanchor_hoon_spot(arg, linemap);
+            }
+        }
+        Hoon::CenTar(_, base, _) => unanchor_hoon_spot(base, linemap),
+        Hoon::TisKet(_, _, p, q) | Hoon::TisTar(_, p, q) => {
+            unanchor_hoon_spot(p, linemap);
+            unanchor_hoon_spot(q, linemap);
+        }
+        Hoon::DotKet(_, args) => {
+            if let Hoon::ColTar(items) = args.as_mut() {
+                if let Some(first) = items.first_mut() {
+                    unanchor_hoon_spot(first, linemap);
+                }
+            }
+        }
+        Hoon::SigCen(_, subject, tyre, _) => {
+            unanchor_hoon_spot(subject, linemap);
+            for (_, value) in tyre.iter_mut() {
+                unanchor_hoon_spot(value, linemap);
+            }
+        }
+        Hoon::SigGal(pair, _) | Hoon::SigGar(pair, _) => {
+            if let TermOrPair::Pair(_, value) = pair {
+                unanchor_hoon_spot(value, linemap);
+            }
+        }
+        Hoon::BarCab(_, alas, _) => {
+            for (_, value) in alas.iter_mut() {
+                unanchor_hoon_spot(value, linemap);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn unanchor_hoon_spot(node: &mut Hoon, linemap: &LineMap) {
+    match node {
+        Hoon::Dbug(spot, _) => unanchor_spot_start(spot, linemap),
+        Hoon::Note(_, inner) => unanchor_hoon_spot(inner, linemap),
+        _ => {}
+    }
+}
+
+fn unanchor_spec_spot(spec: &mut Spec, linemap: &LineMap) {
+    match spec {
+        Spec::Dbug(spot, _) => unanchor_spot_start(spot, linemap),
+        Spec::Gist(_, inner) => unanchor_spec_spot(inner, linemap),
+        _ => {}
+    }
+}
+
+/// Move a walked-back span start (pointing at a doccord `::`) forward to the
+/// first code token. No-op when the start already sits on code.
+fn unanchor_spot_start(spot: &mut Spot, linemap: &LineMap) {
+    let bytes = linemap.source.as_bytes();
+    let (line, col) = spot.q.p;
+    let Some(&line_start) = linemap.starts.get((line as usize).saturating_sub(1)) else {
+        return;
+    };
+    let mut pos = line_start + (col as usize).saturating_sub(1);
+    if pos + 1 >= bytes.len() || bytes[pos] != b':' || bytes[pos + 1] != b':' {
+        return;
+    }
+    while pos < bytes.len() {
+        match bytes[pos] {
+            b' ' | b'\t' | b'\r' | b'\n' => pos += 1,
+            b':' if bytes.get(pos + 1) == Some(&b':') => {
+                while pos < bytes.len() && bytes[pos] != b'\n' {
+                    pos += 1;
+                }
+            }
+            _ => break,
+        }
+    }
+    let (new_line, new_col) = linemap.line_col(pos);
+    spot.q.p = (new_line as u64, new_col as u64);
+}
+
 pub fn wrap_hoon_with_trace(
     wer: Path,
     linemap: Arc<LineMap>,
@@ -12929,6 +11192,8 @@ pub fn wrap_hoon_with_trace(
     move |node, e| {
         let span = (e.span().start(), e.span().end());
         let spot = chumsky_spot_to_hoon_spot(span, &wer, &linemap);
+        let mut node = node;
+        unanchor_gap_glued_children(&mut node, &linemap);
         let node = apply_hoon_docs(node, span, &linemap);
         if let Hoon::Dbug(existing_spot, inner) = node {
             if existing_spot == spot {
@@ -17034,6 +15299,220 @@ mod tests {
     }
 
     #[test]
+    fn parser_attaches_wutcol_postfix_doc_to_false_branch() {
+        let src = "?:  (gth m prc)  (^sub m prc)  0  ::  reduce precision\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "round.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("?: should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::WutCol(_, _, r)] = items.as_slice() else {
+            panic!("expected one ?: expression");
+        };
+        let Hoon::Note(Note::Help(help), inner) = r.as_ref() else {
+            panic!("trailing ?: doc should decorate the false branch");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(LineMap::doc_cord("reduce precision"), LineMap::doc_atom(0)),
+        );
+        assert_eq!(help, &expected);
+        assert!(
+            matches!(
+                inner.as_ref(),
+                Hoon::Axis(_) | Hoon::Rock(_, _) | Hoon::Sand(_, _)
+            ),
+            "doc should wrap the parsed false branch"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_choice_spec_item_docs() {
+        let src = concat!(
+            "|%\n",
+            "++  mite\n",
+            "  $?  %down                                     ::  outer embed\n",
+            "      %lunt                                     ::  unordered list\n",
+            "      %stet                                     ::    == end of markdown\n",
+            "      %dent                                     ::    outdent\n",
+            "      %lime                                     ::  list item\n",
+            "      %lord                                     ::  ordered list\n",
+            "      %poem                                     ::  verse\n",
+            "      %bloc                                     ::  blockquote\n",
+            "      %head                                     ::  heading\n",
+            "  ==\n",
+            "--\n"
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        for name in ["%down", "%lime", "%poem", "%bloc"] {
+            let start = src.find(name).expect("expected choice item");
+            let end = start + name.len();
+            assert!(
+                linemap.help_after_choice_spec_item(start, end).is_some(),
+                "{name} line should expose a choice-item doc"
+            );
+        }
+        let stet_start = src.find("%stet").expect("expected %stet item");
+        assert!(
+            linemap
+                .help_after_choice_spec_item(stet_start, stet_start + "%stet".len())
+                .is_none(),
+            "%stet four-space doc belongs to the following choice item"
+        );
+        let dent_start = src.find("%dent").expect("expected %dent item");
+        assert!(
+            linemap.help_before_choice_spec_item(dent_start).is_some(),
+            "%dent sees the preceding indented rune doc"
+        );
+        let parsed = crate::native_parser(vec!["test".into(), "mite.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("$? should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, arms)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let (_, arms) = arms.get("$").expect("expected $ chapter");
+        let Hoon::KetCol(spec) = arms.get("mite").expect("expected mite arm") else {
+            panic!("expected mite mold");
+        };
+        let Spec::BucWut(first, rest) = spec.as_ref() else {
+            panic!("expected $? mold");
+        };
+        assert!(matches!(first.as_ref(), Spec::Gist(_, _)), "first $? item keeps its doc");
+        assert!(!matches!(&rest[1], Spec::Gist(_, _)), "%stet four-space doc does not wrap itself");
+        assert!(matches!(&rest[2], Spec::Gist(_, _)), "%dent keeps preceding indented rune doc");
+        assert!(matches!(&rest[3], Spec::Gist(_, _)), "%lime keeps list item doc");
+        assert!(matches!(&rest[5], Spec::Gist(_, _)), "%poem keeps verse doc");
+        assert!(matches!(&rest[6], Spec::Gist(_, _)), "%bloc keeps blockquote doc");
+    }
+
+    #[test]
+    fn parser_shifts_indented_choice_docs_to_following_item() {
+        let src = concat!(
+            "|%\n",
+            "++  trig-style\n",
+            "  $%  $:  %one                                  ::  leaf node\n",
+            "      $?  %rule                                 ::    --- horz rule\n",
+            "          %fens                                 ::    ``` code fence\n",
+            "          %expr                                 ::    ;sail expression\n",
+            "      ==  ==\n",
+            "  ==\n",
+            "--\n"
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let rule_start = src.find("%rule").expect("expected %rule item");
+        assert!(
+            linemap
+                .help_after_choice_spec_item(rule_start, rule_start + "%rule".len())
+                .is_none(),
+            "%rule same-line four-space doc is not a direct choice-item doc"
+        );
+        let fens_start = src.find("%fens").expect("expected %fens item");
+        assert!(
+            linemap.help_before_choice_spec_item(fens_start).is_some(),
+            "%fens sees the preceding %rule doc"
+        );
+        let parsed = crate::native_parser(vec!["test".into(), "trig.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("$% should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, arms)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let (_, arms) = arms.get("$").expect("expected $ chapter");
+        let Hoon::KetCol(spec) = arms.get("trig-style").expect("expected trig-style arm") else {
+            panic!("expected trig-style mold");
+        };
+        let Spec::BucCen(first, _) = spec.as_ref() else {
+            panic!("expected $% mold");
+        };
+        let Spec::BucCol(_, tail) = first.as_ref() else {
+            panic!("expected first $% case to be $:");
+        };
+        let Spec::BucWut(first_choice, rest_choices) = &tail[0] else {
+            panic!("expected nested $? mold");
+        };
+        assert!(
+            !matches!(first_choice.as_ref(), Spec::Gist(_, _)),
+            "%rule four-space doc belongs to %fens, not itself: {first_choice:?}"
+        );
+        assert!(
+            matches!(&rest_choices[0], Spec::Gist(_, _)),
+            "%fens keeps preceding %rule doc"
+        );
+        assert!(
+            matches!(&rest_choices[1], Spec::Gist(_, _)),
+            "%expr keeps preceding %fens doc"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_cenhep_postfix_doc_to_argument() {
+        let src = "%-  abs:si  --0  ::  enforce min. exp\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "call.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("%- should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::CenHep(_, q)] = items.as_slice() else {
+            panic!("expected one %- expression");
+        };
+        let Hoon::Note(Note::Help(help), inner) = q.as_ref() else {
+            panic!("trailing %- doc should decorate the argument");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(LineMap::doc_cord("enforce min. exp"), LineMap::doc_atom(0)),
+        );
+        assert_eq!(help, &expected);
+        assert!(
+            matches!(inner.as_ref(), Hoon::Sand(_, _)),
+            "doc should wrap the parsed argument"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_nested_wutcol_postfix_doc_inside_cenhep_argument() {
+        let src = "%-  abs:si  ?:  =(den %i)  --0  ::  enforce min. exp\n  --1\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "round.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("nested %- ?: should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::CenHep(_, q)] = items.as_slice() else {
+            panic!("expected one %- expression");
+        };
+        let Hoon::WutCol(_, q, _) = q.as_ref() else {
+            panic!("expected %- argument to be the ?: expression, got {:?}", q.as_ref());
+        };
+        assert!(
+            matches!(q.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "trailing doc should decorate the nested ?: true branch, got {:?}",
+            q.as_ref()
+        );
+    }
+
+    #[test]
     fn parser_attaches_wutlus_postfix_doc_to_default_hoon() {
         let src = "?+  tlen  h1  ::  fallthrough switch\n  @  h2\n==\n";
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
@@ -17059,7 +15538,35 @@ mod tests {
     }
 
     #[test]
-    fn parser_attaches_buclus_postfix_doc_to_named_spec_wrapper() {
+    fn parser_attaches_wuthep_postfix_doc_to_case_hoon() {
+        let src = "?-  log\n    %noun  ~  ::  maybe could be more aggressive\n==\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "switch.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("?- should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::WutHep(_, cases)] = items.as_slice() else {
+            panic!("expected one ?- expression");
+        };
+        let [(_, case)] = cases.as_slice() else {
+            panic!("expected one ?- case");
+        };
+        let Hoon::Note(Note::Help(_), inner) = case else {
+            panic!("expected trailing ?- case doc to decorate the case hoon");
+        };
+        assert!(
+            matches!(inner.as_ref(), Hoon::Bust(BaseType::Null)),
+            "doc should wrap the parsed case expression"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_buclus_postfix_doc_inside_named_spec_wrapper() {
         let src = concat!("|%\n", "+$  path  (list knot)  ::  like unix path\n", "--\n");
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into(), "type.hoon".into()], false, linemap)
@@ -17080,12 +15587,12 @@ mod tests {
         let Hoon::KetCol(spec) = arm else {
             panic!("expected +$ mold arm");
         };
-        let Spec::Gist(_, named) = spec.as_ref() else {
-            panic!("expected +$ postfix doc to wrap the named spec");
+        let Spec::Name(_, inner) = spec.as_ref() else {
+            panic!("expected +$ name to wrap the documented body spec");
         };
         assert!(
-            matches!(named.as_ref(), Spec::Name(_, _)),
-            "postfix +$ doc should preserve the named spec"
+            matches!(inner.as_ref(), Spec::Gist(_, _)),
+            "postfix +$ doc should decorate the body spec inside the name"
         );
     }
 
@@ -17172,6 +15679,177 @@ mod tests {
     }
 
     #[test]
+    fn parser_attaches_tall_rune_postfix_docs_to_specs() {
+        let src = concat!(
+            "|=  a=@  ::  sample atom\n",
+            "^-  @    ::  cast atom\n",
+            "a\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "rune-docs.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("rune docs should parse");
+
+        let parsed = match parsed {
+            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            other => other,
+        };
+        let Hoon::BarTis(sample, body) = parsed else {
+            panic!("expected |= gate");
+        };
+        assert!(
+            matches!(sample.as_ref(), Spec::Gist(_, _)),
+            "|= sample spec keeps its trailing doc"
+        );
+
+        let Hoon::KetHep(cast, _) = body.as_ref() else {
+            panic!("expected ^- cast body");
+        };
+        assert!(
+            matches!(cast.as_ref(), Spec::Gist(_, _)),
+            "^- cast spec keeps its trailing doc"
+        );
+    }
+
+    #[test]
+    fn parser_moves_four_space_bartis_sample_doc_to_body() {
+        let src = concat!(
+            "|=  a=@  ::    body doc\n",
+            "^-  @    ::  cast atom\n",
+            "a\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "bartis-docs.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("four-space |= doc should parse");
+
+        let parsed = match parsed {
+            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            other => other,
+        };
+        let Hoon::BarTis(sample, body) = parsed else {
+            panic!("expected |= gate");
+        };
+        assert!(
+            !matches!(sample.as_ref(), Spec::Gist(_, _)),
+            "four-space |= sample doc belongs to the gate body"
+        );
+        assert!(
+            matches!(body.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "four-space |= sample doc should wrap the body"
+        );
+    }
+
+    #[test]
+    fn parser_moves_four_space_kethep_spec_doc_to_body() {
+        let src = concat!(
+            "^-  @    ::    cast body doc\n",
+            "a\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed =
+            crate::native_parser(vec!["test".into(), "kethep-docs.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("four-space ^- doc should parse");
+
+        let parsed = match parsed {
+            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            other => other,
+        };
+        let Hoon::KetHep(spec, body) = parsed else {
+            panic!("expected ^- cast");
+        };
+        assert!(
+            !matches!(spec.as_ref(), Spec::Gist(_, _)),
+            "four-space ^- spec doc belongs to the cast body"
+        );
+        assert!(
+            matches!(body.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "four-space ^- spec doc should wrap the body"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_buccen_postfix_doc_after_section_separator() {
+        let src = concat!(
+            "|%\n",
+            "+$  sample\n",
+            "  $%\n",
+            "    [%one p=@]             ::  first item\n",
+            "  ::                        ::::::  group\n",
+            "    [%two p=@ q=@]         ::  :_ [q p]\n",
+            "  ==\n",
+            "--\n",
+        );
+        fn peel_hoon(node: &Hoon) -> &Hoon {
+            let mut node = node;
+            loop {
+                match node {
+                    Hoon::Dbug(_, inner) | Hoon::Note(_, inner) => node = inner.as_ref(),
+                    _ => return node,
+                }
+            }
+        }
+
+        fn peel_spec_dbug(spec: &Spec) -> &Spec {
+            let mut spec = spec;
+            loop {
+                match spec {
+                    Spec::Dbug(_, inner) => spec = inner.as_ref(),
+                    _ => return spec,
+                }
+            }
+        }
+
+        fn has_gist(spec: &Spec) -> bool {
+            match spec {
+                Spec::Gist(_, _) => true,
+                Spec::Dbug(_, inner) => has_gist(inner),
+                _ => false,
+            }
+        }
+
+        for dbug in [false, true] {
+            let linemap = Arc::new(LineMap::new_with_docs(src, true));
+            let parsed =
+                crate::native_parser(vec!["test".into(), "section.hoon".into()], dbug, linemap)
+                    .parse(src)
+                    .into_result()
+                    .expect("sectioned branch spec should parse");
+            let Hoon::TisSig(items) = parsed else {
+                panic!("expected top-level TisSig");
+            };
+            let [item] = items.as_slice() else {
+                panic!("expected one top-level expression");
+            };
+            let Hoon::BarCen(_, tomes) = peel_hoon(item) else {
+                panic!("expected one core expression");
+            };
+            let arm = tomes
+                .get("$")
+                .and_then(|(_, arms)| arms.get("sample"))
+                .expect("expected +$ sample arm");
+            let Hoon::KetCol(spec) = peel_hoon(arm) else {
+                panic!("expected +$ mold arm");
+            };
+            let Spec::Name(_, inner) = peel_spec_dbug(spec.as_ref()) else {
+                panic!("expected named +$ body");
+            };
+            let Spec::BucCen(_, tail) = peel_spec_dbug(inner.as_ref()) else {
+                panic!("expected $% body");
+            };
+            assert!(
+                tail.first().map_or(false, has_gist),
+                "postfix doc should decorate first branch after a section separator (dbug={dbug})"
+            );
+        }
+    }
+
+    #[test]
     fn parser_attaches_prefix_plan_doc_to_buclus_arm() {
         let src = concat!(
             "|%\n", "::\n", "::  $tank: formatted print tree\n", "::\n", "::    just a cord, or\n",
@@ -17231,6 +15909,181 @@ mod tests {
     }
 
     #[test]
+    fn parser_stops_smol_arm_details_at_overindented_doc_line() {
+        let src = concat!(
+            "|%\n",
+            "::\n",
+            "::  +lug: central rounding mechanism\n",
+            "::\n",
+            "::    can perform: floor, ceiling, smaller, larger,\n",
+            "::                 nearest (round ties to: even, away from 0, toward 0)\n",
+            "::    s is sticky bit: represents a value less than ulp(a) = 2^(e.a)\n",
+            "::\n",
+            "++  lug\n",
+            "  ~/  %lug\n",
+            "  |=  a=*\n",
+            "  a\n",
+            "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "float.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("++ lug should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("lug"))
+            .expect("expected ++lug arm");
+        let Hoon::Note(Note::Help(help), inner) = arm else {
+            panic!("prefix +lug doc should decorate the arm");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_list(vec![LineMap::doc_cell(
+                LineMap::doc_cord("funk"),
+                LineMap::doc_cord("lug"),
+            )]),
+            LineMap::doc_cell(
+                LineMap::doc_cord("central rounding mechanism"),
+                LineMap::doc_list(vec![LineMap::doc_list(vec![LineMap::doc_cell(
+                    LineMap::doc_atom(0),
+                    LineMap::doc_cord("can perform: floor, ceiling, smaller, larger,"),
+                )])]),
+            ),
+        );
+        assert_eq!(
+            help, &expected,
+            "smol arm docs stop before overindented continuation lines"
+        );
+        let Hoon::Note(Note::Help(tail_help), _) = inner.as_ref() else {
+            panic!("post-code +lug detail should decorate the arm body");
+        };
+        let expected_tail = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(
+                LineMap::doc_cord("s is sticky bit: represents a value less than ulp(a) = 2^(e.a)"),
+                LineMap::doc_atom(0),
+            ),
+        );
+        assert_eq!(
+            tail_help, &expected_tail,
+            "post-code +lug detail should anchor on the arm body"
+        );
+    }
+
+    #[test]
+    fn parser_attaches_triple_colon_prefix_doc_to_arm_body() {
+        let src = concat!(
+            "|%\n",
+            ":::    +ff\n",
+            ":::\n",
+            ":::  this core has no use outside of the functionality\n",
+            ":::  provided to ++rd, ++rs, ++rq, and ++rh\n",
+            "++  ff  ::  ieee 754 format fp\n",
+            "  |.  ~\n",
+            "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "float.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("++ ff should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("ff"))
+            .expect("expected ++ff arm");
+        let Hoon::Note(Note::Help(postfix_help), inner) = arm else {
+            panic!("inline ++ff doc should decorate the arm");
+        };
+        let Hoon::Note(Note::Help(prefix_help), _) = inner.as_ref() else {
+            panic!("triple-colon +ff doc should decorate the arm body");
+        };
+        let expected_postfix = LineMap::doc_cell(
+            LineMap::doc_list(vec![LineMap::doc_cell(
+                LineMap::doc_cord("funk"),
+                LineMap::doc_cord("ff"),
+            )]),
+            LineMap::doc_cell(LineMap::doc_cord("ieee 754 format fp"), LineMap::doc_atom(0)),
+        );
+        let expected_prefix = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(
+                LineMap::doc_cord("+ff"),
+                LineMap::doc_list(vec![LineMap::doc_list(vec![
+                    LineMap::doc_cell(
+                        LineMap::doc_atom(0),
+                        LineMap::doc_cord("this core has no use outside of the functionality"),
+                    ),
+                    LineMap::doc_cell(
+                        LineMap::doc_atom(0),
+                        LineMap::doc_cord("provided to ++rd, ++rs, ++rq, and ++rh"),
+                    ),
+                ])]),
+            ),
+        );
+        assert_eq!(postfix_help, &expected_postfix);
+        assert_eq!(prefix_help, &expected_prefix);
+    }
+
+    #[test]
+    fn parser_attaches_matching_named_prefix_list_doc() {
+        let src = concat!(
+            "|%\n",
+            "      ::  +r-co: floating point\n",
+            "      ::  +s-co: list of '.'-prefixed base16, 4 digit minimum\n",
+            "      ::  +v-co: base32, takes minimum output digits\n",
+            "      ::\n",
+            "      ++  r-co  ~\n",
+            "      ::\n",
+            "      ++  s-co  ~\n",
+            "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "format.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("++ s-co should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("s-co"))
+            .expect("expected ++s-co arm");
+        let Hoon::Note(Note::Help(help), _) = arm else {
+            panic!("matching +s-co list doc should decorate ++s-co");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_list(vec![LineMap::doc_cell(
+                LineMap::doc_cord("funk"),
+                LineMap::doc_cord("s-co"),
+            )]),
+            LineMap::doc_cell(
+                LineMap::doc_cord("list of '.'-prefixed base16, 4 digit minimum"),
+                LineMap::doc_atom(0),
+            ),
+        );
+        assert_eq!(help, &expected);
+    }
+
+    #[test]
     fn parser_leaves_single_line_arm_doc_on_tail_when_tail_owns_it() {
         let src = concat!(
             "|%\n", "++  grd  |=  [a=dn]  ^-  @rq  (grd:ma a)  ::  decimal float to @rq\n", "--\n",
@@ -17265,7 +16118,7 @@ mod tests {
 
     #[test]
     fn parser_wraps_single_line_gate_doc_when_gate_body_owns_it() {
-        let src = concat!("|%\n", "++  sum  |=  [a=@ b=@]  (add a b)  ::  wrapping add\n", "--\n",);
+        let src = concat!("|%\n", "++  sum  |=([a=@ b=@] (add a b))  ::  wrapping add\n", "--\n",);
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into(), "arm.hoon".into()], false, linemap)
             .parse(src)
@@ -17284,7 +16137,35 @@ mod tests {
             .expect("expected ++sum arm");
         assert!(
             matches!(arm, Hoon::Note(Note::Help(_), inner) if matches!(inner.as_ref(), Hoon::BarTis(..))),
-            "single-line gate doc should wrap the gate when no cast tail owns it"
+            "single-line wide gate doc should wrap the gate"
+        );
+    }
+
+    #[test]
+    fn parser_wraps_single_line_tall_gate_doc_on_tail() {
+        let src = concat!("|%\n", "++  bit  |=  [a=@]  a  ::  fn to @r w+ rounding\n", "--\n",);
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "arm.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("arm should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(_, tomes)] = items.as_slice() else {
+            panic!("expected one core expression");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("bit"))
+            .expect("expected ++bit arm");
+        let Hoon::BarTis(_, tail) = arm else {
+            panic!("expected ++bit arm body to remain a gate");
+        };
+        assert!(
+            matches!(tail.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "single-line tall gate doc should wrap the gate tail"
         );
     }
 
@@ -17402,6 +16283,47 @@ mod tests {
         assert!(
             matches!(tail.as_ref(), Hoon::Note(Note::Help(_), inner) if matches!(inner.as_ref(), Hoon::CenCol(callee, _) if matches!(callee.as_ref(), Hoon::TisGal(..)))),
             "postfix doc should decorate the %+ tail"
+        );
+    }
+
+    #[test]
+    fn parser_shifts_cenlus_middle_four_space_doc_to_tail() {
+        let src = concat!(
+            "%+  both  ::  otherwise head comes\n",
+            "  ?^(i.goo i.goo ?~(pag ~ `u=i.pag))  ::    from goo or pag\n",
+            "$(goo t.goo, pag ?~(pag ~ t.pag))  ::  recurse on tails\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "call.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("%+ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::CenLus(head, middle, tail)] = items.as_slice() else {
+            panic!("expected one %+ expression");
+        };
+        assert!(
+            matches!(head.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "callee keeps its own four-space doc"
+        );
+        assert!(
+            !matches!(middle.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "middle argument must not steal four-space doc from tail"
+        );
+        let Hoon::Note(Note::Help(help), inner) = tail.as_ref() else {
+            panic!("tail should receive the middle line doc");
+        };
+        let expected = LineMap::doc_cell(
+            LineMap::doc_atom(0),
+            LineMap::doc_cell(LineMap::doc_cord("from goo or pag"), LineMap::doc_atom(0)),
+        );
+        assert_eq!(help, &expected);
+        assert!(
+            matches!(inner.as_ref(), Hoon::Note(Note::Help(_), _)),
+            "tail keeps its own postfix doc under the shifted doc"
         );
     }
 
@@ -17532,6 +16454,51 @@ mod tests {
         };
 
         assert_eq!(spot.q.p, (6, 3));
+    }
+
+    #[test]
+    fn parser_anchors_arm_body_over_larg_doc_block() {
+        // hoonc-verified regression pin: an arm body is NOT a gap-glued
+        // position, so its %dbug span walks back to the first larg doc line
+        // in the gap under the ++ header (hoonc emits [[3 3] [6 16]]).
+        fn dbug_spot(node: &Hoon) -> Option<&crate::ast::hoon::Spot> {
+            match node {
+                Hoon::Dbug(spot, _) => Some(spot),
+                Hoon::Note(_, inner) => dbug_spot(inner),
+                _ => None,
+            }
+        }
+        let src = concat!(
+            "|%\n", "++  foo\n", "  ::    the legacy z-set uses raw gor\n",
+            "  ::    so things stay consistent\n", "  =/  one  17\n", "  (add one one)\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "tisfas.hoon".into()], true, linemap)
+            .parse(src)
+            .into_result()
+            .expect("core should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::Dbug(_, core)] = items.as_slice() else {
+            panic!("expected one traced core expression");
+        };
+        let Hoon::BarCen(_, tomes) = core.as_ref() else {
+            panic!("expected a |% core");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("foo"))
+            .expect("expected ++foo arm");
+        let spot = dbug_spot(arm).expect("expected traced arm body");
+
+        assert_eq!(
+            spot.q.p,
+            (3, 3),
+            "expected the arm body span to anchor to the first larg doc line"
+        );
+        assert_eq!(spot.q.q, (6, 16), "unexpected end spot");
     }
 
     fn map_is_apt_mug(slab: &mut NounSlab, tree: Noun) -> bool {
@@ -17715,7 +16682,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_blank_and_comment_lines() {
+    fn line_map_does_not_expand_gap_start_over_blank_and_prose_comment_lines() {
         let src = "a\n\n::  comment\n|%\n";
         let start = src.find("|%").expect("missing rune");
         let end = start + 2;
@@ -17725,8 +16692,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (3, 1),
-            "expected start to include doc comment line"
+            (4, 1),
+            "expected start to stay on the rune line"
         );
         assert_eq!(spot.q.q, (4, 3), "unexpected end spot");
     }
@@ -17767,7 +16734,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_inline_doc_comment_lines() {
+    fn line_map_does_not_expand_span_on_doc_line_to_trailing_prose_inline_doc() {
         let src = concat!("|%\n", "++  fn  ::  summary\n", "  ::  details\n", "  $%  [%f]\n",);
         let start = src.find("::  details").expect("missing doc");
         let end = start + 2;
@@ -17777,8 +16744,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (2, 9),
-            "expected start to include inline doc comment"
+            (3, 3),
+            "expected start to stay put: trailing prose inline doc is not an anchor"
         );
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
@@ -17820,59 +16787,58 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_inline_doc_branch_tags_with_heading() {
+    fn line_map_does_not_expand_gap_start_over_two_space_double_equals_trailing_doc() {
+        // `==` is not a doccord link, so a two-space `::  == end` trailing
+        // comment is prose and never anchors the next span (hoonc-verified).
         let src = concat!("  %stet  ::  == end\n", "  %dent  ::  out\n");
         let start = src.find("%dent").expect("missing branch tag");
         let end = start + "%dent".len();
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  == end").expect("missing inline doc");
-        let expected_col = (doc_offset + 1) as u64;
         let line2_start = src.find('\n').expect("missing newline") + 1;
+        let expected_col = ((start - line2_start) + 1) as u64;
         let expected_end_col = ((start - line2_start) + 1 + "%dent".len()) as u64;
 
         assert_eq!(
             spot.q.p,
-            (1, expected_col),
-            "expected start to anchor to inline doc comment"
+            (2, expected_col),
+            "expected start to stay on the branch tag line"
         );
         assert_eq!(spot.q.q, (2, expected_end_col), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_inline_doc_after_dollar_question_line() {
+    fn line_map_does_not_expand_gap_start_over_dash_rule_trailing_doc() {
+        // `---` is not a doccord link: the trailing comment is prose, no anchor.
         let src = concat!("  $?  %rule  ::  --- horz rule\n", "      %fens  ::  ``` code fence\n",);
         let start = src.find("%fens").expect("missing branch tag");
         let end = start + "%fens".len();
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  --- horz rule").expect("missing inline doc");
-        let expected_col = (doc_offset + 1) as u64;
+        let expected = linemap.line_col(start);
 
         assert_eq!(
-            spot.q.p,
-            (1, expected_col),
-            "expected start to anchor to inline doc on $?-line"
+            spot.q.p, expected,
+            "expected start to stay on the branch tag line"
         );
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_inline_doc_after_dollar_question_line_with_list_marker() {
+    fn line_map_does_not_expand_gap_start_over_bare_list_marker_trailing_doc() {
+        // a bare `+ ` is not a `+sym` doccord link: trailing prose, no anchor.
         let src = concat!("  $?  %lite  ::  + line item\n", "      %lint  ::  - line item\n",);
         let start = src.find("%lint").expect("missing branch tag");
         let end = start + "%lint".len();
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  + line item").expect("missing inline doc");
-        let expected_col = (doc_offset + 1) as u64;
+        let expected = linemap.line_col(start);
 
         assert_eq!(
-            spot.q.p,
-            (1, expected_col),
-            "expected start to anchor to inline doc on $?-line"
+            spot.q.p, expected,
+            "expected start to stay on the branch tag line"
         );
     }
 
@@ -17897,7 +16863,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_nearest_branch_tag_heading() {
+    fn line_map_does_not_anchor_branch_tag_to_prose_trailing_doc_above() {
+        // ``` is not a doccord link: the previous branch tag's trailing
+        // comment is prose and does not anchor the next span.
         let src = concat!(
             "  $?  %rule  ::  --- horz rule\n", "      %fens  ::  ``` code fence\n",
             "      %expr  ::  ;sail expression\n",
@@ -17907,18 +16875,16 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  ``` code fence").expect("missing inline doc");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let expected = linemap.line_col(start);
 
         assert_eq!(
-            spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to nearest branch inline doc heading"
+            spot.q.p, expected,
+            "expected start to stay on the branch tag line"
         );
     }
 
     #[test]
-    fn line_map_expands_gap_start_over_inline_doc_with_outer_blank_line() {
+    fn line_map_does_not_expand_gap_start_over_bare_marker_to_prose_inline_doc() {
         let src = concat!(
             "::\n", "++  fn  ::  summary\n", "        ::\n", "        ::  details\n",
             "        $%  [%f]\n",
@@ -17931,14 +16897,14 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (2, 9),
-            "expected start to include inline doc comment"
+            (4, 9),
+            "expected start to stay put: bare `::` and trailing prose never anchor"
         );
         assert_eq!(spot.q.q, (4, 11), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_from_body_to_inline_doc_header() {
+    fn line_map_does_not_expand_gap_start_from_body_over_prose_doc_lines() {
         let src = concat!(
             "::\n", "++  fn  ::  summary\n", "        ::\n", "        ::  details\n",
             "        $%  [%f]\n",
@@ -17951,8 +16917,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (2, 9),
-            "expected start to include inline doc comment"
+            (5, 9),
+            "expected start to stay on the body rune line"
         );
         assert_eq!(spot.q.q, (5, 11), "unexpected end spot");
     }
@@ -17985,7 +16951,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_underscore_runes() {
+    fn line_map_does_not_expand_gap_start_for_underscore_runes_after_prose_doc() {
         let src = concat!("++  step\n", "  ::  atom size or offset, in bloqs\n", "  _`@u`1\n",);
         let start = src.find("_`").expect("missing underscore rune");
         let end = start + 2;
@@ -17993,7 +16959,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 3), "expected start to include doc comment");
+        assert_eq!(spot.q.p, (3, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
 
@@ -18028,7 +16994,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_doc_block_over_inline_doc_lines() {
+    fn line_map_does_not_anchor_gate_over_prose_doc_block_or_inline_doc() {
         let src = concat!(
             "  ++  lth  ::  less-than\n", "  ::  comparisons return ~ in the event of a NaN\n",
             "  |=  [a=?]\n",
@@ -18041,14 +17007,14 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (2, 3),
-            "expected start to prefer the doc block line"
+            (3, 3),
+            "expected start to stay on the gate rune line"
         );
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_prefers_inline_doc_when_blank_doc_line_follows() {
+    fn line_map_does_not_anchor_to_prose_inline_doc_when_blank_doc_line_follows() {
         let src = concat!(
             "::\n", "++  fn  ::  float, infinity, or NaN\n", "  ::\n", "  ::  details follow\n",
             "  $%  foo\n",
@@ -18059,12 +17025,14 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 9), "expected start to use inline doc line");
+        assert_eq!(spot.q.p, (5, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (5, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_equals_runes() {
+    fn line_map_does_not_expand_gap_start_over_two_space_prose() {
+        // hoonc-verified: two-space prose (`::  doc about binding`) is not a
+        // doccord larg/smol line and never anchors the following span.
         let src = concat!("  ::  doc about binding\n", "  =/  foo  42\n",);
         let start = src.find("=/").expect("missing rune");
         let end = start + 2;
@@ -18072,12 +17040,12 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (1, 3), "expected start to include the doc line");
+        assert_eq!(spot.q.p, (2, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (2, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_equals_tall_runes() {
+    fn line_map_does_not_expand_gap_start_over_two_space_prose_for_tall_equals() {
         let src = concat!("  ::  doc about binding\n", "  =/  foo\n", "    42\n",);
         let start = src.find("=/").expect("missing rune");
         let end = start + 2;
@@ -18085,7 +17053,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (1, 3), "expected start to include the doc line");
+        assert_eq!(spot.q.p, (2, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (2, 5), "unexpected end spot");
     }
 
@@ -18128,7 +17096,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_equals_after_label_and_diagram() {
+    fn line_map_does_not_expand_gap_start_for_label_and_diagram_at_file_top() {
+        // the gap holds a larg line, but there is no previous code line
+        // (file-leading gap), so nothing anchors.
         let src = concat!(
             "  ::  foo: header\n", "  ::\n", "  ::      AB\n", "  ::\n", "  ::    +foo is fine\n",
             "  =/  foo\n",
@@ -18141,14 +17111,15 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (5, 3),
-            "expected start to anchor to the text doc line"
+            (6, 3),
+            "expected start to stay on the rune line"
         );
         assert_eq!(spot.q.q, (6, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_prefers_indented_doc_lines_in_block() {
+    fn line_map_does_not_expand_gap_start_for_indented_doc_block_at_file_top() {
+        // larg lines in a file-leading gap (no previous code line) never anchor.
         let src = concat!(
             "  ::  header line\n", "  ::  ?~  foo\n", "  ::    =+  bar\n", "  ::    ?~(bar ~)\n",
             "  [~ %a]\n",
@@ -18161,8 +17132,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (3, 3),
-            "expected start to anchor to indented doc line"
+            (5, 3),
+            "expected start to stay on the code line"
         );
         assert_eq!(spot.q.q, (5, 5), "unexpected end spot");
     }
@@ -18357,7 +17328,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_gate_doc_after_tilde_slash() {
+    fn line_map_does_not_expand_gap_start_for_prose_gate_doc_after_tilde_slash() {
         let src =
             concat!("++  max\n", "  ~/  %max\n", "  ::  unsigned maximum\n", "  |=  [a=@ b=@]\n",);
         let start = src.find("|=").expect("missing rune");
@@ -18365,22 +17336,22 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src.find("::  unsigned maximum").expect("missing doc line");
-        let doc_line_start = src[..doc_start].rfind('\n').map_or(0, |idx| idx + 1);
-        let expected_col = (doc_start - doc_line_start + 1) as u64;
         let line_start = src[..start].rfind('\n').map_or(0, |idx| idx + 1);
+        let expected_col = (start - line_start + 1) as u64;
         let expected_end_col = (end - line_start + 1) as u64;
 
         assert_eq!(
             spot.q.p,
-            (3, expected_col),
-            "expected start to anchor to the doc line"
+            (4, expected_col),
+            "expected start to stay on the gate rune line"
         );
         assert_eq!(spot.q.q, (4, expected_end_col), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_gate_doc_with_label_section_after_blank() {
+    fn line_map_does_not_expand_gap_start_for_prose_label_section_after_tilde_slash() {
+        // `a: augend` labels are not doccord links (no sigil), so the whole
+        // block is prose and nothing anchors.
         let src = concat!(
             "++  add\n", "  ~/  %add\n", "  ::  unsigned addition\n", "  ::\n",
             "  ::  a: augend\n", "  ::  b: addend\n", "  |=  [a=@ b=@]\n",
@@ -18390,16 +17361,14 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src.find("::  unsigned addition").expect("missing doc line");
-        let doc_line_start = src[..doc_start].rfind('\n').map_or(0, |idx| idx + 1);
-        let expected_col = (doc_start - doc_line_start + 1) as u64;
         let line_start = src[..start].rfind('\n').map_or(0, |idx| idx + 1);
+        let expected_col = (start - line_start + 1) as u64;
         let expected_end_col = (end - line_start + 1) as u64;
 
         assert_eq!(
             spot.q.p,
-            (3, expected_col),
-            "expected start to anchor to the doc line"
+            (7, expected_col),
+            "expected start to stay on the gate rune line"
         );
         assert_eq!(spot.q.q, (7, expected_end_col), "unexpected end spot");
     }
@@ -18428,7 +17397,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_underscore_after_bar_dollar_doc_block() {
+    fn line_map_does_not_expand_gap_start_for_underscore_after_bar_dollar_prose_doc() {
         let src = concat!(
             "++  trap\n", "  |$  [product]\n", "  ::  a core with one arm `$`\n", "  ::\n",
             "  _|?($:product)\n",
@@ -18438,17 +17407,14 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src
-            .find("::  a core with one arm `$`")
-            .expect("missing doc line");
-        let doc_line_start = src[..doc_start].rfind('\n').map_or(0, |idx| idx + 1);
-        let expected_col = (doc_start - doc_line_start + 1) as u64;
-        let expected_end_col = (end - src[..start].rfind('\n').map_or(0, |idx| idx + 1) + 1) as u64;
+        let line_start = src[..start].rfind('\n').map_or(0, |idx| idx + 1);
+        let expected_col = (start - line_start + 1) as u64;
+        let expected_end_col = (end - line_start + 1) as u64;
 
         assert_eq!(
             spot.q.p,
-            (3, expected_col),
-            "expected start to move to the doc line"
+            (5, expected_col),
+            "expected start to stay on the rune line"
         );
         assert_eq!(spot.q.q, (5, expected_end_col), "unexpected end spot");
     }
@@ -18668,7 +17634,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_tall_equals_after_doc_block() {
+    fn line_map_does_not_expand_gap_start_for_link_doc_without_colon() {
+        // hoonc-verified: a smol line needs its links followed by `: text` or
+        // end-of-line; `+lip overlap length` is prose, so no anchor.
         let src = concat!(
             "  =/  len  1\n", "  ::  +lip overlap length\n", "  =/  lip\n", "    =+  foo  1\n",
         );
@@ -18677,14 +17645,11 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  +lip").expect("missing doc");
-        let doc_line_start = src[..doc_offset].rfind('\n').map_or(0, |idx| idx + 1);
-        let expected_col = (doc_offset - doc_line_start + 1) as u64;
+        let expected = linemap.line_col(start);
 
         assert_eq!(
-            spot.q.p,
-            (2, expected_col),
-            "expected start to include the doc block for the tall binding"
+            spot.q.p, expected,
+            "expected start to stay on the tall binding line"
         );
     }
 
@@ -18981,7 +17946,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_to_arm_inline_doc_before_doc_block() {
+    fn line_map_does_not_expand_gap_start_to_arm_prose_inline_doc_before_doc_block() {
         let src = concat!(
             "++  fn  ::  float, infinity, or NaN\n", "        ::\n",
             "        ::  s=sign, e=exponent, a=arithmetic form\n",
@@ -18995,8 +17960,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (1, 9),
-            "expected start to expand to the arm inline doc"
+            (4, 9),
+            "expected start to stay on the union rune line"
         );
         assert_eq!(spot.q.q, (4, 11), "unexpected end spot");
     }
@@ -19311,26 +18276,25 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_doc_block_with_nested_bullets_before_code() {
+    fn line_map_does_not_expand_gap_start_for_nested_bullet_docs_at_file_top() {
+        // larg-shaped bullet lines sit in a file-leading gap (no previous
+        // code line), so nothing anchors.
         let src = concat!(
             "  ::  this goes without saying\n", "  ::    - do not call it\n",
             "  ::    - do not sign it\n", "  [~ ~ %.n]\n",
         );
         let start = src.find("[~ ~ %.n]").expect("missing branch result");
         let end = start + 2;
-        let doc_start = src
-            .find("::    - do not call it")
-            .expect("missing nested doc line");
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let (line, col) = linemap.line_col(doc_start);
+        let (line, col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
             (line, col),
-            "expected start to expand to the nested doc line"
+            "expected start to stay on the code line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -19358,7 +18322,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_after_bare_dollar_colon_inline_doc_with_doc_block() {
+    fn line_map_does_not_anchor_after_bare_dollar_colon_prose_inline_doc() {
         let src = concat!(
             "  $:  ::  header\n", "      ::  details\n", "      output-source=(unit source)\n",
         );
@@ -19367,14 +18331,13 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::").expect("missing inline doc");
-        let (line, col) = linemap.line_col(doc_offset);
+        let (line, col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
             (line, col),
-            "expected start to anchor to the inline doc line"
+            "expected start to stay on the field line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -19532,7 +18495,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_dollar_runes() {
+    fn line_map_does_not_expand_gap_start_for_dollar_runes_after_prose_doc() {
         let src =
             concat!("+$  bite\n", "  ::  atom slice specifier\n", "  $@(bloq [=bloq =step])\n",);
         let start = src.find("$@").expect("missing rune");
@@ -19541,26 +18504,25 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 3), "expected start to include doc comment");
+        assert_eq!(spot.q.p, (3, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_dollar_paren_doc_block() {
+    fn line_map_does_not_expand_gap_start_for_dollar_paren_after_prose_doc() {
         let src = concat!("  ::  recursion step\n", "  $(foo 1)\n",);
         let start = src.find("$(").expect("missing rune");
         let end = start + 2;
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src.find("::  recursion step").expect("missing doc line");
-        let (expected_line, expected_col) = linemap.line_col(doc_start);
+        let (expected_line, expected_col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
             (expected_line, expected_col),
-            "expected start to anchor to the doc line"
+            "expected start to stay on the rune line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -19628,7 +18590,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_bracket_lines() {
+    fn line_map_does_not_expand_gap_start_for_bracket_lines_after_prose_doc() {
         let src = concat!(
             "++  qual\n", "  ::  quadruple tuple\n", "  [p=first q=second r=third s=fourth]\n",
         );
@@ -19638,7 +18600,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 3), "expected start to include doc comment");
+        assert_eq!(spot.q.p, (3, 3), "expected start to stay on the tuple line");
         assert_eq!(spot.q.q, (3, 4), "unexpected end spot");
     }
 
@@ -19677,7 +18639,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_bar_hep_lines_under_plus_header() {
+    fn line_map_does_not_expand_gap_start_for_bar_hep_under_plus_header_prose_doc() {
         let src = concat!(
             "++  autoname\n", "  ::  derive name from spec\n", "  ::\n", "  |-  ^-  (unit term)\n",
         );
@@ -19689,14 +18651,14 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (2, 3),
-            "expected start to include doc comment under the arm header"
+            (4, 3),
+            "expected start to stay on the bar-hep line"
         );
         assert_eq!(spot.q.q, (4, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_caret_hep_lines() {
+    fn line_map_does_not_expand_gap_start_for_caret_hep_after_prose_comment() {
         let src = "  ::  comment\n  ^-  @\n";
         let start = src.find("^-").expect("missing rune");
         let end = start + 2;
@@ -19704,7 +18666,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (1, 3), "expected start to include doc comment");
+        assert_eq!(spot.q.p, (2, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (2, 5), "unexpected end spot");
     }
 
@@ -19726,7 +18688,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_caret_after_gate_sample_inline_doc() {
+    fn line_map_ignores_prose_inline_doc_after_gate_sample_for_caret() {
         let src = concat!(
             "++  poon\n", "  |=  [pag=(list hoon) goo=tyke]  ::  default to pag\n",
             "  ^-  (unit (list hoon))          ::  for null goo's\n",
@@ -19736,12 +18698,11 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  default to pag").expect("missing inline doc");
-        let expected = linemap.line_col(doc_offset);
+        let expected = linemap.line_col(start);
 
         assert_eq!(
             spot.q.p, expected,
-            "expected start to anchor to inline doc on the gate sample line"
+            "expected start to stay on the caret line"
         );
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
@@ -19884,7 +18845,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_caret_plus_after_plus_header_doc_line() {
+    fn line_map_does_not_expand_gap_start_for_caret_plus_after_plus_header_prose_doc() {
         let src = concat!("++  burp\n", "  ::  expel undigested seminouns\n", "  ^+  .\n",);
         let start = src.find("^+").expect("missing rune");
         let end = start + 2;
@@ -19892,7 +18853,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 3), "expected start to include doc comment");
+        assert_eq!(spot.q.p, (3, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
 
@@ -19961,14 +18922,18 @@ mod tests {
     }
 
     #[test]
-    fn line_map_does_not_expand_gap_start_for_internal_step_doc_before_equals() {
+    fn line_map_expands_gap_start_to_first_larg_line_in_internal_step_doc_block() {
+        // the walk-back scans the whole gap and anchors at the FIRST
+        // larg-shaped line, skipping the bare `::` and two-space prose
+        // headers above it. (the previous code line is a plain =. step so
+        // the direct-call semantics are well-defined.)
         let src = concat!(
             "++  test-v1-lock-pkh-m-of-n-valid\n",
             "  ::  use v1-phase=2 to quickly reach v1 activation\n",
             "  =.  constants  bc-v1-phase:helpers\n",
             "  =/  con=consensus-state  initial-consensus-state:h\n",
             "  ::  advance to just before v1 coinbase activation\n",
-            "  =^  par=page:t  con  (add-n-pages:h (dec v1-phase:t) con default-retain:h)\n",
+            "  =.  con  (add-n-pages:h (dec v1-phase:t) con default-retain:h)\n",
             "  ::\n", "  ::  step 1: create simple v1 coinbase for key1\n", "  ::\n",
             "  ::    we cannot directly create a v1 coinbase with an m-of-n lock because\n",
             "  ::    accept-page splits multi-owner coinbases into separate notes, each\n",
@@ -19981,14 +18946,16 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
+        let doc_offset = src
+            .find("::    we cannot directly")
+            .expect("missing detail doc line");
+        let expected = linemap.line_col(doc_offset);
         let line_start = src[..start].rfind('\n').map_or(0, |idx| idx + 1);
-        let expected_col = (start - line_start + 1) as u64;
         let expected_end_col = (end - line_start + 1) as u64;
 
         assert_eq!(
-            spot.q.p,
-            (15, expected_col),
-            "expected start to stay on the =/ line"
+            spot.q.p, expected,
+            "expected start to anchor to the first larg doc line"
         );
         assert_eq!(spot.q.q, (15, expected_end_col), "unexpected end spot");
     }
@@ -20115,7 +19082,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_type_header_doc_block() {
+    fn line_map_does_not_expand_gap_start_for_prose_type_header_doc_block() {
         let src =
             concat!("+$  bloq\n", "  ::  blocksize\n", "  ::\n", "  ::  more detail\n", "  @\n",);
         let start = src.find("@").expect("missing type");
@@ -20123,14 +19090,13 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  blocksize").expect("missing doc line");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (line, col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to include the doc block"
+            (line, col),
+            "expected start to stay on the type line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -20581,7 +19547,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_plus_header_inline_doc() {
+    fn line_map_does_not_expand_gap_start_for_plus_header_prose_inline_doc() {
         let src = concat!(
             "++  prev\n", "::\n", "++  fn  ::  float, infinity, or NaN\n", "        ::\n",
             "        ::  s=sign, e=exponent\n", "        $%  [%f s=?]\n",
@@ -20594,8 +19560,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (3, 9),
-            "expected start to anchor to inline doc on ++ line"
+            (6, 9),
+            "expected start to stay on the $% line"
         );
         assert_eq!(spot.q.q, (6, 11), "unexpected end spot");
     }
@@ -20632,7 +19598,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_arm_doc_block_with_inline_doc_line() {
+    fn line_map_does_not_expand_gap_start_for_arm_prose_doc_block_before_bar_cab() {
         let src = concat!(
             "  ++  analyze\n", "    ::  normalize a fragment of the subject\n", "    ::\n",
             "    |_  $:  ::  axe: axis to fragment\n", "          ::\n", "          axe=axis\n",
@@ -20643,15 +19609,12 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src
-            .find("::  normalize a fragment of the subject")
-            .expect("missing doc line");
-        let expected = linemap.line_col(doc_offset);
+        let expected = linemap.line_col(start);
         let expected_end = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p, expected,
-            "expected start to anchor to the arm doc block"
+            "expected start to stay on the |_ line"
         );
         assert_eq!(spot.q.q, expected_end, "unexpected end spot");
     }
@@ -20679,7 +19642,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_bar_equals_under_plus_header_doc_block() {
+    fn line_map_does_not_expand_gap_start_for_bar_equals_under_plus_header_prose_doc() {
         let src = concat!(
             "  ++  sponge\n", "    ::  sponge construction\n", "    ::\n",
             "    |=  $:  preperm=$-(@ud $-(@ @))\n", "            padding=$-([octs @ud] octs)\n",
@@ -20690,15 +19653,12 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src
-            .find("::  sponge construction")
-            .expect("missing doc line");
-        let expected = linemap.line_col(doc_start);
+        let expected = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p, expected,
-            "expected start to expand to the doc line"
+            "expected start to stay on the |= line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -21298,26 +20258,67 @@ mod tests {
     }
 
     #[test]
-    fn line_map_does_not_expand_gap_start_for_doc_block_under_question_caret() {
-        let src = concat!("  ?^  foo\n", "    ::  note\n", "    ::    nested\n", "    ?:  bar\n",);
-        let start = src.find("?:").expect("missing ?:");
-        let end = start + 2;
-        let linemap = Arc::new(LineMap::new(src));
-        let wer: crate::ast::hoon::Path = vec!["test".to_string()];
-        let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let (start_line, start_col) = linemap.line_col(start);
-        let (end_line, end_col) = linemap.line_col(end);
+    fn parser_does_not_anchor_wutket_branch_over_larg_doc_block() {
+        // hoonc-verified regression pin: a ?^ branch is gap-glued, so the
+        // parser-level unanchor pass keeps its %dbug span on the branch rune
+        // even when the preceding gap holds larg-shaped doc lines. this only
+        // holds through the full parser (direct chumsky_spot_to_hoon_spot
+        // calls cannot see the unanchor pass).
+        fn dbug_spot(node: &Hoon) -> Option<&crate::ast::hoon::Spot> {
+            match node {
+                Hoon::Dbug(spot, _) => Some(spot),
+                Hoon::Note(_, inner) => dbug_spot(inner),
+                _ => None,
+            }
+        }
+        fn peel(node: &Hoon) -> &Hoon {
+            match node {
+                Hoon::Dbug(_, inner) | Hoon::Note(_, inner) => peel(inner),
+                _ => node,
+            }
+        }
+        let src = concat!(
+            "|%\n", "++  foo\n", "  |=  cond=*\n", "  ?^  cond\n", "    ::\n",
+            "    ::  heading\n", "    ::    detail\n", "    ?:  =(1 1)\n", "      1\n",
+            "    2\n", "  3\n", "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "wutket.hoon".into()], true, linemap)
+            .parse(src)
+            .into_result()
+            .expect("core should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::Dbug(_, core)] = items.as_slice() else {
+            panic!("expected one traced core expression");
+        };
+        let Hoon::BarCen(_, tomes) = core.as_ref() else {
+            panic!("expected a |% core");
+        };
+        let arm = tomes
+            .get("$")
+            .and_then(|(_, arms)| arms.get("foo"))
+            .expect("expected ++foo arm");
+        let Hoon::BarTis(_, body) = peel(arm) else {
+            panic!("expected a |= gate arm");
+        };
+        let Hoon::WutKet(_, then_branch, _) = peel(body) else {
+            panic!("expected a ?^ body");
+        };
+        let spot = dbug_spot(then_branch).expect("expected traced ?^ branch");
 
         assert_eq!(
             spot.q.p,
-            (start_line, start_col),
-            "expected start to stay on the ?: line"
+            (8, 5),
+            "expected the ?^ branch span to stay on the ?: line"
         );
-        assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
+        assert_eq!(spot.q.q, (10, 6), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_skips_trailing_doc_line_when_span_starts_on_doc() {
+    fn line_map_keeps_gap_start_when_span_starts_on_doc_line() {
         let src = concat!(
             "  ^-  noun-digest\n", "  ::  ?>  (based leaf)  commented out\n",
             "  (hash-belts-list ~[leaf])\n",
@@ -21331,8 +20332,8 @@ mod tests {
 
         assert_eq!(
             spot.q.p,
-            (3, 3),
-            "expected start to move to the (hash-belts-list line"
+            (2, 3),
+            "expected start to stay where the span starts"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -21377,7 +20378,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_doc_block_after_compact_question_doc() {
+    fn line_map_does_not_expand_gap_start_for_compact_question_doc_at_file_top() {
+        // the gap holds larg lines, but there is no previous code line, so
+        // nothing anchors.
         let src = concat!(
             "  ::  header\n", "  ::?:  %+  levy  tables\n", "  ::    |=  t=table-dat\n",
             "  ::    !=(step.p.p.t base-width.p.t)\n", "  =/  num-tables  (lent tables)\n",
@@ -21387,14 +20390,13 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::    |=").expect("missing doc line");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (line, col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to the doc line"
+            (line, col),
+            "expected start to stay on the =/ line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -21469,7 +20471,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_triple_quote_doc_under_question_colon() {
+    fn line_map_does_not_expand_gap_start_for_two_space_triple_quote_doc() {
+        // two-space `::  \"\"\"` lines are prose (contrast with the
+        // four-space larg block in the compact-tilde test above).
         let src = concat!(
             "  ?:  cond\n", "    ::  \"\"\"\n", "    ::  detailed note\n", "    ::  \"\"\"\n",
             "    =/  log-message\n",
@@ -21479,13 +20483,12 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  \"\"\"").expect("missing triple quote");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (line, col) = linemap.line_col(start);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to the triple-quote doc line"
+            (line, col),
+            "expected start to stay on the =/ line"
         );
         let (end_line, end_col) = linemap.line_col(end);
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
@@ -21631,9 +20634,13 @@ mod tests {
     }
 
     #[test]
-    fn line_map_does_not_expand_gap_start_for_doc_block_before_question_line() {
+    fn line_map_expands_gap_start_to_first_larg_line_in_mixed_doc_block() {
+        // the scan picks the FIRST larg/smol line in the gap: the bare `::`
+        // and two-space prose heading above it are skipped, and the prose
+        // tail after it does not matter. (the previous code line is a plain
+        // binding so the direct-call semantics are well-defined.)
         let src = concat!(
-            "  ?^  cond\n", "  ::\n", "  ::  heading\n", "  ::    detail\n", "  ::  tail\n",
+            "  =/  cond  1\n", "  ::\n", "  ::  heading\n", "  ::    detail\n", "  ::  tail\n",
             "  ?:  yes\n", "  no\n",
         );
         let start = src.find("?:").expect("missing ?:");
@@ -21641,19 +20648,20 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let (expected_line, expected_col) = linemap.line_col(start);
+        let doc_offset = src.find("::    detail").expect("missing larg doc line");
+        let (doc_line, doc_col) = linemap.line_col(doc_offset);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (expected_line, expected_col),
-            "expected start to stay on the ?: line"
+            (doc_line, doc_col),
+            "expected start to anchor to the first larg doc line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_doc_block_with_blank_between_code_lines() {
+    fn line_map_does_not_expand_gap_start_for_prose_doc_block_with_blank_between_code_lines() {
         let src = concat!(
             "  =/  term  0\n", "  ::  heading\n", "  ::\n", "  ::  detail line\n",
             "  (do-stuff term)\n",
@@ -21663,14 +20671,13 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src.find("::  heading").expect("missing doc header");
-        let (expected_line, expected_col) = linemap.line_col(doc_start);
+        let (expected_line, expected_col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
             (expected_line, expected_col),
-            "expected start to anchor to the doc header line"
+            "expected start to stay on the call line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -21725,21 +20732,20 @@ mod tests {
     }
 
     #[test]
-    fn line_map_expands_gap_start_for_tilde_percent_after_equals_arrow_doc() {
+    fn line_map_does_not_expand_gap_start_for_tilde_percent_after_prose_doc() {
         let src = concat!("=>\n", "::  header\n", "~%  %foo  +  ~\n", "|%\n");
         let start = src.find("~%").expect("missing ~%");
         let end = start + 2;
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_start = src.find("::  header").expect("missing doc header");
-        let (expected_line, expected_col) = linemap.line_col(doc_start);
+        let (expected_line, expected_col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
             (expected_line, expected_col),
-            "expected start to anchor to the doc header line"
+            "expected start to stay on the ~% line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -21864,7 +20870,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_doc_line_after_caret_bar() {
+    fn line_map_does_not_anchor_bar_cab_to_prose_doc_after_caret_bar() {
         let src =
             concat!("++  rq\n", "  ^|\n", "  ::  round to nearest\n", "  |_  r=$?(%n %u %d %z)\n",);
         let start = src.find("|_").expect("missing |_");
@@ -21873,12 +20879,12 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (3, 3), "expected start to anchor to the doc line");
+        assert_eq!(spot.q.p, (4, 3), "expected start to stay on the |_ line");
         assert_eq!(spot.q.q, (4, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_prefers_inline_doc_for_gate_sample_before_caret() {
+    fn line_map_ignores_prose_inline_doc_for_gate_sample_before_caret() {
         let src = concat!("++  poon\n", "  |=  [a=@]  ::  sample doc\n", "  ^-  @  ::  detail\n",);
         let start = src.find("^-").expect("missing ^-");
         let end = start + 2;
@@ -21886,12 +20892,12 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (2, 14), "expected start to anchor to inline doc");
+        assert_eq!(spot.q.p, (3, 3), "expected start to stay on the ^- line");
         assert_eq!(spot.q.q, (3, 5), "unexpected end spot");
     }
 
     #[test]
-    fn line_map_prefers_inline_doc_for_caret_hep_before_question() {
+    fn line_map_ignores_prose_inline_doc_for_caret_hep_before_question() {
         let src = concat!(
             "++  poon\n", "  |=  [a=@]\n", "  ^-  @  ::  result type\n",
             "  ?~  a  `~  ::  keep empty\n",
@@ -21902,7 +20908,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(spot.q.p, (3, 10), "expected start to anchor to inline doc");
+        assert_eq!(spot.q.p, (4, 3), "expected start to stay on the ?~ line");
         assert_eq!(spot.q.q, (4, 5), "unexpected end spot");
     }
 
@@ -21920,7 +20926,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_inline_doc_for_dollar_paren_after_question() {
+    fn line_map_ignores_prose_inline_doc_for_dollar_paren_after_question() {
         let src = concat!(
             "    %+  both  ::  otherwise head comes\n", "      ?^  foo  ::  from goo or pag\n",
             "    $(bar)  ::  recurse on tails\n",
@@ -21930,13 +20936,12 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  from goo or pag").expect("missing doc");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (line, col) = linemap.line_col(start);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to inline doc"
+            (line, col),
+            "expected start to stay on the $( line"
         );
         assert_eq!(spot.q.q, (3, 7), "unexpected end spot");
     }
@@ -21961,21 +20966,20 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_colon_header_doc_when_nested_doc_is_heading() {
+    fn line_map_does_not_anchor_nested_line_to_prose_colon_header_doc() {
         let src = concat!("  :+  %tsls  ::  header\n", "    [%ktts %b]  ::  =+  b\n",);
         let start = src.find("[%ktts").expect("missing body");
         let end = start + "[%ktts".len();
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  header").expect("missing header doc");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (start_line, start_col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to the colon header doc"
+            (start_line, start_col),
+            "expected start to stay on the nested line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -22104,7 +21108,9 @@ mod tests {
     }
 
     #[test]
-    fn line_map_does_not_expand_gap_start_after_tilde_plus_doc_block() {
+    fn line_map_expands_gap_start_to_larg_doc_line_after_tilde_plus() {
+        // hoonc-verified: a larg line anchors even when its text looks like
+        // a rune (`%-  bar`), and even under a ~+ hint line.
         let src = concat!(
             "  ~+\n", "  ::\n", "  ::  Equivalent to:\n", "  ::    %-  bar\n",
             "  =/  num-succ  1\n",
@@ -22114,13 +21120,14 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let (start_line, start_col) = linemap.line_col(start);
+        let doc_offset = src.find("::    %-  bar").expect("missing larg doc line");
+        let (doc_line, doc_col) = linemap.line_col(doc_offset);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (start_line, start_col),
-            "expected start to stay on the =/ line"
+            (doc_line, doc_col),
+            "expected start to anchor to the larg doc line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -22280,7 +21287,7 @@ mod tests {
     }
 
     #[test]
-    fn line_map_prefers_branch_doc_above_colon_rune() {
+    fn line_map_does_not_anchor_colon_rune_to_prose_branch_doc_above() {
         let src =
             concat!("    [%cncl %b %c]  ::  (b c)\n", "  :+  %cnts  [%a ~]  ::  a(,.+6 c)\n",);
         let start = src.find(":+").expect("missing :+");
@@ -22288,14 +21295,13 @@ mod tests {
         let linemap = Arc::new(LineMap::new(src));
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
-        let doc_offset = src.find("::  (b c)").expect("missing branch doc");
-        let (doc_line, doc_col) = linemap.line_col(doc_offset);
+        let (start_line, start_col) = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
         assert_eq!(
             spot.q.p,
-            (doc_line, doc_col),
-            "expected start to anchor to branch doc"
+            (start_line, start_col),
+            "expected start to stay on the :+ line"
         );
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
@@ -22368,5 +21374,103 @@ mod tests {
             "expected start to stay on the inline token column"
         );
         assert_eq!(spot.q.q, (1, 7), "unexpected end spot");
+    }
+}
+
+#[cfg(test)]
+mod fragdoc_recon {
+    use super::*;
+    use std::sync::Arc;
+
+    fn note_tree(node: &Hoon, depth: usize, out: &mut String) {
+        match node {
+            Hoon::Note(Note::Help(h), inner) => {
+                let s = format!("{h:?}");
+                out.push_str(&format!("{}Note {}\n", "  ".repeat(depth), &s[..s.len().min(120)]));
+                note_tree(inner, depth + 1, out);
+            }
+            Hoon::Dbug(_, inner) => note_tree(inner, depth, out),
+            Hoon::ColTar(items) => {
+                out.push_str(&format!("{}ColTar({})\n", "  ".repeat(depth), items.len()));
+                for i in items {
+                    note_tree(i, depth + 1, out);
+                }
+            }
+            Hoon::KetTis(skin, inner) => {
+                out.push_str(&format!("{}KetTis {skin:?}\n", "  ".repeat(depth)));
+                note_tree(inner, depth + 1, out);
+            }
+            Hoon::TisLus(a, b) => {
+                out.push_str(&format!("{}TisLus\n", "  ".repeat(depth)));
+                note_tree(a, depth + 1, out);
+                note_tree(b, depth + 1, out);
+            }
+            Hoon::TisSig(items) => {
+                for i in items {
+                    note_tree(i, depth, out);
+                }
+            }
+            Hoon::BarCen(_, tomes) => {
+                for (_, (_, arms)) in tomes {
+                    for (name, arm) in arms {
+                        out.push_str(&format!("{}arm {name}\n", "  ".repeat(depth)));
+                        note_tree(arm, depth + 1, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn fragdoc_note_placement() {
+        let src = concat!(
+            "|%\n",
+            "++  main\n",
+            "  =+  :*  ::  .dom: axis to home\n",
+            "          ::  .hay: wing to home\n",
+            "          ::  .cox: hygienic context\n",
+            "          ::  .bug: debug annotations\n",
+            "          ::  .nut: annotations\n",
+            "          ::  .def: default expression\n",
+            "          ::\n",
+            "          dom=`axis`1\n",
+            "          hay=*wing\n",
+            "          cox=*(map term spec)\n",
+            "          bug=*(list spot)\n",
+            "          nut=*(unit note)\n",
+            "          def=*(unit hoon)\n",
+            "      ==\n",
+            "  0\n",
+            "--\n",
+        );
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("fragdoc block should parse");
+        let mut out = String::new();
+        note_tree(&parsed, 0, &mut out);
+        // hoon-138 ++clad: the whole `.name:` block stacks on the FIRST item,
+        // nested in ~(tap by bat) order (hoonc-verified from the compiled
+        // hoon-138 artifact: def hay dom bug nut cox, outermost first); the
+        // remaining items stay bare.
+        let notes: Vec<&str> = out.lines().filter(|l| l.trim_start().starts_with("Note")).collect();
+        assert_eq!(notes.len(), 6, "all six frag docs stack on one entry:\n{out}");
+        let order: Vec<u64> = [0x666564u64, 0x796168, 0x6d6f64, 0x677562, 0x74756e, 0x786f63]
+            .to_vec(); // def hay dom bug nut cox as LE cords
+        for (line, cord) in notes.iter().zip(order) {
+            assert!(
+                line.contains(&format!("Small({cord})")),
+                "note order must be the bat-map tap order (expected cord {cord}): {line}"
+            );
+        }
+        let dom_idx = out.find("KetTis Term(\"dom\")").expect("dom entry");
+        let deepest_note = out.rfind("Note").expect("notes exist");
+        assert!(deepest_note < dom_idx, "the stack wraps the first item (dom)");
+        assert!(
+            !out[dom_idx..].contains("Note"),
+            "items after the first must stay bare:\n{out}"
+        );
     }
 }

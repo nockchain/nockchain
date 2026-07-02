@@ -15,7 +15,7 @@ pub fn tis_runes_tall<'src>(
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just("|").ignore_then(tisbar(hoon.clone(), spec.clone())),
-        just('.').ignore_then(tisdot(hoon.clone())),
+        just('.').ignore_then(tisdot(hoon.clone(), linemap.clone())),
         just('?').ignore_then(tiswut(hoon.clone())),
         just('^').ignore_then(tisket(hoon.clone(), spec_wide.clone())),
         just(':').ignore_then(tiscol(hoon.clone())),
@@ -324,14 +324,29 @@ pub fn tistar_wide<'src>(
 
 pub fn tisdot<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(winglist())
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(
+            hoon.clone()
+                .map_with(|q: Hoon, e| (q, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(|((p, q), r)| Hoon::TisDot(p, Box::new(q), Box::new(r)))
+        .map(move |((p, (q, q_start, q_end)), r)| {
+            let q = if let Some(help) = linemap.help_after_rune(q_start, q_end) {
+                if hoon_tail_has_help(&q, &help) {
+                    q
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(q))
+                }
+            } else {
+                q
+            };
+            Hoon::TisDot(p, Box::new(q), Box::new(r))
+        })
 }
 
 pub fn tisdot_wide<'src>(

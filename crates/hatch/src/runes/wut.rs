@@ -15,9 +15,9 @@ pub fn wut_runes_tall<'src>(
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
-        just('~').ignore_then(wutsig(hoon.clone(), hoon_wide.clone())),
+        just('~').ignore_then(wutsig(hoon.clone(), hoon_wide.clone(), linemap.clone())),
         just('.').ignore_then(wutdot(hoon.clone(), linemap.clone())),
-        just(':').ignore_then(wutcol(hoon.clone())),
+        just(':').ignore_then(wutcol(hoon.clone(), linemap.clone())),
         just("|").ignore_then(wutbar(hoon.clone())),
         just(">").ignore_then(wutgar(hoon.clone())),
         just("<").ignore_then(wutgal(hoon.clone())),
@@ -31,7 +31,12 @@ pub fn wut_runes_tall<'src>(
             spec.clone(),
             linemap.clone(),
         )),
-        just('-').ignore_then(wuthep(hoon.clone(), hoon_wide.clone(), spec.clone())),
+        just('-').ignore_then(wuthep(
+            hoon.clone(),
+            hoon_wide.clone(),
+            spec.clone(),
+            linemap.clone(),
+        )),
         just("!").ignore_then(wutzap(hoon.clone())),
         just('#').ignore_then(wuthax(hoon.clone(), hoon_wide.clone())),
     ))
@@ -40,11 +45,12 @@ pub fn wut_runes_tall<'src>(
 pub fn wut_runes_wide<'src>(
     hoon_wide: impl ParserExt<'src, Hoon>,
     spec_wide: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
         just('~').ignore_then(wutsig_wide(hoon_wide.clone())),
         just('.').ignore_then(wutdot_wide(hoon_wide.clone())),
-        just(':').ignore_then(wutcol_wide(hoon_wide.clone())),
+        just(':').ignore_then(wutcol_wide(hoon_wide.clone(), linemap.clone())),
         just("|").ignore_then(wutbar_wide(hoon_wide.clone())),
         just(">").ignore_then(wutgar_wide(hoon_wide.clone())),
         just("<").ignore_then(wutgal_wide(hoon_wide.clone())),
@@ -128,26 +134,64 @@ pub fn wutzap_wide<'src>(
 
 pub fn wutcol<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(hoon.clone())
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(
+            hoon.clone()
+                .map_with(|q: Hoon, e| (q, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
-        .then(hoon.clone())
-        .map(|((p, q), r)| Hoon::WutCol(Box::new(p), Box::new(q), Box::new(r)))
+        .then(
+            hoon.clone()
+                .map_with(|r: Hoon, e| (r, e.span().start(), e.span().end())),
+        )
+        .map(move |((p, (q, q_start, q_end)), (r, r_start, r_end))| {
+            let attach = |hoon: Hoon, start, end| {
+                if let Some(help) = linemap.help_after_rune(start, end) {
+                    if hoon_tail_has_help(&hoon, &help) {
+                        hoon
+                    } else {
+                        Hoon::Note(Note::Help(help), Box::new(hoon))
+                    }
+                } else {
+                    hoon
+                }
+            };
+            let q = attach(q, q_start, q_end);
+            let r = attach(r, r_start, r_end);
+            Hoon::WutCol(Box::new(p), Box::new(q), Box::new(r))
+        })
 }
 
 pub fn wutcol_wide<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    hoon.clone()
+    hoon
+        .clone()
         .then_ignore(just(' '))
         .then(hoon.clone())
         .then_ignore(just(' '))
-        .then(hoon.clone())
+        .then(
+            hoon.clone()
+                .map_with(|r: Hoon, e| (r, e.span().start(), e.span().end())),
+        )
         .delimited_by(just('('), just(')'))
-        .map(|((p, q), r)| Hoon::WutCol(Box::new(p), Box::new(q), Box::new(r)))
+        .map(move |((p, q), (r, start, end))| {
+            let r = if let Some(help) = linemap.help_after_rune(start, end) {
+                if hoon_tail_has_help(&r, &help) {
+                    r
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(r))
+                }
+            } else {
+                r
+            };
+            Hoon::WutCol(Box::new(p), Box::new(q), Box::new(r))
+        })
 }
 
 pub fn wutgal<'src>(
@@ -291,21 +335,50 @@ pub fn wuthep<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(tiki_tall(hoon.clone(), hoon_wide.clone()))
         .then_ignore(gap())
         .then(
             spec.clone()
+                .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end()))
                 .then_ignore(gap())
-                .then(hoon.clone())
+                .then(
+                    hoon.clone()
+                        .map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())),
+                )
                 .then_ignore(gap())
                 .repeated()
                 .at_least(1)
                 .collect::<Vec<_>>(),
         )
         .then_ignore(just("=="))
-        .map(|(t, list)| wthp(t, list))
+        .map(move |(t, list)| {
+            let list = list
+                .into_iter()
+                .map(|((spec, spec_start, spec_end), (hoon, start, end))| {
+                    let hoon = if let Some(help) = linemap.help_after_rune(start, end) {
+                        if hoon_tail_has_help(&hoon, &help) {
+                            hoon
+                        } else {
+                            Hoon::Note(Note::Help(help), Box::new(hoon))
+                        }
+                    } else {
+                        hoon
+                    };
+                    let spec = if let Some(help) =
+                        linemap.help_after_line_start_rune(spec_start, spec_end)
+                    {
+                        Spec::Gist(help, Box::new(spec))
+                    } else {
+                        spec
+                    };
+                    (spec, hoon)
+                })
+                .collect::<Vec<_>>();
+            wthp(t, list)
+        })
 }
 
 pub fn wuthep_wide<'src>(
@@ -343,8 +416,9 @@ pub fn wutlus<'src>(
         .then_ignore(gap())
         .then(
             spec.clone()
+                .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end()))
                 .then_ignore(gap())
-                .then(hoon.clone())
+                .then(hoon.clone().map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())))
                 .then_ignore(gap())
                 .repeated()
                 .at_least(1)
@@ -361,6 +435,28 @@ pub fn wutlus<'src>(
             } else {
                 h
             };
+            let list = list
+                .into_iter()
+                .map(|((spec, spec_start, spec_end), (hoon, start, end))| {
+                    let hoon = if let Some(help) = linemap.help_after_rune(start, end) {
+                        if hoon_tail_has_help(&hoon, &help) {
+                            hoon
+                        } else {
+                            Hoon::Note(Note::Help(help), Box::new(hoon))
+                        }
+                    } else {
+                        hoon
+                    };
+                    let spec = if let Some(help) =
+                        linemap.help_after_line_start_rune(spec_start, spec_end)
+                    {
+                        Spec::Gist(help, Box::new(spec))
+                    } else {
+                        spec
+                    };
+                    (spec, hoon)
+                })
+                .collect::<Vec<_>>();
             wtls(t, h, list)
         })
 }
@@ -413,14 +509,29 @@ pub fn wutbar<'src>(
 pub fn wutsig<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     hoon_wide: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(tiki_tall(hoon.clone(), hoon_wide.clone()))
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(
+            hoon.clone()
+                .map_with(|q: Hoon, e| (q, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(|((p, q), r)| wtsg(p, q, r))
+        .map(move |((p, (q, q_start, q_end)), r)| {
+            let q = if let Some(help) = linemap.help_after_rune(q_start, q_end) {
+                if hoon_tail_has_help(&q, &help) {
+                    q
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(q))
+                }
+            } else {
+                q
+            };
+            wtsg(p, q, r)
+        })
 }
 
 pub fn wutsig_wide<'src>(

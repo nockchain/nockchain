@@ -12,15 +12,15 @@ pub fn cen_runes_tall<'src>(
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     choice((
-        just('_').ignore_then(cencab(hoon.clone())),
+        just('_').ignore_then(cencab(hoon.clone(), linemap.clone())),
         just('.').ignore_then(cendot(hoon.clone())),
         just('^').ignore_then(cenket(hoon.clone())),
         just("+").ignore_then(cenlus(hoon.clone(), linemap.clone())),
         just('-').ignore_then(cenhep(hoon.clone(), linemap.clone())),
         just(':').ignore_then(cencol(hoon.clone())),
         just('~').ignore_then(censig(hoon.clone())),
-        just('*').ignore_then(centar(hoon.clone())),
-        just('=').ignore_then(centis(hoon.clone())),
+        just('*').ignore_then(centar(hoon.clone(), linemap.clone())),
+        just('=').ignore_then(centis(hoon.clone(), linemap.clone())),
     ))
 }
 
@@ -43,10 +43,11 @@ pub fn cen_runes_wide<'src>(
 pub fn cen_spec_tall<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
     choice((
         just('-').ignore_then(cenhep_spec(hoon.clone(), spec.clone())),
-        just("+").ignore_then(cenlus_spec(hoon.clone(), spec.clone())),
+        just("+").ignore_then(cenlus_spec(hoon.clone(), spec.clone(), linemap.clone())),
         just("^").ignore_then(cenket_spec(hoon.clone(), spec.clone())),
         just(".").ignore_then(cendot_spec(hoon.clone(), spec.clone())),
         just(":").ignore_then(cencol_spec(hoon.clone(), spec.clone())),
@@ -123,20 +124,53 @@ pub fn cencol_wide<'src>(
 fn documented_rune_body<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     linemap: Arc<LineMap>,
+    allow_four_space: bool,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     hoon.map_with(|hoon: Hoon, e| (hoon, e.span().start(), e.span().end()))
-        .map(move |(hoon, start, end)| attach_rune_help(hoon, start, end, linemap.as_ref()))
+        .map(move |(hoon, start, end)| {
+            attach_rune_help(hoon, start, end, linemap.as_ref(), allow_four_space)
+        })
 }
 
-fn attach_rune_help(hoon: Hoon, start: usize, end: usize, linemap: &LineMap) -> Hoon {
-    if let Some(help) = linemap.help_after_rune(start, end) {
-        if hoon_tail_has_help(&hoon, &help) {
-            hoon
-        } else {
-            Hoon::Note(Note::Help(help), Box::new(hoon))
-        }
-    } else {
+fn documented_rune_body_with_carry<'src>(
+    hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
+    allow_four_space: bool,
+) -> impl Parser<'src, &'src str, (Hoon, Option<NounExpr>), Err<'src>> {
+    hoon.map_with(|hoon: Hoon, e| (hoon, e.span().start(), e.span().end()))
+        .map(move |(hoon, start, end)| {
+            let Some((spaces, help)) = linemap.help_after_rune_with_spaces(start, end) else {
+                return (hoon, None);
+            };
+            if spaces == 4 && !allow_four_space {
+                return (hoon, Some(help));
+            }
+            let hoon = if hoon_tail_has_help(&hoon, &help) {
+                hoon
+            } else {
+                Hoon::Note(Note::Help(help), Box::new(hoon))
+            };
+            (hoon, None)
+        })
+}
+
+fn attach_rune_help(
+    hoon: Hoon,
+    start: usize,
+    end: usize,
+    linemap: &LineMap,
+    allow_four_space: bool,
+) -> Hoon {
+    let Some((spaces, help)) = linemap.help_after_rune_with_spaces(start, end) else {
+        return hoon;
+    };
+    if spaces == 4 && !allow_four_space {
+        return hoon;
+    }
+    if hoon_tail_has_help(&hoon, &help) {
         hoon
+    } else {
+        Hoon::Note(Note::Help(help), Box::new(hoon))
     }
 }
 
@@ -144,11 +178,18 @@ pub fn cenhep<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
+    let q_linemap = linemap.clone();
     gap()
-        .ignore_then(documented_rune_body(hoon.clone(), linemap))
+        .ignore_then(documented_rune_body(hoon.clone(), linemap, true))
         .then_ignore(gap())
-        .then(hoon.clone())
-        .map(|(p, q)| Hoon::CenHep(Box::new(p), Box::new(q)))
+        .then(
+            hoon.clone()
+                .map_with(|q: Hoon, e| (q, e.span().start(), e.span().end())),
+        )
+        .map(move |(p, (q, start, end))| {
+            let q = attach_rune_help(q, start, end, &q_linemap, false);
+            Hoon::CenHep(Box::new(p), Box::new(q))
+        })
 }
 
 pub fn cenhep_wide<'src>(
@@ -177,12 +218,23 @@ pub fn cenlus<'src>(
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(hoon.clone())
+        .ignore_then(documented_rune_body(hoon.clone(), linemap.clone(), true))
         .then_ignore(gap())
-        .then(hoon.clone())
+        .then(documented_rune_body_with_carry(
+            hoon.clone(),
+            linemap.clone(),
+            false,
+        ))
         .then_ignore(gap())
-        .then(documented_rune_body(hoon.clone(), linemap))
-        .map(|((p, q), r)| Hoon::CenLus(Box::new(p), Box::new(q), Box::new(r)))
+        .then(documented_rune_body(hoon.clone(), linemap, false))
+        .map(|((p, (q, q_help)), r)| {
+            let r = if let Some(help) = q_help {
+                attach_help_to_hoon(r, help)
+            } else {
+                r
+            };
+            Hoon::CenLus(Box::new(p), Box::new(q), Box::new(r))
+        })
 }
 
 pub fn cendot_wide<'src>(
@@ -203,11 +255,12 @@ pub fn cenlus_wide<'src>(
 
 pub fn cencab<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(winglist())
         .then_ignore(gap())
-        .then(list_wing_hoon_tall(hoon.clone()))
+        .then(list_wing_hoon_tall_with_docs(hoon.clone(), linemap))
         .then_ignore(just("=="))
         .map(|(p, q)| Hoon::CenCab(p, q))
 }
@@ -224,13 +277,14 @@ pub fn cencab_wide<'src>(
 
 pub fn centar<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(winglist())
         .then_ignore(gap())
         .then(hoon.clone())
         .then_ignore(gap())
-        .then(list_wing_hoon_tall(hoon.clone()))
+        .then(list_wing_hoon_tall_with_docs(hoon.clone(), linemap))
         .then_ignore(just("=="))
         .map(|((p, q), list)| Hoon::CenTar(p, Box::new(q), list))
 }
@@ -249,11 +303,12 @@ pub fn centar_wide<'src>(
 
 pub fn centis<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
         .ignore_then(winglist())
         .then_ignore(gap())
-        .then(list_wing_hoon_tall(hoon.clone()))
+        .then(list_wing_hoon_tall_with_docs(hoon.clone(), linemap))
         .then_ignore(just("=="))
         .map(|(name, list)| Hoon::CenTis(name, list))
 }
@@ -312,16 +367,33 @@ pub fn centis_irregular<'src>(
         .map(|(name, list)| Hoon::CenTis(name, list))
 }
 
+fn line_start_spec_arg_with_doc<'src>(
+    spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
+) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
+    spec.map_with(move |spec: Spec, e| {
+        let start = e.span().start();
+        if let Some(help) = linemap.help_after_line_start_expr(start) {
+            attach_help_to_spec(spec, help)
+        } else {
+            spec
+        }
+    })
+}
+
 pub fn cenlus_spec<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Spec, Err<'src>> {
+    let q = line_start_spec_arg_with_doc(spec.clone(), linemap.clone());
+    let r = line_start_spec_arg_with_doc(spec.clone(), linemap);
     gap()
         .ignore_then(hoon.clone())
         .then_ignore(gap())
-        .then(spec.clone())
+        .then(q)
         .then_ignore(gap())
-        .then(spec.clone())
+        .then(r)
         .map(|((p, q), r)| Spec::Make(p, vec![q, r]))
 }
 

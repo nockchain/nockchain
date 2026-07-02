@@ -16,8 +16,8 @@ pub fn ket_runes_tall<'src>(
         just("|").ignore_then(ketbar(hoon.clone())),
         just('.').ignore_then(ketdot(hoon.clone())),
         just(':').ignore_then(ketcol(spec.clone())),
-        just('-').ignore_then(kethep(hoon.clone(), spec.clone())),
-        just("+").ignore_then(ketlus(hoon.clone())),
+        just('-').ignore_then(kethep(hoon.clone(), spec.clone(), linemap.clone())),
+        just("+").ignore_then(ketlus(hoon.clone(), linemap.clone())),
         just("&").ignore_then(ketpam(hoon.clone())),
         just('~').ignore_then(ketsig(hoon.clone())),
         just('=').ignore_then(kettis(hoon.clone(), linemap.clone())),
@@ -199,12 +199,29 @@ pub fn kettis_irregular<'src>(
 pub fn kethep<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     spec: impl ParserExt<'src, Spec>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(spec.clone())
+        .ignore_then(
+            spec.clone()
+                .map_with(|s: Spec, e| (s, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(|(s, h)| Hoon::KetHep(Box::new(s), Box::new(h)))
+        .map(move |((s, start, end), h)| {
+            if let Some((spaces, help)) = linemap.help_after_rune_with_spaces(start, end) {
+                if spaces == 4 {
+                    return Hoon::KetHep(Box::new(s), Box::new(attach_help_to_hoon(h, help)));
+                }
+                return Hoon::KetHep(Box::new(attach_help_to_spec(s, help)), Box::new(h));
+            }
+            let s = if let Some(help) = linemap.help_after_line_expr_ending_at(end) {
+                attach_help_to_spec(s, help)
+            } else {
+                s
+            };
+            Hoon::KetHep(Box::new(s), Box::new(h))
+        })
 }
 
 pub fn kethep_wide<'src>(
@@ -228,12 +245,27 @@ pub fn ketsig_wide<'src>(
 
 pub fn ketlus<'src>(
     hoon: impl ParserExt<'src, Hoon>,
+    linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     gap()
-        .ignore_then(hoon.clone())
+        .ignore_then(
+            hoon.clone()
+                .map_with(|p: Hoon, e| (p, e.span().start(), e.span().end())),
+        )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(|(p, q)| Hoon::KetLus(Box::new(p), Box::new(q)))
+        .map(move |((p, p_start, p_end), q)| {
+            let p = if let Some(help) = linemap.help_after_rune(p_start, p_end) {
+                if hoon_tail_has_help(&p, &help) {
+                    p
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(p))
+                }
+            } else {
+                p
+            };
+            Hoon::KetLus(Box::new(p), Box::new(q))
+        })
 }
 
 pub fn ketlus_wide<'src>(

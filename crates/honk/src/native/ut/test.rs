@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Rc as NRc};
 
-use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
+use hatch::ast::hoon::{BaseType, Hoon, Note, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
 use nockapp::noun::slab::NounSlab;
 use nockvm::ext::AtomExt;
 use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
@@ -11,9 +11,9 @@ use super::{
     cell_type, coil_from_parts, coil_parts, find_face_axis_skip, hoon_to_noun,
     is_const_bool_formula, map_to_noun, native_of, noun_eq, term_to_noun, ty_atom, ty_cell,
     ty_core, ty_face, ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
-    type_face_name_if_atom, type_face_tool, type_tag, CompilerError, Limb, NTy, NestPairSet,
-    NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet, StructNounSet, Ut,
-    Way,
+    type_face_name_if_atom, type_face_tool, type_fork_options, type_tag, CompilerError, Limb,
+    NTy, NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet,
+    StructNounSet, Ut, Way,
 };
 use crate::native::ut::wet::RedoState;
 
@@ -831,6 +831,98 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
             ut.nest_mug_lookup(sut, ref_type)
                 .expect("repeat inner nest mug lookup"),
             None
+        );
+        Ok(())
+    })
+    .expect("rest leg should succeed");
+}
+
+#[test]
+fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
+    let mut slab = NounSlab::new();
+    let sut = ty_noun(&mut slab);
+    let inner = ty_atom(&mut slab, "@", Some(D(7)));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let gol = ty_hold(&mut slab, inner, hoon);
+    let ty = ty_atom(&mut slab, "@", Some(D(9)));
+    let formula = T(&mut slab, &[D(1), D(123)]);
+    let gen_sig = 0xfeed_u64;
+
+    let mut ut = Ut::new(&mut slab);
+    let space = ut.slab.noun_space();
+    let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
+    let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
+    let ty_n = native_of(&mut ut.cx, ty, &space).expect("native ty");
+
+    ut.mint_cache_store(&sut_n, &gol_n, gen_sig, ty_n, formula)
+        .expect("store mint cache");
+    assert!(ut
+        .mint_cache_lookup(&sut_n, &gol_n, gen_sig)
+        .expect("outside mint lookup")
+        .is_some());
+
+    ut.with_rest_leg(inner, hoon, |ut| {
+        assert_eq!(
+            ut.fan_context_key_scoped(&sut_n)?,
+            0,
+            "the subject alone cannot see the active hold leg"
+        );
+        assert_ne!(
+            ut.fan_context_key_scoped_pair(&sut_n, &gol_n)?,
+            0,
+            "the goal can see the active hold leg"
+        );
+        assert!(
+            ut.mint_cache_lookup(&sut_n, &gol_n, gen_sig)?
+                .is_none(),
+            "mint cache must not reuse a success across a goal-reachable fan change"
+        );
+        Ok(())
+    })
+    .expect("rest leg should succeed");
+}
+
+#[test]
+fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
+    let mut slab = NounSlab::new();
+    let sut = ty_noun(&mut slab);
+    let inner = ty_atom(&mut slab, "@", Some(D(7)));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let gol = ty_hold(&mut slab, inner, hoon);
+    let tomes_map = D(0);
+    let prefix = None::<String>;
+    let poly = Poly::Dry;
+    let core_type = ty_atom(&mut slab, "@", Some(D(10)));
+    let formula = T(&mut slab, &[D(1), D(124)]);
+
+    let mut ut = Ut::new(&mut slab);
+    let space = ut.slab.noun_space();
+    let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
+    let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
+    let core_type_n = native_of(&mut ut.cx, core_type, &space).expect("native core type");
+
+    ut.core_mint_cache_store(
+        &sut_n,
+        &gol_n,
+        tomes_map,
+        &prefix,
+        poly,
+        core_type_n,
+        formula,
+    )
+    .expect("store core mint cache");
+    assert!(ut
+        .core_mint_cache_lookup(&sut_n, &gol_n, tomes_map, &prefix, poly)
+        .expect("outside core mint lookup")
+        .is_some());
+
+    ut.with_rest_leg(inner, hoon, |ut| {
+        assert_eq!(ut.fan_context_key_scoped(&sut_n)?, 0);
+        assert_ne!(ut.fan_context_key_scoped_pair(&sut_n, &gol_n)?, 0);
+        assert!(
+            ut.core_mint_cache_lookup(&sut_n, &gol_n, tomes_map, &prefix, poly)?
+                .is_none(),
+            "core mint cache must not reuse a success across a goal-reachable fan change"
         );
         Ok(())
     })
@@ -2399,6 +2491,37 @@ fn redo_subject_hold_stops_at_active_fan_loop() {
     assert!(
         noun_eq(actual, expected, &ut.slab.noun_space()).expect("noun_eq"),
         "redo should stop at an active fan loop and keep the subject hold instead of expanding it"
+    );
+}
+
+#[test]
+fn fork_from_options_preserves_hinted_member_when_flattening_nested_fork() {
+    let mut slab = NounSlab::new();
+    let note = term_to_noun(&mut slab, "made");
+    let name = term_to_noun(&mut slab, "wine");
+    let zero = D(0);
+    let made_payload = T(&mut slab, &[name, zero]);
+    let made_note = T(&mut slab, &[note, made_payload]);
+    let unit = term_to_noun(&mut slab, "unit");
+    let atom_unit = ty_atom(&mut slab, "tas", Some(unit));
+    let atom_noun = ty_atom(&mut slab, "$", None);
+    let atom_unit_fork = ty_fork(&mut slab, vec![atom_unit]);
+    let hinted = ty_hint(&mut slab, atom_noun, made_note, atom_unit_fork);
+    let nil = term_to_noun(&mut slab, "nil");
+    let other = ty_atom(&mut slab, "tas", Some(nil));
+    let nested = ty_fork(&mut slab, vec![atom_unit, other]);
+
+    let mut ut = Ut::new(&mut slab);
+    let fork = ut
+        .fork_from_options(vec![hinted, nested])
+        .expect("fork_from_options should flatten nested fork");
+    let options = type_fork_options(fork, &ut.slab.noun_space()).expect("fork options");
+
+    assert!(
+        options
+            .iter()
+            .any(|option| noun_eq(*option, hinted, &ut.slab.noun_space()).expect("noun_eq")),
+        "flattening a nested fork must not drop an existing hinted option"
     );
 }
 

@@ -141,13 +141,9 @@ impl<'a> Ut<'a> {
     }
 
     /// Native `%hold` constructor — `[%hold inner hoon]`, interned through the one
-    /// canonical table. Byte-exact replacement for the old
-    /// `ty_hold_cached(inner_noun, hoon) -> native_of` path: `ty_hold` does NOT
-    /// collapse (always `[%hold inner hoon]`), and `intern_type_noun`'s `%hold`
-    /// decode is exactly `Hold { subject: <interned inner>, gene: from_noun(hoon) }`,
-    /// so a native Hold over the same interned `inner` Rc + the same `from_noun`
-    /// gene leaf interns to the SAME canonical `Rc` (mirrors `ty_hold_n`). The old
-    /// `ty_hold_cached` was only a perf cache; the interned RESULT is what matters.
+    /// canonical table. The gene is the RAW arm hoon exactly as `++fire`
+    /// (hoon-138.hoon:9529) stores it: holds carry the verbatim tome hoon and
+    /// `++open` lowering happens only when a hold is forced (repo/rest/play).
     fn cons_hold(&mut self, inner: NRc<NTy>, hoon: Noun) -> NRc<NTy> {
         let gene = NLeaf::from_noun_raw(hoon, &self.slab.noun_space());
         live_intern(
