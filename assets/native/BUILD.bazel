@@ -2,123 +2,123 @@ load("//:rules_hoon/defs.bzl", "honk_library")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(["kernel_parity_test.sh"])
+exports_files([
+    "compile_bench.sh",
+    "kernel_parity_test.sh",
+])
 
-# honk-built twins of the hoonc kernels in //assets. Each target's `deps` MUST
-# match its //assets counterpart exactly: the artifact embeds a hash of the
-# directory tree the compiler sees, so byte parity requires identical sandbox
-# layouts on both sides of a pairing.
-#
-# Outputs are named `<kernel>_native.jam` so they never collide with the
-# untracked local `assets/native/<kernel>.jam` files written by
-# `just honk-kernel-jams`.
-
-honk_library(
-    name = "bridge_native",
-    src = "//hoon/apps/bridge:bridge.hoon",
-    deps = [
-        "//hoon/apps/bridge:files",
-        "//hoon/apps/dumbnet:files",
-        "//hoon/apps/dumbnet/lib:files",
-        "//hoon/apps/wallet/lib:files",
-        "//hoon/common:files",
-        "//hoon/common/markdown:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-    ],
-)
-
-honk_library(
-    name = "dumb_native",
-    src = "//hoon/apps/dumbnet:outer.hoon",
-    deps = [
-        "//hoon/apps/dumbnet:inner.hoon",
-        "//hoon/apps/dumbnet:miner.hoon",
-        "//hoon/apps/dumbnet/lib:files",
-        "//hoon/common:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-    ],
-)
-
-honk_library(
-    name = "peek_native",
-    src = "//hoon/apps/peek:peek.hoon",
-    deps = [
-        "//hoon/common:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-    ],
-)
-
-honk_library(
-    name = "wal_native",
-    src = "//hoon/apps/wallet:wallet.hoon",
-    deps = [
-        "//hoon/apps/bridge:types.hoon",
-        "//hoon/apps/dumbnet:miner.hoon",
-        "//hoon/apps/dumbnet/lib:asert.hoon",
-        "//hoon/apps/dumbnet/lib:types.hoon",
-        "//hoon/apps/wallet/lib:files",
-        "//hoon/common:files",
-        "//hoon/common/markdown:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-    ],
-)
-
-honk_library(
-    name = "miner_native",
-    src = "//hoon/apps/dumbnet:miner.hoon",
-    deps = [
-        "//hoon/apps/dumbnet/lib:asert.hoon",
-        "//hoon/common:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-    ],
-)
-
-honk_library(
-    name = "roswell_native",
-    src = "//hoon/apps/roswell:roswell.hoon",
-    deps = [
-        "//hoon/apps/bridge:files",
-        "//hoon/apps/dumbnet:inner.hoon",
-        "//hoon/apps/dumbnet:miner.hoon",
+# One entry per kernel: src + the hoon dependency tree it compiles against.
+# Each dep list MUST match the //assets hoonc counterpart exactly: the
+# artifact embeds a hash of the directory tree the compiler sees, so byte
+# parity requires identical sandbox layouts on both sides of a pairing.
+KERNELS = {
+    "bridge": (
+        "//hoon/apps/bridge:bridge.hoon",
+        [
+            "//hoon/apps/bridge:files",
+            "//hoon/apps/dumbnet:files",
+            "//hoon/apps/dumbnet/lib:files",
+            "//hoon/apps/wallet/lib:files",
+            "//hoon/common:files",
+            "//hoon/common/markdown:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+        ],
+    ),
+    "dumb": (
         "//hoon/apps/dumbnet:outer.hoon",
-        "//hoon/apps/dumbnet/lib:files",
-        "//hoon/apps/roswell:files",
+        [
+            "//hoon/apps/dumbnet:inner.hoon",
+            "//hoon/apps/dumbnet:miner.hoon",
+            "//hoon/apps/dumbnet/lib:files",
+            "//hoon/common:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+        ],
+    ),
+    "miner": (
+        "//hoon/apps/dumbnet:miner.hoon",
+        [
+            "//hoon/apps/dumbnet/lib:asert.hoon",
+            "//hoon/common:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+        ],
+    ),
+    "peek": (
+        "//hoon/apps/peek:peek.hoon",
+        [
+            "//hoon/common:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+        ],
+    ),
+    "roswell": (
+        "//hoon/apps/roswell:roswell.hoon",
+        [
+            "//hoon/apps/bridge:files",
+            "//hoon/apps/dumbnet:inner.hoon",
+            "//hoon/apps/dumbnet:miner.hoon",
+            "//hoon/apps/dumbnet:outer.hoon",
+            "//hoon/apps/dumbnet/lib:files",
+            "//hoon/apps/roswell:files",
+            "//hoon/apps/wallet:wallet.hoon",
+            "//hoon/apps/wallet/lib:files",
+            "//hoon/common:files",
+            "//hoon/common/markdown:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+            "//hoon/tests:files",
+        ],
+    ),
+    "wal": (
         "//hoon/apps/wallet:wallet.hoon",
-        "//hoon/apps/wallet/lib:files",
-        "//hoon/common:files",
-        "//hoon/common/markdown:files",
-        "//hoon/common/stark:files",
-        "//hoon/common/ztd:files",
-        "//hoon/dat:files",
-        "//hoon/jams:files",
-        "//hoon/tests:files",
-    ],
-)
+        [
+            "//hoon/apps/bridge:types.hoon",
+            "//hoon/apps/dumbnet:miner.hoon",
+            "//hoon/apps/dumbnet/lib:asert.hoon",
+            "//hoon/apps/dumbnet/lib:types.hoon",
+            "//hoon/apps/wallet/lib:files",
+            "//hoon/common:files",
+            "//hoon/common/markdown:files",
+            "//hoon/common/stark:files",
+            "//hoon/common/ztd:files",
+            "//hoon/dat:files",
+            "//hoon/jams:files",
+        ],
+    ),
+}
+
+# honk-built twins of the hoonc kernels in //assets. Outputs are named
+# `<kernel>_native.jam` so they never collide with the untracked local
+# `assets/native/<kernel>.jam` files written by `just honk-kernel-jams`.
+[
+    honk_library(
+        name = "{}_native".format(kernel),
+        src = KERNELS[kernel][0],
+        deps = KERNELS[kernel][1],
+    )
+    for kernel in KERNELS
+]
 
 # Strict byte-parity tests: `cmp` of the hoonc-built kernel against the
 # honk-built twin, both compiled inside Bazel from identical dep trees.
 # No dir-hash waiver — a PASS is byte-for-byte equality.
-
 [
     sh_test(
         name = "{}_parity_test".format(kernel),
-        srcs = ["kernel_parity_test.sh"],
         size = "small",
+        srcs = ["kernel_parity_test.sh"],
         args = [
             "$(rootpath //assets:{})".format(kernel),
             "$(rootpath :{}_native)".format(kernel),
@@ -128,24 +128,49 @@ honk_library(
             "//assets:{}".format(kernel),
         ],
     )
-    for kernel in [
-        "bridge",
-        "dumb",
-        "miner",
-        "peek",
-        "roswell",
-        "wal",
-    ]
+    for kernel in KERNELS
 ]
 
 test_suite(
     name = "kernel_parity_test",
-    tests = [
-        ":bridge_parity_test",
-        ":dumb_parity_test",
-        ":miner_parity_test",
-        ":peek_parity_test",
-        ":roswell_parity_test",
-        ":wal_parity_test",
-    ],
+    tests = ["{}_parity_test".format(kernel) for kernel in KERNELS],
+)
+
+# Uncached compile benchmarks: time hoonc and honk compiling the same kernel
+# from cold state (fresh data dirs, no reuse) and report a comparison. The
+# compiles happen at TEST TIME, deliberately outside Bazel's action cache.
+# Manual: never run by wildcards or CI — invoke explicitly, e.g.
+#   bazel test --test_output=streamed //assets/native:dumb_compile_bench
+#   bazel test --test_env=BENCH_ITERATIONS=3 --test_output=streamed ...
+#   bazel run //assets/native:dumb_compile_bench
+[
+    sh_test(
+        name = "{}_compile_bench".format(kernel),
+        timeout = "eternal",
+        srcs = ["compile_bench.sh"],
+        args = [
+            kernel,
+            "kernel",
+            "$(rootpath //crates/hoonc:hoonc_bin)",
+            "$(rootpath //crates/honk:honk)",
+            "$(rootpath {})".format(KERNELS[kernel][0]),
+            "hoon",
+        ],
+        data = [
+            KERNELS[kernel][0],
+            "//crates/honk:honk",
+            "//crates/hoonc:hoonc_bin",
+        ] + KERNELS[kernel][1],
+        tags = [
+            "benchmark",
+            "manual",
+        ],
+    )
+    for kernel in KERNELS
+]
+
+test_suite(
+    name = "compile_bench",
+    tags = ["manual"],
+    tests = ["{}_compile_bench".format(kernel) for kernel in KERNELS],
 )

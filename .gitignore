@@ -7,6 +7,7 @@ test-follower
 .nockchain_identity.peerid
 target
 assets/*.jam
+!assets/honc-cold-138.jam
 !crates/nockapp/test-jams
 keys.export
 replay-checkpoints-51094
@@ -14,6 +15,6 @@ nockchain-api-checkpoints-backup
 **/.DS_Store
 notes-*.csv
 /txs
-hoonc-octs-type-138.jam
+/hoonc-octs-type-138.jam
 assets/native/*.jam
 bazel-*

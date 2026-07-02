@@ -62,3 +62,33 @@ sh_test(
         ":hoon_138_ref",
     ],
 )
+
+# Uncached compile benchmark for the hoon-138 arbitrary build: times hoonc's
+# arbitrary build vs honk's native self-mint (HONK_NATIVE_PARITY=1) from cold
+# state at TEST TIME (outside Bazel's action cache) and reports a comparison.
+# Manual — invoke explicitly:
+#   bazel test --test_output=streamed //crates/honk/test-assets:hoon_138_compile_bench
+#   bazel run //crates/honk/test-assets:hoon_138_compile_bench
+# NOTE: the honk self-mint peaks ~14GB RSS.
+sh_test(
+    name = "hoon_138_compile_bench",
+    timeout = "eternal",
+    srcs = ["//assets/native:compile_bench.sh"],
+    args = [
+        "hoon-138",
+        "arbitrary",
+        "$(rootpath //crates/hoonc:hoonc_bin)",
+        "$(rootpath //crates/honk:honk)",
+        "$(rootpath //hoon/common:hoon.hoon)",
+        "hoon",
+    ],
+    data = [
+        "//crates/honk:honk",
+        "//crates/hoonc:hoonc_bin",
+        "//hoon/common:hoon.hoon",
+    ] + ALL_HOON_FILES,
+    tags = [
+        "benchmark",
+        "manual",
+    ],
+)
