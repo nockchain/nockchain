@@ -111,8 +111,7 @@ impl PartialEq for Leaf {
             // never occur within one compile (raw is compile-wide-constant).
             (Leaf::Noun(n1, m1), Leaf::Noun(n2, m2)) => {
                 m1 == m2
-                    && crate::native::noun::noun_eq(*n1, *n2, &NounSpace::empty())
-                        .unwrap_or(false)
+                    && crate::native::noun::noun_eq(*n1, *n2, &NounSpace::empty()).unwrap_or(false)
             }
             _ => false,
         }

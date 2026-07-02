@@ -19,37 +19,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Bootstrap builds that genuinely lack the checked-in asset may point
     // HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE at an alternate jam.
     println!("cargo:rerun-if-env-changed=HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE");
-    let hoonc_octs_type_asset_path =
-        if let Some(override_path) = env::var_os("HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE") {
-            let path = PathBuf::from(override_path);
-            if !path.is_file() {
-                return Err(io::Error::other(format!(
-                    "HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE points at a missing file: {}",
-                    path.display()
-                ))
-                .into());
-            }
-            path.canonicalize()?
-        } else if hoonc_octs_type_asset.is_file()
-            && fs::metadata(&hoonc_octs_type_asset)?.len() > 0
-        {
-            hoonc_octs_type_asset.clone()
-        } else {
-            return Err(io::Error::other(
-                "crates/honk/assets/hoonc-octs-type-138.jam is missing or empty; \
+    let hoonc_octs_type_asset_path = if let Some(override_path) =
+        env::var_os("HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE")
+    {
+        let path = PathBuf::from(override_path);
+        if !path.is_file() {
+            return Err(io::Error::other(format!(
+                "HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE points at a missing file: {}",
+                path.display()
+            ))
+            .into());
+        }
+        path.canonicalize()?
+    } else if hoonc_octs_type_asset.is_file() && fs::metadata(&hoonc_octs_type_asset)?.len() > 0 {
+        hoonc_octs_type_asset.clone()
+    } else {
+        return Err(io::Error::other(
+            "crates/honk/assets/hoonc-octs-type-138.jam is missing or empty; \
                  regenerate it with `just hoonc-octs-type-138-asset` (data imports \
                  require hoonc's canonical $octs type), or set \
                  HONK_HOONC_OCTS_TYPE_138_JAM_OVERRIDE to an alternate path",
-            )
-            .into());
-        };
+        )
+        .into());
+    };
 
-    for path in [
-        &hoon_source,
-        &honc_type_asset,
-        &honc_formula_asset,
-        &hoonc_octs_type_asset_path,
-    ] {
+    for path in [&hoon_source, &honc_type_asset, &honc_formula_asset, &hoonc_octs_type_asset_path] {
         println!("cargo:rerun-if-changed={}", path.display());
     }
     println!(

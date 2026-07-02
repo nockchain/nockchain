@@ -169,7 +169,10 @@ pub enum Type {
     Void,
     Noun,
     /// `[%atom aura bits]` — aura + bits carried as leaves.
-    Atom { aura: Leaf, bits: Leaf },
+    Atom {
+        aura: Leaf,
+        bits: Leaf,
+    },
     /// `[%cell head tail]` — both native.
     Cell(Rc<Type>, Rc<Type>),
     /// `[%core payload coil]` — payload native; coil = `[garb [context rest]]`.
@@ -184,14 +187,25 @@ pub enum Type {
         rest: Leaf,
     },
     /// `[%face tool inner]` — inner native; tool carried.
-    Face { tool: Leaf, inner: Rc<Type> },
+    Face {
+        tool: Leaf,
+        inner: Rc<Type>,
+    },
     /// `[%hint [inner note] payload]` — payload native; `[inner note]` carried.
-    Hint { head: Leaf, payload: Rc<Type> },
+    Hint {
+        head: Leaf,
+        payload: Rc<Type>,
+    },
     /// `[%fork set]` — the mug-ordered treap carried (Phase-2 nativizes to a
     /// canonical set + treap re-emission, RT-07).
-    Fork { set: Leaf },
+    Fork {
+        set: Leaf,
+    },
     /// `[%hold sut gen]` — sut native; gene (AST) carried.
-    Hold { subject: Rc<Type>, gene: Leaf },
+    Hold {
+        subject: Rc<Type>,
+        gene: Leaf,
+    },
 }
 
 /// `@tas` cord = little-endian byte packing into an atom. honk builds type tags
@@ -279,7 +293,8 @@ impl Type {
             .map_err(|_| CompilerError::Decode("native type IR: type tag not atom".into()))?;
         // tail-pair helper for the [a b] tails
         let pair = |n: Noun| {
-            noun_pair(n, space).map_err(|_| CompilerError::Decode("native type IR: bad tail".into()))
+            noun_pair(n, space)
+                .map_err(|_| CompilerError::Decode("native type IR: bad tail".into()))
         };
         Ok(if tag.eq_bytes(b"atom") {
             let (aura, bits) = pair(tail)?;
@@ -289,7 +304,10 @@ impl Type {
             }
         } else if tag.eq_bytes(b"cell") {
             let (h, t) = pair(tail)?;
-            Type::Cell(rc(Type::from_noun(h, space)?), rc(Type::from_noun(t, space)?))
+            Type::Cell(
+                rc(Type::from_noun(h, space)?),
+                rc(Type::from_noun(t, space)?),
+            )
         } else if tag.eq_bytes(b"core") {
             let (payload, coil) = pair(tail)?;
             // coil = [garb [context rest]]

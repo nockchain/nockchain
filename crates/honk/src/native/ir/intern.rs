@@ -490,7 +490,12 @@ pub fn nest_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<bool> {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.nest_cache.get(&key).copied()
 }
 
@@ -503,7 +508,12 @@ pub fn nest_cache_store(
     fan: u64,
     result: bool,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.nest_cache.insert(key, result);
 }
 
@@ -516,7 +526,12 @@ pub fn fuse_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.fuse_cache.get(&key).cloned()
 }
 
@@ -529,7 +544,12 @@ pub fn fuse_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.fuse_cache.insert(key, result);
 }
 
@@ -542,7 +562,12 @@ pub fn crop_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.crop_cache.get(&key).cloned()
 }
 
@@ -555,13 +580,24 @@ pub fn crop_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, Rc::as_ptr(ref_) as usize, vet, fan);
+    let key = (
+        Rc::as_ptr(sut) as usize,
+        Rc::as_ptr(ref_) as usize,
+        vet,
+        fan,
+    );
     cx.crop_cache.insert(key, result);
 }
 
 /// Look up a native `fish` result by interned (sut) pointer + (axis, vet, fan).
 /// Returns the cached NOCK FORMULA `Noun` directly.
-pub fn fish_cache_lookup(cx: &Context, sut: &Rc<Type>, axis: u64, vet: u8, fan: u64) -> Option<Noun> {
+pub fn fish_cache_lookup(
+    cx: &Context,
+    sut: &Rc<Type>,
+    axis: u64,
+    vet: u8,
+    fan: u64,
+) -> Option<Noun> {
     let key = (Rc::as_ptr(sut) as usize, axis, vet, fan);
     cx.fish_cache.get(&key).copied()
 }
@@ -610,8 +646,9 @@ pub fn live_to_noun(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) -> 
     // verify). Without growing the stack a deep recursive type overflows the guard
     // page (SIGBUS on macOS, no Rust panic). `maybe_grow` is a cheap pointer
     // compare when headroom remains; 64MB chunks dwarf any real type depth.
-    let noun =
-        stacker::maybe_grow(32 * 1024, 64 * 1024 * 1024, || live_to_noun_node(cx, native, dst));
+    let noun = stacker::maybe_grow(32 * 1024, 64 * 1024 * 1024, || {
+        live_to_noun_node(cx, native, dst)
+    });
     // The node-built noun is already resident in the compile slab `dst` (the frame
     // arena was retired, so there is no base region to relocate to). The memo keeps
     // it live for the whole compile.
@@ -716,16 +753,25 @@ pub fn cons_noun(cx: &mut Context) -> Rc<Type> {
 /// Collapse-aware native `%core`: `core(void,_)` -> void (mirrors ty_core_n).
 /// The coil is carried decomposed: tiny `garb`/bounded `rest` as leaves and the
 /// `context` (deepening subject) as a SHARED native `Rc<Type>`.
-pub fn cons_core(cx: &mut Context, payload: Rc<Type>, garb: Garb, context: Rc<Type>, rest: Leaf) -> Rc<Type> {
+pub fn cons_core(
+    cx: &mut Context,
+    payload: Rc<Type>,
+    garb: Garb,
+    context: Rc<Type>,
+    rest: Leaf,
+) -> Rc<Type> {
     if matches!(&*payload, Type::Void) {
         return live_intern(cx, Type::Void);
     }
-    live_intern(cx, Type::Core {
-        payload,
-        garb,
-        context,
-        rest,
-    })
+    live_intern(
+        cx,
+        Type::Core {
+            payload,
+            garb,
+            context,
+            rest,
+        },
+    )
 }
 
 /// Collapse-aware native `%face`: `face(_,void)` -> void (mirrors ty_face_tool_n).
@@ -942,16 +988,37 @@ fn node_eq(a: &Type, b: &Type) -> bool {
                 rest: r2,
             },
         ) => Rc::ptr_eq(p1, p2) && g1 == g2 && Rc::ptr_eq(ctx1, ctx2) && r1 == r2,
-        (Face { tool: t1, inner: i1 }, Face { tool: t2, inner: i2 }) => {
-            t1 == t2 && Rc::ptr_eq(i1, i2)
-        }
-        (Hint { head: h1, payload: p1 }, Hint { head: h2, payload: p2 }) => {
-            h1 == h2 && Rc::ptr_eq(p1, p2)
-        }
+        (
+            Face {
+                tool: t1,
+                inner: i1,
+            },
+            Face {
+                tool: t2,
+                inner: i2,
+            },
+        ) => t1 == t2 && Rc::ptr_eq(i1, i2),
+        (
+            Hint {
+                head: h1,
+                payload: p1,
+            },
+            Hint {
+                head: h2,
+                payload: p2,
+            },
+        ) => h1 == h2 && Rc::ptr_eq(p1, p2),
         (Fork { set: s1 }, Fork { set: s2 }) => s1 == s2,
-        (Hold { subject: s1, gene: g1 }, Hold { subject: s2, gene: g2 }) => {
-            Rc::ptr_eq(s1, s2) && g1 == g2
-        }
+        (
+            Hold {
+                subject: s1,
+                gene: g1,
+            },
+            Hold {
+                subject: s2,
+                gene: g2,
+            },
+        ) => Rc::ptr_eq(s1, s2) && g1 == g2,
         _ => false,
     }
 }

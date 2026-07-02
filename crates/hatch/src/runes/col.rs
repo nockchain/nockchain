@@ -174,23 +174,25 @@ pub fn colket<'src>(
         )
         .then_ignore(gap())
         .then(hoon.clone())
-        .map(move |((((p, p_start, p_end), (q, q_start, q_end)), (s, s_start, s_end)), r)| {
-            let (p, p_help) = attach_rune_help(p, p_start, p_end, &linemap, false);
-            let (mut q, q_help) = attach_rune_help(q, q_start, q_end, &linemap, false);
-            if let Some(help) = p_help {
-                q = attach_help_to_hoon(q, help);
-            }
-            let (mut s, s_help) = attach_rune_help(s, s_start, s_end, &linemap, false);
-            if let Some(help) = q_help {
-                s = attach_help_to_hoon(s, help);
-            }
-            let r = if let Some(help) = s_help {
-                attach_help_to_hoon(r, help)
-            } else {
-                r
-            };
-            Hoon::ColKet(Box::new(p), Box::new(q), Box::new(s), Box::new(r))
-        })
+        .map(
+            move |((((p, p_start, p_end), (q, q_start, q_end)), (s, s_start, s_end)), r)| {
+                let (p, p_help) = attach_rune_help(p, p_start, p_end, &linemap, false);
+                let (mut q, q_help) = attach_rune_help(q, q_start, q_end, &linemap, false);
+                if let Some(help) = p_help {
+                    q = attach_help_to_hoon(q, help);
+                }
+                let (mut s, s_help) = attach_rune_help(s, s_start, s_end, &linemap, false);
+                if let Some(help) = q_help {
+                    s = attach_help_to_hoon(s, help);
+                }
+                let r = if let Some(help) = s_help {
+                    attach_help_to_hoon(r, help)
+                } else {
+                    r
+                };
+                Hoon::ColKet(Box::new(p), Box::new(q), Box::new(s), Box::new(r))
+            },
+        )
 }
 
 pub fn colket_wide<'src>(

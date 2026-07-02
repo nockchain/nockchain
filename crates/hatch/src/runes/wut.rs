@@ -170,8 +170,7 @@ pub fn wutcol_wide<'src>(
     hoon: impl ParserExt<'src, Hoon>,
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
-    hoon
-        .clone()
+    hoon.clone()
         .then_ignore(just(' '))
         .then(hoon.clone())
         .then_ignore(just(' '))
@@ -418,7 +417,10 @@ pub fn wutlus<'src>(
             spec.clone()
                 .map_with(|spec: Spec, e| (spec, e.span().start(), e.span().end()))
                 .then_ignore(gap())
-                .then(hoon.clone().map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())))
+                .then(
+                    hoon.clone()
+                        .map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())),
+                )
                 .then_ignore(gap())
                 .repeated()
                 .at_least(1)

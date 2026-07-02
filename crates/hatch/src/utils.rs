@@ -4300,19 +4300,17 @@ pub fn list_spec_closed_tall_with_docs<'src>(
     linemap: Arc<LineMap>,
 ) -> impl Parser<'src, &'src str, Vec<Spec>, Err<'src>> {
     let item_linemap = linemap.clone();
-    let documented_spec = spec
-        .clone()
-        .map_with(move |spec: Spec, e| {
-            let span = (e.span().start(), e.span().end());
-            let help = item_linemap
-                .help_after_choice_spec_item(span.0, span.1)
-                .or_else(|| item_linemap.help_before_choice_spec_item(span.0));
-            if let Some(help) = help {
-                attach_help_to_spec(spec, help)
-            } else {
-                spec
-            }
-        });
+    let documented_spec = spec.clone().map_with(move |spec: Spec, e| {
+        let span = (e.span().start(), e.span().end());
+        let help = item_linemap
+            .help_after_choice_spec_item(span.0, span.1)
+            .or_else(|| item_linemap.help_before_choice_spec_item(span.0));
+        if let Some(help) = help {
+            attach_help_to_spec(spec, help)
+        } else {
+            spec
+        }
+    });
     gap()
         .ignore_then(
             documented_spec
@@ -4479,7 +4477,10 @@ pub fn chapters<'src>(
                 .map_with(|name: String, e| (name, e.span().start(), e.span().end())),
         )
         .then_ignore(gap())
-        .then(hoon.clone().map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())))
+        .then(
+            hoon.clone()
+                .map_with(|h: Hoon, e| (h, e.span().start(), e.span().end())),
+        )
         .map(move |((name, start, end), (hoon, body_start, body_end))| {
             // Postfix doc on the arm. `arm_postfix_help` (keyed on the NAME span)
             // catches `++  foo  :: doc` (a trailing `::` right after the name) as
@@ -4534,32 +4535,28 @@ pub fn chapters<'src>(
             } else {
                 hoon
             };
-            let hoon =
-                if let Some(help) = postfix_help {
-                    Hoon::Note(Note::Help(help), Box::new(hoon))
-                } else if let Some(help) = scye_after_name_help {
-                    Hoon::Note(Note::Help(help), Box::new(hoon))
-                } else if let Some(help) = (!body_is_barbuc)
-                    .then(|| luslus_linemap.help_after_arm_body(start, body_end))
-                    .flatten()
-                {
-                    if body_tail_owns_postfix {
-                        attach_help_to_bartis_tail(hoon, help)
-                    } else if hoon_tail_has_help(&hoon, &help) {
-                        hoon
-                    } else {
-                        Hoon::Note(Note::Help(help), Box::new(hoon))
-                    }
-                } else if let Some(help) = prefix_help
-                    .clone()
-                    .filter(|_| !prefix_help_has_link)
-                {
-                    // Prefix doc block above `++ name` (e.g. `::  +aor: …`), which
-                    // the body's own help_before cannot reach across the `++` line.
-                    Hoon::Note(Note::Help(help), Box::new(hoon))
-                } else {
+            let hoon = if let Some(help) = postfix_help {
+                Hoon::Note(Note::Help(help), Box::new(hoon))
+            } else if let Some(help) = scye_after_name_help {
+                Hoon::Note(Note::Help(help), Box::new(hoon))
+            } else if let Some(help) = (!body_is_barbuc)
+                .then(|| luslus_linemap.help_after_arm_body(start, body_end))
+                .flatten()
+            {
+                if body_tail_owns_postfix {
+                    attach_help_to_bartis_tail(hoon, help)
+                } else if hoon_tail_has_help(&hoon, &help) {
                     hoon
-                };
+                } else {
+                    Hoon::Note(Note::Help(help), Box::new(hoon))
+                }
+            } else if let Some(help) = prefix_help.clone().filter(|_| !prefix_help_has_link) {
+                // Prefix doc block above `++ name` (e.g. `::  +aor: …`), which
+                // the body's own help_before cannot reach across the `++` line.
+                Hoon::Note(Note::Help(help), Box::new(hoon))
+            } else {
+                hoon
+            };
             let hoon = if prefix_help_has_link {
                 if let Some(help) = prefix_help {
                     if hoon_tail_has_help(&hoon, &help) {
@@ -6228,7 +6225,8 @@ impl LineMap {
             return None;
         }
 
-        Self::build_doc_help_from_lines(&docs).or_else(|| Self::build_last_larg_doc_help_from_lines(&docs))
+        Self::build_doc_help_from_lines(&docs)
+            .or_else(|| Self::build_last_larg_doc_help_from_lines(&docs))
     }
 
     fn build_doc_help_from_lines(docs: &[(usize, String)]) -> Option<NounExpr> {
@@ -6283,7 +6281,14 @@ impl LineMap {
                 if indent != detail_strip && !is_continuation {
                     break;
                 }
-                let text = strip_doc_spaces(raw, if is_continuation { detail_strip + 2 } else { detail_strip });
+                let text = strip_doc_spaces(
+                    raw,
+                    if is_continuation {
+                        detail_strip + 2
+                    } else {
+                        detail_strip
+                    },
+                );
                 if text.is_empty() {
                     continue;
                 }
@@ -6565,7 +6570,11 @@ impl LineMap {
         }
     }
 
-    fn help_before_named_arm_list_entry(&self, arm_name: &str, name_byte: usize) -> Option<NounExpr> {
+    fn help_before_named_arm_list_entry(
+        &self,
+        arm_name: &str,
+        name_byte: usize,
+    ) -> Option<NounExpr> {
         if !self.docs_enabled {
             return None;
         }
@@ -6595,14 +6604,20 @@ impl LineMap {
                 while docs.last().is_some_and(|(_, line)| line.trim().is_empty()) {
                     docs.pop();
                 }
-                if let Some(help) = Self::named_arm_list_doc_from_docs(&docs, target_indent, arm_name) {
+                if let Some(help) =
+                    Self::named_arm_list_doc_from_docs(&docs, target_indent, arm_name)
+                {
                     return Some(help);
                 }
             } else {
                 let (start, end) = self.line_bounds(idx)?;
                 let line_bytes = &self.source.as_bytes()[start..end];
                 let is_blank = line_bytes.iter().all(|b| matches!(b, b' ' | b'\t'));
-                if !is_blank && self.line_indent(idx).is_some_and(|indent| indent < target_indent) {
+                if !is_blank
+                    && self
+                        .line_indent(idx)
+                        .is_some_and(|indent| indent < target_indent)
+                {
                     break;
                 }
                 if idx == 0 {
@@ -6950,7 +6965,6 @@ impl LineMap {
         self.help_before_with_target_options(byte, Self::line_starts_like_hoon_target, true)
     }
 
-
     fn postfix_doc_summary_parts(
         &self,
         start_byte: usize,
@@ -7073,17 +7087,13 @@ impl LineMap {
         preceding_token_prefix: bool,
         require_prefix: bool,
     ) -> Option<String> {
-        self.postfix_doc_summary_parts(
-            start_byte,
-            end_byte,
-            preceding_token_prefix,
-            require_prefix,
-        )
-        .map(|(_, summary)| summary)
+        self.postfix_doc_summary_parts(start_byte, end_byte, preceding_token_prefix, require_prefix)
+            .map(|(_, summary)| summary)
     }
 
     fn help_after(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
+        let (spaces, summary) =
+            self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
         if spaces != 2 {
             return None;
         }
@@ -7180,8 +7190,7 @@ impl LineMap {
     /// token, so a mid-line cast spec (`^- @  :: roll right`) anchors while a
     /// faced bind spec (`=| a=(tree)  :: doc`) does not. See `postfix_doc_summary`.
     fn help_after_spec(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
-        let (spaces, summary) =
-            self.postfix_doc_summary_parts(start_byte, end_byte, true, true)?;
+        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, true, true)?;
         if spaces != 2 {
             return None;
         }
@@ -7192,8 +7201,13 @@ impl LineMap {
     /// Postfix-doc anchoring at a RUNE-guaranteed position (e.g. the `|$` body
     /// spec), bypassing the line-head/preceding-token guard. The caller is a
     /// specific rune parser that knows this span owns a trailing `::  ` doc.
-    pub fn help_after_rune_with_spaces(&self, start_byte: usize, end_byte: usize) -> Option<(usize, NounExpr)> {
-        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, false)?;
+    pub fn help_after_rune_with_spaces(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Option<(usize, NounExpr)> {
+        let (spaces, summary) =
+            self.postfix_doc_summary_parts(start_byte, end_byte, false, false)?;
         let crib = Self::doc_cell(Self::doc_cord(&summary), Self::doc_atom(0));
         Some((spaces, Self::doc_cell(Self::doc_atom(0), crib)))
     }
@@ -7203,7 +7217,11 @@ impl LineMap {
             .map(|(_, help)| help)
     }
 
-    pub(crate) fn help_after_choice_spec_item(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+    pub(crate) fn help_after_choice_spec_item(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Option<NounExpr> {
         if !self.docs_enabled {
             return None;
         }
@@ -7256,9 +7274,7 @@ impl LineMap {
         if line.get(token_start) == Some(&b':') {
             return None;
         }
-        let doc_start = line
-            .windows(2)
-            .position(|pair| pair == b"::")?;
+        let doc_start = line.windows(2).position(|pair| pair == b"::")?;
         let mut expr_end = doc_start;
         while expr_end > token_start && matches!(line[expr_end - 1], b' ' | b'\t') {
             expr_end -= 1;
@@ -7279,7 +7295,11 @@ impl LineMap {
         Some(Self::doc_cell(Self::doc_atom(0), crib))
     }
 
-    pub fn help_after_line_start_rune(&self, start_byte: usize, end_byte: usize) -> Option<NounExpr> {
+    pub fn help_after_line_start_rune(
+        &self,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> Option<NounExpr> {
         let line_idx = self.line_index(start_byte.min(self.source.len()));
         let (line_start, line_end) = self.line_bounds(line_idx)?;
         let line = &self.source.as_bytes()[line_start..line_end];
@@ -7338,7 +7358,8 @@ impl LineMap {
         start_byte: usize,
         end_byte: usize,
     ) -> Option<NounExpr> {
-        let (spaces, summary) = self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
+        let (spaces, summary) =
+            self.postfix_doc_summary_parts(start_byte, end_byte, false, true)?;
         if spaces != 2 {
             return None;
         }
@@ -11059,7 +11080,6 @@ pub(crate) fn attach_help_to_spec(node: Spec, help: NounExpr) -> Spec {
     }
     Spec::Gist(help, Box::new(node))
 }
-
 
 pub fn hoon_with_span(
     node: Hoon,
@@ -15333,8 +15353,7 @@ mod tests {
     #[test]
     fn parser_attaches_choice_spec_item_docs() {
         let src = concat!(
-            "|%\n",
-            "++  mite\n",
+            "|%\n", "++  mite\n",
             "  $?  %down                                     ::  outer embed\n",
             "      %lunt                                     ::  unordered list\n",
             "      %stet                                     ::    == end of markdown\n",
@@ -15343,9 +15362,7 @@ mod tests {
             "      %lord                                     ::  ordered list\n",
             "      %poem                                     ::  verse\n",
             "      %bloc                                     ::  blockquote\n",
-            "      %head                                     ::  heading\n",
-            "  ==\n",
-            "--\n"
+            "      %head                                     ::  heading\n", "  ==\n", "--\n"
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         for name in ["%down", "%lime", "%poem", "%bloc"] {
@@ -15386,26 +15403,41 @@ mod tests {
         let Spec::BucWut(first, rest) = spec.as_ref() else {
             panic!("expected $? mold");
         };
-        assert!(matches!(first.as_ref(), Spec::Gist(_, _)), "first $? item keeps its doc");
-        assert!(!matches!(&rest[1], Spec::Gist(_, _)), "%stet four-space doc does not wrap itself");
-        assert!(matches!(&rest[2], Spec::Gist(_, _)), "%dent keeps preceding indented rune doc");
-        assert!(matches!(&rest[3], Spec::Gist(_, _)), "%lime keeps list item doc");
-        assert!(matches!(&rest[5], Spec::Gist(_, _)), "%poem keeps verse doc");
-        assert!(matches!(&rest[6], Spec::Gist(_, _)), "%bloc keeps blockquote doc");
+        assert!(
+            matches!(first.as_ref(), Spec::Gist(_, _)),
+            "first $? item keeps its doc"
+        );
+        assert!(
+            !matches!(&rest[1], Spec::Gist(_, _)),
+            "%stet four-space doc does not wrap itself"
+        );
+        assert!(
+            matches!(&rest[2], Spec::Gist(_, _)),
+            "%dent keeps preceding indented rune doc"
+        );
+        assert!(
+            matches!(&rest[3], Spec::Gist(_, _)),
+            "%lime keeps list item doc"
+        );
+        assert!(
+            matches!(&rest[5], Spec::Gist(_, _)),
+            "%poem keeps verse doc"
+        );
+        assert!(
+            matches!(&rest[6], Spec::Gist(_, _)),
+            "%bloc keeps blockquote doc"
+        );
     }
 
     #[test]
     fn parser_shifts_indented_choice_docs_to_following_item() {
         let src = concat!(
-            "|%\n",
-            "++  trig-style\n",
+            "|%\n", "++  trig-style\n",
             "  $%  $:  %one                                  ::  leaf node\n",
             "      $?  %rule                                 ::    --- horz rule\n",
             "          %fens                                 ::    ``` code fence\n",
             "          %expr                                 ::    ;sail expression\n",
-            "      ==  ==\n",
-            "  ==\n",
-            "--\n"
+            "      ==  ==\n", "  ==\n", "--\n"
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let rule_start = src.find("%rule").expect("expected %rule item");
@@ -15503,7 +15535,10 @@ mod tests {
             panic!("expected one %- expression");
         };
         let Hoon::WutCol(_, q, _) = q.as_ref() else {
-            panic!("expected %- argument to be the ?: expression, got {:?}", q.as_ref());
+            panic!(
+                "expected %- argument to be the ?: expression, got {:?}",
+                q.as_ref()
+            );
         };
         assert!(
             matches!(q.as_ref(), Hoon::Note(Note::Help(_), _)),
@@ -15680,16 +15715,13 @@ mod tests {
 
     #[test]
     fn parser_attaches_tall_rune_postfix_docs_to_specs() {
-        let src = concat!(
-            "|=  a=@  ::  sample atom\n",
-            "^-  @    ::  cast atom\n",
-            "a\n",
-        );
+        let src = concat!("|=  a=@  ::  sample atom\n", "^-  @    ::  cast atom\n", "a\n",);
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
-        let parsed = crate::native_parser(vec!["test".into(), "rune-docs.hoon".into()], false, linemap)
-            .parse(src)
-            .into_result()
-            .expect("rune docs should parse");
+        let parsed =
+            crate::native_parser(vec!["test".into(), "rune-docs.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("rune docs should parse");
 
         let parsed = match parsed {
             Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
@@ -15714,17 +15746,16 @@ mod tests {
 
     #[test]
     fn parser_moves_four_space_bartis_sample_doc_to_body() {
-        let src = concat!(
-            "|=  a=@  ::    body doc\n",
-            "^-  @    ::  cast atom\n",
-            "a\n",
-        );
+        let src = concat!("|=  a=@  ::    body doc\n", "^-  @    ::  cast atom\n", "a\n",);
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
-        let parsed =
-            crate::native_parser(vec!["test".into(), "bartis-docs.hoon".into()], false, linemap)
-                .parse(src)
-                .into_result()
-                .expect("four-space |= doc should parse");
+        let parsed = crate::native_parser(
+            vec!["test".into(), "bartis-docs.hoon".into()],
+            false,
+            linemap,
+        )
+        .parse(src)
+        .into_result()
+        .expect("four-space |= doc should parse");
 
         let parsed = match parsed {
             Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
@@ -15745,16 +15776,16 @@ mod tests {
 
     #[test]
     fn parser_moves_four_space_kethep_spec_doc_to_body() {
-        let src = concat!(
-            "^-  @    ::    cast body doc\n",
-            "a\n",
-        );
+        let src = concat!("^-  @    ::    cast body doc\n", "a\n",);
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
-        let parsed =
-            crate::native_parser(vec!["test".into(), "kethep-docs.hoon".into()], false, linemap)
-                .parse(src)
-                .into_result()
-                .expect("four-space ^- doc should parse");
+        let parsed = crate::native_parser(
+            vec!["test".into(), "kethep-docs.hoon".into()],
+            false,
+            linemap,
+        )
+        .parse(src)
+        .into_result()
+        .expect("four-space ^- doc should parse");
 
         let parsed = match parsed {
             Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
@@ -15776,14 +15807,9 @@ mod tests {
     #[test]
     fn parser_attaches_buccen_postfix_doc_after_section_separator() {
         let src = concat!(
-            "|%\n",
-            "+$  sample\n",
-            "  $%\n",
-            "    [%one p=@]             ::  first item\n",
+            "|%\n", "+$  sample\n", "  $%\n", "    [%one p=@]             ::  first item\n",
             "  ::                        ::::::  group\n",
-            "    [%two p=@ q=@]         ::  :_ [q p]\n",
-            "  ==\n",
-            "--\n",
+            "    [%two p=@ q=@]         ::  :_ [q p]\n", "  ==\n", "--\n",
         );
         fn peel_hoon(node: &Hoon) -> &Hoon {
             let mut node = node;
@@ -15911,19 +15937,11 @@ mod tests {
     #[test]
     fn parser_stops_smol_arm_details_at_overindented_doc_line() {
         let src = concat!(
-            "|%\n",
-            "::\n",
-            "::  +lug: central rounding mechanism\n",
-            "::\n",
+            "|%\n", "::\n", "::  +lug: central rounding mechanism\n", "::\n",
             "::    can perform: floor, ceiling, smaller, larger,\n",
             "::                 nearest (round ties to: even, away from 0, toward 0)\n",
-            "::    s is sticky bit: represents a value less than ulp(a) = 2^(e.a)\n",
-            "::\n",
-            "++  lug\n",
-            "  ~/  %lug\n",
-            "  |=  a=*\n",
-            "  a\n",
-            "--\n",
+            "::    s is sticky bit: represents a value less than ulp(a) = 2^(e.a)\n", "::\n",
+            "++  lug\n", "  ~/  %lug\n", "  |=  a=*\n", "  a\n", "--\n",
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into(), "float.hoon".into()], false, linemap)
@@ -15980,14 +15998,10 @@ mod tests {
     #[test]
     fn parser_attaches_triple_colon_prefix_doc_to_arm_body() {
         let src = concat!(
-            "|%\n",
-            ":::    +ff\n",
-            ":::\n",
+            "|%\n", ":::    +ff\n", ":::\n",
             ":::  this core has no use outside of the functionality\n",
-            ":::  provided to ++rd, ++rs, ++rq, and ++rh\n",
-            "++  ff  ::  ieee 754 format fp\n",
-            "  |.  ~\n",
-            "--\n",
+            ":::  provided to ++rd, ++rs, ++rq, and ++rh\n", "++  ff  ::  ieee 754 format fp\n",
+            "  |.  ~\n", "--\n",
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into(), "float.hoon".into()], false, linemap)
@@ -16016,7 +16030,10 @@ mod tests {
                 LineMap::doc_cord("funk"),
                 LineMap::doc_cord("ff"),
             )]),
-            LineMap::doc_cell(LineMap::doc_cord("ieee 754 format fp"), LineMap::doc_atom(0)),
+            LineMap::doc_cell(
+                LineMap::doc_cord("ieee 754 format fp"),
+                LineMap::doc_atom(0),
+            ),
         );
         let expected_prefix = LineMap::doc_cell(
             LineMap::doc_atom(0),
@@ -16041,21 +16058,17 @@ mod tests {
     #[test]
     fn parser_attaches_matching_named_prefix_list_doc() {
         let src = concat!(
-            "|%\n",
-            "      ::  +r-co: floating point\n",
+            "|%\n", "      ::  +r-co: floating point\n",
             "      ::  +s-co: list of '.'-prefixed base16, 4 digit minimum\n",
-            "      ::  +v-co: base32, takes minimum output digits\n",
-            "      ::\n",
-            "      ++  r-co  ~\n",
-            "      ::\n",
-            "      ++  s-co  ~\n",
-            "--\n",
+            "      ::  +v-co: base32, takes minimum output digits\n", "      ::\n",
+            "      ++  r-co  ~\n", "      ::\n", "      ++  s-co  ~\n", "--\n",
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
-        let parsed = crate::native_parser(vec!["test".into(), "format.hoon".into()], false, linemap)
-            .parse(src)
-            .into_result()
-            .expect("++ s-co should parse");
+        let parsed =
+            crate::native_parser(vec!["test".into(), "format.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("++ s-co should parse");
 
         let Hoon::TisSig(items) = parsed else {
             panic!("expected top-level TisSig");
@@ -16690,11 +16703,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(
-            spot.q.p,
-            (4, 1),
-            "expected start to stay on the rune line"
-        );
+        assert_eq!(spot.q.p, (4, 1), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (4, 3), "unexpected end spot");
     }
 
@@ -17109,11 +17118,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(
-            spot.q.p,
-            (6, 3),
-            "expected start to stay on the rune line"
-        );
+        assert_eq!(spot.q.p, (6, 3), "expected start to stay on the rune line");
         assert_eq!(spot.q.q, (6, 5), "unexpected end spot");
     }
 
@@ -17130,11 +17135,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(
-            spot.q.p,
-            (5, 3),
-            "expected start to stay on the code line"
-        );
+        assert_eq!(spot.q.p, (5, 3), "expected start to stay on the code line");
         assert_eq!(spot.q.q, (5, 5), "unexpected end spot");
     }
 
@@ -18933,8 +18934,8 @@ mod tests {
             "  =.  constants  bc-v1-phase:helpers\n",
             "  =/  con=consensus-state  initial-consensus-state:h\n",
             "  ::  advance to just before v1 coinbase activation\n",
-            "  =.  con  (add-n-pages:h (dec v1-phase:t) con default-retain:h)\n",
-            "  ::\n", "  ::  step 1: create simple v1 coinbase for key1\n", "  ::\n",
+            "  =.  con  (add-n-pages:h (dec v1-phase:t) con default-retain:h)\n", "  ::\n",
+            "  ::  step 1: create simple v1 coinbase for key1\n", "  ::\n",
             "  ::    we cannot directly create a v1 coinbase with an m-of-n lock because\n",
             "  ::    accept-page splits multi-owner coinbases into separate notes, each\n",
             "  ::    with a 1-of-1 lock for a single owner. instead, we create a simple\n",
@@ -19558,11 +19559,7 @@ mod tests {
         let wer: crate::ast::hoon::Path = vec!["test".to_string()];
         let spot = chumsky_spot_to_hoon_spot((start, end), &wer, &linemap);
 
-        assert_eq!(
-            spot.q.p,
-            (6, 9),
-            "expected start to stay on the $% line"
-        );
+        assert_eq!(spot.q.p, (6, 9), "expected start to stay on the $% line");
         assert_eq!(spot.q.q, (6, 11), "unexpected end spot");
     }
 
@@ -19612,10 +19609,7 @@ mod tests {
         let expected = linemap.line_col(start);
         let expected_end = linemap.line_col(end);
 
-        assert_eq!(
-            spot.q.p, expected,
-            "expected start to stay on the |_ line"
-        );
+        assert_eq!(spot.q.p, expected, "expected start to stay on the |_ line");
         assert_eq!(spot.q.q, expected_end, "unexpected end spot");
     }
 
@@ -19656,10 +19650,7 @@ mod tests {
         let expected = linemap.line_col(start);
         let (end_line, end_col) = linemap.line_col(end);
 
-        assert_eq!(
-            spot.q.p, expected,
-            "expected start to stay on the |= line"
-        );
+        assert_eq!(spot.q.p, expected, "expected start to stay on the |= line");
         assert_eq!(spot.q.q, (end_line, end_col), "unexpected end spot");
     }
 
@@ -20278,9 +20269,8 @@ mod tests {
             }
         }
         let src = concat!(
-            "|%\n", "++  foo\n", "  |=  cond=*\n", "  ?^  cond\n", "    ::\n",
-            "    ::  heading\n", "    ::    detail\n", "    ?:  =(1 1)\n", "      1\n",
-            "    2\n", "  3\n", "--\n",
+            "|%\n", "++  foo\n", "  |=  cond=*\n", "  ?^  cond\n", "    ::\n", "    ::  heading\n",
+            "    ::    detail\n", "    ?:  =(1 1)\n", "      1\n", "    2\n", "  3\n", "--\n",
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into(), "wutket.hoon".into()], true, linemap)
@@ -21379,14 +21369,19 @@ mod tests {
 
 #[cfg(test)]
 mod fragdoc_recon {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     fn note_tree(node: &Hoon, depth: usize, out: &mut String) {
         match node {
             Hoon::Note(Note::Help(h), inner) => {
                 let s = format!("{h:?}");
-                out.push_str(&format!("{}Note {}\n", "  ".repeat(depth), &s[..s.len().min(120)]));
+                out.push_str(&format!(
+                    "{}Note {}\n",
+                    "  ".repeat(depth),
+                    &s[..s.len().min(120)]
+                ));
                 note_tree(inner, depth + 1, out);
             }
             Hoon::Dbug(_, inner) => note_tree(inner, depth, out),
@@ -21425,24 +21420,13 @@ mod fragdoc_recon {
     #[test]
     fn fragdoc_note_placement() {
         let src = concat!(
-            "|%\n",
-            "++  main\n",
-            "  =+  :*  ::  .dom: axis to home\n",
-            "          ::  .hay: wing to home\n",
-            "          ::  .cox: hygienic context\n",
-            "          ::  .bug: debug annotations\n",
-            "          ::  .nut: annotations\n",
-            "          ::  .def: default expression\n",
-            "          ::\n",
-            "          dom=`axis`1\n",
-            "          hay=*wing\n",
-            "          cox=*(map term spec)\n",
-            "          bug=*(list spot)\n",
-            "          nut=*(unit note)\n",
-            "          def=*(unit hoon)\n",
-            "      ==\n",
-            "  0\n",
-            "--\n",
+            "|%\n", "++  main\n", "  =+  :*  ::  .dom: axis to home\n",
+            "          ::  .hay: wing to home\n", "          ::  .cox: hygienic context\n",
+            "          ::  .bug: debug annotations\n", "          ::  .nut: annotations\n",
+            "          ::  .def: default expression\n", "          ::\n",
+            "          dom=`axis`1\n", "          hay=*wing\n", "          cox=*(map term spec)\n",
+            "          bug=*(list spot)\n", "          nut=*(unit note)\n",
+            "          def=*(unit hoon)\n", "      ==\n", "  0\n", "--\n",
         );
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
         let parsed = crate::native_parser(vec!["test".into()], false, linemap)
@@ -21455,10 +21439,17 @@ mod fragdoc_recon {
         // nested in ~(tap by bat) order (hoonc-verified from the compiled
         // hoon-138 artifact: def hay dom bug nut cox, outermost first); the
         // remaining items stay bare.
-        let notes: Vec<&str> = out.lines().filter(|l| l.trim_start().starts_with("Note")).collect();
-        assert_eq!(notes.len(), 6, "all six frag docs stack on one entry:\n{out}");
-        let order: Vec<u64> = [0x666564u64, 0x796168, 0x6d6f64, 0x677562, 0x74756e, 0x786f63]
-            .to_vec(); // def hay dom bug nut cox as LE cords
+        let notes: Vec<&str> = out
+            .lines()
+            .filter(|l| l.trim_start().starts_with("Note"))
+            .collect();
+        assert_eq!(
+            notes.len(),
+            6,
+            "all six frag docs stack on one entry:\n{out}"
+        );
+        let order: Vec<u64> =
+            [0x666564u64, 0x796168, 0x6d6f64, 0x677562, 0x74756e, 0x786f63].to_vec(); // def hay dom bug nut cox as LE cords
         for (line, cord) in notes.iter().zip(order) {
             assert!(
                 line.contains(&format!("Small({cord})")),
@@ -21467,7 +21458,10 @@ mod fragdoc_recon {
         }
         let dom_idx = out.find("KetTis Term(\"dom\")").expect("dom entry");
         let deepest_note = out.rfind("Note").expect("notes exist");
-        assert!(deepest_note < dom_idx, "the stack wraps the first item (dom)");
+        assert!(
+            deepest_note < dom_idx,
+            "the stack wraps the first item (dom)"
+        );
         assert!(
             !out[dom_idx..].contains("Note"),
             "items after the first must stay bare:\n{out}"

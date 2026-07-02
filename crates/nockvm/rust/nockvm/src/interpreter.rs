@@ -2190,7 +2190,10 @@ mod hint {
                     };
 
                     match cold_res {
-                        Ok(true) => context.warm = Warm::init(stack, cold, hot, &context.test_jets, dispatch),
+                        Ok(true) => {
+                            context.warm =
+                                Warm::init(stack, cold, hot, &context.test_jets, dispatch)
+                        }
                         Err(cold::Error::NoParent) => {
                             let Ok(chum_atom) = chum.in_space(&space).as_atom() else {
                                 flog!(context, "serf: cold: register: cell chum");

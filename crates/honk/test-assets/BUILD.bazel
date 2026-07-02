@@ -1,0 +1,39 @@
+load("//:rules_hoon/defs.bzl", "honk_library", "hoon_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Arbitrary-build parity for the hoon-138 prelude, under Bazel: hoonc's
+# arbitrary build of hoon-138 vs honk's NATIVE self-mint
+# (HONK_NATIVE_PARITY=1, no embedded prelude), byte-compared with `cmp`.
+# Both sides compile inside the sandbox from the same full `//hoon:files`
+# tree, so the artifacts are directly comparable with no waiver. This is the
+# Bazel twin of `just honk-138-parity` (which builds the same pair locally).
+
+hoon_library(
+    name = "hoon_138_ref",
+    src = "//hoon/common:hoon.hoon",
+    arbitrary = True,
+    output = True,
+    deps = ["//hoon:files"],
+)
+
+honk_library(
+    name = "hoon_138_native",
+    src = "//hoon/common:hoon.hoon",
+    arbitrary = True,
+    native_parity = True,
+    deps = ["//hoon:files"],
+)
+
+sh_test(
+    name = "hoon_138_arbitrary_parity_test",
+    srcs = ["//assets/native:kernel_parity_test.sh"],
+    args = [
+        "$(rootpath :hoon_138_ref)",
+        "$(rootpath :hoon_138_native)",
+    ],
+    data = [
+        ":hoon_138_native",
+        ":hoon_138_ref",
+    ],
+)

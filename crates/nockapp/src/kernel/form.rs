@@ -16,9 +16,9 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use nockvm::hamt::Hamt;
 use nockvm::interpreter::{self, interpret, Error, Mote, NockCancelToken};
 use nockvm::jets::cold::{Cold, Nounable};
-use nockvm::jets::JetDispatchMode;
 use nockvm::jets::hot::{HotEntry, URBIT_HOT_STATE};
 use nockvm::jets::nock::util::mook;
+use nockvm::jets::JetDispatchMode;
 use nockvm::mem::{AllocationError, NewStackError, NockStack};
 use nockvm::mug::met3_usize;
 use nockvm::noun::{Atom, Cell, DirectAtom, IndirectAtom, Noun, D, T};
@@ -3497,7 +3497,14 @@ mod tests {
         let mut stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
         let cold = Cold::new(&mut stack);
         let hot_state: [HotEntry; 0] = [];
-        let context = create_context(stack, &hot_state, cold, None, vec![], JetDispatchMode::Exact);
+        let context = create_context(
+            stack,
+            &hot_state,
+            cold,
+            None,
+            vec![],
+            JetDispatchMode::Exact,
+        );
         let cancel_token = context.cancel_token();
         Serf {
             ker_hash: Hash::from([0; 32]),
@@ -3661,8 +3668,7 @@ mod tests {
 
         let mut inject_stack = NockStack::new(NOCK_STACK_SIZE_TINY, 0);
         let inject_cold = Cold::new(&mut inject_stack);
-        let mut inject_context =
-            create_context(
+        let mut inject_context = create_context(
             inject_stack,
             URBIT_HOT_STATE,
             inject_cold,

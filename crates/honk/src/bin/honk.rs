@@ -622,13 +622,15 @@ async fn run(cli: Cli) -> Result<()> {
     let mut jam = builder.jam_product(&mut product, cli.mode, entry, None)?;
     pad_hoonc_jam_atom_bytes(&mut jam);
 
-    if let Some(parent) = output.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         fs::create_dir_all(parent)?;
     }
     fs::write(output, jam)?;
     Ok(())
 }
-
 
 fn parse_prelude_hoon(path: &Path, dbug: bool, docs: bool) -> Result<Hoon> {
     let _parse_log = TimedHoonPathLog::new(path, HoonLogOperation::Parse);
@@ -4168,5 +4170,4 @@ mod tests {
 
         fs::remove_dir_all(temp_dir).expect("cleanup");
     }
-
 }

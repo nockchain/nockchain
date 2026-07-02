@@ -139,7 +139,8 @@ impl Region {
     /// Ensure the active block has room for `words` 8-byte words, growing with a
     /// fresh geometrically-larger block if not.
     unsafe fn ensure(&mut self, words: usize) {
-        if self.allocation_start.is_null() || self.allocation_start.add(words) > self.allocation_stop
+        if self.allocation_start.is_null()
+            || self.allocation_start.add(words) > self.allocation_stop
         {
             let next_idx = std::cmp::max(self.slabs.len(), min_idx_for_size(words));
             self.slabs
@@ -252,8 +253,9 @@ unsafe fn copy_region_subset(
                         dest.alloc_indirect(indirect.as_atom().in_space(space).size());
                     copy_nonoverlapping(indirect_ptr, indirect_new_mem, indirect_mem_size);
                     *indirect_new_mem &= CACHED_MUG_METADATA_MASK;
-                    let copied_noun =
-                        IndirectAtom::from_raw_pointer(indirect_new_mem).as_atom().as_noun();
+                    let copied_noun = IndirectAtom::from_raw_pointer(indirect_new_mem)
+                        .as_atom()
+                        .as_noun();
                     copied.insert(indirect_ptr as u64, copied_noun);
                     *dst = copied_noun;
                 }
@@ -801,10 +803,7 @@ impl<J> NounSlab<J> {
     /// compile error, not a runtime range test. This is the slab-side entry to
     /// `NounSpace::with_brand`; the generative `'id` requires the closure form
     /// (a branded space cannot be returned).
-    pub fn with_brand<R>(
-        &self,
-        f: impl for<'id> FnOnce(BrandedNounSpace<'_, 'id>) -> R,
-    ) -> R {
+    pub fn with_brand<R>(&self, f: impl for<'id> FnOnce(BrandedNounSpace<'_, 'id>) -> R) -> R {
         let space = NounAllocator::noun_space(self);
         space.with_brand(f)
     }
@@ -1429,7 +1428,10 @@ mod tests {
         }
 
         let space = slab.noun_space();
-        let ic = interned.in_space(&space).as_cell().expect("interned is a cell");
+        let ic = interned
+            .in_space(&space)
+            .as_cell()
+            .expect("interned is a cell");
         assert_eq!(ic.head().as_atom().unwrap().as_u64().unwrap(), 42);
         let anchor = ic.tail().as_cell().expect("anchor is a cell");
         assert_eq!(anchor.head().as_atom().unwrap().as_u64().unwrap(), 1);

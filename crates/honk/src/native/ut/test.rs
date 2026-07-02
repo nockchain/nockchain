@@ -11,8 +11,8 @@ use super::{
     cell_type, coil_from_parts, coil_parts, find_face_axis_skip, hoon_to_noun,
     is_const_bool_formula, map_to_noun, native_of, noun_eq, term_to_noun, ty_atom, ty_cell,
     ty_core, ty_face, ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
-    type_face_name_if_atom, type_face_tool, type_fork_options, type_tag, CompilerError, Limb,
-    NTy, NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet,
+    type_face_name_if_atom, type_face_tool, type_fork_options, type_tag, CompilerError, Limb, NTy,
+    NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet,
     StructNounSet, Ut, Way,
 };
 use crate::native::ut::wet::RedoState;
@@ -873,8 +873,7 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
             "the goal can see the active hold leg"
         );
         assert!(
-            ut.mint_cache_lookup(&sut_n, &gol_n, gen_sig)?
-                .is_none(),
+            ut.mint_cache_lookup(&sut_n, &gol_n, gen_sig)?.is_none(),
             "mint cache must not reuse a success across a goal-reachable fan change"
         );
         Ok(())
@@ -902,13 +901,7 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let core_type_n = native_of(&mut ut.cx, core_type, &space).expect("native core type");
 
     ut.core_mint_cache_store(
-        &sut_n,
-        &gol_n,
-        tomes_map,
-        &prefix,
-        poly,
-        core_type_n,
-        formula,
+        &sut_n, &gol_n, tomes_map, &prefix, poly, core_type_n, formula,
     )
     .expect("store core mint cache");
     assert!(ut

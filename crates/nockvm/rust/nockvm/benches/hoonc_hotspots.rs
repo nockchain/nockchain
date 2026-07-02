@@ -5,10 +5,10 @@ use criterion::{black_box, criterion_group, criterion_main, BatchSize, Criterion
 use nockvm::hamt::Hamt;
 use nockvm::interpreter::{interpret, Context, NockCancelToken, Slogger};
 use nockvm::jets;
-use nockvm::jets::JetDispatchMode;
 use nockvm::jets::cold::Cold;
 use nockvm::jets::hot::{Hot, URBIT_HOT_STATE};
 use nockvm::jets::warm::Warm;
+use nockvm::jets::JetDispatchMode;
 use nockvm::mem::NockStack;
 use nockvm::noun::{self, Noun, D, T};
 use nockvm::serialization::{cue, jam};
@@ -291,8 +291,12 @@ fn bench_warm_lookup(c: &mut Criterion) {
             },
             |(mut ctx, mut subject, mut formula)| {
                 let mut warm = ctx.warm;
-                let hit =
-                    warm.find_jet(&mut ctx.stack, &mut subject, &mut formula, JetDispatchMode::Exact);
+                let hit = warm.find_jet(
+                    &mut ctx.stack,
+                    &mut subject,
+                    &mut formula,
+                    JetDispatchMode::Exact,
+                );
                 let mut bogus_formula = D(0);
                 let miss = warm.find_jet(
                     &mut ctx.stack,

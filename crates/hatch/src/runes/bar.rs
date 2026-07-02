@@ -291,7 +291,12 @@ pub fn barket_wide<'src>(
     hoon_wide
         .clone()
         .then_ignore(just(' '))
-        .then(chapters(hoon_wide.clone(), spec_wide.clone(), linemap, true))
+        .then(chapters(
+            hoon_wide.clone(),
+            spec_wide.clone(),
+            linemap,
+            true,
+        ))
         .delimited_by(just('('), just(')'))
         .map(|(h, map_term_tome)| Hoon::BarKet(Box::new(h), map_term_tome))
 }

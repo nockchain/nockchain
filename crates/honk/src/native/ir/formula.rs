@@ -53,20 +53,32 @@ impl Axis {
 
 /// A Nock formula.
 pub enum Formula {
-    Slot(Axis),                                          // [0 axis]
-    Quote(Leaf),                                         // [1 const]
-    Eval(Rc<Formula>, Rc<Formula>),                      // [2 subj form]
-    Cell(Rc<Formula>, Rc<Formula>),                      // autocons [f g]
-    Cond(Rc<Formula>, Rc<Formula>, Rc<Formula>),         // [6 p q r]
-    Kick { axis: Axis, core: Rc<Formula> },              // [9 axis core]
+    Slot(Axis),                                  // [0 axis]
+    Quote(Leaf),                                 // [1 const]
+    Eval(Rc<Formula>, Rc<Formula>),              // [2 subj form]
+    Cell(Rc<Formula>, Rc<Formula>),              // autocons [f g]
+    Cond(Rc<Formula>, Rc<Formula>, Rc<Formula>), // [6 p q r]
+    Kick {
+        axis: Axis,
+        core: Rc<Formula>,
+    }, // [9 axis core]
     Edit {
         axis: Axis,
         value: Rc<Formula>,
         target: Rc<Formula>,
     }, // [10 [axis value] target]
-    JetHint { clue: Leaf, body: Rc<Formula> },           // [11 clue body]
-    NoteHint { note: Leaf, body: Rc<Formula> },          // [11 note body] (op-12 variant TBD in port)
-    Dbug { spot: Leaf, body: Rc<Formula> },              // [11 spot body]
+    JetHint {
+        clue: Leaf,
+        body: Rc<Formula>,
+    }, // [11 clue body]
+    NoteHint {
+        note: Leaf,
+        body: Rc<Formula>,
+    }, // [11 note body] (op-12 variant TBD in port)
+    Dbug {
+        spot: Leaf,
+        body: Rc<Formula>,
+    }, // [11 spot body]
     Op {
         code: u8,
         args: Vec<Rc<Formula>>,
@@ -286,14 +298,18 @@ impl Formula {
             .and_then(|a| a.as_u64().ok())
             .ok_or_else(|| CompilerError::Noun("native IR: opcode not a small atom".into()))?;
         let pair = |n: Noun| {
-            noun_pair(n, space).map_err(|_| CompilerError::Noun("native IR: bad opcode args".into()))
+            noun_pair(n, space)
+                .map_err(|_| CompilerError::Noun("native IR: bad opcode args".into()))
         };
         Ok(match op {
             0 => Formula::Slot(axis_from_noun(tail, space)?),
             1 => Formula::Quote(Leaf::from_noun(tail, space)),
             2 => {
                 let (s, f) = pair(tail)?;
-                Formula::Eval(rc(Formula::from_noun(s, space)?), rc(Formula::from_noun(f, space)?))
+                Formula::Eval(
+                    rc(Formula::from_noun(s, space)?),
+                    rc(Formula::from_noun(f, space)?),
+                )
             }
             3 | 4 => Formula::Op {
                 code: op as u8,
@@ -303,7 +319,10 @@ impl Formula {
                 let (a, b) = pair(tail)?;
                 Formula::Op {
                     code: op as u8,
-                    args: vec![rc(Formula::from_noun(a, space)?), rc(Formula::from_noun(b, space)?)],
+                    args: vec![
+                        rc(Formula::from_noun(a, space)?),
+                        rc(Formula::from_noun(b, space)?),
+                    ],
                 }
             }
             6 => {
@@ -357,7 +376,9 @@ fn axis_from_noun(noun: Noun, space: &NounSpace) -> Result<Axis> {
         .map_err(|_| CompilerError::Noun("native IR: axis not an atom".into()))?;
     match atom.as_u64() {
         Ok(v) => Ok(Axis::Small(v)),
-        Err(_) => Ok(Axis::Big(Rc::new(BigUint::from_bytes_le(atom.as_ne_bytes())))),
+        Err(_) => Ok(Axis::Big(Rc::new(BigUint::from_bytes_le(
+            atom.as_ne_bytes(),
+        )))),
     }
 }
 
@@ -398,7 +419,10 @@ mod tests {
         // [1 42]
         let mut s: NounSlab = NounSlab::new();
         let expect = T(&mut s, &[D(1), D(42)]);
-        assert_eq!(native_jam(&Formula::Quote(Leaf::Direct(42))), jam(s, expect));
+        assert_eq!(
+            native_jam(&Formula::Quote(Leaf::Direct(42))),
+            jam(s, expect)
+        );
         // [2 [0 1] [0 2]]
         let mut s: NounSlab = NounSlab::new();
         let l = T(&mut s, &[D(0), D(1)]);
@@ -478,16 +502,28 @@ mod tests {
             ),
         );
         // 1 fallthrough: [0 a] o [1 c]
-        check_comb(Formula::Slot(Axis::Small(2)), Formula::Quote(Leaf::Direct(7)));
+        check_comb(
+            Formula::Slot(Axis::Small(2)),
+            Formula::Quote(Leaf::Direct(7)),
+        );
         // 2: [x [0 1]] o buz → [8 x buz]
         check_comb(
-            Formula::Cell(rc(Formula::Quote(Leaf::Direct(5))), rc(Formula::Slot(Axis::Small(1)))),
+            Formula::Cell(
+                rc(Formula::Quote(Leaf::Direct(5))),
+                rc(Formula::Slot(Axis::Small(1))),
+            ),
             Formula::Slot(Axis::Small(3)),
         );
         // 3: mal o [0 1] → mal
-        check_comb(Formula::Quote(Leaf::Direct(9)), Formula::Slot(Axis::Small(1)));
+        check_comb(
+            Formula::Quote(Leaf::Direct(9)),
+            Formula::Slot(Axis::Small(1)),
+        );
         // default: [1 c] o [1 d] → [7 …]
-        check_comb(Formula::Quote(Leaf::Direct(1)), Formula::Quote(Leaf::Direct(2)));
+        check_comb(
+            Formula::Quote(Leaf::Direct(1)),
+            Formula::Quote(Leaf::Direct(2)),
+        );
         // big axis skips peg (a is big → check 1 not taken)
         check_comb(
             Formula::Slot(Axis::Big(Rc::new(BigUint::from(1u8) << 70u32))),
@@ -557,8 +593,8 @@ mod tests {
     #[test]
     fn from_noun_roundtrips_raw_nock() {
         let builders: Vec<fn(&mut NounSlab) -> Noun> = vec![
-            |s| T(s, &[D(0), D(7)]),                            // [0 7] slot
-            |s| T(s, &[D(1), D(42)]),                           // [1 42] quote atom
+            |s| T(s, &[D(0), D(7)]),  // [0 7] slot
+            |s| T(s, &[D(1), D(42)]), // [1 42] quote atom
             |s| {
                 let p = T(s, &[D(1), D(9)]);
                 T(s, &[D(1), p])
@@ -616,7 +652,8 @@ mod tests {
             let mut s: NounSlab = NounSlab::new();
             let orig = b(&mut s);
             let space = s.noun_space();
-            let f = Formula::from_noun(orig, &space).unwrap_or_else(|e| panic!("from_noun[{i}]: {e:?}"));
+            let f = Formula::from_noun(orig, &space)
+                .unwrap_or_else(|e| panic!("from_noun[{i}]: {e:?}"));
             let mut a: NounSlab = NounSlab::new();
             a.copy_into(orig, &space);
             let ja = a.jam().to_vec();

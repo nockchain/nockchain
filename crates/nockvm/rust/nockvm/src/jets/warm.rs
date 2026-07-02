@@ -952,11 +952,11 @@ mod test {
         let mut subject = D(10);
         assert!(matches!(
             warm.find_jet(
-            &mut stack,
-            &mut subject,
-            &mut query,
-            JetDispatchMode::HintBlind,
-        ),
+                &mut stack,
+                &mut subject,
+                &mut query,
+                JetDispatchMode::HintBlind,
+            ),
             JetLookupResult::NoJet
         ));
     }
@@ -982,11 +982,11 @@ mod test {
         let mut subject = D(10);
         assert!(matches!(
             warm.find_jet(
-            &mut stack,
-            &mut subject,
-            &mut query,
-            JetDispatchMode::HintBlind,
-        ),
+                &mut stack,
+                &mut subject,
+                &mut query,
+                JetDispatchMode::HintBlind,
+            ),
             JetLookupResult::NoJet
         ));
     }
@@ -1013,12 +1013,7 @@ mod test {
 
         // Exact dispatch never strips hints: the hinted query misses.
         assert!(matches!(
-            warm.find_jet(
-                &mut stack,
-                &mut subject,
-                &mut query,
-                JetDispatchMode::Exact,
-            ),
+            warm.find_jet(&mut stack, &mut subject, &mut query, JetDispatchMode::Exact,),
             JetLookupResult::NoJet
         ));
 
@@ -1075,12 +1070,7 @@ mod test {
         let mut query = T(&mut stack, &[mean_arm, D(7)]);
 
         assert!(matches!(
-            warm.find_jet(
-                &mut stack,
-                &mut subject,
-                &mut query,
-                JetDispatchMode::Exact,
-            ),
+            warm.find_jet(&mut stack, &mut subject, &mut query, JetDispatchMode::Exact,),
             JetLookupResult::NoJet
         ));
         assert!(matches!(

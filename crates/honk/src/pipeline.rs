@@ -493,7 +493,9 @@ fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
 fn parse_raw_import_clause(clause: &str) -> Result<ScopedImport> {
     let token = strip_inline_comment(clause).trim();
     let malformed = || {
-        CompilerError::Parse(format!("malformed /= import clause: `/={clause}` (expected `face suffix`)"))
+        CompilerError::Parse(format!(
+            "malformed /= import clause: `/={clause}` (expected `face suffix`)"
+        ))
     };
     if token.is_empty() {
         return Err(malformed());

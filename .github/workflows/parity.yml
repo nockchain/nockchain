@@ -1,0 +1,81 @@
+name: Compiler parity
+
+# Byte-for-byte artifact parity between hoonc (reference) and honk (native
+# compiler): each kernel plus the hoon-138 arbitrary self-mint, one job per
+# artifact pairing so they run in parallel. Every test is a strict `cmp` of
+# two Bazel-built jams (see assets/native/BUILD.bazel and
+# crates/honk/test-assets/BUILD.bazel) — no dir-hash waiver: both compilers
+# run sandboxed over identical dependency trees, so the artifacts must agree
+# on every byte, including the directory-hash leaf.
+#
+# No remote/disk caching is configured yet: every job cold-builds hoonc, honk,
+# and its jam pair (roughly 1-2h per job). The jam actions declare their
+# memory footprint (rules_hoon/hoon.bzl resource_set) so Bazel does not
+# co-schedule both compiles of a pair on a 16GB runner.
+
+on:
+  push:
+    branches: ["master", "nightly"]
+    paths:
+      - "hoon/**"
+      - "crates/**"
+      - "assets/**"
+      - "rules_hoon/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - ".github/workflows/parity.yml"
+  pull_request:
+    branches: ["master", "nightly"]
+    paths:
+      - "hoon/**"
+      - "crates/**"
+      - "assets/**"
+      - "rules_hoon/**"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - ".github/workflows/parity.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parity-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kernel-parity:
+    name: ${{ matrix.kernel }} kernel parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [dumb, wal, miner, peek, bridge, roswell]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test ${{ matrix.kernel }} parity (hoonc vs honk, strict cmp)
+        run: bazel test //assets/native:${{ matrix.kernel }}_parity_test
+
+  hoon-138-parity:
+    # The honk native self-mint peaks ~14GB RSS; ubuntu-latest (16GB) is
+    # tight but the resource_set declaration serializes it against the hoonc
+    # reference build. Move to a larger runner class if it OOMs.
+    name: hoon-138 arbitrary parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test hoon-138 self-mint parity (hoonc vs honk native, strict cmp)
+        run: bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test

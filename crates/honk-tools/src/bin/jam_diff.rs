@@ -961,7 +961,9 @@ fn set_keys(jam_path: &str, depth: usize) {
             current = branches.tail().noun();
             current_axis = format!("{current_axis}.3.3");
         }
-        let Some((node, node_axis)) = stackv.pop() else { break };
+        let Some((node, node_axis)) = stackv.pop() else {
+            break;
+        };
         let cell = node.in_space(&space).as_cell().unwrap();
         let key = cell.head().noun();
         let mug = nockvm::mug::mug_u32(&mut stack, key);

@@ -10173,10 +10173,8 @@ impl<'a> Ut<'a> {
         if let Some((stored_epoch, mut memo)) = self.miss_memo_persist.take() {
             let context = self.cache_context_key();
             let epoch = (
-                context.semantic.vet_key,
-                context.semantic.fan_context_key,
-                context.memo.arm_epoch_key,
-                context.memo.placeholder_context_key,
+                context.semantic.vet_key, context.semantic.fan_context_key,
+                context.memo.arm_epoch_key, context.memo.placeholder_context_key,
             );
             if stored_epoch != epoch {
                 memo.clear();
@@ -12844,12 +12842,12 @@ use crate::native::ir::intern::{
     core_mint_cache_store as native_core_mint_cache_store,
     crop_cache_lookup as native_crop_cache_lookup, crop_cache_store as native_crop_cache_store,
     fish_cache_lookup as native_fish_cache_lookup, fish_cache_store as native_fish_cache_store,
-    fuse_cache_lookup as native_fuse_cache_lookup,
-    fuse_cache_store as native_fuse_cache_store, legset_memo_lookup, legset_memo_store,
-    live_intern, live_leaf_to_noun, live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
-    mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
-    mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
-    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
+    fuse_cache_lookup as native_fuse_cache_lookup, fuse_cache_store as native_fuse_cache_store,
+    legset_memo_lookup, legset_memo_store, live_intern, live_leaf_to_noun, live_to_noun,
+    mint_cache_lookup as native_mint_cache_lookup, mint_cache_store as native_mint_cache_store,
+    mull_cache_lookup as native_mull_cache_lookup, mull_cache_store as native_mull_cache_store,
+    native_of, native_of_mug_candidates, native_of_mug_insert, nest_cache_lookup, nest_cache_store,
+    Context,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, Garb as NGarb, Type as NTy};

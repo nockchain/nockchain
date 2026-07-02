@@ -708,15 +708,18 @@ pub fn buccol_spec<'src>(
         .then_ignore(gap())
         .then_ignore(just("=="))
         .map(move |specs| {
-            let mut specs = specs.into_iter().enumerate().map(|(idx, (spec, start, end))| {
-                if idx == 0 {
-                    spec
-                } else if let Some(help) = linemap.help_after_choice_spec_item(start, end) {
-                    Spec::Gist(help, Box::new(spec))
-                } else {
-                    spec
-                }
-            });
+            let mut specs = specs
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (spec, start, end))| {
+                    if idx == 0 {
+                        spec
+                    } else if let Some(help) = linemap.help_after_choice_spec_item(start, end) {
+                        Spec::Gist(help, Box::new(spec))
+                    } else {
+                        spec
+                    }
+                });
             let first = specs.next().expect("$: requires at least one spec");
             Spec::BucCol(Box::new(first), specs.collect())
         })
@@ -759,24 +762,27 @@ pub fn buccen_spec<'src>(
         .then_ignore(gap())
         .then_ignore(just("=="))
         .map(move |specs| {
-            let mut specs = specs.into_iter().enumerate().map(|(idx, (spec, start, end))| {
-                let help = if idx == 0 {
-                    linemap
-                        .help_after_line_start_rune(start, end)
-                        .or_else(|| linemap.help_after_line_start_expr(start))
-                        .or_else(|| linemap.help_after_line_expr_ending_at(end))
-                } else {
-                    linemap
-                        .help_after_rune(start, end)
-                        .or_else(|| linemap.help_after_line_start_expr(start))
-                        .or_else(|| linemap.help_after_line_expr_ending_at(end))
-                };
-                if let Some(help) = help {
-                    Spec::Gist(help, Box::new(spec))
-                } else {
-                    spec
-                }
-            });
+            let mut specs = specs
+                .into_iter()
+                .enumerate()
+                .map(|(idx, (spec, start, end))| {
+                    let help = if idx == 0 {
+                        linemap
+                            .help_after_line_start_rune(start, end)
+                            .or_else(|| linemap.help_after_line_start_expr(start))
+                            .or_else(|| linemap.help_after_line_expr_ending_at(end))
+                    } else {
+                        linemap
+                            .help_after_rune(start, end)
+                            .or_else(|| linemap.help_after_line_start_expr(start))
+                            .or_else(|| linemap.help_after_line_expr_ending_at(end))
+                    };
+                    if let Some(help) = help {
+                        Spec::Gist(help, Box::new(spec))
+                    } else {
+                        spec
+                    }
+                });
             let first = specs.next().expect("$% requires at least one spec");
             Spec::BucCen(Box::new(first), specs.collect())
         })

@@ -143,7 +143,6 @@ fn repo_path(path: &str) -> PathBuf {
         .join(path)
 }
 
-
 fn parser_dbug_enabled() -> bool {
     std::env::var("HOON_TEST_PARSER_DBUG")
         .ok()
@@ -217,7 +216,6 @@ fn create_native_test_context() -> Context {
         nockvm::jets::JetDispatchMode::HintBlind,
     )
 }
-
 
 #[tokio::test]
 async fn core_extension_preserves_previous_arms_native() {
