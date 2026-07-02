@@ -63,6 +63,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # Build the hoonc reference before the test so the two ~10GB kernel
+      # compiles (hoonc + honk) never run concurrently on a 16GB runner; the
+      # test step reuses this action result from the job's local cache.
+      - name: Build hoonc ${{ matrix.kernel }} reference
+        run: bazel build //assets:${{ matrix.kernel }}
+
       - name: Test ${{ matrix.kernel }} parity (hoonc vs honk, strict cmp)
         run: bazel test //assets/native:${{ matrix.kernel }}_parity_test
 
@@ -76,6 +82,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      # Serialize the two heavy compiles (see the kernel job note); the honk
+      # self-mint alone peaks ~14GB RSS.
+      - name: Build hoonc hoon-138 reference
+        run: bazel build //crates/honk/test-assets:hoon_138_ref
 
       - name: Test hoon-138 self-mint parity (hoonc vs honk native, strict cmp)
         run: bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test

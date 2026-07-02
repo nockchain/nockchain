@@ -58,7 +58,7 @@ thread_local! {
     static COMPILE_CHILD_NANOS_STACK: RefCell<Vec<u128>> = const { RefCell::new(Vec::new()) };
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Cli {
     entry: Option<PathBuf>,
     directory: PathBuf,
@@ -517,21 +517,43 @@ fn main() {
         }
     };
 
-    let worker = std::thread::Builder::new()
-        .name("honk".to_string())
-        // musk constant folding (^~) recurses once per evaluation step for
-        // partial-subject folds; hoonc performs the same walk on the
-        // interpreter's NockStack, so native stack depth is the parity
-        // constraint here. The reservation is virtual — only touched pages
-        // consume memory.
-        .stack_size(32 * 1024 * 1024 * 1024)
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|err| format!("failed to initialize tokio runtime: {err}"))?;
-            runtime.block_on(run(cli)).map_err(|err| err.to_string())
-        });
+    // musk constant folding (^~) recurses once per evaluation step for
+    // partial-subject folds; hoonc performs the same walk on the
+    // interpreter's NockStack, so native stack depth is the parity
+    // constraint here. The reservation is virtual — only touched pages
+    // consume memory — but Linux refuses a thread-stack mapping larger than
+    // RAM+swap under heuristic overcommit (pthread_create → EAGAIN on a
+    // 16GB CI runner), so fall back by halving until the spawn succeeds.
+    // HONK_WORKER_STACK_BYTES overrides the starting size.
+    let mut stack_size: u64 = env::var("HONK_WORKER_STACK_BYTES")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(32 * 1024 * 1024 * 1024);
+    const MIN_WORKER_STACK: u64 = 2 * 1024 * 1024 * 1024;
+    let worker = loop {
+        let cli = cli.clone();
+        let attempt = std::thread::Builder::new()
+            .name("honk".to_string())
+            .stack_size(stack_size as usize)
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|err| format!("failed to initialize tokio runtime: {err}"))?;
+                runtime.block_on(run(cli)).map_err(|err| err.to_string())
+            });
+        match attempt {
+            Ok(worker) => break Ok(worker),
+            Err(err) if stack_size > MIN_WORKER_STACK => {
+                stack_size /= 2;
+                eprintln!(
+                    "honk: worker spawn failed ({err}); retrying with a {}GB stack",
+                    stack_size / (1024 * 1024 * 1024)
+                );
+            }
+            Err(err) => break Err(err),
+        }
+    };
 
     let result = match worker {
         Ok(worker) => match worker.join() {
