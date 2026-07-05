@@ -1,0 +1,181 @@
+load("//:rules_hoon/defs.bzl", "honk_library", "hoon_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Type-checking parity pairings: each self-contained .hoon entry is compiled
+# by BOTH hoonc (reference) and honk (native), --arbitrary with an explicitly
+# empty deps dir, and the two jams must be byte-identical (`cmp`, no waiver).
+# Empty deps make these pairings cheap (~1-2s per side): the entries import
+# nothing, so both compilers see the same (empty) tree and identical
+# sandbox-relative entry paths — the artifact embeds both.
+#
+# hoonc's exit code is NOT a build verdict (it exits 0 on "build failed,
+# skipping write"), so acceptance is judged by artifact existence: a build
+# failure on either side fails the pairing at the missing-input step.
+
+# Curated probes (this package): each pins inferred types via !> across a
+# distinct region of the type system (refinement, forks, wet gates, variance,
+# molds, wings, hints, casts, auras, stdlib doors, skins, aliases).
+TYPE_PROBES = [
+    "auras",
+    "casts_folds",
+    "cen_mods",
+    "compose_subjects",
+    "core_variance",
+    "faces_wings",
+    "fork_constants",
+    "hint_jet_product",
+    "list_ops",
+    "mold_gates",
+    "recursive_mold",
+    "refine_wuthep",
+    "refine_wutket",
+    "refine_wutlus",
+    "refine_wutpat",
+    "refine_wutsig",
+    "refine_wutts",
+    "skins_names",
+    "tistar_alias",
+    "unit_map_set",
+    "wet_gate",
+]
+
+# Compiler regression fixtures (//hoon/tests:hoon-compiler/*): bare
+# expressions and small files already used by honk's compiler_mint suite;
+# paired here at the artifact level for end-to-end agreement.
+COMPILER_FIXTURES = [
+    "bloq_example",
+    "cap_minimal",
+    "core_extension_preserves_previous_arms",
+    "dec_minimal",
+    "dtkt",
+    "dvr_minimal",
+    "fits_atom",
+    "fits_cell",
+    "fli_can_update_variant_faces",
+    "hand",
+    "hoon_138",
+    "inc_atom",
+    "ket_variance_ketbar",
+    "ket_variance_ketpam",
+    "ket_variance_ketwut",
+    "ketcol",
+    "l4_spot_prefix",
+    "l4_virtualization_prefix",
+    "lth_minimal",
+    "mor_minimal",
+    "ob_raku_mint_nice_minimal",
+    "parent_limb_caret",
+    "parent_limb_comma",
+    "prelude_sigpam",
+    "prelude_sigwut",
+    "prelude_tell",
+    "prelude_yell",
+    "prelude_zapgar",
+    "qual_tuple",
+    "rune_brcl",
+    "rune_brtr",
+    "rune_brts",
+    "rune_clhp",
+    "rune_cltr",
+    "rune_cnhp",
+    "rune_cnls",
+    "rune_cnsg",
+    "rune_mccl",
+    "rune_mcsg",
+    "rune_sgls",
+    "rune_tsdt",
+    "rune_wtcl_dtts_narrow",
+    "sea_fire_core_minimal",
+    "sigcen_wrapper_wuthep",
+    "siggar",
+    "sigzap",
+    "tsls_bardot_wing",
+    "tsls_bardot",
+    "tsls_cnts_axis3_hotspot",
+    "tsls_cnts_hotspot",
+    "tsls_cnts_wing_patch_hotspot",
+    "wet_cast",
+    "wet_compose",
+    "wet_conditional",
+    "wet_core_arm",
+    "wet_identity",
+    "wet_increment",
+    "wet_iron_wrap",
+    "wet_pair",
+    "wthx_atom",
+    "wthx_cell",
+    "wuthep",
+    "zpcom",
+    "zpgl",
+    "zpmc",
+    "zpts",
+]
+
+# (probe name, entry label) for both corpora.
+ALL_PAIRINGS = [
+    (name, "{}.hoon".format(name))
+    for name in TYPE_PROBES
+] + [
+    ("fixture_{}".format(name), "//hoon/tests:hoon-compiler/{}.hoon".format(name))
+    for name in COMPILER_FIXTURES
+]
+
+[
+    hoon_library(
+        name = "{}_ref".format(name),
+        src = src,
+        arbitrary = True,
+        output = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name, src in ALL_PAIRINGS
+]
+
+[
+    honk_library(
+        name = "{}_native".format(name),
+        src = src,
+        arbitrary = True,
+        deps_dir = "_empty_hoon_deps",
+    )
+    for name, src in ALL_PAIRINGS
+]
+
+[
+    sh_test(
+        name = "{}_parity_test".format(name),
+        size = "small",
+        srcs = ["//assets/native:kernel_parity_test.sh"],
+        args = [
+            "$(rootpath :{}_ref)".format(name),
+            "$(rootpath :{}_native)".format(name),
+        ],
+        data = [
+            ":{}_ref".format(name),
+            ":{}_native".format(name),
+        ],
+    )
+    for name, _ in ALL_PAIRINGS
+]
+
+test_suite(
+    name = "type_probe_parity_test",
+    tests = ["{}_parity_test".format(name) for name in TYPE_PROBES],
+)
+
+test_suite(
+    name = "fixture_parity_test",
+    tests = [
+        "fixture_{}_parity_test".format(name)
+        for name in COMPILER_FIXTURES
+    ],
+)
+
+test_suite(
+    name = "all_parity_test",
+    tests = [
+        ":type_probe_parity_test",
+        ":fixture_parity_test",
+    ],
+)

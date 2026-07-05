@@ -16,6 +16,18 @@ def _jam_resource_set_arbitrary(_os, _inputs_size):
     """Arbitrary (hoon-138 self-mint) builds peak ~14GB RSS."""
     return {"memory": 14336, "cpu": 1}
 
+def _jam_resource_set_probe(_os, _inputs_size):
+    """Empty-deps probe pairings (self-contained entries) peak under 1GB RSS
+    and finish in ~1-2s; a small footprint lets Bazel run them in parallel."""
+    return {"memory": 2048, "cpu": 1}
+
+def _jam_resource_set_for(ctx):
+    if ctx.attr.deps_dir:
+        return _jam_resource_set_probe
+    if ctx.attr.arbitrary:
+        return _jam_resource_set_arbitrary
+    return _jam_resource_set
+
 def _hoon_jam_impl(ctx):
     """Implementation of the hoon_jam rule without extra copying."""
 
@@ -48,7 +60,13 @@ def _hoon_jam_impl(ctx):
     src_path = src.path
     src_dir_parts = src_path.split("/")
 
-    if src_dir_parts[0] == "hoon":
+    if ctx.attr.deps_dir:
+        # Explicit dependency directory (e.g. "_empty_hoon_deps" for
+        # self-contained probe entries that import nothing): created fresh in
+        # the sandbox so both compilers of a parity pairing hash the same
+        # (empty) tree.
+        hoon_dir = ctx.attr.deps_dir
+    elif src_dir_parts[0] == "hoon":
         hoon_dir = "hoon"
     else:
         hoon_dir = "/".join(src_dir_parts[:2])
@@ -63,8 +81,11 @@ def _hoon_jam_impl(ctx):
         hoonc_args.append("--output out.jam")
 
     # print("Hoon dir: " + hoon_dir)
+    if ctx.attr.deps_dir:
+        cmd.append("mkdir -p {}".format(hoon_dir))
+    home_dir = tmp_dir.path if ctx.attr.deps_dir else hoon_dir
     cmd.append("env -i HOME={0} XDG_DATA_HOME={0}/.local/share XDG_CONFIG_HOME={0}/.config TMPDIR={1} RUST_LOG=trace {2} {3} {4} {5}".format(
-        hoon_dir,  # Use the original location instead of copying
+        home_dir,  # scratch state (.nockapp) must not land in an explicit deps dir
         tmp_dir.path,
         ctx.executable._hoonc.path,
         " ".join(hoonc_args),
@@ -84,7 +105,7 @@ def _hoon_jam_impl(ctx):
         progress_message = "Building JAM file from %s" % src.path,
         mnemonic = "HoonCompile",
         use_default_shell_env = False,
-        resource_set = _jam_resource_set_arbitrary if ctx.attr.arbitrary else _jam_resource_set,
+        resource_set = _jam_resource_set_for(ctx),
     )
 
     return [DefaultInfo(files = depset([output]))]
@@ -111,6 +132,11 @@ hoon_jam = rule(
             default = False,
             doc = "Whether to use the --output flag",
         ),
+        "deps_dir": attr.string(
+            default = "",
+            doc = "Explicit dependency directory (created empty in the " +
+                  "sandbox); overrides the src-derived hoon tree",
+        ),
         "_hoonc": attr.label(
             default = Label("//crates/hoonc:hoonc_bin"),
             executable = True,
@@ -127,6 +153,7 @@ def hoon_library(
         deps = [],
         arbitrary = False,
         output = False,
+        deps_dir = "",
         visibility = None):
     """Builds a JAM file from a Hoon source file.
 
@@ -148,6 +175,7 @@ def hoon_library(
         out = jam_name,
         arbitrary = arbitrary,
         output = output,
+        deps_dir = deps_dir,
         visibility = ["//visibility:private"],
     )
 
@@ -178,7 +206,9 @@ def _honk_jam_impl(ctx):
 
     src_path = src.path
     src_dir_parts = src_path.split("/")
-    if src_dir_parts[0] == "hoon":
+    if ctx.attr.deps_dir:
+        hoon_dir = ctx.attr.deps_dir
+    elif src_dir_parts[0] == "hoon":
         hoon_dir = "hoon"
     else:
         hoon_dir = "/".join(src_dir_parts[:2])
@@ -197,8 +227,11 @@ def _honk_jam_impl(ctx):
     cmd = []
     cmd.append("set -e")
     cmd.append("mkdir -p {}".format(tmp_dir.path))
+    if ctx.attr.deps_dir:
+        cmd.append("mkdir -p {}".format(hoon_dir))
+    home_dir = tmp_dir.path if ctx.attr.deps_dir else hoon_dir
     cmd.append("env -i HOME={0} TMPDIR={1}{2} {3} {4} --output {5} --prelude {6} {7} {8}".format(
-        hoon_dir,
+        home_dir,
         tmp_dir.path,
         env_vars,
         ctx.executable._honk.path,
@@ -217,7 +250,7 @@ def _honk_jam_impl(ctx):
         progress_message = "Building native JAM file from %s" % src.path,
         mnemonic = "HonkCompile",
         use_default_shell_env = False,
-        resource_set = _jam_resource_set_arbitrary if ctx.attr.arbitrary else _jam_resource_set,
+        resource_set = _jam_resource_set_for(ctx),
     )
 
     return [DefaultInfo(files = depset([output]))]
@@ -249,6 +282,11 @@ honk_jam = rule(
             default = Label("//hoon/common:hoon.hoon"),
             doc = "Prelude source passed to --prelude",
         ),
+        "deps_dir": attr.string(
+            default = "",
+            doc = "Explicit dependency directory (created empty in the " +
+                  "sandbox); overrides the src-derived hoon tree",
+        ),
         "_honk": attr.label(
             default = Label("//crates/honk:honk"),
             executable = True,
@@ -264,6 +302,7 @@ def honk_library(
         deps = [],
         arbitrary = False,
         native_parity = False,
+        deps_dir = "",
         visibility = None):
     """honk twin of `hoon_library`: builds `<name>.jam` natively with honk."""
     jam_name = name + ".jam"
@@ -275,6 +314,7 @@ def honk_library(
         out = jam_name,
         arbitrary = arbitrary,
         native_parity = native_parity,
+        deps_dir = deps_dir,
         visibility = ["//visibility:private"],
     )
 

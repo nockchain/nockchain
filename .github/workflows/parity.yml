@@ -72,6 +72,21 @@ jobs:
       - name: Test ${{ matrix.kernel }} parity (hoonc vs honk, strict cmp)
         run: bazel test //assets/native:${{ matrix.kernel }}_parity_test
 
+  type-probe-parity:
+    # 87 small pairings (21 curated type probes + 66 compiler fixtures), each
+    # a strict cmp of hoonc-vs-honk --arbitrary builds with an empty deps dir.
+    # Every pairing is ~1-2s and under 1GB per side, so one job runs the whole
+    # suite; the wall clock is dominated by the cold compiler builds.
+    name: type probe parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test type-checking parity probes (hoonc vs honk, strict cmp)
+        run: bazel test //crates/honk/test-assets/type-probes:all_parity_test
+
   hoon-138-parity:
     # The honk native self-mint peaks ~14GB RSS; ubuntu-latest (16GB) is
     # tight but the resource_set declaration serializes it against the hoonc

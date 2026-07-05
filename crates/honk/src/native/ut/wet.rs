@@ -157,13 +157,20 @@ impl<'a> Ut<'a> {
         subject_faces: &[NLeaf],
         reference_faces: &[NLeaf],
     ) -> Result<Vec<NLeaf>> {
+        // hoon-138 ++dear: `(weld hos (slag lip har))` in innermost-first stack
+        // order, applied leaf-outward by ++done — REFERENCE faces nest OUTSIDE
+        // the subject's own. Our stacks are outermost-first (push on descent)
+        // and redo_done wraps with .rev() (last element innermost), so the
+        // equivalent forward merge is reference ++ subject, dropping the
+        // overlap where the subject's outermost faces coincide with the
+        // reference's innermost (subject prefix == reference suffix here).
         let mut overlap = 0usize;
         let max_overlap = cmp::min(subject_faces.len(), reference_faces.len());
         for candidate in 0..=max_overlap {
-            let start = subject_faces.len().saturating_sub(candidate);
+            let start = reference_faces.len() - candidate;
             let mut matches = true;
             for idx in 0..candidate {
-                if subject_faces[start + idx] != reference_faces[idx] {
+                if reference_faces[start + idx] != subject_faces[idx] {
                     matches = false;
                     break;
                 }
@@ -172,8 +179,8 @@ impl<'a> Ut<'a> {
                 overlap = candidate;
             }
         }
-        let mut merged = subject_faces.to_vec();
-        merged.extend_from_slice(&reference_faces[overlap..]);
+        let mut merged = reference_faces[..reference_faces.len() - overlap].to_vec();
+        merged.extend_from_slice(subject_faces);
         Ok(merged)
     }
 

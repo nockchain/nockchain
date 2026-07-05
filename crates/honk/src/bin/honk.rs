@@ -1909,7 +1909,9 @@ impl<'a> NativeBuildContext<'a> {
         } else {
             None
         };
-        let vet = keep_product && self.entry_vet;
+        // hoonc vets every file it compiles (`vet=&` is the ++ut door default
+        // in hoonc.hoon's build chain), not just the entry — align.
+        let vet = self.entry_vet;
         let (ty, formula, vase_trap) = match override_value {
             Some(value) => {
                 let (ty, formula) = trace_timed(format!("minting {label}"), || {
@@ -1984,7 +1986,8 @@ impl<'a> NativeBuildContext<'a> {
     }
 
     fn mint_with_subject_type(&mut self, subject_ty: Noun, expr: &Hoon) -> Result<(Noun, Noun)> {
-        self.mint_with_subject_type_vet(subject_ty, expr, false)
+        let vet = self.entry_vet;
+        self.mint_with_subject_type_vet(subject_ty, expr, vet)
     }
 
     fn mint_with_subject_type_vet(
@@ -2144,7 +2147,8 @@ impl<'a> NativeBuildContext<'a> {
         sample_trap: Noun,
     ) -> Result<Noun> {
         let sut = ty_cell_local(&mut *self.ut.slab, gate_ty, sample_ty);
-        let (shot_ty, _shot_formula) = self.mint_with_sut(sut, &shot_gene(), false)?;
+        let entry_vet = self.entry_vet;
+        let (shot_ty, _shot_formula) = self.mint_with_sut(sut, &shot_gene(), entry_vet)?;
         let sample = T(&mut *self.ut.slab, &[gate_trap, sample_trap]);
         let payload = T(&mut *self.ut.slab, &[shot_ty, sample]);
         Ok(self.trap_from_payload(self.wrappers.shot, payload))
