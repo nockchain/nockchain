@@ -18,3 +18,4 @@ notes-*.csv
 /hoonc-octs-type-138.jam
 assets/native/*.jam
 bazel-*
+*.jam

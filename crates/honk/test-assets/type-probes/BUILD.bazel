@@ -37,6 +37,8 @@ TYPE_PROBES = [
     "skins_names",
     "tistar_alias",
     "unit_map_set",
+    "wet_cury_partial",
+    "wet_face_mismatch",
     "wet_gate",
 ]
 

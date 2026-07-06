@@ -129,7 +129,7 @@ fn usage(program: &str) -> String {
          Usage: {program} [--new] --batch-manifest <file> --prelude <hoon.hoon> [--sut-jam <file>] <deps_dir>\n\
          Usage: {program} --dump-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
          Usage: {program} --dump-native-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
-         --new is accepted for hoonc-script compatibility and has no effect. Vet checking is enabled by default; pass --no-vet to disable strict/nice type-checking for the entry expression.\n\
+         --new is accepted for hoonc-script compatibility and has no effect. Vet checking is enabled by default and applies to the whole build (entry and dependency files, matching hoonc); pass --no-vet to disable strict/nice type-checking.\n\
          Example: {program} --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon"
     )
 }
