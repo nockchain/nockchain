@@ -25,8 +25,10 @@ TYPE_PROBES = [
     "faces_wings",
     "fork_constants",
     "hint_jet_product",
+    "lead_payload_peek",
     "list_ops",
     "mold_gates",
+    "mull_bonk_wet_fish",
     "recursive_mold",
     "refine_wuthep",
     "refine_wutket",
@@ -40,6 +42,7 @@ TYPE_PROBES = [
     "wet_cury_partial",
     "wet_face_mismatch",
     "wet_gate",
+    "wrap_noncore",
 ]
 
 # Compiler regression fixtures (//hoon/tests:hoon-compiler/*): bare
@@ -174,10 +177,74 @@ test_suite(
     ],
 )
 
+# Rejection-parity probes (reject/): each is ill-typed on purpose and must
+# be REJECTED by BOTH compilers. These run at TEST time (both binaries in
+# runfiles) because a build-rule action that is supposed to fail cannot be
+# expressed as a hoon_jam/honk_jam build. Verdict = artifact absence.
+# Coverage-targeted via cargo-tarpaulin against honk's ut error branches
+# (mint-nice/vain/lost, find/find-fork, fish-core/loop, fire-dry,
+# mull, redo-match, payload-block, ...); the same corpus runs in-process
+# as crates/honk/tests/compiler_reject.rs so the branches count toward
+# coverage. rest_loop_alias is sh-level only: both compilers currently
+# reject it by native stack overflow, which would abort an in-process test.
+REJECTION_PROBES = [
+    "core_cast_arms",
+    "door_sample_nest",
+    "edit_arm_tack",
+    "edit_nest_fail",
+    "edit_unknown_limb",
+    "find_fail_face_blocked",
+    "find_fail_wing",
+    "fish_core",
+    "fish_loop",
+    "fork_edit_synthetic",
+    "fork_wing_missing",
+    "lead_sample_edit",
+    "mint_lost_case",
+    "mint_vain_case",
+    "mint_vain_wtcl",
+    "mull_wet_body",
+    "nest_fail_cast",
+    "nest_fail_sample",
+    "redo_fork_ambiguous",
+    "redo_shape_mismatch",
+    "rest_loop_alias",
+    "skin_shape_mismatch",
+    "test_not_flag",
+    "tissig_empty",
+]
+
+[
+    sh_test(
+        name = "reject_{}_test".format(name),
+        size = "small",
+        srcs = ["rejection_test.sh"],
+        args = [
+            "$(rootpath //crates/hoonc:hoonc_bin)",
+            "$(rootpath //crates/honk:honk)",
+            "$(rootpath //hoon/common:hoon.hoon)",
+            "$(rootpath reject/{}.hoon)".format(name),
+        ],
+        data = [
+            "reject/{}.hoon".format(name),
+            "//crates/honk:honk",
+            "//crates/hoonc:hoonc_bin",
+            "//hoon/common:hoon.hoon",
+        ],
+    )
+    for name in REJECTION_PROBES
+]
+
+test_suite(
+    name = "rejection_parity_test",
+    tests = ["reject_{}_test".format(name) for name in REJECTION_PROBES],
+)
+
 test_suite(
     name = "all_parity_test",
     tests = [
         ":type_probe_parity_test",
         ":fixture_parity_test",
+        ":rejection_parity_test",
     ],
 )

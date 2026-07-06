@@ -73,10 +73,12 @@ jobs:
         run: bazel test //assets/native:${{ matrix.kernel }}_parity_test
 
   type-probe-parity:
-    # 87 small pairings (21 curated type probes + 66 compiler fixtures), each
-    # a strict cmp of hoonc-vs-honk --arbitrary builds with an empty deps dir.
-    # Every pairing is ~1-2s and under 1GB per side, so one job runs the whole
-    # suite; the wall clock is dominated by the cold compiler builds.
+    # Small probe pairings: curated type probes + compiler fixtures (strict
+    # cmp of hoonc-vs-honk --arbitrary builds with an empty deps dir) plus
+    # the rejection-parity corpus (ill-typed probes both compilers must
+    # reject; verdict = artifact absence). Every probe is ~1-4s and under
+    # 1GB per side, so one job runs the whole suite; the wall clock is
+    # dominated by the cold compiler builds.
     name: type probe parity
     runs-on: ubuntu-latest
     timeout-minutes: 180
