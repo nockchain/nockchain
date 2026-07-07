@@ -1616,7 +1616,44 @@ impl CompositeTrace {
         r: usize,
         num_stripes: usize,
     ) -> (usize, [u32; STRIPE_MAX]) {
+        // Default (contiguous tile): the opened row/col lane == tile-local index.
+        let a_lanes: Vec<usize> = (0..h_tile).collect();
+        let b_lanes: Vec<usize> = (0..w_tile).collect();
+        self.place_useful_work_chain_hw_indexed(
+            row_start,
+            a_prime_rows,
+            b_prime_cols,
+            h_tile,
+            w_tile,
+            r,
+            num_stripes,
+            &a_lanes,
+            &b_lanes,
+        )
+    }
+
+    /// B5b: like [`place_useful_work_chain_hw`] but with explicit per-row/col
+    /// **lanes** — the covering-range position (`opened_index − chunk_base`) of
+    /// each opened row/column. For a contiguous tile `a_lanes[i] == i` so this is
+    /// byte-identical; for a non-contiguous opened pattern the lanes carry the
+    /// actual opened positions so the sweep's `noised_packed` keys match the
+    /// strip-opening producer (which is keyed by the real matrix position).
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_useful_work_chain_hw_indexed(
+        &mut self,
+        row_start: usize,
+        a_prime_rows: &[i8],
+        b_prime_cols: &[i8],
+        h_tile: usize,
+        w_tile: usize,
+        r: usize,
+        num_stripes: usize,
+        a_lanes: &[usize],
+        b_lanes: &[usize],
+    ) -> (usize, [u32; STRIPE_MAX]) {
         use p3_field::integers::QuotientMap;
+        assert_eq!(a_lanes.len(), h_tile, "a_lanes must have h_tile entries");
+        assert_eq!(b_lanes.len(), w_tile, "b_lanes must have w_tile entries");
         assert!(
             h_tile % TILE_H == 0,
             "tile height must split into TILE_H sub-blocks"
@@ -1679,18 +1716,26 @@ impl CompositeTrace {
                             let cc = (sbj * TILE_H + dj) * k + lo + c0;
                             b_blk[dj][..w].copy_from_slice(&b_prime_cols[cc..cc + w]);
                         }
-                        let ids_for = |side_a: bool, lane_base: usize| -> [u64; A_ID_LEN] {
+                        let ids_for = |side_a: bool, sb_base: usize| -> [u64; A_ID_LEN] {
+                            let (lanes, id_base) = if side_a {
+                                (a_lanes, a_id_base)
+                            } else {
+                                (b_lanes, b_id_base)
+                            };
                             core::array::from_fn(|jc| {
                                 let mut src = [None; 8];
                                 for m in 0..8 {
                                     let f = jc * 8 + m;
                                     let (di, col) = (f / TILE_D, f % TILE_D);
                                     if col < w {
-                                        src[m] =
-                                            Some(((lane_base + di) as u32, (lo + c0 + col) as u32));
+                                        // B5b: opened row/col lane (covering-range position).
+                                        src[m] = Some((
+                                            lanes[sb_base + di] as u32,
+                                            (lo + c0 + col) as u32,
+                                        ));
                                     }
                                 }
-                                noised_chunk_id(if side_a { a_id_base } else { b_id_base }, k, &src)
+                                noised_chunk_id(id_base, k, &src)
                             })
                         };
                         let a_ids = ids_for(true, sbi * TILE_H);

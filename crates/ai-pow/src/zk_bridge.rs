@@ -2363,8 +2363,22 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // `place_useful_work_chain` self-asserts both invariants.
     let real_m = {
         let sweep_start = mh_end + 3;
-        let (rows_used, x_steps) = trace.place_useful_work_chain_hw(
-            sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes,
+        // B5b: opened row/col lanes = covering-range positions (index − chunk
+        // base), matching the strip-opening producer keys and the canonical
+        // program's sweep. Contiguous ⇒ [0,1,…]; non-contiguous carries the
+        // actual opened positions.
+        let a_lanes: Vec<usize> = strip_schedule
+            .a_indices
+            .iter()
+            .map(|&i| i as usize - ca0)
+            .collect();
+        let b_lanes: Vec<usize> = strip_schedule
+            .b_indices
+            .iter()
+            .map(|&i| i as usize - cb0)
+            .collect();
+        let (rows_used, x_steps) = trace.place_useful_work_chain_hw_indexed(
+            sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes, &a_lanes, &b_lanes,
         );
         // Store rows live in the post-sweep passthrough region
         // (place AFTER the sweep so its SX/CUMSUM passthrough on
@@ -3430,29 +3444,25 @@ mod tests {
         ));
     }
 
-    /// **B5b progress probe (by running a real Layer-0 proof).**
+    /// **B5b — non-contiguous recursive opening proves + verifies.**
     ///
     /// MoE opens the expert's routed-token rows (`outer_indices`), which are
-    /// **non-contiguous**. This probe proves the recursive certificate for a
-    /// genuinely non-contiguous opened pattern (`[0,1,8,9,64,65,72,73]`, target
-    /// `0xff…` so it is always met).
+    /// **non-contiguous**. This proves and verifies a real recursive certificate
+    /// for a genuinely non-contiguous opened pattern (`[0,1,8,9,64,65,72,73]`),
+    /// and confirms the certificate binds that pattern's ticket (jackpot), not a
+    /// contiguous tile.
     ///
-    /// **Wall 1 (resolved):** the matmul `Sweep` indexed rows by tile geometry,
-    /// not the opened pattern, so the `noised_packed` LogUp diverged
-    /// (`GlobalCumulativeMismatch`). Fixed by indexing `sp.a_indices`/`b_indices`
-    /// (covering-range position `row − c_base`) in the sweep row-descriptor
-    /// (`canonical.rs`, byte-identical for contiguous tiles).
-    ///
-    /// **Wall 2 (current):** the proof now advances past the lookup layer and
-    /// fails at the opening argument with `InvalidOpeningArgument(CapMismatch)` —
-    /// the strip covering-range opening (`indexed_strips_chunk_range`, `min..max`)
-    /// produces a trace/commitment shape that does not match the opened tile;
-    /// the remaining B5b work is **selective (per-selected-chunk) opening** so the
-    /// opened rows are exactly the pattern rows. When that lands this test must be
-    /// flipped to `prove + verify` succeeding. Opt-in (a real ~60s proof).
+    /// Enabled by two coordinated fixes (the matmul sweep previously indexed rows
+    /// by tile geometry, so for a non-contiguous pattern it computed the wrong
+    /// tile and the `noised_packed` LogUp + the opening argument both failed):
+    /// the canonical program (`canonical.rs`) and the trace generator
+    /// (`composite_trace::place_useful_work_chain_hw_indexed`) now index the
+    /// **opened pattern rows** via covering-range lanes (`index − chunk base`),
+    /// byte-identical for contiguous tiles (regression: the contiguous real
+    /// prove + the canonical schedule tests still pass). Opt-in (a real ~60s proof).
     #[test]
-    #[ignore = "real Layer-0 proof; tracks B5b non-contiguous-opening progress"]
-    fn noncontiguous_recursive_prove_currently_fails_at_noised_packed_lookup() {
+    #[ignore = "real Layer-0 proof; B5b non-contiguous recursive opening"]
+    fn noncontiguous_recursive_certificate_proves_and_verifies() {
         let noncontig =
             crate::pearl_compat::PearlPeriodicPattern::from_list(&[0, 1, 8, 9, 64, 65, 72, 73])
                 .expect("representable Pearl pattern");
@@ -3471,19 +3481,21 @@ mod tests {
             noncontig,
             noncontig,
         );
-        let msg = match prove_pearl_merge_recursive_certificate(&attempt, &params, &a, &b, 16) {
-            Ok(_) => panic!(
-                "non-contiguous opening unexpectedly proved — B5b may be resolved; \
-                 flip this test to prove + verify succeeding"
-            ),
-            Err(e) => format!("{e:?}"),
-        };
-        // Wall 1 (noised_packed LogUp) is fixed by the sweep pattern-row indexing;
-        // the remaining wall is the covering-range opening (CapMismatch).
-        assert!(
-            msg.contains("CapMismatch"),
-            "expected the remaining B5b covering-range opening wall (CapMismatch); got: {msg}"
+        let run = prove_pearl_merge_recursive_certificate(&attempt, &params, &a, &b, 16)
+            .expect("prove non-contiguous recursive certificate");
+        // The certificate binds the NON-CONTIGUOUS ticket, not a contiguous tile.
+        assert_eq!(run.pis.jackpot, tile_state_words(&attempt.ticket.tile_state));
+        assert_eq!(
+            run.pis.hash_jackpot,
+            bytes_to_words_le(&attempt.ticket.jackpot_hash)
         );
+        ai_pow_zk::recursion::verify_recursive_certificate(
+            &run.certificate,
+            &run.zk_params,
+            &ai_pow_zk::CircuitConfig::PROD,
+            &run.pis,
+        )
+        .expect("verify non-contiguous recursive certificate");
     }
 
     /// Opt-in because this builds a real Layer-0 proof and recursive
