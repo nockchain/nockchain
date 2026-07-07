@@ -213,6 +213,33 @@ fn decode_rejects_dense_core() {
     );
 }
 
+/// B4 — MoE difficulty pricing is identical to dense: Pearl
+/// `extract_difficulty_bound` prices by `h·w·dot_product_length`, none of which
+/// depend on the MoE config, so the MoE trailer must not perturb the target.
+#[test]
+fn moe_difficulty_pricing_equals_dense() {
+    let dense = {
+        let mut c = moe_core(4, 2);
+        c.mining_config.reserved = [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE];
+        c
+    };
+    let moe = moe_core(4, 2);
+    assert_eq!(
+        dense.difficulty_adjustment_factor().unwrap(),
+        moe.difficulty_adjustment_factor().unwrap(),
+        "h*w*dot adjustment must not depend on the MoE trailer"
+    );
+    assert_eq!(
+        dense.pearl_adjusted_target().unwrap(),
+        moe.pearl_adjusted_target().unwrap()
+    );
+    let nockchain_target = [0x11u8; 32];
+    assert_eq!(
+        dense.nockchain_adjusted_target(&nockchain_target).unwrap(),
+        moe.nockchain_adjusted_target(&nockchain_target).unwrap()
+    );
+}
+
 #[test]
 fn decode_rejects_out_of_matrix_offsets() {
     let mut core = moe_core(2, 1);
