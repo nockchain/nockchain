@@ -222,6 +222,73 @@ commitment is strictly worse than dense-only + fail-closed MoE (R1).
 
 ---
 
+## 5b. Implementation status (2026-07-07)
+
+Track B's **entire off-circuit surface is landed and validated**; the in-circuit
+binding (B5) is the residual. MoE remains **fully fail-closed at acceptance** —
+no MoE proof can be accepted as a Nockchain block until B5.
+
+| Stage | Status | Commit | Where |
+|---|---|---|---|
+| B1 routing canonicalization | ✅ validated | `014451d9` | `src/pearl_moe_routing.rs` |
+| B2 commitment splice | ✅ validated | `520793f2` | `src/fiat_shamir.rs` |
+| B3a config parse + fail-closed accept | ✅ validated | `65d610a2` | `src/pearl_compat.rs` |
+| B3b public-data wire codec | ✅ validated | `4b8c07b0` | `src/pearl_compat.rs`, `tests/pearl_moe_wire.rs` |
+| B4 difficulty (pricing == dense) | ✅ validated | `2b9c1d8a` | `tests/pearl_moe_wire.rs` |
+| B3c plain-proof `MoEProofParams` tail | ✅ validated | `86ceefe2` | `ai-pow-miner/src/pearl_plain_proof.rs` |
+| B3d grouped-tile reference | ✅ validated | `c4517844` | `src/pearl_compat.rs`, `src/pearl_moe_routing.rs`, `tests/pearl_moe_tile.rs` |
+| B5-gate MoE fail-closed end-to-end | ✅ validated | `59594765` | `tests/pearl_moe_fail_closed.rs` |
+| **B5 recursive circuit binding** | ⛔ **residual** | — | `crates/ai-pow-zk/` |
+
+**Validation notes.** B1/B2/B3a/B3b/B3c/B4 are byte-exact against Pearl's
+unambiguous spec (algorithm / formula / wire layout / bincode oracle) — no live
+Pearl vector needed. B3d's `compute_moe_tile` is validated by **dense-equivalence**
+(byte-identical to the already-validated dense per-tile compute given the same
+opened indices/seeds) + MoE self-consistency; its one from-reading assumption
+(the exact `outer_indices` gather semantics) carries a residual KAT (below).
+
+### B5 residual — the recursive circuit (soundness linchpin; NOT started)
+
+**Why deferred (honest):** `ai-pow-zk` is ~25k lines of plonky3 STARK circuitry.
+Binding the MoE routing commitment, the `outer_indices` CTL, and the grouped
+matmul *in-circuit*, with the exhaustive soundness validation a consensus proof
+system demands (constraint completeness, no under-constraining, adversarial
+tamper coverage), is multi-week circuit engineering. It cannot be soundly
+completed and exhaustively tested in one session, and a half-built constraint
+system is strictly worse than none (standing rule R1). It was therefore **not
+started** — deferred deliberately, not rushed.
+
+**Exact remaining steps (each KAT-first; MoE stays fail-closed until all pass):**
+1. **Pearl KAT vectors.** Build the Pearl `zk-pow` crate; emit a fixed
+   `(public_data, PlainProof)` MoE vector via `try_mine_one_moe` + `parse_proof`
+   (Pearl `zk-pow/tests/moe_test.rs`), and vendor it (as S0–S9 were). This also
+   closes B3d's residual: cross-check `RoutingData::outer_indices` and
+   `compute_moe_tile` against Pearl's mined tile byte-for-byte.
+2. **B5a routing/offsets in-circuit bind.** Constrain `routing_root` over the
+   `s_routing` 64-byte strips + Merkle proof and `hash_offsets`, then the
+   `hash_activations` splice into `s_A` — reproducing `fiat_shamir::moe_routing_commitment`
+   in-circuit. Reuse the existing `blake3_tree` / composite BLAKE3 chip.
+3. **B5b `outer_indices` CTL.** Cross-table-lookup binding public `outer_indices`
+   to the routed tokens (Pearl rejects mismatched `outer_indices` —
+   `moe_test.rs::test_moe_wrong_public_outer_indices_fails_verification`).
+4. **B5c grouped matmul bind.** Expert column offset `expert_idx·n`; A-rows via
+   `outer_indices`. Reuse the composite matmul→fold keystone.
+5. **B5d full prove→verify** of a mined MoE ticket; **B5e adversarial** — corrupt
+   routing ⇒ constraint failure; `outer_indices` / `weight_col_offset` / field
+   tamper ⇒ reject (mirror every `moe_test.rs` failure case).
+6. **Lift the guards** only after B5a–e validate: `sanity_check`,
+   `validate_pearl_merge_config_for_recursive_prover`, `from_public_data`, and the
+   plain-proof `LegacyV1` MoE rejection — plus wire the `PearlMoeParams` /
+   `PearlMoeProof` into `PearlPublicProofParams` / the mined attempt end-to-end
+   (the field integration deferred in B3b/B3c to avoid churn before a real consumer).
+7. **STARK `"V2"` domain prefix** in `public_data_commitment`.
+
+**Fail-closed guarantee (verified, `tests/pearl_moe_fail_closed.rs`):** a MoE
+mining config is rejected at (a) the 164-byte merge-statement cap, (b)
+`from_public_data`, (c) `sanity_check` / `verify_pearl_compatible_work`, and (d)
+`validate_pearl_merge_config_for_recursive_prover`. The landed B1–B4 building
+blocks are inert with respect to block acceptance until step 6 lifts these guards.
+
 ## 6. Soundness / adversarial requirements (must all have rejecting tests)
 
 - Routing canonicalization mismatch (any tie-break/order deviation) — caught by B1 KAT.
