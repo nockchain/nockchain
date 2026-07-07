@@ -74,6 +74,20 @@ pub enum PearlCompatError {
     BadPatternLen(usize),
     #[error("Pearl encoded public proof params have wrong length: expected 164, got {0}")]
     BadPublicParamsLen(usize),
+    #[error("Pearl MoE public data is too short: need at least {expected}, got {actual}")]
+    MoeWireTooShort { expected: usize, actual: usize },
+    #[error("Pearl MoE public data length mismatch: expected {expected}, got {actual}")]
+    MoeWireLengthMismatch { expected: usize, actual: usize },
+    #[error("Pearl MoE number of experts {0} exceeds the maximum (1024)")]
+    MoeExpertsExceedMax(usize),
+    #[error("Pearl MoE outer_indices length {0} exceeds the maximum (128)")]
+    MoeOuterIndicesExceedMax(usize),
+    #[error("Pearl MoE public data present but mining config is not GROUPED_GEMM")]
+    MoePublicMissingConfig,
+    #[error("Pearl MoE routing_offsets length {actual} must equal the expert count {expected}")]
+    MoeExpertCountMismatch { expected: usize, actual: usize },
+    #[error("Pearl MoE expert_idx {expert_idx} is out of range (e={e})")]
+    MoeExpertIdxOutOfRange { expert_idx: u16, e: u16 },
     #[error("unsupported Pearl MMA type: {0}")]
     UnsupportedMmaType(u16),
     #[error("Pearl mining config common_dim does not match params.k")]
@@ -579,6 +593,36 @@ pub struct PearlPublicProofParams {
     pub t_cols: u32,
 }
 
+/// Pearl `PublicProofParams::MAX_NUM_EXPERTS`.
+pub const PEARL_MOE_MAX_NUM_EXPERTS: usize = 1024;
+/// Pearl `PublicProofParams::MAX_OUTER_INDICES`.
+pub const PEARL_MOE_MAX_OUTER_INDICES: usize = 128;
+/// Bytes per routing offset (`u32`).
+pub const PEARL_MOE_ROUTING_OFFSET_BYTES: usize = 4;
+/// Fixed part of an MoE `public_data`: 164-byte core + `expert_idx(2)` +
+/// `hash_routing(32)` + `outer_count(1)`. Variable: `routing_offsets(4·e)` and
+/// `outer_indices(4·oc)`. (Pearl `MIN_MOE_WIRE_SIZE = 199`.)
+pub const PEARL_MOE_MIN_WIRE_SIZE: usize = PEARL_PUBLIC_PROOF_PARAMS_SIZE + 2 + 32 + 1;
+/// Largest MoE `public_data` (Pearl `MAX_WIRE_SIZE = 4807`).
+pub const PEARL_MOE_MAX_WIRE_SIZE: usize = PEARL_MOE_MIN_WIRE_SIZE
+    + PEARL_MOE_MAX_OUTER_INDICES * 4
+    + PEARL_MOE_MAX_NUM_EXPERTS * PEARL_MOE_ROUTING_OFFSET_BYTES;
+
+/// The MoE-specific public parameters carried in the `public_data` tail (Pearl
+/// `MoEParams`). `e` and `top_k` live in the mining-config trailer, not here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMoeParams {
+    /// The opened expert.
+    pub expert_idx: u16,
+    /// Per-expert exclusive-end cumulative token counts; `len == e`, last entry
+    /// `== m·top_k`.
+    pub routing_offsets: Vec<u32>,
+    /// `moe.hash_routing` (the routing Merkle root, `= routing_root`).
+    pub hash_routing: [u8; 32],
+    /// Opened tile rows decoded to global token positions in `A`.
+    pub outer_indices: Vec<u32>,
+}
+
 impl PearlPublicProofParams {
     pub fn to_public_data(&self) -> Result<[u8; PEARL_PUBLIC_PROOF_PARAMS_SIZE], PearlCompatError> {
         let mut out = [0u8; PEARL_PUBLIC_PROOF_PARAMS_SIZE];
@@ -591,6 +635,173 @@ impl PearlPublicProofParams {
         out[156..160].copy_from_slice(&self.t_rows.to_le_bytes());
         out[160..164].copy_from_slice(&self.t_cols.to_le_bytes());
         Ok(out)
+    }
+
+    /// Serialize this (MoE) statement to Pearl V2 wire `public_data` including the
+    /// MoE tail (Pearl `PublicProofParams::to_wire_bytes`, MoE arm):
+    ///
+    /// ```text
+    /// core(164) ‖ expert_idx(2) ‖ routing_offsets[e]·(4) ‖ hash_routing(32)
+    ///           ‖ outer_count(1) ‖ outer_indices[oc]·(4)
+    /// ```
+    ///
+    /// `self.mining_config` must be GROUPED_GEMM with `e == routing_offsets.len()`.
+    pub fn to_wire_bytes_moe(&self, moe: &PearlMoeParams) -> Result<Vec<u8>, PearlCompatError> {
+        let cfg = self
+            .mining_config
+            .moe()
+            .ok_or(PearlCompatError::MoePublicMissingConfig)?;
+        let e = cfg.e as usize;
+        if moe.routing_offsets.len() != e {
+            return Err(PearlCompatError::MoeExpertCountMismatch {
+                expected: e,
+                actual: moe.routing_offsets.len(),
+            });
+        }
+        if e > PEARL_MOE_MAX_NUM_EXPERTS {
+            return Err(PearlCompatError::MoeExpertsExceedMax(e));
+        }
+        if moe.outer_indices.len() > PEARL_MOE_MAX_OUTER_INDICES {
+            return Err(PearlCompatError::MoeOuterIndicesExceedMax(
+                moe.outer_indices.len(),
+            ));
+        }
+        if moe.expert_idx >= cfg.e {
+            return Err(PearlCompatError::MoeExpertIdxOutOfRange {
+                expert_idx: moe.expert_idx,
+                e: cfg.e,
+            });
+        }
+        let mut out = Vec::with_capacity(
+            PEARL_MOE_MIN_WIRE_SIZE + moe.routing_offsets.len() * 4 + moe.outer_indices.len() * 4,
+        );
+        out.extend_from_slice(&self.to_public_data()?);
+        out.extend_from_slice(&moe.expert_idx.to_le_bytes());
+        for off in &moe.routing_offsets {
+            out.extend_from_slice(&off.to_le_bytes());
+        }
+        out.extend_from_slice(&moe.hash_routing);
+        out.push(moe.outer_indices.len() as u8);
+        for idx in &moe.outer_indices {
+            out.extend_from_slice(&idx.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// Decode a Pearl V2 MoE `public_data` (core + MoE tail) into the core
+    /// statement and its [`PearlMoeParams`]. Mirrors Pearl
+    /// `PublicProofParams::from_wire_bytes` (MoE arm): the expert count `e` comes
+    /// from the mining-config trailer and fixes the routing-offsets length; the
+    /// total length is checked exactly.
+    ///
+    /// This is the byte-level MoE decoder; it does **not** by itself accept an MoE
+    /// proof — the recursive certificate path stays fail-closed until Track B5.
+    pub fn from_wire_bytes_moe(
+        block_header: PearlIncompleteBlockHeader,
+        bytes: &[u8],
+    ) -> Result<(Self, PearlMoeParams), PearlCompatError> {
+        if bytes.len() < PEARL_MOE_MIN_WIRE_SIZE {
+            return Err(PearlCompatError::MoeWireTooShort {
+                expected: PEARL_MOE_MIN_WIRE_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        // Parse the 164-byte core directly (from_public_data is fail-closed on MoE).
+        let mining_config = PearlMiningConfig::from_bytes(&bytes[0..PEARL_MINING_CONFIG_SIZE])?;
+        let cfg = mining_config
+            .moe()
+            .ok_or(PearlCompatError::MoePublicMissingConfig)?;
+        let e = cfg.e as usize;
+        if e > PEARL_MOE_MAX_NUM_EXPERTS {
+            return Err(PearlCompatError::MoeExpertsExceedMax(e));
+        }
+        let hash_a = bytes[52..84].try_into().unwrap();
+        let hash_b = bytes[84..116].try_into().unwrap();
+        let hash_jackpot = bytes[116..148].try_into().unwrap();
+        let m = u32::from_le_bytes(bytes[148..152].try_into().unwrap());
+        let n = u32::from_le_bytes(bytes[152..156].try_into().unwrap());
+        let t_rows = u32::from_le_bytes(bytes[156..160].try_into().unwrap());
+        let t_cols = u32::from_le_bytes(bytes[160..164].try_into().unwrap());
+
+        // MoE tail. Need at least the routing offsets before the fixed remainder.
+        let min_with_offsets = PEARL_MOE_MIN_WIRE_SIZE + e * PEARL_MOE_ROUTING_OFFSET_BYTES;
+        if bytes.len() < min_with_offsets {
+            return Err(PearlCompatError::MoeWireTooShort {
+                expected: min_with_offsets,
+                actual: bytes.len(),
+            });
+        }
+        let tail = &bytes[PEARL_PUBLIC_PROOF_PARAMS_SIZE..];
+        let expert_idx = u16::from_le_bytes(tail[0..2].try_into().unwrap());
+        if expert_idx >= cfg.e {
+            return Err(PearlCompatError::MoeExpertIdxOutOfRange {
+                expert_idx,
+                e: cfg.e,
+            });
+        }
+        let mut cursor = 2usize;
+        let mut routing_offsets = Vec::with_capacity(e);
+        for _ in 0..e {
+            routing_offsets.push(u32::from_le_bytes(
+                tail[cursor..cursor + 4].try_into().unwrap(),
+            ));
+            cursor += 4;
+        }
+        let hash_routing: [u8; 32] = tail[cursor..cursor + 32].try_into().unwrap();
+        cursor += 32;
+        let num_outer = tail[cursor] as usize;
+        cursor += 1;
+        if num_outer > PEARL_MOE_MAX_OUTER_INDICES {
+            return Err(PearlCompatError::MoeOuterIndicesExceedMax(num_outer));
+        }
+        let expected_len = PEARL_MOE_MIN_WIRE_SIZE
+            + num_outer * 4
+            + e * PEARL_MOE_ROUTING_OFFSET_BYTES;
+        if bytes.len() != expected_len {
+            return Err(PearlCompatError::MoeWireLengthMismatch {
+                expected: expected_len,
+                actual: bytes.len(),
+            });
+        }
+        let mut outer_indices = Vec::with_capacity(num_outer);
+        for _ in 0..num_outer {
+            outer_indices.push(u32::from_le_bytes(
+                tail[cursor..cursor + 4].try_into().unwrap(),
+            ));
+            cursor += 4;
+        }
+
+        // Core offset validity (same as the dense decoder) + t_rows/t_cols bounds
+        // (Pearl `from_wire_bytes`).
+        if !mining_config.rows_pattern.offset_is_valid(t_rows)
+            || !mining_config.cols_pattern.offset_is_valid(t_cols)
+        {
+            return Err(PearlCompatError::InvalidPatternOffset);
+        }
+        if t_rows >= m || t_cols >= n {
+            return Err(PearlCompatError::PatternOutOfMatrix);
+        }
+
+        let core = Self {
+            block_header,
+            mining_config,
+            hash_a,
+            hash_b,
+            hash_jackpot,
+            m,
+            n,
+            t_rows,
+            t_cols,
+        };
+        Ok((
+            core,
+            PearlMoeParams {
+                expert_idx,
+                routing_offsets,
+                hash_routing,
+                outer_indices,
+            },
+        ))
     }
 
     pub fn from_public_data(
