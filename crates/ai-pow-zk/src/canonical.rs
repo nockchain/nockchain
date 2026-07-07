@@ -620,6 +620,10 @@ struct StripPlan {
     b_id_base: u64,
     blocks_a: Vec<StripBlock>,
     blocks_b: Vec<StripBlock>,
+    // B5b: the opened row/column pattern (may be non-contiguous). The sweep must
+    // index these, not tile geometry.
+    a_indices: Vec<u32>,
+    b_indices: Vec<u32>,
 }
 
 impl StripPlan {
@@ -639,6 +643,8 @@ impl StripPlan {
             b_id_base,
             blocks_a: strip_blocks(ca0, ca1, a_nc),
             blocks_b: strip_blocks(cb0, cb1, b_nc),
+            a_indices: strip_schedule.a_indices.clone(),
+            b_indices: strip_schedule.b_indices.clone(),
         }
     }
 }
@@ -891,14 +897,25 @@ fn row_descriptor(
             let lo = step * r;
             let c0 = chunk * TILE_D;
             let w = (r - c0).min(TILE_D);
-            let ids_for = |side_a: bool, lane_base: usize| -> [u64; 4] {
+            let ids_for = |side_a: bool, sb_base: usize| -> [u64; 4] {
+                // B5b: map the tile-local sub-block row to the actual opened
+                // (possibly non-contiguous) matrix row, then to its covering-range
+                // position (`row - c_base`) — the key the strip-opening producer
+                // publishes. For a contiguous tile `indices[i] - c_base == i`, so
+                // this is byte-identical to the previous tile-geometry path.
+                let (indices, c_base) = if side_a {
+                    (&sp.a_indices, sp.ca0)
+                } else {
+                    (&sp.b_indices, sp.cb0)
+                };
                 core::array::from_fn(|jc| {
                     let mut src = [None; 8];
                     for m in 0..8 {
                         let f = jc * 8 + m;
                         let (di, col) = (f / TILE_D, f % TILE_D);
                         if col < w {
-                            src[m] = Some(((lane_base + di) as u32, (lo + c0 + col) as u32));
+                            let lane = indices[sb_base + di] as usize - c_base;
+                            src[m] = Some((lane as u32, (lo + c0 + col) as u32));
                         }
                     }
                     crate::composite_trace::noised_chunk_id(

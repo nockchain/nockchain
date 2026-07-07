@@ -3430,26 +3430,28 @@ mod tests {
         ));
     }
 
-    /// **B5b empirical wall (decisive, by running a real Layer-0 proof).**
+    /// **B5b progress probe (by running a real Layer-0 proof).**
     ///
     /// MoE opens the expert's routed-token rows (`outer_indices`), which are
     /// **non-contiguous**. This probe proves the recursive certificate for a
     /// genuinely non-contiguous opened pattern (`[0,1,8,9,64,65,72,73]`, target
-    /// `0xff…` so it is always met). It currently **fails inside the STARK** with
-    /// `GlobalCumulativeMismatch: noised_packed` — the `noised_packed` LogUp bus
-    /// (noise produced on the strip-opening leaf rows ↔ consumed by the matmul
-    /// sweep) does not balance: the non-contiguous strip opens a *covering chunk
-    /// range* (`min..max`), producing per-row noise for rows the sweep never
-    /// consumes, so the global cumulative sums differ.
+    /// `0xff…` so it is always met).
     ///
-    /// This pins B5b precisely: the in-circuit change is to make the
-    /// noise-producer / matmul-consumer accounting (`composite_lookups`
-    /// `noised_packed_freq` / `matmul_noised_packed_query_count`, the co-located
-    /// leaf-row noise pins in `canonical.rs`, and the sweep row indexing) correct
-    /// for a non-contiguous opened row set. When B5b lands, this test must be
-    /// flipped to `prove + verify` succeeding. Opt-in (a real ~30s proof).
+    /// **Wall 1 (resolved):** the matmul `Sweep` indexed rows by tile geometry,
+    /// not the opened pattern, so the `noised_packed` LogUp diverged
+    /// (`GlobalCumulativeMismatch`). Fixed by indexing `sp.a_indices`/`b_indices`
+    /// (covering-range position `row − c_base`) in the sweep row-descriptor
+    /// (`canonical.rs`, byte-identical for contiguous tiles).
+    ///
+    /// **Wall 2 (current):** the proof now advances past the lookup layer and
+    /// fails at the opening argument with `InvalidOpeningArgument(CapMismatch)` —
+    /// the strip covering-range opening (`indexed_strips_chunk_range`, `min..max`)
+    /// produces a trace/commitment shape that does not match the opened tile;
+    /// the remaining B5b work is **selective (per-selected-chunk) opening** so the
+    /// opened rows are exactly the pattern rows. When that lands this test must be
+    /// flipped to `prove + verify` succeeding. Opt-in (a real ~60s proof).
     #[test]
-    #[ignore = "real Layer-0 proof; documents the B5b non-contiguous-opening wall"]
+    #[ignore = "real Layer-0 proof; tracks B5b non-contiguous-opening progress"]
     fn noncontiguous_recursive_prove_currently_fails_at_noised_packed_lookup() {
         let noncontig =
             crate::pearl_compat::PearlPeriodicPattern::from_list(&[0, 1, 8, 9, 64, 65, 72, 73])
@@ -3476,9 +3478,11 @@ mod tests {
             ),
             Err(e) => format!("{e:?}"),
         };
+        // Wall 1 (noised_packed LogUp) is fixed by the sweep pattern-row indexing;
+        // the remaining wall is the covering-range opening (CapMismatch).
         assert!(
-            msg.contains("GlobalCumulativeMismatch") && msg.contains("noised_packed"),
-            "expected the non-contiguous noised_packed LogUp wall; got: {msg}"
+            msg.contains("CapMismatch"),
+            "expected the remaining B5b covering-range opening wall (CapMismatch); got: {msg}"
         );
     }
 
