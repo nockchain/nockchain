@@ -320,6 +320,58 @@ mod tests {
         assert_eq!(c.hash_offsets, crate::commit::matrix_commitment(&ro, &kappa));
     }
 
+    /// **Real Pearl KAT** — our `hash_offsets` (keyed matrix commitment of the
+    /// LE routing offsets) + `hash_routing` + `hash_activations` composition must
+    /// equal Pearl `zk_pow::api::proof_utils::compute_hash_activations` for a
+    /// fixed input. Vector emitted from the Pearl `zk-pow` crate (2026-07-07):
+    /// `hash_a=[0x22;32]`, `routing_root=[0x33;32]`, `routing_offsets=[10,20,30,40]`,
+    /// `job_key=[0x11;32]`. This anchors B2 to Pearl's actual function, not just
+    /// its documented formula.
+    #[test]
+    fn moe_hash_activations_matches_pearl_kat() {
+        let hash_a = [0x22u8; 32];
+        let routing_root = [0x33u8; 32];
+        let job_key = [0x11u8; 32];
+        let routing_offsets_le: Vec<u8> = [10u32, 20, 30, 40]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let hash_offsets = crate::commit::matrix_commitment(&routing_offsets_le, &job_key);
+        let hash_routing = moe_hash_routing(&routing_root, &hash_offsets);
+        let hash_activations = moe_hash_activations(&hash_a, &hash_routing);
+        let pearl: [u8; 32] = [
+            124, 127, 230, 159, 165, 18, 134, 171, 128, 119, 180, 146, 8, 204, 18, 208, 114, 21,
+            147, 95, 107, 11, 231, 120, 157, 77, 25, 124, 22, 30, 51, 102,
+        ];
+        assert_eq!(
+            hash_activations, pearl,
+            "hash_activations must match Pearl compute_hash_activations"
+        );
+    }
+
+    /// Cross-crate byte-equivalence: `ai-pow-zk`'s off-circuit MoE reference
+    /// (`moe_ref`, the spec the B5 sub-AIR reproduces) equals this crate's MoE
+    /// splice. Transitively Pearl-validated via the KAT above (this crate) and
+    /// fixture S8 (`matrix_commitment`). `ai-pow-zk` cannot depend on `ai-pow`,
+    /// so the equivalence is asserted here (`--features zk`).
+    #[cfg(feature = "zk")]
+    #[test]
+    fn moe_ref_byte_equivalent_to_fiat_shamir_splice() {
+        let job_key = [0x11u8; 32];
+        let h_a = [0x22u8; 32];
+        let rd: Vec<u8> = (0u32..40).flat_map(|v| v.to_le_bytes()).collect();
+        let ro: Vec<u8> = [10u32, 20, 30, 40]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let ours = moe_routing_commitment(&job_key, &h_a, &rd, &ro);
+        let zk = ai_pow_zk::moe_ref::moe_commitment(&job_key, &h_a, &rd, &ro);
+        assert_eq!(ours.routing_root, zk.routing_root);
+        assert_eq!(ours.hash_offsets, zk.hash_offsets);
+        assert_eq!(ours.hash_routing, zk.hash_routing);
+        assert_eq!(ours.hash_activations, zk.hash_activations);
+    }
+
     /// The MoE seed derivation folds routing in: `s_A` differs from the dense
     /// `s_A` (which keys off `H_A`), while `s_B` is unchanged. This is the
     /// defining effect of the splice.

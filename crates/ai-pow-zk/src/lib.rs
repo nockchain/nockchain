@@ -109,6 +109,7 @@ pub mod composite_preprocess;
 pub mod composite_proof;
 pub mod composite_public;
 pub mod composite_trace;
+pub mod moe_ref;
 pub mod noise_ref;
 pub mod params;
 
