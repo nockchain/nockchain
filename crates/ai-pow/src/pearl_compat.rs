@@ -90,6 +90,20 @@ pub enum PearlCompatError {
     MoeExpertIdxOutOfRange { expert_idx: u16, e: u16 },
     #[error(transparent)]
     MoeRouting(#[from] crate::pearl_moe_routing::RoutingError),
+    #[error("Pearl MoE routing_data length {actual} must equal m*top_k = {expected}")]
+    MoeRoutingDataLenMismatch { expected: u64, actual: usize },
+    #[error("Pearl MoE routing commitment does not match the committed routing_root")]
+    MoeRoutingRootMismatch,
+    #[error("Pearl MoE routing token index {token} at slot {slot} is out of range (m={m})")]
+    MoeRoutingTokenOutOfRange { slot: usize, token: u32, m: u32 },
+    #[error("Pearl MoE routing_offsets are not a valid non-decreasing partition ending at m*top_k")]
+    MoeOffsetsInconsistent,
+    #[error("Pearl MoE outer_indices length {actual} must equal the row-pattern size {expected}")]
+    MoeOuterIndicesLenMismatch { expected: usize, actual: usize },
+    #[error("Pearl MoE opened row position {pos} falls outside expert {expert_idx}'s routed tokens")]
+    MoeOuterIndexOutsideExpert { expert_idx: u16, pos: u32 },
+    #[error("Pearl MoE outer_indices do not match the expert's routed tokens (gather mismatch)")]
+    MoeOuterIndicesMismatch,
     #[error("unsupported Pearl MMA type: {0}")]
     UnsupportedMmaType(u16),
     #[error("Pearl mining config common_dim does not match params.k")]
@@ -1401,6 +1415,126 @@ pub fn compute_pearl_moe_ticket(
         tile_state,
         jackpot_hash,
     })
+}
+
+/// **MoE routing-consistency binding (soundness gate).**
+///
+/// Verifies that the opened tile rows (`moe.outer_indices` — the rows the
+/// recursive Layer-0 STARK proves the tile over) are **exactly** the expert's
+/// routed tokens selected by the *public* row pattern, and that this follows from
+/// the *committed* routing. Without this a prover could open arbitrary A-rows and
+/// claim they are the expert's routed tokens, breaking the correspondence to a
+/// valid Pearl MoE proof.
+///
+/// The Nockchain recursive certificate proves the Pearl-compatible statement its
+/// own way, so it may carry `routing_data` (the flat per-expert-sorted token
+/// indices) publicly and check the gather in the verifier, rather than via an
+/// in-circuit CTL. Everything the check relies on is committed:
+/// `routing_data` → `routing_root` (= `moe.hash_routing`) → `hash_activations` →
+/// `s_A` → jackpot; `routing_offsets` → `hash_offsets` → `s_A`; `rows_pattern` /
+/// `expert_idx` → the mining config → `job_key`. So a forged `outer_indices`,
+/// `routing_data`, or `routing_offsets` either fails a check here or changes the
+/// jackpot the STARK is bound to.
+///
+/// Checks: `routing_data` is a well-formed `m·top_k` array of in-range token
+/// indices; `routing_root == matrix_commitment(routing_data)`; `routing_offsets`
+/// is a non-decreasing partition ending at `m·top_k`; and the gather
+/// `outer_indices[u] == routing_data[expert_start + pattern[u]]` with each opened
+/// position inside the expert's real (non-padding) token span.
+pub fn verify_pearl_moe_routing_binding(
+    kappa: &[u8; 32],
+    mining_config: &PearlMiningConfig,
+    moe: &PearlMoeParams,
+    m: u32,
+    t_rows: u32,
+    routing_data: &[u32],
+    max_pattern_len: usize,
+) -> Result<(), PearlCompatError> {
+    let cfg = mining_config
+        .moe()
+        .ok_or(PearlCompatError::MoePublicMissingConfig)?;
+    let e = cfg.e as usize;
+    let top_k = cfg.top_k as usize;
+
+    // Expert bookkeeping is well-formed.
+    if moe.routing_offsets.len() != e {
+        return Err(PearlCompatError::MoeExpertCountMismatch {
+            expected: e,
+            actual: moe.routing_offsets.len(),
+        });
+    }
+    if (moe.expert_idx as usize) >= e {
+        return Err(PearlCompatError::MoeExpertIdxOutOfRange {
+            expert_idx: moe.expert_idx,
+            e: cfg.e,
+        });
+    }
+
+    // routing_data is a well-formed m*top_k array of in-range token indices.
+    let numel = (m as u64)
+        .checked_mul(top_k as u64)
+        .ok_or(PearlCompatError::PublicParamEnvelope)?;
+    if routing_data.len() as u64 != numel {
+        return Err(PearlCompatError::MoeRoutingDataLenMismatch {
+            expected: numel,
+            actual: routing_data.len(),
+        });
+    }
+    for (slot, &token) in routing_data.iter().enumerate() {
+        if token >= m {
+            return Err(PearlCompatError::MoeRoutingTokenOutOfRange { slot, token, m });
+        }
+    }
+
+    // routing_offsets is a non-decreasing partition ending at numel (each expert
+    // span is non-negative; the last entry accounts for every routed slot).
+    if !moe.routing_offsets.windows(2).all(|w| w[0] <= w[1]) {
+        return Err(PearlCompatError::MoeOffsetsInconsistent);
+    }
+    if u64::from(*moe.routing_offsets.last().unwrap()) != numel {
+        return Err(PearlCompatError::MoeOffsetsInconsistent);
+    }
+
+    // routing_root binding: the carried routing_data commits to moe.hash_routing.
+    let routing_data_le: Vec<u8> = routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    if crate::commit::matrix_commitment(&routing_data_le, kappa) != moe.hash_routing {
+        return Err(PearlCompatError::MoeRoutingRootMismatch);
+    }
+
+    // The public row pattern selects positions within the expert's token subset.
+    let inner = mining_config
+        .rows_pattern
+        .indices_with_offset_bounded(t_rows, max_pattern_len)?;
+    if moe.outer_indices.len() != inner.len() {
+        return Err(PearlCompatError::MoeOuterIndicesLenMismatch {
+            expected: inner.len(),
+            actual: moe.outer_indices.len(),
+        });
+    }
+    let expert_start = if moe.expert_idx == 0 {
+        0u32
+    } else {
+        moe.routing_offsets[moe.expert_idx as usize - 1]
+    };
+    let expert_end = moe.routing_offsets[moe.expert_idx as usize];
+
+    // The gather: each opened row is the expert's routed token at the pattern
+    // position, and that position is inside the expert's real (non-padding) span.
+    for (u, &inner_u) in inner.iter().enumerate() {
+        let pos = expert_start
+            .checked_add(inner_u)
+            .ok_or(PearlCompatError::PatternPeriodTooLarge)?;
+        if pos >= expert_end {
+            return Err(PearlCompatError::MoeOuterIndexOutsideExpert {
+                expert_idx: moe.expert_idx,
+                pos,
+            });
+        }
+        if moe.outer_indices[u] != routing_data[pos as usize] {
+            return Err(PearlCompatError::MoeOuterIndicesMismatch);
+        }
+    }
+    Ok(())
 }
 
 pub fn verify_pearl_pattern_ticket(
