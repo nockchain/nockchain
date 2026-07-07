@@ -3,7 +3,9 @@
 ::  instead of repeating, so no rest-loop cycle-cut fires and the process
 ::  aborts) — the pairing still agrees (no artifact from either side), but
 ::  this probe is excluded from the in-process compiler_reject Rust test
-::  because the overflow would abort the test harness.
+::  (the overflow would abort the test harness) and its Bazel test is
+::  tagged manual (how long the overflow takes is platform-dependent and
+::  exceeds CI's small-test timeout on Linux runners).
 |%
 +$  aaa  aaa
 ++  main

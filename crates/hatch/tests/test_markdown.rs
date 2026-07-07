@@ -31,8 +31,8 @@ fn test_markdown() {
     // Prefer the in-tree copy (repo root is two levels above this crate;
     // repo_path resolves against the repo's PARENT dir). Fall back to the
     // `open` sibling checkout the golden jam was originally generated from.
-    let mut source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../hoon/common/markdown/markdown.hoon");
+    let mut source_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../hoon/common/markdown/markdown.hoon");
     if !source_path.exists() {
         source_path = repo_path("open/hoon/common/markdown/markdown.hoon");
     }

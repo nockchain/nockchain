@@ -37,11 +37,9 @@ fn term_u64(tag: &str) -> u64 {
 }
 
 fn is_type_tag(value: u64) -> bool {
-    [
-        "noun", "void", "atom", "cell", "core", "face", "fork", "hint", "hold",
-    ]
-    .iter()
-    .any(|tag| term_u64(tag) == value)
+    ["noun", "void", "atom", "cell", "core", "face", "fork", "hint", "hold"]
+        .iter()
+        .any(|tag| term_u64(tag) == value)
 }
 
 fn is_type_noun(noun: Noun, space: &NounSpace) -> bool {

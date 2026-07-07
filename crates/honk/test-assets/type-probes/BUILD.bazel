@@ -185,8 +185,13 @@ test_suite(
 # (mint-nice/vain/lost, find/find-fork, fish-core/loop, fire-dry,
 # mull, redo-match, payload-block, ...); the same corpus runs in-process
 # as crates/honk/tests/compiler_reject.rs so the branches count toward
-# coverage. rest_loop_alias is sh-level only: both compilers currently
-# reject it by native stack overflow, which would abort an in-process test.
+# coverage. rest_loop_alias is special-cased twice: it is sh-level only
+# (both compilers currently reject it by native stack overflow, which would
+# abort an in-process test), and its test is tagged manual / kept out of the
+# suites — how long the overflow takes to hit the guard page is platform-
+# dependent, and on Linux CI runners it exceeds the small-test timeout.
+# Run it locally with:
+#   bazel test //crates/honk/test-assets/type-probes:reject_rest_loop_alias_test
 REJECTION_PROBES = [
     "core_cast_arms",
     "door_sample_nest",
@@ -231,13 +236,20 @@ REJECTION_PROBES = [
             "//crates/hoonc:hoonc_bin",
             "//hoon/common:hoon.hoon",
         ],
+        tags = ["manual"] if name == "rest_loop_alias" else [],
     )
     for name in REJECTION_PROBES
 ]
 
 test_suite(
     name = "rejection_parity_test",
-    tests = ["reject_{}_test".format(name) for name in REJECTION_PROBES],
+    tests = [
+        "reject_{}_test".format(name)
+        for name in REJECTION_PROBES
+        # explicitly listed suite members override the manual tag, so the
+        # stack-overflow probe must also be left out of the suite
+        if name != "rest_loop_alias"
+    ],
 )
 
 test_suite(
