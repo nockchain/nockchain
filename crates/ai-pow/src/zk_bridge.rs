@@ -3430,6 +3430,58 @@ mod tests {
         ));
     }
 
+    /// **B5b empirical wall (decisive, by running a real Layer-0 proof).**
+    ///
+    /// MoE opens the expert's routed-token rows (`outer_indices`), which are
+    /// **non-contiguous**. This probe proves the recursive certificate for a
+    /// genuinely non-contiguous opened pattern (`[0,1,8,9,64,65,72,73]`, target
+    /// `0xff…` so it is always met). It currently **fails inside the STARK** with
+    /// `GlobalCumulativeMismatch: noised_packed` — the `noised_packed` LogUp bus
+    /// (noise produced on the strip-opening leaf rows ↔ consumed by the matmul
+    /// sweep) does not balance: the non-contiguous strip opens a *covering chunk
+    /// range* (`min..max`), producing per-row noise for rows the sweep never
+    /// consumes, so the global cumulative sums differ.
+    ///
+    /// This pins B5b precisely: the in-circuit change is to make the
+    /// noise-producer / matmul-consumer accounting (`composite_lookups`
+    /// `noised_packed_freq` / `matmul_noised_packed_query_count`, the co-located
+    /// leaf-row noise pins in `canonical.rs`, and the sweep row indexing) correct
+    /// for a non-contiguous opened row set. When B5b lands, this test must be
+    /// flipped to `prove + verify` succeeding. Opt-in (a real ~30s proof).
+    #[test]
+    #[ignore = "real Layer-0 proof; documents the B5b non-contiguous-opening wall"]
+    fn noncontiguous_recursive_prove_currently_fails_at_noised_packed_lookup() {
+        let noncontig =
+            crate::pearl_compat::PearlPeriodicPattern::from_list(&[0, 1, 8, 9, 64, 65, 72, 73])
+                .expect("representable Pearl pattern");
+        let params = MatmulParams {
+            m: 128,
+            k: 1024,
+            n: 128,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (attempt, params, a, b) = pearl_merge_ticket_fixture_with_params(
+            b"pearl-recursive-noncontiguous-real",
+            params,
+            noncontig,
+            noncontig,
+        );
+        let msg = match prove_pearl_merge_recursive_certificate(&attempt, &params, &a, &b, 16) {
+            Ok(_) => panic!(
+                "non-contiguous opening unexpectedly proved — B5b may be resolved; \
+                 flip this test to prove + verify succeeding"
+            ),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(
+            msg.contains("GlobalCumulativeMismatch") && msg.contains("noised_packed"),
+            "expected the non-contiguous noised_packed LogUp wall; got: {msg}"
+        );
+    }
+
     /// Opt-in because this builds a real Layer-0 proof and recursive
     /// certificate. Run with:
     /// `GNORT_DISABLE=1 cargo test -p ai-pow --release --features zk \
