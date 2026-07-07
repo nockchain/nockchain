@@ -15,10 +15,10 @@
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    validate_pearl_merge_config_for_recursive_prover, PearlCompatError, PearlIncompleteBlockHeader,
-    PearlMiningConfig, PearlMoeConfig, PearlPeriodicPattern, PearlPublicProofParams,
-    PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MINING_CONFIG_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
-    PEARL_PUBLIC_PROOF_PARAMS_SIZE,
+    validate_pearl_merge_config_for_recursive_prover, verify_pearl_compatible_work,
+    PearlCompatError, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeConfig,
+    PearlPeriodicPattern, PearlPublicProofParams, PEARL_MINING_CONFIG_RESERVED_SIZE,
+    PEARL_MINING_CONFIG_SIZE, PEARL_MMA_INT7XINT7_TO_INT32, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
 };
 
 fn dense_config() -> PearlMiningConfig {
@@ -188,6 +188,22 @@ fn moe_public_data_is_rejected_fail_closed() {
     assert_eq!(
         PearlPublicProofParams::from_public_data(dense_header(), &with_tail),
         Err(PearlCompatError::UnsupportedMoeConfig { e: 6, top_k: 2 }),
+    );
+}
+
+/// B5-gate (soundness) — an MoE statement is fail-closed end-to-end through the
+/// shared-work verify entrypoint (`sanity_check` guard fires before any ticket
+/// compute or recursive acceptance). No MoE proof can be accepted until the
+/// recursive circuit (Track B5) binds the routing commitment + grouped matmul.
+#[test]
+fn moe_statement_is_fail_closed_through_verify() {
+    let mut public = dense_public_params();
+    public.mining_config.reserved = PearlMiningConfig::moe_trailer(4, 2);
+    // Empty matrices: the MoE guard rejects before any matrix access.
+    let target = [0xffu8; 32];
+    assert_eq!(
+        verify_pearl_compatible_work(&public, &[], &[], &target, 4096),
+        Err(PearlCompatError::UnsupportedMoeConfig { e: 4, top_k: 2 }),
     );
 }
 
