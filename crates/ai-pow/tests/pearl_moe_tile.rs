@@ -12,10 +12,12 @@
 use ai_pow::commit::matrix_commitment;
 use ai_pow::fiat_shamir::canonical_noise_seeds_moe;
 use ai_pow::params::MatmulParams;
+use ai_pow::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
 use ai_pow::pearl_compat::{
-    compute_moe_tile, compute_pearl_pattern_ticket, derive_pearl_work_commitments,
-    PearlIncompleteBlockHeader, PearlMiningConfig, PearlPeriodicPattern, PearlPublicProofParams,
-    PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
+    compute_moe_tile, compute_pearl_moe_ticket, compute_pearl_pattern_ticket,
+    derive_pearl_work_commitments, PearlIncompleteBlockHeader, PearlMiningConfig,
+    PearlPeriodicPattern, PearlPublicProofParams, PEARL_MINING_CONFIG_RESERVED_SIZE,
+    PEARL_MMA_INT7XINT7_TO_INT32,
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::synth_matrices;
@@ -155,4 +157,75 @@ fn moe_tile_uses_routing_and_splice_end_to_end() {
     let other_cols = [1u32, 3].iter().map(|c| c + (expert_idx * n_e) as u32).collect::<Vec<_>>();
     let (t_cols, _) = compute_moe_tile(&a, &b, &outer, &other_cols, &s_a, &s_b, k, r, k);
     assert_ne!(tile, t_cols, "different opened cols must change the tile");
+}
+
+/// End-to-end Rust MoE work ticket (B1 routing → B2 splice → B3d gather+tile),
+/// plus the soundness-relevant property that the **verifier recomputes `s_a`
+/// from public data only** (`kappa`, `h_a`, `moe.hash_routing` = routing_root,
+/// `routing_offsets`) — no private `routing_data` — so the `hash_activations`
+/// reroute needs no circuit change. (The remaining in-circuit requirement is the
+/// `outer_indices`↔routing CTL; MoE stays fail-closed until it lands.)
+#[test]
+fn moe_ticket_end_to_end_and_verifier_recomputes_s_a_from_public_data() {
+    use ai_pow::commit::matrix_commitment;
+    use ai_pow::params::MatmulParams;
+    use ai_pow::pearl_moe_routing::build_routing_data;
+
+    let (m, k, n_e, e, r) = (8usize, 64usize, 4usize, 2usize, 4usize);
+    let top_k = 1usize;
+    let moe_params = MatmulParams {
+        m: m as u32,
+        k: k as u32,
+        n: (n_e * e) as u32,
+        noise_rank: r as u32,
+        tile: 2,
+        spot_checks: 1,
+        difficulty_bits: 0,
+    };
+    let (a, b) = synth_matrices(b"pearl-moe-ticket-e2e", &moe_params);
+    let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+    let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+
+    let kappa = [0x42u8; 32];
+    let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+    let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+    let h_a = matrix_commitment(&a_bytes, &kappa);
+    let h_b = matrix_commitment(&b_bytes, &kappa);
+
+    let expert_idx = 1usize;
+    let inner = [0u32, 1];
+    let local_b = [0u32, 2];
+    let ticket = compute_pearl_moe_ticket(
+        &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+    )
+    .unwrap();
+
+    // Ticket internally consistent: gather + expert column offset + splice.
+    assert_eq!(ticket.outer_indices, routing.outer_indices(expert_idx, &inner).unwrap());
+    assert_eq!(
+        ticket.b_cols_global,
+        vec![(expert_idx * n_e) as u32, 2 + (expert_idx * n_e) as u32]
+    );
+    assert_eq!(
+        ticket.s_a,
+        noise_seed_a(&ticket.s_b, &ticket.commitment.hash_activations)
+    );
+
+    // Verifier recomputes s_a from PUBLIC data only (no private routing_data):
+    // routing_root is public (moe.hash_routing); routing_offsets is public.
+    let hash_offsets = matrix_commitment(&routing.routing_offsets_le_bytes(), &kappa);
+    let hash_routing = moe_hash_routing(&ticket.commitment.routing_root, &hash_offsets);
+    let hash_activations = moe_hash_activations(&h_a, &hash_routing);
+    let s_b_pub = noise_seed_b(&kappa, &h_b);
+    let s_a_pub = noise_seed_a(&s_b_pub, &hash_activations);
+    assert_eq!(s_a_pub, ticket.s_a, "verifier recomputes s_a from public MoE params");
+
+    // Routing binds the jackpot: a different routing yields a different result.
+    let topk2: Vec<u32> = (0..m).map(|t| ((t + 1) % e) as u32).collect();
+    let routing2 = build_routing_data(&topk2, m, top_k, e).unwrap();
+    let ticket2 = compute_pearl_moe_ticket(
+        &kappa, &h_a, &h_b, &a, &b, &routing2, expert_idx, &inner, &local_b, n_e, k, r, k,
+    )
+    .unwrap();
+    assert_ne!(ticket.jackpot_hash, ticket2.jackpot_hash, "routing binds the jackpot");
 }

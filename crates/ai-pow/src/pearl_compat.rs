@@ -88,6 +88,8 @@ pub enum PearlCompatError {
     MoeExpertCountMismatch { expected: usize, actual: usize },
     #[error("Pearl MoE expert_idx {expert_idx} is out of range (e={e})")]
     MoeExpertIdxOutOfRange { expert_idx: u16, e: u16 },
+    #[error(transparent)]
+    MoeRouting(#[from] crate::pearl_moe_routing::RoutingError),
     #[error("unsupported Pearl MMA type: {0}")]
     UnsupportedMmaType(u16),
     #[error("Pearl mining config common_dim does not match params.k")]
@@ -1328,6 +1330,77 @@ pub fn compute_moe_tile(
     .state;
     let jackpot = pearl_jackpot_hash(&tile_state, s_a);
     (tile_state, jackpot)
+}
+
+/// A fully-assembled off-circuit MoE work ticket (Track B end-to-end, Rust side):
+/// routing (B1) → routing-commitment splice + `s_A` (B2) → `outer_indices` gather
+/// (B3d) → grouped tile + jackpot (B3d). This is the prover-side reference the
+/// recursive certificate binds; MoE acceptance stays fail-closed until the
+/// in-circuit `outer_indices`↔routing CTL (the sole remaining soundness change).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMoeTicket {
+    pub s_a: [u8; 32],
+    pub s_b: [u8; 32],
+    pub commitment: crate::fiat_shamir::MoeRoutingCommitment,
+    pub outer_indices: Vec<u32>,
+    pub b_cols_global: Vec<u32>,
+    pub tile_state: TileState,
+    pub jackpot_hash: [u8; 32],
+}
+
+/// Assemble a MoE work ticket end-to-end (Rust). `kappa` is the job key,
+/// `h_a`/`h_b` the keyed matrix commitments of the token matrix `A` and weight
+/// matrix `B`; `routing` is the canonical routing; `inner_a_rows` selects the
+/// expert's opened token rows (local positions), `local_b_cols` the expert-local
+/// columns (offset by `expert_idx·n_e` into the stacked weight matrix).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_pearl_moe_ticket(
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    k: usize,
+    r: usize,
+    dot_product_len: usize,
+) -> Result<PearlMoeTicket, PearlCompatError> {
+    let (s_a, s_b, commitment) = crate::fiat_shamir::canonical_noise_seeds_moe(
+        kappa,
+        h_a,
+        h_b,
+        &routing.routing_data_le_bytes(),
+        &routing.routing_offsets_le_bytes(),
+    );
+    let outer_indices = routing.outer_indices(expert_idx, inner_a_rows)?;
+    let b_cols_global: Vec<u32> = local_b_cols
+        .iter()
+        .map(|&c| c + (expert_idx * n_e) as u32)
+        .collect();
+    let (tile_state, jackpot_hash) = compute_moe_tile(
+        a_row_major,
+        b_col_major,
+        &outer_indices,
+        &b_cols_global,
+        &s_a,
+        &s_b,
+        k,
+        r,
+        dot_product_len,
+    );
+    Ok(PearlMoeTicket {
+        s_a,
+        s_b,
+        commitment,
+        outer_indices,
+        b_cols_global,
+        tile_state,
+        jackpot_hash,
+    })
 }
 
 pub fn verify_pearl_pattern_ticket(
