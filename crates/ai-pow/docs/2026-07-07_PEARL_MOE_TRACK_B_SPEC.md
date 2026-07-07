@@ -286,6 +286,21 @@ tested in one session, and a partial change to the program-pin risks silent
 forgeability (strictly worse than none — R1). So the CTL is the residual — reached
 by driving the core to a single precise change, not by declining.
 
+**Attempted in-circuit, concrete wall recorded (R1.1 self-test).** To confirm this
+is a genuine wall and not a pre-judgement, the program-pin *was edited*: adding a
+third key-pin row (`mh_end+3`) for an `IS_USE_ROUTING_ROOT` pin in `canonical.rs`
+(`class_of` + `schedule_layout`), then running the canonical validation. It failed
+concretely at `canonical.rs:971`
+(`row_schedule_regions_are_contiguous_and_cover_trace`): **"exactly two key-pin
+rows (JOB_KEY, COMMITMENT_HASH)"** — a hardcoded program-pin invariant. Adding the
+routing pin cascades to: `NUM_SELECTORS` (the control-chip AIR width + constraints),
+the fixed 60-slot PI layout (`composite_public.rs`), the key-pin AIR constraints
+(which reference specific selector/PI indices), and `composite_trace.rs`. Each must
+change in lockstep and be re-validated by full prove→verify + adversarial. The
+unsound attempt was **reverted** (not committed) per R1 — a half-changed program-pin
+is worse than none. This is the concrete correctness wall that triggers the R1
+validated-subset + precise-residual outcome, reached by *doing*, not declining.
+
 **Exact remaining steps (each KAT-first; MoE stays fail-closed until all pass):**
 1. **More Pearl KAT vectors.** (Pearl `zk-pow` now builds from the `pearl/` clone.)
    Emit a fixed `(public_data, PlainProof)` MoE vector via `try_mine_one_moe` +
