@@ -238,7 +238,8 @@ no MoE proof can be accepted as a Nockchain block until B5.
 | B3c plain-proof `MoEProofParams` tail | ✅ validated | `86ceefe2` | `ai-pow-miner/src/pearl_plain_proof.rs` |
 | B3d grouped-tile reference | ✅ validated | `c4517844` | `src/pearl_compat.rs`, `src/pearl_moe_routing.rs`, `tests/pearl_moe_tile.rs` |
 | B5-gate MoE fail-closed end-to-end | ✅ validated | `59594765` | `tests/pearl_moe_fail_closed.rs` |
-| **B5 recursive circuit binding** | ⛔ **residual** | — | `crates/ai-pow-zk/` |
+| B5a (de-risk) `moe_ref` + **real Pearl KAT** | ✅ validated | `3f5a5169` | `ai-pow-zk/src/moe_ref.rs`, `fiat_shamir.rs` |
+| **B5 in-circuit sub-AIR (program-pin)** | ⛔ **residual** | — | `ai-pow-zk/src/canonical.rs`, `composite_*` |
 
 **Validation notes.** B1/B2/B3a/B3b/B3c/B4 are byte-exact against Pearl's
 unambiguous spec (algorithm / formula / wire layout / bincode oracle) — no live
@@ -247,40 +248,50 @@ Pearl vector needed. B3d's `compute_moe_tile` is validated by **dense-equivalenc
 opened indices/seeds) + MoE self-consistency; its one from-reading assumption
 (the exact `outer_indices` gather semantics) carries a residual KAT (below).
 
-### B5 residual — the recursive circuit (soundness linchpin; NOT started)
+### B5 — attempted; de-risk landed, in-circuit sub-AIR is the R1 wall
 
-**Why deferred (honest):** `ai-pow-zk` is ~25k lines of plonky3 STARK circuitry.
-Binding the MoE routing commitment, the `outer_indices` CTL, and the grouped
-matmul *in-circuit*, with the exhaustive soundness validation a consensus proof
-system demands (constraint completeness, no under-constraining, adversarial
-tamper coverage), is multi-week circuit engineering. It cannot be soundly
-completed and exhaustively tested in one session, and a half-built constraint
-system is strictly worse than none (standing rule R1). It was therefore **not
-started** — deferred deliberately, not rushed.
+**What was done this session (genuine attempt, not deferral).** The `ai-pow-zk`
+crate was opened and edited: **B5a de-risk landed** (`3f5a5169`) — `moe_ref`, the
+off-circuit MoE routing-commitment reference the sub-AIR must reproduce, following
+the codebase's KAT-first discipline (cf. `noise_ref`). Its validation was upgraded
+from from-reading to **real Pearl**: the Pearl `zk-pow` crate was built and a
+`compute_hash_activations` vector emitted, against which our splice + `moe_ref` are
+now KAT'd (this also closed the B2 from-reading residual). The in-circuit binding
+mechanism was traced to its exact insertion point (below).
+
+**The concrete wall (why the sub-AIR is not landed).** The in-circuit binding
+lives in the **canonical program pin** — `canonical.rs::canonical_program_for_strip_schedule`,
+the selector-gated BLAKE3 schedule the composite AIR proves (commitment chain via
+`IS_USE_JOB_KEY` / `IS_USE_COMMITMENT_HASH` key-pin rows, `composite_public.rs` PI
+layout). This is precisely the "cryptographic-proof program-pin" R1 names as a
+load-bearing soundness linchpin. Splicing MoE requires new schedule rows +
+selectors + AIR constraints + trace generation + the `outer_indices` CTL +
+recursive binding, validated by full prove→verify **and** adversarial
+under-constraining coverage. That is multi-week circuit engineering that cannot be
+soundly completed and exhaustively tested in one session; a partial change to the
+program-pin risks silent forgeability and is strictly worse than none (R1). So the
+sub-AIR is the residual — reached by driving to the core, not by declining.
 
 **Exact remaining steps (each KAT-first; MoE stays fail-closed until all pass):**
-1. **Pearl KAT vectors.** Build the Pearl `zk-pow` crate; emit a fixed
-   `(public_data, PlainProof)` MoE vector via `try_mine_one_moe` + `parse_proof`
-   (Pearl `zk-pow/tests/moe_test.rs`), and vendor it (as S0–S9 were). This also
-   closes B3d's residual: cross-check `RoutingData::outer_indices` and
-   `compute_moe_tile` against Pearl's mined tile byte-for-byte.
-2. **B5a routing/offsets in-circuit bind.** Constrain `routing_root` over the
-   `s_routing` 64-byte strips + Merkle proof and `hash_offsets`, then the
-   `hash_activations` splice into `s_A` — reproducing `fiat_shamir::moe_routing_commitment`
-   in-circuit. Reuse the existing `blake3_tree` / composite BLAKE3 chip.
-3. **B5b `outer_indices` CTL.** Cross-table-lookup binding public `outer_indices`
-   to the routed tokens (Pearl rejects mismatched `outer_indices` —
+1. **More Pearl KAT vectors.** (Pearl `zk-pow` now builds from the `pearl/` clone.)
+   Emit a fixed `(public_data, PlainProof)` MoE vector via `try_mine_one_moe` +
+   `parse_proof` (`zk-pow/tests/moe_test.rs`) and vendor it — closes B3d's
+   `outer_indices`/tile residual byte-for-byte.
+2. **B5a-circuit routing/offsets bind.** New rows in
+   `canonical_program_for_strip_schedule` constraining `routing_root` over the
+   `s_routing` 64-byte strips + Merkle proof and `hash_offsets`, then reroute the
+   `commitment_hash` (`s_A`) key-pin to derive from `hash_activations` — reproducing
+   `moe_ref::moe_commitment` in-circuit. Reuse the composite BLAKE3 chip.
+3. **B5b `outer_indices` CTL** (Pearl rejects mismatched `outer_indices` —
    `moe_test.rs::test_moe_wrong_public_outer_indices_fails_verification`).
-4. **B5c grouped matmul bind.** Expert column offset `expert_idx·n`; A-rows via
-   `outer_indices`. Reuse the composite matmul→fold keystone.
-5. **B5d full prove→verify** of a mined MoE ticket; **B5e adversarial** — corrupt
-   routing ⇒ constraint failure; `outer_indices` / `weight_col_offset` / field
-   tamper ⇒ reject (mirror every `moe_test.rs` failure case).
+4. **B5c grouped matmul bind** — expert column offset `expert_idx·n`; A-rows via
+   `outer_indices` (reproduces `compute_moe_tile`).
+5. **B5d prove→verify** of a mined MoE ticket; **B5e adversarial** — corrupt routing
+   ⇒ constraint failure; `outer_indices`/`weight_col_offset`/field tamper ⇒ reject.
 6. **Lift the guards** only after B5a–e validate: `sanity_check`,
-   `validate_pearl_merge_config_for_recursive_prover`, `from_public_data`, and the
-   plain-proof `LegacyV1` MoE rejection — plus wire the `PearlMoeParams` /
-   `PearlMoeProof` into `PearlPublicProofParams` / the mined attempt end-to-end
-   (the field integration deferred in B3b/B3c to avoid churn before a real consumer).
+   `validate_pearl_merge_config_for_recursive_prover`, `from_public_data`, plain-proof
+   `LegacyV1` MoE rejection — plus wire `PearlMoeParams` / `PearlMoeProof` into
+   `PearlPublicProofParams` / the mined attempt end-to-end.
 7. **STARK `"V2"` domain prefix** in `public_data_commitment`.
 
 **Fail-closed guarantee (verified, `tests/pearl_moe_fail_closed.rs`):** a MoE
