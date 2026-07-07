@@ -71,6 +71,10 @@ pub mod pearl_mining;
 /// Internal by design: Hoon and external Nockchain callers submit only the
 /// recursive `%ai-pow` certificate. Pearl `PlainProof` is a Gateway wire detail
 /// built by the miner when a Pearl target hits.
+// Only the `node` run-loop (gateway submission) consumes this module; its own
+// tests exercise it directly. Gate it so a default (no-`node`) build does not
+// flag the whole module as dead code.
+#[cfg(any(feature = "node", test))]
 pub(crate) mod pearl_plain_proof;
 
 /// Wire vocabulary (`AiPowMinerWire`, `SOURCE = "ai-pow-miner"`). Behind

@@ -80,8 +80,15 @@ pub enum PearlCompatError {
     CommonDimMismatch,
     #[error("Pearl mining config rank does not match params.noise_rank")]
     RankMismatch,
-    #[error("Pearl mining config reserved field must be all zero")]
+    #[error("Pearl mining config reserved trailer (bytes 4..32) must be all zero")]
     NonzeroReserved,
+    #[error(
+        "Pearl MoE (GROUPED_GEMM) mining config is not supported yet \
+         (e={e}, top_k={top_k}); dense (e=0) only"
+    )]
+    UnsupportedMoeConfig { e: u16, top_k: u16 },
+    #[error("Pearl mining config has top_k={0} with e==0 (a non-MoE job requires top_k==0)")]
+    MoeTopKWithoutExperts(u16),
     #[error("Pearl periodic pattern has non-canonical trailing dimension")]
     NonCanonicalPattern,
     #[error("Pearl periodic pattern must not break a single stride across dimensions")]
@@ -450,14 +457,39 @@ pub struct PearlMiningConfig {
     pub reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
 }
 
+/// Interpret and validate the 32-byte `MiningConfiguration` trailer per Pearl's
+/// MoE-aware layout `e(2 LE) | top_k(2 LE) | zero-padding(28)` (Pearl
+/// `zk-pow/src/api/proof_utils.rs::MiningConfiguration::from_bytes`).
+///
+/// `e == 0` is a standard (dense) job — the only mode Nockchain supports today,
+/// and byte-identical to the pre-MoE all-zero trailer. `e > 0` selects
+/// GROUPED_GEMM (MoE), which is not yet supported and fails closed here. This
+/// mirrors Pearl's structural checks (`trailer[4..] == 0`, `top_k == 0` when
+/// `e == 0`) so a dense trailer round-trips unchanged.
+fn validate_mining_config_trailer(
+    reserved: &[u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
+) -> Result<(), PearlCompatError> {
+    let e = u16::from_le_bytes([reserved[0], reserved[1]]);
+    let top_k = u16::from_le_bytes([reserved[2], reserved[3]]);
+    if reserved[4..].iter().any(|&b| b != 0) {
+        return Err(PearlCompatError::NonzeroReserved);
+    }
+    if e == 0 {
+        if top_k != 0 {
+            return Err(PearlCompatError::MoeTopKWithoutExperts(top_k));
+        }
+        Ok(())
+    } else {
+        Err(PearlCompatError::UnsupportedMoeConfig { e, top_k })
+    }
+}
+
 impl PearlMiningConfig {
     pub fn to_bytes(&self) -> Result<[u8; PEARL_MINING_CONFIG_SIZE], PearlCompatError> {
         if self.mma_type != PEARL_MMA_INT7XINT7_TO_INT32 {
             return Err(PearlCompatError::UnsupportedMmaType(self.mma_type));
         }
-        if self.reserved != [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE] {
-            return Err(PearlCompatError::NonzeroReserved);
-        }
+        validate_mining_config_trailer(&self.reserved)?;
         let mut out = [0u8; PEARL_MINING_CONFIG_SIZE];
         out[0..4].copy_from_slice(&self.common_dim.to_le_bytes());
         out[4..6].copy_from_slice(&self.rank.to_le_bytes());
@@ -481,9 +513,7 @@ impl PearlMiningConfig {
         let rows_pattern = PearlPeriodicPattern::from_bytes(&bytes[8..14])?;
         let cols_pattern = PearlPeriodicPattern::from_bytes(&bytes[14..20])?;
         let reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE] = bytes[20..52].try_into().unwrap();
-        if reserved != [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE] {
-            return Err(PearlCompatError::NonzeroReserved);
-        }
+        validate_mining_config_trailer(&reserved)?;
         Ok(Self {
             common_dim,
             rank,
@@ -535,6 +565,18 @@ impl PearlPublicProofParams {
         block_header: PearlIncompleteBlockHeader,
         bytes: &[u8],
     ) -> Result<Self, PearlCompatError> {
+        // Fail closed on MoE (GROUPED_GEMM) public data regardless of length: the
+        // MoE variant carries a variable-length tail after the 164-byte dense core
+        // (Pearl `PublicProofParams::to_wire_bytes`), so a length check alone would
+        // report `BadPublicParamsLen` for what is really an unsupported MoE proof.
+        // The mode discriminant `e` lives at bytes[20..22] (mining-config trailer).
+        if bytes.len() >= PEARL_MINING_CONFIG_SIZE
+            && u16::from_le_bytes([bytes[20], bytes[21]]) != 0
+        {
+            // Surfaces the precise `UnsupportedMoeConfig` (or a malformed-trailer
+            // error) rather than a misleading length error.
+            PearlMiningConfig::from_bytes(&bytes[0..PEARL_MINING_CONFIG_SIZE])?;
+        }
         if bytes.len() != PEARL_PUBLIC_PROOF_PARAMS_SIZE {
             return Err(PearlCompatError::BadPublicParamsLen(bytes.len()));
         }

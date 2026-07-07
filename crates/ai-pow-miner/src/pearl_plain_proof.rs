@@ -35,7 +35,35 @@ pub enum PearlPlainProofError {
     LeafIndexOutOfBounds,
     #[error("Pearl proof serialization length overflow")]
     LengthOverflow,
+    #[error("Pearl MoE (GROUPED_GEMM) plain-proof share generation is not supported yet")]
+    MoeNotSupported,
 }
+
+/// bincode tag byte for `Option::None`. Pearl's V2 `PlainProof` ends in a
+/// `moe: Option<MoEProofParams>` field, so a native V2 dense proof appends this
+/// single tag byte after `bt` (Pearl `zk-pow/src/ffi/plain_proof.rs`).
+const BINCODE_OPTION_NONE_TAG: u8 = 0x00;
+
+/// Which Pearl `PlainProof` wire encoding to emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlainProofWireFormat {
+    /// Native post-MoE-fork V2: the trailing `moe: Option<_>` bincode tag is
+    /// present. A dense share carries `moe == None`, i.e. a single `0x00` byte.
+    /// This is the exact byte format Pearl's V2 prover serializes.
+    V2,
+    /// Legacy pre-fork V1: no trailing `moe` field. A V2 gateway still accepts
+    /// this via `PlainProof::deserialize_compat` (which retries with a `0x00`
+    /// appended); retained only for talking to a pre-fork gateway.
+    LegacyV1,
+}
+
+/// Placeholder for the MoE (GROUPED_GEMM) `PlainProof` tail (Pearl
+/// `MoEProofParams`). Track B: constructing and encoding a MoE share is not yet
+/// supported and fails closed. Kept as a distinct `Option` payload type so the
+/// dense wire path (`moe == None`) stays byte-exact while the shape is reserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PearlMoeProof {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PearlPlainProof {
@@ -45,6 +73,9 @@ pub struct PearlPlainProof {
     pub noise_rank: usize,
     pub a: PearlMatrixMerkleProof,
     pub bt: PearlMatrixMerkleProof,
+    /// MoE tail. `None` for a dense (standard) share — the only mode supported
+    /// today. `Some(..)` is Track B and fails closed on encode.
+    pub moe: Option<PearlMoeProof>,
 }
 
 impl PearlPlainProof {
@@ -85,24 +116,45 @@ impl PearlPlainProof {
             noise_rank,
             a,
             bt,
+            // Dense share: no MoE tail.
+            moe: None,
         })
     }
 
-    /// Serialize exactly as Pearl's `PlainProof.to_base64()` does:
-    /// bincode 1 fixed-int, little-endian, then standard base64.
+    /// Serialize exactly as Pearl's V2 `PlainProof.to_base64()` does: bincode 1
+    /// fixed-int, little-endian, then standard base64. Emits the native V2
+    /// encoding (trailing `moe` `Option` tag) by default.
     pub fn to_base64_bincode1(&self) -> Result<String, PearlPlainProofError> {
         let mut bytes = Vec::new();
         self.encode_bincode1(&mut bytes)?;
         Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
     }
 
+    /// Native V2 encoding (default). Equivalent to
+    /// `encode_bincode1_with_format(out, PlainProofWireFormat::V2)`.
     pub fn encode_bincode1(&self, out: &mut Vec<u8>) -> Result<(), PearlPlainProofError> {
+        self.encode_bincode1_with_format(out, PlainProofWireFormat::V2)
+    }
+
+    pub fn encode_bincode1_with_format(
+        &self,
+        out: &mut Vec<u8>,
+        format: PlainProofWireFormat,
+    ) -> Result<(), PearlPlainProofError> {
         put_usize(out, self.m)?;
         put_usize(out, self.n)?;
         put_usize(out, self.k)?;
         put_usize(out, self.noise_rank)?;
         self.a.encode_bincode1(out)?;
         self.bt.encode_bincode1(out)?;
+        match (&self.moe, format) {
+            // MoE (GROUPED_GEMM) share generation is Track B: fail closed.
+            (Some(_), _) => return Err(PearlPlainProofError::MoeNotSupported),
+            // Native V2 dense: trailing bincode `Option::None` tag.
+            (None, PlainProofWireFormat::V2) => out.push(BINCODE_OPTION_NONE_TAG),
+            // Legacy V1: no trailing `moe` field.
+            (None, PlainProofWireFormat::LegacyV1) => {}
+        }
         Ok(())
     }
 }
@@ -337,11 +389,15 @@ mod tests {
     };
     use ai_pow::synth::synth_matrices;
     use base64::Engine as _;
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     use super::*;
 
-    #[derive(Serialize)]
+    /// Serde mirror of Pearl's V2 `PlainProof` (with the trailing
+    /// `moe: Option<_>` field). We only exercise the dense case (`moe == None`),
+    /// which bincode encodes as a single `0x00` tag regardless of the payload
+    /// type, so `Option<()>` is byte-faithful here.
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct SerdePlainProof {
         m: usize,
         n: usize,
@@ -349,15 +405,16 @@ mod tests {
         noise_rank: usize,
         a: SerdeMatrixMerkleProof,
         bt: SerdeMatrixMerkleProof,
+        moe: Option<()>,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct SerdeMatrixMerkleProof {
         proof: SerdeMerkleProof,
         row_indices: Vec<usize>,
     }
 
-    #[derive(Serialize)]
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct SerdeMerkleProof {
         leaf_data: Vec<Vec<u8>>,
         leaf_indices: Vec<usize>,
@@ -375,6 +432,7 @@ mod tests {
                 noise_rank: value.noise_rank,
                 a: SerdeMatrixMerkleProof::from(&value.a),
                 bt: SerdeMatrixMerkleProof::from(&value.bt),
+                moe: value.moe.as_ref().map(|_| ()),
             }
         }
     }
@@ -543,6 +601,121 @@ mod tests {
         assert!(matches!(
             PearlPlainProof::from_attempt(&params, &attempt, &a, &b),
             Err(PearlPlainProofError::CommitmentMismatch { matrix: "A" })
+        ));
+    }
+
+    fn build_dense_proof() -> PearlPlainProof {
+        let params = test_params();
+        let config = test_config();
+        let (a, b) = synth_matrices(b"pearl-plain-proof-v2", &params);
+        let attempt = evaluate_pearl_merge_ticket_attempt(
+            &test_header(),
+            &config,
+            &params,
+            0,
+            0,
+            &a,
+            &b,
+            &[0xffu8; 32],
+            16,
+            test_aux(),
+        )
+        .expect("evaluate Pearl ticket");
+        PearlPlainProof::from_attempt(&params, &attempt, &a, &b).expect("build plain proof")
+    }
+
+    /// A3 — native V2 dense encoding is exactly the legacy V1 bytes plus a single
+    /// trailing bincode `Option::None` tag, and the default encoder emits V2.
+    #[test]
+    fn pearl_v2_native_dense_is_legacy_plus_option_none_tag() {
+        let proof = build_dense_proof();
+        assert!(proof.moe.is_none());
+
+        let mut v2 = Vec::new();
+        proof
+            .encode_bincode1_with_format(&mut v2, PlainProofWireFormat::V2)
+            .unwrap();
+        let mut legacy = Vec::new();
+        proof
+            .encode_bincode1_with_format(&mut legacy, PlainProofWireFormat::LegacyV1)
+            .unwrap();
+
+        assert_eq!(
+            v2.len(),
+            legacy.len() + 1,
+            "V2 adds exactly one option-tag byte over legacy"
+        );
+        assert_eq!(&v2[..legacy.len()], &legacy[..], "V2 core == legacy encoding");
+        assert_eq!(*v2.last().unwrap(), 0x00, "trailing bincode Option::None tag");
+
+        // Default encoder / base64 helper both emit native V2.
+        let mut default = Vec::new();
+        proof.encode_bincode1(&mut default).unwrap();
+        assert_eq!(default, v2, "default encoding is native V2");
+        let b64 = proof.to_base64_bincode1().unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap(),
+            v2
+        );
+    }
+
+    /// A3/A4 — our dense bytes deserialize as `moe == None` under the exact
+    /// `bincode 1` fixint config Pearl uses, and the legacy encoding is recovered
+    /// only after appending the `0x00` tag — i.e. our two encodings behave
+    /// exactly as Pearl's `PlainProof::deserialize_compat` expects.
+    #[test]
+    fn pearl_v2_dense_bytes_deserialize_as_moe_none_like_pearl_compat() {
+        let proof = build_dense_proof();
+        let expected = SerdePlainProof::from(&proof);
+        assert!(expected.moe.is_none());
+
+        // Native V2: strict bincode1 (fixint LE) decodes directly, moe == None.
+        let mut v2 = Vec::new();
+        proof
+            .encode_bincode1_with_format(&mut v2, PlainProofWireFormat::V2)
+            .unwrap();
+        let decoded: SerdePlainProof = bincode1::deserialize(&v2).expect("strict decode V2");
+        assert_eq!(decoded, expected);
+        assert!(decoded.moe.is_none());
+
+        // Legacy V1: strict decode fails (missing moe tag); appending the
+        // Option::None tag recovers it — exactly Pearl's `deserialize_compat`.
+        let mut legacy = Vec::new();
+        proof
+            .encode_bincode1_with_format(&mut legacy, PlainProofWireFormat::LegacyV1)
+            .unwrap();
+        assert!(
+            bincode1::deserialize::<SerdePlainProof>(&legacy).is_err(),
+            "legacy bytes must not strict-decode as V2"
+        );
+        let mut padded = legacy.clone();
+        padded.push(0x00);
+        let recovered: SerdePlainProof = bincode1::deserialize(&padded).expect("compat decode");
+        assert_eq!(recovered, expected);
+    }
+
+    /// A5 — generating a MoE (GROUPED_GEMM) share is Track B and fails closed on
+    /// every encoding path, so we can never emit an unsupported MoE share.
+    #[test]
+    fn pearl_moe_share_encoding_fails_closed() {
+        let mut proof = build_dense_proof();
+        proof.moe = Some(PearlMoeProof {});
+
+        let mut out = Vec::new();
+        assert!(matches!(
+            proof.encode_bincode1(&mut out),
+            Err(PearlPlainProofError::MoeNotSupported)
+        ));
+        assert!(matches!(
+            proof.to_base64_bincode1(),
+            Err(PearlPlainProofError::MoeNotSupported)
+        ));
+        let mut out_legacy = Vec::new();
+        assert!(matches!(
+            proof.encode_bincode1_with_format(&mut out_legacy, PlainProofWireFormat::LegacyV1),
+            Err(PearlPlainProofError::MoeNotSupported)
         ));
     }
 }
