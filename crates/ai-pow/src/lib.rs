@@ -32,6 +32,7 @@ pub mod fiat_shamir;
 pub mod matmul;
 pub mod params;
 pub mod pearl_compat;
+pub mod pearl_moe_routing;
 pub mod prng;
 pub mod proof;
 pub mod prover;
