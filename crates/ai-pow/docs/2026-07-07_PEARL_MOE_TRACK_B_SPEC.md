@@ -286,20 +286,38 @@ tested in one session, and a partial change to the program-pin risks silent
 forgeability (strictly worse than none — R1). So the CTL is the residual — reached
 by driving the core to a single precise change, not by declining.
 
-**Attempted in-circuit, concrete wall recorded (R1.1 self-test).** To confirm this
-is a genuine wall and not a pre-judgement, the program-pin *was edited*: adding a
-third key-pin row (`mh_end+3`) for an `IS_USE_ROUTING_ROOT` pin in `canonical.rs`
-(`class_of` + `schedule_layout`), then running the canonical validation. It failed
-concretely at `canonical.rs:971`
-(`row_schedule_regions_are_contiguous_and_cover_trace`): **"exactly two key-pin
-rows (JOB_KEY, COMMITMENT_HASH)"** — a hardcoded program-pin invariant. Adding the
-routing pin cascades to: `NUM_SELECTORS` (the control-chip AIR width + constraints),
-the fixed 60-slot PI layout (`composite_public.rs`), the key-pin AIR constraints
-(which reference specific selector/PI indices), and `composite_trace.rs`. Each must
-change in lockstep and be re-validated by full prove→verify + adversarial. The
-unsound attempt was **reverted** (not committed) per R1 — a half-changed program-pin
-is worse than none. This is the concrete correctness wall that triggers the R1
-validated-subset + precise-residual outcome, reached by *doing*, not declining.
+**Empirically pinned the wall by running a real proof (commit `066746ca`).** The
+recursive prover already takes arbitrary opened indices via
+`StripIndexSchedule::from_indices` (`zk_bridge.rs:1423`), and the Pearl-merge shape
+check does **not** reject non-contiguous patterns. So a real Layer-0 recursive
+proof was built and run for a genuinely non-contiguous opened pattern
+(`[0,1,8,9,64,65,72,73]`, target `0xff…`). It **fails inside the STARK** with
+`LookupError(GlobalCumulativeMismatch: noised_packed)` (test
+`noncontiguous_recursive_prove_currently_fails_at_noised_packed_lookup`, ~32s).
+
+**Root cause (structural, confirmed).** `indexed_strips_chunk_range`
+(`blake3_tree.rs`) opens the **covering chunk range** `min_idx·k .. (max_idx+1)·k`.
+For a contiguous tile the covering range **equals** the selected rows, so the
+`noised_packed` LogUp (noise produced on the strip-opening leaf rows ↔ consumed by
+the matmul sweep) balances. For non-contiguous rows the covering range is far larger
+than the selected set (rows 0–73 vs 8 selected), so the strip produces per-row noise
+the sweep never consumes and the global cumulative sums diverge. This is the hard
+in-circuit reason the recursive AIR is "square-contiguous only" — not a soft guard.
+
+**Therefore B5b's precise in-circuit change** is **selective (per-selected-chunk)
+opening** — open only the selected rows/chunks rather than the `min..max` covering
+range — reworking `indexed_strips_chunk_range` / `strip_blocks` / `StripPlan`
+(disjoint chunk sets), the co-located leaf-row noise pins (`canonical.rs`), and the
+`noised_packed` producer/consumer accounting (`composite_lookups`), then the routing
+binding on top. That is a real, now-precisely-scoped circuit change, validated by
+full prove→verify + adversarial. The committed `#[ignore]`d probe is the B5b
+regression target: when selective opening lands it must flip to prove+verify
+succeeding. Reached by *doing* (a real proof), not by declining.
+
+(An earlier program-pin edit — adding a third `IS_USE_ROUTING_ROOT` key-pin row —
+was also tried and hit the hardcoded "exactly two key-pin rows" invariant
+(`canonical.rs:971`) + the `NUM_SELECTORS` circuit-width cascade; reverted per R1.
+The `noised_packed` opening wall above is the deeper, load-bearing one.)
 
 **Exact remaining steps (each KAT-first; MoE stays fail-closed until all pass):**
 1. **More Pearl KAT vectors.** (Pearl `zk-pow` now builds from the `pearl/` clone.)
