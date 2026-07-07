@@ -3498,6 +3498,94 @@ mod tests {
         .expect("verify non-contiguous recursive certificate");
     }
 
+    /// **B5c/d — real MoE grouped-tile Layer-0 proof (end-to-end).**
+    ///
+    /// Proves the recursive Layer-0 statement for an actual MoE grouped tile:
+    /// the opened A-rows are an expert's routed tokens (`outer_indices`, sorted
+    /// non-contiguous), the B-columns are that expert's weight slice
+    /// (`expert_idx·n_e + local`), and `s_a` comes from the MoE routing-commitment
+    /// splice (B2). Integrates B1 (routing) + B2 (splice) + B3d (grouped tile) +
+    /// B5b (non-contiguous opening). Asserts the Layer-0 jackpot PI equals the
+    /// off-circuit MoE ticket's tile — i.e. the circuit computes the MoE grouped
+    /// tile correctly. Opt-in (a real proof).
+    #[test]
+    #[ignore = "real MoE grouped-tile Layer-0 proof"]
+    fn real_moe_grouped_tile_layer0_proof() {
+        use crate::commit::matrix_commitment;
+        use crate::pearl_moe_routing::build_routing_data;
+
+        let (m, k, n_e, e, r) = (128usize, 1024usize, 64usize, 2usize, 64usize);
+        let top_k = 1usize;
+        let params = MatmulParams {
+            m: m as u32,
+            k: k as u32,
+            n: (n_e * e) as u32,
+            noise_rank: r as u32,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"moe-grouped-tile-layer0", &params);
+
+        // Valid routing: token t → expert t % e (distinct per token ⇒ each
+        // expert's routed tokens are sorted-increasing).
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+
+        let kappa = [0x41u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+
+        // Open expert 0: 8 routed tokens (inner rows 0..8) and 8 expert-0 columns.
+        let expert_idx = 0usize;
+        let inner: Vec<u32> = (0..8).collect();
+        let local_b: Vec<u32> = (0..8).collect();
+        let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+            &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+        )
+        .expect("MoE ticket");
+        // outer_indices are sorted-increasing (valid routing) and 8-wide.
+        assert!(ticket.outer_indices.windows(2).all(|w| w[0] < w[1]));
+
+        let zctx = ZkProverContext {
+            a: &a,
+            b: &b,
+            params,
+            kappa,
+            h_a_chunk: h_a,
+            h_b_chunk: h_b,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+            jackpot_key: ticket.s_a,
+        };
+        let zk = zk_params_from(&params);
+        let strip_schedule = StripIndexSchedule::from_indices(
+            &zk,
+            ticket.outer_indices.clone(),
+            ticket.b_cols_global.clone(),
+        )
+        .expect("MoE strip schedule");
+        let (artifact, _prog, _) = prove_ai_pow_scheduled_full_with_context(
+            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+        )
+        .expect("prove MoE grouped tile Layer-0");
+
+        // The circuit computed the MoE grouped tile: its jackpot PI matches the
+        // off-circuit MoE ticket (B3d) computed over the same opened rows/cols
+        // and the MoE-spliced s_a.
+        assert_eq!(
+            artifact.pis.jackpot,
+            tile_state_words(&ticket.tile_state),
+            "Layer-0 jackpot PI must equal the off-circuit MoE grouped tile"
+        );
+        assert_eq!(
+            ai_pow_zk::hash_jackpot_le_bytes(&artifact.pis.hash_jackpot),
+            ticket.jackpot_hash
+        );
+    }
+
     /// Opt-in because this builds a real Layer-0 proof and recursive
     /// certificate. Run with:
     /// `GNORT_DISABLE=1 cargo test -p ai-pow --release --features zk \
