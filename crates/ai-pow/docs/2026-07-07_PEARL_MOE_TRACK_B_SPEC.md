@@ -239,7 +239,8 @@ no MoE proof can be accepted as a Nockchain block until B5.
 | B3d grouped-tile reference | ✅ validated | `c4517844` | `src/pearl_compat.rs`, `src/pearl_moe_routing.rs`, `tests/pearl_moe_tile.rs` |
 | B5-gate MoE fail-closed end-to-end | ✅ validated | `59594765` | `tests/pearl_moe_fail_closed.rs` |
 | B5a (de-risk) `moe_ref` + **real Pearl KAT** | ✅ validated | `3f5a5169` | `ai-pow-zk/src/moe_ref.rs`, `fiat_shamir.rs` |
-| **B5 in-circuit sub-AIR (program-pin)** | ⛔ **residual** | — | `ai-pow-zk/src/canonical.rs`, `composite_*` |
+| **B5b non-contiguous recursive opening** | ✅ **implemented + proves/verifies** | `a4ca3158`, `e1b963d3` | `canonical.rs`, `composite_trace.rs`, `zk_bridge.rs` |
+| **B5c/d/e MoE end-to-end wiring + adversarial** | ⛔ residual (now tractable) | — | `zk_bridge.rs` |
 
 **Validation notes.** B1/B2/B3a/B3b/B3c/B4 are byte-exact against Pearl's
 unambiguous spec (algorithm / formula / wire layout / bincode oracle) — no live
