@@ -1269,6 +1269,67 @@ pub fn compute_pearl_pattern_ticket(
     })
 }
 
+/// Off-circuit MoE grouped-tile reference (Track B3d).
+///
+/// Builds `A' = A + E` over the opened global token rows (`outer_indices`, from
+/// [`crate::pearl_moe_routing::RoutingData::outer_indices`]) and `B' = B + F` over
+/// the opened global expert columns (`b_cols_global = expert_idx·n + local`),
+/// applies the noise seeds (`s_a` from the MoE routing-commitment splice —
+/// [`crate::fiat_shamir::canonical_noise_seeds_moe`]; `s_b` unchanged), then
+/// computes the tile state and jackpot. This composition is byte-identical to the
+/// dense per-tile compute given the same opened indices and seeds (that
+/// equivalence is the reference test); the only MoE-specific inputs are *which*
+/// global rows/columns are opened and *which* `s_a` is used.
+///
+/// This is the reference the recursive circuit (Track B5) must reproduce. It does
+/// **not** by itself accept an MoE proof — acceptance stays fail-closed until B5.
+///
+/// `a_row_major` is the `m × k` token matrix (row-major); `b_col_major` is the
+/// full `k × (n·e)` weight matrix (column-major, column `c` at `c·k`).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_moe_tile(
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    outer_indices: &[u32],
+    b_cols_global: &[u32],
+    s_a: &[u8; 32],
+    s_b: &[u8; 32],
+    k: usize,
+    r: usize,
+    dot_product_len: usize,
+) -> (TileState, [u8; 32]) {
+    let mut a_prime = Vec::with_capacity(outer_indices.len() * k);
+    let mut e_row = vec![0i8; k];
+    for &row in outer_indices {
+        pearl_e_row_into(s_a, row, k as u32, r, &mut e_row);
+        let off = row as usize * k;
+        for l in 0..k {
+            a_prime.push((a_row_major[off + l] as i16 + e_row[l] as i16) as i8);
+        }
+    }
+    let mut b_prime = Vec::with_capacity(b_cols_global.len() * k);
+    let mut f_col = vec![0i8; k];
+    for &col in b_cols_global {
+        pearl_f_col_into(s_b, col, k as u32, r, &mut f_col);
+        let off = col as usize * k;
+        for l in 0..k {
+            b_prime.push((b_col_major[off + l] as i16 + f_col[l] as i16) as i8);
+        }
+    }
+    let tile_state = compute_pattern_tile_trace_from_slices(
+        &a_prime,
+        &b_prime,
+        outer_indices.len(),
+        b_cols_global.len(),
+        k,
+        r,
+        dot_product_len,
+    )
+    .state;
+    let jackpot = pearl_jackpot_hash(&tile_state, s_a);
+    (tile_state, jackpot)
+}
+
 pub fn verify_pearl_pattern_ticket(
     public_params: &PearlPublicProofParams,
     a_row_major: &[i8],

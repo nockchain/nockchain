@@ -45,6 +45,17 @@ pub enum RoutingError {
         expert: u32,
         num_experts: usize,
     },
+    #[error("expert_idx {expert_idx} is out of range (num_experts={num_experts})")]
+    ExpertIdxOutOfRange {
+        expert_idx: usize,
+        num_experts: usize,
+    },
+    #[error("inner row {inner} is out of range for expert {expert_idx} (routed tokens={count})")]
+    InnerRowOutOfRange {
+        expert_idx: usize,
+        inner: u32,
+        count: usize,
+    },
 }
 
 /// Canonical routing for one MoE job.
@@ -174,6 +185,39 @@ impl RoutingData {
         let start = self.expert_start(expert_idx) as usize;
         let end = self.routing_offsets[expert_idx] as usize;
         &self.routing_data[start..end]
+    }
+
+    /// Global token positions (Pearl `outer_indices`) of an expert's opened tile
+    /// rows. `inner_a_rows` are local positions within the expert's routed-token
+    /// subset (Pearl `MoEProofParams::inner_a_rows`); this gathers them through
+    /// the routing: `outer_indices[u] = routing_data[expert_start + inner[u]]`
+    /// (Pearl `plain_proof.rs::moe_inner_indices`). Each inner index must be
+    /// `< routed-token count` for the expert.
+    pub fn outer_indices(
+        &self,
+        expert_idx: usize,
+        inner_a_rows: &[u32],
+    ) -> Result<Vec<u32>, RoutingError> {
+        if expert_idx >= self.num_experts {
+            return Err(RoutingError::ExpertIdxOutOfRange {
+                expert_idx,
+                num_experts: self.num_experts,
+            });
+        }
+        let start = self.expert_start(expert_idx) as usize;
+        let count = self.routing_offsets[expert_idx] as usize - start;
+        let mut out = Vec::with_capacity(inner_a_rows.len());
+        for &inner in inner_a_rows {
+            if inner as usize >= count {
+                return Err(RoutingError::InnerRowOutOfRange {
+                    expert_idx,
+                    inner,
+                    count,
+                });
+            }
+            out.push(self.routing_data[start + inner as usize]);
+        }
+        Ok(out)
     }
 
     /// `routing_data` as the committed little-endian `u32` byte string. This is
@@ -344,6 +388,38 @@ mod tests {
             exp_off.extend_from_slice(&v.to_le_bytes());
         }
         assert_eq!(r.routing_offsets_le_bytes(), exp_off);
+    }
+
+    #[test]
+    fn outer_indices_gather_matches_manual_and_validates() {
+        // topk (m=4, top_k=2): expert ids per slot [0,2,1,0,2,1,0,0].
+        let topk = [0u32, 2, 1, 0, 2, 1, 0, 0];
+        let r = build_routing_data(&topk, 4, 2, 3).unwrap();
+        // expert 0 routed tokens = routing_data[0..4] = [0,1,3,3].
+        assert_eq!(r.expert_tokens(0), &[0, 1, 3, 3]);
+        // inner rows [0,2,3] → global outer = [routing_data[0], routing_data[2], routing_data[3]].
+        let outer = r.outer_indices(0, &[0, 2, 3]).unwrap();
+        assert_eq!(outer, vec![0, 3, 3]);
+        // expert 2 routed tokens = routing_data[6..8] = [0,2]; inner [1,0] → [2,0].
+        assert_eq!(r.outer_indices(2, &[1, 0]).unwrap(), vec![2, 0]);
+
+        // inner row past the expert's routed-token count is rejected.
+        assert_eq!(
+            r.outer_indices(1, &[2]), // expert 1 has 2 tokens (indices 0,1)
+            Err(RoutingError::InnerRowOutOfRange {
+                expert_idx: 1,
+                inner: 2,
+                count: 2
+            })
+        );
+        // expert_idx out of range.
+        assert_eq!(
+            r.outer_indices(3, &[0]),
+            Err(RoutingError::ExpertIdxOutOfRange {
+                expert_idx: 3,
+                num_experts: 3
+            })
+        );
     }
 
     #[test]
