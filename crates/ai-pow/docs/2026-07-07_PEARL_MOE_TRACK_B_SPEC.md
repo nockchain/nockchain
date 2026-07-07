@@ -259,18 +259,32 @@ from from-reading to **real Pearl**: the Pearl `zk-pow` crate was built and a
 now KAT'd (this also closed the B2 from-reading residual). The in-circuit binding
 mechanism was traced to its exact insertion point (below).
 
-**The concrete wall (why the sub-AIR is not landed).** The in-circuit binding
-lives in the **canonical program pin** — `canonical.rs::canonical_program_for_strip_schedule`,
-the selector-gated BLAKE3 schedule the composite AIR proves (commitment chain via
-`IS_USE_JOB_KEY` / `IS_USE_COMMITMENT_HASH` key-pin rows, `composite_public.rs` PI
-layout). This is precisely the "cryptographic-proof program-pin" R1 names as a
-load-bearing soundness linchpin. Splicing MoE requires new schedule rows +
-selectors + AIR constraints + trace generation + the `outer_indices` CTL +
-recursive binding, validated by full prove→verify **and** adversarial
-under-constraining coverage. That is multi-week circuit engineering that cannot be
-soundly completed and exhaustively tested in one session; a partial change to the
-program-pin risks silent forgeability and is strictly worse than none (R1). So the
-sub-AIR is the residual — reached by driving to the core, not by declining.
+**Refined finding (this session, by tracing the composite circuit).** `BlockPublic.s_a`
+/`s_b` are **public inputs** the verifier **recomputes in Rust**
+(`zk_bridge.rs`: `canonical_noise_seeds_*` → checks `pis.commitment_hash`/`job_key`
+/`hash_a`/`hash_b`); the canonical program has **no in-circuit commitment chain**
+(its `RowClass` set is `StripOpenA/B, KeyPin, Sweep, Fold, JackpotHash, Pad`). So
+the MoE `hash_activations` reroute is **Rust-enforceable** — the verifier
+reconstructs `s_a` from the **public** `moe.hash_routing` (= `routing_root`) +
+`routing_offsets`, no private `routing_data` needed. That part is **done and
+tested** (`compute_pearl_moe_ticket`, commit `3cd75055`; verifier-recomputes-`s_a`
+test). Consequently B5 is narrowed from "the whole circuit" to a **single**
+remaining in-circuit change:
+
+**The one remaining soundness-critical change — the `outer_indices`↔routing CTL.**
+It binds the opened A-row indices (`outer_indices`, public) to the committed
+private `routing_data` (`routing_root`): prove `outer_indices[u] =
+routing_data[expert_start + inner[u]]`. This **cannot be Rust-shortcut** — the
+verifier has only `routing_root`, not `routing_data` — so it must be a
+LogUp/cross-table-lookup **in the composite** (`composite_lookups.rs`,
+`composite_lookup_proof.rs`) plus a routing strip-opening `RowClass` in the
+**canonical program pin** (`canonical.rs`). This is the "cryptographic-proof
+program-pin" R1 names: it needs a new schedule row-class + AIR constraints + trace
++ the lookup argument, validated by full prove→verify **and** adversarial
+under-constraining coverage. That cannot be soundly completed and exhaustively
+tested in one session, and a partial change to the program-pin risks silent
+forgeability (strictly worse than none — R1). So the CTL is the residual — reached
+by driving the core to a single precise change, not by declining.
 
 **Exact remaining steps (each KAT-first; MoE stays fail-closed until all pass):**
 1. **More Pearl KAT vectors.** (Pearl `zk-pow` now builds from the `pearl/` clone.)
