@@ -13,10 +13,12 @@
 //!   * **MoE fail-closed** — every non-dense trailer / MoE public-data shape is
 //!     rejected with a precise error, before any proving.
 
+use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    PearlCompatError, PearlIncompleteBlockHeader, PearlMiningConfig, PearlPeriodicPattern,
-    PearlPublicProofParams, PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MINING_CONFIG_SIZE,
-    PEARL_MMA_INT7XINT7_TO_INT32, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
+    validate_pearl_merge_config_for_recursive_prover, PearlCompatError, PearlIncompleteBlockHeader,
+    PearlMiningConfig, PearlMoeConfig, PearlPeriodicPattern, PearlPublicProofParams,
+    PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MINING_CONFIG_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
+    PEARL_PUBLIC_PROOF_PARAMS_SIZE,
 };
 
 fn dense_config() -> PearlMiningConfig {
@@ -75,20 +77,38 @@ fn dense_config_round_trips_with_all_zero_trailer() {
     assert_eq!(restored, config);
 }
 
-/// A1 — `e > 0` in the trailer is GROUPED_GEMM and must fail closed with the
-/// precise `UnsupportedMoeConfig`, carrying the decoded `e` / `top_k`.
+/// B3a — an `e > 0` trailer now *parses* as GROUPED_GEMM (Pearl-faithful decode),
+/// round-trips byte-for-byte, and is exposed via `moe()` — but block-acceptance
+/// stays fail-closed (the recursive prover refuses it until the circuit lands).
 #[test]
-fn moe_config_trailer_is_rejected_fail_closed() {
+fn moe_config_parses_and_acceptance_fails_closed() {
     for (e, top_k) in [(1u16, 0u16), (8, 2), (256, 4), (u16::MAX, u16::MAX)] {
         let mut bytes = dense_config().to_bytes().unwrap();
         bytes[20..22].copy_from_slice(&e.to_le_bytes());
         bytes[22..24].copy_from_slice(&top_k.to_le_bytes());
+
+        // Decode now succeeds and exposes the MoE config.
+        let config = PearlMiningConfig::from_bytes(&bytes).expect("MoE config decodes");
+        assert_eq!(config.moe(), Some(PearlMoeConfig { e, top_k }));
+        // Round-trips byte-for-byte.
+        assert_eq!(config.to_bytes().unwrap(), bytes);
+
+        // Block-acceptance (recursive prover) refuses MoE.
         assert_eq!(
-            PearlMiningConfig::from_bytes(&bytes),
-            Err(PearlCompatError::UnsupportedMoeConfig { e, top_k }),
-            "e={e} top_k={top_k} must fail closed as UnsupportedMoeConfig"
+            validate_pearl_merge_config_for_recursive_prover(
+                &config,
+                &MatmulParams::TEST_SMALL,
+                4096
+            ),
+            Err(PearlCompatError::UnsupportedRecursivePearlParams(
+                "MoE (GROUPED_GEMM) recursive proving is not implemented"
+            )),
+            "e={e} top_k={top_k} recursive acceptance must fail closed"
         );
     }
+
+    // A dense config still exposes `moe() == None`.
+    assert_eq!(dense_config().moe(), None);
 }
 
 /// A1 — `top_k != 0` while `e == 0` is malformed (mirrors Pearl's
@@ -118,18 +138,17 @@ fn nonzero_reserved_padding_is_rejected() {
     }
 }
 
-/// A1 — `to_bytes` is symmetric: a struct whose `reserved` encodes an MoE
-/// trailer fails closed the same way as decode, so we can never emit an
-/// unsupported MoE mining config.
+/// B3a — `to_bytes` round-trips an MoE trailer (via `moe_trailer`), but still
+/// rejects a malformed trailer with nonzero padding.
 #[test]
-fn to_bytes_fails_closed_on_moe_reserved() {
+fn to_bytes_round_trips_moe_and_rejects_bad_pad() {
     let mut config = dense_config();
-    config.reserved[0..2].copy_from_slice(&4u16.to_le_bytes());
-    config.reserved[2..4].copy_from_slice(&2u16.to_le_bytes());
-    assert_eq!(
-        config.to_bytes(),
-        Err(PearlCompatError::UnsupportedMoeConfig { e: 4, top_k: 2 }),
-    );
+    config.reserved = PearlMiningConfig::moe_trailer(4, 2);
+    let bytes = config.to_bytes().expect("MoE trailer serializes");
+    assert_eq!(&bytes[20..22], &4u16.to_le_bytes());
+    assert_eq!(&bytes[22..24], &2u16.to_le_bytes());
+    assert_eq!(&bytes[24..52], &[0u8; 28]);
+    assert_eq!(PearlMiningConfig::from_bytes(&bytes).unwrap(), config);
 
     let mut padded = dense_config();
     padded.reserved[8] = 1;

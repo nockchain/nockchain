@@ -457,18 +457,27 @@ pub struct PearlMiningConfig {
     pub reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
 }
 
-/// Interpret and validate the 32-byte `MiningConfiguration` trailer per Pearl's
-/// MoE-aware layout `e(2 LE) | top_k(2 LE) | zero-padding(28)` (Pearl
+/// A parsed Pearl MoE (GROUPED_GEMM) mining config: `e` experts, each token
+/// routed to `top_k` of them (Pearl `MoEConfig`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PearlMoeConfig {
+    pub e: u16,
+    pub top_k: u16,
+}
+
+/// Parse + structurally validate the 32-byte `MiningConfiguration` trailer per
+/// Pearl's MoE-aware layout `e(2 LE) | top_k(2 LE) | zero-padding(28)` (Pearl
 /// `zk-pow/src/api/proof_utils.rs::MiningConfiguration::from_bytes`).
 ///
-/// `e == 0` is a standard (dense) job — the only mode Nockchain supports today,
-/// and byte-identical to the pre-MoE all-zero trailer. `e > 0` selects
-/// GROUPED_GEMM (MoE), which is not yet supported and fails closed here. This
-/// mirrors Pearl's structural checks (`trailer[4..] == 0`, `top_k == 0` when
-/// `e == 0`) so a dense trailer round-trips unchanged.
-fn validate_mining_config_trailer(
+/// Returns `None` for a dense job (`e == 0`, byte-identical to the pre-MoE
+/// all-zero trailer) or `Some(cfg)` for GROUPED_GEMM. Mirrors Pearl's structural
+/// checks (`trailer[4..] == 0`, `top_k == 0` when `e == 0`) so a dense trailer
+/// round-trips unchanged. MoE-specific envelope validation (`top_k < e`,
+/// `e ≤ MAX`, `n·e ≤ 2²⁴`, …) is layered on at use sites; and MoE *proving /
+/// acceptance* remains fail-closed until the recursive circuit (Track B5) lands.
+fn parse_mining_config_trailer(
     reserved: &[u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
-) -> Result<(), PearlCompatError> {
+) -> Result<Option<PearlMoeConfig>, PearlCompatError> {
     let e = u16::from_le_bytes([reserved[0], reserved[1]]);
     let top_k = u16::from_le_bytes([reserved[2], reserved[3]]);
     if reserved[4..].iter().any(|&b| b != 0) {
@@ -478,18 +487,41 @@ fn validate_mining_config_trailer(
         if top_k != 0 {
             return Err(PearlCompatError::MoeTopKWithoutExperts(top_k));
         }
-        Ok(())
+        Ok(None)
     } else {
-        Err(PearlCompatError::UnsupportedMoeConfig { e, top_k })
+        Ok(Some(PearlMoeConfig { e, top_k }))
     }
 }
 
 impl PearlMiningConfig {
+    /// The parsed MoE config, or `None` for a dense job. Assumes a
+    /// validly-encoded trailer (enforced by [`from_bytes`](Self::from_bytes) /
+    /// [`to_bytes`](Self::to_bytes)).
+    pub fn moe(&self) -> Option<PearlMoeConfig> {
+        let e = u16::from_le_bytes([self.reserved[0], self.reserved[1]]);
+        if e == 0 {
+            None
+        } else {
+            Some(PearlMoeConfig {
+                e,
+                top_k: u16::from_le_bytes([self.reserved[2], self.reserved[3]]),
+            })
+        }
+    }
+
+    /// Encode an MoE config into the 32-byte trailer (`e | top_k | zero(28)`).
+    pub fn moe_trailer(e: u16, top_k: u16) -> [u8; PEARL_MINING_CONFIG_RESERVED_SIZE] {
+        let mut t = [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE];
+        t[0..2].copy_from_slice(&e.to_le_bytes());
+        t[2..4].copy_from_slice(&top_k.to_le_bytes());
+        t
+    }
+
     pub fn to_bytes(&self) -> Result<[u8; PEARL_MINING_CONFIG_SIZE], PearlCompatError> {
         if self.mma_type != PEARL_MMA_INT7XINT7_TO_INT32 {
             return Err(PearlCompatError::UnsupportedMmaType(self.mma_type));
         }
-        validate_mining_config_trailer(&self.reserved)?;
+        parse_mining_config_trailer(&self.reserved)?;
         let mut out = [0u8; PEARL_MINING_CONFIG_SIZE];
         out[0..4].copy_from_slice(&self.common_dim.to_le_bytes());
         out[4..6].copy_from_slice(&self.rank.to_le_bytes());
@@ -513,7 +545,7 @@ impl PearlMiningConfig {
         let rows_pattern = PearlPeriodicPattern::from_bytes(&bytes[8..14])?;
         let cols_pattern = PearlPeriodicPattern::from_bytes(&bytes[14..20])?;
         let reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE] = bytes[20..52].try_into().unwrap();
-        validate_mining_config_trailer(&reserved)?;
+        parse_mining_config_trailer(&reserved)?;
         Ok(Self {
             common_dim,
             rank,
@@ -570,12 +602,18 @@ impl PearlPublicProofParams {
         // (Pearl `PublicProofParams::to_wire_bytes`), so a length check alone would
         // report `BadPublicParamsLen` for what is really an unsupported MoE proof.
         // The mode discriminant `e` lives at bytes[20..22] (mining-config trailer).
-        if bytes.len() >= PEARL_MINING_CONFIG_SIZE
-            && u16::from_le_bytes([bytes[20], bytes[21]]) != 0
-        {
-            // Surfaces the precise `UnsupportedMoeConfig` (or a malformed-trailer
-            // error) rather than a misleading length error.
-            PearlMiningConfig::from_bytes(&bytes[0..PEARL_MINING_CONFIG_SIZE])?;
+        // MoE (GROUPED_GEMM) public data carries a variable-length tail after the
+        // 164-byte dense core (Track B3b). Until that parser lands, fail closed on
+        // the MoE discriminant `e` (trailer bytes 20..22) with a precise error
+        // rather than a misleading length error.
+        if bytes.len() >= PEARL_MINING_CONFIG_SIZE {
+            let e = u16::from_le_bytes([bytes[20], bytes[21]]);
+            if e != 0 {
+                let top_k = u16::from_le_bytes([bytes[22], bytes[23]]);
+                // Surface a malformed-trailer error first if the trailer is bad.
+                PearlMiningConfig::from_bytes(&bytes[0..PEARL_MINING_CONFIG_SIZE])?;
+                return Err(PearlCompatError::UnsupportedMoeConfig { e, top_k });
+            }
         }
         if bytes.len() != PEARL_PUBLIC_PROOF_PARAMS_SIZE {
             return Err(PearlCompatError::BadPublicParamsLen(bytes.len()));
@@ -649,6 +687,15 @@ impl PearlPublicProofParams {
     }
 
     pub fn sanity_check(&self) -> Result<(), PearlCompatError> {
+        // Fail-closed on MoE (GROUPED_GEMM): the shape-aware envelope below is the
+        // dense envelope. MoE envelope validation + the grouped-tile compute land
+        // in Track B3d; until then no MoE statement is computed or accepted.
+        if let Some(m) = self.mining_config.moe() {
+            return Err(PearlCompatError::UnsupportedMoeConfig {
+                e: m.e,
+                top_k: m.top_k,
+            });
+        }
         let k = self.mining_config.common_dim;
         let r = u32::from(self.mining_config.rank);
         let h = self.h()?;
@@ -790,6 +837,15 @@ pub fn validate_pearl_merge_config_for_recursive_prover(
     params: &MatmulParams,
     max_pattern_len: usize,
 ) -> Result<(), PearlCompatError> {
+    // Block-acceptance fail-closed: the recursive certificate does not yet bind
+    // the MoE routing commitment / grouped matmul (Track B5). Refuse MoE mining
+    // configs so no MoE proof can be accepted as a Nockchain block until the
+    // circuit lands, even though the config now parses (B3a).
+    if config.moe().is_some() {
+        return Err(PearlCompatError::UnsupportedRecursivePearlParams(
+            "MoE (GROUPED_GEMM) recursive proving is not implemented",
+        ));
+    }
     if params.difficulty_bits != 0 {
         return Err(PearlCompatError::UnsupportedRecursivePearlParams(
             "difficulty_bits must be 0; Nockchain target is verifier-supplied",
