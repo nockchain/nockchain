@@ -43,6 +43,9 @@ pub enum PearlPlainProofError {
 /// `moe: Option<MoEProofParams>` field, so a native V2 dense proof appends this
 /// single tag byte after `bt` (Pearl `zk-pow/src/ffi/plain_proof.rs`).
 const BINCODE_OPTION_NONE_TAG: u8 = 0x00;
+/// bincode tag byte for `Option::Some`. An MoE proof appends this then the
+/// bincode-serialized [`PearlMoeProof`].
+const BINCODE_OPTION_SOME_TAG: u8 = 0x01;
 
 /// Which Pearl `PlainProof` wire encoding to emit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,13 +60,38 @@ pub enum PlainProofWireFormat {
     LegacyV1,
 }
 
-/// Placeholder for the MoE (GROUPED_GEMM) `PlainProof` tail (Pearl
-/// `MoEProofParams`). Track B: constructing and encoding a MoE share is not yet
-/// supported and fails closed. Kept as a distinct `Option` payload type so the
-/// dense wire path (`moe == None`) stays byte-exact while the shape is reserved.
+/// The MoE (GROUPED_GEMM) `PlainProof` tail (Pearl `MoEProofParams`, field order
+/// preserved for bincode 1 fixint compatibility). Present on an MoE share; `None`
+/// for a dense share.
+///
+/// NOTE (Track B3c): this pins the byte-exact *serialization*. Constructing a
+/// valid `routing_proof` (the routing Merkle membership witness) and wiring MoE
+/// shares end-to-end into the mined attempt is Track B3d/B5; MoE proof acceptance
+/// stays fail-closed until the recursive circuit lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct PearlMoeProof {}
+pub struct PearlMoeProof {
+    pub e: usize,
+    pub top_k: usize,
+    pub expert_idx: u16,
+    pub routing_end_offsets: Vec<u32>,
+    pub inner_a_rows: Vec<usize>,
+    pub routing_proof: PearlMerkleProof,
+}
+
+impl PearlMoeProof {
+    fn encode_bincode1(&self, out: &mut Vec<u8>) -> Result<(), PearlPlainProofError> {
+        put_usize(out, self.e)?;
+        put_usize(out, self.top_k)?;
+        out.extend_from_slice(&self.expert_idx.to_le_bytes());
+        put_len(out, self.routing_end_offsets.len())?;
+        for &off in &self.routing_end_offsets {
+            out.extend_from_slice(&off.to_le_bytes());
+        }
+        put_usize_vec(out, &self.inner_a_rows)?;
+        self.routing_proof.encode_bincode1(out)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PearlPlainProof {
@@ -148,8 +176,15 @@ impl PearlPlainProof {
         self.a.encode_bincode1(out)?;
         self.bt.encode_bincode1(out)?;
         match (&self.moe, format) {
-            // MoE (GROUPED_GEMM) share generation is Track B: fail closed.
-            (Some(_), _) => return Err(PearlPlainProofError::MoeNotSupported),
+            // Native V2 MoE: trailing bincode `Option::Some` tag + MoEProofParams.
+            (Some(moe), PlainProofWireFormat::V2) => {
+                out.push(BINCODE_OPTION_SOME_TAG);
+                moe.encode_bincode1(out)?;
+            }
+            // Legacy V1 has no `moe` field and cannot carry an MoE tail.
+            (Some(_), PlainProofWireFormat::LegacyV1) => {
+                return Err(PearlPlainProofError::MoeNotSupported)
+            }
             // Native V2 dense: trailing bincode `Option::None` tag.
             (None, PlainProofWireFormat::V2) => out.push(BINCODE_OPTION_NONE_TAG),
             // Legacy V1: no trailing `moe` field.
@@ -394,9 +429,8 @@ mod tests {
     use super::*;
 
     /// Serde mirror of Pearl's V2 `PlainProof` (with the trailing
-    /// `moe: Option<_>` field). We only exercise the dense case (`moe == None`),
-    /// which bincode encodes as a single `0x00` tag regardless of the payload
-    /// type, so `Option<()>` is byte-faithful here.
+    /// `moe: Option<MoEProofParams>` field), serialized by the same `bincode 1`
+    /// crate Pearl uses — the byte oracle for our hand-rolled encoder.
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct SerdePlainProof {
         m: usize,
@@ -405,7 +439,18 @@ mod tests {
         noise_rank: usize,
         a: SerdeMatrixMerkleProof,
         bt: SerdeMatrixMerkleProof,
-        moe: Option<()>,
+        moe: Option<SerdeMoeProof>,
+    }
+
+    /// Serde mirror of Pearl `MoEProofParams` (exact field order).
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct SerdeMoeProof {
+        e: usize,
+        top_k: usize,
+        expert_idx: u16,
+        routing_end_offsets: Vec<u32>,
+        inner_a_rows: Vec<usize>,
+        routing_proof: SerdeMerkleProof,
     }
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -423,6 +468,19 @@ mod tests {
         siblings: Vec<[u8; 32]>,
     }
 
+    impl From<&PearlMoeProof> for SerdeMoeProof {
+        fn from(v: &PearlMoeProof) -> Self {
+            Self {
+                e: v.e,
+                top_k: v.top_k,
+                expert_idx: v.expert_idx,
+                routing_end_offsets: v.routing_end_offsets.clone(),
+                inner_a_rows: v.inner_a_rows.clone(),
+                routing_proof: SerdeMerkleProof::from(&v.routing_proof),
+            }
+        }
+    }
+
     impl From<&PearlPlainProof> for SerdePlainProof {
         fn from(value: &PearlPlainProof) -> Self {
             Self {
@@ -432,7 +490,7 @@ mod tests {
                 noise_rank: value.noise_rank,
                 a: SerdeMatrixMerkleProof::from(&value.a),
                 bt: SerdeMatrixMerkleProof::from(&value.bt),
-                moe: value.moe.as_ref().map(|_| ()),
+                moe: value.moe.as_ref().map(SerdeMoeProof::from),
             }
         }
     }
@@ -696,25 +754,63 @@ mod tests {
         assert_eq!(recovered, expected);
     }
 
-    /// A5 — generating a MoE (GROUPED_GEMM) share is Track B and fails closed on
-    /// every encoding path, so we can never emit an unsupported MoE share.
-    #[test]
-    fn pearl_moe_share_encoding_fails_closed() {
-        let mut proof = build_dense_proof();
-        proof.moe = Some(PearlMoeProof {});
+    fn synthetic_moe_proof() -> PearlMoeProof {
+        PearlMoeProof {
+            e: 4,
+            top_k: 2,
+            expert_idx: 1,
+            routing_end_offsets: vec![10, 20, 30, 40],
+            inner_a_rows: vec![0, 3, 7],
+            routing_proof: PearlMerkleProof {
+                leaf_data: vec![[0x11u8; CHUNK_LEN], [0x22u8; CHUNK_LEN]],
+                leaf_indices: vec![0, 1],
+                total_leaves: 2,
+                root: [0x33u8; 32],
+                siblings: vec![[0x44u8; 32]],
+            },
+        }
+    }
 
+    /// B3c — the MoE `PlainProof` tail encodes byte-exactly against Pearl's
+    /// `bincode 1` serialization of `PlainProof{ moe: Some(MoEProofParams) }`
+    /// (the `0x01` Option tag + MoEProofParams field order), and deserializes back.
+    #[test]
+    fn pearl_moe_share_serializes_byte_exactly_and_round_trips() {
+        let mut proof = build_dense_proof();
+        proof.moe = Some(synthetic_moe_proof());
+
+        let mut manual = Vec::new();
+        proof.encode_bincode1(&mut manual).expect("encode MoE share");
+        // Trailing tail begins with the Option::Some tag.
+        let dense_len = {
+            let mut d = build_dense_proof();
+            d.moe = None;
+            let mut v = Vec::new();
+            d.encode_bincode1_with_format(&mut v, PlainProofWireFormat::LegacyV1)
+                .unwrap();
+            v.len()
+        };
+        assert_eq!(manual[dense_len], BINCODE_OPTION_SOME_TAG);
+
+        // Byte-exact vs the real bincode 1 oracle.
+        let oracle = bincode1::serialize(&SerdePlainProof::from(&proof)).unwrap();
+        assert_eq!(manual, oracle, "MoE tail must match Pearl bincode layout");
+
+        // Round-trips through strict bincode deserialize, moe present + equal.
+        let decoded: SerdePlainProof = bincode1::deserialize(&manual).expect("decode MoE share");
+        assert_eq!(decoded, SerdePlainProof::from(&proof));
+        assert!(decoded.moe.is_some());
+    }
+
+    /// B3c — a MoE share cannot be expressed in the legacy V1 format (no `moe`
+    /// field); encoding fails closed.
+    #[test]
+    fn pearl_moe_share_rejects_legacy_format() {
+        let mut proof = build_dense_proof();
+        proof.moe = Some(synthetic_moe_proof());
         let mut out = Vec::new();
         assert!(matches!(
-            proof.encode_bincode1(&mut out),
-            Err(PearlPlainProofError::MoeNotSupported)
-        ));
-        assert!(matches!(
-            proof.to_base64_bincode1(),
-            Err(PearlPlainProofError::MoeNotSupported)
-        ));
-        let mut out_legacy = Vec::new();
-        assert!(matches!(
-            proof.encode_bincode1_with_format(&mut out_legacy, PlainProofWireFormat::LegacyV1),
+            proof.encode_bincode1_with_format(&mut out, PlainProofWireFormat::LegacyV1),
             Err(PearlPlainProofError::MoeNotSupported)
         ));
     }
