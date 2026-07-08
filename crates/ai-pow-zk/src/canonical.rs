@@ -171,13 +171,19 @@ pub(crate) fn schedule_layout_for_strip_schedule(
     let r = params.noise_rank as usize;
     let num_stripes = k / r;
 
-    // Strip-opening A then B (P-B.2.4 + public strip schedule +
-    // CR.0a strip_opening_rows -- all params-pure).
-    let ((ca0, ca1, a_nc), (cb0, cb1, b_nc)) = strip_schedule
+    // Strip-opening A then B (P-B.2.4 + public strip schedule).
+    // B5b selective opening: the row count is over the SET of chunks the opened
+    // rows/cols touch (== the range for a contiguous tile), matching StripPlan's
+    // strip_blocks_set + place_matrix_strip_opening_set.
+    let ((_ca0, _ca1, a_nc), (_cb0, _cb1, b_nc)) = strip_schedule
         .chunk_ranges(params)
         .expect("schedule_layout requires valid strip chunk ranges");
-    let na = strip_opening_rows(ca0, ca1, a_nc);
-    let nb = strip_opening_rows(cb0, cb1, b_nc);
+    let (a_chunks, _) =
+        crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.a_indices, k, a_nc * 1024);
+    let (b_chunks, _) =
+        crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.b_indices, k, b_nc * 1024);
+    let na = strip_opening_rows_set(&a_chunks, a_nc);
+    let nb = strip_opening_rows_set(&b_chunks, b_nc);
     let mh_end = na + nb;
 
     // Key-pin: row mh_end is the gap; mh_end+1 = JOB_KEY,
@@ -669,6 +675,14 @@ fn strip_blocks_set(sel: &[usize], num_chunks: usize) -> Vec<StripBlock> {
     out
 }
 
+/// Trace-row count for the selective strip opening of the sorted, distinct chunk
+/// set `sel` (8 rows per `StripBlock`) — the multi-proof analogue of
+/// [`crate::blake3_tree::strip_opening_rows`]. Used by `expected_layer0_rows` so
+/// the row budget matches `place_matrix_strip_opening_set`'s placement.
+pub fn strip_opening_rows_set(sel: &[usize], num_chunks: usize) -> usize {
+    8 * strip_blocks_set(sel, num_chunks).len()
+}
+
 /// Per-tile strip-opening plan: the params-pure block list + the
 /// region's `IS_HASH_A/B` finalize selector (4 = `IS_HASH_A`
 /// A-side, 5 = `IS_HASH_B` B-side — `place_matrix_hash_a/b`).
@@ -688,21 +702,33 @@ struct StripPlan {
 
 impl StripPlan {
     fn build_for_strip_schedule(params: &ZkParams, strip_schedule: &StripIndexSchedule) -> Self {
-        let ((ca0, ca1, a_nc), (cb0, cb1, b_nc)) = strip_schedule
+        let ((_ca0, _ca1, a_nc), (_cb0, _cb1, b_nc)) = strip_schedule
             .chunk_ranges(params)
             .expect("StripPlan requires valid strip chunk ranges");
+        let k = params.k as usize;
+        // B5b: selective opening — the schedule authenticates only the chunks the
+        // opened rows/cols actually touch (a SET), not the covering range. For a
+        // contiguous tile the set == the range, so `strip_blocks_set` reduces to
+        // `strip_blocks` (byte-identical); for scattered MoE rows it is
+        // O(|rows|·⌈k/1024⌉), keeping the trace inside `PEARL_TRACE_BOUND`.
+        let (a_chunks, _) =
+            crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.a_indices, k, a_nc * 1024);
+        let (b_chunks, _) =
+            crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.b_indices, k, b_nc * 1024);
+        let ca0 = a_chunks[0];
+        let cb0 = b_chunks[0];
         let h_tile = strip_schedule.a_indices.len();
         let w_tile = strip_schedule.b_indices.len();
         let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
-        let b_id_base = a_id_base + ((h_tile * params.k as usize).div_ceil(8)) as u64;
+        let b_id_base = a_id_base + ((h_tile * k).div_ceil(8)) as u64;
         StripPlan {
             ca0,
             cb0,
             w_tile,
             a_id_base,
             b_id_base,
-            blocks_a: strip_blocks(ca0, ca1, a_nc),
-            blocks_b: strip_blocks(cb0, cb1, b_nc),
+            blocks_a: strip_blocks_set(&a_chunks, a_nc),
+            blocks_b: strip_blocks_set(&b_chunks, b_nc),
             a_indices: strip_schedule.a_indices.clone(),
             b_indices: strip_schedule.b_indices.clone(),
         }
@@ -1249,10 +1275,24 @@ mod tests {
         .expect("rectangular Pearl schedule");
         let layout = schedule_layout_for_strip_schedule(&p, &sched, len);
         let ((ca0, ca1, a_nc), (cb0, cb1, b_nc)) = sched.chunk_ranges(&p).expect("chunk ranges");
-        let na = strip_opening_rows(ca0, ca1, a_nc);
-        let nb = strip_opening_rows(cb0, cb1, b_nc);
+        // B5b: schedule_layout now uses the SELECTIVE (disjoint-chunk) opening —
+        // only the chunks the scattered rows/cols touch, not the covering range.
+        let kk = p.k as usize;
+        let (a_chunks, _) =
+            crate::blake3_tree::indexed_strips_chunk_set(&sched.a_indices, kk, a_nc * 1024);
+        let (b_chunks, _) =
+            crate::blake3_tree::indexed_strips_chunk_set(&sched.b_indices, kk, b_nc * 1024);
+        let na = strip_opening_rows_set(&a_chunks, a_nc);
+        let nb = strip_opening_rows_set(&b_chunks, b_nc);
         assert_eq!(layout.na, na);
         assert_eq!(layout.mh_end, na + nb);
+        // The scattered schedule's selective count is strictly smaller than the
+        // covering-range count (the production trace-size win).
+        assert!(
+            na < strip_opening_rows(ca0, ca1, a_nc),
+            "selective na {na} should be < covering-range na {}",
+            strip_opening_rows(ca0, ca1, a_nc)
+        );
 
         let num_stripes = (p.k / p.noise_rank) as usize;
         let chunks = (p.noise_rank as usize).div_ceil(TILE_D);

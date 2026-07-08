@@ -187,7 +187,7 @@ pub fn expected_layer0_rows_for_strip_schedule(
 ) -> Result<Layer0RowBudget, BridgeError> {
     validate_scheduled_params(params)?;
     let zk_params = zk_params_from(params);
-    let ((ca0, ca1, a_nc), (cb0, cb1, b_nc)) = strip_schedule
+    let ((_ca0, _ca1, a_nc), (_cb0, _cb1, b_nc)) = strip_schedule
         .chunk_ranges(&zk_params)
         .map_err(BridgeError::ZkParamsInvalid)?;
     let h = strip_schedule.a_indices.len() as u64;
@@ -196,9 +196,19 @@ pub fn expected_layer0_rows_for_strip_schedule(
     let k = params.k as u64;
     let num_stripes = params.num_stripes() as u64;
     let sweep = (h / 2) * (w / 2) * num_stripes * r.div_ceil(16);
+    // B5b: selective-opening row budget — count only the chunks the opened
+    // rows/cols touch (a SET), matching StripPlan's strip_blocks_set schedule and
+    // place_matrix_strip_opening_set's placement. Contiguous ⇒ == the range count.
+    let kk = params.k as usize;
+    let (a_chunks, _) = ai_pow_zk::blake3_tree::indexed_strips_chunk_set(
+        &strip_schedule.a_indices, kk, a_nc * 1024,
+    );
+    let (b_chunks, _) = ai_pow_zk::blake3_tree::indexed_strips_chunk_set(
+        &strip_schedule.b_indices, kk, b_nc * 1024,
+    );
     Ok(Layer0RowBudget {
-        mhash_a: ai_pow_zk::blake3_tree::strip_opening_rows(ca0, ca1, a_nc) as u64,
-        mhash_b: ai_pow_zk::blake3_tree::strip_opening_rows(cb0, cb1, b_nc) as u64,
+        mhash_a: ai_pow_zk::canonical::strip_opening_rows_set(&a_chunks, a_nc) as u64,
+        mhash_b: ai_pow_zk::canonical::strip_opening_rows_set(&b_chunks, b_nc) as u64,
         sweep,
         store: ((h + w).saturating_mul(k)) / 8 + 1,
         fixed: 3 + num_stripes + 8 + 16,
@@ -2290,15 +2300,22 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // schedule (P-B.2.3) — a pure fn of public params + the
     // attested tile, so the prover cannot open a cheaper region.
     // O(t·k), size-independent ⇒ one tile = one STARK.
-    use ai_pow_zk::blake3_tree::{indexed_strips_chunk_range, open_strip, pad_to_chunk_boundary};
+    use ai_pow_zk::blake3_tree::{indexed_strips_chunk_set, open_strip_set, pad_to_chunk_boundary};
     let a_bytes: Vec<u8> = zctx.a.iter().map(|&v| v as u8).collect();
     let b_bytes: Vec<u8> = zctx.b.iter().map(|&v| v as u8).collect();
     let kk = params.k as usize;
     // A row-major (m rows × k): tile_i's `t` rows, span t·k.
     let a_pad = pad_to_chunk_boundary(&a_bytes);
     let a_indices = &strip_schedule.a_indices;
-    let (ca0, ca1, a_nc) = indexed_strips_chunk_range(a_indices, kk, a_bytes.len());
-    let (_oa, a_sibs) = open_strip(&a_bytes, &zctx.kappa, ca0, ca1);
+    // B5b selective opening: authenticate only the chunks the opened rows touch.
+    let (a_chunks, a_nc) = indexed_strips_chunk_set(a_indices, kk, a_bytes.len());
+    let (_oa, a_sibs) = open_strip_set(&a_bytes, &zctx.kappa, &a_chunks);
+    let a_strip_bytes: Vec<u8> = a_chunks
+        .iter()
+        .flat_map(|&c| a_pad[c * 1024..(c + 1) * 1024].iter().copied())
+        .collect();
+    // Producer-key / sweep-lane base = min selected chunk (== the range c0).
+    let ca0 = a_chunks[0];
     // §4.C.2 c-exact cx.2 g=1 co-location: the Pearl `noise_ref`
     // byte parallel to the opened A strip — entry j = noise at the
     // committed matrix position of `a_pad[ca0*1024 + j]` (A is
@@ -2316,24 +2333,28 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // the leaf-row noise strips AND retiring the separate store.
     let coloc = params.noise_rank % 16 == 0;
     let rr = params.noise_rank;
-    let a_strip_lo = ca0 * 1024;
     let a_id_base = ai_pow_zk::composite_trace::NOISED_CHUNK_ID_BASE;
     let b_id_base = a_id_base + ((strip_schedule.a_indices.len() * kk).div_ceil(8)) as u64;
-    let a_noise_strip: Vec<i8> = (0..(ca1 - ca0) * 1024)
-        .map(|j| {
-            let p = a_strip_lo + j;
-            if p < a_bytes.len() {
-                ai_pow_zk::noise_ref::e_value(&zctx.s_a, (p / kk) as u32, (p % kk) as u32, rr)
-            } else {
-                0
-            }
+    // noise_ref parallel to the SELECTED strip bytes: each byte at its ACTUAL
+    // matrix position `c*1024 + off` (0 on chunk-padding p >= |A|).
+    let a_len = a_bytes.len();
+    let a_noise_strip: Vec<i8> = a_chunks
+        .iter()
+        .flat_map(|&c| {
+            (0..1024).map(move |off| {
+                let p = c * 1024 + off;
+                if p < a_len {
+                    ai_pow_zk::noise_ref::e_value(&zctx.s_a, (p / kk) as u32, (p % kk) as u32, rr)
+                } else {
+                    0
+                }
+            })
         })
         .collect();
-    let (next, _root_a) = trace.place_matrix_strip_opening(
+    let (next, _root_a) = trace.place_matrix_strip_opening_set(
         0,
-        &a_pad[ca0 * 1024..ca1 * 1024],
-        ca0,
-        ca1,
+        &a_strip_bytes,
+        &a_chunks,
         a_nc,
         &a_sibs,
         &zctx.kappa,
@@ -2344,26 +2365,33 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // B col-major (n cols × k, col j at j·k): tile_j's `t` cols.
     let b_pad = pad_to_chunk_boundary(&b_bytes);
     let b_indices = &strip_schedule.b_indices;
-    let (cb0, cb1, b_nc) = indexed_strips_chunk_range(b_indices, kk, b_bytes.len());
-    let (_ob, b_sibs) = open_strip(&b_bytes, &zctx.kappa, cb0, cb1);
+    let (b_chunks, b_nc) = indexed_strips_chunk_set(b_indices, kk, b_bytes.len());
+    let (_ob, b_sibs) = open_strip_set(&b_bytes, &zctx.kappa, &b_chunks);
+    let b_strip_bytes: Vec<u8> = b_chunks
+        .iter()
+        .flat_map(|&c| b_pad[c * 1024..(c + 1) * 1024].iter().copied())
+        .collect();
+    let cb0 = b_chunks[0];
     // B is col-major flattened [col0(k)|col1(k)|…]: for byte p the
     // matrix col = p/k, k-index = p%k ⇒ f_value(s_b, k-idx, col).
-    let b_strip_lo = cb0 * 1024;
-    let b_noise_strip: Vec<i8> = (0..(cb1 - cb0) * 1024)
-        .map(|j| {
-            let p = b_strip_lo + j;
-            if p < b_bytes.len() {
-                ai_pow_zk::noise_ref::f_value(&zctx.s_b, (p % kk) as u32, (p / kk) as u32, rr)
-            } else {
-                0
-            }
+    let b_len = b_bytes.len();
+    let b_noise_strip: Vec<i8> = b_chunks
+        .iter()
+        .flat_map(|&c| {
+            (0..1024).map(move |off| {
+                let p = c * 1024 + off;
+                if p < b_len {
+                    ai_pow_zk::noise_ref::f_value(&zctx.s_b, (p % kk) as u32, (p / kk) as u32, rr)
+                } else {
+                    0
+                }
+            })
         })
         .collect();
-    let (mh_end, _root_b) = trace.place_matrix_strip_opening(
+    let (mh_end, _root_b) = trace.place_matrix_strip_opening_set(
         next,
-        &b_pad[cb0 * 1024..cb1 * 1024],
-        cb0,
-        cb1,
+        &b_strip_bytes,
+        &b_chunks,
         b_nc,
         &b_sibs,
         &zctx.kappa,

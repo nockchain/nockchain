@@ -258,6 +258,34 @@ pub fn indexed_strips_chunk_range(
     (c0, c1, num_chunks)
 }
 
+/// The sorted, distinct SET of chunks covering the opened rows/columns `indices`
+/// (each spanning `k` bytes). Selective-opening analogue of
+/// [`indexed_strips_chunk_range`]: for **contiguous** `indices` it equals the
+/// full range `c0..c1`, but for **scattered** `indices` (MoE routed tokens) it is
+/// only the O(|indices|·⌈k/1024⌉) chunks actually touched — not the O(max−min)
+/// covering range — which keeps the Layer-0 trace inside `PEARL_TRACE_BOUND` at
+/// production scale. `chunks[0]` equals the range `c0` (the producer-key base).
+pub fn indexed_strips_chunk_set(indices: &[u32], k: usize, total_bytes: usize) -> (Vec<usize>, usize) {
+    assert!(!indices.is_empty(), "indexed strip opening requires >= 1 index");
+    assert!(k > 0, "strip length k must be nonzero");
+    let padded = (total_bytes.div_ceil(CHUNK_LEN) * CHUNK_LEN).max(CHUNK_LEN);
+    let num_chunks = padded / CHUNK_LEN;
+    let mut chunks: Vec<usize> = Vec::new();
+    for &idx in indices {
+        let lo = (idx as usize).checked_mul(k).expect("indexed strip lo overflow");
+        let hi = lo + k;
+        assert!(hi <= total_bytes, "indexed strip [{lo},{hi}) exceeds {total_bytes}B");
+        let c_lo = lo / CHUNK_LEN;
+        let c_hi = hi.div_ceil(CHUNK_LEN).min(num_chunks).max(c_lo + 1);
+        for c in c_lo..c_hi {
+            chunks.push(c);
+        }
+    }
+    chunks.sort_unstable();
+    chunks.dedup();
+    (chunks, num_chunks)
+}
+
 /// **Phase A-CR (CR.0).** The number of trace rows
 /// [`crate::composite_trace::CompositeTrace::place_matrix_strip_opening`]
 /// consumes for the opening of `[c0,c1)` within `num_chunks`
