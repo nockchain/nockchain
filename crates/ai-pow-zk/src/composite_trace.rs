@@ -3907,6 +3907,49 @@ mod tests {
         }
     }
 
+    /// **§L adversarial audit — row-budget == placement.** The trace is sized to
+    /// `strip_opening_rows_set(sel, nc)`; `place_matrix_strip_opening_set` must
+    /// place *exactly* that many rows. Too many → CapMismatch (overflow); too few
+    /// → unconstrained trace rows a prover could fill freely. This pins the exact
+    /// equality over scattered/boundary sets (the selective-opening switch changed
+    /// this accounting from covering-range to set-based).
+    #[test]
+    fn selective_strip_opening_row_budget_equals_placement() {
+        let key: [u8; 32] = core::array::from_fn(|i| (i as u8) ^ 0x33);
+        // nc capped at 31 to fit `baseline_min`'s trace (matches the sibling
+        // root-equality test); the accounting is nc-independent.
+        for &nc in &[2usize, 3, 5, 8, 13, 31] {
+            let raw: Vec<u8> = (0..nc * 1024).map(|i| i as u8).collect();
+            let mut sets: Vec<Vec<usize>> = vec![
+                vec![0],
+                vec![nc - 1],
+                vec![0, nc - 1],
+                (0..nc).step_by(3).collect(),
+                (0..nc).collect(),
+            ];
+            if nc >= 4 {
+                sets.push(vec![0, 1, nc - 2, nc - 1]);
+                sets.push(vec![1, nc / 2, nc - 1]);
+            }
+            for sel in &sets {
+                let (_o, sibs) = crate::blake3_tree::open_strip_set(&raw, &key, sel);
+                let strip_bytes: Vec<u8> = sel
+                    .iter()
+                    .flat_map(|&c| raw[c * 1024..(c + 1) * 1024].iter().copied())
+                    .collect();
+                let mut t = CompositeTrace::baseline_min();
+                let (n, _root) = t.place_matrix_strip_opening_set(
+                    0, &strip_bytes, sel, nc, &sibs, &key, 4, None, None,
+                );
+                assert_eq!(
+                    n,
+                    crate::canonical::strip_opening_rows_set(sel, nc),
+                    "placed rows {n} != budget for sel {sel:?} of {nc}"
+                );
+            }
+        }
+    }
+
     /// **Positive AIR.** A strip opening verifies through the
     /// composite AIR, with the recomputed root bound to
     /// `PI_HASH_A` by the unchanged C3 constraint — and that PI

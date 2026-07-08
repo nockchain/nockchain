@@ -205,4 +205,59 @@ deferred). **SAFE.**
 
 ---
 
-<!-- subsequent angles appended as they are evaluated -->
+## §G Non-contiguous sweep ↔ opened-rows binding — **SAFE**
+
+**Finding:** the sweep must consume the *position-keyed* opened rows via the
+`noised_packed` `(id, value)` bus (§A). Any deviation is caught:
+- **wrong/permuted rows:** `sec_4c10_sweep_on_row_permuted_matrix_rejects` and
+  `sec_4c10_noncontiguous_sweep_on_row_permuted_matrix_rejects` (zk_bridge) —
+  sweeping a row-permuted matrix has no matching producer at the position key ⇒
+  LogUp imbalance ⇒ reject.
+- **subset/superset/aliased lanes:** a superset reads a position with no producer
+  (imbalance); a subset leaves a producer multiplicity unmatched (imbalance); an
+  aliased read violates the matmul dot constraint for that position.
+- **covering-range remnants:** the selective switch makes non-selected chunks
+  0-row (no producer), validated by §B/§L (the in-circuit fold + exact row budget).
+**SAFE.**
+
+## §J Fail-closed guard integrity — **SAFE**
+
+**Finding:** 12 tests in `pearl_moe_fail_closed.rs` cover every layer:
+`moe_config_parses_and_acceptance_fails_closed`, `nonzero_top_k_without_experts_is_
+rejected`, `nonzero_reserved_padding_is_rejected`, `moe_public_data_is_rejected_
+fail_closed`, `moe_statement_is_fail_closed_through_verify`, plus dense round-trip
+parity. `e > 0` is rejected on the acceptance path; dense (`e=0`, all-zero trailer)
+round-trips byte-identically. The selective/non-contiguous code on the live dense
+path is covered by §A–§C. **SAFE.**
+
+## §K DoS / resource exhaustion — **SAFE (residual: tighten routing-size bound when MoE is live)**
+
+**Finding:** `MAX_NUM_EXPERTS = 1024` (Pearl parity) is enforced in
+`build_routing_data`; `m·top_k` uses `checked_mul` + `u32::try_from`; the trace is
+bounded by `PEARL_WORKER_INPUT_MAX = 2²²`, so a real routing is ≤ ~2²² entries
+(~16 MB), not adversarially huge. MoE decode/verify is **fail-closed**, so the
+routing path is unreachable in production today. **Residual:** when MoE is enabled,
+add an explicit `m·top_k ≤ trace-envelope` cap *before* the routing buffers are
+materialized (the abstract `u32` bound alone permits a ~16 GB allocation).
+
+## §L Selective-opening trace-size accounting — **SAFE (validated)**
+
+**Finding:** `strip_opening_rows_set(sel, nc) = 8·strip_blocks_set(sel, nc).len()`
+is the exact budget the trace is sized to; a mismatch would either overflow
+(CapMismatch) or leave unconstrained rows. New
+`selective_strip_opening_row_budget_equals_placement` asserts
+`place_matrix_strip_opening_set`'s *placed* row count equals the budget exactly
+over scattered/boundary/full sets — closing the covering-range→set-based accounting
+change. **SAFE.**
+
+## §I `verify_pearl_moe_recursive_certificate` wiring — **SOUND but TEST-ONLY (residual)**
+
+**Finding:** the function is soundness-complete (§D routing binding + §E `s_A` +
+§F opened-schedule binding + `verify_recursive_certificate`), but is **only called
+from tests** (zk_bridge:3949) — MoE is fail-closed at block acceptance (§J), so it
+is not on a live node path. **Residuals for when MoE is enabled:** (1) carry
+`PearlMoeParams`/`routing_data` in the artifact **bound to the proof** (not trusted
+function args), and (2) run the jackpot-vs-target difficulty check with the
+tile-scaled target (deferred today, "a separate node concern, identical to dense").
+Not a defect — a documented gate. Track under the production residual doc.
+
