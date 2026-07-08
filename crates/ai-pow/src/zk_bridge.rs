@@ -3584,6 +3584,44 @@ mod tests {
             ai_pow_zk::hash_jackpot_le_bytes(&artifact.pis.hash_jackpot),
             ticket.jackpot_hash
         );
+
+        // Soundness tie-in: the rows the STARK proved the tile over (a_indices =
+        // outer_indices) ARE expert 0's routed tokens under the public row
+        // pattern, from the committed routing. Together with the STARK binding
+        // s_a (which the verifier recomputes from routing_root + offsets), the
+        // certificate proves work over the expert's actual routed tokens — not
+        // arbitrary rows.
+        let mining_config = crate::pearl_compat::PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: crate::pearl_compat::PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            cols_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            reserved: crate::pearl_compat::PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+        let moe_params = crate::pearl_compat::PearlMoeParams {
+            expert_idx: expert_idx as u16,
+            routing_offsets: routing.routing_offsets.clone(),
+            hash_routing: ticket.commitment.routing_root,
+            outer_indices: ticket.outer_indices.clone(),
+        };
+        assert_eq!(strip_schedule.a_indices, moe_params.outer_indices, "a_indices == outer_indices");
+        crate::pearl_compat::verify_pearl_moe_routing_binding(
+            &kappa,
+            &mining_config,
+            &moe_params,
+            m as u32,
+            0,
+            &routing.routing_data,
+            4096,
+        )
+        .expect("opened rows are expert 0's routed tokens (routing binding)");
     }
 
     /// Opt-in because this builds a real Layer-0 proof and recursive
