@@ -5230,6 +5230,138 @@ mod tests {
     /// RUSTFLAGS="-C target-cpu=native" cargo test -p ai-pow-miner --release --features node \
     ///   real_compact_pearl_merge_artifact_jam_size_for_selected_route -- --ignored --nocapture
     /// ```
+    /// **D1a — production-scale-`m` compact size/latency.** The fixture above uses
+    /// `m=n=8` (tile==matrix ⇒ opens the whole matrix, no real strip-opening
+    /// merkle proof). The production default tile is `tile=8, k=1024, rank=64`
+    /// (miner default), but over a large model matrix. This proves the compact
+    /// certificate for the default tile over a large `m=n=512` matrix — a real
+    /// disjoint strip opening (8 of 512 chunks + auth siblings up a depth-9 tree)
+    /// — to confirm the ≤150 KB / ~30 s bar holds with a real merkle proof, not
+    /// just the degenerate whole-matrix fixture. Run fully parallel + native:
+    ///
+    /// ```text
+    /// RUSTFLAGS="-C target-cpu=native" cargo test -p ai-pow-miner --release --features node \
+    ///   real_compact_pearl_merge_prod_scale_m_size_and_latency -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[ignore = "real compact recursive proof generation is intentionally opt-in"]
+    #[test]
+    fn real_compact_pearl_merge_prod_scale_m_size_and_latency() {
+        let params = MatmulParams {
+            m: 512,
+            k: 1024,
+            n: 512,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let aux = pearl_test_aux();
+        let (header, _aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let config = pearl_test_config(); // common_dim=1024, rank=64, pattern(8)
+        let (a, b) = synth_matrices(b"pearl-prod-scale-m-512", &params);
+        let attempt = evaluate_pearl_merge_ticket_attempt(
+            &header, &config, &params, 0, 0, &a, &b, &[0xff; 32], 16, aux,
+        )
+        .expect("evaluate prod-scale Pearl merge ticket attempt");
+
+        eprintln!(
+            "D1a prod-scale-m: available_parallelism = {}",
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0)
+        );
+        let start = std::time::Instant::now();
+        let run = ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate(
+            &attempt, &params, &a, &b, 16,
+        )
+        .expect("prove compact Pearl recursive certificate (prod-scale m)");
+        let prove_wall_ms = start.elapsed().as_millis();
+        let compact_bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(run.certificate())
+                .expect("encode compact recursive certificate");
+        eprintln!(
+            "D1a prod-scale-m (m=n=512, tile=8, k=1024, r=64): compact_cert={} bytes ({:.2} KiB), \
+             prove_wall_ms={}, l1_build_ms={}, l1_outer_ms={}, l2_prep_ms={}, l2_prove_ms={}, \
+             l2_compact_ms={}, l2_compact_verify_ms={}, trace_height={}",
+            compact_bytes.len(),
+            compact_bytes.len() as f64 / 1024.0,
+            prove_wall_ms,
+            run.l1_circuit_build_ms(),
+            run.l1_outer_cert_ms(),
+            run.l2_prep_ms(),
+            run.l2_prove_ms(),
+            run.l2_compact_ms(),
+            run.l2_compact_verify_ms(),
+            run.trace_height(),
+        );
+        assert!(
+            compact_bytes.len() <= 150_000,
+            "prod-scale compact cert exceeded 150,000 bytes: {}",
+            compact_bytes.len()
+        );
+    }
+
+    /// **D1a (worst case) — max prod-envelope tile compact size/latency.**
+    /// `tile=16` (h·w=256 = `PEARL_HW_MAX`), `k=4096`, `r=64`
+    /// (num_stripes=64=`STRIPE_MAX`) — the largest in-circuit tile the prod
+    /// envelope admits. This measures how far the ~30 s wall-time bar stretches at
+    /// the top of the envelope (the compact byte size stays fixed). Run fully
+    /// parallel + native (see the default test above).
+    #[ignore = "real compact recursive proof generation is intentionally opt-in"]
+    #[test]
+    fn real_compact_pearl_merge_max_envelope_size_and_latency() {
+        let params = MatmulParams {
+            m: 512,
+            k: 4096,
+            n: 512,
+            noise_rank: 64,
+            tile: 16,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params
+            .validate_prod_envelope()
+            .expect("tile=16,k=4096,r=64 must be in the prod envelope");
+        let aux = pearl_test_aux();
+        let (header, _aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let config = PearlMiningConfig {
+            common_dim: 4096,
+            rank: 64,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: pearl_test_pattern(16),
+            cols_pattern: pearl_test_pattern(16),
+            reserved: [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
+        };
+        let (a, b) = synth_matrices(b"pearl-max-envelope-t16-k4096", &params);
+        let attempt = evaluate_pearl_merge_ticket_attempt(
+            &header, &config, &params, 0, 0, &a, &b, &[0xff; 32], 16, aux,
+        )
+        .expect("evaluate max-envelope Pearl merge ticket attempt");
+
+        let start = std::time::Instant::now();
+        let run = ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate(
+            &attempt, &params, &a, &b, 16,
+        )
+        .expect("prove compact Pearl recursive certificate (max envelope)");
+        let prove_wall_ms = start.elapsed().as_millis();
+        let compact_bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(run.certificate())
+                .expect("encode compact recursive certificate");
+        eprintln!(
+            "D1a max-envelope (m=n=512, tile=16, k=4096, r=64): compact_cert={} bytes ({:.2} KiB), \
+             prove_wall_ms={}, l1_outer_ms={}, l2_prove_ms={}, trace_height={}",
+            compact_bytes.len(),
+            compact_bytes.len() as f64 / 1024.0,
+            prove_wall_ms,
+            run.l1_outer_cert_ms(),
+            run.l2_prove_ms(),
+            run.trace_height(),
+        );
+        assert!(
+            compact_bytes.len() <= 150_000,
+            "max-envelope compact cert exceeded 150,000 bytes: {}",
+            compact_bytes.len()
+        );
+    }
+
     #[ignore = "real compact recursive proof generation is intentionally opt-in"]
     #[test]
     fn real_compact_pearl_merge_artifact_jam_size_for_selected_route() {
