@@ -552,7 +552,7 @@ fn prove_compact_batch_from_verified_l0(
         let cached =
             ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache(
                 zk_params,
-                &CircuitConfig::PROD,
+                &CircuitConfig::for_layer0_trace(verified_l0.trace_height()),
                 verified_l0,
                 &cache.inner,
             );
@@ -565,7 +565,7 @@ fn prove_compact_batch_from_verified_l0(
 
     ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof(
         zk_params,
-        &CircuitConfig::PROD,
+        &CircuitConfig::for_layer0_trace(verified_l0.trace_height()),
         verified_l0,
     )
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
@@ -1217,7 +1217,8 @@ pub fn prove_ai_pow_recursive_certificate(
     };
     let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
         &zk_params,
-        &CircuitConfig::PROD,
+        // Same degree-adaptive profile the Layer-0 proof used (bound trace_height).
+        &CircuitConfig::for_layer0_trace(trace_height),
         verified_l0,
     )
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
@@ -1524,7 +1525,8 @@ pub fn prove_pearl_merge_recursive_certificate(
     };
     let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
         &zk_params,
-        &CircuitConfig::PROD,
+        // Same degree-adaptive profile the Layer-0 proof used (bound trace_height).
+        &CircuitConfig::for_layer0_trace(trace_height),
         verified_l0,
     )
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
@@ -1672,7 +1674,7 @@ pub fn verify_pearl_moe_recursive_certificate(
     ai_pow_zk::recursion::verify_recursive_certificate(
         certificate,
         &zk_params,
-        &CircuitConfig::PROD,
+        &CircuitConfig::for_layer0_trace(trace_height),
         pis,
     )
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
@@ -2103,7 +2105,12 @@ fn verify_ai_pow_tiled_with_statement(
     artifact: &ZkProofArtifact,
 ) -> Result<(), BridgeError> {
     let zk_params = zk_params_from(params);
-    let cfg = build_config(&zk_params, &CircuitConfig::PROD);
+    // Degree-adaptive profile re-derived from the bound Layer-0 trace height —
+    // MUST match the prover's `for_layer0_trace(height)`.
+    let cfg = build_config(
+        &zk_params,
+        &CircuitConfig::for_layer0_trace(artifact.trace_height),
+    );
     let bp = verified_block_public(verified);
     let canonical = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
         &zk_params, &verified.strip_schedule, &bp, artifact.trace_height,
@@ -2601,11 +2608,12 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
         tile: params.tile,
         difficulty_bits: params.difficulty_bits,
     };
-    // The production FRI profile. `prove_and_verify_*` is the live
-    // mining path (`prover.rs` → `prove_and_verify_for_block`), so it
-    // proves the composite at `CircuitConfig::PROD` (the ≥60-bit
-    // unconditional-Johnson production config) — never a TEST profile.
-    let cfg = build_config(&zk_params, &CircuitConfig::PROD);
+    // The production FRI profile, chosen degree-adaptively from the bound trace
+    // length: `prod_adaptive` holds the ≥60-bit unconditional-Johnson floor while
+    // picking the total-prove-optimal blowup for this degree (`lb=4` small, `lb=2`
+    // large). The verifier re-derives the identical profile from the bound
+    // `trace_height`, so this must stay `for_layer0_trace(height)` everywhere.
+    let cfg = build_config(&zk_params, &CircuitConfig::for_layer0_trace(height));
 
     // HIGH-2.2 §4.C Route A: program-pinned proving **with the
     // cross-chip LogUp enforced** (batch-stark). `*_pinned_logup`
@@ -2665,7 +2673,10 @@ pub(crate) fn prove_and_verify_tiled_full<F: FnOnce(&mut CompositeTrace)>(
         verify_ai_pow_tiled_with_statement(params, target, &verified, &artifact)?;
     } else {
         let zk_params = zk_params_from(params);
-        let cfg = build_config(&zk_params, &CircuitConfig::PROD);
+        let cfg = build_config(
+            &zk_params,
+            &CircuitConfig::for_layer0_trace(artifact.trace_height),
+        );
         composite_verify_pow_pinned_logup(
             &cfg, &prover_program, &artifact.proof, &artifact.pis, target,
         )

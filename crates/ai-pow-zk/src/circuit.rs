@@ -170,6 +170,20 @@ impl CircuitConfig {
         }
     }
 
+    /// **The production Layer-0 / recursion FRI profile for a trace of `trace_len`
+    /// rows** — [`prod_adaptive`](Self::prod_adaptive) keyed by the trace's STARK
+    /// degree (`log2(trace_len)`). This is the **single source of truth** every
+    /// Layer-0 prove, Layer-0 verify, L1 recursion, and recursive-certificate
+    /// verify MUST use so the prover and verifier derive the *same* profile from
+    /// the (public, proof-bound) trace length. `trace_len` is a power of two (the
+    /// STARK trace is padded to one); non-power-of-two inputs round up so the
+    /// degree is well-defined.
+    pub fn for_layer0_trace(trace_len: usize) -> Self {
+        debug_assert!(trace_len.is_power_of_two(), "STARK trace_len must be 2^k");
+        let degree_bits = trace_len.next_power_of_two().trailing_zeros() as usize;
+        Self::prod_adaptive(degree_bits)
+    }
+
     /// Small profile for unit tests once the circuit is real.
     /// Soundness is not the goal here — we just want a fast
     /// prove/verify round-trip.

@@ -142,22 +142,30 @@ miss the ~30 s bar (2¹⁶–2¹⁸), `prod_adaptive` is **1.72× at 2¹⁶** an
 with the size and the 60-bit floor unchanged; at the small default (2¹³) it keeps
 `lb=4` so nothing regresses.
 
-**Remaining to realize it in production (a dedicated validated pass — consensus
-soundness-critical):** thread `prod_adaptive(log2(trace_height))` into the ~4
-config-choice sites so the **prover and verifier derive the same profile from the
-bound `trace_height`** (a mismatch breaks verification):
-1. Layer-0 prove config (`zk_bridge` scheduled prover, where the trace is built).
-2. L1 recursion profile (`recursion.rs` — passed through from Layer-0).
-3. Layer-0 verify (`verify_ai_pow_tiled_with_statement`, has `artifact.trace_height`).
-4. Recursive-cert verify (`verify_recursive_certificate` callers in
-   `certificate_noun.rs` / `zk_bridge` — derive from `cert.trace_height`, which
-   the precheck already binds to `expected_layer0_rows`).
+**THREADED + VALIDATED (production-ready).** `CircuitConfig::for_layer0_trace(
+trace_len)` — the single source of truth — is now used at every prove/verify site
+so the prover and verifier derive the **identical** profile from the bound
+`trace_height`:
+- Layer-0 prove (`zk_bridge`, `for_layer0_trace(height)`).
+- L1 recursion, both paths (`prove_recursive_certificate_...`, `trace_height`).
+- L2 compact, both cached/uncached (`prove_compact_batch_from_verified_l0`, via a
+  new `ChainVerifiedCompositeProof::trace_height()` accessor).
+- Layer-0 verify (`verify_ai_pow_tiled_with_statement` + the else-branch,
+  `artifact.trace_height`).
+- Recursive-cert verify (`verify_pearl_moe_recursive_certificate`; the 4 node
+  verifiers in `certificate_noun.rs`, `certificate.trace_height`).
 
-Gate: full recursion prove→verify round-trip at **both** a ≤14 and a ≥15 degree
-(profile selection must round-trip), the compact size/latency tests, and the
-soundness/adversarial suite. The `trace_height` is already a bound public input,
-so the derivation is verifier-safe; the work is the careful threading + the
-two-degree regression.
+**Round-trip validated at both degrees (12-core native, full node verify incl.
+jam/decode/precheck + wrong-digest rejection):**
+
+| degree | profile | prove wall | node-verify | size |
+|---|---|---|---|---|
+| 2¹³ (default) | PROD lb=4 | 28.5 s (unchanged) | ✓ | 121.65 KiB |
+| 2¹⁶ (max env) | **lb=2** | **55.3 s (1.72×)** | ✓ re-derived lb=2 | 120.58 KiB |
+
+The 60-bit Johnson floor is preserved at both. Test sites that hardcode `PROD` are
+all ≤14-degree fixtures (`for_layer0_trace(2¹³)=PROD`, so they still match). No
+residual beyond broader regression coverage.
 
 ## Next levers (after the blowup win)
 

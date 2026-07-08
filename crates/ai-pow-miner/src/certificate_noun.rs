@@ -1847,7 +1847,7 @@ pub fn verify_decoded_ai_pow_pearl_merge_artifact_with_context_and_limits(
     ai_pow_zk::recursion::verify_recursive_certificate(
         &certificate,
         &artifact.certificate.zk_params,
-        &ai_pow_zk::CircuitConfig::PROD,
+        &ai_pow_zk::CircuitConfig::for_layer0_trace(artifact.certificate.trace_height),
         &artifact.certificate.public_inputs,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
@@ -1983,7 +1983,7 @@ pub fn verify_ai_pow_pearl_merge_artifact_slab_with_context<J>(
     ai_pow_zk::recursion::verify_recursive_certificate(
         &certificate,
         &metadata.certificate.zk_params,
-        &ai_pow_zk::CircuitConfig::PROD,
+        &ai_pow_zk::CircuitConfig::for_layer0_trace(metadata.certificate.trace_height),
         &public_inputs,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
@@ -2242,7 +2242,7 @@ pub fn verify_decoded_ai_pow_certificate(
     ai_pow_zk::recursion::verify_recursive_certificate(
         &certificate,
         &shape.zk_params,
-        &ai_pow_zk::CircuitConfig::PROD,
+        &ai_pow_zk::CircuitConfig::for_layer0_trace(shape.trace_height),
         &shape.public_inputs,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))
@@ -2316,7 +2316,7 @@ pub fn verify_ai_pow_pearl_merge_artifact_jam_with_context(
     ai_pow_zk::recursion::verify_recursive_certificate(
         &certificate,
         &zk_params,
-        &ai_pow_zk::CircuitConfig::PROD,
+        &ai_pow_zk::CircuitConfig::for_layer0_trace(certificate_shape.trace_height),
         &public_inputs,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
@@ -5321,7 +5321,7 @@ mod tests {
             .validate_prod_envelope()
             .expect("tile=16,k=4096,r=64 must be in the prod envelope");
         let aux = pearl_test_aux();
-        let (header, _aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
         let config = PearlMiningConfig {
             common_dim: 4096,
             rank: 64,
@@ -5360,6 +5360,48 @@ mod tests {
             "max-envelope compact cert exceeded 150,000 bytes: {}",
             compact_bytes.len()
         );
+
+        // FULL NODE ROUND-TRIP at 2^16 — the degree-adaptive lb=2 path. The
+        // artifact must decode + node-verify, confirming the verifier re-derives
+        // the SAME `for_layer0_trace(trace_height)` profile (lb=2/nq=30 at 2^16)
+        // the prover used across L0/L1/L2. A profile mismatch would fail here.
+        let artifact_slab =
+            build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+                &attempt,
+                &aux_inclusion,
+                &a,
+                &b,
+                16,
+                &run,
+            )
+            .expect("build max-envelope compact artifact");
+        let jammed = artifact_slab.jam();
+        let decoded =
+            decode_ai_pow_pearl_merge_artifact_jam(&jammed, CertificateNounLimits::default())
+                .expect("decode max-envelope compact artifact");
+        assert_eq!(decoded.certificate.trace_height, run.trace_height());
+        let verifier_context = PearlMergeAiPowVerifierContext {
+            candidate_nock_block_commitment: &attempt.aux.nock_block_commitment,
+            a_row_major: &a,
+            b_col_major: &b,
+            nockchain_target: &attempt.nockchain_target,
+            max_pattern_len: 16,
+        };
+        let expected_digest_bytes =
+            ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                run.verifier_key_digest(),
+            );
+        let verified =
+            verify_decoded_ai_pow_pearl_merge_compact_artifact_with_digest_bytes_and_limits(
+                &decoded,
+                verifier_context,
+                run.verifier_context(),
+                &expected_digest_bytes,
+                CertificateNounLimits::default(),
+            )
+            .expect("max-envelope compact artifact node-verifies (degree-adaptive lb=2)");
+        assert_eq!(verified.work.ticket, attempt.ticket);
+        assert_eq!(verified.work.commitments, attempt.commitments);
     }
 
     #[ignore = "real compact recursive proof generation is intentionally opt-in"]

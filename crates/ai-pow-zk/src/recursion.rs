@@ -1410,6 +1410,15 @@ impl<'a> ChainVerifiedCompositeProof<'a> {
             public_inputs,
         }
     }
+
+    /// The Layer-0 composite trace height (the preprocessed program has one row
+    /// per trace row, so its height IS the trace length). Callers use this to
+    /// pick the degree-adaptive FRI profile (`CircuitConfig::for_layer0_trace`)
+    /// consistently on the prove side.
+    pub fn trace_height(&self) -> usize {
+        use p3_matrix::Matrix;
+        self.program.height()
+    }
 }
 
 struct CompactBatchL2Prep {
