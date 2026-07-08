@@ -6488,6 +6488,92 @@ mod tests {
         );
     }
 
+    /// §4.C.10 for the **non-contiguous** opening (the MoE `outer_indices`
+    /// shape). B5b makes the sweep index the opened pattern rows via covering-
+    /// range lanes; this proves that binding is *sound* against a malicious miner
+    /// who runs the §6(b) sweep on a row-permuted matrix while the strip-opening
+    /// and `HASH_A` stay the committed `a`. The position-keyed `noised_packed`
+    /// bus must reject it exactly as in the contiguous case.
+    #[test]
+    #[ignore = "real Layer-0 proof; §4.C.10 malicious-miner for non-contiguous opening"]
+    fn sec_4c10_noncontiguous_sweep_on_row_permuted_matrix_rejects() {
+        use crate::commit::matrix_commitment;
+        use crate::fiat_shamir::{noise_seed_a, noise_seed_b};
+        use crate::synth::synth_matrices;
+
+        let params = MatmulParams {
+            m: 128,
+            k: 1024,
+            n: 128,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"4c10-noncontig-perm", &params);
+        let kappa = [0x43u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+        let s_b = noise_seed_b(&kappa, &h_b);
+        let s_a = noise_seed_a(&s_b, &h_a);
+        let zctx = ZkProverContext {
+            a: &a,
+            b: &b,
+            params,
+            kappa,
+            h_a_chunk: h_a,
+            h_b_chunk: h_b,
+            s_a,
+            s_b,
+            jackpot_key: s_a,
+        };
+        let zk = zk_params_from(&params);
+        // Non-contiguous opened rows/cols (the MoE outer_indices shape).
+        let strip_schedule = StripIndexSchedule::from_indices(
+            &zk,
+            vec![0, 1, 8, 9, 64, 65, 72, 73],
+            vec![0, 1, 8, 9, 64, 65, 72, 73],
+        )
+        .expect("non-contiguous schedule");
+
+        // Row-reverse A: the §6(b) sweep + noised_packed store run on a', the
+        // strip-opening + HASH_A stay committed `a`.
+        let k = params.k as usize;
+        let m = params.m as usize;
+        let a_perm: Vec<i8> = (0..m)
+            .rev()
+            .flat_map(|i| a[i * k..(i + 1) * k].iter().copied())
+            .collect();
+        assert_ne!(a_perm, a);
+
+        let res = (|| -> Result<(), BridgeError> {
+            let (artifact, _, _) = prove_ai_pow_scheduled_full_with_context(
+                &zctx,
+                &params,
+                0,
+                0,
+                &strip_schedule,
+                |_| {},
+                Some((&a_perm, &b)),
+            )?;
+            let verified = VerifiedZkStatement {
+                tile_i: 0,
+                tile_j: 0,
+                strip_schedule: strip_schedule.clone(),
+                derived: ZkDerivedStatement { kappa, s_a, s_b },
+            };
+            verify_ai_pow_tiled_with_statement(&params, &[0xffu8; 32], &verified, &artifact)
+        })();
+        assert!(
+            res.is_err(),
+            "§4.C.10 non-contiguous: a sweep on a row-permuted committed matrix \
+             MUST be rejected by the position-keyed noised_packed bus even for a \
+             non-contiguous opened row set (B5b)."
+        );
+    }
+
     // ===================================================================
     // M2 (DoS audit): structural-invariant defense at the `pub` bridge
     // boundary. A `MatmulParams` with `noise_rank = 0` historically hit
