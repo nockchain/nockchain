@@ -98,6 +98,10 @@ pub enum PearlCompatError {
     MoeRoutingTokenOutOfRange { slot: usize, token: u32, m: u32 },
     #[error("Pearl MoE routing_offsets are not a valid non-decreasing partition ending at m*top_k")]
     MoeOffsetsInconsistent,
+    #[error("Pearl MoE top_k={top_k} must be < number of experts e={e}")]
+    MoeTopKNotLessThanExperts { top_k: usize, e: usize },
+    #[error("Pearl MoE expert {expert} span {span} exceeds the token count m={m} (a token routes to an expert at most once)")]
+    MoeExpertSpanExceedsTokens { expert: usize, span: u32, m: u32 },
     #[error("Pearl MoE outer_indices length {actual} must equal the row-pattern size {expected}")]
     MoeOuterIndicesLenMismatch { expected: usize, actual: usize },
     #[error("Pearl MoE opened row position {pos} falls outside expert {expert_idx}'s routed tokens")]
@@ -1493,6 +1497,26 @@ pub fn verify_pearl_moe_routing_binding(
     }
     if u64::from(*moe.routing_offsets.last().unwrap()) != numel {
         return Err(PearlCompatError::MoeOffsetsInconsistent);
+    }
+
+    // Pearl acceptance-set parity (`zk-pow/src/api/sanity_checks.rs`): `top_k < e`
+    // and each expert's span `<= m`. A token routes to a given expert at most once,
+    // so an expert holds at most `m` of the `m*top_k` slots; without these bounds
+    // we would accept degenerate over-routings (a token repeated within an expert,
+    // or `top_k >= e`) that Pearl rejects — a merge-mining divergence, and a
+    // routing the difficulty model never priced. `offsets[0] <= m` is the span of
+    // expert 0 (start 0), covered by the loop below.
+    if top_k >= e {
+        return Err(PearlCompatError::MoeTopKNotLessThanExperts { top_k, e });
+    }
+    let mut prev = 0u32;
+    for (expert, &end) in moe.routing_offsets.iter().enumerate() {
+        // `end >= prev` (non-decreasing, checked above) so the span never underflows.
+        let span = end - prev;
+        if span > m {
+            return Err(PearlCompatError::MoeExpertSpanExceedsTokens { expert, span, m });
+        }
+        prev = end;
     }
 
     // routing_root binding: the carried routing_data commits to moe.hash_routing.

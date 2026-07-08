@@ -78,6 +78,64 @@ fn cross_expert_forgery_rejected() {
     assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOuterIndicesMismatch));
 }
 
+/// §D audit — Pearl acceptance-set parity. `top_k >= e` (each token routed to at
+/// least as many experts as exist) is rejected by Pearl `sanity_checks.rs`; we
+/// must reject it too or we accept a routing Pearl rejects (merge-mining divergence).
+#[test]
+fn top_k_not_less_than_experts_rejected() {
+    let (e, top_k, m) = (2usize, 2usize, 4u32); // top_k == e (invalid)
+    // Each token → both experts; grouped: expert 0 = [0,1,2,3], expert 1 = [0,1,2,3].
+    let routing_data: Vec<u32> = vec![0, 1, 2, 3, 0, 1, 2, 3];
+    let routing_data_le: Vec<u8> = routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+    };
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![4, 8],
+        hash_routing: matrix_commitment(&routing_data_le, &KAPPA),
+        outer_indices: vec![0, 1],
+    };
+    assert_eq!(
+        verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &routing_data, 4096),
+        Err(PearlCompatError::MoeTopKNotLessThanExperts { top_k, e })
+    );
+}
+
+/// §D audit — a token routed to the SAME expert twice makes that expert's span
+/// exceed `m`. Pearl caps each expert at `m` tokens (`w[1]-w[0] <= m`); we must
+/// reject the over-routing too. Here expert 0 spans 3 slots for m=2.
+#[test]
+fn expert_span_exceeding_m_rejected() {
+    let (e, top_k, m) = (3usize, 2usize, 2u32); // top_k < e, so the span check is reached
+    // expert 0 = [0,0,1] (token 0 twice → span 3 > m), expert 1 = [1], expert 2 = [].
+    let routing_data: Vec<u32> = vec![0, 0, 1, 1];
+    let routing_data_le: Vec<u8> = routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+    };
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![3, 4, 4],
+        hash_routing: matrix_commitment(&routing_data_le, &KAPPA),
+        outer_indices: vec![0, 0],
+    };
+    assert_eq!(
+        verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &routing_data, 4096),
+        Err(PearlCompatError::MoeExpertSpanExceedsTokens { expert: 0, span: 3, m: 2 })
+    );
+}
+
 #[test]
 fn tampered_routing_data_root_mismatch() {
     let (config, mut routing, moe) = valid();

@@ -119,4 +119,60 @@ matmul keying is k-agnostic by construction. Tracked as future coverage.
 
 ---
 
+## §D MoE routing-consistency binding / grinding / difficulty — **ISSUE FOUND → MITIGATED**
+
+**Binding is sound (no forgery):** `routing_data → routing_root ==
+moe.hash_routing` binds the routing to `s_A` (via §E), and `outer_indices[u] ==
+routing_data[expert_start + inner_u]` with `pos < expert_end` binds the opened rows
+to the routing. A prover cannot change the opened rows without changing the
+jackpot. 9 pre-existing adversarial tests reject every forgery path (forged/
+cross-expert/tampered/out-of-range/inconsistent-offsets/etc.).
+
+**ISSUE (acceptance-set divergence from Pearl):** our binding was **missing three
+of Pearl's `sanity_checks.rs` constraints** — `top_k < e` (line 80), each expert
+span `w[1]−w[0] ≤ m` (line 103), and `offsets[0] ≤ m` (line 107). Since a token
+routes to a given expert at most once, an expert holds ≤ m of the m·top_k slots;
+without these bounds we accepted **degenerate over-routings** (a token repeated
+within an expert, or `top_k ≥ e`) that Pearl rejects — a merge-mining divergence
+and a routing shape the difficulty model never priced. The routing is
+prover-supplied and only structurally checked (matching Pearl's design — the
+verifier can't run the model), so matching Pearl's *exact* structural bounds is
+required.
+
+**MITIGATED:** added `top_k < e` and per-expert `span ≤ m` (subsuming
+`offsets[0] ≤ m`) to `verify_pearl_moe_routing_binding`, with new errors
+`MoeTopKNotLessThanExperts` / `MoeExpertSpanExceedsTokens`. Tests
+`top_k_not_less_than_experts_rejected` + `expert_span_exceeding_m_rejected`.
+Honest round-robin routings (`build_routing_data`) have balanced spans `< m`, so
+the recursive round-trips are unaffected (re-verified). **Grinding:** each
+(routing, nonce) is a distinct jackpot attempt costing a full tile computation; the
+routing freedom is Pearl's inherited PoUW model, priced into difficulty, not a new
+lever.
+
+---
+
+## §H Degree-adaptive FRI config — profile-selection attacks — **SAFE**
+
+**Finding:** all four sub-attacks fail:
+1. **Weaker-profile grind:** both classes (`lb=4/nq=15`, `lb=2/nq=30`) are
+   *exactly* 60-bit Johnson (`lb·nq`), so there is no weaker profile to reach.
+2. **Lie about the degree:** `trace_height` is bound by the node precheck
+   (`certificate_noun.rs:2077`, `metadata.trace_height != expected_layer0_rows →
+   reject`, where `expected_layer0_rows` is a pure function of the chain-bound
+   params + strip schedule). The verifier derives the profile from that bound
+   value, and the proof was produced at the same profile, so a mismatched-profile
+   proof fails verification.
+3. **Boundary desync:** `for_layer0_trace` is called on the *same* bound
+   `trace_height` by prover and verifier; non-power-of-2 rounds up identically
+   (the real STARK trace is always a power of two).
+4. **Soundness floor:** the 60-bit Johnson floor is unconditional/proven for both
+   `lb` values; the known-insecure CYCLE-SUM floor (~22 bits) is 38 bits below both.
+
+**Evidence:** `for_layer0_trace_boundary_floor_and_rounding` (new) pins the
+crossover, the 60-bit floor at every degree 1–20, and the rounding; the earlier
+degree-adaptive work validated the full recursive round-trip at both 2¹³ (lb=4)
+and 2¹⁶ (lb=2). **SAFE.**
+
+---
+
 <!-- subsequent angles appended as they are evaluated -->
