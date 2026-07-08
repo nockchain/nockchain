@@ -5,6 +5,30 @@ Companion to `2026-07-08_MOE_ADVERSARIAL_AUDIT_ANGLES.md`. One section per angle
 with the **verdict** (SAFE / EXPLOITABLE / MITIGATED) + the evidence (test, proof,
 or PoC) and any mitigation landed.
 
+## Summary
+
+| angle | verdict | outcome |
+|---|---|---|
+| §A noised_packed key collision | **SAFE** | collision real but benign — `(id,value)` fingerprint disambiguates; regression pins it |
+| §B selective multi-proof | **SAFE** | equivalence + scattered auth + tamper rejection + in-circuit fold |
+| §C k≠1024 keying | **SAFE** | keying is byte-position (k-agnostic); new k∈{2048,4096,14336} test; residual: full k>1024 matmul round-trip |
+| §D routing grinding/difficulty | **ISSUE → MITIGATED** | added missing Pearl checks (`top_k<e`, expert span ≤ m); binding is jackpot-bound |
+| §E Pearl byte-compat | **SAFE** | full splice chain re-derived vs Pearl formula + real KAT |
+| §F opened-schedule binding | **SAFE** | complete identity (RowMajorMatrix); recomputed from public schedule |
+| §G non-contiguous sweep | **SAFE** | position-keyed; permuted/subset/superset/aliased all rejected |
+| §H degree-adaptive config | **SAFE** | bound trace_height, both 60-bit, consistent derivation |
+| §I MoE verify wiring | **SOUND, TEST-ONLY** | fail-closed; residuals: bind params to proof + difficulty check |
+| §J fail-closed guards | **SAFE** | 12 tests, all layers reject `e>0` |
+| §K DoS | **SAFE** | caps + fail-closed; residual: tighten routing-size bound when live |
+| §L trace-size accounting | **SAFE** | new test: placement == budget exactly |
+
+**One real issue found and fixed: §D** (acceptance-set divergence from Pearl —
+degenerate over-routings were accepted). Everything else is safe by construction or
+already covered; new regression tests were added for §A, §C, §D, §H, §L and the §E
+full chain. Residuals (all non-defects, gated by MoE being fail-closed): full
+k>1024 recursive round-trip (§C), routing-size allocation bound (§K), live MoE
+wiring + tile-scaled difficulty (§I), end-to-end l0_program mismatch test (§F).
+
 ---
 
 ## §A `noised_packed` LogUp key collision under scattered opening — **SAFE**
