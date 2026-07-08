@@ -1,9 +1,19 @@
 # Track B — Pearl MoE grouped-GEMM: concrete implementation specification
 
 **Date:** 2026-07-07
-**Status:** specification / de-risk design. No Track B code landed yet. Track A (V2-dense
-byte-parity + MoE fail-closed) is committed (`f4cedea6`); every entry point below is
-currently fail-closed on `e > 0`.
+**Status:** **Track B off-circuit + core circuit + MoE soundness IMPLEMENTED and
+validated** (B1–B4, B3a–d, B5a de-risk, **B5b non-contiguous opening**, **B5c grouped
+matmul**, **B5d full recursive prove→verify**, **routing-consistency binding + 10
+adversarial tests**, **§4.C.10 malicious-miner for non-contiguous**). The complete MoE
+proving stack proves + verifies end-to-end (`real_moe_recursive_certificate_proves_and_verifies`).
+Track A (V2-dense byte-parity + MoE fail-closed) is committed (`f4cedea6`).
+**Remaining (precise residual):** the production **node-boundary integration** — a MoE
+variant of `certificate_noun.rs::verify_decoded_ai_pow_pearl_merge_artifact` precheck
+(recompute MoE `s_a` from routing + call `verify_pearl_moe_routing_binding` + recompute
+the MoE canonical program from `outer_indices`), the MoE artifact encode/decode, a
+high-level MoE prove path, and lifting the `e > 0` fail-closed guards. This is
+soundness-critical node-boundary work; land it in validated stages (R1), MoE stays
+fail-closed until it does.
 **Discipline:** soundness-critical + invasive (a cryptographic PoW commitment + circuit
 change). Land in validated stages, KAT-first against pinned Pearl vectors, MoE kept
 fail-closed until each stage validates. Dense S0–S9 byte-equivalence is the standing
