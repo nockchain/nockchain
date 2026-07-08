@@ -1610,18 +1610,20 @@ pub fn verify_pearl_moe_recursive_certificate(
         .ok_or(BridgeError::PearlMergeStatement(
             crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
         ))?;
-    if params.n % u32::from(cfg.e) != 0 {
-        return Err(BridgeError::PearlMergeUnsupportedTileShape);
-    }
-    let n_e = params.n / u32::from(cfg.e);
-    let inner_cols = mining_config
-        .cols_pattern
-        .indices_with_offset_bounded(t_cols, max_pattern_len)
-        .map_err(BridgeError::PearlMergeStatement)?;
-    let b_cols_global: Vec<u32> = inner_cols
-        .iter()
-        .map(|&c| c + u32::from(moe.expert_idx) * n_e)
-        .collect();
+    // Recompute the opened B-columns AND enforce the per-expert clamp (audit N1):
+    // local columns must stay within this expert's n_e block, or they bleed into a
+    // neighbouring expert's weights (a fork from Pearl + a column-grinding lever).
+    // `moe_expert_b_cols_global` performs the divisibility check + the `local < n_e`
+    // clamp that the downstream `validate_strip_indices` (global `< n`) misses.
+    let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
+        mining_config,
+        cfg.e,
+        params.n,
+        moe.expert_idx,
+        t_cols,
+        max_pattern_len,
+    )
+    .map_err(BridgeError::PearlMergeStatement)?;
 
     // (3) Recompute s_A from the routing splice and bind the public inputs.
     let routing_offsets_le: Vec<u8> = moe

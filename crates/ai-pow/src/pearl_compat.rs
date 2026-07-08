@@ -102,6 +102,10 @@ pub enum PearlCompatError {
     MoeTopKNotLessThanExperts { top_k: usize, e: usize },
     #[error("Pearl MoE expert {expert} span {span} exceeds the token count m={m} (a token routes to an expert at most once)")]
     MoeExpertSpanExceedsTokens { expert: usize, span: u32, m: u32 },
+    #[error("Pearl MoE column dimension n={n} is not divisible by the number of experts e={e}")]
+    MoeColumnDimIndivisible { n: u32, e: u16 },
+    #[error("Pearl MoE local column {local} reaches outside expert {expert_idx}'s block (n_e={n_e}); would bleed into a neighbouring expert's weights")]
+    MoeColumnOutsideExpert { local: u32, n_e: u32, expert_idx: u16 },
     #[error("Pearl MoE outer_indices length {actual} must equal the row-pattern size {expected}")]
     MoeOuterIndicesLenMismatch { expected: usize, actual: usize },
     #[error("Pearl MoE opened row position {pos} falls outside expert {expert_idx}'s routed tokens")]
@@ -1559,6 +1563,61 @@ pub fn verify_pearl_moe_routing_binding(
         }
     }
     Ok(())
+}
+
+/// Recompute the opened **global** B-columns for a MoE expert tile from the PUBLIC
+/// column pattern, binding them to the expert's own weight block.
+///
+/// Pearl stacks the per-expert weight matrices, so expert `expert_idx` owns
+/// **exactly** columns `[expert_idx·n_e, (expert_idx+1)·n_e)` with `n_e = n / e`
+/// (Pearl `proof_utils.rs`: `first_expert_col = n_e · expert_idx`; the intra-expert
+/// pattern indices are drawn from `n_e`). The intra-expert local columns therefore
+/// MUST stay within `n_e`.
+///
+/// **Soundness (audit N1):** the downstream `validate_strip_indices` only bounds
+/// the *global* column `< n` (total), which does NOT catch a local column
+/// `≥ n_e`. Without the `local < n_e` clamp below, a `cols_pattern`/`t_cols` that
+/// reaches past `n_e` makes `b_cols_global = local + expert_idx·n_e` bleed into a
+/// **neighbouring expert's weights** while still passing `< n` — a divergence from
+/// Pearl (which validates the pattern against the per-expert `n_e`) and a
+/// column-grinding lever (the prover could open a favourable expert's columns
+/// under a different `expert_idx`). This helper enforces the missing clamp.
+pub fn moe_expert_b_cols_global(
+    mining_config: &PearlMiningConfig,
+    e: u16,
+    n: u32,
+    expert_idx: u16,
+    t_cols: u32,
+    max_pattern_len: usize,
+) -> Result<Vec<u32>, PearlCompatError> {
+    if e == 0 {
+        return Err(PearlCompatError::MoePublicMissingConfig);
+    }
+    if expert_idx >= e {
+        return Err(PearlCompatError::MoeExpertIdxOutOfRange { expert_idx, e });
+    }
+    if n % u32::from(e) != 0 {
+        return Err(PearlCompatError::MoeColumnDimIndivisible { n, e });
+    }
+    let n_e = n / u32::from(e);
+    let inner_cols = mining_config
+        .cols_pattern
+        .indices_with_offset_bounded(t_cols, max_pattern_len)?;
+    // The load-bearing clamp: every intra-expert column stays inside this expert's
+    // n_e-wide block (matches Pearl, which draws pattern indices from n_e).
+    for &local in &inner_cols {
+        if local >= n_e {
+            return Err(PearlCompatError::MoeColumnOutsideExpert {
+                local,
+                n_e,
+                expert_idx,
+            });
+        }
+    }
+    Ok(inner_cols
+        .iter()
+        .map(|&local| local + u32::from(expert_idx) * n_e)
+        .collect())
 }
 
 pub fn verify_pearl_pattern_ticket(

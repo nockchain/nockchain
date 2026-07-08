@@ -5,8 +5,9 @@
 
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
-    verify_pearl_moe_routing_binding, PearlCompatError, PearlMiningConfig, PearlMoeParams,
-    PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
+    moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError, PearlMiningConfig,
+    PearlMoeParams, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
+    PEARL_MMA_INT7XINT7_TO_INT32,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
 
@@ -133,6 +134,84 @@ fn expert_span_exceeding_m_rejected() {
     assert_eq!(
         verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &routing_data, 4096),
         Err(PearlCompatError::MoeExpertSpanExceedsTokens { expert: 0, span: 3, m: 2 })
+    );
+}
+
+/// §N1 audit — column-within-expert bleed. The opened B-columns for expert
+/// `expert_idx` must stay inside that expert's `[expert_idx·n_e, (expert_idx+1)·n_e)`
+/// block. A `cols_pattern`/`t_cols` reaching `local ≥ n_e` bleeds into a
+/// neighbouring expert's weights (a Pearl fork + a column-grinding lever) — the
+/// downstream global `< n` check does not catch it.
+fn cols_config(pattern: &[u32]) -> PearlMiningConfig {
+    PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(pattern).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(2, 1),
+    }
+}
+
+#[test]
+fn moe_columns_stay_within_expert_block_accept() {
+    // e=2, n=8 → n_e=4. Pattern [0,1], t_cols=0.
+    let cfg = cols_config(&[0, 1]);
+    // expert 0 → local [0,1] → global [0,1].
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 2, 8, 0, 0, 4096).unwrap(),
+        vec![0, 1]
+    );
+    // expert 1 → local [0,1] → global [4,5] (offset by n_e=4).
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 2, 8, 1, 0, 4096).unwrap(),
+        vec![4, 5]
+    );
+    // A t_cols offset that keeps local < n_e is fine: t_cols=2 → local [2,3] → global expert1 [6,7].
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 2, 8, 1, 2, 4096).unwrap(),
+        vec![6, 7]
+    );
+}
+
+#[test]
+fn moe_column_bleed_via_t_cols_rejected() {
+    // e=2, n=8 → n_e=4. t_cols=4 pushes local to [4,5] ≥ n_e → would bleed into
+    // expert 1's block (global [8,9] for expert 1, or [4,5] under expert 0 = expert
+    // 1's weights). Must be rejected.
+    let cfg = cols_config(&[0, 1]);
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 2, 8, 0, 4, 4096),
+        Err(PearlCompatError::MoeColumnOutsideExpert {
+            local: 4,
+            n_e: 4,
+            expert_idx: 0
+        })
+    );
+}
+
+#[test]
+fn moe_column_bleed_via_wide_pattern_rejected() {
+    // A pattern whose local index reaches n_e (=4): [0,4]. Under expert 0 this
+    // opens global column 4 = expert 1's first weight column. Reject.
+    let cfg = cols_config(&[0, 4]);
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 2, 8, 0, 0, 4096),
+        Err(PearlCompatError::MoeColumnOutsideExpert {
+            local: 4,
+            n_e: 4,
+            expert_idx: 0
+        })
+    );
+}
+
+#[test]
+fn moe_column_dim_indivisible_rejected() {
+    // n=8 not divisible by e=3.
+    let cfg = cols_config(&[0, 1]);
+    assert_eq!(
+        moe_expert_b_cols_global(&cfg, 3, 8, 0, 0, 4096),
+        Err(PearlCompatError::MoeColumnDimIndivisible { n: 8, e: 3 })
     );
 }
 
