@@ -1097,6 +1097,158 @@ impl CompositeTrace {
         self.place_parent(row, &l, &r, key_words, is_root, selector_idx)
     }
 
+    /// Selective (disjoint-chunk) counterpart of [`place_matrix_strip_opening`]:
+    /// place the trace rows for a BLAKE3 **multi-proof** over the sorted, distinct
+    /// chunk set `sel`. `strip_bytes` is the selected chunks' bytes concatenated in
+    /// `sel` order (`sel.len()*1024`); `noise_strip` (if any) is parallel. The
+    /// producer keying is `strip_c0 = sel[0]` (⇒ key `chunk_index - strip_c0`),
+    /// identical to the range opening, so the §6(b) sweep's `noised_packed`
+    /// consumers match unchanged — only the SET of emitted leaf rows differs, so a
+    /// scattered opening costs O(|sel|·log n) rows instead of the O(max−min)
+    /// covering range (the production trace-bound fix for MoE).
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_matrix_strip_opening_set(
+        &mut self,
+        row_start: usize,
+        strip_bytes: &[u8],
+        sel: &[usize],
+        num_chunks: usize,
+        auth_siblings: &[crate::blake3_tree::AuthSibling],
+        kappa: &[u8; 32],
+        selector_idx: usize,
+        noise_strip: Option<&[i8]>,
+        mat_id_base: Option<u64>,
+    ) -> (usize, [u32; 8]) {
+        assert!(!sel.is_empty(), "selective opening requires >= 1 chunk");
+        assert!(
+            sel.windows(2).all(|w| w[0] < w[1]),
+            "sel must be sorted + distinct"
+        );
+        assert!(*sel.last().unwrap() < num_chunks, "sel chunk out of range");
+        assert_eq!(strip_bytes.len(), sel.len() * 1024, "strip_bytes must be |sel|*1024");
+        if let Some(n) = noise_strip {
+            assert_eq!(n.len(), strip_bytes.len(), "noise_strip must be parallel to strip_bytes");
+        }
+        let key_words: [u32; 8] = core::array::from_fn(|i| {
+            u32::from_le_bytes([kappa[i * 4], kappa[i * 4 + 1], kappa[i * 4 + 2], kappa[i * 4 + 3]])
+        });
+        let strip_c0 = sel[0];
+        let mut row = row_start;
+        if num_chunks == 1 {
+            assert!(sel == [0] && auth_siblings.is_empty(), "lone chunk: sel=[0], no siblings");
+            let cv = self.place_leaf_chunk(
+                &mut row,
+                &strip_bytes[0..1024],
+                0,
+                &key_words,
+                true,
+                selector_idx,
+                noise_strip.map(|n| &n[0..1024]),
+                mat_id_base,
+                strip_c0,
+            );
+            return (row, cv);
+        }
+        let mut si = 0usize;
+        let root = self.fold_strip_set(
+            &mut row, 0, num_chunks, sel, strip_bytes, auth_siblings, &mut si, &key_words, true,
+            selector_idx, noise_strip, mat_id_base, strip_c0,
+        );
+        assert_eq!(si, auth_siblings.len(), "unconsumed authentication siblings");
+        (row, root)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fold_strip_set(
+        &mut self,
+        row: &mut usize,
+        lo: usize,
+        hi: usize,
+        sel: &[usize],
+        strip_bytes: &[u8],
+        sibs: &[crate::blake3_tree::AuthSibling],
+        si: &mut usize,
+        key_words: &[u32; 8],
+        is_root: bool,
+        selector_idx: usize,
+        noise_strip: Option<&[i8]>,
+        mat_id_base: Option<u64>,
+        strip_c0: usize,
+    ) -> [u32; 8] {
+        let cnt = sel.partition_point(|&c| c < hi) - sel.partition_point(|&c| c < lo);
+        if cnt == 0 {
+            let s = &sibs[*si];
+            *si += 1;
+            assert!(
+                s.lo == lo && s.hi == hi,
+                "auth sibling range ({},{}) != node ({lo},{hi})",
+                s.lo,
+                s.hi
+            );
+            return core::array::from_fn(|i| {
+                u32::from_le_bytes([s.cv[i * 4], s.cv[i * 4 + 1], s.cv[i * 4 + 2], s.cv[i * 4 + 3]])
+            });
+        }
+        if cnt == hi - lo {
+            return self.subtree_inside_set(
+                row, lo, hi, sel, strip_bytes, key_words, is_root, selector_idx, noise_strip,
+                mat_id_base, strip_c0,
+            );
+        }
+        let mid = lo + crate::blake3_tree::left_len((hi - lo) as u64) as usize;
+        let l = self.fold_strip_set(
+            row, lo, mid, sel, strip_bytes, sibs, si, key_words, false, selector_idx, noise_strip,
+            mat_id_base, strip_c0,
+        );
+        let r = self.fold_strip_set(
+            row, mid, hi, sel, strip_bytes, sibs, si, key_words, false, selector_idx, noise_strip,
+            mat_id_base, strip_c0,
+        );
+        self.place_parent(row, &l, &r, key_words, is_root, selector_idx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn subtree_inside_set(
+        &mut self,
+        row: &mut usize,
+        lo: usize,
+        hi: usize,
+        sel: &[usize],
+        strip_bytes: &[u8],
+        key_words: &[u32; 8],
+        is_root: bool,
+        selector_idx: usize,
+        noise_strip: Option<&[i8]>,
+        mat_id_base: Option<u64>,
+        strip_c0: usize,
+    ) -> [u32; 8] {
+        if hi - lo == 1 {
+            // Fully selected ⇒ lo ∈ sel; its bytes sit at rank(lo) in the strip.
+            let off = sel.partition_point(|&c| c < lo) * 1024;
+            return self.place_leaf_chunk(
+                row,
+                &strip_bytes[off..off + 1024],
+                lo as u64,
+                key_words,
+                false,
+                selector_idx,
+                noise_strip.map(|n| &n[off..off + 1024]),
+                mat_id_base,
+                strip_c0,
+            );
+        }
+        let mid = lo + crate::blake3_tree::left_len((hi - lo) as u64) as usize;
+        let l = self.subtree_inside_set(
+            row, lo, mid, sel, strip_bytes, key_words, false, selector_idx, noise_strip,
+            mat_id_base, strip_c0,
+        );
+        let r = self.subtree_inside_set(
+            row, mid, hi, sel, strip_bytes, key_words, false, selector_idx, noise_strip,
+            mat_id_base, strip_c0,
+        );
+        self.place_parent(row, &l, &r, key_words, is_root, selector_idx)
+    }
+
     /// F1 (C1) — place a "key-pin" row binding the chain-pinned
     /// BLAKE3 key into `CV_IN`.
     ///
@@ -3690,6 +3842,66 @@ mod tests {
                         crate::blake3_tree::strip_opening_rows(c0, c1, nc),
                         "strip_opening_rows({c0},{c1},{nc}) != placed rows"
                     );
+                }
+            }
+        }
+    }
+
+    /// Trace-side selective (disjoint-chunk) multi-proof recomputes exactly the
+    /// committed full-matrix root, for scattered/every-other/endpoint/full sets;
+    /// and is byte-identical to the range opening (same root + same placed rows)
+    /// for a contiguous set — the trace counterpart of the off-circuit
+    /// `open_strip_set` KATs. Pure (no prove) ⇒ fast.
+    #[test]
+    fn selective_strip_opening_root_equals_full_matrix_hash() {
+        let key: [u8; 32] = core::array::from_fn(|i| (i as u8) ^ 0x5A);
+        for &nc in &[2usize, 3, 5, 8, 13, 31] {
+            let raw: Vec<u8> = (0..nc * 1024)
+                .map(|i| ((i.wrapping_mul(2654435761)) ^ (i >> 4)) as u8)
+                .collect();
+            let full_root = {
+                let mut t = CompositeTrace::baseline_min();
+                t.place_matrix_hash_a(0, &raw, &key).1
+            };
+            let mut sets: Vec<Vec<usize>> = vec![
+                vec![0],
+                vec![nc - 1],
+                vec![0, nc - 1],
+                (0..nc).step_by(2).collect(),
+                (0..nc).collect(),
+            ];
+            if nc >= 4 {
+                sets.push(vec![0, 1, nc - 2, nc - 1]);
+                sets.push(vec![1, nc / 2, nc - 1]);
+            }
+            for sel in &sets {
+                let (_opened, sibs) = crate::blake3_tree::open_strip_set(&raw, &key, sel);
+                let strip_bytes: Vec<u8> = sel
+                    .iter()
+                    .flat_map(|&c| raw[c * 1024..(c + 1) * 1024].iter().copied())
+                    .collect();
+                let mut t = CompositeTrace::baseline_min();
+                let (_n, root) = t.place_matrix_strip_opening_set(
+                    0, &strip_bytes, sel, nc, &sibs, &key, 4, None, None,
+                );
+                assert_eq!(root, full_root, "selective open {sel:?} of {nc} != committed root");
+            }
+            // Contiguous set ⇒ identical to the range opening (root + placed rows).
+            for c0 in 0..nc {
+                for c1 in (c0 + 1)..=nc {
+                    let sel: Vec<usize> = (c0..c1).collect();
+                    let (_o, sibs) = crate::blake3_tree::open_strip_set(&raw, &key, &sel);
+                    let strip_bytes = &raw[c0 * 1024..c1 * 1024];
+                    let (n_set, r_set) = {
+                        let mut t = CompositeTrace::baseline_min();
+                        t.place_matrix_strip_opening_set(0, strip_bytes, &sel, nc, &sibs, &key, 4, None, None)
+                    };
+                    let (n_rng, r_rng) = {
+                        let (_o, sibs_r) = crate::blake3_tree::open_strip(&raw, &key, c0, c1);
+                        let mut t = CompositeTrace::baseline_min();
+                        t.place_matrix_strip_opening(0, strip_bytes, c0, c1, nc, &sibs_r, &key, 4, None, None)
+                    };
+                    assert_eq!((n_set, r_set), (n_rng, r_rng), "selective != range for [{c0},{c1}) of {nc}");
                 }
             }
         }
