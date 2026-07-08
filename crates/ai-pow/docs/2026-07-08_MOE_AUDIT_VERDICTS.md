@@ -79,4 +79,44 @@ would fully close it. Tracked under §I/residual.
 
 ---
 
+## §B Selective-opening Merkle multi-proof soundness — **SAFE**
+
+**Finding:** the disjoint-set multi-proof (`open_strip_set` /
+`verify_strip_opening_set` / `collect_siblings_set` / `fold_opening_set`) is
+sound and well-covered:
+- `selective_matches_contiguous_range_opening` — the set opening is byte-identical
+  to the range opening for every contiguous `[c0,c1)` of `nc ∈ {2,5,8,13,31,64}`.
+- `selective_opening_multiproof_is_sublinear` — a scattered 64-of-4096 set
+  authenticates to the committed root with `O(h·log n)` siblings.
+- `selective_opening_rejects_tampering` — a tampered opened leaf **and** a forged
+  sibling each make the recomputed root diverge.
+- `selective_strip_opening_root_equals_full_matrix_hash` — the **in-circuit** fold
+  (`place_matrix_strip_opening_set`) reproduces the committed root for arbitrary
+  scattered chunk sets (pure, no prove).
+
+The fold consumes every opened leaf + every sibling; a second-preimage would need
+a BLAKE3 collision. No boundary mis-classification found. **SAFE.**
+
+## §C `indexed_strips_chunk_set` / k≠1024 row-vs-chunk keying — **SAFE (mapping+opening); residual: full matmul round-trip**
+
+**Finding (the concern is unfounded):** the sweep and the producer BOTH key the
+`noised_packed` bus via the *same* `noised_chunk_id(id_base, k, src)` — a **byte-
+position** key (`id_base + (lane·k + col)/8`), not a chunk index — so it is
+k-agnostic by construction. The row→chunk expansion for k>1024 is now covered:
+- `indexed_strips_chunk_set_authenticates_k_gt_1024_noncontiguous` (new) — for
+  k ∈ {2048, 4096, 14336} a scattered set of rows expands to exactly its
+  `k/1024`-chunk runs, the disjoint set authenticates to the root, and tampering a
+  spanning chunk breaks it. This is the Llama-scale case (Pearl k=4096/14336/28672)
+  the k=1024 fixtures never touched.
+- Composed with `selective_strip_opening_root_equals_full_matrix_hash` (arbitrary
+  chunk sets → in-circuit root), the full k>1024 **opening** path is validated.
+
+**Residual (recommended, not a known defect):** a full k>1024 *recursive* round-trip
+(matmul sweep + prove + verify) would definitively confirm the k-agnostic keying
+end-to-end. k>1024 is a Llama-scale production requirement, not a current live path
+(the dense/MoE fixtures are k=1024); the mapping + opening are validated, and the
+matmul keying is k-agnostic by construction. Tracked as future coverage.
+
+---
+
 <!-- subsequent angles appended as they are evaluated -->

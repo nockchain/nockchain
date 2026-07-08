@@ -830,6 +830,57 @@ mod tests {
         assert_ne!(verify_strip_opening_set(&opened2, &sibs2, &sel, nc, &k), root);
     }
 
+    /// **§C adversarial audit (k > 1024).** At Llama scale a single strip (row)
+    /// spans `k/1024` chunks, so `indexed_strips_chunk_set` must expand each
+    /// scattered row to its full run of chunks; the resulting disjoint set must
+    /// authenticate to the committed root and reject tampering. The k=1024
+    /// fixtures (1 chunk/row) never exercise this multi-chunk-per-row expansion,
+    /// which is exactly the production case (Pearl k = 4096 / 14336 / 28672).
+    #[test]
+    fn indexed_strips_chunk_set_authenticates_k_gt_1024_noncontiguous() {
+        let k = kappa();
+        for &kk in &[2048usize, 4096, 14336] {
+            let chunks_per_row = kk / CHUNK_LEN;
+            let total_rows = 128usize;
+            let raw = bytes(total_rows * kk);
+            let root = merkle_root(&raw, &k);
+            let rows = [0u32, 5, 63, 127]; // scattered, far apart → disjoint runs
+            let (chunk_set, nc) = indexed_strips_chunk_set(&rows, kk, raw.len());
+
+            // Each row expands to exactly its contiguous run of `chunks_per_row`.
+            assert_eq!(
+                chunk_set.len(),
+                rows.len() * chunks_per_row,
+                "kk={kk}: expected {} chunks",
+                rows.len() * chunks_per_row
+            );
+            for &r in &rows {
+                for c in 0..chunks_per_row {
+                    let want = (r as usize) * chunks_per_row + c;
+                    assert!(
+                        chunk_set.contains(&want),
+                        "kk={kk}: row {r} missing spanning chunk {want}"
+                    );
+                }
+            }
+            // The disjoint multi-chunk-per-row set authenticates to the root.
+            let (opened, sibs) = open_strip_set(&raw, &k, &chunk_set);
+            assert_eq!(
+                verify_strip_opening_set(&opened, &sibs, &chunk_set, nc, &k),
+                root,
+                "kk={kk}: k>1024 non-contiguous set must authenticate"
+            );
+            // Tamper a byte in row 5's first spanning chunk → root diverges.
+            let (mut o2, s2) = open_strip_set(&raw, &k, &chunk_set);
+            o2[chunks_per_row][0] ^= 1;
+            assert_ne!(
+                verify_strip_opening_set(&o2, &s2, &chunk_set, nc, &k),
+                root,
+                "kk={kk}: tampering a spanning chunk must break the root"
+            );
+        }
+    }
+
     /// **P-B.2.3.** The opening schedule is a pure deterministic
     /// function of public params (verifier-recomputable, no
     /// prover freedom), every tile's schedule-derived range
