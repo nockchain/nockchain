@@ -66,6 +66,9 @@ dependencies = [
  "rayon",
  "sha2",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "tracing-tracy",
 ]
 
 [[package]]
