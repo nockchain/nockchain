@@ -1536,6 +1536,84 @@ pub fn prove_pearl_merge_recursive_certificate(
     })
 }
 
+/// Node-facing **MoE recursive-certificate soundness verification** — the
+/// MoE-specific statement half of the node security boundary (the analogue of the
+/// dense `certificate_noun.rs` precheck + `verify_recursive_certificate`). All
+/// inputs are public (carried in the certificate / block). It binds an untrusted
+/// MoE certificate to its claimed statement:
+///
+/// 1. **Routing-consistency binding** (`verify_pearl_moe_routing_binding`): the
+///    opened tile rows (`moe.outer_indices`, which the STARK proves the tile
+///    over) are exactly the expert's routed tokens under the *public* row pattern
+///    from the *committed* routing (`routing_data` → `routing_root` ==
+///    `moe.hash_routing`).
+/// 2. **MoE `s_A` recompute + public-input binding**: recompute `s_A` from the
+///    routing splice (`routing_root` + `hash_offsets` → `hash_activations` →
+///    `s_A`) and bind it — with the matrix/job commitments — to the proof's
+///    public inputs (`COMMITMENT_HASH`, `HASH_A`, `HASH_B`, `JOB_KEY`). A forged
+///    routing changes `s_A`, so `COMMITMENT_HASH` no longer matches the proof.
+/// 3. **Recursive certificate verification** (`verify_recursive_certificate`).
+///
+/// The opened rows are bound to the proof because the caller recomputes the MoE
+/// canonical program from `outer_indices` (as the dense node precheck recomputes
+/// its statement). The jackpot-vs-target difficulty check is a separate node
+/// concern on `pis.hash_jackpot`, identical to the dense path.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pearl_moe_recursive_certificate_soundness(
+    certificate: &ai_pow_zk::recursion::AiPowRecursiveCertificate,
+    pis: &ai_pow_zk::composite_public::CompositePublicInputs,
+    params: &MatmulParams,
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    mining_config: &crate::pearl_compat::PearlMiningConfig,
+    moe: &crate::pearl_compat::PearlMoeParams,
+    m: u32,
+    t_rows: u32,
+    routing_data: &[u32],
+    max_pattern_len: usize,
+) -> Result<(), BridgeError> {
+    use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
+
+    // (1) Routing-consistency binding.
+    crate::pearl_compat::verify_pearl_moe_routing_binding(
+        kappa,
+        mining_config,
+        moe,
+        m,
+        t_rows,
+        routing_data,
+        max_pattern_len,
+    )
+    .map_err(BridgeError::PearlMergeStatement)?;
+
+    // (2) Recompute s_A from the routing splice and bind the public inputs.
+    let routing_offsets_le: Vec<u8> = moe
+        .routing_offsets
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let hash_offsets = crate::commit::matrix_commitment(&routing_offsets_le, kappa);
+    let hash_routing = moe_hash_routing(&moe.hash_routing, &hash_offsets);
+    let hash_activations = moe_hash_activations(h_a, &hash_routing);
+    let s_b = noise_seed_b(kappa, h_b);
+    let s_a = noise_seed_a(&s_b, &hash_activations);
+    expect_pi_eq(&pis.commitment_hash, &bytes_to_words_le(&s_a), "COMMITMENT_HASH")?;
+    expect_pi_eq(&pis.hash_a, &bytes_to_words_le(h_a), "HASH_A")?;
+    expect_pi_eq(&pis.hash_b, &bytes_to_words_le(h_b), "HASH_B")?;
+    expect_pi_eq(&pis.job_key, &bytes_to_words_le(kappa), "JOB_KEY")?;
+
+    // (3) Verify the recursive certificate.
+    let zk_params = zk_params_from(params);
+    ai_pow_zk::recursion::verify_recursive_certificate(
+        certificate,
+        &zk_params,
+        &CircuitConfig::PROD,
+        pis,
+    )
+    .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
+}
+
 /// Build the selected compact final-layer batch-STARK recursive certificate for
 /// a Pearl-compatible merge-mined ticket.
 ///
@@ -3704,14 +3782,55 @@ mod tests {
         )
         .expect("prove MoE recursive certificate");
 
-        // Verify the recursive certificate.
-        ai_pow_zk::recursion::verify_recursive_certificate(
-            &l1.l1_cert,
-            &zk_params,
-            &CircuitConfig::PROD,
-            &pis,
-        )
-        .expect("verify MoE recursive certificate");
+        // Node-facing MoE soundness verification: routing binding + s_a recompute
+        // + PI binding + recursive certificate verification.
+        let mining_config = crate::pearl_compat::PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: crate::pearl_compat::PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            cols_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            reserved: crate::pearl_compat::PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+        let moe_params = crate::pearl_compat::PearlMoeParams {
+            expert_idx: expert_idx as u16,
+            routing_offsets: routing.routing_offsets.clone(),
+            hash_routing: ticket.commitment.routing_root,
+            outer_indices: ticket.outer_indices.clone(),
+        };
+        let verify = |h_a_in: &[u8; 32], routing_in: &[u32]| {
+            verify_pearl_moe_recursive_certificate_soundness(
+                &l1.l1_cert,
+                &pis,
+                &params,
+                &kappa,
+                h_a_in,
+                &h_b,
+                &mining_config,
+                &moe_params,
+                m as u32,
+                0,
+                routing_in,
+                4096,
+            )
+        };
+        verify(&h_a, &routing.routing_data).expect("node verifies the MoE certificate");
+
+        // Adversarial: a forged routing (valid tokens, wrong committed root) is
+        // rejected by the routing binding.
+        let mut bad_routing = routing.routing_data.clone();
+        bad_routing[0] ^= 1;
+        assert!(verify(&h_a, &bad_routing).is_err(), "forged routing must be rejected");
+        // Adversarial: a forged matrix commitment breaks the PI binding.
+        let mut bad_h_a = h_a;
+        bad_h_a[0] ^= 1;
+        assert!(verify(&bad_h_a, &routing.routing_data).is_err(), "forged h_a must be rejected");
 
         // The verified certificate carries the MoE grouped-tile jackpot.
         assert_eq!(pis.jackpot, tile_state_words(&ticket.tile_state));
