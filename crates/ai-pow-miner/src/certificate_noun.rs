@@ -136,6 +136,12 @@ pub struct CertificateNounLimits {
     pub max_packed_items: usize,
     /// Maximum jammed artifact bytes accepted before cueing attacker input.
     pub max_jam_bytes: usize,
+    /// Maximum CUMULATIVE decoded atom bytes across the whole proof tree (audit
+    /// N9). `max_atom_bytes` caps a *single* node; without this, `max_total_nodes`
+    /// (1M) × `max_atom_bytes` (1 MiB) permits ~1 TiB of transient allocation from
+    /// a ≤4 MiB jam (each `[%bytes [len data]]` costs only a few jam bytes once the
+    /// tag is back-referenced, yet allocates `len`). This bounds the total.
+    pub max_total_atom_bytes: usize,
 }
 
 impl Default for CertificateNounLimits {
@@ -147,6 +153,10 @@ impl Default for CertificateNounLimits {
             max_atom_bytes: 1 << 20,
             max_packed_items: 1_000_000,
             max_jam_bytes: 4 << 20,
+            // 64 MiB: ~16× the jam cap — generous for any legitimate proof tree
+            // (real compact certs decode to < a few MiB) yet bounds the DoS from
+            // ~1 TiB to 64 MiB.
+            max_total_atom_bytes: 64 << 20,
         }
     }
 }
@@ -2391,6 +2401,7 @@ pub fn verify_ai_pow_pearl_merge_compact_artifact_jam_with_digest_bytes_and_cont
 struct DecodeState {
     limits: CertificateNounLimits,
     total_nodes: usize,
+    total_atom_bytes: usize,
 }
 
 impl DecodeState {
@@ -2398,6 +2409,7 @@ impl DecodeState {
         Self {
             limits,
             total_nodes: 0,
+            total_atom_bytes: 0,
         }
     }
 
@@ -2411,6 +2423,20 @@ impl DecodeState {
             .ok_or(CertificateNounError::LimitExceeded("proof-node count"))?;
         if self.total_nodes > self.limits.max_total_nodes {
             return Err(CertificateNounError::LimitExceeded("proof-node count"));
+        }
+        Ok(())
+    }
+
+    /// Charge `n` decoded atom bytes against the cumulative budget (audit N9).
+    /// A single node is already capped by `max_atom_bytes`; this bounds the SUM
+    /// across all nodes so a many-node jam cannot drive unbounded allocation.
+    fn charge_atom_bytes(&mut self, n: usize) -> Result<(), CertificateNounError> {
+        self.total_atom_bytes = self
+            .total_atom_bytes
+            .checked_add(n)
+            .ok_or(CertificateNounError::LimitExceeded("cumulative atom bytes"))?;
+        if self.total_atom_bytes > self.limits.max_total_atom_bytes {
+            return Err(CertificateNounError::LimitExceeded("cumulative atom bytes"));
         }
         Ok(())
     }
@@ -2546,6 +2572,7 @@ fn decode_proof_node(
                 "ext2s",
                 state.limits,
             )?;
+            state.charge_atom_bytes(bytes.len())?;
             let mut values = Vec::with_capacity(len);
             for chunk in bytes.chunks_exact(16) {
                 let c0 = u64::from_le_bytes(chunk[0..8].try_into().expect("chunk len"));
@@ -2561,9 +2588,10 @@ fn decode_proof_node(
             let len = expect_len(
                 fields[0], space, "bytes length", state.limits.max_packed_items,
             )?;
-            Ok(AiProofNode::Bytes(expect_declared_bytes(
-                fields[1], space, len, "bytes", state.limits,
-            )?))
+            let bytes =
+                expect_declared_bytes(fields[1], space, len, "bytes", state.limits)?;
+            state.charge_atom_bytes(bytes.len())?;
+            Ok(AiProofNode::Bytes(bytes))
         }
         x if x == tas!(b"u64s") => {
             let fields = tuple2(tail, space, "u64s proof-node")?;
@@ -2578,6 +2606,7 @@ fn decode_proof_node(
                 "u64s",
                 state.limits,
             )?;
+            state.charge_atom_bytes(bytes.len())?;
             Ok(AiProofNode::U64s(
                 bytes
                     .chunks_exact(8)
@@ -2598,6 +2627,7 @@ fn decode_proof_node(
                 "i64s",
                 state.limits,
             )?;
+            state.charge_atom_bytes(bytes.len())?;
             Ok(AiProofNode::I64s(
                 bytes
                     .chunks_exact(8)
@@ -4807,6 +4837,46 @@ mod tests {
         assert_eq!(decoded.commitments, noun_commitments(commitments));
         assert_eq!(decoded.public_inputs, pis);
         assert_eq!(decoded.certificate, cert);
+    }
+
+    /// **Audit N9 — cumulative-atom-bytes DoS guard.** Each `%bytes` node here is
+    /// well under `max_atom_bytes` (1 MiB), but their SUM exceeds a tight
+    /// cumulative budget. Without the `charge_atom_bytes` guard, a many-node jam
+    /// could drive `max_total_nodes × max_atom_bytes` ≈ 1 TiB of allocation; the
+    /// guard bounds the total.
+    #[test]
+    fn decode_rejects_cumulative_atom_bytes_over_budget() {
+        let params = sample_params();
+        let commitments = sample_commitments();
+        let pis = sample_pis();
+        // 3 × 2 KiB atoms = 6 KiB; each node is tiny, the sum is the attack.
+        let cert = AiProofNode::Seq(vec![
+            AiProofNode::Bytes(vec![7u8; 2048]),
+            AiProofNode::Bytes(vec![8u8; 2048]),
+            AiProofNode::Bytes(vec![9u8; 2048]),
+        ]);
+        let slab = build_ai_pow_certificate_noun_from_node(
+            &params, 9, 16_384, &commitments, &pis, &cert,
+        );
+        let jammed = slab.jam();
+        let mut cued: NounSlab = NounSlab::new();
+        let root = cued.cue_into(jammed).expect("cue");
+        cued.set_root(root);
+
+        // The 6 KiB tree decodes fine under the default 64 MiB cumulative budget.
+        decode_ai_pow_certificate_slab(&cued, CertificateNounLimits::default())
+            .expect("6 KiB tree under default budget");
+
+        // A 5 KiB cumulative budget rejects on the SUM (no single node exceeds it).
+        let tight = CertificateNounLimits {
+            max_total_atom_bytes: 5 * 1024,
+            ..Default::default()
+        };
+        let err = decode_ai_pow_certificate_slab(&cued, tight).unwrap_err();
+        assert!(
+            matches!(err, CertificateNounError::LimitExceeded("cumulative atom bytes")),
+            "expected cumulative-atom-bytes rejection, got {err:?}"
+        );
     }
 
     #[test]

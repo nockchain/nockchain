@@ -108,4 +108,41 @@ scoped open item, but the keystone chain already binds the fold to the accumulat
 
 ---
 
+## N6 Unbound PIs (cumsum/jackpot/hash_jackpot) + strip_schedule — **SAFE**
+
+**Finding:** the composite AIR binds all three "unbound" PIs to the trace
+(`composite_full_air.rs:522-536` + selector-gated binding at 551+): `pi_cumsum ==
+CUMSUM_TILE` (the matmul accumulator), `pi_jackpot == JACKPOT_MSG`, `pi_hash_jackpot
+== CV_OUT`. So the 4-of-7 re-derivation in `verify_pearl_moe_recursive_certificate`
+is correct by design: the 4 chain-derived PIs (COMMITMENT_HASH/HASH_A/HASH_B/
+JOB_KEY) are re-checked in Rust because the AIR cannot rebuild them; cumsum/jackpot/
+hash_jackpot are bound to the tile computation **by the proof** (the recursion
+verifies the composite AIR), so a prover cannot forge them. `strip_schedule` is
+bound via the recomputed `l0_program` (§F / N1). **SAFE.** Residual: the
+jackpot-vs-target difficulty check for MoE is an external node concern (wiring, =
+dense; tracked under §I/N14/N7).
+
+---
+
+## N9 Certificate-noun decode heap-amplification DoS — **ISSUE FOUND → MITIGATED**
+
+**Confirmed real.** `DecodeState` capped node *count* (`max_total_nodes` = 1M) and
+per-node atom size (`max_atom_bytes` = 1 MiB) but had **no cumulative-byte budget**.
+Each `%bytes`/`u64s`/`i64s`/`ext2s` node allocates `vec![0u8; declared]` sized by the
+noun's length field, so `1M × 1 MiB ≈ 1 TiB` of transient allocation was reachable
+from a ≤4 MiB jam (a back-referenced `%bytes` tag costs a few jam bytes yet
+allocates `declared`). Reachable unauthenticated via the public non-precheck
+decoders (`decode_ai_pow_certificate_noun` etc.); the `verify_*_jam` consensus
+entrypoints gate it behind the statement precheck.
+
+**MITIGATED:** added `CertificateNounLimits::max_total_atom_bytes` (default 64 MiB
+— ~16× the jam cap, generous for any real proof tree, bounds the DoS from ~1 TiB to
+64 MiB) + `DecodeState::charge_atom_bytes`, charged at all four `expect_declared_
+bytes` sites in `decode_proof_node`. Test `decode_rejects_cumulative_atom_bytes_
+over_budget` (3 small atoms summing past a tight 5 KiB budget → rejected on the SUM;
+the same tree decodes under the default 64 MiB). 51 certificate_noun decode tests
+green (honest decode unaffected).
+
+---
+
 <!-- subsequent angles appended as evaluated -->
