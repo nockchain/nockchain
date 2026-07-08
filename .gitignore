@@ -55,3 +55,4 @@ f1_profile_*.json.gz
 
 # Worktrees managed by Claude Code (transient per-session work).
 .claude/worktrees/
+*.swp
