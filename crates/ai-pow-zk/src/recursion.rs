@@ -125,6 +125,22 @@ impl AiPowRecursiveCertificate {
     pub fn l0_proof(&self) -> &BatchProof<AiPowStarkConfig> {
         &self.l0_proof
     }
+
+    /// **Opened-statement binding.** Returns `true` iff the certificate's embedded
+    /// Layer-0 program equals `expected`.
+    ///
+    /// [`verify_recursive_certificate`] proves the Layer-0 statement for *this*
+    /// certificate's `l0_program` but does **not** bind that program to any public
+    /// statement — a malicious prover can embed a program that opened a
+    /// prover-favorable strip. A sound node MUST recompute the canonical program
+    /// from the *public* opened schedule
+    /// ([`crate::canonical::canonical_program_for_strip_schedule`]) and require
+    /// this to return `true`, so the certificate is proven over exactly the
+    /// claimed opened rows/columns. Compares the preprocessed program matrix
+    /// (shape + every cell), which pins the entire strip schedule + selectors.
+    pub fn l0_program_matches(&self, expected: &crate::AiPowProgram) -> bool {
+        self.l0_program.width == expected.width && self.l0_program.values == expected.values
+    }
 }
 
 /// Compact final-layer batch-STARK recursive proof candidate for AI-PoW.

@@ -1536,37 +1536,33 @@ pub fn prove_pearl_merge_recursive_certificate(
     })
 }
 
-/// MoE-specific **routing + public-input binding** for a recursive certificate —
-/// **one component** of the node security boundary, NOT a complete standalone
-/// node verify. It checks:
+/// Node-facing **MoE recursive-certificate soundness verification**. Binds an
+/// untrusted MoE certificate to its public statement so it proves work over
+/// exactly the expert's routed tokens with the routing-spliced noise. All inputs
+/// are public (carried in the certificate / block). The jackpot-vs-target
+/// difficulty check on `pis.hash_jackpot` is a separate node concern, identical
+/// to the dense path.
 ///
 /// 1. **Routing-consistency binding** (`verify_pearl_moe_routing_binding`):
 ///    `moe.outer_indices` are the expert's routed tokens under the *public* row
 ///    pattern from the *committed* routing (`routing_data` → `routing_root` ==
 ///    `moe.hash_routing`).
-/// 2. **MoE `s_A` recompute + public-input binding**: recompute `s_A` from the
+/// 2. **Expert-column derivation**: the opened B-columns are recomputed from the
+///    *public* column pattern offset by the expert (`expert_idx·n_e + cols`),
+///    never taken from the prover.
+/// 3. **MoE `s_A` recompute + public-input binding**: recompute `s_A` from the
 ///    routing splice and bind it — with the matrix/job commitments — to the
 ///    proof's public inputs (`COMMITMENT_HASH`, `HASH_A`, `HASH_B`, `JOB_KEY`).
-/// 3. **Recursive certificate verification** (`verify_recursive_certificate`).
-///
-/// # SECURITY — incomplete on its own (must be composed)
-///
-/// `verify_recursive_certificate` proves the Layer-0 statement for the
-/// *certificate's own* `l0_program`; it does **not** bind that program to the
-/// public statement. This function checks that `moe.outer_indices` are the routed
-/// tokens, but it does **not** verify that the certificate's `l0_program` actually
-/// opened `outer_indices` (vs. some other, prover-favorable row set). A complete
-/// node verify MUST additionally recompute the MoE canonical program from
-/// `from_indices(outer_indices, b_cols_global)` and bind it to the certificate —
-/// exactly as the dense node precheck (`certificate_noun.rs`
-/// `precheck_pearl_merge_certificate_metadata`) binds `found_idx` / `trace_height`
-/// / the recomputed strip schedule. That opened-rows binding lives in the node
-/// precheck integration (the remaining Track B work) and is required for
-/// soundness against a malicious prover. Until then this function is validated as
-/// a component (routing + PI binding) and MoE stays fail-closed at block
-/// acceptance. The jackpot-vs-target difficulty check is a separate node concern.
+/// 4. **Opened-schedule binding** (the soundness crux): recompute the MoE
+///    canonical Layer-0 program from the public schedule
+///    (`from_indices(outer_indices, b_cols_global)` + `s_A`/`s_B`/κ + the
+///    schedule-determined trace height) and require the certificate's embedded
+///    `l0_program` to equal it (`l0_program_matches`). Without this,
+///    `verify_recursive_certificate` would prove the statement for the prover's
+///    *own* program, which could have opened a prover-favorable strip.
+/// 5. **Recursive certificate verification** (`verify_recursive_certificate`).
 #[allow(clippy::too_many_arguments)]
-pub fn verify_pearl_moe_routing_and_public_input_binding(
+pub fn verify_pearl_moe_recursive_certificate(
     certificate: &ai_pow_zk::recursion::AiPowRecursiveCertificate,
     pis: &ai_pow_zk::composite_public::CompositePublicInputs,
     params: &MatmulParams,
@@ -1577,12 +1573,13 @@ pub fn verify_pearl_moe_routing_and_public_input_binding(
     moe: &crate::pearl_compat::PearlMoeParams,
     m: u32,
     t_rows: u32,
+    t_cols: u32,
     routing_data: &[u32],
     max_pattern_len: usize,
 ) -> Result<(), BridgeError> {
     use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
 
-    // (1) Routing-consistency binding.
+    // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
     crate::pearl_compat::verify_pearl_moe_routing_binding(
         kappa,
         mining_config,
@@ -1594,7 +1591,27 @@ pub fn verify_pearl_moe_routing_and_public_input_binding(
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
-    // (2) Recompute s_A from the routing splice and bind the public inputs.
+    // (2) Recompute the opened B-columns from the PUBLIC column pattern offset by
+    // the expert — never trust prover-supplied columns.
+    let cfg = mining_config
+        .moe()
+        .ok_or(BridgeError::PearlMergeStatement(
+            crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
+        ))?;
+    if params.n % u32::from(cfg.e) != 0 {
+        return Err(BridgeError::PearlMergeUnsupportedTileShape);
+    }
+    let n_e = params.n / u32::from(cfg.e);
+    let inner_cols = mining_config
+        .cols_pattern
+        .indices_with_offset_bounded(t_cols, max_pattern_len)
+        .map_err(BridgeError::PearlMergeStatement)?;
+    let b_cols_global: Vec<u32> = inner_cols
+        .iter()
+        .map(|&c| c + u32::from(moe.expert_idx) * n_e)
+        .collect();
+
+    // (3) Recompute s_A from the routing splice and bind the public inputs.
     let routing_offsets_le: Vec<u8> = moe
         .routing_offsets
         .iter()
@@ -1610,8 +1627,38 @@ pub fn verify_pearl_moe_routing_and_public_input_binding(
     expect_pi_eq(&pis.hash_b, &bytes_to_words_le(h_b), "HASH_B")?;
     expect_pi_eq(&pis.job_key, &bytes_to_words_le(kappa), "JOB_KEY")?;
 
-    // (3) Verify the recursive certificate.
+    // (4) Opened-schedule binding: recompute the canonical program from the
+    // public schedule and require the certificate's l0_program to equal it.
     let zk_params = zk_params_from(params);
+    let schedule = ai_pow_zk::canonical::StripIndexSchedule::from_indices(
+        &zk_params,
+        moe.outer_indices.clone(),
+        b_cols_global,
+    )
+    .map_err(BridgeError::ZkParamsInvalid)?;
+    let trace_height = expected_layer0_rows_for_strip_schedule(params, &schedule)?
+        .required_trace_len();
+    let bp = ai_pow_zk::canonical::BlockPublic {
+        tile_i: 0,
+        tile_j: 0,
+        kappa: *kappa,
+        s_a,
+        s_b,
+    };
+    let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
+        &zk_params,
+        &schedule,
+        &bp,
+        trace_height,
+    )
+    .map_err(BridgeError::ZkParamsInvalid)?;
+    if !certificate.l0_program_matches(&expected_program) {
+        return Err(BridgeError::PublicInputMismatch(
+            "MOE_OPENED_SCHEDULE (certificate opened rows/cols != committed routing statement)",
+        ));
+    }
+
+    // (5) Verify the recursive certificate against the bound program + PIs.
     ai_pow_zk::recursion::verify_recursive_certificate(
         certificate,
         &zk_params,
@@ -3813,8 +3860,8 @@ mod tests {
             hash_routing: ticket.commitment.routing_root,
             outer_indices: ticket.outer_indices.clone(),
         };
-        let verify = |h_a_in: &[u8; 32], routing_in: &[u32]| {
-            verify_pearl_moe_routing_and_public_input_binding(
+        let verify = |h_a_in: &[u8; 32], routing_in: &[u32], t_cols: u32| {
+            verify_pearl_moe_recursive_certificate(
                 &l1.l1_cert,
                 &pis,
                 &params,
@@ -3825,21 +3872,31 @@ mod tests {
                 &moe_params,
                 m as u32,
                 0,
+                t_cols,
                 routing_in,
                 4096,
             )
         };
-        verify(&h_a, &routing.routing_data).expect("node verifies the MoE certificate");
+        verify(&h_a, &routing.routing_data, 0).expect("node verifies the MoE certificate");
 
         // Adversarial: a forged routing (valid tokens, wrong committed root) is
         // rejected by the routing binding.
         let mut bad_routing = routing.routing_data.clone();
         bad_routing[0] ^= 1;
-        assert!(verify(&h_a, &bad_routing).is_err(), "forged routing must be rejected");
+        assert!(verify(&h_a, &bad_routing, 0).is_err(), "forged routing must be rejected");
         // Adversarial: a forged matrix commitment breaks the PI binding.
         let mut bad_h_a = h_a;
         bad_h_a[0] ^= 1;
-        assert!(verify(&bad_h_a, &routing.routing_data).is_err(), "forged h_a must be rejected");
+        assert!(verify(&bad_h_a, &routing.routing_data, 0).is_err(), "forged h_a must be rejected");
+        // Adversarial (opened-schedule binding, the soundness crux): the honest
+        // certificate opened expert-0 columns [0,8) at t_cols=0. Verifying with a
+        // shifted column offset recomputes a different opened schedule, so the
+        // recomputed canonical program no longer equals the certificate's
+        // l0_program — the cert is rejected even though routing + PIs still match.
+        assert!(
+            verify(&h_a, &routing.routing_data, 1).is_err(),
+            "opened-schedule binding must reject a certificate over different columns"
+        );
 
         // The verified certificate carries the MoE grouped-tile jackpot.
         assert_eq!(pis.jackpot, tile_state_words(&ticket.tile_state));
