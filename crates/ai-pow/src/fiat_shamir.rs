@@ -349,6 +349,70 @@ mod tests {
         );
     }
 
+    /// **§E full-chain byte-compat (adversarial audit).** Independently
+    /// re-implements Pearl's `compute_commitment_hash_with_offsets`
+    /// (`zk-pow/src/ffi/mine.rs`) + `compute_hash_activations`
+    /// (`proof_utils.rs`) byte-for-byte and asserts our `canonical_noise_seeds_moe`
+    /// produces the identical `s_A` for a concrete routing built by
+    /// `build_routing_data`. This binds the WHOLE splice chain (routing_data →
+    /// routing_root → hash_offsets → hash_routing → hash_activations → s_b → s_a)
+    /// to Pearl's exact formula. The real-Pearl KAT above anchors
+    /// `hash_activations` to Pearl's actual output bytes; together they close the
+    /// merge-mining fork risk for the MoE commitment. Pearl reference (verbatim):
+    ///   hash_routing_data = blake3(pad_to_chunk_boundary(flatten_routing), key=job_key)
+    ///   hash_offsets      = blake3(pad_to_chunk_boundary(offsets_le),      key=job_key)
+    ///   hash_routing      = blake3(hash_routing_data ‖ hash_offsets)        (unkeyed)
+    ///   hash_activations  = blake3(hash_a ‖ hash_routing)                   (unkeyed)
+    ///   b_noise_seed      = blake3(job_key ‖ hash_b)                        (unkeyed)
+    ///   a_noise_seed      = blake3(b_noise_seed ‖ hash_activations)         (unkeyed)
+    #[test]
+    fn full_moe_s_a_chain_matches_pearl_formula() {
+        let kappa = [0x11u8; 32]; // job_key
+        let hash_a = [0x22u8; 32];
+        let hash_b = [0x44u8; 32];
+        // m=5, top_k=2, e=4 — includes an empty expert and a token routed twice
+        // to the same expert (slots 0,1 → expert 3), exercising the grouping.
+        let topk = [3u32, 3, 0, 1, 3, 0, 2, 2, 1, 0];
+        let rd = crate::pearl_moe_routing::build_routing_data(&topk, 5, 2, 4).unwrap();
+        let routing_data_le: Vec<u8> =
+            rd.routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let routing_offsets_le: Vec<u8> =
+            rd.routing_offsets.iter().flat_map(|v| v.to_le_bytes()).collect();
+
+        // ---- Pearl reference, re-implemented from mine.rs + proof_utils.rs ----
+        let unkeyed = |parts: &[&[u8]]| -> [u8; 32] {
+            let mut h = Hasher::new();
+            for p in parts {
+                h.update(p);
+            }
+            *h.finalize().as_bytes()
+        };
+        let keyed_padded = |key: &[u8; 32], data: &[u8]| -> [u8; 32] {
+            let padded = crate::commit::pad_to_chunk_boundary(data);
+            *Hasher::new_keyed(key).update(&padded).finalize().as_bytes()
+        };
+        let routing_root = keyed_padded(&kappa, &routing_data_le);
+        let hash_offsets = keyed_padded(&kappa, &routing_offsets_le);
+        let hash_routing = unkeyed(&[&routing_root, &hash_offsets]);
+        let hash_activations = unkeyed(&[&hash_a, &hash_routing]);
+        let s_b_ref = unkeyed(&[&kappa, &hash_b]);
+        let s_a_ref = unkeyed(&[&s_b_ref, &hash_activations]);
+
+        // ---- Our implementation ----
+        let (s_a, s_b, c) = canonical_noise_seeds_moe(
+            &kappa,
+            &hash_a,
+            &hash_b,
+            &routing_data_le,
+            &routing_offsets_le,
+        );
+        assert_eq!(c.routing_root, routing_root, "routing_root");
+        assert_eq!(c.hash_offsets, hash_offsets, "hash_offsets");
+        assert_eq!(c.hash_activations, hash_activations, "hash_activations");
+        assert_eq!(s_b, s_b_ref, "s_b (b_noise_seed)");
+        assert_eq!(s_a, s_a_ref, "s_a (a_noise_seed) — full Pearl splice chain");
+    }
+
     /// Cross-crate byte-equivalence: `ai-pow-zk`'s off-circuit MoE reference
     /// (`moe_ref`, the spec the B5 sub-AIR reproduces) equals this crate's MoE
     /// splice. Transitively Pearl-validated via the KAT above (this crate) and
