@@ -145,4 +145,120 @@ green (honest decode unaffected).
 
 ---
 
-<!-- subsequent angles appended as evaluated -->
+## N5 Multi-commitment coinbase / Pearl-PoW work-reuse — **CONFIRMED → consensus-policy residual**
+
+**Confirmed:** `contains_subslice` (`pearl_compat.rs`) is an unrestricted
+`windows().any()` substring match; nothing enforces a single Nockchain-aux tag per
+coinbase (coinbase-only, `PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH = 0`). A miner who
+knows two `nock_block_commitment`s before solving Pearl can embed both aux tags in
+one coinbase, so one Pearl PoW satisfies `verify_pearl_aux_inclusion` for **both** —
+binding one unit of work to two Nockchain candidate blocks (competing same-height
+forks). The single-commitment binding itself is sound given a unique verifier-
+supplied `candidate_nock_block_commitment`; the gap is non-uniqueness of what one
+PoW may attest.
+
+**Residual (not unilaterally mitigated — needs a consensus decision):** whether one
+Pearl PoW may bind multiple Nockchain commitments is a **merge-mining policy**
+question. The mitigation is ready: enforce **exactly one** occurrence of the
+`"NOCKCHAIN-AI-POW-AUX"` tag prefix in the coinbase and require it to equal the
+expected commitment (reject multi-tag coinbases). This is a consensus-soundness
+change on a not-yet-wired path; flagged for decision rather than changed blind, per
+R1 (don't rush an invasive consensus change without the policy intent). If work-
+reuse across forks is unwanted (the default expectation), land the single-tag rule.
+
+## N7 Compact L2 verify path unwired; digest doesn't stand alone — **SOUND but UNWIRED (residual)**
+
+`verify_compact_batch_recursive_certificate_with_context` is self-consistent
+(digest = cert vs context checksum; real pinning = verifier-owned
+`context.circuit_prover_data`), but no consensus caller pins the digest bytes or
+calls `l0_program_matches` — unlike the full L1 path (`zk_bridge.rs:1667`). MoE +
+compact are fail-closed today. **Residual (= §I):** when wired, the compact verifier
+must (a) build the context from verifier-pinned constants (never the prover's
+returned `verifier_context()`, else the digest checks are vacuous), (b) call
+`l0_program_matches`, (c) derive PI/profile from chain data. Not a live defect.
+
+## N8 `params.n` vs `n_e` semantic mismatch — **SAFE (exploit closed by N1); doc reconciliation residual**
+
+The code is internally consistent: `params.n` is the **total** (`n_e = params.n/e`,
+`zk_bridge.rs:1616`; tests use `n = n_e·e`). The spec docs use the opposite
+convention (`params.n == n_e`). N1's `local < n_e` clamp makes the column derivation
+exploit-safe regardless of the naming. **Residual:** reconcile the spec docs to the
+code's total-`n` convention and confirm the wire maps Pearl's per-expert `n` to our
+total (Pearl `total_b_cols = n_e·e`, so Pearl's public `n` = `n_e`; the artifact
+builder must set `params.n = n_e·e`). Verify at wiring time; no live exploit.
+
+## N10 Grouped-GEMM dense/expert-agnostic — **SAFE (rests on N1 + §F)**
+
+The MoE↔dense correspondence is `l0_program_matches(canonical_program_for_strip_
+schedule(from_indices(outer_indices, b_cols_global), s_A, …))`. §F established
+`l0_program_matches` is a complete `RowMajorMatrix` identity; N1 closed the column
+clamp; the schedule encodes the exact opened rows/cols + noise, so distinct openings
+yield distinct programs. **SAFE**, contingent on N1's clamp (landed).
+
+## N11 Recursion transcript / profile binding — **SAFE**
+
+Agent-confirmed: public values are observed before `alpha`/`zeta` (no challenge-
+grinding gap); PoW bits threaded from `profile`. The full production path derives
+`profile`/`zk_params` from chain data (`zk_bridge.rs:1644,1677`). **Residual (note):**
+any *other* caller of `verify_recursive_certificate` must likewise derive them from
+the statement (the compact path, N7, must too when wired).
+
+## N12 Periodic-pattern reaches past n_e — **MITIGATED by N1**
+
+Root cause: `cols_pattern` is validated against the total `n` (not `n_e`), so a
+pattern/`t_cols` can index past `n_e`. N1's explicit `local < n_e` clamp in
+`moe_expert_b_cols_global` closes the resulting bleed (tests
+`moe_column_bleed_via_wide_pattern_rejected` / `..._via_t_cols_rejected`). Full
+Pearl-parity of the *pattern validation dimension* (n_e vs n) is the N8 reconciliation.
+
+## N13 Tile-selection grinding — **SAFE**
+
+`attempt_tile_index = blake3_derive_key(CTX, params_tag ‖ s_A) % num_tiles`
+(`fiat_shamir.rs:208`) is bound to `s_A` (routing/nonce/commitment-derived). A
+different tile requires a different `s_A`, i.e. a fresh attempt (full tile
+computation) — no independent tile grinding. Pinned by
+`attempt_tile_index_is_deterministic_bounded_and_attempt_bound`. **SAFE.**
+
+## N14 Difficulty-factor arithmetic — **SAFE (bound); MoE difficulty check is a wiring residual**
+
+`difficulty_adjustment_factor = h·w·dot` (`checked_mul`) with `h/w/dot` the
+schedule-bound tile dims (`|outer_indices|`, `|b_cols_global|`, `k`), so a prover
+cannot inflate the factor without a proportionally larger real tile. The target
+math (`pearl_nbits_to_target_le` + `pearl_adjust_target_for_config`) is the same for
+dense and MoE. **Residual (= §I):** the jackpot-vs-target check for MoE is deferred
+to the node (not wired); confirm it runs with the tile-scaled target when enabled.
+
+## N15 Noise expansion byte-compat — **SAFE**
+
+Agent-verified byte-identical to Pearl `pearl_noise.rs` (keyed BLAKE3 counter mode,
+`&0x3F−32` uniform, `first^(1+mul_hi(r−1,rnd))` permutation, base-129/256 packing),
+with a real-Pearl KAT + cross-crate equivalence tests. Note N2/N3 (the range +
+pin around the noise) turned up the MAT_UNPACK divergence, now fixed.
+
+---
+
+## Round-2 summary
+
+| angle | verdict | outcome |
+|---|---|---|
+| **N1** column-within-expert bleed | **ISSUE → MITIGATED** | `local < n_e` clamp + errors + 4 tests; recursion re-verified |
+| **N2** MAT_UNPACK range divergence | **ISSUE → MITIGATED** | routed to int7 [-64,64] (Pearl parity); AIR+freq; 408/0 + recursion 2/0 |
+| N3 noise pin dependency | SAFE | pinned-only prod; NOISE_PACKED_PREP pinned; LogUp binds operands |
+| N4 matmul under-constraint | SAFE | CONTROL_PREP pins selectors; keystone chain closes fold |
+| N5 multi-commitment work-reuse | **CONFIRMED — residual** | consensus policy; single-tag mitigation ready |
+| N6 unbound cumsum/jackpot | SAFE | composite AIR binds all three PIs to the trace |
+| N7 compact verify unwired | UNWIRED (residual) | fail-closed; wiring guard specified |
+| N8 n vs n_e | SAFE (N1 closes it) | doc/wire reconciliation residual |
+| **N9** decode heap-amplification DoS | **ISSUE → MITIGATED** | `max_total_atom_bytes` budget + charge + test |
+| N10 dense/expert-agnostic | SAFE | rests on N1 + §F |
+| N11 transcript/profile | SAFE | observe-order correct; full path derives profile |
+| N12 pattern past n_e | MITIGATED by N1 | clamp closes the bleed |
+| N13 tile grinding | SAFE | tile index bound to s_A |
+| N14 difficulty arithmetic | SAFE (bound) | MoE difficulty-check wiring residual |
+| N15 noise byte-compat | SAFE | byte-identical + KAT |
+
+**3 issues found and fixed: N1 (column bleed, fork+grind), N2 (MAT_UNPACK range,
+fork), N9 (decode DoS). 1 confirmed finding awaiting a consensus decision: N5
+(work-reuse). Everything else safe (several contingent on N1/N2, now landed) or a
+documented wiring residual (all gated by MoE/compact being fail-closed).**
+
