@@ -1536,30 +1536,37 @@ pub fn prove_pearl_merge_recursive_certificate(
     })
 }
 
-/// Node-facing **MoE recursive-certificate soundness verification** — the
-/// MoE-specific statement half of the node security boundary (the analogue of the
-/// dense `certificate_noun.rs` precheck + `verify_recursive_certificate`). All
-/// inputs are public (carried in the certificate / block). It binds an untrusted
-/// MoE certificate to its claimed statement:
+/// MoE-specific **routing + public-input binding** for a recursive certificate —
+/// **one component** of the node security boundary, NOT a complete standalone
+/// node verify. It checks:
 ///
-/// 1. **Routing-consistency binding** (`verify_pearl_moe_routing_binding`): the
-///    opened tile rows (`moe.outer_indices`, which the STARK proves the tile
-///    over) are exactly the expert's routed tokens under the *public* row pattern
-///    from the *committed* routing (`routing_data` → `routing_root` ==
+/// 1. **Routing-consistency binding** (`verify_pearl_moe_routing_binding`):
+///    `moe.outer_indices` are the expert's routed tokens under the *public* row
+///    pattern from the *committed* routing (`routing_data` → `routing_root` ==
 ///    `moe.hash_routing`).
 /// 2. **MoE `s_A` recompute + public-input binding**: recompute `s_A` from the
-///    routing splice (`routing_root` + `hash_offsets` → `hash_activations` →
-///    `s_A`) and bind it — with the matrix/job commitments — to the proof's
-///    public inputs (`COMMITMENT_HASH`, `HASH_A`, `HASH_B`, `JOB_KEY`). A forged
-///    routing changes `s_A`, so `COMMITMENT_HASH` no longer matches the proof.
+///    routing splice and bind it — with the matrix/job commitments — to the
+///    proof's public inputs (`COMMITMENT_HASH`, `HASH_A`, `HASH_B`, `JOB_KEY`).
 /// 3. **Recursive certificate verification** (`verify_recursive_certificate`).
 ///
-/// The opened rows are bound to the proof because the caller recomputes the MoE
-/// canonical program from `outer_indices` (as the dense node precheck recomputes
-/// its statement). The jackpot-vs-target difficulty check is a separate node
-/// concern on `pis.hash_jackpot`, identical to the dense path.
+/// # SECURITY — incomplete on its own (must be composed)
+///
+/// `verify_recursive_certificate` proves the Layer-0 statement for the
+/// *certificate's own* `l0_program`; it does **not** bind that program to the
+/// public statement. This function checks that `moe.outer_indices` are the routed
+/// tokens, but it does **not** verify that the certificate's `l0_program` actually
+/// opened `outer_indices` (vs. some other, prover-favorable row set). A complete
+/// node verify MUST additionally recompute the MoE canonical program from
+/// `from_indices(outer_indices, b_cols_global)` and bind it to the certificate —
+/// exactly as the dense node precheck (`certificate_noun.rs`
+/// `precheck_pearl_merge_certificate_metadata`) binds `found_idx` / `trace_height`
+/// / the recomputed strip schedule. That opened-rows binding lives in the node
+/// precheck integration (the remaining Track B work) and is required for
+/// soundness against a malicious prover. Until then this function is validated as
+/// a component (routing + PI binding) and MoE stays fail-closed at block
+/// acceptance. The jackpot-vs-target difficulty check is a separate node concern.
 #[allow(clippy::too_many_arguments)]
-pub fn verify_pearl_moe_recursive_certificate_soundness(
+pub fn verify_pearl_moe_routing_and_public_input_binding(
     certificate: &ai_pow_zk::recursion::AiPowRecursiveCertificate,
     pis: &ai_pow_zk::composite_public::CompositePublicInputs,
     params: &MatmulParams,
@@ -3782,8 +3789,10 @@ mod tests {
         )
         .expect("prove MoE recursive certificate");
 
-        // Node-facing MoE soundness verification: routing binding + s_a recompute
-        // + PI binding + recursive certificate verification.
+        // MoE routing + public-input binding component (NOT the complete node
+        // verify — the opened-rows/schedule binding is the remaining node-precheck
+        // work; see the function's SECURITY note). Here the certificate is the
+        // honest prover's, so its l0_program did open `outer_indices`.
         let mining_config = crate::pearl_compat::PearlMiningConfig {
             common_dim: params.k,
             rank: params.noise_rank as u16,
@@ -3805,7 +3814,7 @@ mod tests {
             outer_indices: ticket.outer_indices.clone(),
         };
         let verify = |h_a_in: &[u8; 32], routing_in: &[u32]| {
-            verify_pearl_moe_recursive_certificate_soundness(
+            verify_pearl_moe_routing_and_public_input_binding(
                 &l1.l1_cert,
                 &pis,
                 &params,
