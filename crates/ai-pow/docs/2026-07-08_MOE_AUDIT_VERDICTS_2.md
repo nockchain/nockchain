@@ -40,4 +40,40 @@ Pearl-parity of the *pattern validation* itself.
 
 ---
 
+## N2 MAT_UNPACK range-check divergence from Pearl — **ISSUE FOUND → MITIGATED**
+
+**Confirmed real.** Pearl range-checks the PLAIN matrix operand `MAT_UNPACK` to
+int7 `[-64,64]` via IRANGE7P1 (`pearl_stark.rs:141`, verbatim `// Signal is in
+[-64, 64]`, chained `MAT_UNPACK_RANGE.chain(NOISE_UNPACK_RANGE)`). Our composite AIR
+routed `MAT_UNPACK` to IRANGE8 `[-128,127]` instead, admitting plain bytes in
+`[65,127]∪[-128,-65]` that Pearl rejects — an **accept-set divergence** on the
+**dense live path**: a proof we accept that Pearl's constraint set rejects, and a
+weakened useful-work domain. (Not a direct forgery/grind — the jackpot is a hash,
+so its success probability is byte-range-independent — but a genuine merge-mining
+fork surface.)
+
+**MITIGATED (3-site AIR change + freq, matching Pearl exactly):**
+- `irange7p1()` now range-checks `MAT_UNPACK` alongside `NOISE_UNPACK` (Pearl's
+  IRANGE7P1 = MAT ⧺ NOISE).
+- `irange8()` no longer queries `MAT_UNPACK` (Pearl's IRANGE8 = A_NOISED ⧺
+  B_NOISED, the genuinely-i8 noised operands).
+- `populate_lookup_freq` moves the `MAT_UNPACK` histogram from IRANGE8 to
+  IRANGE7P1.
+
+**Validation (soundness-critical, staged per R1):**
+- New `prop_mat_unpack_out_of_int7_rejects` (proptest) — a *consistent* staging
+  row whose `MAT_UNPACK` i8 view ∈ [65,127]∪[-128,-65] is now REJECTED (it
+  VERIFIED before the fix). `prop_urange8_valid_query_verifies` updated to the
+  reachable UINT8 range `{0..64}∪{192..255}` (u8 view of int7).
+- The composite unit tests used full-i8 synthetic *plain* data (13 generators in
+  `composite_proof.rs`); masked to int7 `[-64,64]` (Pearl's domain — the real
+  prove paths already use `synth_matrices` ∈ int7, so they were unaffected). No
+  full-i8 plain generators exist in the integration tests or recursion.
+- **Regression (12-core native):** ai-pow-zk lib **408/0** (composite prove/verify
+  + range LogUp), recursion round-trips **2/0** (`noncontiguous` + `real_moe`
+  proving real composite traces with the tightened range). The honest plain matrix
+  is int7 in all real paths, so tightening only rejects out-of-domain values.
+
+---
+
 <!-- subsequent angles appended as evaluated -->

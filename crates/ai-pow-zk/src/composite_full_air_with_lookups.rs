@@ -284,13 +284,28 @@ mod bus_emit {
                 1,
             );
         }
+        // Pearl parity (audit N2): the PLAIN matrix operand `MAT_UNPACK` is
+        // int7 `[-64,64]`, range-checked here alongside `NOISE_UNPACK` — exactly
+        // Pearl `pearl_stark.rs` (`MAT_UNPACK_RANGE.chain(NOISE_UNPACK_RANGE)` →
+        // IRANGE7P1, "// Signal is in [-64, 64]"). Previously `MAT_UNPACK` went to
+        // IRANGE8 `[-128,127]`, admitting plain bytes Pearl rejects (accept-set
+        // divergence). `i8u8` still bridges these i8 cells to `UINT8_DATA`.
+        for i in 0..MAT_UNPACK_WIN {
+            builder.push_interaction(
+                BUS_IRANGE7P1,
+                [<AB::Var as Into<AB::Expr>>::into(cur[MAT_UNPACK_START + i])],
+                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
+                1,
+            );
+        }
     }
 
     /// `irange8` bus — i8 range check `[-128, 127]`.
     ///
     /// Table: (IRANGE8_TABLE, −IRANGE8_FREQ).
-    /// Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32]
-    /// + MAT_UNPACK[0..64] every row (i8 matrix cells).
+    /// Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row (the
+    /// NOISED operands, genuinely i8). `MAT_UNPACK` moved to IRANGE7P1 `[-64,64]`
+    /// for Pearl parity (audit N2) — matches Pearl's IRANGE8 = A_NOISED ⧺ B_NOISED.
     pub fn irange8<AB: AirBuilder + InteractionBuilder>(builder: &mut AB) {
         let main = builder.main();
         let cur = main.current_slice();
@@ -312,14 +327,6 @@ mod bus_emit {
             builder.push_interaction(
                 BUS_IRANGE8,
                 [<AB::Var as Into<AB::Expr>>::into(cur[B_NOISED_UNPACK_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
-            );
-        }
-        for i in 0..MAT_UNPACK_WIN {
-            builder.push_interaction(
-                BUS_IRANGE8,
-                [<AB::Var as Into<AB::Expr>>::into(cur[MAT_UNPACK_START + i])],
                 <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
                 1,
             );
@@ -1562,16 +1569,41 @@ mod tests {
         }
 
         /// URange8 bus (gated): place a valid u8 query at row 0 via
-        /// place_urange8_query. Should always verify regardless of
-        /// the chosen u8 value.
+        /// place_urange8_query. `place_urange8_query` couples UINT8_DATA to
+        /// MAT_UNPACK's i8 view through the i8u8 bus, and MAT_UNPACK is now
+        /// int7-constrained to [-64,64] (audit N2, Pearl parity). So the reachable
+        /// (and honest) UINT8_DATA values are exactly the u8 view of [-64,64] =
+        /// {0..=64} ∪ {192..=255}; those must verify.
         #[test]
-        fn prop_urange8_valid_query_verifies(v in 0u32..256) {
+        fn prop_urange8_valid_query_verifies(v in prop_oneof![0u32..=64, 192u32..=255]) {
             let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
             let mut trace = CompositeTrace::baseline_min();
             place_urange8_query(&mut trace, 0, v);
             trace.populate_lookup_freq();
             run_batch(&cfg, &trace.matrix)
                 .expect("valid u8 query must verify");
+        }
+
+        /// **Audit N2 — Pearl parity (the fix's teeth).** A CONSISTENT staging row
+        /// (MAT_UNPACK = i8(u8), matching NOISED_PACKED / UINT8_DATA) whose
+        /// MAT_UNPACK i8 view is OUT of int7 `[-64,64]` — i.e. u8 ∈ [65,191] →
+        /// i8 ∈ [65,127]∪[-128,-65] — is now REJECTED by the `irange7p1` range bus.
+        /// Before the fix, MAT_UNPACK was range-checked to full i8 `[-128,127]`
+        /// (`irange8`), so this exact row VERIFIED — an accept-set divergence from
+        /// Pearl (`pearl_stark.rs`: "// Signal is in [-64, 64]"). This is the
+        /// regression that pins the fix.
+        #[test]
+        fn prop_mat_unpack_out_of_int7_rejects(u in prop_oneof![65u32..=127, 128u32..=191]) {
+            let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+            let mut trace = CompositeTrace::baseline_min();
+            place_urange8_query(&mut trace, 0, u);
+            trace.populate_lookup_freq();
+            let res = run_batch(&cfg, &trace.matrix);
+            prop_assert!(
+                res.is_err(),
+                "MAT_UNPACK i8 view of u8={} is out of int7 [-64,64]; must reject; got {:?}",
+                u, res
+            );
         }
 
         /// I8U8 bus: inconsistent (i8, u8) pair where unsigned ≠

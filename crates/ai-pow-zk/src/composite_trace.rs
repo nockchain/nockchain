@@ -2406,13 +2406,22 @@ impl CompositeTrace {
         }
 
         // ---- IRange7P1 (i7+1 ∈ [-64, 64], 129 values) ----
-        // Queries: NOISE_UNPACK[0..64] every row.
+        // Queries: NOISE_UNPACK[0..64] + MAT_UNPACK[0..64] every row (Pearl
+        // parity, audit N2: the plain matrix operand is int7 [-64,64], not full
+        // i8; it moved here from IRange8).
         // Map signed value v → table-row index (v + 64).
         let mut i7p1_count = [0u64; 129];
         for r in 0..n {
             let base = r * TOTAL_TRACE_WIDTH;
             for i in 0..NOISE_UNPACK_WIN {
                 let raw = self.matrix.values[base + NOISE_UNPACK_START + i].as_canonical_u64();
+                let signed = goldilocks_to_signed(raw);
+                if (-64..=64).contains(&signed) {
+                    i7p1_count[(signed + 64) as usize] += 1;
+                }
+            }
+            for i in 0..MAT_UNPACK_WIN {
+                let raw = self.matrix.values[base + MAT_UNPACK_START + i].as_canonical_u64();
                 let signed = goldilocks_to_signed(raw);
                 if (-64..=64).contains(&signed) {
                     i7p1_count[(signed + 64) as usize] += 1;
@@ -2428,8 +2437,8 @@ impl CompositeTrace {
         }
 
         // ---- IRange8 (i8 ∈ [-128, 127], 256 values) ----
-        // Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32]
-        // + MAT_UNPACK[0..64] every row.
+        // Queries: A_NOISED_UNPACK[0..32] + B_NOISED_UNPACK[0..32] every row (the
+        // genuinely-i8 NOISED operands). MAT_UNPACK moved to IRange7P1 (audit N2).
         let mut i8_count = [0u64; 256];
         let scan_i8_cells = |start: usize, len: usize, dst: &mut [u64; 256], values: &[Val]| {
             for r in 0..n {
@@ -2448,9 +2457,6 @@ impl CompositeTrace {
         );
         scan_i8_cells(
             B_NOISED_UNPACK_START, B_NOISED_UNPACK_LEN, &mut i8_count, &self.matrix.values,
-        );
-        scan_i8_cells(
-            MAT_UNPACK_START, MAT_UNPACK_WIN, &mut i8_count, &self.matrix.values,
         );
         for v in 0..256.min(n) {
             self.matrix.values[v * TOTAL_TRACE_WIDTH + IRANGE8_FREQ] =

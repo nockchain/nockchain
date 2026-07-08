@@ -659,10 +659,10 @@ mod tests {
         let h = trace.height();
         let (t, _k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_prime: Vec<i8> = (0..(t * 64) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_prime: Vec<i8> = (0..(t * 64) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
         let (rows_used, x_steps) =
             trace.place_useful_work_chain(8, &a_prime, &b_prime, t, r, num_stripes);
@@ -710,10 +710,10 @@ mod tests {
         // (MatmulParams::TEST_SMALL: t=8, k=64, r=4, num_stripes=16).
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
 
         let sweep_start = 8;
@@ -811,10 +811,10 @@ mod tests {
 
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
 
         let mut trace = CompositeTrace::baseline_min();
@@ -879,7 +879,7 @@ mod tests {
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let mk = |salt: i32| -> Vec<i8> {
             (0..(t * k) as i32)
-                .map(|i| (i.wrapping_mul(7).wrapping_add(salt) ^ (i >> 3)) as i8)
+                .map(|i| (((i.wrapping_mul(7).wrapping_add(salt) ^ (i >> 3)) & 0x7F) - 64) as i8)
                 .collect()
         };
         // Two unrelated byte fillings of the same geometry.
@@ -936,10 +936,10 @@ mod tests {
 
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_canon: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_canon: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
         // The tile actually swept differs from the published store
         // (a "cheaper"/forged tile the prover would prefer).
@@ -1011,10 +1011,10 @@ mod tests {
         // MatmulParams::TEST_SMALL (t=8, k=64, r=4, num_stripes=16).
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
 
         let sweep_start = 8;
@@ -1137,10 +1137,10 @@ mod tests {
 
         let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
         let a_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(7) ^ (i >> 3)) as i8)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
             .collect();
         let b_prime: Vec<i8> = (0..(t * k) as i32)
-            .map(|i| (i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) as i8)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
             .collect();
 
         let sweep_start = 8;
