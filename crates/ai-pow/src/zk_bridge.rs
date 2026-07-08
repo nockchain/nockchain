@@ -3624,6 +3624,99 @@ mod tests {
         .expect("opened rows are expert 0's routed tokens (routing binding)");
     }
 
+    /// **B5d — full MoE recursive certificate (Layer-0 → Layer-1 → verify).**
+    ///
+    /// Wraps the MoE grouped-tile Layer-0 proof in the recursive certificate
+    /// exactly as the dense Pearl-merge path does, and verifies it. Demonstrates
+    /// the complete MoE proving stack end-to-end (the recursive wrap is generic
+    /// over the Layer-0 statement; here the Layer-0 is the MoE grouped tile with
+    /// the routing-spliced s_a). Opt-in (a real recursive proof, ~2 min).
+    #[test]
+    #[ignore = "real recursive certificate; full MoE stack"]
+    fn real_moe_recursive_certificate_proves_and_verifies() {
+        use crate::commit::matrix_commitment;
+        use crate::pearl_moe_routing::build_routing_data;
+
+        let (m, k, n_e, e, r) = (128usize, 1024usize, 64usize, 2usize, 64usize);
+        let top_k = 1usize;
+        let params = MatmulParams {
+            m: m as u32,
+            k: k as u32,
+            n: (n_e * e) as u32,
+            noise_rank: r as u32,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"moe-recursive-cert", &params);
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+        let kappa = [0x41u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+        let (expert_idx, inner, local_b) =
+            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+            &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+        )
+        .expect("MoE ticket");
+
+        let zctx = ZkProverContext {
+            a: &a,
+            b: &b,
+            params,
+            kappa,
+            h_a_chunk: h_a,
+            h_b_chunk: h_b,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+            jackpot_key: ticket.s_a,
+        };
+        let zk_params = zk_params_from(&params);
+        let strip_schedule = StripIndexSchedule::from_indices(
+            &zk_params,
+            ticket.outer_indices.clone(),
+            ticket.b_cols_global.clone(),
+        )
+        .expect("MoE strip schedule");
+
+        // Layer-0: prove the MoE grouped tile.
+        let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
+            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+        )
+        .expect("prove MoE Layer-0");
+        let ZkProofArtifact { proof, pis, .. } = artifact;
+
+        // Layer-1: wrap the verified Layer-0 in the recursive certificate.
+        let verified_l0 = unsafe {
+            ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+                prover_program,
+                proof,
+                &pis,
+            )
+        };
+        let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
+            &zk_params,
+            &CircuitConfig::PROD,
+            verified_l0,
+        )
+        .expect("prove MoE recursive certificate");
+
+        // Verify the recursive certificate.
+        ai_pow_zk::recursion::verify_recursive_certificate(
+            &l1.l1_cert,
+            &zk_params,
+            &CircuitConfig::PROD,
+            &pis,
+        )
+        .expect("verify MoE recursive certificate");
+
+        // The verified certificate carries the MoE grouped-tile jackpot.
+        assert_eq!(pis.jackpot, tile_state_words(&ticket.tile_state));
+    }
+
     /// Opt-in because this builds a real Layer-0 proof and recursive
     /// certificate. Run with:
     /// `GNORT_DISABLE=1 cargo test -p ai-pow --release --features zk \
