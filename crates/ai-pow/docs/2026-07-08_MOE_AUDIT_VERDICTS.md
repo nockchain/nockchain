@@ -175,4 +175,34 @@ and 2¹⁶ (lb=2). **SAFE.**
 
 ---
 
+## §F Opened-schedule binding (`l0_program_matches`) completeness — **SAFE**
+
+**Finding:** the three sub-attacks fail:
+1. **`(width, values)` completeness:** `AiPowProgram` is a type alias for
+   `p3_matrix::dense::RowMajorMatrix<Val>` (`lib.rs:155`) — a struct with exactly
+   `{values, width}`. Height is `values.len()/width`, so `l0_program_matches`
+   (width + values equality) is a **complete** identity: no field the recursion's
+   `CompositeFullAirWithLookupsPinned::new_with(cert.l0_program, …)` consumes is
+   left unbound. Two programs with equal `(width, values)` are byte-identical.
+2. **`tile_i/tile_j`:** the expected program is recomputed from the *schedule*
+   (`from_indices(outer_indices, b_cols_global)` + `s_A`/`s_B`/κ + the
+   schedule-determined trace height), not from `tile_i/j`; those are vestigial for
+   the scheduled prover (the schedule alone fixes the opened rows/cols), so `bp.
+   tile_i = 0` cannot slip a different opening through.
+3. **trace_height divergence:** the program's height is bound by the `values`
+   match, and `trace_height` is separately bound by the precheck (§H). A padded/
+   wrong height yields different `values` → mismatch → reject.
+
+The binding recomputes from **public** inputs only (never the proof), so a prover
+who proved over a favorable strip gets a program `≠` the schedule-derived one and
+is rejected before `verify_recursive_certificate`.
+
+**Evidence:** completeness is a type-level guarantee (RowMajorMatrix); the honest
+`real_moe_recursive_certificate` round-trip exercises the equality on the true
+program. **Residual (recommended):** an end-to-end "cert proved over rows X,
+verified with outer_indices Y → reject" test (needs a full cert to prove, hence
+deferred). **SAFE.**
+
+---
+
 <!-- subsequent angles appended as they are evaluated -->
