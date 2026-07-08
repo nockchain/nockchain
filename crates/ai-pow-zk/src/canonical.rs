@@ -609,6 +609,66 @@ fn strip_blocks(c0: usize, c1: usize, num_chunks: usize) -> Vec<StripBlock> {
     out
 }
 
+/// Selective (disjoint-chunk) strip-opening block list — the in-circuit schedule
+/// for a **multi-proof** over an arbitrary sorted, distinct chunk set `sel`,
+/// generalizing [`strip_blocks`] from a contiguous range to a set-membership
+/// predicate (mirrors `blake3_tree::collect_siblings_set` / `open_strip_set`).
+/// Sibling subtrees disjoint from `sel` consume 0 rows, so the block count is
+/// O(|sel|·log n) rather than the O(max−min) covering range — this is what keeps
+/// the Layer-0 trace inside `PEARL_TRACE_BOUND` for scattered MoE routed tokens.
+/// For a contiguous `sel == c0..c1` it is byte-identical to `strip_blocks`.
+#[allow(dead_code)]
+fn strip_blocks_set(sel: &[usize], num_chunks: usize) -> Vec<StripBlock> {
+    let mut out = Vec::new();
+    if num_chunks == 1 {
+        debug_assert_eq!(sel, [0]);
+        for b in 0..16 {
+            out.push(StripBlock::Leaf {
+                chunk_index: 0,
+                b,
+                single_chunk_root: true,
+            });
+        }
+        return out;
+    }
+    // #{selected chunks in [lo,hi)} for the sorted, distinct `sel`.
+    fn sel_count(sel: &[usize], lo: usize, hi: usize) -> usize {
+        sel.partition_point(|&c| c < hi) - sel.partition_point(|&c| c < lo)
+    }
+    fn subtree_inside(out: &mut Vec<StripBlock>, lo: usize, hi: usize, is_root: bool) {
+        if hi - lo == 1 {
+            for b in 0..16 {
+                out.push(StripBlock::Leaf {
+                    chunk_index: lo as u64,
+                    b,
+                    single_chunk_root: false,
+                });
+            }
+            return;
+        }
+        let mid = lo + left_len((hi - lo) as u64) as usize;
+        subtree_inside(out, lo, mid, false);
+        subtree_inside(out, mid, hi, false);
+        out.push(StripBlock::Parent { is_root });
+    }
+    fn fold(out: &mut Vec<StripBlock>, lo: usize, hi: usize, sel: &[usize], is_root: bool) {
+        let cnt = sel_count(sel, lo, hi);
+        if cnt == 0 {
+            return; // auth sibling — 0 rows
+        }
+        if cnt == hi - lo {
+            subtree_inside(out, lo, hi, is_root);
+            return;
+        }
+        let mid = lo + left_len((hi - lo) as u64) as usize;
+        fold(out, lo, mid, sel, false);
+        fold(out, mid, hi, sel, false);
+        out.push(StripBlock::Parent { is_root });
+    }
+    fold(&mut out, 0, num_chunks, sel, true);
+    out
+}
+
 /// Per-tile strip-opening plan: the params-pure block list + the
 /// region's `IS_HASH_A/B` finalize selector (4 = `IS_HASH_A`
 /// A-side, 5 = `IS_HASH_B` B-side — `place_matrix_hash_a/b`).
@@ -959,6 +1019,58 @@ mod tests {
     use p3_matrix::Matrix;
 
     use super::*;
+
+    /// The selective (disjoint-chunk) strip-opening schedule strictly generalizes
+    /// the contiguous-range schedule: for `sel == c0..c1` they are byte-identical.
+    #[test]
+    fn strip_blocks_set_generalizes_range() {
+        for &nc in &[2usize, 3, 5, 8, 13, 17, 31, 64] {
+            for c0 in 0..nc {
+                for c1 in (c0 + 1)..=nc {
+                    let sel: Vec<usize> = (c0..c1).collect();
+                    assert_eq!(
+                        strip_blocks_set(&sel, nc),
+                        strip_blocks(c0, c1, nc),
+                        "selective schedule != range schedule for [{c0},{c1}) of {nc}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A scattered selected set costs O(|sel|·log n) blocks (one 16-block leaf per
+    /// selected chunk + fold parents), far fewer than the covering-range schedule —
+    /// the production trace-size win that keeps the Layer-0 trace inside
+    /// `PEARL_TRACE_BOUND` for scattered MoE routed tokens.
+    #[test]
+    fn strip_blocks_set_is_sublinear_for_scattered() {
+        let nc = 4096usize;
+        let sel: Vec<usize> = (0..64).map(|i| i * 63).collect();
+        let blocks = strip_blocks_set(&sel, nc);
+        let leaves = blocks
+            .iter()
+            .filter(|b| matches!(b, StripBlock::Leaf { .. }))
+            .count();
+        assert_eq!(leaves, sel.len() * 16, "one 16-block leaf per selected chunk");
+        let covering = strip_blocks(*sel.first().unwrap(), sel.last().unwrap() + 1, nc);
+        assert!(
+            blocks.len() < covering.len() / 4,
+            "selective {} not << covering {}",
+            blocks.len(),
+            covering.len()
+        );
+        assert!(matches!(
+            blocks.last(),
+            Some(StripBlock::Parent { is_root: true })
+        ));
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|b| matches!(b, StripBlock::Parent { is_root: true }))
+                .count(),
+            1
+        );
+    }
     use crate::blake3_tree::tile_chunk_range;
 
     fn p16() -> ZkParams {
