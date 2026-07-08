@@ -442,6 +442,137 @@ fn subtree_from_opened(
     parent_cv(&l, &r, kappa, is_root)
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Selective (disjoint-chunk) opening — the BLAKE3 keyed-tree MULTI-PROOF.
+//
+// [`open_strip`] opens a *contiguous* chunk range `[c0,c1)`; its recomputation
+// cost is O(c1−c0). Production MoE opens an expert's routed-token rows, which
+// scatter across ~m rows, so the covering range `[min,max)` is O(m) and breaches
+// `PEARL_TRACE_BOUND` at scale. A *selective* opening authenticates an arbitrary
+// SORTED SET of chunks in O(|set|·log n) recomputation instead. This is the
+// off-circuit reference / de-risk foundation; the in-circuit selective schedule
+// (`canonical.rs` strip-block generation + the AIR) is a separate staged change.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Number of selected chunks (from the sorted, distinct `sel`) that lie in
+/// `[lo,hi)`.
+fn sel_count(sel: &[usize], lo: usize, hi: usize) -> usize {
+    sel.partition_point(|&c| c < hi) - sel.partition_point(|&c| c < lo)
+}
+
+/// Selective strip opening: authenticate the sorted, distinct chunk set `sel` to
+/// the committed root. Returns the opened leaf CVs (one per `sel` entry, in
+/// order) and the off-set authentication siblings (maximal subtrees disjoint from
+/// `sel`). Reconstruct + check with [`verify_strip_opening_set`].
+pub fn open_strip_set(
+    matrix_bytes: &[u8],
+    kappa: &[u8; 32],
+    sel: &[usize],
+) -> (Vec<[u8; 32]>, Vec<AuthSibling>) {
+    let padded = pad_to_chunk_boundary(matrix_bytes);
+    let n = padded.len() / CHUNK_LEN;
+    assert!(!sel.is_empty(), "selective opening requires >= 1 chunk");
+    assert!(
+        sel.windows(2).all(|w| w[0] < w[1]),
+        "selective opening chunks must be sorted + distinct"
+    );
+    assert!(*sel.last().unwrap() < n, "selective chunk out of 0..{n}");
+    let cvs = leaf_cvs(&padded, kappa);
+    let opened: Vec<[u8; 32]> = sel.iter().map(|&c| cvs[c]).collect();
+    let mut sibs = Vec::new();
+    collect_siblings_set(&cvs, 0, n, sel, kappa, &mut sibs);
+    (opened, sibs)
+}
+
+fn collect_siblings_set(
+    cvs: &[[u8; 32]],
+    lo: usize,
+    hi: usize,
+    sel: &[usize],
+    kappa: &[u8; 32],
+    out: &mut Vec<AuthSibling>,
+) {
+    let cnt = sel_count(sel, lo, hi);
+    if cnt == 0 {
+        // Fully disjoint from the opening ⇒ one authentication sibling.
+        out.push(AuthSibling {
+            lo,
+            hi,
+            cv: subtree_root(cvs, lo, hi, kappa, false),
+        });
+        return;
+    }
+    if cnt == hi - lo {
+        return; // fully selected ⇒ recomputed from opened leaves
+    }
+    let mid = lo + left_len((hi - lo) as u64) as usize;
+    collect_siblings_set(cvs, lo, mid, sel, kappa, out);
+    collect_siblings_set(cvs, mid, hi, sel, kappa, out);
+}
+
+/// Recompute the committed root from a selective opening; the caller asserts it
+/// `== PI_HASH_A/B`. Pure structural fold — no full matrix needed.
+pub fn verify_strip_opening_set(
+    opened: &[[u8; 32]],
+    siblings: &[AuthSibling],
+    sel: &[usize],
+    num_chunks: usize,
+    kappa: &[u8; 32],
+) -> [u8; 32] {
+    assert_eq!(opened.len(), sel.len(), "opened count != selected count");
+    if num_chunks == 1 {
+        assert!(sel == [0] && siblings.is_empty());
+        return opened[0];
+    }
+    let mut sib = siblings.iter();
+    let root = fold_opening_set(0, num_chunks, sel, opened, &mut sib, kappa, true);
+    assert!(sib.next().is_none(), "unconsumed authentication siblings");
+    root
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fold_opening_set<'a, I: Iterator<Item = &'a AuthSibling>>(
+    lo: usize,
+    hi: usize,
+    sel: &[usize],
+    opened: &[[u8; 32]],
+    sibs: &mut I,
+    kappa: &[u8; 32],
+    is_root: bool,
+) -> [u8; 32] {
+    let cnt = sel_count(sel, lo, hi);
+    if cnt == 0 {
+        let s = sibs.next().expect("missing authentication sibling");
+        assert!(s.lo == lo && s.hi == hi, "sibling range mismatch");
+        return s.cv;
+    }
+    if cnt == hi - lo {
+        return subtree_from_opened_set(lo, hi, sel, opened, kappa, is_root);
+    }
+    let mid = lo + left_len((hi - lo) as u64) as usize;
+    let l = fold_opening_set(lo, mid, sel, opened, sibs, kappa, false);
+    let r = fold_opening_set(mid, hi, sel, opened, sibs, kappa, false);
+    parent_cv(&l, &r, kappa, is_root)
+}
+
+fn subtree_from_opened_set(
+    lo: usize,
+    hi: usize,
+    sel: &[usize],
+    opened: &[[u8; 32]],
+    kappa: &[u8; 32],
+    is_root: bool,
+) -> [u8; 32] {
+    if hi - lo == 1 {
+        // [lo,hi) fully selected ⇒ lo ∈ sel; its opened CV is at rank(lo).
+        return opened[sel.partition_point(|&x| x < lo)];
+    }
+    let mid = lo + left_len((hi - lo) as u64) as usize;
+    let l = subtree_from_opened_set(lo, mid, sel, opened, kappa, false);
+    let r = subtree_from_opened_set(mid, hi, sel, opened, kappa, false);
+    parent_cv(&l, &r, kappa, is_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +698,108 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Selective (disjoint-chunk) multi-proof authenticates to the committed root
+    /// for singletons, endpoints, every-other, scattered handfuls, and the full
+    /// set, across power- and non-power-of-two chunk counts.
+    #[test]
+    fn selective_opening_recomputes_committed_root() {
+        let k = kappa();
+        for &nc in &[2usize, 3, 5, 8, 13, 17, 31, 64, 100] {
+            let raw = bytes(nc * CHUNK_LEN);
+            let root = merkle_root(&raw, &k);
+            let mut sets: Vec<Vec<usize>> = vec![
+                vec![0],
+                vec![nc / 2],
+                vec![nc - 1],
+                vec![0, nc - 1],
+                (0..nc).step_by(2).collect(),
+                (0..nc).step_by(3).collect(),
+                (0..nc).collect(),
+            ];
+            if nc >= 4 {
+                sets.push(vec![0, 1, nc - 2, nc - 1]);
+                sets.push(vec![1, nc / 2, nc - 1]);
+            }
+            for sel in &sets {
+                let (opened, sibs) = open_strip_set(&raw, &k, sel);
+                let got = verify_strip_opening_set(&opened, &sibs, sel, nc, &k);
+                assert_eq!(got, root, "selective open {sel:?} of {nc} chunks != root");
+            }
+        }
+    }
+
+    /// For a contiguous selected set `[c0,c1)` the multi-proof is byte-identical to
+    /// the range opening — the set path strictly generalizes the range path.
+    #[test]
+    fn selective_matches_contiguous_range_opening() {
+        let k = kappa();
+        for &nc in &[2usize, 5, 8, 13, 31, 64] {
+            let raw = bytes(nc * CHUNK_LEN);
+            for c0 in 0..nc {
+                for c1 in (c0 + 1)..=nc {
+                    let sel: Vec<usize> = (c0..c1).collect();
+                    let (o_set, s_set) = open_strip_set(&raw, &k, &sel);
+                    let (o_rng, s_rng) = open_strip(&raw, &k, c0, c1);
+                    assert_eq!(o_set, o_rng, "opened differ for [{c0},{c1}) of {nc}");
+                    let key = |s: &[AuthSibling]| {
+                        s.iter().map(|x| (x.lo, x.hi, x.cv)).collect::<Vec<_>>()
+                    };
+                    assert_eq!(key(&s_set), key(&s_rng), "siblings differ for [{c0},{c1}) of {nc}");
+                }
+            }
+        }
+    }
+
+    /// The production win: a scattered set of `h` chunks in a large tree costs
+    /// O(h·log n) opened+siblings, NOT the O(max−min) covering range that
+    /// [`open_strip`] (and the current in-circuit schedule) would pay.
+    #[test]
+    fn selective_opening_multiproof_is_sublinear() {
+        let k = kappa();
+        let nc = 4096usize; // e.g. m=4096 tokens (one chunk per row)
+        let raw = bytes(nc * CHUNK_LEN);
+        // 64 tokens spread evenly across all of [0,4096) — covering range 3970.
+        let sel: Vec<usize> = (0..64).map(|i| i * 63).collect();
+        let (opened, sibs) = open_strip_set(&raw, &k, &sel);
+        assert_eq!(
+            verify_strip_opening_set(&opened, &sibs, &sel, nc, &k),
+            merkle_root(&raw, &k)
+        );
+        let logn = (usize::BITS - (nc - 1).leading_zeros()) as usize; // ceil(log2 nc)
+        assert_eq!(opened.len(), sel.len());
+        assert!(
+            sibs.len() <= sel.len() * logn,
+            "multi-proof siblings {} exceed |sel|·log2(nc)={}",
+            sibs.len(),
+            sel.len() * logn
+        );
+        let covering = sel.last().unwrap() - sel.first().unwrap() + 1;
+        assert!(
+            opened.len() + sibs.len() < covering,
+            "selective proof ({}+{}) not smaller than covering range {}",
+            opened.len(),
+            sibs.len(),
+            covering
+        );
+    }
+
+    /// Tampering an opened leaf CV or an authentication sibling breaks the root.
+    #[test]
+    fn selective_opening_rejects_tampering() {
+        let k = kappa();
+        let nc = 64usize;
+        let raw = bytes(nc * CHUNK_LEN);
+        let sel = vec![0usize, 7, 8, 31, 63];
+        let root = merkle_root(&raw, &k);
+        let (mut opened, sibs) = open_strip_set(&raw, &k, &sel);
+        assert_eq!(verify_strip_opening_set(&opened, &sibs, &sel, nc, &k), root);
+        opened[2][0] ^= 1;
+        assert_ne!(verify_strip_opening_set(&opened, &sibs, &sel, nc, &k), root);
+        let (opened2, mut sibs2) = open_strip_set(&raw, &k, &sel);
+        sibs2[0].cv[0] ^= 1;
+        assert_ne!(verify_strip_opening_set(&opened2, &sibs2, &sel, nc, &k), root);
     }
 
     /// **P-B.2.3.** The opening schedule is a pure deterministic
