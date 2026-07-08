@@ -76,4 +76,36 @@ fork surface.)
 
 ---
 
+## N3 Noise-value seed-binding pin-dependency — **SAFE**
+
+**Finding:** the binding is live. (1) The production prove path uses **only** the
+pinned variant (`composite_prove_pinned_logup`); no unpinned `composite_prove`
+exists in `zk_bridge`/`recursion`. (2) The noise pin: `NOISE_PACKED_PREP` is in
+`PROGRAM_COLS` (`composite_full_air.rs`), pinned per row to the canonical program's
+`e_value/f_value(s_A/s_B)`, and IRANGE7P1's `[-64,64]` width makes the base-129
+packing bijective → the pinned noise is unique. The verifier independently rebuilds
+the canonical program and requires equality (§F `l0_program_matches`). (3) The
+matmul-side noised operands are bound by the `noised_packed` `(id,value)` RAM LogUp
+(§A), not the (reverted, redundant) operand pin; the shipping sweep **does** place
+the matmul rows — the `real_moe`/`noncontiguous` recursion round-trips prove real
+sweeps end-to-end. **SAFE.**
+
+## N4 Matmul chip under-constraint (delegated exclusivity + A/B binding) — **SAFE**
+
+**Finding:** the delegations are enforced upstream. (1) **Selector exclusivity:**
+`CONTROL_PREP` pins all 21 selectors + `MAT_ID` and is in `PROGRAM_COLS`
+(`composite_full_air.rs:101-123`); the ControlChip enforces `CONTROL_PREP ==
+pack(selectors, mat_id)` bijectively, so the program pin fixes the selectors to the
+canonical one-hot assignment — both `IS_RESET_CUMSUM` and `IS_UPDATE_CUMSUM` = 1 is
+impossible (a prover cannot forge `CONTROL_PREP`). (2) **A/B-input binding:** the
+`noised_packed` `(id,value)` LogUp (§A, round-1) ties the dot's operands to the
+committed store; the §6(b)/§4.D keystone chain (Agent-confirmed: committed A/B →
+CUMSUM → SX → FOLD → JACKPOT) closes dense faithfulness, validated by the `sec_4c*`
+suite. The last-row cumsum is pinned by the §4.D keystone (`when_last_row`
+JACKPOT_MSG == FOLD_STATE). **SAFE.** (Residual noted in round 1: the "full
+step-transcript binding" at `composite_full_air.rs:315-319` remains an explicitly
+scoped open item, but the keystone chain already binds the fold to the accumulator.)
+
+---
+
 <!-- subsequent angles appended as evaluated -->
