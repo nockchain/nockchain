@@ -2805,6 +2805,52 @@ mod tests {
 
     const TEST_NONCE: &[u8] = b"zk-bridge-test-nonce";
 
+    /// **Tracy profiling harness — isolated Layer-0 batch-STARK prove.** Proves a
+    /// single 2¹⁶-trace tile (tile=16, k=4096, r=64 = the max prod envelope),
+    /// with **no L1/L2 wrap**, under a `TracyLayer` subscriber so the
+    /// p3-batch-stark spans (commit / compute-quotient / FRI / open) stream to
+    /// Tracy. Run under `tracy-capture`, then `tracy-csvexport`:
+    ///
+    /// ```text
+    /// mkdir -p /tmp/prof
+    /// tracy-capture -o /tmp/prof/l0.tracy -f -a 127.0.0.1 >/tmp/prof/cap.log 2>&1 &
+    /// RUSTFLAGS="-C target-cpu=native" RAYON_NUM_THREADS=12 cargo test -p ai-pow \
+    ///   --release --features zk profile_layer0_prove_max_envelope \
+    ///   -- --ignored --nocapture --test-threads=1
+    /// wait; tracy-csvexport /tmp/prof/l0.tracy > /tmp/prof/zones.csv
+    /// ```
+    #[test]
+    #[ignore = "tracy profiling harness for the Layer-0 batch-STARK prove"]
+    fn profile_layer0_prove_max_envelope() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let _ = tracing_subscriber::registry()
+            .with(tracing_tracy::TracyLayer::default())
+            .try_init();
+
+        let params = MatmulParams {
+            m: 64,
+            k: 4096,
+            n: 64,
+            noise_rank: 64,
+            tile: 16,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"l0-profile-2p16-max-envelope", &params);
+        let ctx = BlockContext::build(b"l0-profile-block-commitment", TEST_NONCE, &a, &b, &params)
+            .expect("build Layer-0 profiling ctx");
+        let start = std::time::Instant::now();
+        let (artifact, _prog, _v) =
+            prove_ai_pow_tiled_full(&ctx, &params, TEST_NONCE, 0, 0, |_| {}, None)
+                .expect("prove isolated Layer-0");
+        eprintln!(
+            "[L0 profile] trace_height={} prove_wall_ms={}",
+            artifact.trace_height,
+            start.elapsed().as_millis()
+        );
+    }
+
     #[test]
     fn compact_recursive_prover_cache_is_shareable_for_miner_lifecycle() {
         fn assert_send_sync<T: Send + Sync>() {}
