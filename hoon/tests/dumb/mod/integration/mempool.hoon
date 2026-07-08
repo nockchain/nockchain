@@ -3,10 +3,10 @@
 /=  zoon  /common/zoon
 /=  *  /common/test
 |%
-++  h  ~(. helpers bc-v1-phase:helpers)
-++  t  ~(. txe bc-v1-phase:helpers)
+++  h  ~(. helpers bc-v1-phase-provable:helpers)
+++  t  ~(. txe bc-v1-phase-provable:helpers)
 ++  bc-v1-timelock
-  %*  .  bc-v1-phase:helpers
+  %*  .  bc-v1-phase-provable:helpers
     coinbase-timelock-min  2
   ==
 ::  v1 mempool context validation tests

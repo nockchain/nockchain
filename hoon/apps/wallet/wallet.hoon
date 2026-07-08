@@ -937,11 +937,18 @@
         ---
 
         """
+      ::  NOTE: intentionally NO [%exit 0] here. The %nockchain-grpc %send-tx
+      ::  effect is delivered to the grpc listener driver, which performs the
+      ::  actual network broadcast asynchronously. If we emitted [%exit 0] in the
+      ::  same breath, the process would tear down and abort the in-flight send
+      ::  before it reached the node (the tx would silently never be broadcast).
+      ::  Instead, the grpc listener driver triggers a clean exit itself once the
+      ::  node has acknowledged the send. See grpc_listener_driver in
+      ::  crates/nockapp-grpc/.../public_nockchain/v2/driver.rs.
       :_  state
       :~  [%markdown msg]
           [%grpc %poke pid nock-cause]
           [%nockchain-grpc %send-tx raw]
-          [%exit 0]
       ==
     ::
         %.n

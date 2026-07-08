@@ -8,6 +8,7 @@
 /=  dcon  /apps/dumbnet/lib/consensus
 /=  dmin  /apps/dumbnet/lib/miner
 /=  dder  /apps/dumbnet/lib/derived
+/=  pow-lib  /common/pow
 /=  *  /common/test
 /=  *  /common/zeke
 /=  *  /common/h-zoon
@@ -107,6 +108,24 @@
     check-pow-flag  %.n
     max-future-timestamp  (bex 32)
   ==
+::  provable variants for KERNEL integration tests (mempool/pending): on
+::  this branch the kernel's +check-pow / +check-genesis do REAL STARK
+::  verification (the check-pow-flag bypass was removed from consensus),
+::  so blocks poked via %heard-block must carry a real, verifiable proof.
+::  These variants set the difficulty target to max (any proof clears
+::  +check-target, so no nonce search is required) and pow-len=1 (proving
+::  a 1-item STARK is ~2s vs ~23s at the mainnet len=64), keeping the
+::  suite fast. Pages are stamped with a real proof by +prove-page below.
+++  bc-v1-phase-provable
+  %*  .  bc-v1-phase
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+  ==
+++  bc-pending-provable
+  %*  .  bc-pending-integration-tests
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+  ==
 --
 ::
 ::  structs
@@ -114,6 +133,47 @@
 ::  helper functions
 |_  bc=blockchain-constants:txe
 +*  t  ~(. txe bc)
+::
+::  +der: pre-activation derived-state (read-only extra arg for consensus door)
+++  der  ^-  derived-state  *derived-state
+::
+::  +mock-pow: a minimal, well-typed version-%0 ZK proof artifact used as
+::  the pow for library-level (non-kernel) test pages. On this branch the
+::  `check-pow-flag` bypass was removed from consensus, so every block a
+::  test validates via +validate-page-without-txs must carry a proof (the
+::  arm does `(need ~(pow ...))`). That arm's only pow gate is
+::  `check-target` — a difficulty check — NOT a full STARK verification
+::  (real STARK verify lives in the KERNEL's +check-pow, not the lib).
+::  proof-to-pow of this empty-objects %0 proof is a fixed tip5 hash that
+::  is <= the default test genesis-target, so it passes check-target at
+::  the standard test difficulty without any target override. All test
+::  blocks sit far below proof-version-1-start (6.750), so %0 is the
+::  height-correct version. This does NOT weaken any real check: the
+::  kernel pow path (real verify:nv) is untouched and still rejects it.
+++  mock-pow  ^-  (unit proof)  `[%0 objects=~ hashes=~ read-index=0]
+::
+::  +prove-page: stamp a page with a REAL, verifiable ZK proof for the
+::  KERNEL block-acceptance path (+heard-block/+check-genesis run
+::  +check-pow = check-pow-puzzle + verify:nv, which a mock cannot
+::  satisfy). Requires `bc` to be a *-provable constant (target=max so
+::  any proof clears +check-target; pow-len=1 so proving is fast). The
+::  proof's %puzzle object commits to (block-commitment pag), matching
+::  +check-pow-puzzle. Recomputes the digest AFTER attaching the proof
+::  because the block-id hashes the pow (see +hashable-digest).
+++  prove-page
+  |=  pag=page:t
+  ^-  page:t
+  =/  header=noun-digest:tip5  (block-commitment:page:t pag)
+  =/  res=[prf=proof dig=@]
+    (prove-block-inner:pow-lib [%0 header *noun-digest:tip5 pow-len.bc])
+  =.  pag
+    ?^  -.pag
+      pag(pow `prf.res)
+    pag(pow `prf.res)
+  =/  new-digest  (compute-digest:page:t pag)
+  ?^  -.pag
+    pag(digest new-digest)
+  pag(digest new-digest)
 ::
 ::  +add-n-pages: add n empty pages and return the consensus  state
 ::
@@ -129,12 +189,12 @@
   ?:  =(k n)
     [prev-page con]
   =/  new-page=page:t  (make-empty-page prev-page)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con bc) new-page)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) new-page)
   ?>  ?=(%.y -.r)
   =/  acc=tx-acc:t  +.r
-  =.  con  (~(accept-page dcon con bc) new-page acc *@da)
-  =.  con  (~(update-heaviest dcon con bc) new-page)
-  =.  con  (~(garbage-collect dcon con bc) retain)
+  =.  con  (~(accept-page dcon con der bc) new-page acc *@da)
+  =.  con  (~(update-heaviest dcon con der bc) new-page)
+  =.  con  (~(garbage-collect dcon con der bc) retain)
   $(k +(k), prev-page new-page)
 ::
 ++  default-genesis-page
@@ -170,11 +230,11 @@
 ++  initial-consensus-state
   ^-  consensus-state
   =/  con=consensus-state
-    (~(add-btc-data dcon *consensus-state bc) `*btc-hash:t)
+    (~(add-btc-data dcon *consensus-state der bc) `*btc-hash:t)
   =.  con
-    (~(set-genesis-seal dcon con bc) height=0 msg-hash=default-genesis-seal)
-  =.  con  (~(accept-page dcon con bc) default-genesis-page *tx-acc:t *@da)
-  =.  con  (~(update-heaviest dcon con bc) default-genesis-page)
+    (~(set-genesis-seal dcon con der bc) height=0 msg-hash=default-genesis-seal)
+  =.  con  (~(accept-page dcon con der bc) default-genesis-page *tx-acc:t *@da)
+  =.  con  (~(update-heaviest dcon con der bc) default-genesis-page)
   con
 ::
 
@@ -182,9 +242,9 @@
   |=  cus=blockchain-constants:t
   ^-  consensus-state
   =/  con=consensus-state
-    (~(add-btc-data dcon *consensus-state cus) `*btc-hash:t)
-  =.  con  (~(accept-page dcon con cus) default-genesis-page *tx-acc:t *@da)
-  =.  con  (~(update-heaviest dcon con cus) default-genesis-page)
+    (~(add-btc-data dcon *consensus-state der cus) `*btc-hash:t)
+  =.  con  (~(accept-page dcon con der cus) default-genesis-page *tx-acc:t *@da)
+  =.  con  (~(update-heaviest dcon con der cus) default-genesis-page)
   con
 ::
 ++  initial-mining-state
@@ -380,7 +440,7 @@
           *@da
           ~(target get:page:t default-genesis-page)
           shares-v1
-          asert-phase:default-bc
+          phase.zk-asert:default-bc
       ==
     =/  pkh-hashes=(z-set hash:t)  (~(put z-in *(z-set hash:t)) pk-hash)
     (new:coinbase:t new-page pkh-hashes)
@@ -526,14 +586,14 @@
     ?^  -.pag
       pag(digest new-digest)
     pag(digest new-digest)
-  =^  ready  con  (~(add-raw-tx dcon con bc) raw)
-  ?>  -:(~(validate-page-without-txs dcon con bc) pag ~(timestamp get:page:t pag))
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con bc) pag)
+  =^  ready  con  (~(add-raw-tx dcon con der bc) raw)
+  ?>  -:(~(validate-page-without-txs dcon con der bc) pag ~(timestamp get:page:t pag))
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) pag)
   ?:  ?=(%.n -.r)
     ~|  "failed-to-validate-page: {<p.r>}"
     !!
-  =.  con  (~(accept-page dcon con bc) pag +.r *@da)
-  =.  con  (~(update-heaviest dcon con bc) pag)
+  =.  con  (~(accept-page dcon con der bc) pag +.r *@da)
+  =.  con  (~(update-heaviest dcon con der bc) pag)
   [pag con +.r]
 ::
 ++  make-empty-page
@@ -563,14 +623,14 @@
         *@da
         ~(target get:page:t parent)
         shares
-        asert-phase.bc
+        phase.zk-asert.bc
     ==
   =/  new-timestamp  (add ~(timestamp get:page:t parent) 600)
   =.  new-page
     ?^  -.new-page
       new-page(timestamp new-timestamp)
     new-page(timestamp new-timestamp)
-  =/  new-pow  ~
+  =/  new-pow  mock-pow
   =.  new-page
     ?^  -.new-page
       new-page(pow new-pow)
@@ -792,6 +852,10 @@
   [;;((list effect) effs) nockchain]
 ::
 ++  init-nockchain
+  ::  genesis must carry a real proof for the kernel's +check-genesis
+  ::  (real +check-pow). Prove it, poke the proven page, and return the
+  ::  proven genesis so callers build children on its (proven) digest.
+  =/  genesis=page:t  (prove-page default-genesis-page)
   =/  [effs=(list effect) nockchain=_nockchain]
     (pok [%command %set-constants bc] nockchain)
   =/  [effs=(list effect) nockchain=_nockchain]
@@ -801,27 +865,27 @@
   =/  [effs=(list effect) nockchain=_nockchain]
     (pok [%command %born ~] nockchain)
   =^  effs=(list effect)  nockchain
-    (pok [%fact %0 %heard-block default-genesis-page] nockchain)
-  ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t default-genesis-page))
-  [nockchain default-genesis-page]
+    (pok [%fact %0 %heard-block genesis] nockchain)
+  ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t genesis))
+  [nockchain genesis]
 ::
 ++  add-n-pages-integration
   |=  [start=page:t num=@ nockchain=_nockchain]
-  =|  i=@
+  ^-  [(list page:t) _nockchain]
   =/  cur=page:t  start
   =|  pages-added=(list page:t)
-  =-  [(flop pages-added) nockchain]
-  %+  roll  (range:z num)
-  |=  [i=@ nockchain=_nockchain cur=_start pages-added=(list page:t)]
-  =/  next=page:t  (make-empty-page cur)
-  ~&  %next
+  =|  i=@
+  |-
+  ?:  =(i num)
+    [(flop pages-added) nockchain]
+  ::  prove each block so the kernel's +heard-block (real +check-pow)
+  ::  accepts it; thread the proven page as the parent for the next.
+  =/  next=page:t  (prove-page (make-empty-page cur))
   =^  effs=(list effect)  nockchain
     (pok [%fact %0 %heard-block next] nockchain)
-  ~&  %new-block-poke
   ::  confirm block was added to consensus state
   ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t next))
-  [nockchain next [next pages-added]]
-  ::$(nockchain nockchain, cur next, pages-added [next pages-added], i +(i))
+  $(i +(i), cur next, pages-added [next pages-added])
 ::
 ++  filter-heard-tx-effects
   |=  effs=(list effect)
@@ -851,7 +915,9 @@
 ++  k-by
   |_  nockchain=_nockchain
   ::
-  ++  con  ;;(consensus-state c.internal.outer.nockchain)
+  ++  con  ~+  ;;(consensus-state c.internal.outer.nockchain)
+  ::
+  ++  der  ~+  ;;(derived-state d.internal.outer.nockchain)
   ::
   ++  has-raw-tx
     |=  =tx-id:t
@@ -888,7 +954,7 @@
   ++  get-excluded
     |=  =tx-id:t
     ?:  (has-excluded tx-id)
-      (~(get-raw-tx dcon con bc) tx-id)
+      (~(get-raw-tx dcon con der bc) tx-id)
     ~
   ::
   ++  get-bnb
@@ -901,7 +967,7 @@
     ^-  (unit raw-tx:t)
     =/  con=consensus-state  con
     ?:  (~(has h-by blocks-needed-by.con) id)
-      (~(get-raw-tx dcon con bc) id)
+      (~(get-raw-tx dcon con der bc) id)
     ~
   ::
   ++  heaviest-block
@@ -914,11 +980,11 @@
   ::
   ++  inputs-in-heaviest-balance
     |=  raw=raw-tx:t
-   (~(inputs-in-heaviest-balance dcon con bc) raw)
+   (~(inputs-in-heaviest-balance dcon con der bc) raw)
   ::
   ++  get-cur-balance
     ^-  (h-map nname:t nnote:t)
-   ~(get-cur-balance dcon con bc)
+   ~(get-cur-balance dcon con der bc)
   ::
   ++  has-pending-block
     |=  id=block-id:t

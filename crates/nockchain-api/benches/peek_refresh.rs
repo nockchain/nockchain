@@ -14,8 +14,10 @@ use tonic::transport::Channel;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let addr = std::env::var("NOCKCHAIN_BENCH_SERVER")
-        .unwrap_or_else(|_| "http://127.0.0.1:50051".to_string());
+    let explicit_addr = std::env::var("NOCKCHAIN_BENCH_SERVER").ok();
+    let addr = explicit_addr
+        .clone()
+        .unwrap_or_else(|| "http://127.0.0.1:50051".to_string());
 
     // Check if we should test a specific block
     if let Ok(height_str) = std::env::var("TEST_BLOCK_HEIGHT") {
@@ -23,12 +25,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return test_specific_block(&addr, height).await;
     }
 
-    run_grpc_mode(&addr).await
+    run_grpc_mode(&addr, explicit_addr.is_some()).await
 }
 
-async fn run_grpc_mode(addr: &str) -> Result<(), Box<dyn Error>> {
+async fn run_grpc_mode(addr: &str, require_server: bool) -> Result<(), Box<dyn Error>> {
     println!("Using existing gRPC server at {}", addr);
-    let channel = Channel::from_shared(addr.to_string())?.connect().await?;
+    let channel = match Channel::from_shared(addr.to_string())?.connect().await {
+        Ok(channel) => channel,
+        Err(err) if !require_server => {
+            println!(
+                "Skipping peek_refresh benchmark: no gRPC server reachable at default address ({err})"
+            );
+            return Ok(());
+        }
+        Err(err) => return Err(err.into()),
+    };
     let mut client = NockchainBlockServiceClient::new(channel);
 
     let tip_height = fetch_tip_height(&mut client).await?;

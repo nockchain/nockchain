@@ -17,12 +17,64 @@
 ++  bn  bignum
 ++  page-msg  page-msg:v0
 ++  proof  proof:v0
++$  ai-blake  @uxblake  ::  32-byte BLAKE3 digest, little-endian atom bytes
++$  ai-pow-nonce  [len=@ud data=@uxaipownonce]  ::  Rust-owned AI-PoW nonce bytes
++$  ai-ext2   @uxfelt  ::  Goldilocks degree-2 scalar: low 8 bytes c0, high 8 bytes c1
++$  ai-ext2s  @uxfelts ::  Packed sequence of ai-ext2 scalars, 16 bytes per scalar
++$  ai-ext2-vec
+  $:  len=@ud
+      data=ai-ext2s
+  ==
++$  ai-pow-commitments
+  $:  h-a-chunk=ai-blake
+      h-b-chunk=ai-blake
+  ==
++$  ai-pow-public-inputs
+  $:  cumsum=[c0=@sd c1=@sd c2=@sd c3=@sd]
+      jackpot=[j0=@ud j1=@ud j2=@ud j3=@ud j4=@ud j5=@ud j6=@ud j7=@ud j8=@ud j9=@ud j10=@ud j11=@ud j12=@ud j13=@ud j14=@ud j15=@ud]
+      hash-a=ai-blake
+      hash-b=ai-blake
+      job-key=ai-blake
+      commitment-hash=ai-blake
+      hash-jackpot=ai-blake
+  ==
++$  ai-proof-node
+  $%  [%n ~]
+      [%b value=?]
+      [%u value=@ud]
+      [%i data=@]
+      [%ext2 value=ai-ext2]
+      [%ext2s len=@ud data=ai-ext2s]
+      [%bytes len=@ud data=@]
+      [%u64s len=@ud data=@]
+      [%i64s len=@ud data=@]
+      [%seq items=*]
+      [%map entries=*]
+      [%none ~]
+      [%some value=*]
+  ==
++$  ai-recursive-certificate  ai-proof-node
++$  ai-pow-certificate
+  $:  version=@ud
+      params=[m=@ud k=@ud n=@ud noise-rank=@ud tile=@ud difficulty-bits=@ud]
+      found-idx=@ud
+      trace-height=@ud
+      commitments=ai-pow-commitments
+      public-inputs=ai-pow-public-inputs
+      certificate=ai-recursive-certificate
+  ==
++$  ai-pow-artifact
+  $:  nonce=ai-pow-nonce
+      certificate=ai-pow-certificate
+  ==
++$  pow-artifact
+  *
 ++  reason
   |$  object
   (each object term)
 ::
 ::  $fund-address: lock-script hash that receives the 20% protocol-fund
-::  share of every post-activation coinbase (014-aletheia, asert-phase
+::  share of every post-activation coinbase (014-aletheia, zk-asert-phase
 ::  onward). The lock-root of a 3-of-4 multisig over the four pkhs in
 ::  /asert-protocol-lock-fund.txt at the repo root; spending the fund
 ::  therefore requires three of four signatures.
@@ -75,10 +127,10 @@
   [%pkh [m=3 (z-silt pkhs)]]~
 ::
 ::  +post-asert-activation: 014-aletheia activation predicate, 2-arg form.
-::    Returns %.y when `height` is at or past the asert-phase boundary.
+::    Returns %.y when `height` is at or past the puzzle's asert-phase boundary.
 ::    The 1-arg wrappers in /common/tx-engine close over the kernel's
 ::    blockchain-constants; this 2-arg form is for callers (like
-::    +new-candidate below) that already have asert-phase as a separate
+::    +new-candidate below) that already have the asert-phase as a separate
 ::    parameter rather than via blockchain-constants. SINGLE source of
 ::    truth for the boundary semantics — see
 ::    014-aletheia-emissions-audit.md finding #3.
@@ -99,9 +151,10 @@
   =<  form
   |%
   +$  form
+    $+  page
     $:  version=%1
         digest=block-id
-        pow=$+(pow (unit proof))
+        pow=$+(pow (unit pow-artifact))
         parent=block-id
         tx-ids=(z-set tx-id)
         coinbase=coinbase-split
@@ -152,7 +205,7 @@
   ++  to-local-page
     |=  pag=form
     ^-  local-page
-    pag(pow (bind pow.pag |=(p=proof (jam p))))
+    pag(pow (bind pow.pag |=(p=pow-artifact (jam p))))
   ::
   ++  hashable-block-commitment
     |=  =form
@@ -180,7 +233,10 @@
     |=  pag=form
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
-        [leaf+~ hash+(hash-proof:v0 u.pow.pag)]
+        ?:  ?=([%ai-pow *] u.pow.pag)
+          [leaf+%ai-pow leaf+(jam u.pow.pag)]
+        =/  prf=form:proof  (need ((soft form:proof) u.pow.pag))
+        [leaf+~ hash+(hash-proof:v0 prf)]
     (hashable-block-commitment pag)
   ::
   ++  block-commitment
@@ -249,7 +305,7 @@
   ++  to-page
     |=  lp=form
     ^-  page
-    lp(pow (biff pow.lp |=(j=@ ((soft proof) (cue j)))))
+    lp(pow (biff pow.lp |=(j=@ ((soft pow-artifact) (cue j)))))
   ::
   ++  to-page-no-pow
     |=  lp=form
@@ -258,10 +314,98 @@
   --
 ++  timelock-range  timelock-range:v0
 ++  size  size:v0
+::  aserti3-2d difficulty adjustment parameters — one named type per
+::  puzzle. Same field shape; each carries its own default-bunt so the
+::  parent blockchain-constants picks them up automatically via the
+::  `=name` shorthand on field declarations.
+::    .phase: activation height. at or after, target is computed
+::       per-block via aserti3-2d instead of epoch retarget.
+::    .anchor-height / .anchor-target-atom: the fixed (height, target)
+::       used as the aserti3-2d reference. The anchor block's
+::       median-of-11 timestamp is not a constant here: it's derived at
+::       compute-target time by walking .blocks back from the
+::       parent-digest of the SAME puzzle type to the puzzle's anchor
+::       and reading .min-timestamps.
+::    .ideal-block-time: post-activation interblock time target (sec).
+::    .half-life: real-time seconds of drift to halve or double.
+::    rbits is hardcoded to 16 in lib/asert.hoon.
+::
+::  ZK puzzle ASERT, pre-AI-activation regime. 150s ideal ⇒ 2.5 min
+::  average per ZK block. This is the current (single-puzzle) mainnet
+::  cadence and stays in force for blocks in [65500, ai-pow-activation).
+::  anchor-target = 2^291; half-life = 12 hours.
++$  zk-asert
+  $+  zk-asert
+  $~  :*  phase=65.500
+          anchor-height=65.499
+          anchor-target-atom=^~((bex 291))
+          ideal-block-time=150
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Phase-2 of 014-aletheia: hardcoded median-of-11 at the
+          ::  canonical mainnet anchor block (height 65,499). Replaces
+          ::  the phase-1 runtime walk through .blocks/.min-timestamps.
+          anchor-min-timestamp=9.223.372.093.639.027.842
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
+::  ZK puzzle ASERT, post-AI-activation regime. 300s ideal ⇒ 5 min
+::  average per ZK block. Active for blocks at and after
+::  ai-pow-activation-height — at the boundary, the ZK ASERT
+::  computation re-anchors at height (ai-pow-activation-height - 1)
+::  with anchor-target = 2^291. Combined with ai-asert (also 300s
+::  ideal), the chain averages 2.5 min globally.
++$  zk-asert-post-ai
+  $+  zk-asert-post-ai
+  $~  :*  phase=95.000
+          anchor-height=94.999
+          anchor-target-atom=^~((bex 291))
+          ideal-block-time=300
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Placeholder. Pinned to the mainnet block at height 94,999
+          ::  by the deferred-task AI-PoW activation hard fork.
+          anchor-min-timestamp=0
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
+::  AI puzzle ASERT (matmul). Single regime — active from
+::  ai-pow-activation-height onward. By default phase = anchor-height =
+::  ai-pow-activation-height (the first block where AI mining can land
+::  becomes the AI puzzle's anchor); ASERT is well-defined from the
+::  second AI block onward.
++$  ai-asert
+  $+  ai-asert
+  $~  :*  phase=95.000
+          anchor-height=95.000
+          anchor-target-atom=^~((bex 291))
+          ideal-block-time=300
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Placeholder. Pinned to the first AI block's median-of-11
+          ::  by the deferred-task AI-PoW verifier integration.
+          anchor-min-timestamp=0
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
 +$  blockchain-constants
   $+  blockchain-constants
-  $~  :*
-          ::  activation heights
+  $~  :*  ::  activation heights
           v1-phase=39.000
           bythos-phase=54.000
           ::  note data field constraints
@@ -273,35 +417,21 @@
           ::  divisor for input fees (inputs cost 1/divisor of outputs)
           input-fee-divisor=4
           *blockchain-constants:v0
-          ::  aserti3-2d difficulty adjustment.
-          ::    .asert-phase: activation height. at or after, target is
-          ::       computed per-block via aserti3-2d instead of epoch retarget.
-          ::    .asert-anchor-height / -target-atom: the fixed anchor (height,
-          ::       target-atom) used as the aserti3-2d reference. anchor-target
-          ::       is 2^291: at constant hashrate H, expected blocks/sec is
-          ::       H*target/max, so to cut block time 600s → 150s (4x more
-          ::       blocks per sec) we increase target by ~4x, which reduces
-          ::       per-block difficulty (max/target) by the same factor.
-          ::       2^291 is the closest power of 2 to 4 * pre-activation
-          ::       mainnet target (~2^291.38); it yields ~3.2x faster blocks
-          ::       (expected ~187s) under the same hashrate, slightly
-          ::       conservative vs the ideal 150s.
-          ::    .asert-anchor-min-timestamp: median-of-11 timestamp at the
-          ::       anchor block (height 65,499). pinned at phase-2 cutover
-          ::       to the value observed when the canonical mainnet block at
-          ::       asert-anchor-height was finalized. replaces phase-1's
-          ::       runtime parent-walk through .blocks / .min-timestamps.
-          ::    .asert-ideal-block-time: post-asert-activation block time in seconds.
-          ::    .asert-half-life: real-time seconds of drift to halve or double.
-          ::    rbits is hardcoded to 16 in lib/asert.hoon (the polynomial
-          ::       coefficients are tied to that precision and cannot be varied
-          ::       per-constants without a hard fork of the polynomial itself).
-          asert-phase=65.500
-          asert-anchor-height=65.499
-          asert-anchor-target-atom=^~((bex 291))
-          asert-ideal-block-time=150
-          asert-half-life=^~((mul 12 ^~((mul 60 60))))
-          asert-anchor-min-timestamp=9.223.372.093.639.027.842
+          ::  ZK ASERT regime 1 (pre-AI-activation, 150s ideal).
+          ::  Defaults (including phase-2 hardcoded anchor-min-timestamp)
+          ::  come from `+$ zk-asert`'s own $~ clause.
+          *zk-asert
+          ::  ZK ASERT regime 2 (post-AI-activation, 300s ideal).
+          ::  Active at and after ai-pow-activation-height. Per-puzzle
+          ::  compute-target picks between regimes based on candidate
+          ::  height vs zk-asert-post-ai.phase.
+          *zk-asert-post-ai
+          ::  AI PoW activation threshold. The wire/type surface exists
+          ::  here, but consensus remains fail-closed for %ai-pow until
+          ::  recursive certificate verification is wired.
+          ai-pow-activation-height=95.000
+          ::  AI ASERT defaults come from `+$ ai-asert`'s own $~ clause.
+          *ai-asert
       ==
   $:  v1-phase=@
       bythos-phase=@
@@ -309,12 +439,14 @@
       base-fee=@
       input-fee-divisor=@
       blockchain-constants:v0
-      asert-phase=@
-      asert-anchor-height=@
-      asert-anchor-target-atom=@
-      asert-ideal-block-time=@
-      asert-half-life=@
-      asert-anchor-min-timestamp=@
+      =zk-asert
+      =zk-asert-post-ai
+      ::  AI PoW puzzle (cf hoon/apps/dumbnet/lib/types.hoon::pow-variant
+      ::  for the wire side). The height remains a threshold for future
+      ::  activation, but current consensus rejects %ai-pow until the
+      ::  recursive certificate verifier is wired.
+      ai-pow-activation-height=@
+      =ai-asert
   ==
 :: $nname
 ++  nname

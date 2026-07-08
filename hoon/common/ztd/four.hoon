@@ -23,7 +23,14 @@
 ::
 +$  proof-objects  (list proof-data)
 ::
-+$  proof-version  ?(%2 %1 %0)
+::  proof-version: discriminates proof shapes.
+::    %0/%1/%2: ZK STARK proof variants (ZK PoW puzzle).
+::    %3: AI PoW puzzle marker. Blocks no longer persist the AI
+::        recursive certificate through this old proof-stream body;
+::        tx-engine-1 defines the structured `pow-artifact` /
+::        `%ai-pow` noun. version-to-puzzle-type in consensus.hoon
+::        still maps %0/%1/%2 -> %dumb-zkpow, %3 -> %ai-pow.
++$  proof-version  ?(%3 %2 %1 %0)
 +$  proof
   $%  $:  version=%2
           objects=proof-objects
@@ -42,6 +49,17 @@
           hashes=(list noun-digest:tip5)
           read-index=@
       ==
+    ::
+      ::  %3 is retained only as the legacy proof-version
+      ::  discriminator. The canonical AI block artifact is
+      ::  `[%ai-pow nonce=ai-pow-nonce cert=ai-pow-certificate]`
+      ::  via tx-engine-1 / dumbnet types, not this proof-stream arm.
+      ::  ZK helpers crash on %3 via explicit ?= guards.
+      $:  version=%3
+          objects=proof-objects
+          hashes=(list noun-digest:tip5)
+          read-index=@
+      ==
   ==
 ::
 +$  tip5-hash-atom  @ux
@@ -53,6 +71,10 @@
   ~/  %get-pow
   |=  p=proof
   ^-  proof
+  ::  %3 (AI) is not a ZK proof-stream artifact. The ZK pow extraction
+  ::  helper is meaningless for AI; callers that reach here for a %3
+  ::  proof are calling the wrong helper.
+  ?:  ?=(%3 -.p)  ~|(%get-pow-not-defined-for-v3 !!)
   p(objects (scag pow-items objects.p))
 ::
 ++  proof-to-pow
@@ -71,6 +93,7 @@
   ~/  %hash-proof
   |=  p=proof
   ^-  noun-digest:tip5
+  ?:  ?=(%3 -.p)  ~|(%hash-proof-not-defined-for-v3 !!)
   =/  rng  (absorb-proof-objects objects.p ~)
   =^  lis=(list belt)  rng  (belts:rng 5)
   =-  ?>  ?=(noun-digest:tip5 -)  -

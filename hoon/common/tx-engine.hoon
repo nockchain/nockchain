@@ -20,17 +20,17 @@
 ::    boundary semantics also live in the 2-arg
 ::    +post-asert-activation:v1 (used by +new-candidate); the inline
 ::    `gte` here is the canonical definition for callers that read
-::    asert-phase from blockchain-constants. See
+::    phase.zk-asert from blockchain-constants. See
 ::    014-aletheia-emissions-audit.md finding #3.
 ++  post-asert-activation
   |=  height=@
   ^-  ?
-  (gte height asert-phase)
+  (gte height phase.zk-asert)
 ::
 ++  pre-asert-activation
   |=  height=@
   ^-  ?
-  (lth height asert-phase)
+  (lth height phase.zk-asert)
 ::
 ++  bignum  bignum:v0
 ++  block-commitment  block-commitment:v0
@@ -150,6 +150,18 @@
 ++  page-summary  page-summary:v0
 ++  pkh-signature  pkh-signature:v1
 ++  proof  proof:v0
+++  ai-blake  ai-blake:v1
+++  ai-pow-nonce  ai-pow-nonce:v1
+++  ai-ext2   ai-ext2:v1
+++  ai-ext2s  ai-ext2s:v1
+++  ai-ext2-vec  ai-ext2-vec:v1
+++  ai-pow-commitments  ai-pow-commitments:v1
+++  ai-pow-public-inputs  ai-pow-public-inputs:v1
+++  ai-proof-node  ai-proof-node:v1
+++  ai-recursive-certificate  ai-recursive-certificate:v1
+++  ai-pow-certificate  ai-pow-certificate:v1
+++  ai-pow-artifact  ai-pow-artifact:v1
+++  pow-artifact  pow-artifact:v1
 ++  reason
   |$  object
   (each object term)
@@ -358,7 +370,7 @@
   ::
   ::  +new-candidate: build candidate page for mining with v1 shares
   ::
-  ::    creates a v1 page with hash-based coinbase-split. `asert-phase`
+  ::    creates a v1 page with hash-based coinbase-split. `zk-asert-phase`
   ::    threads through so post-asert-activation candidates carry the 80/20
   ::    miner/fund split (014-aletheia).
   ++  new-candidate
@@ -420,7 +432,7 @@
       msg.form
     ::
     ++  pow
-      ^-  (unit proof)
+      ^-  (unit pow-artifact)
       ?^  -.form  pow.form
       pow.form
     --

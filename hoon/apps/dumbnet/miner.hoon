@@ -6,9 +6,13 @@
 =<  ((moat |) inner)  :: wrapped kernel
 =>
   |%
+  ::  Outer envelope of a successful mine: `[%command %pow %dumb-zkpow ...]`.
+  ::  The `%dumb-zkpow` tag selects this variant of the consensus-kernel's
+  ::  `pow-variant` tagged union (see hoon/apps/dumbnet/lib/types.hoon).
   +$  mine-success
     $:  %command
         %pow
+        %dumb-zkpow
         =proof
         dig=tip5-hash-atom
         header=noun-digest:tip5
@@ -55,7 +59,7 @@
       (prove-block-inner:mine input)
     :_  k
     ?:  (check-target:mine dig target.cause)
-      [%mine-result %& (atom-to-digest:tip5 dig) %command %pow prf dig header.cause nonce.cause]~
+      [%mine-result %& (atom-to-digest:tip5 dig) %command %pow %dumb-zkpow prf dig header.cause nonce.cause]~
     [%mine-result %| (atom-to-digest:tip5 dig)]~
   --
 --

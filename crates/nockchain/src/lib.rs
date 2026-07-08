@@ -10,7 +10,6 @@
 
 pub mod backbone;
 pub mod config;
-pub mod mining;
 pub mod setup;
 pub mod traces;
 
@@ -36,8 +35,6 @@ use nockvm::jets::hot::HotEntry;
 use nockvm::noun::{D, T, YES};
 use nockvm_macros::tas;
 use tracing::{debug, info, instrument};
-
-use crate::mining::{MiningKeyConfig, MiningPkhConfig};
 
 /// Module for handling driver initialization signals
 pub mod driver_init {
@@ -386,7 +383,6 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     let mut born_driver_signals = driver_init::DriverInitSignals::new();
 
     // Register drivers that need initialization signals
-    let mining_init_tx = born_driver_signals.register_driver("mining");
     let libp2p_init_tx = born_driver_signals.register_driver("libp2p");
 
     // Create the born task that waits for all drivers to initialize
@@ -435,11 +431,34 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
+        if let Some(ai_activation) = cli.fakenet_ai_pow_activation_height {
+            // Apply to ai-pow-activation-height AND to phase.zk-asert-post-ai
+            // and phase.ai-asert so the ZK regime switch + AI puzzle activation
+            // all happen at the same height. anchor-height for both stays at
+            // (phase - 1) per the design convention. The post-AI regime's
+            // anchor-target-atom keeps its default 2^291; the
+            // anchor-min-timestamp stays 0 placeholder and the cache populates
+            // it lazily when accept-block crosses the boundary.
+            fakenet_constants = fakenet_constants.with_ai_pow_activation_height(ai_activation);
+            let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
+            zk_post.phase = ai_activation;
+            zk_post.anchor_height = ai_activation - 1;
+            fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
+            let mut ai_asert = fakenet_constants.ai_asert.clone();
+            ai_asert.phase = ai_activation;
+            ai_asert.anchor_height = ai_activation;
+            fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
+        }
         if let Some(asert) = cli.fakenet_asert.into_config()? {
-            fakenet_constants = fakenet_constants
-                .with_asert_phase(asert.phase)
-                .with_asert_anchor_height(asert.anchor_height)
-                .with_asert_anchor_target_bex(asert.anchor_target_bex);
+            // CLI overrides apply to the ZK puzzle's ASERT. AI puzzle's
+            // ASERT stays at defaults until/unless we add dedicated
+            // `--fakenet-ai-asert-*` flags.
+            let mut zk_asert = fakenet_constants.zk_asert.clone();
+            zk_asert.phase = asert.phase;
+            zk_asert.anchor_height = asert.anchor_height;
+            zk_asert.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            fakenet_constants = fakenet_constants.with_zk_asert(zk_asert);
         }
         if let Some(interval_secs) = cli.fakenet_update_candidate_interval_secs {
             fakenet_constants =
@@ -490,38 +509,12 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     };
     setup::poke(&mut nockapp, setup::SetupCommand::PokeSetBtcData).await?;
 
-    // Set up empty mining config by default (TODO remove when taking out pubkey infra)
-    let mining_config: Option<Vec<MiningKeyConfig>> = { None };
-
-    let mining_pkh_config = if let Some(pkh) = &cli.mining_pkh {
-        Some(vec![MiningPkhConfig {
-            share: 1,
-            pkh: pkh.clone(),
-        }])
-    } else if let Some(mining_pkh_adv) = &cli.mining_pkh_adv {
-        Some(mining_pkh_adv.clone())
-    } else {
-        None
-    };
-
     let prune_inbound = cli.prune_inbound;
 
-    let mine = cli.mine;
-
-    let threads = if let Some(num_threads) = &cli.num_threads {
-        *num_threads
-    } else {
-        1
-    };
-
-    let mining_driver = crate::mining::create_mining_driver(
-        mining_config,
-        mining_pkh_config,
-        mine,
-        threads,
-        Some(mining_init_tx),
-    );
-    nockapp.add_io_driver(mining_driver).await;
+    // Mining lives in an external process (see `crates/nockchain-mining-common`
+    // and forthcoming miner binaries). The node still emits `%mine` effects
+    // from the kernel; miners subscribe via the private NockAppService's
+    // WatchEffects RPC.
 
     let libp2p_driver = nockchain_libp2p_io::driver::make_libp2p_driver(
         keypair,

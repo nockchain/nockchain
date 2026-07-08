@@ -1,0 +1,35 @@
+[package]
+name = "ai-pow"
+version = "0.1.0"
+edition.workspace = true
+description = "Pearl-style INT8 matrix-multiplication proof-of-useful-work puzzle for Nockchain."
+publish = false
+
+[dependencies]
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true, optional = true }
+# Optional Plonky3 STARK/recursion integration. Disabled by default so the
+# core mining path stays lean; enable `zk` for recursive AI-PoW certificate
+# construction. The plain `MatmulProof` remains a prover-internal diagnostic,
+# not the canonical block artifact.
+ai-pow-zk = { path = "../ai-pow-zk", optional = true }
+bincode = { workspace = true, features = ["serde"], optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+ai-pow-zk = { path = "../ai-pow-zk", features = ["dev-unsafe"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-tracy = { workspace = true }
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+zk = ["dep:ai-pow-zk", "dep:bincode", "ai-pow-zk/recursion"]
+
+[[bench]]
+name = "bench"
+harness = false

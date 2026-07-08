@@ -3,7 +3,7 @@ pub mod artifact;
 pub mod driver;
 pub mod error;
 pub mod export;
-pub(crate) mod metrics;
+pub mod metrics;
 pub mod save;
 pub mod test;
 pub mod wire;

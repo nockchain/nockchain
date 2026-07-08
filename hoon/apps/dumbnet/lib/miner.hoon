@@ -2,12 +2,13 @@
 /=  sp  /common/stark/prover
 /=  dumb-transact  /common/tx-engine
 /=  asert  /apps/dumbnet/lib/asert
+/=  dcon  /apps/dumbnet/lib/consensus
 /=  *  /common/h-zoon
 ::
 :: everything to do with mining and mining state
 ::
 ~%  %dumb-miner  ..ut  ~
-|_  [m=mining-state:dk =blockchain-constants:dumb-transact]
+|_  [m=mining-state:dk d=derived-state:dk =blockchain-constants:dumb-transact]
 +*  t  ~(. dumb-transact blockchain-constants)
 +|  %admin
 ::  +set-mining: set .mining
@@ -39,9 +40,11 @@
 +|  %candidate-block
 ++  set-pow
   ~/  %set-pow
-  |=  prf=proof:sp
+  |=  prf=pow-artifact:t
   ^-  mining-state:dk
-  ?^  -.candidate-block.m  m(pow.candidate-block (some prf))
+  ?^  -.candidate-block.m
+    =/  old-prf=proof:sp  (need ((soft proof:sp) prf))
+    m(pow.candidate-block (some old-prf))
   m(pow.candidate-block (some prf))
 ::
 ++  set-digest
@@ -293,28 +296,31 @@
   ::    parent's stored median-of-11. pre-activation: read the next target
   ::    stored at parent.digest by the epoch rule.
   =/  candidate-height=@  +(~(height get:page:t parent))
+  ::  Candidate target (currently ZK-puzzle-only — Stage 4 adds the
+  ::  parallel AI candidate target for emission of the second %mine-ai
+  ::  effect post-AI-activation). Pre-asert-activation falls through
+  ::  to the legacy epoch-stored target.
   =/  candidate-target=bignum:bignum:t
     ?:  (post-asert-activation:t candidate-height)
-      =/  parent-min-ts=@
-        (~(got h-by min-timestamps.c) u.heaviest-block.c)
-      ::  phase 2 of 014-aletheia: the anchor's median-of-11 is a
-      ::  hardcoded protocol constant. paired with the [%65.499 ...]
-      ::  checkpoint, only the canonical anchor block is admissible
-      ::  at the anchor height, so reading the constant is consensus-
-      ::  identical to the phase-1 parent-walk.
-      =/  anchor-min-ts=@
-        asert-anchor-min-timestamp.blockchain-constants
-      %-  chunk:bignum:t
-      %-  compute-target:asert
-      :*  asert-anchor-target-atom.blockchain-constants
-          anchor-min-ts
-          asert-anchor-height.blockchain-constants
-          parent-min-ts
-          candidate-height
-          asert-ideal-block-time.blockchain-constants
-          asert-half-life.blockchain-constants
-          max-target-atom:t
-      ==
+      ::  Per-puzzle compute-target lives in lib/consensus.hoon. ZK
+      ::  variant picks between regime 1 (pre-AI-activation, 150s ideal)
+      ::  and regime 2 (post-AI-activation, 300s ideal) based on
+      ::  candidate-height. Each regime uses its own hardcoded anchor
+      ::  median-of-11 (phase-2 of 014-aletheia + the AI activation
+      ::  fork).
+      ::
+      ::  Stage 6: parent-digest is the most recent ZK ancestor of
+      ::  the heaviest tip (which may itself be ZK). Pre-AI-
+      ::  activation the heaviest is always ZK, so this resolves to
+      ::  heaviest immediately. Post-AI-activation the heaviest may
+      ::  be an AI block, in which case find-same-type-ancestor
+      ::  walks back to the nearest ZK ancestor.
+      =/  zk-parent=block-id:t
+        =/  found=(unit block-id:t)
+          (~(find-same-type-ancestor dcon c d blockchain-constants) u.heaviest-block.c %dumb-zkpow)
+        ?~  found  u.heaviest-block.c  ::  bootstrap: degenerate to global heaviest
+        u.found
+      (~(compute-target-zk-asert dcon c d blockchain-constants) candidate-height zk-parent)
     (~(got h-by targets.c) u.heaviest-block.c)
   =.  candidate-block.m
     ?^  -.parent
@@ -323,9 +329,9 @@
       ::    otherwise use v1 new-candidate with v1 shares
       ?:  (lth +(height.parent) v1-phase.blockchain-constants)
         (new-candidate:v0:page:t parent now candidate-target v0-shares.m)
-      (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+      (new-candidate:page:t parent now candidate-target shares.m phase.zk-asert.blockchain-constants)
     ::  v1 parent - use v1 new-candidate with v1 shares
-    (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+    (new-candidate:page:t parent now candidate-target shares.m phase.zk-asert.blockchain-constants)
   =.  candidate-acc.m
     %+  new:tx-acc:t
       (~(get h-by balance.c) u.heaviest-block.c)

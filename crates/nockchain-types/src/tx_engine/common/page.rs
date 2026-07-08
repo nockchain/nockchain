@@ -7,6 +7,14 @@ use super::{Hash, TxId};
 
 pub type BlockId = Hash;
 
+fn atom_payload_bytes(atom: nockvm::noun::AtomHandle<'_>) -> Vec<u8> {
+    let mut bytes = atom.as_ne_bytes().to_vec();
+    while bytes.last() == Some(&0) {
+        bytes.pop();
+    }
+    bytes
+}
+
 /// Decode a z-set into a Vec
 /// z-set structure: either `~` (atom 0) for empty, or `[n=item l=tree r=tree]`
 fn decode_zset<T: NounDecode>(noun: &NounHandle) -> Result<Vec<T>, NounDecodeError> {
@@ -282,7 +290,8 @@ impl NounDecode for Page {
                 (digest, rest_after)
             };
 
-        // POW: (unit proof) - we just detect presence, don't decode the proof structure
+        // POW: (unit proof). The proof payload is opaque to this crate, but
+        // page noun roundtrips must preserve its bytes exactly.
         let pow_noun = rest_after_digest.head();
         let pow = if pow_noun.is_atom() {
             let atom = pow_noun
@@ -292,11 +301,37 @@ impl NounDecode for Page {
                 None
             } else {
                 // Non-zero atom - treat as raw proof bytes
-                Some(atom.as_ne_bytes().to_vec())
+                Some(atom_payload_bytes(atom))
             }
         } else {
-            // Cell means [~ proof] - proof is present but we don't decode it
-            Some(vec![])
+            // Unit `some`: `[~ proof]`, where this Rust encoder stores
+            // `proof` as a byte list.
+            let cell = pow_noun
+                .as_cell()
+                .map_err(|_| NounDecodeError::Custom("Page.pow: expected cell".into()))?;
+            let tag = cell
+                .head()
+                .as_atom()
+                .map_err(|_| NounDecodeError::Custom("Page.pow: unit tag not atom".into()))?
+                .as_u64()
+                .map_err(|_| NounDecodeError::Custom("Page.pow: unit tag too large".into()))?;
+            if tag != 0 {
+                return Err(NounDecodeError::Custom(format!(
+                    "Page.pow: invalid unit tag {tag}"
+                )));
+            }
+            let payload = cell.tail();
+            if payload.is_atom() {
+                let atom = payload
+                    .as_atom()
+                    .map_err(|_| NounDecodeError::Custom("Page.pow: payload not atom".into()))?;
+                Some(atom_payload_bytes(atom))
+            } else {
+                Some(
+                    Vec::<u8>::from_noun_handle(&payload)
+                        .map_err(|e| NounDecodeError::Custom(format!("Page.pow: {}", e)))?,
+                )
+            }
         };
 
         let rest = rest_after_digest
@@ -389,5 +424,102 @@ impl NounDecode for Page {
             height,
             msg,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nockapp::noun::slab::NounSlab;
+    use nockchain_math::belt::Belt;
+    use nockvm::ext::AtomExt;
+    use nockvm::noun::{Atom, NounAllocator};
+    use noun_serde::{NounDecode, NounEncode};
+
+    use super::{BigNum, CoinbaseSplit, Page};
+    use crate::tx_engine::common::Hash;
+
+    fn test_hash(seed: u64) -> Hash {
+        Hash([Belt(seed), Belt(seed + 1), Belt(seed + 2), Belt(seed + 3), Belt(seed + 4)])
+    }
+
+    #[test]
+    fn page_pow_unit_roundtrip_preserves_opaque_bytes() {
+        let proof_bytes = (0..=255).collect::<Vec<u8>>();
+        let page = Page {
+            digest: test_hash(10),
+            pow: Some(proof_bytes.clone()),
+            parent: test_hash(20),
+            tx_ids: vec![],
+            coinbase: CoinbaseSplit::V0(vec![1, 2, 3]),
+            timestamp: 123,
+            epoch_counter: 456,
+            target: BigNum::from_u64(789),
+            accumulated_work: BigNum::from_u64(1_000),
+            height: 42,
+            msg: vec![7, 8, 9],
+        };
+
+        let mut slab: NounSlab = NounSlab::new();
+        let noun = page.to_noun(&mut slab);
+        let space = slab.noun_space();
+        let decoded = Page::from_noun(&noun, &space).expect("page should decode");
+
+        assert_eq!(decoded.pow, Some(proof_bytes));
+        assert_eq!(decoded.digest, page.digest);
+        assert_eq!(decoded.parent, page.parent);
+        assert_eq!(decoded.msg, page.msg);
+    }
+
+    #[test]
+    fn page_pow_unit_atom_decodes_as_opaque_jam_bytes() {
+        let proof_bytes = vec![0xa1, 0xb2, 0xc3, 0xd4, 0xe5];
+        let page = Page {
+            digest: test_hash(30),
+            pow: None,
+            parent: test_hash(40),
+            tx_ids: vec![],
+            coinbase: CoinbaseSplit::V0(vec![]),
+            timestamp: 321,
+            epoch_counter: 654,
+            target: BigNum::from_u64(987),
+            accumulated_work: BigNum::from_u64(2_000),
+            height: 43,
+            msg: vec![],
+        };
+
+        let mut slab: NounSlab = NounSlab::new();
+        let pow_atom = Atom::from_bytes(&mut slab, &proof_bytes).as_noun();
+        let pow = nockvm::noun::T(&mut slab, &[nockvm::noun::D(0), pow_atom]);
+        let digest = page.digest.to_noun(&mut slab);
+        let parent = page.parent.to_noun(&mut slab);
+        let tx_ids = page.tx_ids.to_noun(&mut slab);
+        let coinbase = page.coinbase.to_noun(&mut slab);
+        let timestamp = Atom::new(&mut slab, page.timestamp).as_noun();
+        let epoch_counter = Atom::new(&mut slab, page.epoch_counter).as_noun();
+        let target = page.target.to_noun(&mut slab);
+        let accumulated_work = page.accumulated_work.to_noun(&mut slab);
+        let height = Atom::new(&mut slab, page.height).as_noun();
+        let msg = page.msg.to_noun(&mut slab);
+        let noun = nockvm::noun::T(
+            &mut slab,
+            &[
+                nockvm::noun::D(1),
+                digest,
+                pow,
+                parent,
+                tx_ids,
+                coinbase,
+                timestamp,
+                epoch_counter,
+                target,
+                accumulated_work,
+                height,
+                msg,
+            ],
+        );
+        let space = slab.noun_space();
+        let decoded = Page::from_noun(&noun, &space).expect("page should decode");
+
+        assert_eq!(decoded.pow, Some(proof_bytes));
     }
 }

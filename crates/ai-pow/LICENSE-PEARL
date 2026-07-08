@@ -1,0 +1,30 @@
+This file is included to satisfy the license terms of the Pearl reference
+implementation (https://github.com/pearl-research-labs/pearl). Portions of
+this crate — specifically the vendored reference functions in
+`tests/gen_fixtures.rs` (used to capture the Pearl byte-fixtures in
+`tests/fixtures/pearl.rs`) — are derived from the Pearl source files
+`Pearl zk-pow pearl_noise.rs`, `Pearl zk-pow api/proof_utils.rs`,
+`Pearl zk-pow ffi/mine.rs`, and `Pearl pearl-blake3 merkle.rs`.
+The Pearl license below applies to those derived portions.
+
+The rest of `crates/ai-pow` is dual-licensed under `LICENSE-APACHE` and
+`LICENSE-MIT` at the workspace root.
+
+----------------------------------------------------------------------
+
+ISC License
+
+Copyright (c) 2025-2026 Pearl Research Labs
+Copyright (c) 2015-2016 The Decred developers
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

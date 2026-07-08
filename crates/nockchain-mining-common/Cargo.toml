@@ -1,0 +1,22 @@
+[package]
+name = "nockchain-mining-common"
+version.workspace = true
+edition.workspace = true
+description = "Shared substrate for nockchain miner binaries: MiningWire ABI, mining-key configs, MiningCandidate decode, and a NodeClient that drives the node's private gRPC (Peek/Poke + WatchEffects)."
+publish = false
+
+[lib]
+name = "nockchain_mining_common"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = { workspace = true }
+futures = { workspace = true }
+nockapp = { workspace = true }
+nockapp-grpc = { workspace = true }
+nockchain-math = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }

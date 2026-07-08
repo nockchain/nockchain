@@ -1,0 +1,40 @@
+[package]
+name = "p3-tip5-circuit-air"
+description = "A from-scratch AIR for recursive proving's 5-round Tip5 permutation, faithful to nockchain-math::tip5::permute_5round and KAT-anchored to its frozen golden oracle."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+p3-air.workspace = true
+p3-field.workspace = true
+p3-goldilocks.workspace = true
+p3-lookup.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-symmetric.workspace = true
+
+[dev-dependencies]
+p3-test-utils.workspace = true
+p3-uni-stark.workspace = true
+
+[features]
+# Rayon-parallel trace generation. When ON, `generate_lookup_trace`
+# parallelizes the P permutation rows via `par_chunks_exact_mut +
+# par_fold_reduce` (each row's content is determined solely by its
+# input + constants; the shared `mult[TABLE_ROWS]` byte-frequency
+# counter is accumulated via thread-local arrays and reduced via
+# integer sum — associative + commutative ⇒ output is BIT-IDENTICAL
+# to the serial path regardless of thread count). When OFF, falls
+# back to the serial mimic via p3-maybe-rayon's prelude. **Default
+# ON 2026-05-21** to match the rest of the Plonky3-recursion
+# workspace; serial = `--no-default-features`.
+default = ["parallel"]
+parallel = ["p3-maybe-rayon/parallel"]
+
+[lints]
+workspace = true

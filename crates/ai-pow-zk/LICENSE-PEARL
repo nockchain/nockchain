@@ -1,0 +1,61 @@
+This file is included to satisfy the license terms of the Pearl reference
+implementation (https://github.com/pearl-research-labs/pearl). Portions
+of this crate — specifically the per-file-labelled **Port of
+`Pearl zk-pow ...`** modules below — are derived from the Pearl
+`zk-pow` source code (Plonky2-side STARK circuit chips + AIRs).
+The Pearl license reproduced below applies to those derived files.
+
+The rest of `crates/ai-pow-zk` is dual-licensed under `LICENSE-APACHE`
+and `LICENSE-MIT` at the workspace root.
+
+Each derived file additionally carries a top-of-file ISC notice
+identifying it as Pearl-derived and pointing at this `LICENSE-PEARL`.
+
+## Derived files (Pearl ISC applies)
+
+Pearl `zk-pow` STARK-circuit chips + AIRs, ported to Plonky3:
+
+  * `src/composite_full_air.rs`          — Port of `Pearl zk-pow pearl_air.rs`
+  * `src/composite_trace.rs`             — Port of `Pearl zk-pow pearl_trace.rs`
+  * `src/composite_preprocess.rs`        — Port of `Pearl zk-pow pearl_preprocess.rs`
+  * `src/chips/range_table.rs`           — Port of `Pearl zk-pow chip/range_table.rs`
+  * `src/chips/stark_row.rs`             — Port of `Pearl zk-pow chip/monotonic_increment.rs`
+  * `src/chips/control.rs`               — Port of `Pearl zk-pow chip/control_and_matid_packed.rs`
+  * `src/chips/i8u8.rs`                  — Port of `Pearl zk-pow chip/i8u8.rs`
+  * `src/chips/input.rs`                 — Port of `Pearl zk-pow chip/input/constraints.rs`
+  * `src/chips/blake3/mod.rs`            — Port of `Pearl zk-pow chip/blake3/`
+  * `src/chips/blake3/layout.rs`         — Port of `Pearl zk-pow chip/blake3/blake3_layout.rs`
+  * `src/chips/blake3/logic.rs`          — Port of `Pearl zk-pow chip/blake3/logic.rs`
+  * `src/chips/blake3/compress.rs`       — Port of `Pearl zk-pow chip/blake3/blake3_compress.rs`
+  * `src/chips/blake3/round_ops.rs`      — Port of `Pearl zk-pow chip/blake3/blake3_air.rs` (constraint primitives)
+  * `src/chips/blake3/round_air.rs`      — Port of `Pearl zk-pow chip/blake3/blake3_air.rs` (round AIR composition)
+  * `src/chips/blake3/chip.rs`           — Port of `Pearl zk-pow chip/blake3/blake3_air.rs` (top-level chip)
+  * `src/chips/jackpot/mod.rs`           — Port of `Pearl zk-pow chip/jackpot/`
+  * `src/chips/jackpot/chip.rs`          — Port of `Pearl zk-pow chip/jackpot/jackpot_air.rs`
+  * `src/chips/jackpot/compute.rs`       — Port of `Pearl zk-pow chip/jackpot/` arithmetic
+  * `src/chips/matmul/mod.rs`            — Port of `Pearl zk-pow chip/matmul/`
+  * `src/chips/matmul/chip.rs`           — Port of `Pearl zk-pow chip/matmul/`
+  * `src/chips/matmul/compute.rs`        — Port of `Pearl zk-pow chip/matmul/` arithmetic
+
+Files that mirror Pearl semantics by deriving from `ai-pow`'s own
+spec-driven re-implementation (not a direct Pearl source port) are
+*not* listed above; those are covered by the workspace dual-license.
+
+----------------------------------------------------------------------
+
+ISC License
+
+Copyright (c) 2025-2026 Pearl Research Labs
+Copyright (c) 2015-2016 The Decred developers
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

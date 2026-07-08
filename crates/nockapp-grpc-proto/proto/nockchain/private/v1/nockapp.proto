@@ -9,6 +9,15 @@ import "nockchain/common/v1/primitives.proto";
 service NockAppService {
   rpc Peek(PeekRequest) returns (PeekResponse);
   rpc Poke(PokeRequest) returns (PokeResponse);
+
+  // Server-streaming subscription to kernel-emitted effects.
+  //
+  // The server taps the in-process effect broadcast bus and forwards every
+  // emitted effect to the client, optionally filtered by the head atom of the
+  // effect cell. Intended use: external miner binaries subscribing to
+  // %mine effects (head_filter = [b"mine"]). Localhost-only by design; the
+  // private NockAppService gives effective kernel-level access.
+  rpc WatchEffects(WatchEffectsRequest) returns (stream EffectMessage);
 }
 
 message PeekRequest {
@@ -34,4 +43,18 @@ message PokeResponse {
     bool acknowledged = 1; // true if successful
     common.v1.ErrorStatus error = 2;
   }
+}
+
+message WatchEffectsRequest {
+  int32 pid = 1; // process ID for tracking
+  // Optional head-atom filter. Each entry is the raw byte string of an
+  // effect's head atom (e.g., b"mine"). The server forwards an effect only
+  // if its head atom byte-equals one of these. Empty list ⇒ forward all
+  // effects.
+  repeated bytes head_filter = 2;
+}
+
+message EffectMessage {
+  // JAM-encoded effect noun (same on-wire shape as PeekResponse.data).
+  bytes effect = 1;
 }

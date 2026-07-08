@@ -1,0 +1,39 @@
+[graph]
+# Only check for the targets you actually care about
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+version = 2
+ignore = [
+    "RUSTSEC-2021-0139",    # ansi_term from tracing-forest
+    "RUSTSEC-2024-0436",    # paste from p3_field
+]
+
+[licenses]
+version = 2
+# This project is MIT OR Apache-2.0; allow the same and common compatible licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"   # workspace = true is not a real wildcard
+
+[sources]
+# Only allow crates from crates.io and the Plonky3 git repository
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/Plonky3/Plonky3"]

@@ -19,7 +19,6 @@ equix.workspace = true
 futures.workspace = true
 ibig.workspace = true
 kernels-open-dumb = { workspace = true }
-kernels-open-miner = { workspace = true }
 libp2p = { workspace = true, features = [
     "ping",
     "kad",
@@ -63,9 +62,11 @@ vergen = { workspace = true, features = [
 
 [dev-dependencies]
 blake3.workspace = true
+kernels-open-miner = { workspace = true }
 libc.workspace = true
 memmap2.workspace = true
 nockchain-math.workspace = true
+nockchain-mining-common.workspace = true
 
 [lints]
 workspace = true

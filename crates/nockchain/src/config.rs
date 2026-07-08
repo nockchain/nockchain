@@ -2,11 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{value_parser, ArgAction, Args, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser};
 use nockapp::kernel::boot::{NockStackSize, PmaSize};
-use nockchain_types::tx_engine::common::Hash;
-
-use crate::mining::MiningPkhConfig;
 
 // TODO: command-line/configure
 /** Path to read current node's identity from */
@@ -115,20 +112,6 @@ pub const DEFAULT_FAKENET_BYTHOS_PHASE: u64 = 1;
 pub struct NockchainCli {
     #[command(flatten)]
     pub nockapp_cli: nockapp::kernel::boot::Cli,
-    #[arg(long, help = "Mine in-kernel", default_value = "false")]
-    pub mine: bool,
-    #[arg(
-        long,
-        help = "Pubkey hash to mine to (mutually exclusive with --mining-pkh-adv)"
-    )]
-    pub mining_pkh: Option<String>,
-    #[arg(
-        long,
-        help = "Advanced mining pubkey hash configuration (mutually exclusive with --mining-pkh). Format: share,pkh",
-        value_parser = value_parser!(MiningPkhConfig),
-        num_args = 1..,
-    )]
-    pub mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
     #[arg(long, help = "Whether to run as fakenet", default_value_t = false)]
     pub fakenet: bool,
     #[arg(long, short, help = "Initial peer", action = ArgAction::Append)]
@@ -180,8 +163,6 @@ pub struct NockchainCli {
     pub max_system_memory_fraction: Option<f64>,
     #[arg(long, help = "Maximum process memory for connection limits (bytes)")]
     pub max_system_memory_bytes: Option<usize>,
-    #[arg(long, help = "Number of threads to mine with defaults to one less than the number of cpus available.", default_value = None)]
-    pub num_threads: Option<u64>,
     #[arg(
         long,
         help = "Size of Proof of Work puzzle for mining on fakenet. Mainnet uses 64. Must be a power of 2. Defaults to 2. Ignored on mainnet.",
@@ -210,6 +191,16 @@ pub struct NockchainCli {
         requires = "fakenet"
     )]
     pub fakenet_bythos_phase: Option<u64>,
+    #[arg(
+        long,
+        help = "Override the AI-PoW activation height when running on fakenet. Also \
+                sets phase.zk-asert-post-ai and phase.ai-asert to the same value so the \
+                ZK regime switch + AI puzzle activation happen together. \
+                Defaults to mainnet 95000 (effectively never on fakenet). \
+                Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub fakenet_ai_pow_activation_height: Option<u64>,
     #[command(flatten)]
     pub fakenet_asert: FakenetAsertArgs,
     #[arg(
@@ -288,30 +279,6 @@ fn stack_size_default_arg(stack_size: NockStackSize) -> &'static str {
 
 impl NockchainCli {
     pub fn validate(&self) -> Result<(), String> {
-        if self.mine && !(self.mining_pkh.is_some() || self.mining_pkh_adv.is_some()) {
-            return Err(
-                "Cannot specify mine without either mining_pkh or mining_pkh_adv".to_string(),
-            );
-        }
-
-        if self.mining_pkh.is_some() && self.mining_pkh_adv.is_some() {
-            return Err(
-                "Cannot specify both mining_pkh and mining_pkh_adv at the same time".to_string(),
-            );
-        }
-
-        if let Some(pkh) = &self.mining_pkh {
-            Hash::from_base58(pkh).map_err(|err| format!("Invalid mining_pkh: {err}"))?;
-        }
-
-        if let Some(pkh_configs) = &self.mining_pkh_adv {
-            for config in pkh_configs {
-                Hash::from_base58(&config.pkh).map_err(|err| {
-                    format!("Invalid mining_pkh_adv entry '{}': {err}", config.pkh)
-                })?;
-            }
-        }
-
         self.fakenet_asert.clone().into_config().map(|_| ())?;
 
         Ok(())
@@ -325,15 +292,9 @@ mod tests {
 
     use super::*;
 
-    const VALID_V0_PUBKEY: &str = "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ";
-    const VALID_MINING_PKH: &str = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV";
-
     fn base_cli() -> NockchainCli {
         NockchainCli {
             nockapp_cli: default_boot_cli(false),
-            mine: false,
-            mining_pkh: None,
-            mining_pkh_adv: None,
             fakenet: false,
             peer: Vec::new(),
             force_peer: Vec::new(),
@@ -352,11 +313,11 @@ mod tests {
             prune_inbound: None,
             max_system_memory_fraction: None,
             max_system_memory_bytes: None,
-            num_threads: None,
             fakenet_pow_len: 2,
             fakenet_log_difficulty: 1,
             fakenet_v1_phase: None,
             fakenet_bythos_phase: None,
+            fakenet_ai_pow_activation_height: None,
             fakenet_asert: FakenetAsertArgs::default(),
             fakenet_update_candidate_interval_secs: None,
             fakenet_genesis_jam_path: None,
@@ -411,17 +372,6 @@ mod tests {
             cli.nockapp_cli.pma_initial_size.unwrap().words(),
             64 * 1024 * 1024
         );
-    }
-
-    #[test]
-    fn validate_accepts_valid_advanced_configs() {
-        let mut cli = base_cli();
-        cli.mining_pkh_adv = Some(vec![MiningPkhConfig {
-            share: 1,
-            pkh: VALID_MINING_PKH.to_string(),
-        }]);
-
-        assert!(cli.validate().is_ok());
     }
 
     #[test]
@@ -492,19 +442,5 @@ mod tests {
         };
         let err = cli.validate().expect_err("expected bex cap error");
         assert!(err.contains("must be <="));
-    }
-
-    #[test]
-    fn validate_rejects_invalid_mining_pkh_adv_entry() {
-        // We specifically want to catch if users mix up v0 and v1 addresses, because they are both base58-encoded.
-        // Using a base58-encoded pubkey ensures the input is base58 but not a valid hash.
-        let mut cli = base_cli();
-        cli.mining_pkh_adv = Some(vec![MiningPkhConfig {
-            share: 1,
-            pkh: VALID_V0_PUBKEY.to_string(),
-        }]);
-
-        let err = cli.validate().expect_err("expected invalid pkh adv");
-        assert!(err.contains("Invalid mining_pkh_adv entry"));
     }
 }

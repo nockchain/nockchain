@@ -1,0 +1,42 @@
+[package]
+name = "zk-pow-miner"
+version.workspace = true
+edition.workspace = true
+description = "Standalone ZK PoW (puzzle-nock STARK) block miner. Connects to a nockchain node via the private NockAppService gRPC, subscribes to %mine effects, runs the STARK prover in a SerfThread worker pool, and submits solutions back."
+publish = false
+
+[lib]
+name = "zk_pow_miner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zk-pow-mine"
+path = "src/bin/zk_pow_mine.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+blake3 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+futures = { workspace = true }
+kernels-open-miner = { workspace = true }
+nockapp = { workspace = true }
+nockapp-grpc = { workspace = true }
+nockchain-math = { workspace = true }
+nockchain-mining-common = { workspace = true }
+nockvm = { workspace = true }
+nockvm_macros = { workspace = true }
+num_cpus = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "ansi"] }
+zkvm-jetpack = { workspace = true }
+
+[dev-dependencies]
+gnort = { workspace = true }
+ibig = { workspace = true }
+once_cell = { workspace = true }
+tempfile = { workspace = true }
