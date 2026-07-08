@@ -136,6 +136,40 @@ impl CircuitConfig {
         num_queries: 15,
     };
 
+    /// **60-bit Johnson floor at `log_blowup = 2`** (`2·30 = 60`, same floor as
+    /// [`PROD`]) but a **4× smaller LDE** — cheaper Merkle commit at the cost of a
+    /// larger L1 verifier circuit (2× the queries). Measured 2026-07-08: at a 2¹⁶
+    /// Layer-0 trace this cuts the full compact prove 95.1 s → 55.4 s (1.72×); the
+    /// win grows with degree. See `PROD_ADAPTIVE`.
+    pub const PROD_LB2_NQ30: Self = Self {
+        log_blowup: 2,
+        pow_bits: 0,
+        num_queries: 30,
+    };
+
+    /// **Degree-adaptive production profile (60-bit).** The Layer-0 prove is
+    /// Merkle-commit-bound and the commit scales with `2^log_blowup × trace`,
+    /// while the L1 recursion cost scales with `num_queries` (independent of the
+    /// Layer-0 degree). So the total-prove-optimal blowup depends on the trace
+    /// size: small traces favor the commit-heavy/recursion-cheap `lb=4/nq=15`;
+    /// large traces favor the commit-cheap/recursion-heavier `lb=2/nq=30`. Both
+    /// hold the 60-bit Johnson floor. Crossover measured near 2¹⁵ (12-core native):
+    ///
+    /// | Layer-0 degree | profile | full compact prove |
+    /// |---|---|---|
+    /// | ≤ 14 (e.g. 2¹³ default) | `PROD` (lb=4/nq=15) | 28.8 s |
+    /// | ≥ 15 (e.g. 2¹⁶ max env) | `PROD_LB2_NQ30` | 55.4 s (vs 95.1 s) |
+    ///
+    /// Pearl's `stark_degree_bits ∈ 13..18`, so both regimes occur; this picks the
+    /// faster profile per degree while preserving the security floor exactly.
+    pub const fn prod_adaptive(stark_degree_bits: usize) -> Self {
+        if stark_degree_bits >= 15 {
+            Self::PROD_LB2_NQ30
+        } else {
+            Self::PROD
+        }
+    }
+
     /// Small profile for unit tests once the circuit is real.
     /// Soundness is not the goal here — we just want a fast
     /// prove/verify round-trip.
