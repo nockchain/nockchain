@@ -181,17 +181,16 @@
   |%
   +$  form  ^proof
   ::
-  ::  +max-size:  upper bound on a proof's size in bits. +compute-size-without-txs
-  ::    reserves this constant for the proof instead of jamming the actual proof,
-  ::    so a mining candidate (pow=~) and the mined block (full proof) size
-  ::    identically and the miner guard agrees with consensus +check-size.
-  ::    Because proofs are NOT all the same size, this must stay a genuine upper
-  ::    bound: raised from 1.000.000 (~125 kB) to 2.000.000 bits (~250 kB) to
-  ::    keep margin over the largest real proofs. Consensus-critical: every node
+  ::  +max-size:  upper bound on a proof's size in bits (1.000.000 bits ~= 125 kB).
+  ::    +compute-size-without-txs reserves this constant for the proof instead of
+  ::    jamming the actual proof, so a mining candidate (pow=~) and the mined block
+  ::    (full proof) size identically and the miner guard agrees with consensus
+  ::    +check-size. Proofs are not all the same size, so this must stay a genuine
+  ::    upper bound over the largest real proof. Consensus-critical: every node
   ::    must use the same value.
   ++  max-size
     ^-  size
-    `size``@`2.000.000
+    `size``@`1.000.000
   ::
   ++  hash  |=(=form (hash-proof form))
   --
