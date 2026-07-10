@@ -203,10 +203,26 @@
   ++  compute-size-without-txs
     |=  pag=form
     ^-  size
+    ::  size the jam of the page WITHOUT the digest or the powork: both are
+    ::  variable-length but bounded, so they are accounted for by the
+    ::  +max-size constants below instead of being jammed here.
+    ::
+    ::  the v1 $page prepends a `version` head that v0 does not have, so the
+    ::  layout is [version digest pow parent ...]. that shifts every field by
+    ::  one axis versus v0's [digest pow parent ...]. v0 jams `+>.pag`
+    ::  (axis 7 = [parent ...]), which on a v1 page is [pow parent ...] --
+    ::  i.e. it wrongly folds the proof into the jam. because a candidate
+    ::  block carries `pow=~` while a mined block carries the full proof, the
+    ::  miner's +candidate-block-below-max-size guard (run on the candidate)
+    ::  then disagreed with consensus +check-size (run on the mined page),
+    ::  letting a miner produce a block it immediately self-rejected as
+    ::  %block-too-large -- wedging the chain. `+>+.pag` (axis 15 =
+    ::  [parent ...]) excludes version, digest, AND pow, matching v0's intent
+    ::  and making the two size checks agree.
     ;:  add
         max-size:block-id:v0
         max-size:proof:v0
-        (compute-size-jam `*`+>.pag)
+        (compute-size-jam `*`+>+.pag)
     ==
   --
 ::

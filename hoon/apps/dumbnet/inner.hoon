@@ -1111,6 +1111,22 @@
         :_  k
         [(liar-effect wir %raw-tx-not-based)]~
       ::
+      ::  reject transactions too large to ever fit in a block. this closes
+      ::  the pre-packing / block-creation asymmetry: mempool acceptance did
+      ::  not bound tx size, so an oversize tx passed here, was gossiped, and
+      ::  then could never be mined -- consensus +check-size rejected any
+      ::  block that included it. we mirror that accounting here (a block is
+      ::  +compute-size-without-txs plus the size of every included tx) using
+      ::  an empty page as the block-overhead floor, so a tx that would not
+      ::  fit even in an otherwise-empty block is discarded on receipt rather
+      ::  than propagated.
+      =/  tx-size=@  ~(size get:raw-tx:t raw)
+      ?:  %+  gth
+            (add tx-size (compute-size-without-txs:page:t *page:t))
+          max-block-size:t
+        ~>  %slog.[1 'heard-tx: Transaction too large to fit in a block, discarding']
+        `k
+      ::
       ::  check tx-id. this is faster than calling validate:raw-tx (which also checks the id)
       ::  so we do it first
       =/  computed-id=hash:t  (compute-id:raw-tx:t raw)

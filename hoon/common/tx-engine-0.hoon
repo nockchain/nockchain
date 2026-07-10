@@ -35,8 +35,15 @@
 ::  when using non-default constants.
 +$  blockchain-constants
   $+  blockchain-constants
-  $~  :*  ::  max block size in bits
-          max-block-size=`@`8.000.000
+  $~  :*  ::  max block size in bits.
+          ::    raised from 8.000.000 (~1 MB) so that large but legitimate
+          ::    transactions -- e.g. a protocol-fund spend that fans in many
+          ::    hundreds of small fund-note inputs, each carrying a 3-of-4
+          ::    multisig witness -- fit in a block. this is a consensus
+          ::    parameter: every node must run the same value, so treat any
+          ::    change as a coordinated upgrade. tune to taste vs. the
+          ::    validation/sync cost of larger blocks.
+          max-block-size=`@`100.000.000
           :: actual number of blocks, not 2017 by counting from 0
           blocks-per-epoch=2.016
           ::  14 days measured in seconds, 1.209.600
@@ -169,11 +176,17 @@
   |%
   +$  form  ^proof
   ::
-  ::  +max-size:  max size of proof in bits. We upper bound it to
-  ::    125kb or 125000 bytes or 1000000 bits
+  ::  +max-size:  upper bound on a proof's size in bits. +compute-size-without-txs
+  ::    reserves this constant for the proof instead of jamming the actual proof,
+  ::    so a mining candidate (pow=~) and the mined block (full proof) size
+  ::    identically and the miner guard agrees with consensus +check-size.
+  ::    Because proofs are NOT all the same size, this must stay a genuine upper
+  ::    bound: raised from 1.000.000 (~125 kB) to 2.000.000 bits (~250 kB) to
+  ::    keep margin over the largest real proofs. Consensus-critical: every node
+  ::    must use the same value.
   ++  max-size
     ^-  size
-    `size``@`1.000.000
+    `size``@`2.000.000
   ::
   ++  hash  |=(=form (hash-proof form))
   --

@@ -13,6 +13,7 @@
 /=  review-fix-tests  /tests/dumb/mod/unit/review-fixes
 /=  emissions-tests  /tests/dumb/mod/unit/emissions
 /=  coinbase-split-tests  /tests/dumb/mod/unit/coinbase-split
+/=  block-size-tests  /tests/dumb/mod/unit/block-size
 /=  fund-split-tests  /tests/dumb/mod/integration/fund-split
 /=  benches  /tests/dumb/mod/benchmarks/huge-tx
 /=  h-zoon-benches  /tests/dumb/mod/benchmarks/h-zoon-hot-path
@@ -34,6 +35,7 @@
   (get-prefix-arms:tt name !>(review-fix-tests))
   (get-prefix-arms:tt name !>(emissions-tests))
   (get-prefix-arms:tt name !>(coinbase-split-tests))
+  (get-prefix-arms:tt name !>(block-size-tests))
   (get-prefix-arms:tt name !>(fund-split-tests))
   (get-prefix-arms:tt name !>(benches))
   (get-prefix-arms:tt name !>(h-zoon-benches))

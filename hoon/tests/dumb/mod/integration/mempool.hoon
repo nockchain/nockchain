@@ -207,4 +207,40 @@
           !(~(has-excluded k-by:h-tim nockchain) id.raw)
       ==
   ~
+::
+::  +test-v1-mempool-reject-oversize-tx: a transaction too large to ever fit
+::  in a block must be discarded on receipt (not stored, not relayed). This
+::  closes the pre-packing / block-creation asymmetry that let an oversize tx
+::  reach candidate blocks that were then self-rejected as %block-too-large,
+::  wedging the chain. Uses a ~10 KB block-size limit and a 25-input coinbase
+::  fan-in transaction, which is comfortably over the limit.
+++  test-v1-mempool-reject-oversize-tx
+  =+  h-med=~(. helpers bc-max-block-size-medium-v0:helpers)
+  =+  t-med=~(. txe bc-max-block-size-medium-v0:helpers)
+  =+  [nockchain genesis]=init-nockchain:h-med
+  =^  pages  nockchain
+    (add-n-pages-integration:h-med genesis 85 nockchain)
+  =/  raw=raw-tx:t
+    %-  from-inputs:v0:raw-tx:t
+    %-  multi:new:v0:inputs:t
+    %+  turn  (scag 80 pages)
+    |=  =page:t
+    =/  coin=coinbase:t  (new:v0:coinbase:t page p:default-keys-1:h-med)
+    ?>  ?=(^ -.coin)
+    %:  simple-from-note:new:v0:input:t
+        p:default-keys-2:h-med
+        coin
+        s:default-keys-1:h-med
+    ==
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  ::  sanity: this fan-in tx genuinely cannot fit in a block under the small
+  ::  size limit, so a rejection is really the size guard firing (not some
+  ::  other check). +compute-size-without-txs is the per-block overhead floor.
+  =/  overhead=@  (compute-size-without-txs:page:t *page:t)
+  ?>  (gth (add ~(size get:raw-tx:t raw) overhead) max-block-size:t-med)
+  =^  effs  nockchain
+    (pok:h-med [%fact %0 %heard-tx raw] nockchain)
+  %+  expect-eq
+    !>(%.n)
+  !>((~(has-raw-tx k-by:h-med nockchain) tx-id))
 --
