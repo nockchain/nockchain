@@ -35,15 +35,20 @@
 ::  when using non-default constants.
 +$  blockchain-constants
   $+  blockchain-constants
-  $~  :*  ::  max block size in bits.
-          ::    raised from 8.000.000 (~1 MB) so that large but legitimate
-          ::    transactions -- e.g. a protocol-fund spend that fans in many
-          ::    hundreds of small fund-note inputs, each carrying a 3-of-4
-          ::    multisig witness -- fit in a block. this is a consensus
-          ::    parameter: every node must run the same value, so treat any
-          ::    change as a coordinated upgrade. tune to taste vs. the
-          ::    validation/sync cost of larger blocks.
-          max-block-size=`@`100.000.000
+  $~  :*  ::  max block size in bits (size is @bits; +compute-size-jam is
+          ::    (met 0 (jam n)), i.e. a bit count -- so 8.000.000 bits == 1 MB
+          ::    and 64.000.000 bits == 8 MB). this cap already INCLUDES the
+          ::    proof: +compute-size-without-txs reserves +max-size:proof
+          ::    inside this budget, and the real proof is <= that reservation,
+          ::    so the whole block (proof included) stays at or under 8 MB --
+          ::    comfortably under the 10 MB ceiling.
+          ::    raised from 8.000.000 (1 MB) to 64.000.000 (8 MB) so that
+          ::    large but legitimate transactions -- e.g. a protocol-fund
+          ::    spend that fans in many hundreds of small fund-note inputs,
+          ::    each carrying a 3-of-4 multisig witness -- fit in a block.
+          ::    consensus parameter: every node must run the same value, so
+          ::    treat any change as a coordinated upgrade.
+          max-block-size=`@`64.000.000
           :: actual number of blocks, not 2017 by counting from 0
           blocks-per-epoch=2.016
           ::  14 days measured in seconds, 1.209.600
