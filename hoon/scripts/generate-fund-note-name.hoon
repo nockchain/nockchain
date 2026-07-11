@@ -29,10 +29,10 @@
 ::  3-of-4 multisig lock-root == the value pinned in +fund-address.
 =/  fund-addr=hash  (hash:lock [%pkh [m=3 participant-set]]~)
 ::  Reconstruct the coinbase note lock exactly as +make-name:coinbase does.
-::  coinbase-timelock-min is 100 on mainnet (default blockchain-constants).
+::  fund-note-timelock-min is the canonical relative age committed by these notes.
 =/  fund-pkh-set=(z-set:zo hash)  (z-silt:zo ~[fund-addr])
 =/  pkh-prim=lock-primitive  [%pkh [m=1 fund-pkh-set]]
-=/  tim-prim=lock-primitive  [%tim [rel=[min=`100 max=~] abs=[min=~ max=~]]]
+=/  tim-prim=lock-primitive  [%tim [rel=[min=`fund-note-timelock-min max=~] abs=[min=~ max=~]]]
 =/  note-lock=lock  ~[pkh-prim tim-prim]
 =/  note-lock-root=hash  (hash:lock note-lock)
 =/  fund-note-firstname=hash  (first:nname note-lock-root)

@@ -1,4 +1,4 @@
-use nockchain_types::tx_engine::common::{FirstName, Hash};
+use nockchain_types::tx_engine::common::{FirstName, Hash, HashDecodeError};
 use nockchain_types::tx_engine::v1::tx::{
     FirstNameFromLockRootError, LockHashError, SpendCondition,
 };
@@ -14,11 +14,23 @@ pub enum LockResolutionSource {
     Unknown,
 }
 
+/// Relative maturity encoded in every 014-aletheia protocol-fund coinbase note.
+///
+/// This is part of the immutable on-chain lock preimage. It must not follow
+/// network-specific coinbase defaults.
+pub const PROTOCOL_FUND_NOTE_TIMELOCK_MIN: u64 = 100;
+
+/// Canonical 014-aletheia protocol-fund lock root (`+fund-address` in Hoon).
+const PROTOCOL_FUND_ADDRESS_B58: &str = "9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockResolution {
     pub source: LockResolutionSource,
     pub spend_condition: Option<SpendCondition>,
     pub spend_condition_count: Option<u64>,
+    /// Additional relative maturity required by protocol routing but absent
+    /// from the effective spend condition used for witness planning.
+    pub required_relative_min_blocks: Option<u64>,
 }
 
 impl LockResolution {
@@ -28,6 +40,7 @@ impl LockResolution {
             source: LockResolutionSource::Unknown,
             spend_condition: None,
             spend_condition_count: None,
+            required_relative_min_blocks: None,
         }
     }
 
@@ -88,6 +101,7 @@ pub trait LockMatcher {
                         source: LockResolutionSource::NoteData,
                         spend_condition: Some(spend_condition.clone()),
                         spend_condition_count: None,
+                        required_relative_min_blocks: None,
                     };
                 }
             }
@@ -100,6 +114,7 @@ pub trait LockMatcher {
                     source: LockResolutionSource::ReconstructedSimplePkh,
                     spend_condition: Some(simple),
                     spend_condition_count: None,
+                    required_relative_min_blocks: None,
                 };
             }
         }
@@ -112,6 +127,7 @@ pub trait LockMatcher {
                     source: LockResolutionSource::ReconstructedCoinbasePkh,
                     spend_condition: Some(coinbase),
                     spend_condition_count: None,
+                    required_relative_min_blocks: None,
                 };
             }
         }
@@ -128,6 +144,8 @@ pub enum CoinbaseFundFirstNameError {
     LockHash(#[from] LockHashError),
     #[error(transparent)]
     FirstName(#[from] FirstNameFromLockRootError),
+    #[error(transparent)]
+    FundAddress(#[from] HashDecodeError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,12 +160,13 @@ pub struct LockRootLockMatcher {
     ///
     /// `+make-name:coinbase` does not take a fund note's first-name directly from
     /// the multisig lock-root: it wraps that lock-root in a single
-    /// `[%pkh m=1 {lock_root}]` primitive plus the coinbase relative timelock and
-    /// takes the first-name of *that* wrapped lock-root (`+fund-note-firstname`
-    /// in tx-engine-1.hoon). The committed lock is therefore unsatisfiable as
-    /// written; `+check:check-context` special-cases this first-name and routes
-    /// the spend to the real m-of-n multisig (`+check-multisig-lock`). This field
-    /// is the Rust mirror of that routing key.
+    /// `[%pkh m=1 {lock_root}]` primitive plus the immutable protocol-fund
+    /// timelock and takes the first-name of *that* wrapped lock-root
+    /// (`+fund-note-firstname` in tx-engine-1.hoon). The committed lock is
+    /// therefore unsatisfiable as written; `+check:check-context` special-cases
+    /// this first-name and routes the spend to the real m-of-n multisig
+    /// (`+check-multisig-lock`). This field is the Rust mirror of that routing
+    /// key.
     coinbase_wrapped_first_name: Option<Hash>,
     planning_spend_condition: Option<SpendCondition>,
 }
@@ -170,22 +189,21 @@ impl LockRootLockMatcher {
         self
     }
 
-    /// Also accept protocol-fund-style coinbase notes, whose committed lock wraps
-    /// the multisig lock-root in `[%pkh m=1 {lock_root}]` plus the coinbase
-    /// relative timelock before the first-name is taken.
+    /// Enables the 014-aletheia protocol-fund recovery route when this matcher
+    /// owns the canonical `+fund-address` lock root.
     ///
-    /// Mirrors the `+fund-note-firstname` routing in `+check:check-context`: a
-    /// note carrying the wrapped first-name is spendable by revealing the real
-    /// multisig spend-condition (whose `+hash:lock` equals `lock_root`), which is
-    /// exactly the `planning_spend_condition` carried for fee/witness sizing. The
-    /// on-chain check (`+check-multisig-lock`) bypasses both the broken merkle
-    /// proof and the committed coinbase timelock, so the bare multisig
-    /// spend-condition is the correct planning lock.
-    pub fn with_coinbase_fund_notes(
-        mut self,
-        coinbase_timelock_min: u64,
-    ) -> Result<Self, CoinbaseFundFirstNameError> {
-        let wrapped = SpendCondition::coinbase_pkh(self.lock_root.clone(), coinbase_timelock_min);
+    /// Ordinary multisig lock roots are left unchanged: the on-chain
+    /// `+check:check-context` special case recognizes only the canonical
+    /// `+fund-note-firstname`, so generating arbitrary wrapped first-names would
+    /// produce plans the kernel rejects. For the canonical fund, selection
+    /// returns the real multisig condition for witness sizing and separately
+    /// preserves the immutable maturity bypassed by `+check-multisig-lock`.
+    pub fn with_coinbase_fund_notes(mut self) -> Result<Self, CoinbaseFundFirstNameError> {
+        if self.lock_root != Hash::from_base58(PROTOCOL_FUND_ADDRESS_B58)? {
+            return Ok(self);
+        }
+        let wrapped =
+            SpendCondition::coinbase_pkh(self.lock_root.clone(), PROTOCOL_FUND_NOTE_TIMELOCK_MIN);
         let note_lock_root = wrapped.hash()?;
         self.coinbase_wrapped_first_name =
             Some(FirstName::from_lock_root(&note_lock_root)?.into_hash());
@@ -217,10 +235,10 @@ impl LockMatcher for LockRootLockMatcher {
         // Protocol-fund coinbase notes carry no canonical lock-data and their
         // committed lock is unsatisfiable as written, so `resolve_lock` (which
         // re-derives the leaf first-name from decoded note-data) cannot and must
-        // not resolve them. Only attempt note-data resolution for notes selected
-        // by the direct lock-root first-name; route wrapped fund notes straight
-        // to the carried multisig spend-condition, mirroring `+check-multisig-lock`.
-        if matches_lock_root_first_name {
+        // not resolve them. Only attempt note-data resolution for direct
+        // lock-root notes; route wrapped fund notes straight to the carried
+        // multisig condition and preserve their bypassed maturity requirement.
+        if matches_lock_root_first_name && !matches_coinbase_wrapped {
             let resolved = self.resolve_lock(request);
             if resolved.is_selected() {
                 return resolved;
@@ -231,6 +249,8 @@ impl LockMatcher for LockRootLockMatcher {
             source: LockResolutionSource::LockRootFirstName,
             spend_condition: self.planning_spend_condition.clone(),
             spend_condition_count: None,
+            required_relative_min_blocks: matches_coinbase_wrapped
+                .then_some(PROTOCOL_FUND_NOTE_TIMELOCK_MIN),
         }
     }
 
@@ -255,6 +275,7 @@ impl LockMatcher for LockRootLockMatcher {
                 source: LockResolutionSource::NoteData,
                 spend_condition: Some(spend_condition.clone()),
                 spend_condition_count: None,
+                required_relative_min_blocks: None,
             };
         }
         LockResolution::unknown()
@@ -447,15 +468,20 @@ mod tests {
         // lock-data. The matcher must still select them and hand the planner the
         // real multisig spend-condition (the preimage `+check-multisig-lock`
         // requires), mirroring the `+fund-note-firstname` routing.
+        const FUND_NOTE_FIRSTNAME_B58: &str =
+            "8TvVfU7sbFoY8qV53ffUdBag7Kcqw8LXjsnYgY71nQ1biWE6giRYzkn";
+
         let spend_condition = SpendCondition::simple_pkh(hash(42));
-        let lock_root = lock_root_for_lock(&spend_condition);
+        let lock_root =
+            Hash::from_base58(PROTOCOL_FUND_ADDRESS_B58).expect("canonical fund address");
         let matcher = LockRootLockMatcher::from_lock_root(&lock_root)
             .expect("matcher")
             .with_spend_condition(spend_condition.clone())
-            .with_coinbase_fund_notes(100)
+            .with_coinbase_fund_notes()
             .expect("coinbase fund first-name");
 
-        let wrapped_first_name = coinbase_wrapped_first_name(&lock_root, 100);
+        let wrapped_first_name =
+            Hash::from_base58(FUND_NOTE_FIRSTNAME_B58).expect("canonical fund first-name");
         // The wrapped first-name is distinct from the direct lock-root first-name;
         // the pre-fix matcher would have rejected it outright.
         let direct_first_name = FirstName::from_lock_root(&lock_root)
@@ -468,13 +494,17 @@ mod tests {
             note_first_name: &wrapped_first_name,
             decoded_note_data: &decoded,
             signer_pkh: None,
-            coinbase_relative_min: Some(100),
+            coinbase_relative_min: None,
         });
 
         assert!(result.is_selected());
         assert_eq!(result.source, LockResolutionSource::LockRootFirstName);
         assert_eq!(result.spend_condition, Some(spend_condition));
         assert_eq!(result.spend_condition_count, None);
+        assert_eq!(
+            result.required_relative_min_blocks,
+            Some(PROTOCOL_FUND_NOTE_TIMELOCK_MIN)
+        );
     }
 
     #[test]
@@ -486,7 +516,7 @@ mod tests {
         let matcher = LockRootLockMatcher::from_lock_root(&lock_root)
             .expect("matcher")
             .with_spend_condition(spend_condition.clone())
-            .with_coinbase_fund_notes(100)
+            .with_coinbase_fund_notes()
             .expect("coinbase fund first-name");
         let direct_first_name = FirstName::from_lock_root(&lock_root)
             .expect("first-name")
@@ -502,24 +532,27 @@ mod tests {
 
         assert_eq!(result.source, LockResolutionSource::NoteData);
         assert_eq!(result.spend_condition, Some(spend_condition));
+        assert_eq!(result.required_relative_min_blocks, None);
     }
 
     #[test]
-    fn lock_root_matcher_rejects_unrelated_first_name_with_fund_support() {
+    fn lock_root_matcher_fund_support_ignores_arbitrary_wrapped_first_name() {
         let spend_condition = SpendCondition::simple_pkh(hash(42));
         let lock_root = lock_root_for_lock(&spend_condition);
+        let wrapped_first_name =
+            coinbase_wrapped_first_name(&lock_root, PROTOCOL_FUND_NOTE_TIMELOCK_MIN);
         let matcher = LockRootLockMatcher::from_lock_root(&lock_root)
             .expect("matcher")
             .with_spend_condition(spend_condition)
-            .with_coinbase_fund_notes(100)
+            .with_coinbase_fund_notes()
             .expect("coinbase fund first-name");
         let decoded = decoded_note_data(Vec::new());
 
         let result = matcher.select_v1_candidate(ResolveLockRequest {
-            note_first_name: &hash(999),
+            note_first_name: &wrapped_first_name,
             decoded_note_data: &decoded,
             signer_pkh: None,
-            coinbase_relative_min: Some(100),
+            coinbase_relative_min: None,
         });
 
         assert_eq!(result.source, LockResolutionSource::Unknown);

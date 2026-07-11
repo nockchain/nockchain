@@ -19,6 +19,8 @@
 ::    These tests pin that property: the size of a page excluding its txs must
 ::    not depend on whether the proof is present.
 ::
+/=  dcon  /apps/dumbnet/lib/consensus
+/=  *  /apps/dumbnet/lib/types
 /=  txe  /common/tx-engine
 /=  *  /common/zoon
 /=  *  /common/test
@@ -64,4 +66,31 @@
   %+  expect-eq
     !>((compute-size-without-txs:page:t candidate))
     !>((compute-size-without-txs:page:t mined))
+::
+::  +test-check-size-inclusive-boundary: consensus rejects an empty page when
+::  max-block-size is one bit below its computed size, and accepts the page at
+::  the exact limit and one bit above it. This calls the production +check-size
+::  arm so a future accidental `<` in place of `<=` fails at the exact limit.
+++  test-check-size-inclusive-boundary
+  ^-  tang
+  =/  pag=page:t  *page:v1:t
+  =/  con=consensus-state  *consensus-state
+  =/  total-size=@  (compute-size-without-txs:page:t pag)
+  =/  below=blockchain-constants:txe
+    %*  .  constants
+      max-block-size  `size:txe`(dec total-size)
+    ==
+  =/  exact=blockchain-constants:txe
+    %*  .  constants
+      max-block-size  `size:txe`total-size
+    ==
+  =/  above=blockchain-constants:txe
+    %*  .  constants
+      max-block-size  `size:txe`+(total-size)
+    ==
+  ;:  weld
+    (expect-eq !>(%.n) !>((~(check-size dcon con below) pag)))
+    (expect-eq !>(%.y) !>((~(check-size dcon con exact) pag)))
+    (expect-eq !>(%.y) !>((~(check-size dcon con above) pag)))
+  ==
 --

@@ -208,36 +208,53 @@
       ==
   ~
 ::
-::  +test-v1-mempool-reject-oversize-tx: a transaction too large to ever fit
-::  in a block must be discarded on receipt (not stored, not relayed). This
+::  +test-v1-mempool-reject-oversize-tx: a v1 transaction too large to ever
+::  fit in a block must be discarded on receipt (not stored, not relayed). This
 ::  closes the pre-packing / block-creation asymmetry that let an oversize tx
 ::  reach candidate blocks that were then self-rejected as %block-too-large,
-::  wedging the chain. Uses a ~10 KB block-size limit and a 25-input coinbase
-::  fan-in transaction, which is comfortably over the limit.
+::  wedging the chain. Uses v1 constants with a ~10 KB block-size limit and an
+::  80-input v1 coinbase fan-in carrying real spend witnesses.
 ++  test-v1-mempool-reject-oversize-tx
-  =+  h-med=~(. helpers bc-max-block-size-medium-v0:helpers)
-  =+  t-med=~(. txe bc-max-block-size-medium-v0:helpers)
+  =+  h-med=~(. helpers bc-max-block-size-medium-v1:helpers)
+  =+  t-med=~(. txe bc-max-block-size-medium-v1:helpers)
   =+  [nockchain genesis]=init-nockchain:h-med
   =^  pages  nockchain
     (add-n-pages-integration:h-med genesis 85 nockchain)
-  =/  raw=raw-tx:t
-    %-  from-inputs:v0:raw-tx:t
-    %-  multi:new:v0:inputs:t
-    %+  turn  (scag 80 pages)
-    |=  =page:t
-    =/  coin=coinbase:t  (new:v0:coinbase:t page p:default-keys-1:h-med)
-    ?>  ?=(^ -.coin)
-    %:  simple-from-note:new:v0:input:t
-        p:default-keys-2:h-med
-        coin
-        s:default-keys-1:h-med
-    ==
-  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  =/  pks=(list schnorr-pubkey:t-med)
+    ~(tap z-in:zoon pubkeys.p:default-keys-1:h-med)
+  =/  [root=hash:t-med sc=spend-condition:v1:t-med *]
+    (make-coinbase-lock:v1:h-med (lent pks) pks)
+  =/  pk=schnorr-pubkey:t-med  (snag 0 pks)
+  =/  sps=spends:v1:t-med
+    %+  roll
+      (scag 80 pages)
+    |=  [page=page:t-med acc=spends:v1:t-med]
+    =/  coin=coinbase:t-med
+      (new:coinbase:t-med page (sig-to-pkh-hashes:v1:h-med p:default-keys-1:h-med))
+    ?>  ?=(@ -.coin)
+    =/  fee=coins:t-med  0
+    =/  sed=seed:v1:t-med
+      (make-seed:v1:h-med root (sub assets.coin fee) (hash:nnote:t-med coin))
+    =/  seds=seeds:v1:t-med  (~(put z-in:zoon *seeds:v1:t-med) sed)
+    =/  sp1=spend-1:v1:t-med
+      %*  .  *spend-1:v1:t-med
+        witness  *witness:v1:t-med
+        seeds    seds
+        fee      fee
+      ==
+    =/  sig-h=hash:t-med  (sig-hash:spend-1:v1:t-med sp1)
+    =/  wit=witness:t-med
+      (make-pkh-witness:v1:h-med root sc sig-h ~[[s:default-keys-1:h-med pk]])
+    =/  sp1=spend-1:v1:t-med  sp1(witness wit)
+    =/  nam=nname:t-med  ~(name get:nnote:t-med coin)
+    (~(put z-by:zoon acc) nam [%1 sp1])
+  =/  raw=raw-tx:v1:t-med  (new:raw-tx:v1:t-med sps)
+  =/  tx-id=tx-id:t-med  ~(id get:raw-tx:t-med raw)
   ::  sanity: this fan-in tx genuinely cannot fit in a block under the small
   ::  size limit, so a rejection is really the size guard firing (not some
   ::  other check). +compute-size-without-txs is the per-block overhead floor.
-  =/  overhead=@  (compute-size-without-txs:page:t *page:t)
-  ?>  (gth (add ~(size get:raw-tx:t raw) overhead) max-block-size:t-med)
+  =/  overhead=@  (compute-size-without-txs:page:t-med *page:t-med)
+  ?>  (gth (add ~(size get:raw-tx:t-med raw) overhead) max-block-size:t-med)
   =^  effs  nockchain
     (pok:h-med [%fact %0 %heard-tx raw] nockchain)
   %+  expect-eq

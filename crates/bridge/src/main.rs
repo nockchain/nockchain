@@ -1407,6 +1407,24 @@ mod tests {
     }
 
     #[test]
+    fn expected_bridge_lock_root_uses_mainnet_only_for_default_constants() {
+        let mainnet_constants = BlockchainConstants::default();
+        let mut testing_constants = mainnet_constants.clone();
+        testing_constants.max_block_size += 1;
+
+        assert_eq!(
+            expected_bridge_lock_root_for_environment(&mainnet_constants)
+                .expect("default constants should select a valid root"),
+            canonical_mainnet_bridge_lock_root().expect("canonical mainnet root")
+        );
+        assert_eq!(
+            expected_bridge_lock_root_for_environment(&testing_constants)
+                .expect("modified constants should select a valid root"),
+            canonical_testing_bridge_lock_root().expect("canonical testing root")
+        );
+    }
+
+    #[test]
     fn resolve_effective_blockchain_constants_initializes_kernel_when_missing() {
         let connected = default_fakenet_blockchain_constants();
 

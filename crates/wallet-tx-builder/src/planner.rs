@@ -357,6 +357,19 @@ fn admit_selectable_v1_candidate<M: LockMatcher>(
             resolution_source: resolution.source,
         });
     };
+    if let Some(relative_min) = resolution.required_relative_min_blocks {
+        if !relative_min_satisfied(
+            relative_min,
+            &candidate.identity().origin_page,
+            context.current_height,
+        ) {
+            context.debug_trace.push(format!(
+                "skipped note {first}/{last}: required relative maturity {relative_min} not satisfied at height={}",
+                height_value(context.current_height)
+            ));
+            return Ok(None);
+        }
+    }
     if !timelock_satisfied(
         &spend_condition,
         &candidate.identity().origin_page,
@@ -1235,6 +1248,18 @@ fn height_value(height: &BlockHeight) -> u64 {
     (height.0).0
 }
 
+/// Evaluates an inclusive relative-minimum maturity requirement without
+/// allowing height arithmetic to wrap.
+fn relative_min_satisfied(
+    relative_min: u64,
+    note_origin_page: &BlockHeight,
+    current_height: &BlockHeight,
+) -> bool {
+    height_value(note_origin_page)
+        .checked_add(relative_min)
+        .is_some_and(|required| height_value(current_height) >= required)
+}
+
 /// Returns true when every timelock primitive in the spend condition is
 /// currently satisfiable.
 fn timelock_satisfied(
@@ -1259,11 +1284,11 @@ fn timelock_primitive_satisfied(
 ) -> bool {
     let now = height_value(current_height);
     let since = height_value(note_origin_page);
-    let rel_min_ok = tim.rel.min.as_ref().is_none_or(|min| {
-        since
-            .checked_add((min.0).0)
-            .is_some_and(|required| now >= required)
-    });
+    let rel_min_ok = tim
+        .rel
+        .min
+        .as_ref()
+        .is_none_or(|min| relative_min_satisfied((min.0).0, note_origin_page, current_height));
     let rel_max_ok = tim.rel.max.as_ref().is_none_or(|max| {
         since
             .checked_add((max.0).0)
@@ -1296,7 +1321,7 @@ mod tests {
     use nockchain_types::tx_engine::v1::tx::{LockPrimitive, LockTim, Pkh, SpendCondition};
 
     use super::*;
-    use crate::lock_resolver::LockMatcher;
+    use crate::lock_resolver::{LockMatcher, LockRootLockMatcher, PROTOCOL_FUND_NOTE_TIMELOCK_MIN};
     use crate::note_data::{
         DecodedNoteData, DecodedNoteDataEntry, DecodedNoteDataPayload, LockDataPayload,
         NormalizedNoteDataKey,
@@ -2018,6 +2043,86 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    /// Protocol-fund notes use a coinbase-wrapped first-name but reveal the
+    /// underlying multisig spend condition when spent. Both automatic and
+    /// manual planning must exclude the note one block before its immutable
+    /// 100-block maturity, then admit it at and after the inclusive boundary.
+    fn wrapped_fund_v1_notes_respect_protocol_maturity_in_auto_and_manual_modes() {
+        const FUND_ADDRESS_B58: &str = "9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up";
+        const FUND_NOTE_FIRSTNAME_B58: &str =
+            "8TvVfU7sbFoY8qV53ffUdBag7Kcqw8LXjsnYgY71nQ1biWE6giRYzkn";
+        const ORIGIN_HEIGHT: u64 = 50;
+
+        let fund_address = Hash::from_base58(FUND_ADDRESS_B58).expect("fund address");
+        let wrapped_first_name =
+            Hash::from_base58(FUND_NOTE_FIRSTNAME_B58).expect("fund note first-name");
+        let spend_condition = simple_pkh_lock(hash(777));
+
+        let mut fund_note = candidate(1, 20);
+        fund_note.identity_mut().name.first = wrapped_first_name;
+        fund_note.identity_mut().origin_page = BlockHeight(Belt(ORIGIN_HEIGHT));
+        let fund_name = fund_note.identity().name.clone();
+        let maturity_height = ORIGIN_HEIGHT + PROTOCOL_FUND_NOTE_TIMELOCK_MIN;
+
+        let matcher = LockRootLockMatcher::from_lock_root(&fund_address)
+            .expect("fund matcher")
+            .with_spend_condition(spend_condition)
+            .with_coinbase_fund_notes()
+            .expect("wrapped fund support");
+
+        for (mode_name, selection_mode) in [
+            ("auto", SelectionMode::Auto),
+            (
+                "manual",
+                SelectionMode::Manual {
+                    note_names: vec![fund_name.clone()],
+                },
+            ),
+        ] {
+            for (current_height, should_admit) in [
+                (maturity_height - 1, false),
+                (maturity_height, true),
+                (maturity_height + 1, true),
+            ] {
+                let mut request = base_request();
+                request.selection_mode = selection_mode.clone();
+                request.chain_context.height = BlockHeight(Belt(current_height));
+                request.candidates = vec![fund_note.clone()];
+                request.recipient_outputs = vec![output(42, 10)];
+                request.signer_pkh = None;
+                request.coinbase_relative_min = None;
+
+                let result = plan_create_tx(&request, &matcher);
+                if should_admit {
+                    let plan = result.unwrap_or_else(|error| {
+                        panic!(
+                            "{mode_name} mode rejected mature wrapped fund note at height \
+                             {current_height}: {error}"
+                        )
+                    });
+                    assert_eq!(
+                        plan.selected.as_slice(),
+                        &[fund_note.identity().clone()],
+                        "{mode_name} mode selected the wrong note at height {current_height}"
+                    );
+                } else {
+                    assert!(
+                        matches!(
+                            result,
+                            Err(PlanError::InsufficientFunds {
+                                selected_total: 0,
+                                ..
+                            })
+                        ),
+                        "{mode_name} mode admitted immature wrapped fund note at height \
+                         {current_height}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

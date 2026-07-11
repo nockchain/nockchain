@@ -3862,9 +3862,10 @@
 ::    in for the 3-of-4); the real constants are pinned by +test-fund-note-
 ::    firstname and +test-fund-address-is-3-of-4-multisig in coinbase-split.
 ::
-::  +test-fund-multisig-spend-valid: a correctly-revealed multisig with enough
-::    valid signatures over the spend's sig-hash is accepted.
-++  test-fund-multisig-spend-valid
+::  +test-fund-multisig-spend-maturity-boundary: a correctly-revealed
+::    multisig with enough valid signatures is rejected before the bypassed
+::    fund-note timelock matures, then accepted at and after exact maturity.
+++  test-fund-multisig-spend-maturity-boundary
   =/  pk1=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-1:h))
   =/  pk2=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-2:h))
   =/  pk3=schnorr-pubkey:t  (head ~(tap z-in pubkeys.p:default-keys-3:h))
@@ -3884,15 +3885,19 @@
       sig-ha
       ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2]]
     ==
+  =/  min-age=page-number:t  100
   =/  ctx=check-context:t
-    :*  now=1
+    :*  now=100
         since=0
         sig-hash=sig-ha
         witness=wit
         bythos-phase=bythos-phase.constants
     ==
-  %+  expect-eq  !>(%.y)
-  !>  (check-multisig-lock:check-context:t root ctx)
+  ;:  weld
+    (expect-eq !>(%.n) !>((check-multisig-lock:check-context:t root min-age ctx(now 99))))
+    (expect-eq !>(%.y) !>((check-multisig-lock:check-context:t root min-age ctx(now 100))))
+    (expect-eq !>(%.y) !>((check-multisig-lock:check-context:t root min-age ctx(now 101))))
+  ==
 ::
 ::  +test-fund-multisig-spend-insufficient-sigs: fewer than m signatures is
 ::    rejected (check:pkh requires exactly m).
@@ -3917,14 +3922,14 @@
       ~[[s:default-keys-1:h pk1]]
     ==
   =/  ctx=check-context:t
-    :*  now=1
+    :*  now=100
         since=0
         sig-hash=sig-ha
         witness=wit
         bythos-phase=bythos-phase.constants
     ==
   %+  expect-eq  !>(%.n)
-  !>  (check-multisig-lock:check-context:t root ctx)
+  !>  (check-multisig-lock:check-context:t root 100 ctx)
 ::
 ::  +test-fund-multisig-spend-wrong-target: a valid multisig witness whose
 ::    revealed spend-condition does NOT hash to the target is rejected (the
@@ -3951,7 +3956,7 @@
       ~[[s:default-keys-1:h pk1] [s:default-keys-2:h pk2]]
     ==
   =/  ctx=check-context:t
-    :*  now=1
+    :*  now=100
         since=0
         sig-hash=sig-ha
         witness=wit
@@ -3959,5 +3964,5 @@
     ==
   ::  target is the zero hash, not (hash:lock sc) -> binding fails
   %+  expect-eq  !>(%.n)
-  !>  (check-multisig-lock:check-context:t *hash:t ctx)
+  !>  (check-multisig-lock:check-context:t *hash:t 100 ctx)
 --

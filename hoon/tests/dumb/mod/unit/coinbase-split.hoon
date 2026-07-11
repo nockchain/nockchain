@@ -254,11 +254,12 @@
 ::    first-name (-.name) shared by every protocol-fund coinbase note.
 ::    Reconstructs the wrapped coinbase note lock exactly as
 ::    +make-name:coinbase does -- the single %pkh primitive over {fund-address}
-::    plus the coinbase timelock -- takes (first:nname (hash:lock ...)), and
-::    asserts it matches the pinned literal in +fund-note-firstname. This is
+::    plus the immutable fund-note maturity timelock -- takes
+::    (first:nname (hash:lock ...)), and asserts it matches the pinned literal
+::    in +fund-note-firstname. This is
 ::    the value +check:check-context special-cases to recover spendability;
 ::    drift in the participant set, the threshold, the lock structure, the
-::    +hash:lock / +first:nname formulas, or coinbase-timelock-min would all
+::    +hash:lock / +first:nname formulas, or fund-note-timelock-min would all
 ::    move it. Mirrors /scripts/generate-fund-note-name.hoon.
 ++  test-fund-note-firstname  ^-  tang
   =/  pkhs=(list hash:t)
@@ -273,10 +274,11 @@
   =/  fund-pkh-set=(z-set hash:t)  (z-silt ~[fund-addr])
   =/  pkh-prim=lock-primitive:t  [%pkh [m=1 fund-pkh-set]]
   =/  tim-prim=lock-primitive:t
-    [%tim [rel=[min=`coinbase-timelock-min.constants max=~] abs=[min=~ max=~]]]
+    [%tim [rel=[min=`fund-note-timelock-min:t max=~] abs=[min=~ max=~]]]
   =/  note-lock=lock:t  ~[pkh-prim tim-prim]
   =/  expected=hash:t  (first:nname:t (hash:lock:t note-lock))
   ;:  weld
+    (expect-eq !>(100) !>(fund-note-timelock-min:t))
     (expect-eq !>(expected) !>(fund-note-firstname:t))
     (expect-eq !>(%.y) !>(!=(*hash:t fund-note-firstname:t)))
   ==

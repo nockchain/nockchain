@@ -294,4 +294,77 @@
     :: TODO: pending blocks retention policy and state management
     ::       possibly scrutinize spend-by more
   ::
+:::
+:::  A block can arrive before a transaction that is individually too large to
+:::  fit under the configured block maximum. Receiving that valid transaction
+:::  must drive the pending-block validation path, reject the now-known
+:::  oversized block, and clear every dependency/request index.
+++  test-pending-block-rejects-oversize-tx-when-tx-arrives
+  =+  h-med=~(. helpers bc-max-block-size-medium-v0:helpers)
+  =+  t-med=~(. txe bc-max-block-size-medium-v0:helpers)
+  =+  [nockchain genesis]=init-nockchain:h-med
+  =^  pages  nockchain
+    (add-n-pages-integration:h-med genesis 85 nockchain)
+  =/  parent=page:t  (snag 84 pages)
+  =/  raw=raw-tx:t
+    %-  from-inputs:v0:raw-tx:t
+    %-  multi:new:v0:inputs:t
+    %+  turn  (scag 80 pages)
+    |=  =page:t
+    =/  coin=coinbase:t  (new:v0:coinbase:t page p:default-keys-1:h-med)
+    ?>  ?=(^ -.coin)
+    %:  simple-from-note:new:v0:input:t
+        p:default-keys-2:h-med
+        coin
+        s:default-keys-1:h-med
+    ==
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  =/  missing-raw=raw-tx:t
+    (make-raw-tx-from-coinbase:v0:h-med p:default-keys-3:h-med (snag 80 pages))
+  =/  missing-tx-id=tx-id:t  ~(id get:raw-tx:t missing-raw)
+  =/  overhead=@  (compute-size-without-txs:page:t *page:t)
+  ?>  (validate:raw-tx:t raw)
+  ?>  (gth (add ~(size get:raw-tx:t raw) overhead) max-block-size:t-med)
+  =/  pending=page:t  (make-page-with-txs:v0:h-med parent ~[tx-id missing-tx-id])
+  =/  pending-id=block-id:t  ~(digest get:page:t pending)
+  ::
+  ::  The production order under test is block first: the block waits on two
+  ::  absent transactions and asks the runtime for both.
+  =^  block-effects=(list effect:h-med)  nockchain
+    (~(heard-block k-by:h-med nockchain) pending)
+  =/  requested=(z-set:zoon tx-id:t)
+    (filter-request-tx-effects:h-med block-effects)
+  =/  missing-before=(z-set:zoon tx-id:t)
+    (z-silt:zoon ~(missing-tx-ids k-by:h-med nockchain))
+  ?>  ?&  (~(has-pending-block k-by:h-med nockchain) pending-id)
+          (~(has-bnb-raw-tx k-by:h-med nockchain) tx-id)
+          (~(has-bnb-raw-tx k-by:h-med nockchain) missing-tx-id)
+          (~(has-bnb-block-id k-by:h-med nockchain) tx-id pending-id)
+          (~(has-bnb-block-id k-by:h-med nockchain) missing-tx-id pending-id)
+          =(2 ~(wyt z-in:zoon missing-before))
+          (~(has z-in:zoon missing-before) tx-id)
+          (~(has z-in:zoon missing-before) missing-tx-id)
+          =(2 ~(wyt z-in:zoon requested))
+          (~(has z-in:zoon requested) tx-id)
+          (~(has z-in:zoon requested) missing-tx-id)
+      ==
+  ::
+  ::  Transaction second: even though the block still lacks `missing-tx-id`,
+  ::  this transaction is intrinsically too large for any block. Production
+  ::  rejects it before raw-tx insertion and rejects every pending block that
+  ::  references it, clearing the other unresolved dependency as well.
+  =^  tx-effects=(list effect:h-med)  nockchain
+    (~(heard-tx k-by:h-med nockchain) raw)
+  ?>  ?&  =(~(digest get:page:t parent) ~(heaviest-block k-by:h-med nockchain))
+          !(~(has-pending-block k-by:h-med nockchain) pending-id)
+          !(~(has-bnb-raw-tx k-by:h-med nockchain) tx-id)
+          !(~(has-bnb-raw-tx k-by:h-med nockchain) missing-tx-id)
+          !(~(has-bnb-block-id k-by:h-med nockchain) tx-id pending-id)
+          !(~(has-bnb-block-id k-by:h-med nockchain) missing-tx-id pending-id)
+          =(~ ~(missing-tx-ids k-by:h-med nockchain))
+          !(~(has-raw-tx k-by:h-med nockchain) tx-id)
+          !(~(has-excluded k-by:h-med nockchain) tx-id)
+      ==
+  ~
+  ::
 --

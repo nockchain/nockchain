@@ -4,6 +4,7 @@ use nockapp::Bytes;
 use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::zoon::zmap::ZMap;
 use nockchain_types::tx_engine::common::Signature;
+use nockchain_types::BlockchainConstants;
 use nockvm::noun::NounSpace;
 use wallet_tx_builder::types::{CandidateNote, CreateTxPlanningMode, PlanResult};
 
@@ -184,9 +185,10 @@ pub(crate) fn remove_notes_from_csv(path: &Path, removed: &[Name]) -> Result<usi
 
 /// Network default `max-block-size` in bits. The on-chain block-inclusion check
 /// (`candidate-block-below-max-size`, miner.hoon) rejects blocks larger than
-/// this (8,000,000 bits ~= 1 MB on mainnet), so a transaction that cannot fit in
-/// a block can never be mined.
-const MAX_BLOCK_SIZE_BITS: u64 = 8_000_000;
+/// this (16,000,000 bits ~= 2 MB on mainnet), so a transaction that cannot fit
+/// in a block can never be mined.
+const MAX_BLOCK_SIZE_BITS: u64 = BlockchainConstants::DEFAULT_MAX_BLOCK_SIZE;
+const BLOCK_OVERHEAD_RESERVE_BITS: u64 = 2_000_000;
 
 /// Returns a human-readable reason when `plan` would build a transaction too
 /// large to be mined, or `None` when it is within budget.
@@ -196,14 +198,14 @@ const MAX_BLOCK_SIZE_BITS: u64 = 8_000_000;
 /// planner's `witness_words` already reflects per-input cost. We add a small
 /// per-input framing allowance (input first/last name + spend wrapper) not
 /// captured by the seed/witness word counts, convert words (64-bit field
-/// leaves) to bits, and compare against the block-size budget after reserving
-/// headroom for the block's PoW proof (~720k bits) and coinbase/header overhead.
+/// leaves) to bits, and reserve the kernel's 2,000,000-bit proof allowance plus
+/// fixed block overhead.
 fn oversized_plan_reason(plan: &PlanResult) -> Option<String> {
     const BITS_PER_WORD: u64 = 64;
     const PER_INPUT_FRAMING_WORDS: u64 = 16;
-    /// Block budget for the transaction itself, reserving ~1,000,000 bits for the
-    /// PoW proof and coinbase/header overhead that share the block.
-    const TX_SIZE_BUDGET_BITS: u64 = MAX_BLOCK_SIZE_BITS - 1_000_000;
+    /// Block budget for the transaction itself after reserving the same
+    /// 2,000,000-bit proof allowance used by the consensus kernel.
+    const TX_SIZE_BUDGET_BITS: u64 = MAX_BLOCK_SIZE_BITS - BLOCK_OVERHEAD_RESERVE_BITS;
 
     let input_count = plan.selected.len() as u64;
     let estimated_words = plan
@@ -564,6 +566,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                         source: LockResolutionSource::NoteData,
                         spend_condition: Some(spend_condition.clone()),
                         spend_condition_count: None,
+                        required_relative_min_blocks: None,
                     };
                 }
             }
@@ -576,6 +579,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                     source: LockResolutionSource::ReconstructedSimplePkh,
                     spend_condition: Some(simple),
                     spend_condition_count: None,
+                    required_relative_min_blocks: None,
                 };
             }
         }
@@ -588,6 +592,7 @@ impl LockMatcher for SigningKeyLockMatcher {
                         source: LockResolutionSource::ReconstructedCoinbasePkh,
                         spend_condition: Some(coinbase),
                         spend_condition_count: None,
+                        required_relative_min_blocks: None,
                     };
                 }
             }
@@ -1596,11 +1601,11 @@ impl Wallet {
         let plan_result = if let Some(ctx) = multisig_lock.as_ref() {
             // Multisig spend: resolve inputs by the multisig lock-root's first-name
             // and carry the reconstructed spend-condition for fee/witness planning.
-            // Also accept protocol-fund coinbase notes, whose committed lock wraps
-            // the multisig lock-root in `[%pkh m=1 {lock_root}]` plus the coinbase
-            // relative timelock before the first-name is taken (the on-chain notes
-            // share `+fund-note-firstname`, not `from_lock_root(lock_root)`). This
-            // mirrors the `+check:check-context` routing to `+check-multisig-lock`.
+            // Also accept 014-aletheia protocol-fund notes, whose committed lock
+            // wraps the multisig lock-root with the immutable fund-note timelock
+            // before deriving `+fund-note-firstname`. The matcher preserves that
+            // maturity while mirroring `+check:check-context` routing to
+            // `+check-multisig-lock`.
             let matcher = match LockRootLockMatcher::from_lock_root(&ctx.lock_root) {
                 Ok(matcher) => matcher.with_spend_condition(ctx.spend_condition.clone()),
                 Err(err) => {
@@ -1610,7 +1615,7 @@ impl Wallet {
                     ));
                 }
             };
-            let matcher = match matcher.with_coinbase_fund_notes(coinbase_relative_min) {
+            let matcher = match matcher.with_coinbase_fund_notes() {
                 Ok(matcher) => matcher,
                 Err(err) => {
                     return planner_error(format!(
@@ -1651,11 +1656,11 @@ impl Wallet {
         // Fail-fast guard: refuse a plan that cannot fit in a block before the
         // kernel spends minutes building and signing it. The on-chain
         // block-inclusion check (`candidate-block-below-max-size` in miner.hoon)
-        // rejects blocks over `max-block-size` (8,000,000 bits ~= 1 MB on
+        // rejects blocks over `max-block-size` (16,000,000 bits ~= 2 MB on
         // mainnet), so a larger transaction can never be mined. Multisig inputs
         // are large (each carries the full m-of-n witness), so a high-value spend
-        // over a fund of tiny notes selects thousands of inputs and yields a
-        // multi-MB, unmineable transaction that takes many minutes to build.
+        // over a fund of tiny notes can select thousands of inputs and yield an
+        // unmineable transaction that takes many minutes to build.
         if let Some(reason) = oversized_plan_reason(&plan) {
             return planner_error(reason);
         }
@@ -2570,6 +2575,19 @@ mod tests {
 
         // A normal single-sig spend with a handful of inputs is unaffected.
         assert!(oversized_plan_reason(&plan_result_with(50, 13, 50 * 35)).is_none());
+    }
+
+    #[test]
+    fn oversized_plan_reason_enforces_inclusive_transaction_budget() {
+        // 218,750 64-bit words is exactly the 14,000,000-bit transaction
+        // budget left after reserving 2,000,000 bits from a 16,000,000-bit
+        // block. The inclusive boundary must remain mineable.
+        let at_budget = plan_result_with(0, 218_750, 0);
+        assert!(oversized_plan_reason(&at_budget).is_none());
+
+        // One additional 64-bit word crosses the budget.
+        let one_word_over = plan_result_with(0, 218_751, 0);
+        assert!(oversized_plan_reason(&one_word_over).is_some());
     }
 
     #[test]

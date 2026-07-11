@@ -85,6 +85,8 @@
 ::  $fund-address: lock-script hash receiving the 20% protocol-fund
 ::  share of every post-asert-activation coinbase. See tx-engine-1.hoon.
 ++  fund-address  fund-address:v1
+:::  $fund-note-timelock-min: relative maturity encoded in protocol-fund notes.
+++  fund-note-timelock-min  fund-note-timelock-min:v1
 ::  $fund-note-firstname: on-chain first-name of every protocol-fund coinbase
 ::  note; +check:check-context routes it to the multisig recovery. See
 ::  tx-engine-1.hoon.

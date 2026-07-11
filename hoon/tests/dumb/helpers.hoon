@@ -90,12 +90,14 @@
 ++  bc-max-block-size-medium-v0
   %*  .  default-bc
     max-block-size  `size:txe``@`(add (mul 10 (mul 8 1.024)) max-size:proof:txe)
+    max-future-timestamp  (bex 32)
     coinbase-timelock-min  0
     v1-phase  1.000.000
   ==
 ++  bc-max-block-size-medium-v1
   %*  .  default-bc
     max-block-size  `size:txe``@`(add (mul 10 (mul 8 1.024)) max-size:proof:txe)
+    max-future-timestamp  (bex 32)
     coinbase-timelock-min  0
     v1-phase  1
   ==
@@ -924,6 +926,10 @@
     |=  id=block-id:t
     ^-  ?
     (~(has h-by pending-blocks:con) id)
+  ::
+  ++  missing-tx-ids
+    ^-  (list tx-id:t)
+    ~(missing-tx-ids dcon con bc)
   ::
   ++  check-excluded
     |=  =tx-id:t

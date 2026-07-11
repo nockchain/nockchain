@@ -653,6 +653,16 @@ mod tests {
         let constants = default_fakenet_blockchain_constants();
 
         assert_eq!(
+            constants.max_block_size,
+            BlockchainConstants::DEFAULT_MAX_BLOCK_SIZE,
+            "fakenet max-block-size must match the shared consensus limit"
+        );
+        assert_eq!(
+            constants.max_block_size, 16_000_000,
+            "fakenet max-block-size consensus limit changed"
+        );
+
+        assert_eq!(
             constants.pow_len, DEFAULT_FAKENET_POW_LEN,
             "pow-len mismatch"
         );

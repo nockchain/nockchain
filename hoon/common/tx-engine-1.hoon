@@ -37,6 +37,15 @@
   ^-  hash
   (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
 ::
+:::  $fund-note-timelock-min: relative maturity encoded in every protocol-fund
+:::  coinbase note identified by +fund-note-firstname. The recovery path bypasses
+:::  the note's unsatisfiable lock, so it must enforce this original %tim
+:::  primitive separately. This is part of the on-chain lock preimage and must
+:::  not track mutable network defaults.
+++  fund-note-timelock-min
+  ^-  page-number
+  100
+:::
 ::  $fund-note-firstname: the on-chain first-name (-.name) shared by every
 ::  protocol-fund coinbase note. +make-name:coinbase wraps the coinbase-split
 ::  key (here +fund-address, itself a 3-of-4 multisig lock-root) as a single
@@ -2016,7 +2025,7 @@
     ::  firstname); recover spendability by routing it to the true multisig
     ::  check. See /scripts/generate-fund-note-name.hoon.
     ?:  =(lock fund-note-firstname)
-      (check-multisig-lock fund-address form)
+      (check-multisig-lock fund-address fund-note-timelock-min form)
     =/  bythos-ok=?
       ?:  ?=([%full * * *] lmp.witness.form)
         (gte now.form bythos-phase.form)
@@ -2050,13 +2059,14 @@
   ::  root, trust is re-derived from `target`: the spender reveals, via the
   ::  witness LMP's spend-condition field, the real spend-condition whose
   ::  +hash:lock equals `target`. Collision resistance means only the exact
-  ::  intended spend-condition passes that bind; we then require its primitives
-  ::  (the m-of-n %pkh) to be satisfied by the witness over the spend's
-  ::  sig-hash. The merkle proof is deliberately bypassed. Generic over
-  ::  `target` so the spend mechanism is testable with non-production keys;
-  ::  production passes +fund-address.
+  ::  intended spend-condition passes that bind. `min-age` restores the relative
+  ::  %tim primitive bypassed with the broken lock; the witness must also satisfy
+  ::  the revealed primitives over the spend's sig-hash. The merkle proof is
+  ::  deliberately bypassed. Generic over `target` and `min-age` so the complete
+  ::  mechanism is testable with non-production keys; production passes
+  ::  +fund-address and +fund-note-timelock-min.
   ++  check-multisig-lock
-    |=  [target=hash =form]
+    |=  [target=hash min-age=page-number =form]
     ^-  ?
     =/  sc=spend-condition
       ?:  ?=([%full * * *] lmp.witness.form)
@@ -2065,6 +2075,8 @@
       =+  [msc ax mp]=lmp.witness.form
       msc
     ?&
+    ::  preserve the relative coinbase maturity encoded by the bypassed lock
+      (check:tim [rel=[min=`min-age max=~] abs=[min=~ max=~]] form)
     ::  the revealed spend-condition must BE the spend-condition `target` commits
       =(target (hash:lock sc))
     ::  ...and the witness must satisfy it (e.g. 3 of the 4 fund signatures)
