@@ -4,6 +4,7 @@
 # These mirror the cargo recipes one-for-one but drive Bazel instead:
 #   - build / test            -> the whole Bazel graph
 #   - build-assets            -> hoonc-built kernel jams (rules_hoon)
+#   - build-assets-honk       -> the same jams built by honk inside Bazel
 #   - honk-kernel-jams        -> kernels compiled natively by the Bazel-built honk
 #   - honk-parity             -> compare the two with the Bazel-built jam-diff
 # Note: rules_hoon always invokes hoonc with `--new` in a sandbox, so the
@@ -32,6 +33,22 @@ build-assets:
     cp -f bazel-bin/assets/peek.jam assets/peek.jam
     cp -f bazel-bin/assets/bridge.jam assets/bridge.jam
     cp -f bazel-bin/assets/roswell.jam assets/roswell.jam
+    chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
+
+# honk twin of build-assets: build all six kernels with honk INSIDE Bazel
+# (parallel, resource-scheduled — the Bazel equivalent of the cargo-side
+# `just build-kernel-assets-honk`) and copy into the same assets/<kernel>.jam
+# consumer paths. Byte-identical to build-assets output; the per-kernel
+# strict-cmp parity gates (//assets/native:kernel_parity_test) guarantee it.
+build-assets-honk:
+    bazel build //assets/native:kernels
+    mkdir -p assets
+    cp -f bazel-bin/assets/native/dumb_native.jam assets/dumb.jam
+    cp -f bazel-bin/assets/native/wal_native.jam assets/wal.jam
+    cp -f bazel-bin/assets/native/miner_native.jam assets/miner.jam
+    cp -f bazel-bin/assets/native/peek_native.jam assets/peek.jam
+    cp -f bazel-bin/assets/native/bridge_native.jam assets/bridge.jam
+    cp -f bazel-bin/assets/native/roswell_native.jam assets/roswell.jam
     chmod u+w assets/dumb.jam assets/wal.jam assets/miner.jam assets/peek.jam assets/bridge.jam assets/roswell.jam
 
 # Compile every kernel natively with the Bazel-built honk into assets/native/.

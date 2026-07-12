@@ -68,6 +68,41 @@ roswell-jam:
     time target/release/hoonc --new --data-dir target/hoonc-new --output roswell.jam hoon/apps/roswell/roswell.hoon hoon
     mv roswell.jam assets/roswell.jam
 
+# honk twins of the kernel-asset recipes: same output paths (assets/<k>.jam,
+# what the cargo-side kernel crates embed via KERNEL_JAM_PATH), built by the
+# native compiler instead of hoonc. Byte-identical to the hoonc output — the
+# per-kernel strict-cmp parity gates in CI (//assets/native:<k>_parity_test)
+# guarantee it — and several times faster, so these are a drop-in alternative
+# producer for local NockApp builds. Opt-in only: nothing else invokes them.
+build-kernel-assets-honk: build-honk honk-dumb-jam honk-wal-jam honk-miner-jam honk-peek-jam honk-bridge-jam honk-roswell-jam
+
+build-honk:
+    cargo build --release -p honk
+
+honk-dumb-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
+
+honk-wal-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/wal.jam --prelude hoon/common/hoon.hoon hoon/apps/wallet/wallet.hoon hoon
+
+honk-miner-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/miner.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/miner.hoon hoon
+
+honk-peek-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/peek.jam --prelude hoon/common/hoon.hoon hoon/apps/peek/peek.hoon hoon
+
+honk-bridge-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/bridge.jam --prelude hoon/common/hoon.hoon hoon/apps/bridge/bridge.hoon hoon
+
+honk-roswell-jam:
+    mkdir -p assets
+    time target/release/honk --new --output assets/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon
+
 honk-roswell-kernel:
     mkdir -p assets/native
     cargo run --release -p honk --bin honk -- --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon

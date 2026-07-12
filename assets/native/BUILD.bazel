@@ -111,6 +111,16 @@ KERNELS = {
     for kernel in KERNELS
 ]
 
+# All six honk-built kernels in one Bazel invocation — the parallel twin of
+# //assets:kernels. The jam actions carry resource_set memory hints, so Bazel
+# schedules as many concurrent kernel compiles as local RAM allows.
+# `just bazel build-assets-honk` builds this and copies the jams into
+# assets/<kernel>.jam (the paths the cargo-side kernel crates embed).
+filegroup(
+    name = "kernels",
+    srcs = ["{}_native".format(kernel) for kernel in KERNELS],
+)
+
 # Strict byte-parity tests: `cmp` of the hoonc-built kernel against the
 # honk-built twin, both compiled inside Bazel from identical dep trees.
 # No dir-hash waiver — a PASS is byte-for-byte equality.
