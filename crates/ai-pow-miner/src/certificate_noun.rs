@@ -668,6 +668,12 @@ pub struct PearlMergeAiPowArtifactShape {
     pub statement: PearlMergePublicStatementShape,
     pub aux_inclusion: PearlAuxInclusionProof,
     pub certificate: AiPowCertificateShape,
+    /// GROUPED_GEMM (MoE) tail from an `AIM1` nonce: `PearlMoeParams` +
+    /// `routing_data`. `None` for a dense (`AIP1`) artifact. Carried so the node
+    /// `e>0` verify branch (M3) can run the routing binding + the MoE
+    /// opened-schedule commitment fold. MoE remains fail-closed at the admission
+    /// guards until M4.
+    pub moe: Option<PearlMergeMoeArtifact>,
 }
 
 /// Metadata-only view of a Pearl-format-compatible `%ai-pow` artifact.
@@ -1748,11 +1754,22 @@ pub fn decode_ai_pow_pearl_merge_artifact_noun(
     let nonce = expect_declared_bounded_bytes(
         fields[1], space, 1, AI_POW_NONCE_MAX_SIZE, "ai-pow nonce", limits,
     )?;
-    let parsed_nonce = decode_pearl_merge_ai_pow_nonce(&nonce)?;
+    // Dispatch on the nonce tag: `AIM1` (MoE) carries the routing tail, `AIP1`
+    // (dense) does not. The dense decoder rejects an `AIM1` nonce on the magic, so
+    // this branch is the only way MoE data reaches the node.
+    let (statement, aux_inclusion, moe) =
+        if nonce.len() >= 4 && nonce[0..4] == AI_POW_NONCE_MAGIC_MOE {
+            let parsed = decode_pearl_merge_ai_pow_nonce_moe(&nonce)?;
+            (parsed.statement, parsed.aux_inclusion, Some(parsed.moe))
+        } else {
+            let parsed = decode_pearl_merge_ai_pow_nonce(&nonce)?;
+            (parsed.statement, parsed.aux_inclusion, None)
+        };
     Ok(PearlMergeAiPowArtifactShape {
-        statement: parsed_nonce.statement,
-        aux_inclusion: parsed_nonce.aux_inclusion,
+        statement,
+        aux_inclusion,
         certificate: decode_ai_pow_certificate_noun(fields[2], space, limits)?,
+        moe,
     })
 }
 
