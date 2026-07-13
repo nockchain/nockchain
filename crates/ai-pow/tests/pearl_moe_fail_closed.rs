@@ -218,3 +218,121 @@ fn dense_wrong_length_still_reports_bad_len() {
         Err(PearlCompatError::BadPublicParamsLen(160)),
     );
 }
+
+// ---------------------------------------------------------------------------
+// M4 — MoE-aware admission envelope (`sanity_check_allowing_moe`).
+//
+// The dense `sanity_check` stays fail-closed on MoE (proven above). The MoE
+// admission path uses `sanity_check_allowing_moe`, which shares the IDENTICAL
+// dense dimension/pattern envelope but validates the MoE config bounds instead
+// of rejecting. These tests pin: (a) the dense envelope is genuinely shared and
+// unchanged, (b) the MoE config bounds are enforced cheaply pre-proof. The
+// detailed per-expert routing binding is covered by `pearl_moe_routing_binding`.
+// ---------------------------------------------------------------------------
+
+/// Sanity for the shared base: the dense params builder is envelope-valid, so a
+/// MoE variant of it isolates the MoE-specific behavior below.
+#[test]
+fn dense_base_params_pass_both_sanity_paths() {
+    let params = dense_public_params();
+    params.sanity_check().expect("dense base is envelope-valid");
+    params
+        .sanity_check_allowing_moe()
+        .expect("dense base also passes the MoE-aware envelope");
+}
+
+/// The dense `sanity_check` MUST remain fail-closed on any MoE config — the
+/// M4 envelope split must not weaken the dense path.
+#[test]
+fn dense_sanity_check_still_rejects_moe() {
+    for (e, top_k) in [(1u16, 0u16), (8, 2), (256, 4), (1024, 3)] {
+        let mut p = dense_public_params();
+        p.mining_config.reserved = PearlMiningConfig::moe_trailer(e, top_k);
+        assert_eq!(
+            p.sanity_check(),
+            Err(PearlCompatError::UnsupportedMoeConfig { e, top_k }),
+            "dense sanity_check must fail-close MoE e={e} top_k={top_k}",
+        );
+    }
+}
+
+/// `sanity_check_allowing_moe` ACCEPTS a valid, in-envelope MoE config (this is
+/// the gate the node MoE verify branch runs before `derive_pearl_work_commitments`).
+#[test]
+fn moe_envelope_accepts_valid_in_range_moe() {
+    for (e, top_k) in [(2u16, 1u16), (8, 2), (256, 4), (1024, 8)] {
+        let mut p = dense_public_params();
+        p.mining_config.reserved = PearlMiningConfig::moe_trailer(e, top_k);
+        p.sanity_check_allowing_moe().unwrap_or_else(|err| {
+            panic!("valid MoE e={e} top_k={top_k} must pass the envelope: {err:?}")
+        });
+    }
+}
+
+/// `sanity_check_allowing_moe` rejects `e` past the 1024-expert cap.
+#[test]
+fn moe_envelope_rejects_experts_over_cap() {
+    let mut p = dense_public_params();
+    // 1025 experts is one over PEARL_MOE_MAX_NUM_EXPERTS; top_k stays in range.
+    p.mining_config.reserved = PearlMiningConfig::moe_trailer(1025, 4);
+    assert_eq!(
+        p.sanity_check_allowing_moe(),
+        Err(PearlCompatError::MoeExpertsExceedMax(1025)),
+    );
+}
+
+/// `sanity_check_allowing_moe` rejects `top_k == 0` when `e > 0` (a MoE job must
+/// route to at least one expert).
+#[test]
+fn moe_envelope_rejects_top_k_zero() {
+    let mut p = dense_public_params();
+    p.mining_config.reserved = PearlMiningConfig::moe_trailer(8, 0);
+    assert_eq!(
+        p.sanity_check_allowing_moe(),
+        Err(PearlCompatError::MoeTopKZero { e: 8 }),
+    );
+}
+
+/// `sanity_check_allowing_moe` rejects `top_k >= e` (Pearl acceptance parity:
+/// a token routes to strictly fewer experts than exist).
+#[test]
+fn moe_envelope_rejects_top_k_not_less_than_experts() {
+    for (e, top_k) in [(4u16, 4u16), (4, 5), (8, 8)] {
+        let mut p = dense_public_params();
+        p.mining_config.reserved = PearlMiningConfig::moe_trailer(e, top_k);
+        assert_eq!(
+            p.sanity_check_allowing_moe(),
+            Err(PearlCompatError::MoeTopKNotLessThanExperts {
+                top_k: top_k as usize,
+                e: e as usize,
+            }),
+            "top_k={top_k} >= e={e} must be rejected",
+        );
+    }
+}
+
+/// The MoE envelope shares the dense dimension/pattern checks: a MoE config with
+/// out-of-envelope base dims is rejected with the SAME `PublicParamEnvelope`
+/// error as the dense path (not silently accepted because it is MoE).
+#[test]
+fn moe_envelope_shares_dense_dimension_checks() {
+    // Break a base dimension the shared envelope guards (common_dim not a
+    // multiple of 64) — dense and MoE variants must both report the envelope
+    // error, proving the check is genuinely shared.
+    let mut dense = dense_public_params();
+    dense.mining_config.common_dim = 1000; // not a multiple of 64
+    assert_eq!(
+        dense.sanity_check(),
+        Err(PearlCompatError::PublicParamEnvelope),
+        "dense: bad common_dim is an envelope error",
+    );
+
+    let mut moe = dense_public_params();
+    moe.mining_config.common_dim = 1000;
+    moe.mining_config.reserved = PearlMiningConfig::moe_trailer(8, 2);
+    assert_eq!(
+        moe.sanity_check_allowing_moe(),
+        Err(PearlCompatError::PublicParamEnvelope),
+        "MoE: the SAME bad common_dim is the SAME envelope error",
+    );
+}

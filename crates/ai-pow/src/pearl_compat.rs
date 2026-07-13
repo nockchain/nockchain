@@ -943,15 +943,60 @@ impl PearlPublicProofParams {
     }
 
     pub fn sanity_check(&self) -> Result<(), PearlCompatError> {
-        // Fail-closed on MoE (GROUPED_GEMM): the shape-aware envelope below is the
-        // dense envelope. MoE envelope validation + the grouped-tile compute land
-        // in Track B3d; until then no MoE statement is computed or accepted.
+        // Fail-closed on MoE (GROUPED_GEMM): the dense admission path never
+        // computes or accepts a MoE statement. The MoE admission path uses
+        // `sanity_check_allowing_moe`, which shares the identical dimension/pattern
+        // envelope below via `envelope_check_dims`.
         if let Some(m) = self.mining_config.moe() {
             return Err(PearlCompatError::UnsupportedMoeConfig {
                 e: m.e,
                 top_k: m.top_k,
             });
         }
+        self.envelope_check_dims()
+    }
+
+    /// Envelope check for the MoE (GROUPED_GEMM) admission path.
+    ///
+    /// Runs the **identical** dimension/pattern envelope as [`Self::sanity_check`]
+    /// (the base matmul tile shape and the global pattern-in-matrix bound are
+    /// MoE-independent) but, instead of fail-closing on a MoE config, validates
+    /// the cheap MoE config bounds (`e ≤ PEARL_MOE_MAX_NUM_EXPERTS`,
+    /// `0 < top_k < e`). The detailed per-expert routing binding — `routing_data`
+    /// well-formedness, `routing_offsets` partition, per-expert span ≤ `m`, column
+    /// clamp — is enforced separately by [`verify_pearl_moe_routing_binding`]
+    /// during the full certificate verify; this is only the cheap pre-proof gate.
+    ///
+    /// Soundness note: this method does **not** relax [`Self::sanity_check`]; the
+    /// dense path stays fail-closed on MoE. It is reachable only from the MoE
+    /// compact verify branch, which additionally requires the full recursive
+    /// certificate (`verify_pearl_moe_compact_recursive_certificate`). A MoE
+    /// ticket can therefore never be admitted on the strength of this envelope
+    /// alone.
+    pub fn sanity_check_allowing_moe(&self) -> Result<(), PearlCompatError> {
+        if let Some(m) = self.mining_config.moe() {
+            let e = m.e as usize;
+            if e > PEARL_MOE_MAX_NUM_EXPERTS {
+                return Err(PearlCompatError::MoeExpertsExceedMax(e));
+            }
+            if m.top_k == 0 {
+                return Err(PearlCompatError::MoeTopKZero { e });
+            }
+            if m.top_k >= m.e {
+                return Err(PearlCompatError::MoeTopKNotLessThanExperts {
+                    top_k: m.top_k as usize,
+                    e,
+                });
+            }
+        }
+        self.envelope_check_dims()
+    }
+
+    /// Shared dense dimension/pattern envelope for both [`Self::sanity_check`] and
+    /// [`Self::sanity_check_allowing_moe`]. This validates the base matmul tile
+    /// shape and the global row/column pattern fit — quantities that are
+    /// MoE-independent (per-expert routing is layered on top in the full verify).
+    fn envelope_check_dims(&self) -> Result<(), PearlCompatError> {
         let k = self.mining_config.common_dim;
         let r = u32::from(self.mining_config.rank);
         let h = self.h()?;
