@@ -194,6 +194,22 @@ accepts a prover-supplied one.
 >    the node recompute + compare it cheaply. *Invasive p3-recursion circuit
 >    change (L1 verifier must expose the L0 program commitment as a constrained
 >    public value).*
+>    > **Root cause + exact seam (found by reading the circuit, 2026-07-13):** in
+>    > `build_composite_l1_verifier_circuit` the L0 `common_data` — which carries
+>    > the L0 program's **preprocessed commitment** — is packed as
+>    > **prover-supplied values** and allocated as circuit *inputs*
+>    > (`recursion.rs:686` allocate, `:742` `pack_values(..., proof, common_data)`).
+>    > So the L1 circuit proves "the L0 proof is valid for the program whose
+>    > commitment the prover supplied" — the commitment is never a *public* value,
+>    > which is exactly why the program is unbound. **Fix seam:** promote that
+>    > preprocessed-commitment target to a public input alongside
+>    > `statement_digest_targets` (`recursion.rs:729-737`), thread it through
+>    > `statement_public_digest` / the L2 statement, and have the node recompute
+>    > the canonical program's MMCS preprocessed commitment and pass it in the
+>    > expected public values. **Non-localized:** changing the L1 public-input
+>    > count ripples into L2 packing (`public_binding_lanes`), the FRI shape, and
+>    > `verifier_key_digest`; validation requires real proving (does the modified
+>    > circuit still prove/verify, and does a wrong-program commitment reject?).
 > 3. **Node re-proves L0** — the node has `A`/`B`, so it can reconstruct the
 >    canonical trace, re-prove L0, and run the existing builder. *Sound but
 >    NON-succinct (re-proving defeats the compact cert's purpose) — acceptable
