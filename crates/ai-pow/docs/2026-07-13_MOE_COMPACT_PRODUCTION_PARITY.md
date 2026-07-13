@@ -413,7 +413,7 @@ From the compact-recursive production pipeline:
 | **D6 / P0** compact opened-schedule binding | ✅ **IMPLEMENTED + VALIDATED** — program-commitment **digest fold** (§4 P0). Circuit folds the L0 program commitment into the L1 statement digest; node derives the canonical commitment witness-free from the opened schedule and binds it. Validated with real proving: honest round-trip verifies + wrong-commitment rejects (21.99 s); full node round-trip at production scale (47.68 s, 122.68 KiB). D6 gap closed. |
 | **M1** MoE artifact noun | 🟡 opaque-nonce codec + DoS cap landed & tested (16 tests); builder/verify wiring remains (lands with M2/M3) |
 | **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
-| **M3** MoE compact node verify | 🟡 recursion-level verify done (M2); node branch for e>0 (MoE schedule + routing binding) remains |
+| **M3** MoE compact node verify | 🟡 **core validated** — node independently derives the MoE canonical commitment from the opened schedule (== prover's) and it binds (real proving); `certificate_noun` e>0 wiring (MoE artifact decode + routing binding) remains |
 | **M5** MoE compact size/latency | ✅ measured — 125 KB / ~26s at m=128,k=1024 (M2); production-scale MoE still to measure |
 | **M6** k≠1024 keying | ⚠️ validated only for k=1024 |
 | **M7** adversarial on compact | ❌ not ported |

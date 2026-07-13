@@ -4053,8 +4053,7 @@ mod tests {
         .expect("prove MoE Layer-0");
         let ZkProofArtifact { proof, pis, .. } = artifact;
 
-        // P0/D6: the MoE canonical program commitment the node would derive
-        // witness-free from the opened schedule.
+        // P0/D6: the MoE canonical program commitment, from the prover's program.
         let trace_height = expected_layer0_rows_for_strip_schedule(&params, &strip_schedule)
             .expect("MoE trace height")
             .required_trace_len();
@@ -4063,6 +4062,32 @@ mod tests {
             &zk_params, &profile, &prover_program,
         );
         assert!(!commit.is_empty());
+
+        // M3 (node-side soundness): the NODE rebuilds the MoE canonical program
+        // INDEPENDENTLY from the opened schedule (outer_indices / expert-columns)
+        // + the work commitments — never the prover's program — and derives the
+        // same commitment. This is what `certificate_noun` must do for `e>0`.
+        let block_public = ai_pow_zk::canonical::BlockPublic {
+            tile_i: 0,
+            tile_j: 0,
+            kappa,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+        };
+        let node_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
+            &zk_params,
+            &strip_schedule,
+            &block_public,
+            trace_height,
+        )
+        .expect("node-side MoE canonical program");
+        let node_commit = ai_pow_zk::recursion::canonical_l0_program_commitment_vals(
+            &zk_params, &profile, &node_program,
+        );
+        assert_eq!(
+            node_commit, commit,
+            "node-derived MoE commitment must equal the prover's program commitment (M3)"
+        );
 
         let verified_l0 = unsafe {
             ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
@@ -4082,9 +4107,9 @@ mod tests {
         let decoded = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode MoE compact cert");
         ai_pow_zk::recursion::verify_compact_batch_recursive_certificate_with_context(
-            &run.verifier_context, decoded, &pis, &commit,
+            &run.verifier_context, decoded, &pis, &node_commit,
         )
-        .expect("MoE compact certificate verifies with its program commitment");
+        .expect("MoE compact certificate verifies with the NODE-derived commitment (M3)");
 
         // M7 adversarial: a wrong program commitment must reject (D6 for MoE).
         let decoded_wrong = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
