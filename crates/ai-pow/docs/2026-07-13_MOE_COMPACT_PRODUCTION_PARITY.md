@@ -415,8 +415,8 @@ From the compact-recursive production pipeline:
 | **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
 | **M3** MoE compact node verify | 🟡 **core validated** — node independently derives the MoE canonical commitment from the opened schedule (== prover's) and it binds (real proving); `certificate_noun` e>0 wiring (MoE artifact decode + routing binding) remains |
 | **M5** MoE compact size/latency | ✅ measured — 125 KB / ~26s at m=128,k=1024 (M2); production-scale MoE still to measure |
-| **M6** k≠1024 keying | ⚠️ validated only for k=1024 |
-| **M7** adversarial on compact | ❌ not ported |
+| **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
+| **M7** adversarial on compact | 🟡 wrong-commitment reject validated for MoE (M2/M6); routing-binding adversarial port to node remains (with M3 wiring) |
 | **M4** lift fail-closed guards | 🔒 gated on all above |
 | **D4/S1** Hoon↔Rust consensus wiring | ❌ fail-closed (shared with dense) |
 

@@ -3996,14 +3996,19 @@ mod tests {
     /// proves a MoE compact certificate and verifies it against the MoE canonical
     /// program commitment, then checks a wrong commitment is rejected (D6 binding
     /// on the compact path, for the MoE program).
-    #[test]
-    #[ignore = "real MoE compact recursive proof generation is opt-in (M2)"]
-    fn real_moe_compact_recursive_certificate_proves_and_verifies() {
+    /// M2 (compact prove) + M3-core (node-independent commitment) + M6 (k≠1024)
+    /// + M7 (wrong-commitment reject) for a MoE grouped tile on the compact cert.
+    fn moe_compact_prove_verify_and_bind(
+        m: usize,
+        k: usize,
+        n_e: usize,
+        e: usize,
+        r: usize,
+        top_k: usize,
+    ) {
         use crate::commit::matrix_commitment;
         use crate::pearl_moe_routing::build_routing_data;
 
-        let (m, k, n_e, e, r) = (128usize, 1024usize, 64usize, 2usize, 64usize);
-        let top_k = 1usize;
         let params = MatmulParams {
             m: m as u32,
             k: k as u32,
@@ -4130,7 +4135,28 @@ mod tests {
             "MoE compact cert should stay within the relaxed size gate: {}",
             bytes.len()
         );
-        eprintln!("M2 MoE compact cert: {} bytes, trace_height={}", bytes.len(), trace_height);
+        eprintln!(
+            "MoE compact cert (k={k}, r={r}): {} bytes, trace_height={}",
+            bytes.len(),
+            trace_height
+        );
+    }
+
+    /// M2/M3/M7 — MoE on the compact cert at k=1024 (the validated selective-keying
+    /// baseline).
+    #[test]
+    #[ignore = "real MoE compact recursive proof generation is opt-in (M2)"]
+    fn real_moe_compact_recursive_certificate_proves_and_verifies() {
+        moe_compact_prove_verify_and_bind(128, 1024, 64, 2, 64, 1);
+    }
+
+    /// M6 — MoE on the compact cert at **k=4096 ≠ 1024** (16r ≤ k ≤ 4r², k/r=64 ≤
+    /// STRIPE_MAX). Confirms the selective-opening lane↔chunk keying holds for the
+    /// scattered MoE schedule when a row spans ⌈k/1024⌉>1 chunks.
+    #[test]
+    #[ignore = "real MoE compact recursive proof generation is opt-in (M6)"]
+    fn real_moe_compact_recursive_certificate_k_neq_1024() {
+        moe_compact_prove_verify_and_bind(128, 4096, 64, 2, 64, 1);
     }
 
     /// Opt-in because this builds a real Layer-0 proof and recursive
