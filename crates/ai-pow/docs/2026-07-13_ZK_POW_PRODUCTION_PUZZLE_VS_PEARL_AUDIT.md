@@ -538,6 +538,15 @@ strip / disable a selector-gated constraint and still verify.
 
 ### G.3 Feasibility of a verifier-side builder, and the wall
 
+> **⚠️ SUPERSEDED (2026-07-13) — read `2026-07-13_MOE_COMPACT_PRODUCTION_PARITY.md`
+> §4 P0 instead.** The "wall" below assumes the fix must *rebuild the verifier
+> context's `circuit_prover_data`* (which needs a shape-correct `BatchProof`). It
+> does **not**: the sound fix binds only the L0 program's preprocessed commitment
+> — a tiny value the verifier derives **witness-free** via `logup_common_for`
+> (`composite_proof.rs:405`) — by folding it into the L2 **statement digest**. No
+> shape-proof synthesizer and no re-proving are needed. P0 is **tractable**; the
+> analysis below is kept only for the record.
+
 - The L1 verifier circuit allocates the inner L0 proof as circuit **inputs**
   (`BatchStarkVerifierInputsBuilder::allocate`, `recursion.rs:686`), so the
   circuit structure — and thus `circuit_prover_data` — is **witness-independent**:

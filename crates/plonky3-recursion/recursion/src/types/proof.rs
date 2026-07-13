@@ -155,6 +155,15 @@ pub struct CommonDataTargets<SC: StarkGenericConfig, Comm> {
     pub lookups: Vec<Vec<Lookup<Val<SC>>>>,
 }
 
+impl<SC: StarkGenericConfig, Comm> CommonDataTargets<SC, Comm> {
+    /// The preprocessed-trace commitment target, if this instance has preprocessed
+    /// data. Exposed so a recursive verifier circuit can bind the inner program's
+    /// commitment as a public value (ai-pow P0/D6: pin the opened schedule).
+    pub fn preprocessed_commitment(&self) -> Option<&Comm> {
+        self.preprocessed.as_ref().map(|p| &p.commitment)
+    }
+}
+
 impl<SC: StarkGenericConfig, Comm> Recursive<SC::Challenge> for CommonDataTargets<SC, Comm>
 where
     Comm: Recursive<

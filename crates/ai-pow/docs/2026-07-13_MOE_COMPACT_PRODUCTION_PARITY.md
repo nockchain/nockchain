@@ -156,69 +156,67 @@ that path until the builder lands.
 Dependency-ordered. Each stage: KAT/de-risk first, full regression + adversarial
 gates, commit per validated stage (per R1). "M#" cross-reference the residual.
 
-### P0 — D6 verifier-side canonical context builder (MoE-aware) — *prerequisite, shared with dense* — 🚧 **attempted 2026-07-13; blocked at a concrete API wall**
-Build `AiPowCompactBatchVerifierContext` (or at least the pinned
-`circuit_prover_data` + expected `verifier_key_digest`) from the **canonical
-program** re-derived from the public opened schedule
-(`canonical_program_for_strip_schedule` + noise pins + the 60 PIs), via
-`logup_common_for` → `build_composite_l1_verifier_circuit` →
-`build_compact_batch_l1_prep` → `build_compact_batch_l2_over_l1_prep`. **Design it
-MoE-aware from the start** so the dense and MoE canonical programs share one
-builder. Node rewiring: the compact verify path builds its own context; never
-accepts a prover-supplied one.
+### P0 — D6 compact opened-schedule binding — *prerequisite, shared with dense* — 🟢 **UNBLOCKED 2026-07-13: tractable via program-commitment digest fold (do NOT re-derive the "shape-proof wall")**
 
-> **Concrete wall (found by attempting the code path, 2026-07-13):** the context's
-> `circuit_prover_data` cannot be built from the canonical program alone.
-> - `build_composite_l1_verifier_circuit` (`recursion.rs:632`) takes a
->   `BatchProof<AiPowStarkConfig>` — the **L0 proof**, which the compact cert
->   deliberately omits. It uses the proof only for *shape* (allocated as circuit
->   inputs), but `BatchStarkProof` wraps a real FRI `BatchProof<SC>`
->   (`batch_stark_prover.rs:532`) and there is **no shape-only / dummy
->   constructor** — you cannot synthesize a stand-in.
-> - The path to `circuit_prover_data` also runs through
->   `prove_compact_batch_l1_with_prep` → `run_composite_l1_verifier_traces`
->   (`recursion.rs:1021,1027`), which consume the **actual L0 proof values** to
->   produce the L1 outer proof that `build_compact_batch_l2_over_l1_prep`
->   (`recursion.rs:1520`) needs. So even though the *final* `circuit_prover_data`
->   is witness-independent (confirmed: `build_compact_batch_l1_prep` keys on
->   `circuit_shape`, `recursion.rs:1012`), the *route* to it requires real proofs.
->
-> **⇒ Three sound options, each a large invasive change requiring real-proving +
-> adversarial validation (out of a single session; half-landing forbidden by R1):**
-> 1. **Shape-proof synthesizer** — add a p3-recursion API to construct a
->    dimensionally-valid `BatchProof`/`BatchStarkProof` scaffold from
->    (params, trace_height, FRI shape) so the verifier builds the context from
->    shapes, keeping verify succinct. *New, soundness-adjacent p3 capability.*
-> 2. **Program-commitment binding** — bind the canonical L0 program's
->    preprocessed commitment into the L2 statement/`verifier_key_digest` and have
->    the node recompute + compare it cheaply. *Invasive p3-recursion circuit
->    change (L1 verifier must expose the L0 program commitment as a constrained
->    public value).*
->    > **Root cause + exact seam (found by reading the circuit, 2026-07-13):** in
->    > `build_composite_l1_verifier_circuit` the L0 `common_data` — which carries
->    > the L0 program's **preprocessed commitment** — is packed as
->    > **prover-supplied values** and allocated as circuit *inputs*
->    > (`recursion.rs:686` allocate, `:742` `pack_values(..., proof, common_data)`).
->    > So the L1 circuit proves "the L0 proof is valid for the program whose
->    > commitment the prover supplied" — the commitment is never a *public* value,
->    > which is exactly why the program is unbound. **Fix seam:** promote that
->    > preprocessed-commitment target to a public input alongside
->    > `statement_digest_targets` (`recursion.rs:729-737`), thread it through
->    > `statement_public_digest` / the L2 statement, and have the node recompute
->    > the canonical program's MMCS preprocessed commitment and pass it in the
->    > expected public values. **Non-localized:** changing the L1 public-input
->    > count ripples into L2 packing (`public_binding_lanes`), the FRI shape, and
->    > `verifier_key_digest`; validation requires real proving (does the modified
->    > circuit still prove/verify, and does a wrong-program commitment reject?).
-> 3. **Node re-proves L0** — the node has `A`/`B`, so it can reconstruct the
->    canonical trace, re-prove L0, and run the existing builder. *Sound but
->    NON-succinct (re-proving defeats the compact cert's purpose) — acceptable
->    only as a correctness-first stopgap, not production.*
->
-> R1.1 self-test satisfied: the load-bearing code was actually traced/attempted
-> and the wall is concrete (a missing constructor / a required circuit change),
-> not a size objection. The next session should pick option (1) or (2) and land
-> it with the cross-schedule adversarial test (M7) as one validated unit.
+> **READ THIS FIRST — it corrects an earlier wrong conclusion.** A previous pass
+> concluded P0 was "blocked at a concrete API wall" because *rebuilding the
+> verifier context's `circuit_prover_data`* needs a real L0 `BatchProof` the
+> compact cert omits (and `BatchStarkProof` has no shape-only constructor). **That
+> framing was wrong about the fix.** You do **not** need to rebuild
+> `circuit_prover_data`, and you do **not** need a shape-proof synthesizer or to
+> re-prove L0. The sound fix binds one small, deterministic value.
+
+**The actual situation.** The Layer-0 (composite) STARK is *already* program-pinned:
+the verifier rebuilds the canonical program from the trusted per-block context and
+derives its preprocessed commitment **witness-free** via
+`ProverData::from_airs_and_degrees` — see `composite_proof.rs:343-348` and
+`logup_common_for` (`composite_proof.rs:405-421`, `pub(crate)` precisely "so the
+recursion integration can obtain the CommonData the recursive verifier needs").
+The gap is only that the **compact recursion does not carry that pin**: in
+`build_composite_l1_verifier_circuit` the L0 `common_data` (which holds the L0
+program's preprocessed commitment) is packed as a **prover-supplied witness**
+(`recursion.rs:742` `pack_values(..., proof, common_data)`), and the L1 statement
+digest hashes only the L0 public values (`recursion.rs:713-737`,
+`air_public_targets[0]`), **not** the commitment. So the L2 proves "the L0 proof
+verified against *some* program whose commitment the prover chose."
+
+**The fix (concrete, code-grounded, NOT gigantic):** fold the L0 program
+commitment into the **statement digest** (the value the L2 actually proves — not
+`verifier_key_digest`, which is only a metadata check and is *not* proof-bound),
+and have the node derive the canonical commitment witness-free and fold the same
+value into its expected digest. The commitment is tiny (`CompositeComm =
+MerkleCapTargets<Val, DIGEST_ELEMS>`, `recursion.rs:557` — a few field elements),
+deterministic from the public opened schedule, and **verifier-derived, not
+transmitted** — so proof size is unchanged and nothing new rides the wire.
+
+Exact edits:
+1. **Reachability primitive (done):** `CommonDataTargets::preprocessed_commitment()`
+   accessor added in `plonky3-recursion/recursion/src/types/proof.rs` (the target
+   was `pub(crate)`; `CompositeComm: Into<Vec<ExprId>>` — verified it flattens).
+2. **Circuit** (`build_composite_l1_verifier_circuit`, `recursion.rs:713-740`):
+   extend the Tip5 statement-digest sponge to absorb
+   `air_public_targets[0] ‖ flatten(common_data.preprocessed.commitment)`, and set
+   `statement_public_values = statement_public_digest(public_values ‖
+   commitment_vals)` (the value flatten of `common_data`'s commitment — the arg is
+   the *value* `&CommonData`, so both sides are available).
+3. **Node** (`statement_public_digest` / `compact_batch_l1_public_values_for_statement`,
+   `recursion.rs:390-412`): absorb `60 PIs ‖ canonical_commitment_vals`, where
+   `canonical_commitment_vals = flatten(logup_common_for(cfg, canonical_program,
+   sx_bound).preprocessed.commitment)` — witness-free, using the program the node
+   already rebuilds (`canonical_program_for_strip_schedule`).
+4. **Correctness crux:** the value-flatten (node, `MerkleCap<Val, DIGEST_ELEMS>`)
+   and the target-flatten (circuit, `MerkleCapTargets` `Into<Vec<ExprId>>`) MUST
+   use the same digest order. Add a shared flatten helper and a KAT that a target
+   built from a value flattens identically.
+5. **MoE-aware for free:** the MoE canonical program is just a different
+   `Program`; `logup_common_for` handles it. No MoE-specific work in P0 itself.
+
+**Validation (real-proving gated — the reason this is one atomic unit):**
+(a) the existing compact round-trip (`compact_batch_recursive_certificate_round_trip_for_test_pearl`,
+`#[ignore]`) must still prove+verify; (b) **adversarial:** a cert proven over one
+opened schedule verified against the canonical context for a *different* same-shape
+schedule must **reject** (the D6/M7 test). Land circuit + node + both tests as one
+commit; per R1 do not commit any subset that leaves the linchpin half-bound.
 
 ### M1 — MoE artifact noun shape + canonical encode/decode — 🟡 **codec landed 2026-07-13; artifact wiring remains**
 Extend the compact `%ai-pow` artifact to carry `PearlMoeParams` (`expert_idx`,
@@ -365,7 +363,7 @@ From the compact-recursive production pipeline:
 | MoE circuit + selective opening (diagnostic-L1) | ✅ done, validated |
 | MoE routing-consistency binding | ✅ done (`verify_pearl_moe_routing_binding`, ~10 adversarial) |
 | MoE opened-schedule binding (diagnostic-L1) | ✅ done (`l0_program_matches`) |
-| **D6 / P0** compact opened-schedule binding | 🚧 attempted in code → concrete API wall (no shape-proof constructor; context needs real L0/L1 proofs). 3 options scoped (§4 P0). **Not fixed** — the invasive p3-recursion change is out of one session and half-landing is forbidden (R1). |
+| **D6 / P0** compact opened-schedule binding | 🟢 **UNBLOCKED** — tractable via program-commitment **digest fold** (§4 P0). The commitment is witness-free-derivable by the verifier (`logup_common_for`), tiny, and deterministic — no shape-proof synthesizer / re-prove needed (the earlier "wall" was about rebuilding the context, which the fix avoids). Reachability accessor landed; circuit+node fold + adversarial test remain (one atomic, real-proving-gated unit). |
 | **M1** MoE artifact noun | 🟡 opaque-nonce codec + DoS cap landed & tested (16 tests); builder/verify wiring remains (lands with M2/M3) |
 | **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
 | **M3** MoE compact node verify | ❌ not started |
