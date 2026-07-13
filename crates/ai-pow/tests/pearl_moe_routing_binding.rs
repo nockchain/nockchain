@@ -370,3 +370,52 @@ fn routing_entries_at_cap_passes_entries_guard() {
         PearlCompatError::MoeRoutingDataLenMismatch { .. }
     ));
 }
+
+/// Pearl acceptance parity (`sanity_checks.rs:132`) — `outer_indices` must be
+/// strictly increasing. An unsorted or duplicated opened set is Pearl-invalid;
+/// accepting it would be a merge-mining divergence. The check fires before the
+/// gather, so a Pearl-rejected order is caught even when it would otherwise
+/// gather-match.
+#[test]
+fn unsorted_or_duplicate_outer_indices_rejected() {
+    let (config, routing, mut moe) = valid();
+    moe.outer_indices = vec![2, 0]; // valid is [0,2]; reversed is unsorted
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOuterIndicesNotSortedUnique)
+    );
+    let (config, routing, mut moe) = valid();
+    moe.outer_indices = vec![0, 0]; // duplicate
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOuterIndicesNotSortedUnique)
+    );
+}
+
+/// Pearl acceptance parity (`sanity_checks.rs:69`) — `top_k > 0`. The trailer
+/// parse permits `top_k == 0` for `e > 0`, so the routing binding must reject the
+/// degenerate no-routing config explicitly, matching Pearl.
+#[test]
+fn top_k_zero_rejected() {
+    let (e, top_k, m) = (2usize, 0usize, 4u32);
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+    };
+    // top_k=0 ⇒ m*top_k=0 ⇒ empty routing; reach the top_k guard with matching
+    // empty routing_data + zero offsets.
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![0, 0],
+        hash_routing: [0u8; 32],
+        outer_indices: vec![],
+    };
+    assert_eq!(
+        verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &[], 4096),
+        Err(PearlCompatError::MoeTopKZero { e })
+    );
+}

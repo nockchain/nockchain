@@ -77,6 +77,15 @@ this plan moves it into the bottom-right (compact) cell.
   (`pearl_compat.rs:1460`) — the opened A-rows (`outer_indices`) provably match
   the committed routing; ~10 adversarial tests, plus the expert-column clamp
   (`local < n_e`, prevents bleeding into a neighbour expert's weights).
+  > **Acceptance-parity fixes (2026-07-13, found by re-auditing vs Pearl
+  > `sanity_checks.rs`):** the binding was missing two Pearl checks — it now
+  > rejects **`top_k == 0`** (Pearl `:69`) and **non-strictly-increasing
+  > `outer_indices`** (Pearl `:132`, sorted, no duplicates). Both are configs
+  > Pearl's own verifier rejects; accepting them would have been a merge-mining
+  > divergence (a ticket valid for us but not for Pearl). New errors
+  > `MoeTopKZero` / `MoeOuterIndicesNotSortedUnique`; +2 adversarial tests.
+  > (`n·e ≤ 2²⁴` is not a gap: our `n` is the total column count, so the dense
+  > `n ≤ 2²⁴` bound already covers Pearl's per-expert `n·e ≤ 2²⁴`.)
 - **Opened-schedule binding:** `verify_pearl_moe_recursive_certificate`
   (`zk_bridge.rs:1577`) binds the opened set via
   `from_indices(outer_indices, expert-columns)` + `l0_program_matches`

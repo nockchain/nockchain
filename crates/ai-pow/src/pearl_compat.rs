@@ -114,6 +114,10 @@ pub enum PearlCompatError {
     MoeOuterIndexOutsideExpert { expert_idx: u16, pos: u32 },
     #[error("Pearl MoE outer_indices do not match the expert's routed tokens (gather mismatch)")]
     MoeOuterIndicesMismatch,
+    #[error("Pearl MoE outer_indices must be strictly increasing (sorted, no duplicates)")]
+    MoeOuterIndicesNotSortedUnique,
+    #[error("Pearl MoE top_k must be > 0 in the GROUPED_GEMM setting (e={e})")]
+    MoeTopKZero { e: usize },
     #[error("unsupported Pearl MMA type: {0}")]
     UnsupportedMmaType(u16),
     #[error("Pearl mining config common_dim does not match params.k")]
@@ -1546,6 +1550,13 @@ pub fn verify_pearl_moe_routing_binding(
     // or `top_k >= e`) that Pearl rejects — a merge-mining divergence, and a
     // routing the difficulty model never priced. `offsets[0] <= m` is the span of
     // expert 0 (start 0), covered by the loop below.
+    // Pearl acceptance parity (`sanity_checks.rs`): `top_k > 0`. `top_k == 0` is a
+    // degenerate routing (no token routed anywhere) that Pearl rejects; the
+    // trailer parse permits it for `e > 0`, so gate it here explicitly rather than
+    // relying on a downstream "outside expert" rejection.
+    if top_k == 0 {
+        return Err(PearlCompatError::MoeTopKZero { e });
+    }
     if top_k >= e {
         return Err(PearlCompatError::MoeTopKNotLessThanExperts { top_k, e });
     }
@@ -1574,6 +1585,16 @@ pub fn verify_pearl_moe_routing_binding(
             expected: inner.len(),
             actual: moe.outer_indices.len(),
         });
+    }
+    // Pearl acceptance parity (`sanity_checks.rs`): `outer_indices` are the opened
+    // A-row (token) positions and must be **strictly increasing** — distinct rows
+    // in canonical order. Pearl rejects any ticket whose opened set is unsorted or
+    // has duplicates; without this check we would accept a Pearl-invalid ticket (a
+    // merge-mining divergence, and an opened set the difficulty model never priced).
+    // The gather below binds each `outer_indices[u]` to a routed token, but that
+    // alone does not force the sorted/distinct order Pearl requires.
+    if !moe.outer_indices.windows(2).all(|w| w[0] < w[1]) {
+        return Err(PearlCompatError::MoeOuterIndicesNotSortedUnique);
     }
     let expert_start = if moe.expert_idx == 0 {
         0u32
