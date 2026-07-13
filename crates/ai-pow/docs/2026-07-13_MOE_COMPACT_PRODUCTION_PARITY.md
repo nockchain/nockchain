@@ -24,14 +24,27 @@ track lives in one place.
   opened-schedule binding) is now **✅ DONE + validated** (program-commitment
   digest fold, §4 P0) — so the compact path binds the opened schedule for both
   dense and MoE.
-- **Order:** ~~fix D6~~ **(done)** → land MoE compact prove/verify (**M1–M3**,
-  now unblocked) → size/latency + k≠1024 + adversarial (**M5–M7**) → **lift the
-  fail-closed guards last (M4)**. Actual mainnet acceptance additionally waits on
-  the Hoon↔Rust consensus wiring (**D4/S1**), which is shared with dense.
-- **Nothing is mis-accepted today:** MoE is fail-closed at four independent
-  guards, and the compact node-verify path is not wired into consensus (Hoon
-  rejects `%ai-pow`). This is a *build-forward* plan, not a live-vulnerability
-  fix.
+- **Order:** ~~fix D6~~ **(done)** → ~~MoE compact prove (**M2**)~~ **(done)** →
+  ~~MoE artifact codec + decode dispatch (**M1**)~~ **(done, encoder remains)** →
+  ~~MoE compact verify *logic* (**M3**)~~ **(done)** → **the node verify branch +
+  its jackpot/target binding (M3 residual)** → size/latency + k≠1024 + adversarial
+  (**M5–M7**, largely done on the verify logic) → **lift the admission guards last
+  (M4 admission half)**. Actual mainnet acceptance additionally waits on the
+  Hoon↔Rust consensus wiring (**D4/S1**), shared with dense.
+- **Coupling finding (2026-07-13):** the M4 *envelope* guard (`sanity_check`
+  fail-closing MoE) is a **prerequisite** for the M3 node branch, not a follow-on
+  — the node can't recompute work commitments for a MoE ticket while the envelope
+  rejects it. Split + landed as `sanity_check_allowing_moe` (dense path
+  byte-identical, not wired to admission). The *admission* guards stay last.
+- **The one genuinely-unbuilt soundness piece** is the node's MoE **jackpot ≤
+  target** binding (§4 M3): the recursive verify checks matmul + schedule + seeds
+  but **not** difficulty — dense binds it in the precheck via the opened tile, and
+  MoE must do the same via `compute_moe_tile`. It needs a MoE statement fixture to
+  validate; per R1 it lands with that validation, not before.
+- **Nothing is mis-accepted today:** MoE is fail-closed at the admission guards,
+  the new MoE envelope is not wired into admission, and the compact node-verify
+  path is not wired into consensus (Hoon rejects `%ai-pow`). This is a
+  *build-forward* plan, not a live-vulnerability fix.
 
 ---
 
@@ -274,13 +287,21 @@ wire cap is `PublicDataMaxSizeV2 = 4807`.)
 > fuzz, trailing-byte rejection, faithful-carry); full miner suite green
 > (137 passed, 6 ignored).
 >
+> **Decode plumbing landed (validated) 2026-07-13:** `PearlMergeAiPowArtifactShape`
+> now carries `moe: Option<PearlMergeMoeArtifact>`, and
+> `decode_ai_pow_pearl_merge_artifact_noun` **dispatches on the nonce tag** — an
+> `AIM1` nonce decodes via `decode_pearl_merge_ai_pow_nonce_moe` into
+> `Some(moe)`; a dense `AIP1` nonce is byte-identical and yields `None` (the only
+> construction site touched is the decoder; dense path unchanged). This carries
+> the MoE tail to the node so the `e>0` verify branch (M3) can reach the validated
+> `verify_pearl_moe_compact_recursive_certificate`. Full miner suite green.
+>
 > **Remaining (still M1):** thread the MoE fields through the **artifact builders**
-> (`build_ai_pow_pearl_merge_artifact_noun_from_ticket_*`) and the **decode +
-> statement-precheck** path (`decode_ai_pow_pearl_merge_artifact_*`,
-> `precheck_ai_pow_pearl_merge_artifact_statement_*`) so a full MoE artifact
-> round-trips and feeds `verify_pearl_moe_routing_binding`. That wiring is only
-> exercisable end-to-end once M2 (MoE compact prove) produces a MoE ticket, so it
-> lands with M2/M3. MoE stays fail-closed at every verify gate throughout.
+> (`build_ai_pow_pearl_merge_artifact_noun_from_ticket_*`) — encode side — so a
+> full MoE artifact noun round-trips. Only needed to construct a MoE artifact
+> *noun* end-to-end (the M3 verify branch can be validated directly on a
+> `PearlMergeAiPowArtifactShape` without the noun encoder). MoE stays fail-closed
+> at every admission gate throughout.
 
 > **⚠️ New documented Pearl-narrowing (routing_data DoS cap):** our native routing
 > binding carries the full `routing_data` (`m·top_k` u32s) publicly and recomputes
@@ -315,14 +336,67 @@ automatically (Layer-0/trace property).
 > which also validates **M5** (size/latency) for MoE at this scale. MoE stays
 > fail-closed at the node admission gates; this is the prove+recursion path.
 
-### M3 — MoE node verify branch on compact
+### M3 — MoE node verify branch on compact — 🟡 **verify LOGIC done + validated 2026-07-13; node branch + jackpot/target binding remain (precise residual below)**
 Wire MoE soundness verification into
-`verify_decoded_ai_pow_pearl_merge_compact_artifact` for `e > 0`: recompute `s_A`
-from the carried routing, run `verify_pearl_moe_routing_binding`, recompute + bind
-the MoE canonical program **through the P0 context** (the compact analogue of
-`l0_program_matches`), then verify the compact cert. This is porting
-`verify_pearl_moe_recursive_certificate`'s logic from diagnostic-L1 to the compact
-boundary.
+`verify_decoded_ai_pow_pearl_merge_compact_artifact` for `e > 0`.
+
+> **DONE + VALIDATED — the MoE compact verify LOGIC:**
+> `verify_pearl_moe_compact_recursive_certificate` (`zk_bridge.rs`) is the compact
+> counterpart of `verify_pearl_moe_recursive_certificate`: identical routing
+> binding + expert-column recompute + routing-spliced `s_A`/PI binding, with the
+> opened-schedule binding done via the **P0/D6 program-commitment digest fold**
+> (`canonical_l0_program_commitment_vals`) instead of `l0_program_matches`.
+> Validated by `real_moe_compact_recursive_certificate_proves_and_verifies` and
+> `..._k_neq_1024` (real proving, k=1024 and k=4096): proves+verifies, node
+> independently derives the same program commitment, wrong-commitment rejected,
+> forged-routing rejected.
+
+> **⚠️ Precise residual — the node verify BRANCH + the jackpot/target binding.**
+> Two pieces remain to wire `verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits`
+> for `artifact.moe.is_some()`:
+>
+> 1. **A MoE work precheck** (analogue of the dense `verify_pearl_compatible_work`,
+>    which the dense branch runs via `precheck_ai_pow_pearl_merge_artifact_statement_with_context`).
+>    It must NOT reuse the dense precheck — that goes through `sanity_check`, which
+>    fail-closes MoE. It uses the new **`sanity_check_allowing_moe`** (M4, landed)
+>    for the envelope, then: verify aux inclusion + `nock_block_commitment` +
+>    `aux_commitment` (consensus binding, unchanged from dense — the
+>    `verify_pearl_merge_mining_public_data` prefix before `sanity_check`);
+>    recompute `kappa`/`h_a`/`h_b` via `derive_pearl_work_commitments(sigma, mu, a, b)`.
+>
+> 2. **The jackpot/target binding — soundness-critical, and the reason this can't
+>    be rushed.** ⚠️ *Neither* `verify_pearl_moe_recursive_certificate` *nor*
+>    `verify_pearl_moe_compact_recursive_certificate` checks
+>    `hash_jackpot ≤ target`. For BOTH dense and MoE, the recursive verify binds
+>    only matmul correctness + opened schedule + seeds (`s_A`/`h_A`/`h_B`/`kappa`
+>    PIs); the **difficulty check is the node precheck's job** (dense does it in
+>    `verify_pearl_compatible_work`: `verify_pearl_pattern_ticket` recomputes the
+>    opened tile → `jackpot_hash`, asserts `== public_params.hash_jackpot`, then
+>    `hash_le_target`). The MoE branch must do the same via the MoE tile:
+>    recompute the opened tile with **`compute_moe_tile`** from the schedule the
+>    verify already derives — `outer_indices` (public, in `artifact.moe`),
+>    `b_cols_global` (from `moe_expert_b_cols_global` on the public column pattern),
+>    and the recomputed `s_A`/`s_B` — take its `jackpot_hash`, assert
+>    `== public_params.hash_jackpot`, then `hash_le_target(jackpot, nockchain_adjusted_target)`.
+>    Soundness of this binding rests on the PI chain: `h_A = commit(a)` and
+>    `h_B = commit(b)` (PIs) pin the node's matrices to the proven ones, and the
+>    program-commitment fold pins the opened rows/cols — so the node's tile
+>    recompute *is* the proven tile. A bug here would admit a valid MoE proof that
+>    does **not** meet difficulty (or reject valid ones): a consensus break that
+>    compiles clean and passes every non-proving unit test. Per R1 it must land
+>    with its validation, not before it.
+>
+> **What its validation requires (the concrete wall this session hit):** a full
+> **MoE merge-mining statement fixture** — a `block_header` + MoE `public_data`
+> (mining_config with `e>0`, `m`/`n`/`t_rows`/`t_cols`) + `aux` + `aux_inclusion`
+> + a `nockchain_target` the recomputed MoE jackpot actually meets — paired with a
+> real MoE compact certificate (from M2's `prove_compact_batch_from_verified_l0`
+> path, ~26 s). No such MoE statement fixture exists yet (the dense fixtures are
+> dense-only, and the M2 test validates `verify_pearl_moe_compact_recursive_certificate`
+> at the kappa/h_a/h_b level, below the statement layer). Building that fixture so
+> the recomputed jackpot meets the target — and the aux commitment binds — is the
+> next validated stage. The branch is directly testable on a
+> `PearlMergeAiPowArtifactShape` (no noun encoder needed).
 
 ### M5 — compact size/latency validation for a MoE tile
 The selective-opening trace is O(tile), comparable to dense, so ≤ 150 KB / ~30 s
@@ -342,14 +416,31 @@ from the diagnostic-L1 boundary to the compact node boundary — including the D
 against the *other* schedule's canonical context must reject), now for the MoE
 program.
 
-### M4 — lift the four `e>0` fail-closed guards — **LAST**
-`pearl_compat.rs:850, 929, 1087` + the FP8 guard (`params.rs:488`). Only after
-P0 + M1–M3 + M5–M7 and the full adversarial suite are green on compact. This is
-the mainnet-enabling step; land it staged, per R1.
-
-> Note: the D3 fix (Pearl's `h·w ≤ 256` per-tile cap, now enforced in
-> `sanity_check`) already applies to MoE — it fires once the guards lift, since
-> `sanity_check` currently fail-closes on MoE *before* reaching the shape checks.
+### M4 — lift the `e>0` fail-closed guards — split into the envelope guard (done, a prerequisite) and the admission guards (LAST)
+> **Re-scoped 2026-07-13 (a coupling finding).** The node MoE verify branch (M3)
+> must run an envelope check that *accepts* a MoE config before it can reach
+> `derive_pearl_work_commitments` + the validated compact verify. But the
+> `sanity_check` MoE guard (was `pearl_compat.rs:929`) fail-closes at the first
+> line. So the **envelope guard is a hard prerequisite for M3, not a follow-on**.
+>
+> **Envelope guard — DONE + VALIDATED 2026-07-13.** Split the shared dense
+> dimension/pattern envelope into a private `envelope_check_dims`; the dense
+> `sanity_check` is **byte-identical** (still fail-closes MoE) and a new
+> **`sanity_check_allowing_moe`** runs the identical envelope but validates the
+> MoE config bounds (`e ≤ 1024`, `0 < top_k < e`) instead of rejecting. It is
+> **not wired to admission** — reachable only from the (still-to-land) M3 branch,
+> which additionally requires the full recursive certificate — so no MoE ticket
+> can be admitted on the envelope alone. 6 new fast tests
+> (`pearl_moe_fail_closed.rs`); dense regression green (81/81 across
+> compat+routing+wire). The D3 `h·w ≤ 256` per-tile cap is inside the shared
+> envelope, so it now applies to MoE too.
+>
+> **Admission guards — still LAST (mainnet-enabling).** The *recursive-prover
+> acceptance* guard (`validate_pearl_merge_config_for_recursive_prover`,
+> `pearl_compat.rs:~1108`) + the FP8 guard (`params.rs:488`) + any remaining
+> `UnsupportedRecursivePearlParams` MoE fail-close stay closed until P0 + M1–M3 +
+> M5–M7 and the full adversarial suite are green on compact. These are what gate
+> actual block acceptance; lifting them is the final staged step, per R1.
 
 ---
 
@@ -411,13 +502,13 @@ From the compact-recursive production pipeline:
 | MoE routing-consistency binding | ✅ done (`verify_pearl_moe_routing_binding`, ~10 adversarial) |
 | MoE opened-schedule binding (diagnostic-L1) | ✅ done (`l0_program_matches`) |
 | **D6 / P0** compact opened-schedule binding | ✅ **IMPLEMENTED + VALIDATED** — program-commitment **digest fold** (§4 P0). Circuit folds the L0 program commitment into the L1 statement digest; node derives the canonical commitment witness-free from the opened schedule and binds it. Validated with real proving: honest round-trip verifies + wrong-commitment rejects (21.99 s); full node round-trip at production scale (47.68 s, 122.68 KiB). D6 gap closed. |
-| **M1** MoE artifact noun | 🟡 opaque-nonce codec + DoS cap landed & tested (16 tests); builder/verify wiring remains (lands with M2/M3) |
-| **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
-| **M3** MoE compact node verify | ✅ **verify logic done + validated** — `verify_pearl_moe_compact_recursive_certificate` (routing binding + s_A + PI binding + opened-schedule commitment fold); honest verify + forged-routing reject (real proving 34.35s). `certificate_noun` decode-dispatch plumbing (AIM1 artifact → this fn) remains |
+| **M1** MoE artifact noun | 🟡 codec + DoS cap (16 tests) **and** artifact **decode dispatch** landed — `PearlMergeAiPowArtifactShape.moe` populated from an `AIM1` nonce, dense `AIP1` byte-identical. Artifact **builders** (encode side) remain (not needed to validate M3) |
+| **M2** MoE compact prove | ✅ **done + validated** — MoE Layer-0 wraps + drives `prove_compact_batch_from_verified_l0` (program-generic); real proving 26.38 s, 125,237-byte cert |
+| **M3** MoE compact node verify | 🟡 **verify LOGIC done + validated** — `verify_pearl_moe_compact_recursive_certificate` (routing binding + s_A + PI binding + P0 opened-schedule fold); honest verify + forged-routing + wrong-commitment reject (real proving, k=1024 & k=4096). **Node BRANCH + jackpot/target binding remain** (§4 M3): the recursive verify does NOT check `hash_jackpot ≤ target` — that difficulty gate is the node precheck's job (via `compute_moe_tile`), and validating it needs a MoE merge-mining statement fixture. **Soundness-critical; not to be rushed unvalidated (R1).** |
 | **M5** MoE compact size/latency | ✅ measured — 125 KB / ~26s at m=128,k=1024 (M2); production-scale MoE still to measure |
 | **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
-| **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** rejects validated on the compact node path |
-| **M4** lift fail-closed guards | 🔒 gated on all above |
+| **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** rejects validated on the compact verify logic (extends to the node branch once it lands) |
+| **M4** envelope guard (`sanity_check_allowing_moe`) | ✅ **done + validated** (prerequisite for M3; dense `sanity_check` byte-identical, 6 new tests, 81/81 regression). **Admission guards** (recursive-prover acceptance + FP8) 🔒 still LAST |
 | **D4/S1** Hoon↔Rust consensus wiring | ❌ fail-closed (shared with dense) |
 
 ---
