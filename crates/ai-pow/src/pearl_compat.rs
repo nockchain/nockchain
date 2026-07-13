@@ -92,6 +92,8 @@ pub enum PearlCompatError {
     MoeRouting(#[from] crate::pearl_moe_routing::RoutingError),
     #[error("Pearl MoE routing_data length {actual} must equal m*top_k = {expected}")]
     MoeRoutingDataLenMismatch { expected: u64, actual: usize },
+    #[error("Pearl MoE routing entries m*top_k={numel} exceed the DoS cap {max}")]
+    MoeRoutingEntriesExceedMax { numel: u64, max: usize },
     #[error("Pearl MoE routing commitment does not match the committed routing_root")]
     MoeRoutingRootMismatch,
     #[error("Pearl MoE routing token index {token} at slot {slot} is out of range (m={m})")]
@@ -631,6 +633,21 @@ pub const PEARL_MOE_MIN_WIRE_SIZE: usize = PEARL_PUBLIC_PROOF_PARAMS_SIZE + 2 + 
 pub const PEARL_MOE_MAX_WIRE_SIZE: usize = PEARL_MOE_MIN_WIRE_SIZE
     + PEARL_MOE_MAX_OUTER_INDICES * 4
     + PEARL_MOE_MAX_NUM_EXPERTS * PEARL_MOE_ROUTING_OFFSET_BYTES;
+
+/// DoS cap on the flat `routing_data` (`m·top_k` u32 token indices) carried for
+/// the native routing binding.
+///
+/// The Nockchain recursive certificate binds routing **natively** — it carries
+/// `routing_data` publicly and recomputes
+/// `routing_root == matrix_commitment(routing_data)`
+/// ([`verify_pearl_moe_routing_binding`]) — whereas Pearl keeps routing off-wire
+/// and binds opened routing strips in-circuit, allowing `m·top_k` up to 2³². This
+/// cap bounds the accepted MoE space to `m·top_k ≤ PEARL_MOE_MAX_ROUTING_ENTRIES`
+/// and caps every layer that allocates or hashes `routing_data` (the artifact
+/// nonce codec **and** this binding function). **Documented Pearl-narrowing**;
+/// closing it means moving the routing binding in-circuit. `1 << 20` u32s = 4 MiB,
+/// matching the jammed-artifact DoS budget.
+pub const PEARL_MOE_MAX_ROUTING_ENTRIES: usize = 1 << 20;
 
 /// The MoE-specific public parameters carried in the `public_data` tail (Pearl
 /// `MoEParams`). `e` and `top_k` live in the mining-config trailer, not here.
@@ -1490,6 +1507,17 @@ pub fn verify_pearl_moe_routing_binding(
     let numel = (m as u64)
         .checked_mul(top_k as u64)
         .ok_or(PearlCompatError::PublicParamEnvelope)?;
+    // DoS cap: bound m*top_k before the O(numel) token loop + routing hash, so a
+    // crafted config cannot force unbounded work here even if a caller supplied an
+    // oversized routing_data. Mirrors the artifact-codec cap
+    // (`PEARL_MOE_MAX_ROUTING_ENTRIES`); a documented narrowing of Pearl's MoE
+    // space (Pearl binds routing in-circuit and does not wire routing_data).
+    if numel > PEARL_MOE_MAX_ROUTING_ENTRIES as u64 {
+        return Err(PearlCompatError::MoeRoutingEntriesExceedMax {
+            numel,
+            max: PEARL_MOE_MAX_ROUTING_ENTRIES,
+        });
+    }
     if routing_data.len() as u64 != numel {
         return Err(PearlCompatError::MoeRoutingDataLenMismatch {
             expected: numel,

@@ -196,6 +196,11 @@ wire cap is `PublicDataMaxSizeV2 = 4807`.)
 > known scale (m=131072, top_k=2 ⇒ 262144), but a **narrowing of Pearl's MoE space
 > and a wire-size divergence**. Closing it means moving the routing binding
 > in-circuit (Pearl's approach). This is a D2-class discrepancy, MoE-specific.
+> The cap constant lives in `pearl_compat` and is enforced at **both** layers: the
+> artifact nonce codec (before decode allocation) and
+> `verify_pearl_moe_routing_binding` (before the O(m·top_k) token loop + routing
+> hash), with boundary tests on each. Defense-in-depth: the binding does not rely
+> on the codec having already capped the input.
 
 ### M2 — MoE prove path that emits the *compact* cert
 There is no `prove_pearl_moe_compact` today. Evaluate the MoE ticket

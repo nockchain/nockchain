@@ -7,7 +7,7 @@ use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
     moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError, PearlMiningConfig,
     PearlMoeParams, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
-    PEARL_MMA_INT7XINT7_TO_INT32,
+    PEARL_MMA_INT7XINT7_TO_INT32, PEARL_MOE_MAX_ROUTING_ENTRIES,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
 
@@ -311,5 +311,62 @@ fn pattern_position_beyond_expert_tokens_rejected() {
     assert!(matches!(
         verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, M, 0, &routing.routing_data, 4096),
         Err(PearlCompatError::MoeOuterIndexOutsideExpert { expert_idx: 0, pos: 5 })
+    ));
+}
+
+/// A config with `m·top_k` over [`PEARL_MOE_MAX_ROUTING_ENTRIES`] is rejected by
+/// the DoS cap *before* the O(m·top_k) token loop / routing hash. The cap fires
+/// ahead of the length / partition / root checks, so an empty `routing_data` and
+/// placeholder offsets suffice — we are asserting the guard, not the data.
+#[test]
+fn routing_entries_exceeding_cap_rejected() {
+    let m: u32 = (PEARL_MOE_MAX_ROUTING_ENTRIES as u32) + 1; // numel = m*1 > cap
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(2, 1), // e=2, top_k=1
+    };
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![0, 0], // len == e; values irrelevant (cap fires first)
+        hash_routing: [0u8; 32],
+        outer_indices: vec![],
+    };
+    assert!(matches!(
+        verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &[], 4096),
+        Err(PearlCompatError::MoeRoutingEntriesExceedMax { numel, max })
+            if numel == m as u64 && max == PEARL_MOE_MAX_ROUTING_ENTRIES
+    ));
+}
+
+/// At exactly the cap the entries-guard passes (it is `>`, not `>=`), so the
+/// function proceeds to the length check — proving the boundary is admitted and
+/// the cap is not off-by-one.
+#[test]
+fn routing_entries_at_cap_passes_entries_guard() {
+    let m: u32 = PEARL_MOE_MAX_ROUTING_ENTRIES as u32; // numel = cap exactly
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(2, 1),
+    };
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![0, 0],
+        hash_routing: [0u8; 32],
+        outer_indices: vec![],
+    };
+    // Empty routing_data at the cap fails the *length* check, not the entries cap.
+    let err = verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &[], 4096)
+        .expect_err("empty routing_data at cap must still fail the length check");
+    assert!(matches!(
+        err,
+        PearlCompatError::MoeRoutingDataLenMismatch { .. }
     ));
 }

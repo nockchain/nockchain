@@ -36,7 +36,7 @@ use ai_pow::pearl_compat::{
     PearlNockchainAux, PearlPatternTicket, PearlPublicProofParams, PearlWorkCommitments,
     PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
     PEARL_INCOMPLETE_BLOCK_HEADER_SIZE, PEARL_MINING_CONFIG_SIZE, PEARL_MOE_MAX_NUM_EXPERTS,
-    PEARL_MOE_MAX_OUTER_INDICES, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
+    PEARL_MOE_MAX_OUTER_INDICES, PEARL_MOE_MAX_ROUTING_ENTRIES, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
 };
 #[cfg(test)]
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
@@ -73,22 +73,6 @@ pub const AI_POW_NONCE_MAX_SIZE: usize = 4
 /// [`AI_POW_NONCE_MAGIC`] so the dense wire stays byte-identical and a decoder
 /// dispatches on the tag; a dense decoder rejects a MoE nonce (and vice versa).
 pub const AI_POW_NONCE_MAGIC_MOE: [u8; 4] = *b"AIM1";
-
-/// DoS cap on the carried `routing_data` (the flat `m·top_k` token array).
-///
-/// The Nockchain recursive certificate binds routing **natively** — it carries
-/// `routing_data` publicly and recomputes
-/// `routing_root == matrix_commitment(routing_data)`
-/// (`pearl_compat::verify_pearl_moe_routing_binding`) — rather than via Pearl's
-/// in-circuit routing CTL. Pearl therefore never wires `routing_data` (only
-/// `hash_routing` + `routing_offsets` + `outer_indices`) and allows `m·top_k`
-/// up to 2³². Carrying the full array bounds our accepted MoE space to
-/// `m·top_k ≤ PEARL_MOE_MAX_ROUTING_ENTRIES` and caps the decoder allocation
-/// against a crafted nonce. **This is a documented narrowing of Pearl's MoE
-/// space** (see `2026-07-13_MOE_COMPACT_PRODUCTION_PARITY.md`); closing it means
-/// moving the routing binding in-circuit (Pearl's approach). `1 << 20` u32s =
-/// 4 MiB, matching the jammed-artifact DoS budget.
-pub const PEARL_MOE_MAX_ROUTING_ENTRIES: usize = 1 << 20;
 
 /// Upper bound on a MoE `ai-pow-nonce` (dense envelope + MoE tail + routing block).
 pub const AI_POW_NONCE_MOE_MAX_SIZE: usize = AI_POW_NONCE_MAX_SIZE
