@@ -1682,6 +1682,115 @@ pub fn verify_pearl_moe_recursive_certificate(
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
 }
 
+/// M3 — the **compact** counterpart of [`verify_pearl_moe_recursive_certificate`].
+///
+/// Identical MoE statement binding (routing-consistency, expert-column recompute,
+/// routing-spliced `s_A` + public-input binding), but the opened-schedule binding
+/// is the P0/D6 program-commitment **digest fold** instead of `l0_program_matches`:
+/// the node derives the canonical MoE program commitment witness-free from the
+/// public opened schedule (`outer_indices` / expert-columns) and the compact verify
+/// rejects any certificate proven over a different program.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pearl_moe_compact_recursive_certificate(
+    context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    cert: ai_pow_zk::recursion::AiPowCompactBatchRecursiveCertificate,
+    pis: &ai_pow_zk::composite_public::CompositePublicInputs,
+    params: &MatmulParams,
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    mining_config: &crate::pearl_compat::PearlMiningConfig,
+    moe: &crate::pearl_compat::PearlMoeParams,
+    m: u32,
+    t_rows: u32,
+    t_cols: u32,
+    routing_data: &[u32],
+    max_pattern_len: usize,
+) -> Result<(), BridgeError> {
+    use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
+
+    // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
+    crate::pearl_compat::verify_pearl_moe_routing_binding(
+        kappa,
+        mining_config,
+        moe,
+        m,
+        t_rows,
+        routing_data,
+        max_pattern_len,
+    )
+    .map_err(BridgeError::PearlMergeStatement)?;
+
+    // (2) Recompute the opened B-columns from the PUBLIC column pattern offset by
+    // the expert (per-expert `local < n_e` clamp; audit N1).
+    let cfg = mining_config
+        .moe()
+        .ok_or(BridgeError::PearlMergeStatement(
+            crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
+        ))?;
+    let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
+        mining_config,
+        cfg.e,
+        params.n,
+        moe.expert_idx,
+        t_cols,
+        max_pattern_len,
+    )
+    .map_err(BridgeError::PearlMergeStatement)?;
+
+    // (3) Recompute s_A from the routing splice and bind the public inputs.
+    let routing_offsets_le: Vec<u8> = moe
+        .routing_offsets
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let hash_offsets = crate::commit::matrix_commitment(&routing_offsets_le, kappa);
+    let hash_routing = moe_hash_routing(&moe.hash_routing, &hash_offsets);
+    let hash_activations = moe_hash_activations(h_a, &hash_routing);
+    let s_b = noise_seed_b(kappa, h_b);
+    let s_a = noise_seed_a(&s_b, &hash_activations);
+    expect_pi_eq(&pis.commitment_hash, &bytes_to_words_le(&s_a), "COMMITMENT_HASH")?;
+    expect_pi_eq(&pis.hash_a, &bytes_to_words_le(h_a), "HASH_A")?;
+    expect_pi_eq(&pis.hash_b, &bytes_to_words_le(h_b), "HASH_B")?;
+    expect_pi_eq(&pis.job_key, &bytes_to_words_le(kappa), "JOB_KEY")?;
+
+    // (4) Opened-schedule binding (P0/D6 compact fold): derive the canonical MoE
+    // program commitment from the public schedule — never the prover's program.
+    let zk_params = zk_params_from(params);
+    let schedule = ai_pow_zk::canonical::StripIndexSchedule::from_indices(
+        &zk_params,
+        moe.outer_indices.clone(),
+        b_cols_global,
+    )
+    .map_err(BridgeError::ZkParamsInvalid)?;
+    let trace_height =
+        expected_layer0_rows_for_strip_schedule(params, &schedule)?.required_trace_len();
+    let bp = ai_pow_zk::canonical::BlockPublic {
+        tile_i: 0,
+        tile_j: 0,
+        kappa: *kappa,
+        s_a,
+        s_b,
+    };
+    let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
+        &zk_params,
+        &schedule,
+        &bp,
+        trace_height,
+    )
+    .map_err(BridgeError::ZkParamsInvalid)?;
+    let profile = CircuitConfig::for_layer0_trace(trace_height);
+    let commit = ai_pow_zk::recursion::canonical_l0_program_commitment_vals(
+        &zk_params, &profile, &expected_program,
+    );
+
+    // (5) Verify the compact certificate; the P0 fold binds it to `expected_program`.
+    ai_pow_zk::recursion::verify_compact_batch_recursive_certificate_with_context(
+        context, cert, pis, &commit,
+    )
+    .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
+}
+
 /// Build the selected compact final-layer batch-STARK recursive certificate for
 /// a Pearl-compatible merge-mined ticket.
 ///
@@ -4129,6 +4238,76 @@ mod tests {
             &run.verifier_context, decoded_wrong, &pis, &wrong,
         )
         .expect_err("MoE compact cert must reject a wrong L0 program commitment (D6)");
+
+        // M3 — the FULL node MoE verify on the compact path: routing-consistency
+        // binding + routing-spliced s_A + public-input binding + the opened-schedule
+        // commitment fold, all from the public statement (never the prover).
+        let mining_config = crate::pearl_compat::PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: crate::pearl_compat::PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            cols_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            reserved: crate::pearl_compat::PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+        let moe_params = crate::pearl_compat::PearlMoeParams {
+            expert_idx: expert_idx as u16,
+            routing_offsets: routing.routing_offsets.clone(),
+            hash_routing: ticket.commitment.routing_root,
+            outer_indices: ticket.outer_indices.clone(),
+        };
+        let node_cert = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode for node MoE verify");
+        verify_pearl_moe_compact_recursive_certificate(
+            &run.verifier_context,
+            node_cert,
+            &pis,
+            &params,
+            &kappa,
+            &h_a,
+            &h_b,
+            &mining_config,
+            &moe_params,
+            m as u32,
+            0,
+            0,
+            &routing.routing_data,
+            4096,
+        )
+        .expect("full node MoE compact verify (routing + PI + schedule binding)");
+
+        // M7: a forged routing (valid tokens, wrong committed root) is rejected.
+        let node_cert_bad =
+            ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+                .expect("decode for forged-routing test");
+        let mut bad_routing = routing.routing_data.clone();
+        bad_routing[0] ^= 1;
+        assert!(
+            verify_pearl_moe_compact_recursive_certificate(
+                &run.verifier_context,
+                node_cert_bad,
+                &pis,
+                &params,
+                &kappa,
+                &h_a,
+                &h_b,
+                &mining_config,
+                &moe_params,
+                m as u32,
+                0,
+                0,
+                &bad_routing,
+                4096,
+            )
+            .is_err(),
+            "forged routing must be rejected on the compact node path (M7)"
+        );
 
         assert!(
             bytes.len() < 150_000,

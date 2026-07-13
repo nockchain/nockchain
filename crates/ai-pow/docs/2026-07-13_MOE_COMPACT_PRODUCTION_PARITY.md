@@ -413,10 +413,10 @@ From the compact-recursive production pipeline:
 | **D6 / P0** compact opened-schedule binding | ✅ **IMPLEMENTED + VALIDATED** — program-commitment **digest fold** (§4 P0). Circuit folds the L0 program commitment into the L1 statement digest; node derives the canonical commitment witness-free from the opened schedule and binds it. Validated with real proving: honest round-trip verifies + wrong-commitment rejects (21.99 s); full node round-trip at production scale (47.68 s, 122.68 KiB). D6 gap closed. |
 | **M1** MoE artifact noun | 🟡 opaque-nonce codec + DoS cap landed & tested (16 tests); builder/verify wiring remains (lands with M2/M3) |
 | **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
-| **M3** MoE compact node verify | 🟡 **core validated** — node independently derives the MoE canonical commitment from the opened schedule (== prover's) and it binds (real proving); `certificate_noun` e>0 wiring (MoE artifact decode + routing binding) remains |
+| **M3** MoE compact node verify | ✅ **verify logic done + validated** — `verify_pearl_moe_compact_recursive_certificate` (routing binding + s_A + PI binding + opened-schedule commitment fold); honest verify + forged-routing reject (real proving 34.35s). `certificate_noun` decode-dispatch plumbing (AIM1 artifact → this fn) remains |
 | **M5** MoE compact size/latency | ✅ measured — 125 KB / ~26s at m=128,k=1024 (M2); production-scale MoE still to measure |
 | **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
-| **M7** adversarial on compact | 🟡 wrong-commitment reject validated for MoE (M2/M6); routing-binding adversarial port to node remains (with M3 wiring) |
+| **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** rejects validated on the compact node path |
 | **M4** lift fail-closed guards | 🔒 gated on all above |
 | **D4/S1** Hoon↔Rust consensus wiring | ❌ fail-closed (shared with dense) |
 
