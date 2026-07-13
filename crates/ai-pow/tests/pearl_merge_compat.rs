@@ -623,6 +623,49 @@ fn pearl_recursive_prover_config_preflight_accepts_bounded_patterns() {
     );
 }
 
+/// Pearl's reference prover (`structure_matmul_in_stark`) and verifier sanity
+/// check both hard-reject a tile with `h·w > 256`. The merge path must mirror
+/// that exactly: an oversize tile is out of Pearl's envelope and un-provable in
+/// one Layer-0 STARK (the trace scales as `h·w·(k/r)`). This pins the bound and
+/// its boundary (`h·w == 256` accepted).
+#[test]
+fn pearl_recursive_prover_config_rejects_tile_hw_above_256() {
+    let params = MatmulParams {
+        m: 32,
+        k: 1024,
+        n: 32,
+        noise_rank: 64,
+        tile: 16,
+        spot_checks: 1,
+        difficulty_bits: 0,
+    };
+    // h = w = 18 => h·w = 324 > 256. Every other envelope constraint holds
+    // (k=1024, r=64, k/r=16 ≤ STRIPE_MAX, worker_input ≪ 2^22, offsets in
+    // range), so `h·w > 256` is the sole reason for rejection.
+    let oversize = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: simple_pattern(18),
+        cols_pattern: simple_pattern(18),
+        reserved: [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
+    };
+    assert_eq!(
+        validate_pearl_merge_config_for_recursive_prover(&oversize, &params, 32),
+        Err(PearlCompatError::PublicParamEnvelope),
+        "h·w = 324 > 256 must be rejected to match Pearl's per-tile cap"
+    );
+
+    // Boundary: h = w = 16 => h·w == 256 is exactly at Pearl's cap and accepted.
+    let at_cap = PearlMiningConfig {
+        rows_pattern: simple_pattern(16),
+        cols_pattern: simple_pattern(16),
+        ..oversize
+    };
+    validate_pearl_merge_config_for_recursive_prover(&at_cap, &params, 32)
+        .expect("h·w == 256 is exactly at Pearl's per-tile cap and must be accepted");
+}
+
 #[test]
 fn pearl_public_proof_params_round_trip_and_sanity_match_reference_shape() {
     let pattern = pearl_compat_test_pattern();

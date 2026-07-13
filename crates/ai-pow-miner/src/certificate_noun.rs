@@ -32,10 +32,11 @@ use ai_pow::pearl_compat::{
     verify_pearl_aux_inclusion, verify_pearl_merge_public_statement_bytes,
     verify_pearl_merge_public_statement_bytes_with_aux_inclusion, PearlAuxInclusionProof,
     PearlCompatError, PearlIncompleteBlockHeader, PearlMergeMiningPrecheck,
-    PearlMergePublicStatement, PearlMergeTicketAttempt, PearlNockchainAux, PearlPatternTicket,
-    PearlPublicProofParams, PearlWorkCommitments, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
-    PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH, PEARL_INCOMPLETE_BLOCK_HEADER_SIZE,
-    PEARL_PUBLIC_PROOF_PARAMS_SIZE,
+    PearlMergePublicStatement, PearlMergeTicketAttempt, PearlMiningConfig, PearlMoeParams,
+    PearlNockchainAux, PearlPatternTicket, PearlPublicProofParams, PearlWorkCommitments,
+    PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
+    PEARL_INCOMPLETE_BLOCK_HEADER_SIZE, PEARL_MINING_CONFIG_SIZE, PEARL_MOE_MAX_NUM_EXPERTS,
+    PEARL_MOE_MAX_OUTER_INDICES, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
 };
 #[cfg(test)]
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
@@ -67,6 +68,37 @@ pub const AI_POW_NONCE_MAX_SIZE: usize = 4
     + PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES
     + 1
     + 32 * PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH;
+
+/// Magic tag for a MoE (GROUPED_GEMM) `ai-pow-nonce`. Distinct from the dense
+/// [`AI_POW_NONCE_MAGIC`] so the dense wire stays byte-identical and a decoder
+/// dispatches on the tag; a dense decoder rejects a MoE nonce (and vice versa).
+pub const AI_POW_NONCE_MAGIC_MOE: [u8; 4] = *b"AIM1";
+
+/// DoS cap on the carried `routing_data` (the flat `m·top_k` token array).
+///
+/// The Nockchain recursive certificate binds routing **natively** — it carries
+/// `routing_data` publicly and recomputes
+/// `routing_root == matrix_commitment(routing_data)`
+/// (`pearl_compat::verify_pearl_moe_routing_binding`) — rather than via Pearl's
+/// in-circuit routing CTL. Pearl therefore never wires `routing_data` (only
+/// `hash_routing` + `routing_offsets` + `outer_indices`) and allows `m·top_k`
+/// up to 2³². Carrying the full array bounds our accepted MoE space to
+/// `m·top_k ≤ PEARL_MOE_MAX_ROUTING_ENTRIES` and caps the decoder allocation
+/// against a crafted nonce. **This is a documented narrowing of Pearl's MoE
+/// space** (see `2026-07-13_MOE_COMPACT_PRODUCTION_PARITY.md`); closing it means
+/// moving the routing binding in-circuit (Pearl's approach). `1 << 20` u32s =
+/// 4 MiB, matching the jammed-artifact DoS budget.
+pub const PEARL_MOE_MAX_ROUTING_ENTRIES: usize = 1 << 20;
+
+/// Upper bound on a MoE `ai-pow-nonce` (dense envelope + MoE tail + routing block).
+pub const AI_POW_NONCE_MOE_MAX_SIZE: usize = AI_POW_NONCE_MAX_SIZE
+    + 2
+    + PEARL_MOE_MAX_NUM_EXPERTS * 4
+    + 32
+    + 1
+    + PEARL_MOE_MAX_OUTER_INDICES * 4
+    + 4
+    + PEARL_MOE_MAX_ROUTING_ENTRIES * 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CertificateNounError {
@@ -347,6 +379,296 @@ pub fn decode_pearl_merge_ai_pow_nonce(
         aux_inclusion: PearlAuxInclusionProof {
             coinbase_tx,
             merkle_branch,
+        },
+    })
+}
+
+/// Rust-owned MoE (GROUPED_GEMM) contents carried alongside a Pearl-compatible
+/// statement in a MoE `ai-pow-nonce`.
+///
+/// `moe` is the Pearl `MoEParams` tail (`expert_idx`, `routing_offsets`,
+/// `hash_routing`, `outer_indices`); `routing_data` is the flat `m·top_k`
+/// per-expert-sorted token array the node needs to recompute the routing
+/// commitment (`verify_pearl_moe_routing_binding`). This codec only carries and
+/// bounds these values; it performs **no** semantic validation (routing length
+/// vs `m·top_k`, token ranges, root binding, gather) — that is the verifier's
+/// job, and MoE stays fail-closed at every production admission gate until the
+/// compact prove/verify path (M2/M3) and the D6 binding land.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMergeMoeArtifact {
+    pub moe: PearlMoeParams,
+    pub routing_data: Vec<u32>,
+}
+
+/// Decoded MoE `ai-pow-nonce`: the dense-framed Pearl statement + aux inclusion,
+/// plus the MoE tail and `routing_data`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMergeAiPowNonceMoeShape {
+    pub statement: PearlMergePublicStatementShape,
+    pub aux_inclusion: PearlAuxInclusionProof,
+    pub moe: PearlMergeMoeArtifact,
+}
+
+/// Expert count `e` from a 164-byte Pearl core `public_data`, via a canonical
+/// `MiningConfiguration` parse of the leading 52 bytes (which enforces the
+/// trailer rules: reserved-zero, `top_k == 0` when `e == 0`). Returns `0` for a
+/// dense (non-MoE) core.
+fn moe_expert_count_from_core(
+    core: &[u8; PEARL_PUBLIC_PROOF_PARAMS_SIZE],
+) -> Result<usize, CertificateNounError> {
+    let cfg = PearlMiningConfig::from_bytes(&core[0..PEARL_MINING_CONFIG_SIZE])?;
+    Ok(cfg.moe().map_or(0, |m| m.e as usize))
+}
+
+/// Encode a MoE (GROUPED_GEMM) `ai-pow-nonce`.
+///
+/// Additive to [`encode_pearl_merge_ai_pow_nonce`]: the dense statement + aux
+/// framing is produced verbatim (so the 164-byte core, aux commitment, and aux
+/// inclusion are byte-identical to the dense path), the envelope is retagged with
+/// [`AI_POW_NONCE_MAGIC_MOE`], and the Pearl MoE tail
+/// (`expert_idx ‖ routing_offsets ‖ hash_routing ‖ outer_count ‖ outer_indices`,
+/// matching `PearlPublicProofParams::to_wire_bytes_moe`) plus the natively-bound
+/// `routing_data` block (`len(u32 LE) ‖ data[u32 LE]`) are appended.
+///
+/// `statement.public_data` must be a GROUPED_GEMM core (`e > 0`) with
+/// `e == moe.moe.routing_offsets.len()`. All Pearl caps (`e ≤ 1024`,
+/// `outer ≤ 128`) and the [`PEARL_MOE_MAX_ROUTING_ENTRIES`] DoS cap are enforced.
+pub fn encode_pearl_merge_ai_pow_nonce_moe(
+    statement: &PearlMergePublicStatementShape,
+    aux_inclusion: &PearlAuxInclusionProof,
+    moe: &PearlMergeMoeArtifact,
+) -> Result<Vec<u8>, CertificateNounError> {
+    let e = moe_expert_count_from_core(&statement.public_data)?;
+    if e == 0 {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce core is not GROUPED_GEMM (e == 0)",
+        ));
+    }
+    if e > PEARL_MOE_MAX_NUM_EXPERTS {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE experts"));
+    }
+    if moe.moe.routing_offsets.len() != e {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE routing_offsets length must equal expert count e",
+        ));
+    }
+    if (moe.moe.expert_idx as usize) >= e {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE expert_idx out of range",
+        ));
+    }
+    if moe.moe.outer_indices.len() > PEARL_MOE_MAX_OUTER_INDICES {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE outer indices"));
+    }
+    if moe.routing_data.len() > PEARL_MOE_MAX_ROUTING_ENTRIES {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE routing_data"));
+    }
+
+    // Reuse the exact dense framing, then retag the magic — this guarantees the
+    // statement/aux bytes are identical to the dense encoding.
+    let mut out = encode_pearl_merge_ai_pow_nonce(statement, aux_inclusion)?;
+    out[0..4].copy_from_slice(&AI_POW_NONCE_MAGIC_MOE);
+
+    // Pearl MoE tail (mirror of `PublicProofParams::to_wire_bytes_moe`).
+    out.extend_from_slice(&moe.moe.expert_idx.to_le_bytes());
+    for off in &moe.moe.routing_offsets {
+        out.extend_from_slice(&off.to_le_bytes());
+    }
+    out.extend_from_slice(&moe.moe.hash_routing);
+    out.push(moe.moe.outer_indices.len() as u8);
+    for idx in &moe.moe.outer_indices {
+        out.extend_from_slice(&idx.to_le_bytes());
+    }
+
+    // Natively-bound routing_data block.
+    out.extend_from_slice(&(moe.routing_data.len() as u32).to_le_bytes());
+    for token in &moe.routing_data {
+        out.extend_from_slice(&token.to_le_bytes());
+    }
+    Ok(out)
+}
+
+/// Decode a MoE `ai-pow-nonce` produced by [`encode_pearl_merge_ai_pow_nonce_moe`].
+///
+/// Every read is length-checked before indexing and every count is capped before
+/// allocation, so a crafted nonce cannot over-allocate or index out of bounds.
+/// The final length must match exactly (no trailing bytes).
+pub fn decode_pearl_merge_ai_pow_nonce_moe(
+    nonce: &[u8],
+) -> Result<PearlMergeAiPowNonceMoeShape, CertificateNounError> {
+    if nonce.len() > AI_POW_NONCE_MOE_MAX_SIZE {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE nonce bytes"));
+    }
+    if nonce.len() < 4 + 2 + 4 + 1 {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce is too short"));
+    }
+    if nonce[0..4] != AI_POW_NONCE_MAGIC_MOE {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce magic"));
+    }
+
+    // --- dense framing: statement ---
+    let mut offset = 4usize;
+    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().unwrap()) as usize;
+    offset += 2;
+    let statement_end = offset
+        .checked_add(statement_len)
+        .ok_or(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce statement bytes",
+        ))?;
+    if statement_end > nonce.len() {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce statement length",
+        ));
+    }
+    let statement = PearlMergePublicStatementShape::from_wire_bytes(&nonce[offset..statement_end])?;
+    offset = statement_end;
+
+    // --- dense framing: coinbase ---
+    if nonce.len().saturating_sub(offset) < 4 + 1 {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce coinbase length",
+        ));
+    }
+    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    if coinbase_len > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
+        return Err(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce coinbase bytes",
+        ));
+    }
+    let coinbase_end = offset
+        .checked_add(coinbase_len)
+        .ok_or(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce coinbase bytes",
+        ))?;
+    if coinbase_end > nonce.len() {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce coinbase length",
+        ));
+    }
+    let coinbase_tx = nonce[offset..coinbase_end].to_vec();
+    offset = coinbase_end;
+
+    // --- dense framing: merkle branch ---
+    let Some(&branch_len_byte) = nonce.get(offset) else {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce branch length"));
+    };
+    let branch_len = branch_len_byte as usize;
+    offset += 1;
+    if branch_len > PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH {
+        return Err(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce merkle branch",
+        ));
+    }
+    let branch_bytes = branch_len
+        .checked_mul(32)
+        .ok_or(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce merkle branch",
+        ))?;
+    let branch_end = offset
+        .checked_add(branch_bytes)
+        .ok_or(CertificateNounError::LimitExceeded(
+            "ai-pow MoE nonce merkle branch",
+        ))?;
+    if branch_end > nonce.len() {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce branch length"));
+    }
+    let mut merkle_branch = Vec::with_capacity(branch_len);
+    for chunk in nonce[offset..branch_end].chunks_exact(32) {
+        merkle_branch.push(chunk.try_into().expect("chunk length"));
+    }
+    offset = branch_end;
+
+    // --- MoE tail (expert count comes from the canonical core trailer) ---
+    let e = moe_expert_count_from_core(&statement.public_data)?;
+    if e == 0 {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce core is not GROUPED_GEMM (e == 0)",
+        ));
+    }
+    if e > PEARL_MOE_MAX_NUM_EXPERTS {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE experts"));
+    }
+    let tail_fixed = 2usize
+        + e.checked_mul(4)
+            .ok_or(CertificateNounError::LimitExceeded("ai-pow MoE experts"))?
+        + 32
+        + 1;
+    if nonce.len().saturating_sub(offset) < tail_fixed {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce tail"));
+    }
+    let expert_idx = u16::from_le_bytes(nonce[offset..offset + 2].try_into().unwrap());
+    offset += 2;
+    if (expert_idx as usize) >= e {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE expert_idx out of range",
+        ));
+    }
+    let mut routing_offsets = Vec::with_capacity(e);
+    for _ in 0..e {
+        routing_offsets.push(u32::from_le_bytes(
+            nonce[offset..offset + 4].try_into().unwrap(),
+        ));
+        offset += 4;
+    }
+    let hash_routing: [u8; 32] = nonce[offset..offset + 32].try_into().unwrap();
+    offset += 32;
+    let outer_count = nonce[offset] as usize;
+    offset += 1;
+    if outer_count > PEARL_MOE_MAX_OUTER_INDICES {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE outer indices"));
+    }
+    let outer_bytes = outer_count
+        .checked_mul(4)
+        .ok_or(CertificateNounError::LimitExceeded("ai-pow MoE outer indices"))?;
+
+    // --- outer_indices + routing_data block ---
+    // Remaining must hold outer_indices(4·oc) + routing_len(4) at minimum.
+    if nonce.len().saturating_sub(offset) < outer_bytes + 4 {
+        return Err(CertificateNounError::Shape(
+            "ai-pow MoE nonce outer/routing length",
+        ));
+    }
+    let mut outer_indices = Vec::with_capacity(outer_count);
+    for _ in 0..outer_count {
+        outer_indices.push(u32::from_le_bytes(
+            nonce[offset..offset + 4].try_into().unwrap(),
+        ));
+        offset += 4;
+    }
+    let routing_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().unwrap()) as usize;
+    offset += 4;
+    if routing_len > PEARL_MOE_MAX_ROUTING_ENTRIES {
+        return Err(CertificateNounError::LimitExceeded("ai-pow MoE routing_data"));
+    }
+    let routing_bytes = routing_len
+        .checked_mul(4)
+        .ok_or(CertificateNounError::LimitExceeded("ai-pow MoE routing_data"))?;
+    let routing_end = offset
+        .checked_add(routing_bytes)
+        .ok_or(CertificateNounError::LimitExceeded("ai-pow MoE routing_data"))?;
+    if routing_end != nonce.len() {
+        return Err(CertificateNounError::Shape("ai-pow MoE nonce trailing bytes"));
+    }
+    let mut routing_data = Vec::with_capacity(routing_len);
+    for chunk in nonce[offset..routing_end].chunks_exact(4) {
+        routing_data.push(u32::from_le_bytes(chunk.try_into().expect("chunk length")));
+    }
+
+    Ok(PearlMergeAiPowNonceMoeShape {
+        statement,
+        aux_inclusion: PearlAuxInclusionProof {
+            coinbase_tx,
+            merkle_branch,
+        },
+        moe: PearlMergeMoeArtifact {
+            moe: PearlMoeParams {
+                expert_idx,
+                routing_offsets,
+                hash_routing,
+                outer_indices,
+            },
+            routing_data,
         },
     })
 }
@@ -1900,6 +2222,30 @@ fn verify_compact_certificate_shape_with_context_and_limits(
 /// verifier-key/setup digest from trusted verifier configuration; this function
 /// rejects before proof verification if either the context or certificate uses
 /// a different digest.
+///
+/// # Soundness — the `compact_context` MUST be canonically derived (audit D6)
+///
+/// The checkpoint path binds the opened row/column schedule (and every
+/// constraint selector) to the *public* ticket by recomputing the canonical
+/// Layer-0 program and requiring
+/// [`ai_pow_zk::recursion::AiPowRecursiveCertificate::l0_program_matches`]. The
+/// compact certificate carries **no** `l0_program`, so that check cannot run
+/// here. On this path the entire opened-schedule / selector binding therefore
+/// lives in `compact_context.circuit_prover_data`, which encodes the specific
+/// Layer-0 program. The `verifier_key_digest` this function checks is
+/// **shape-only** (route params + L2 proof metadata + FRI shape); it does NOT
+/// bind which rows/columns were opened.
+///
+/// Consequently, a caller wiring this into consensus MUST construct
+/// `compact_context` (and `expected_verifier_key_digest`) from the *canonical*
+/// program re-derived from the public opened schedule — never from a
+/// prover-supplied context, and never from a single generic context reused
+/// across blocks. Passing the prover's own context (as the `#[ignore]`d
+/// round-trip tests do for convenience) would let a malicious prover open a
+/// favorable strip and still verify. The verifier-side canonical-context builder
+/// that makes this safe is **not yet implemented** (residual M2/M3); until it
+/// exists this function must not be reached by block acceptance. See
+/// `crates/ai-pow/docs/2026-07-13_ZK_POW_PRODUCTION_PUZZLE_VS_PEARL_AUDIT.md` §G.
 pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
     artifact: &PearlMergeAiPowArtifactShape,
     context: PearlMergeAiPowVerifierContext<'_>,
@@ -2084,6 +2430,14 @@ fn precheck_pearl_merge_certificate_metadata(
     let expected_trace_height = expected_layer0_rows_for_strip_schedule(&params, &strip_schedule)
         .map_err(|_| CertificateNounError::PearlMergeUnsupportedTileShape)?
         .required_trace_len();
+    // Defense-in-depth backstop for the one-tile-one-STARK invariant: the
+    // Pearl `h·w ≤ 256` cap (enforced upstream in `sanity_check`) already
+    // bounds the Layer-0 trace, but assert it directly at the consensus
+    // boundary so a future change to the trace formula or an upstream gap
+    // cannot admit a certificate whose tile does not fit a single STARK.
+    if expected_trace_height as u64 > ai_pow::params::PEARL_TRACE_BOUND {
+        return Err(CertificateNounError::PearlMergeUnsupportedTileShape);
+    }
     if metadata.trace_height != expected_trace_height {
         return Err(CertificateNounError::PearlMergePublicInputMismatch(
             "trace-height",
@@ -7170,5 +7524,265 @@ mod tests {
             run.l1_in_circuit_verify_ms,
             run.l1_outer_cert_ms,
         );
+    }
+
+    // ===================================================================
+    // M1: MoE (GROUPED_GEMM) `ai-pow-nonce` codec.
+    //
+    // The codec is additive: the dense `AIP1` path is byte-identical and
+    // untouched; MoE uses the `AIM1` tag and appends the Pearl MoE tail plus a
+    // DoS-capped `routing_data` block. These tests exercise round-trip fidelity,
+    // dense/MoE tag disjointness, every cap, and adversarial truncation/trailing
+    // input (a crafted nonce must error, never panic or over-allocate). MoE stays
+    // fail-closed at every verify gate; this layer only carries and bounds bytes.
+    // ===================================================================
+
+    fn moe_nonce_test_statement(
+        e: u16,
+        top_k: u16,
+    ) -> (PearlMergePublicStatementShape, PearlAuxInclusionProof) {
+        let aux = pearl_test_aux();
+        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let config = PearlMiningConfig {
+            common_dim: 1024,
+            rank: 64,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: pearl_test_pattern(8),
+            cols_pattern: pearl_test_pattern(8),
+            reserved: PearlMiningConfig::moe_trailer(e, top_k),
+        };
+        let public = PearlPublicProofParams {
+            block_header: header,
+            mining_config: config,
+            hash_a: [0x11; 32],
+            hash_b: [0x22; 32],
+            hash_jackpot: [0x33; 32],
+            m: 64,
+            n: 64,
+            t_rows: 0,
+            t_cols: 0,
+        };
+        let statement = PearlMergePublicStatementShape {
+            block_header: header.to_bytes(),
+            public_data: public.to_public_data().unwrap(),
+            expected_aux_commitment: aux.commitment().unwrap(),
+            aux,
+        };
+        (statement, aux_inclusion)
+    }
+
+    fn moe_nonce_test_artifact(
+        e: usize,
+        num_outer: usize,
+        num_routing: usize,
+    ) -> PearlMergeMoeArtifact {
+        PearlMergeMoeArtifact {
+            moe: PearlMoeParams {
+                expert_idx: 0,
+                routing_offsets: (1..=e as u32).map(|i| i * 2).collect(),
+                hash_routing: [0x44; 32],
+                outer_indices: (0..num_outer as u32).collect(),
+            },
+            routing_data: (0..num_routing as u32).collect(),
+        }
+    }
+
+    #[test]
+    fn moe_nonce_round_trips_and_is_tagged() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 6, 40);
+        let nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        assert_eq!(&nonce[0..4], &AI_POW_NONCE_MAGIC_MOE);
+        let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
+        assert_eq!(decoded.statement, statement);
+        assert_eq!(decoded.aux_inclusion, aux_inclusion);
+        assert_eq!(decoded.moe, art);
+    }
+
+    #[test]
+    fn moe_nonce_round_trips_empty_routing_and_outer() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(2, 1);
+        let art = moe_nonce_test_artifact(2, 0, 0);
+        let nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
+        assert_eq!(decoded.moe, art);
+        assert_eq!(decoded.statement, statement);
+    }
+
+    #[test]
+    fn moe_nonce_round_trips_at_max_experts_and_outer() {
+        let e = PEARL_MOE_MAX_NUM_EXPERTS;
+        let (statement, aux_inclusion) = moe_nonce_test_statement(e as u16, 1);
+        let art = moe_nonce_test_artifact(e, PEARL_MOE_MAX_OUTER_INDICES, 100);
+        let nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
+        assert_eq!(decoded.moe, art);
+        assert_eq!(decoded.statement, statement);
+    }
+
+    #[test]
+    fn moe_nonce_reuses_dense_framing_verbatim() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 3, 8);
+        let dense = encode_pearl_merge_ai_pow_nonce(&statement, &aux_inclusion).unwrap();
+        let moe = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        assert_eq!(&dense[0..4], &AI_POW_NONCE_MAGIC);
+        // Everything after the 4-byte magic is the dense framing verbatim.
+        assert_eq!(&moe[4..dense.len()], &dense[4..]);
+        assert!(moe.len() > dense.len());
+    }
+
+    #[test]
+    fn dense_and_moe_decoders_reject_each_others_tags() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 2, 8);
+        let dense = encode_pearl_merge_ai_pow_nonce(&statement, &aux_inclusion).unwrap();
+        let moe = encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        assert!(decode_pearl_merge_ai_pow_nonce_moe(&dense).is_err());
+        assert!(decode_pearl_merge_ai_pow_nonce(&moe).is_err());
+    }
+
+    #[test]
+    fn moe_encode_rejects_dense_core() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(0, 0);
+        let art = moe_nonce_test_artifact(1, 0, 0);
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn moe_encode_rejects_expert_count_mismatch() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let mut art = moe_nonce_test_artifact(4, 2, 8);
+        art.moe.routing_offsets.pop();
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn moe_encode_rejects_expert_idx_out_of_range() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let mut art = moe_nonce_test_artifact(4, 2, 8);
+        art.moe.expert_idx = 4;
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn moe_encode_rejects_outer_over_cap() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, PEARL_MOE_MAX_OUTER_INDICES + 1, 8);
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn moe_encode_rejects_routing_over_cap() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 2, PEARL_MOE_MAX_ROUTING_ENTRIES + 1);
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn moe_encode_rejects_expert_count_over_cap() {
+        let (statement, aux_inclusion) =
+            moe_nonce_test_statement((PEARL_MOE_MAX_NUM_EXPERTS + 1) as u16, 1);
+        let art = moe_nonce_test_artifact(PEARL_MOE_MAX_NUM_EXPERTS + 1, 2, 8);
+        assert!(matches!(
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art),
+            Err(CertificateNounError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn moe_decode_rejects_routing_len_over_cap_without_allocating() {
+        // A crafted nonce whose `routing_len` field claims > cap must be rejected
+        // by the cap check *before* any allocation, not by running out of memory.
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 2, 4);
+        let mut nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        // routing_len u32 precedes the 4 carried entries (4 * 4 = 16 bytes).
+        let routing_len_pos = nonce.len() - 4 - 4 * 4;
+        nonce[routing_len_pos..routing_len_pos + 4]
+            .copy_from_slice(&((PEARL_MOE_MAX_ROUTING_ENTRIES as u32) + 1).to_le_bytes());
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe(&nonce),
+            Err(CertificateNounError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn moe_decode_rejects_expert_count_over_cap_in_core_trailer() {
+        // Build a valid e=4 nonce, then poison the mining-config trailer's `e` to
+        // 1025. The decoder must cap on `e` before reading the (mismatched) tail.
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 2, 8);
+        let mut nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        // Nonce: nonce_magic(4) | stmt_len(2) | [stmt_magic(4) | block_header(76)
+        // | public_data(164) | ...]. Mining-config trailer `e` is at
+        // public_data[20..22] (common_dim 4 + rank 2 + mma 2 + rows 6 + cols 6).
+        let e_pos = 4 + 2 + 4 + PEARL_INCOMPLETE_BLOCK_HEADER_SIZE + 20;
+        nonce[e_pos..e_pos + 2]
+            .copy_from_slice(&((PEARL_MOE_MAX_NUM_EXPERTS + 1) as u16).to_le_bytes());
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe(&nonce),
+            Err(CertificateNounError::LimitExceeded(_))
+        ));
+    }
+
+    #[test]
+    fn moe_decode_rejects_truncation_at_every_length() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 5, 12);
+        let nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        for cut in 0..nonce.len() {
+            assert!(
+                decode_pearl_merge_ai_pow_nonce_moe(&nonce[..cut]).is_err(),
+                "truncation to {cut} bytes must error, not panic"
+            );
+        }
+        assert!(decode_pearl_merge_ai_pow_nonce_moe(&nonce).is_ok());
+    }
+
+    #[test]
+    fn moe_decode_rejects_trailing_bytes() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 5, 12);
+        let mut nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        nonce.push(0);
+        assert!(matches!(
+            decode_pearl_merge_ai_pow_nonce_moe(&nonce),
+            Err(CertificateNounError::Shape(_))
+        ));
+    }
+
+    #[test]
+    fn moe_decode_faithfully_carries_routing_data() {
+        let (statement, aux_inclusion) = moe_nonce_test_statement(4, 2);
+        let art = moe_nonce_test_artifact(4, 5, 12);
+        let mut nonce =
+            encode_pearl_merge_ai_pow_nonce_moe(&statement, &aux_inclusion, &art).unwrap();
+        let last = nonce.len() - 1;
+        nonce[last] ^= 0xff;
+        let decoded = decode_pearl_merge_ai_pow_nonce_moe(&nonce).unwrap();
+        assert_ne!(decoded.moe.routing_data, art.routing_data);
     }
 }

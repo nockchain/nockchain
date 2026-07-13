@@ -27,7 +27,7 @@ use crate::fiat_shamir::{noise_seed_a, noise_seed_b};
 use crate::matmul::{
     compute_pattern_tile_trace_from_slices, compute_tile, BlockNoise, Matrices, TileState,
 };
-use crate::params::{MatmulParams, ParamError, STRIPE_MAX};
+use crate::params::{MatmulParams, ParamError, PEARL_HW_MAX, PEARL_HW_MIN, STRIPE_MAX};
 use crate::prng;
 use crate::tile_hash::hash_le_target;
 
@@ -947,7 +947,15 @@ impl PearlPublicProofParams {
             || k < 1024
             || !h.is_multiple_of(PEARL_TILE_H)
             || !w.is_multiple_of(PEARL_TILE_H)
-            || u64::from(h) * u64::from(w) < 32
+            || u64::from(h) * u64::from(w) < PEARL_HW_MIN
+            // Pearl's reference prover hard-rejects h·w > 256
+            // (`structure_matmul_in_stark`), and its verifier sanity check
+            // enforces the same bound (`api/sanity_checks.rs`). Because the
+            // Layer-0 trace scales as h·w·(k/r), this — not the whitepaper's
+            // k·(h+w) proxy — is the cap that keeps one opened tile in one
+            // STARK (`params::PEARL_HW_MAX`). Omitting it here would admit
+            // Pearl-out-of-envelope tickets that Pearl's own verifier rejects.
+            || u64::from(h) * u64::from(w) > PEARL_HW_MAX
             || dot_product_len % u64::from(PEARL_DWORD_SIZE) != 0
             || self.m > PearlPeriodicPattern::MAX_PERIOD
             || self.n > PearlPeriodicPattern::MAX_PERIOD
