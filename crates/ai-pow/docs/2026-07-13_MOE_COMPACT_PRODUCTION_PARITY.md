@@ -156,7 +156,42 @@ that path until the builder lands.
 Dependency-ordered. Each stage: KAT/de-risk first, full regression + adversarial
 gates, commit per validated stage (per R1). "M#" cross-reference the residual.
 
-### P0 — D6 compact opened-schedule binding — *prerequisite, shared with dense* — 🟢 **UNBLOCKED 2026-07-13: tractable via program-commitment digest fold (do NOT re-derive the "shape-proof wall")**
+### P0 — D6 compact opened-schedule binding — *prerequisite, shared with dense* — ✅ **IMPLEMENTED + VALIDATED 2026-07-13 (program-commitment digest fold)**
+
+> **DONE (2026-07-13).** The compact opened-schedule binding is implemented and
+> validated end-to-end with real proving. The L0 program's preprocessed
+> commitment is now folded into the L1 **statement digest** (the value the L2
+> proves), and the node derives the **canonical** commitment witness-free from the
+> opened schedule (never the prover) and folds the same value into its expected
+> digest — so a certificate proven over a different program fails the digest check.
+>
+> - **Circuit** (`build_composite_l1_verifier_circuit`, `recursion.rs`): the Tip5
+>   statement-digest sponge absorbs `air_public_targets[0] ‖
+>   to_observation_targets(common_data.preprocessed.commitment)`; the expected
+>   `statement_public_values` folds the matching value flatten (`get_values`).
+> - **Verify** (`verify_compact_batch_recursive_certificate_with_context`): takes
+>   the canonical commitment and folds it via
+>   `compact_batch_l1_public_values_for_statement`.
+> - **Node** (`certificate_noun.rs`): `verify_decoded_ai_pow_pearl_merge_compact_artifact_*`
+>   rebuilds the canonical program from the precheck's opened schedule
+>   (`work.ticket` → `canonical_program_for_strip_schedule`) and derives the
+>   commitment via `canonical_l0_program_commitment_vals` (witness-free
+>   `logup_common_for`) — never from the prover's context.
+> - **Reachability primitive:** `CommonDataTargets::preprocessed_commitment()`
+>   (plonky3-recursion). Flatten pair `to_observation_targets` (target) ↔
+>   `get_values` (value) match by construction.
+>
+> **Validation (real proving):** (a) the compact round-trip
+> (`compact_batch_recursive_certificate_round_trip_for_test_pearl`) verifies with
+> the fold **and** a wrong-commitment cert is **rejected** (D6 adversarial),
+> 21.99 s; (b) the full node round-trip
+> (`real_compact_pearl_merge_max_envelope_size_and_latency`, production scale
+> m=n=512/k=4096/r=64) verifies via the node's canonically-derived commitment,
+> 47.68 s, cert 122.68 KiB (≤ 150 KB — the fold adds negligible size, confirming
+> "not gigantic"). **MoE-aware for free** — a MoE canonical program is just a
+> different `Program`.
+>
+> **Below: the original design (now implemented). Kept for the rationale.**
 
 > **READ THIS FIRST — it corrects an earlier wrong conclusion.** A previous pass
 > concluded P0 was "blocked at a concrete API wall" because *rebuilding the
@@ -363,7 +398,7 @@ From the compact-recursive production pipeline:
 | MoE circuit + selective opening (diagnostic-L1) | ✅ done, validated |
 | MoE routing-consistency binding | ✅ done (`verify_pearl_moe_routing_binding`, ~10 adversarial) |
 | MoE opened-schedule binding (diagnostic-L1) | ✅ done (`l0_program_matches`) |
-| **D6 / P0** compact opened-schedule binding | 🟢 **UNBLOCKED** — tractable via program-commitment **digest fold** (§4 P0). The commitment is witness-free-derivable by the verifier (`logup_common_for`), tiny, and deterministic — no shape-proof synthesizer / re-prove needed (the earlier "wall" was about rebuilding the context, which the fix avoids). Reachability accessor landed; circuit+node fold + adversarial test remain (one atomic, real-proving-gated unit). |
+| **D6 / P0** compact opened-schedule binding | ✅ **IMPLEMENTED + VALIDATED** — program-commitment **digest fold** (§4 P0). Circuit folds the L0 program commitment into the L1 statement digest; node derives the canonical commitment witness-free from the opened schedule and binds it. Validated with real proving: honest round-trip verifies + wrong-commitment rejects (21.99 s); full node round-trip at production scale (47.68 s, 122.68 KiB). D6 gap closed. |
 | **M1** MoE artifact noun | 🟡 opaque-nonce codec + DoS cap landed & tested (16 tests); builder/verify wiring remains (lands with M2/M3) |
 | **M2** MoE compact prove | ❌ not started (compact pipeline dense-only) |
 | **M3** MoE compact node verify | ❌ not started |

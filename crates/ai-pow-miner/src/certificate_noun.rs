@@ -2175,6 +2175,10 @@ fn verify_compact_certificate_shape_with_context_and_limits(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
     limits: CertificateNounLimits,
+    // P0/D6: the CANONICAL L0 program commitment, derived by the node from the
+    // opened schedule (never from the prover). Binds the opened schedule on the
+    // compact path (the recursion folds it into the statement digest).
+    l0_program_commitment: &[ai_pow_zk::Val],
 ) -> Result<(), CertificateNounError> {
     if compact_context.verifier_key_digest() != expected_verifier_key_digest {
         return Err(CertificateNounError::CompactVerifierKeyDigestMismatch(
@@ -2190,9 +2194,53 @@ fn verify_compact_certificate_shape_with_context_and_limits(
         ));
     }
     ai_pow_zk::recursion::verify_compact_batch_recursive_certificate_with_context(
-        compact_context, certificate, &certificate_shape.public_inputs,
+        compact_context,
+        certificate,
+        &certificate_shape.public_inputs,
+        l0_program_commitment,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))
+}
+
+/// P0/D6: derive the canonical L0 program's preprocessed commitment the node must
+/// fold into the compact statement digest, from the opened schedule the precheck
+/// rebuilt (`work.ticket`) and the work commitments — never from the prover.
+fn canonical_l0_commitment_for_compact(
+    certificate: &AiPowCertificateShape,
+    precheck: &PearlMergeMiningPrecheck,
+) -> Result<Vec<ai_pow_zk::Val>, CertificateNounError> {
+    let zk_params = certificate.zk_params;
+    let ticket = &precheck.work.ticket;
+    let strip_schedule = StripIndexSchedule::from_indices(
+        &zk_params,
+        ticket.a_rows.clone(),
+        ticket.b_cols.clone(),
+    )
+    .map_err(|_| CertificateNounError::PearlMergeUnsupportedTileShape)?;
+    let col_tiles = zk_params.n / zk_params.tile;
+    if col_tiles == 0 {
+        return Err(CertificateNounError::PearlMergeUnsupportedTileShape);
+    }
+    let block_public = ai_pow_zk::canonical::BlockPublic {
+        tile_i: certificate.found_idx / col_tiles,
+        tile_j: certificate.found_idx % col_tiles,
+        kappa: precheck.work.commitments.kappa,
+        s_a: precheck.work.commitments.s_a,
+        s_b: precheck.work.commitments.s_b,
+    };
+    let program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
+        &zk_params,
+        &strip_schedule,
+        &block_public,
+        certificate.trace_height,
+    )
+    .map_err(|e| {
+        CertificateNounError::RecursiveCertificate(format!("canonical L0 program: {e:?}"))
+    })?;
+    let profile = ai_pow_zk::circuit::CircuitConfig::for_layer0_trace(certificate.trace_height);
+    Ok(ai_pow_zk::recursion::canonical_l0_program_commitment_vals(
+        &zk_params, &profile, &program,
+    ))
 }
 
 /// Verify a decoded Pearl-compatible `%ai-pow` artifact carrying the selected
@@ -2238,8 +2286,18 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limit
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
     let precheck = precheck_ai_pow_pearl_merge_artifact_statement_with_context(artifact, context)?;
+    // P0/D6: derive the canonical L0 program commitment from the opened schedule
+    // the precheck rebuilt (never from the prover) and bind it into the compact
+    // verify — a certificate proven over a different program fails the statement
+    // digest. Closes the compact-path opened-schedule binding gap.
+    let l0_program_commitment =
+        canonical_l0_commitment_for_compact(&artifact.certificate, &precheck)?;
     verify_compact_certificate_shape_with_context_and_limits(
-        &artifact.certificate, compact_context, expected_verifier_key_digest, limits,
+        &artifact.certificate,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
+        &l0_program_commitment,
     )?;
     Ok(precheck)
 }
@@ -2710,8 +2768,16 @@ pub fn verify_ai_pow_pearl_merge_compact_artifact_jam_with_context(
     )?;
 
     let certificate_shape = decode_ai_pow_certificate_noun(fields[2], &space, limits)?;
+    // P0/D6: bind the canonical L0 program commitment (derived from the opened
+    // schedule, not the prover) into the compact verify.
+    let l0_program_commitment =
+        canonical_l0_commitment_for_compact(&certificate_shape, &precheck)?;
     verify_compact_certificate_shape_with_context_and_limits(
-        &certificate_shape, compact_context, expected_verifier_key_digest, limits,
+        &certificate_shape,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
+        &l0_program_commitment,
     )?;
     Ok(precheck)
 }

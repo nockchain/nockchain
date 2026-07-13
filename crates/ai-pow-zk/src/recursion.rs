@@ -45,7 +45,7 @@ use p3_recursion::pcs::fri::{
 };
 use p3_recursion::pcs::set_fri_mmcs_private_data;
 use p3_recursion::public_inputs::BatchStarkVerifierInputsBuilder;
-use p3_recursion::{verify_batch_circuit, RecursiveAir, VerificationError};
+use p3_recursion::{verify_batch_circuit, ObservableCommitment, RecursiveAir, VerificationError};
 use p3_symmetric::Permutation;
 use p3_tip5_circuit_air::Tip5Perm as RecTip5Perm;
 use serde::{Deserialize, Serialize};
@@ -398,8 +398,17 @@ fn statement_public_digest(public_values: &[Val]) -> Vec<Val> {
     state[..DIGEST_ELEMS].to_vec()
 }
 
-fn compact_batch_l1_public_values_for_statement(public_values: &[Val]) -> Vec<Val> {
-    statement_public_digest(public_values)
+fn compact_batch_l1_public_values_for_statement(
+    public_values: &[Val],
+    l0_program_commitment: &[Val],
+) -> Vec<Val> {
+    // P0/D6: fold the L0 program commitment into the statement-digest preimage,
+    // exactly as the in-circuit sponge does. The caller supplies the *canonical*
+    // commitment (verifier-derived via `logup_common_for`), so the L2 proof only
+    // verifies if the prover used the canonical program's opened schedule.
+    let mut preimage = public_values.to_vec();
+    preimage.extend_from_slice(l0_program_commitment);
+    statement_public_digest(&preimage)
         .into_iter()
         .flat_map(|value| {
             let lifted = Challenge::from(value);
@@ -409,6 +418,59 @@ fn compact_batch_l1_public_values_for_statement(public_values: &[Val]) -> Vec<Va
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// Base-field flatten of an L0 program's preprocessed commitment (P0/D6).
+///
+/// Uses the same order the recursive verifier target-side uses
+/// (`MerkleCapTargets::get_values`), base-extracted (each element is a base value
+/// lifted to the extension field, so coefficient 0 is lossless). Empty if the
+/// program has no preprocessed data.
+fn l0_program_commitment_vals(
+    common_data: &CommonData<AiPowStarkConfig>,
+) -> Vec<Val> {
+    match common_data.preprocessed.as_ref() {
+        Some(prep) => {
+            <CompositeComm as p3_recursion::Recursive<Challenge>>::get_values(&prep.commitment)
+                .into_iter()
+                .map(|c| {
+                    <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&c)[0]
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// Preimage of the compact L1 statement digest: the L0 public values followed by
+/// the L0 program commitment (P0/D6). Both the in-circuit sponge
+/// (`build_composite_l1_verifier_circuit`) and the node's expected digest fold
+/// this identically; the node derives `common_data` witness-free from the
+/// canonical program via `logup_common_for`.
+fn compact_batch_l1_statement_digest_preimage(
+    public_values: &[Val],
+    common_data: &CommonData<AiPowStarkConfig>,
+) -> Vec<Val> {
+    let mut preimage = public_values.to_vec();
+    preimage.extend(l0_program_commitment_vals(common_data));
+    preimage
+}
+
+/// Derive the **canonical** L0 program commitment (base-field flatten) the node
+/// folds into the compact statement digest to pin the opened schedule (P0/D6).
+///
+/// Witness-free: needs only the canonical `program` (rebuilt by the verifier from
+/// the public opened schedule via `canonical_program_for_strip_schedule`) and the
+/// config. Uses the compact prove path's `sx_bound = true`. MoE is handled for
+/// free — a MoE canonical program is just a different `Program`.
+pub fn canonical_l0_program_commitment_vals(
+    zk_params: &crate::params::ZkParams,
+    profile: &crate::circuit::CircuitConfig,
+    program: &crate::AiPowProgram,
+) -> Vec<Val> {
+    let cfg = crate::composite_proof::build_config(zk_params, profile);
+    let pd = crate::composite_proof::logup_common_for(&cfg, program, true);
+    l0_program_commitment_vals(&pd.common)
 }
 
 fn compact_batch_l1_public_values_from_built(built: &BuiltCompositeL1) -> Vec<Val> {
@@ -710,11 +772,19 @@ fn build_composite_l1_verifier_circuit_with_recompose_coeff_ctl(
         Tip5Config::GOLDILOCKS_W16,
     )?;
 
+    // P0/D6: fold the L0 program's preprocessed commitment into the statement
+    // digest, so the node can pin the opened schedule to the canonical program
+    // (the commitment is witness-free-derivable by the verifier via
+    // `logup_common_for`; see the compact-parity doc §4 P0). The target-side
+    // flatten (`to_observation_targets`) matches the value-side flatten
+    // (`MerkleCapTargets::get_values`) used to build the expected digest below.
+    let mut digest_input: Vec<p3_circuit::ExprId> = verifier_inputs.air_public_targets[0].clone();
+    if let Some(l0_program_commitment) = verifier_inputs.common_data.preprocessed_commitment() {
+        digest_input.extend(l0_program_commitment.to_observation_targets());
+    }
+
     let mut digest_state = [None; WIDTH];
-    for (block_idx, chunk) in verifier_inputs.air_public_targets[0]
-        .chunks(RATE)
-        .enumerate()
-    {
+    for (block_idx, chunk) in digest_input.chunks(RATE).enumerate() {
         let mut inputs = [None; WIDTH];
         for i in 0..RATE {
             inputs[i] = Some(chunk.get(i).copied().unwrap_or(p3_circuit::ExprId::ZERO));
@@ -737,7 +807,14 @@ fn build_composite_l1_verifier_circuit_with_recompose_coeff_ctl(
     }
 
     let circuit = cb.build()?;
-    let statement_public_values = statement_public_digest(public_values);
+    // P0/D6: the expected statement digest must fold in the same commitment the
+    // in-circuit sponge absorbs above — the VALUE flatten of the L0 program's
+    // preprocessed commitment (`get_values`), base-extracted to match the base
+    // sponge. Node-side (`compact_batch_l1_statement_digest_preimage`) recomputes
+    // this from the canonical program.
+    let statement_digest_preimage =
+        compact_batch_l1_statement_digest_preimage(public_values, common_data);
+    let statement_public_values = statement_public_digest(&statement_digest_preimage);
     let (verifier_public_inputs, private_inputs) =
         verifier_inputs.pack_values(&[public_values.to_vec()], proof, common_data);
     let mut public_inputs = statement_public_values
@@ -1880,8 +1957,14 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
         ))
     })?;
     let t = Instant::now();
+    // Self-verify sanity: fold the prover's own L0 program commitment (equals the
+    // canonical one for an honest prover). The node passes the canonical commitment
+    // via `canonical_l0_program_commitment_vals` instead.
     verify_compact_batch_recursive_certificate_with_context(
-        &verifier_context, verify_cert, verified.public_inputs,
+        &verifier_context,
+        verify_cert,
+        verified.public_inputs,
+        &l0_program_commitment_vals(&pd.common),
     )?;
     let l2_compact_verify_ms = t.elapsed().as_millis();
 
@@ -1911,6 +1994,12 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
     context: &AiPowCompactBatchVerifierContext,
     cert: AiPowCompactBatchRecursiveCertificate,
     public_inputs: &crate::composite_public::CompositePublicInputs,
+    // P0/D6: the CANONICAL L0 program commitment (verifier-derived witness-free
+    // via `canonical_l0_program_commitment_vals` from the program the node
+    // rebuilds from the public opened schedule). Binds the opened schedule: a
+    // certificate proven over a different program fails the statement-digest
+    // check. Pass the prover's own for a self-verify sanity check.
+    l0_program_commitment: &[Val],
 ) -> Result<(), VerificationError> {
     let expected_digest =
         compact_batch_verifier_key_digest_from_parts(&context.metadata, context.fri_shape)
@@ -1948,7 +2037,7 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
     }
 
     let l1_statement_public_values =
-        compact_batch_l1_public_values_for_statement(&public_inputs.to_vec());
+        compact_batch_l1_public_values_for_statement(&public_inputs.to_vec(), l0_program_commitment);
     let l2_statement_public_values =
         compact_batch_l2_statement_public_values_for_l1(&l1_statement_public_values);
     let compact_context = p3_circuit_prover::GoldilocksBlake3PathPrunedCompactVerifierContext::new(
@@ -2259,17 +2348,33 @@ mod tests {
             .expect("encode compact batch recursive certificate");
         let decoded = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate");
+        // P0/D6: the canonical L0 program commitment the node folds into the
+        // statement digest (here == the prover's, honest program).
+        let commit = canonical_l0_program_commitment_vals(&zk, &profile, &verified.program);
+        assert!(!commit.is_empty(), "L0 program must have a preprocessed commitment");
         verify_compact_batch_recursive_certificate_with_context(
-            &run.verifier_context, decoded, &pis,
+            &run.verifier_context, decoded, &pis, &commit,
         )
         .expect("decoded compact batch recursive certificate must verify");
+
+        // P0/D6 ADVERSARIAL: a certificate proven over one opened schedule must be
+        // rejected when the node folds a DIFFERENT program's commitment — i.e. a
+        // prover who opened a favorable strip cannot pass the canonical check.
+        let mut wrong_commit = commit.clone();
+        wrong_commit[0] += Val::ONE;
+        let decoded_for_wrong_commit = decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode for wrong-commitment test");
+        verify_compact_batch_recursive_certificate_with_context(
+            &run.verifier_context, decoded_for_wrong_commit, &pis, &wrong_commit,
+        )
+        .expect_err("must reject a cert whose L0 program commitment ≠ canonical (D6 binding)");
 
         let mut wrong_pis = pis.clone();
         wrong_pis.hash_jackpot[0] ^= 1;
         let wrong_decoded = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate for tamper test");
         verify_compact_batch_recursive_certificate_with_context(
-            &run.verifier_context, wrong_decoded, &wrong_pis,
+            &run.verifier_context, wrong_decoded, &wrong_pis, &commit,
         )
         .expect_err("compact batch recursive certificate must reject wrong public inputs");
 
@@ -2278,7 +2383,7 @@ mod tests {
         wrong_digest_cert.verifier_key_digest[0] =
             wrong_digest_cert.verifier_key_digest[0] + Val::ONE;
         verify_compact_batch_recursive_certificate_with_context(
-            &run.verifier_context, wrong_digest_cert, &pis,
+            &run.verifier_context, wrong_digest_cert, &pis, &commit,
         )
         .expect_err("compact batch recursive certificate must reject wrong verifier-key digest");
 
@@ -2287,7 +2392,7 @@ mod tests {
         let decoded_for_wrong_context = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate for context digest test");
         verify_compact_batch_recursive_certificate_with_context(
-            &wrong_context, decoded_for_wrong_context, &pis,
+            &wrong_context, decoded_for_wrong_context, &pis, &commit,
         )
         .expect_err("compact batch recursive verifier must reject stale context digest");
 
