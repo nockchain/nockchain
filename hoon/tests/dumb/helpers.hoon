@@ -126,6 +126,24 @@
     genesis-target-atom  max-tip5-atom:tip5
     pow-len              1
   ==
+::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
+::  limit, but poke-able through the kernel. The oversize-tx mempool test
+::  drives +init-nockchain / +add-n-pages-integration, both of which poke
+::  %heard-block and assert acceptance, so the pages need real proofs.
+::
+::  max-future-timestamp is also lifted, as +bc-pending-integration-tests
+::  does. +pok pokes with now=*@ (0), and +make-empty-page steps each page
+::  600s past its parent, so consensus +check-timestamp
+::  (lte timestamp (add now-secs max-future-timestamp)) caps the chain at
+::  7.200/600 = 12 blocks under the 2-hour default. The oversize test needs
+::  85, so without this the 13th page is rejected and
+::  +add-n-pages-integration's acceptance assertion crashes.
+++  bc-max-block-size-medium-v0-provable
+  %*  .  bc-max-block-size-medium-v0
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+    max-future-timestamp  (bex 32)
+  ==
 --
 ::
 ::  structs
