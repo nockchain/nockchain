@@ -297,12 +297,23 @@ wire cap is `PublicDataMaxSizeV2 = 4807`.)
 > hash), with boundary tests on each. Defense-in-depth: the binding does not rely
 > on the codec having already capped the input.
 
-### M2 — MoE prove path that emits the *compact* cert
-There is no `prove_pearl_moe_compact` today. Evaluate the MoE ticket
-(routing → splice `s_A` → grouped tile → jackpot), build the prover context with
-the MoE splice + `from_indices(outer_indices, expert-columns)`, and drive
-`prove_pearl_merge_compact_recursive_certificate` (not the diagnostic-L1 prover).
-Selective opening flows through automatically (it is a Layer-0/trace property).
+### M2 — MoE prove path that emits the *compact* cert — ✅ **DONE + VALIDATED 2026-07-13**
+Evaluate the MoE ticket (routing → splice `s_A` → grouped tile → jackpot), build
+the prover context with the MoE splice + `from_indices(outer_indices,
+expert-columns)`, and drive the compact prover. Selective opening flows through
+automatically (Layer-0/trace property).
+
+> **DONE — the compact prover is program-generic.** The MoE Layer-0 (already built
+> by `prove_ai_pow_scheduled_full_with_context` over the MoE strip schedule)
+> wraps as a `ChainVerifiedCompositeProof` and drives
+> `prove_compact_batch_from_verified_l0` directly — the same path as dense. P0's
+> program-commitment digest fold is MoE-aware for free. Validated by
+> `real_moe_compact_recursive_certificate_proves_and_verifies` (`zk_bridge.rs`,
+> real proving, **26.38 s**): a MoE compact cert **proves + verifies** with its
+> canonical program commitment, a **wrong commitment is rejected** (D6 binding for
+> the MoE program = part of M7), and the cert is **125,237 bytes (≤ 150 KB)** —
+> which also validates **M5** (size/latency) for MoE at this scale. MoE stays
+> fail-closed at the node admission gates; this is the prove+recursion path.
 
 ### M3 — MoE node verify branch on compact
 Wire MoE soundness verification into

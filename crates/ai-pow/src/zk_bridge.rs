@@ -3989,6 +3989,125 @@ mod tests {
         assert_eq!(pis.jackpot, tile_state_words(&ticket.tile_state));
     }
 
+    /// M2 + M7 — MoE on the **compact** production certificate. The compact
+    /// prover is program-generic, so the MoE Layer-0 (grouped tile + routing
+    /// splice, opened over `outer_indices`/expert-columns) drives it directly,
+    /// and the P0/D6 program-commitment digest fold is MoE-aware for free. This
+    /// proves a MoE compact certificate and verifies it against the MoE canonical
+    /// program commitment, then checks a wrong commitment is rejected (D6 binding
+    /// on the compact path, for the MoE program).
+    #[test]
+    #[ignore = "real MoE compact recursive proof generation is opt-in (M2)"]
+    fn real_moe_compact_recursive_certificate_proves_and_verifies() {
+        use crate::commit::matrix_commitment;
+        use crate::pearl_moe_routing::build_routing_data;
+
+        let (m, k, n_e, e, r) = (128usize, 1024usize, 64usize, 2usize, 64usize);
+        let top_k = 1usize;
+        let params = MatmulParams {
+            m: m as u32,
+            k: k as u32,
+            n: (n_e * e) as u32,
+            noise_rank: r as u32,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"moe-compact-cert", &params);
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+        let kappa = [0x41u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+        let (expert_idx, inner, local_b) =
+            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+            &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+        )
+        .expect("MoE ticket");
+        let zctx = ZkProverContext {
+            a: &a,
+            b: &b,
+            params,
+            kappa,
+            h_a_chunk: h_a,
+            h_b_chunk: h_b,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+            jackpot_key: ticket.s_a,
+        };
+        let zk_params = zk_params_from(&params);
+        let strip_schedule = StripIndexSchedule::from_indices(
+            &zk_params,
+            ticket.outer_indices.clone(),
+            ticket.b_cols_global.clone(),
+        )
+        .expect("MoE strip schedule");
+
+        // Layer-0: prove the MoE grouped tile.
+        let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
+            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+        )
+        .expect("prove MoE Layer-0");
+        let ZkProofArtifact { proof, pis, .. } = artifact;
+
+        // P0/D6: the MoE canonical program commitment the node would derive
+        // witness-free from the opened schedule.
+        let trace_height = expected_layer0_rows_for_strip_schedule(&params, &strip_schedule)
+            .expect("MoE trace height")
+            .required_trace_len();
+        let profile = CircuitConfig::for_layer0_trace(trace_height);
+        let commit = ai_pow_zk::recursion::canonical_l0_program_commitment_vals(
+            &zk_params, &profile, &prover_program,
+        );
+        assert!(!commit.is_empty());
+
+        let verified_l0 = unsafe {
+            ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+                prover_program,
+                proof,
+                &pis,
+            )
+        };
+
+        // M2: drive the COMPACT prover on the MoE Layer-0 (program-generic path).
+        let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)
+            .expect("prove MoE compact certificate");
+
+        let bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
+                .expect("encode MoE compact cert");
+        let decoded = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode MoE compact cert");
+        ai_pow_zk::recursion::verify_compact_batch_recursive_certificate_with_context(
+            &run.verifier_context, decoded, &pis, &commit,
+        )
+        .expect("MoE compact certificate verifies with its program commitment");
+
+        // M7 adversarial: a wrong program commitment must reject (D6 for MoE).
+        let decoded_wrong = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode for wrong-commitment test");
+        // A different program commitment ⇒ different statement-digest preimage ⇒
+        // reject. (Same-length value-sensitivity is covered by the dense recursion
+        // round-trip's `wrong[0] += Val::ONE` adversarial.)
+        let mut wrong = commit.clone();
+        wrong.push(commit[0]);
+        assert_ne!(wrong, commit);
+        ai_pow_zk::recursion::verify_compact_batch_recursive_certificate_with_context(
+            &run.verifier_context, decoded_wrong, &pis, &wrong,
+        )
+        .expect_err("MoE compact cert must reject a wrong L0 program commitment (D6)");
+
+        assert!(
+            bytes.len() < 150_000,
+            "MoE compact cert should stay within the relaxed size gate: {}",
+            bytes.len()
+        );
+        eprintln!("M2 MoE compact cert: {} bytes, trace_height={}", bytes.len(), trace_height);
+    }
+
     /// Opt-in because this builds a real Layer-0 proof and recursive
     /// certificate. Run with:
     /// `GNORT_DISABLE=1 cargo test -p ai-pow --release --features zk \
