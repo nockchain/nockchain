@@ -20,13 +20,14 @@ track lives in one place.
   prove/verify end-to-end against the large diagnostic-L1 certificate. None of it
   runs on the **compact** certificate that production actually ships.
 - Getting to compact production is therefore mostly **integration + re-validation
-  onto the compact format**, plus **one shared prerequisite: D6** — the compact
-  path has no verifier-side opened-schedule binding, and the whole point of MoE
-  (prover opened *exactly the routed tokens*) depends on that binding.
-- **Order:** fix **D6** (MoE-aware) → land MoE compact prove/verify (**M1–M3**) →
-  size/latency + k≠1024 + adversarial (**M5–M7**) → **lift the fail-closed guards
-  last (M4)**. Actual mainnet acceptance additionally waits on the Hoon↔Rust
-  consensus wiring (**D4/S1**), which is shared with dense.
+  onto the compact format**. The shared prerequisite **D6** (compact
+  opened-schedule binding) is now **✅ DONE + validated** (program-commitment
+  digest fold, §4 P0) — so the compact path binds the opened schedule for both
+  dense and MoE.
+- **Order:** ~~fix D6~~ **(done)** → land MoE compact prove/verify (**M1–M3**,
+  now unblocked) → size/latency + k≠1024 + adversarial (**M5–M7**) → **lift the
+  fail-closed guards last (M4)**. Actual mainnet acceptance additionally waits on
+  the Hoon↔Rust consensus wiring (**D4/S1**), which is shared with dense.
 - **Nothing is mis-accepted today:** MoE is fail-closed at four independent
   guards, and the compact node-verify path is not wired into consensus (Hoon
   rejects `%ai-pow`). This is a *build-forward* plan, not a live-vulnerability
