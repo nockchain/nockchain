@@ -30,6 +30,8 @@ use nockvm::jets::JetErr;
 use nockvm::noun::{Noun, NounSpace, D};
 use once_cell::sync::OnceCell;
 
+pub mod setup;
+
 /// Pattern-length bound the verifier enforces (protocol constant; matches the
 /// production admission envelope).
 pub const AI_POW_VERIFY_MAX_PATTERN_LEN: usize = 4096;
@@ -147,77 +149,14 @@ pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::{prove_canonical_moe_block, CANONICAL_SETUP_COMMIT};
     use ai_pow::params::MatmulParams;
-    use ai_pow::pearl_compat::{
-        derive_pearl_work_commitments, pearl_bitcoin_double_sha256_raw, PearlAuxInclusionProof,
-        PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams, PearlNockchainAux,
-        PearlPeriodicPattern, PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32,
-        PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
-    };
-    use ai_pow::pearl_moe_routing::build_routing_data;
-    use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-    use ai_pow_miner::certificate_noun::{
-        build_ai_pow_pearl_merge_moe_artifact_noun_from_node, AiPowCertificateShape, AiProofNode,
-        PearlMergeMoeArtifact, PearlMergePublicStatementShape,
-    };
+    use ai_pow_miner::certificate_noun::build_ai_pow_pearl_merge_moe_artifact_noun_from_node;
     use nockapp::noun::slab::NounSlab;
     use nockapp::IndirectAtomExt;
     use nockvm::noun::{IndirectAtom, NounAllocator, T};
 
-    fn test_pattern(len: u32) -> PearlPeriodicPattern {
-        PearlPeriodicPattern {
-            shape: [(1, len), (len, 1), (len, 1)],
-        }
-    }
-
-    fn test_aux(commit: [u8; 32]) -> PearlNockchainAux {
-        PearlNockchainAux {
-            nockchain_chain_id: b"nockchain-mainnet\0".to_vec(),
-            nock_block_commitment: commit,
-            nockchain_target_epoch_or_height: 123_456,
-            extra_domain_data: b"ai-pow-target-window\0\0".to_vec(),
-        }
-    }
-
-    fn test_aux_inclusion(
-        aux_commitment: &[u8; 32],
-    ) -> (PearlIncompleteBlockHeader, PearlAuxInclusionProof) {
-        let mut script = Vec::from([0x01u8, 0x00]);
-        script.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
-        script.extend_from_slice(aux_commitment);
-        let mut coinbase_tx = Vec::new();
-        coinbase_tx.extend_from_slice(&1u32.to_le_bytes());
-        coinbase_tx.push(1);
-        coinbase_tx.extend_from_slice(&[0u8; 32]);
-        coinbase_tx.extend_from_slice(&u32::MAX.to_le_bytes());
-        coinbase_tx.push(script.len() as u8);
-        coinbase_tx.extend_from_slice(&script);
-        coinbase_tx.extend_from_slice(&u32::MAX.to_le_bytes());
-        coinbase_tx.push(1);
-        coinbase_tx.extend_from_slice(&0u64.to_le_bytes());
-        coinbase_tx.push(1);
-        coinbase_tx.push(0x51);
-        coinbase_tx.extend_from_slice(&0u32.to_le_bytes());
-        let mut merkle_root = pearl_bitcoin_double_sha256_raw(&coinbase_tx);
-        merkle_root.reverse();
-        let header = PearlIncompleteBlockHeader {
-            version: 0x0102_0304,
-            prev_block: [0x11; 32],
-            merkle_root,
-            timestamp: 0x6677_8899,
-            nbits: 0x207f_ffff,
-        };
-        (
-            header,
-            PearlAuxInclusionProof {
-                coinbase_tx,
-                merkle_branch: Vec::new(),
-            },
-        )
-    }
-
-    /// Build the sample noun `[artifact commit target]` in a fresh slab from a
-    /// jammed artifact + the two 32-byte atoms.
+    /// Build the jet sample noun `[artifact commit target]` from a jammed artifact.
     fn build_sample(jammed: nockapp::Bytes, commit: [u8; 32], target: [u8; 32]) -> NounSlab {
         let mut slab = NounSlab::new();
         let artifact_root = slab.cue_into(jammed).expect("cue artifact");
@@ -230,117 +169,50 @@ mod tests {
         slab
     }
 
-    /// KAT (real proving, ~25s): a real MoE `%ai-pow` block artifact, presented as
-    /// the structured jet sample `[artifact commit target]`, verifies through the
-    /// jet CORE; a wrong block commitment is rejected (Ok(false), not a jet error);
-    /// a malformed artifact atom is rejected. This validates the jet's noun
-    /// plumbing (slot axes, atom extraction, decode-from-noun) end-to-end on top of
-    /// the already-validated `verify_ai_pow_block_artifact`.
+    /// KAT (real proving, ~25s): a real MoE `%ai-pow` block, presented as the
+    /// structured jet sample `[artifact commit target]`, verifies through the jet
+    /// CORE; a wrong block commitment and an unmet difficulty are rejected
+    /// (`Ok(false)`, not a jet error). Validates the jet noun plumbing (slot axes,
+    /// atom extraction, decode-from-noun) end-to-end over the already-validated
+    /// `verify_ai_pow_block_artifact`, and exercises `setup::prove_canonical_moe_block`.
     #[test]
     #[ignore = "real MoE compact proof (~25s); opt-in"]
     fn ai_pow_verify_jet_core_accepts_real_block_and_rejects_tampering() {
-        let (m, n, e, top_k, n_e) = (64usize, 64usize, 2usize, 1usize, 32usize);
         let params = MatmulParams {
-            m: m as u32,
+            m: 64,
             k: 1024,
-            n: n as u32,
+            n: 64,
             noise_rank: 64,
             tile: 8,
             spot_checks: 1,
             difficulty_bits: 0,
         };
-        let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, &params);
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
+            .expect("prove canonical MoE block");
 
-        let commit = [0x42u8; 32];
-        let aux = test_aux(commit);
-        let aux_commitment = aux.commitment().unwrap();
-        let (header, aux_inclusion) = test_aux_inclusion(&aux_commitment);
-        let config = PearlMiningConfig {
-            common_dim: 1024,
-            rank: 64,
-            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
-            rows_pattern: test_pattern(8),
-            cols_pattern: test_pattern(8),
-            reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
-        };
-        let commitments =
-            derive_pearl_work_commitments(&header.to_bytes(), &config.to_bytes().unwrap(), &a, &b);
-        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
-        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
-        let inner: Vec<u32> = config
-            .rows_pattern
-            .indices_with_offset_bounded(0, 4096)
-            .unwrap();
-        let local_b: Vec<u32> = config
-            .cols_pattern
-            .indices_with_offset_bounded(0, 4096)
-            .unwrap();
-        let run = ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate(
-            &params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-            &inner, &local_b, n_e,
-        )
-        .expect("prove MoE compact certificate");
-
-        let public = PearlPublicProofParams {
-            block_header: header,
-            mining_config: config,
-            hash_a: commitments.h_a,
-            hash_b: commitments.h_b,
-            hash_jackpot: run.ticket.jackpot_hash,
-            m: m as u32,
-            n: n as u32,
-            t_rows: 0,
-            t_cols: 0,
-        };
-        let statement = PearlMergePublicStatementShape {
-            block_header: header.to_bytes(),
-            public_data: public.to_public_data().unwrap(),
-            expected_aux_commitment: aux_commitment,
-            aux,
-        };
-        let cert_bytes =
-            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
-                .unwrap();
-        let certificate = AiPowCertificateShape {
-            version: 1,
-            zk_params: run.zk_params,
-            found_idx: 0,
-            trace_height: run.trace_height,
-            commitments: run.commitments,
-            public_inputs: run.pis.clone(),
-            certificate: AiProofNode::Bytes(cert_bytes),
-        };
-        let moe_art = PearlMergeMoeArtifact {
-            moe: PearlMoeParams {
-                expert_idx: 0,
-                routing_offsets: routing.routing_offsets.clone(),
-                hash_routing: run.ticket.commitment.routing_root,
-                outer_indices: run.ticket.outer_indices.clone(),
-            },
-            routing_data: routing.routing_data.clone(),
-        };
         let artifact_slab = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &statement,
-            &aux_inclusion,
-            &moe_art,
-            &certificate.zk_params,
-            certificate.found_idx,
-            certificate.trace_height,
-            &certificate.commitments,
-            &certificate.public_inputs,
-            &certificate.certificate,
+            &block.statement,
+            &block.aux_inclusion,
+            &block.moe_art,
+            &block.certificate.zk_params,
+            block.certificate.found_idx,
+            block.certificate.trace_height,
+            &block.certificate.commitments,
+            &block.certificate.public_inputs,
+            &block.certificate.certificate,
         )
         .expect("build MoE artifact noun");
         let jammed = artifact_slab.jam();
 
         let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-            &run.verifier_key_digest(),
+            &block.run.verifier_key_digest(),
         )
         .to_vec();
         let setup = AiPowVerifierSetup {
-            context: run.verifier_context,
+            context: block.run.verifier_context,
             digest_bytes,
         };
+        let commit = block.commit;
         let loose_target = [0xffu8; 32];
 
         // Valid block → verified.
