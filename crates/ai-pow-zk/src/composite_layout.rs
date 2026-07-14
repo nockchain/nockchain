@@ -611,6 +611,16 @@ pub const MSG_PAIR_SEL_LEN: usize = 8;
 /// End-of-MSG_PAIR_SEL cursor.
 pub const MSG_PAIR_SEL_END: usize = MSG_PAIR_SEL_START + MSG_PAIR_SEL_LEN;
 
+/// §6(b)-G3 SEGMENT RESET — the `StripeXorChip`'s per-segment reset
+/// boolean at composite offset (see `chips::stripe_xor::cols::SEG_RESET`).
+/// A single WITNESS column (not a `PROGRAM_COL`); it is made verifier-
+/// fixed by `StripeXorChip::eval_composite`. In the current pre-G3 regime
+/// (`num_stripes ≤ STRIPE_MAX`, one segment) it is pinned to 0, so the
+/// segmented path reduces exactly to the pre-G3 StripeXor constraints;
+/// G3 Stage 3 pins it via a `CONTROL_PREP` bit (bit 61) to fire at each
+/// segment boundary.
+pub const SX_SEG_RESET: usize = MSG_PAIR_SEL_END;
+
 // =====================================================================
 //  Total trace width
 // =====================================================================
@@ -618,7 +628,7 @@ pub const MSG_PAIR_SEL_END: usize = MSG_PAIR_SEL_START + MSG_PAIR_SEL_LEN;
 /// Total trace width: pinned end-of-layout cursor. Phases 3+ extend
 /// chip-internal sub-columns but must not exceed this without bumping
 /// the constant.
-pub const TOTAL_TRACE_WIDTH: usize = MSG_PAIR_SEL_END;
+pub const TOTAL_TRACE_WIDTH: usize = SX_SEG_RESET + 1;
 
 #[cfg(test)]
 mod tests {
@@ -677,7 +687,8 @@ mod tests {
             + SX_IN_LEN
             + SX_XR_LEN
             + 1 /* SX_NEW_SEL */
-            + SX_Q_LEN;
+            + SX_Q_LEN
+            + 1 /* SX_SEG_RESET (§6(b)-G3) */;
         let fold_stripe_sel = FOLD_STRIPE_SEL_LEN; // 64
         let msg_pair_sel = MSG_PAIR_SEL_LEN; // 8
 
@@ -731,12 +742,12 @@ mod tests {
         assert_eq!(blake3_output, 8);
         assert_eq!(jackpot_xbits, 49);
         assert_eq!(fold, 99);
-        // sx_stripe: 166 — the StripeXor block-own columns
+        // sx_stripe: 167 — the StripeXor block-own columns
         // (SX_IS_ACTIVE 1 + SX_LANE_SEL 64 + SX_IN 4 + SX_XR 64 +
-        // SX_NEW_SEL 1 + SX_Q 32). The 192 bit columns (SX_IN_BITS,
-        // SX_XR_SEL_BITS, SX_NEW_SEL_BITS) are aliased into the
-        // BLAKE3-round region (§M-S5b Path A column-overlay).
-        assert_eq!(sx, 166);
+        // SX_NEW_SEL 1 + SX_Q 32 + SX_SEG_RESET 1). The 192 bit columns
+        // (SX_IN_BITS, SX_XR_SEL_BITS, SX_NEW_SEL_BITS) are aliased into
+        // the BLAKE3-round region (§M-S5b Path A column-overlay).
+        assert_eq!(sx, 167);
         assert_eq!(fold_stripe_sel, 64);
         assert_eq!(msg_pair_sel, 8);
 
@@ -1044,8 +1055,13 @@ mod tests {
             ),
             (
                 MSG_PAIR_SEL_START + MSG_PAIR_SEL_LEN,
+                SX_SEG_RESET,
+                "MSG_PAIR_SEL → SX_SEG_RESET",
+            ),
+            (
+                SX_SEG_RESET + 1,
                 TOTAL_TRACE_WIDTH,
-                "MSG_PAIR_SEL → TOTAL_TRACE_WIDTH",
+                "SX_SEG_RESET → TOTAL_TRACE_WIDTH",
             ),
         ];
         for &(end, next, name) in checkpoints {

@@ -186,14 +186,7 @@ impl StripeXorChip {
         new_sel: crate::composite_layout::SX_NEW_SEL,
         new_sel_bits: crate::composite_layout::SX_NEW_SEL_BITS_START,
         q: crate::composite_layout::SX_Q_START,
-        // §6(b)-G3 Stage 2 TODO: wire a dedicated preprocessed
-        // `SX_SEG_RESET` composite column here and call
-        // `eval_reset_at` from `eval_composite`. Until then the
-        // composite runs a SINGLE segment (num_stripes ≤ STATE_LEN),
-        // `eval_composite` does NOT emit the reset constraints, and
-        // this placeholder is never read. `SX_IS_ACTIVE` is a safe
-        // stand-in (any valid column) precisely because it is unread.
-        seg_reset: crate::composite_layout::SX_IS_ACTIVE,
+        seg_reset: crate::composite_layout::SX_SEG_RESET,
     };
 
     /// Composite-layout entry point: the chip-internal XOR
@@ -207,7 +200,21 @@ impl StripeXorChip {
     /// on every non-stripe-xor row (`SX_IS_ACTIVE = 0`), so all
     /// existing traces (all-zero SX columns) are unaffected.
     pub fn eval_composite<AB: AirBuilder>(builder: &mut AB) {
-        Self::eval_at(builder, &Self::COMPOSITE_OFFSETS);
+        // §6(b)-G3 Stage 2: run the SEGMENTED constraint set. The
+        // `SX_SEG_RESET` column is pinned to 0 here (single-segment,
+        // `num_stripes ≤ STRIPE_MAX`), so `eval_at_segmented` reduces
+        // EXACTLY to the pre-G3 `eval_at` constraints — the composite
+        // is behaviorally unchanged. Stage 3 replaces this hard pin
+        // with a `CONTROL_PREP` bit so the reset can fire (verifier-
+        // fixed) at each segment boundary.
+        {
+            let seg_reset = {
+                let main = builder.main();
+                main.current_slice()[crate::composite_layout::SX_SEG_RESET]
+            };
+            builder.assert_zero(seg_reset);
+        }
+        Self::eval_at_segmented(builder, &Self::COMPOSITE_OFFSETS);
 
         // SX_IN ← matmul accumulator-after-step (cross-row, gated).
         let off = &Self::COMPOSITE_OFFSETS;
