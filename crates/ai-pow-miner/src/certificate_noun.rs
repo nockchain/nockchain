@@ -2394,9 +2394,11 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_l
         ));
     }
 
-    // (2) Public params from the authenticated statement, then the MoE work
+    // (2) Public params from the authenticated statement (MoE-tolerant parse — the
+    // dense `from_public_data` fail-closes on the MoE trailer), then the MoE work
     // precheck (envelope + routing-consistency + jackpot/difficulty binding).
-    let public_params = PearlPublicProofParams::from_public_data(header, &statement.public_data)?;
+    let public_params =
+        PearlPublicProofParams::from_public_data_allowing_moe(header, &statement.public_data)?;
     let work = verify_pearl_moe_compatible_work(
         &public_params,
         context.a_row_major,
@@ -7747,6 +7749,217 @@ mod tests {
             run.l1_circuit_build_ms,
             run.l1_in_circuit_verify_ms,
             run.l1_outer_cert_ms,
+        );
+    }
+
+    /// M3 (end-to-end, real proving) — a full MoE (`AIM1`) compact artifact
+    /// proves, assembles into a `PearlMergeAiPowArtifactShape`, and VERIFIES
+    /// through the node MoE branch: aux binding + MoE-aware envelope + routing
+    /// binding + **jackpot/difficulty binding** + routing/PI/schedule binding +
+    /// compact proof (P0/D6 fold). Adversarial: forged routing, unmet difficulty,
+    /// and routing a MoE artifact through the dense verify all reject.
+    ///
+    /// This is the node-boundary validation of the whole MoE compact path with a
+    /// statement-derived `kappa` (the node re-derives it from the block header +
+    /// config, so this exercises the full chain the M2 kappa-fixed test does not).
+    #[test]
+    #[ignore = "real MoE compact recursive proof generation is opt-in (M2/M3)"]
+    fn real_moe_compact_pearl_merge_artifact_verifies_through_node_branch() {
+        use ai_pow::pearl_compat::derive_pearl_work_commitments;
+        use ai_pow::pearl_moe_routing::build_routing_data;
+        use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate;
+
+        // Envelope-valid MoE dims: k=1024, r=64, h=w=8, m=n=64, e=2 (n_e=32).
+        let (m, n, e, top_k, n_e) = (64usize, 64usize, 2usize, 1usize, 32usize);
+        let params = MatmulParams {
+            m: m as u32,
+            k: 1024,
+            n: n as u32,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+
+        // Deterministic int7-range matrices (no RNG — resume-safe).
+        let synth = |seed: u64, len: usize| -> Vec<i8> {
+            let mut s = seed | 1;
+            (0..len)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    ((s % 16) as i8) - 8
+                })
+                .collect()
+        };
+        let a = synth(0xA11CE, m * 1024);
+        let b = synth(0xB0B, n * 1024);
+
+        // Valid aux binding + the block header it fixes.
+        let aux = pearl_test_aux();
+        let aux_commitment = aux.commitment().unwrap();
+        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux_commitment);
+
+        let config = PearlMiningConfig {
+            common_dim: 1024,
+            rank: 64,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: pearl_test_pattern(8),
+            cols_pattern: pearl_test_pattern(8),
+            reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+
+        // Node-matching kappa/h_a/h_b: derived from the statement (header + config),
+        // exactly as the node re-derives them in verify_pearl_moe_compatible_work.
+        let sigma = header.to_bytes();
+        let mu = config.to_bytes().unwrap();
+        let commitments = derive_pearl_work_commitments(&sigma, &mu, &a, &b);
+
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+        let inner: Vec<u32> = config
+            .rows_pattern
+            .indices_with_offset_bounded(0, 4096)
+            .unwrap();
+        let local_b: Vec<u32> = config
+            .cols_pattern
+            .indices_with_offset_bounded(0, 4096)
+            .unwrap();
+        let expert_idx = 0usize;
+
+        eprintln!("MoE artifact e2e: proving compact certificate (real proving)");
+        let run = prove_pearl_moe_compact_recursive_certificate(
+            &params,
+            &a,
+            &b,
+            &commitments.kappa,
+            &commitments.h_a,
+            &commitments.h_b,
+            &routing,
+            expert_idx,
+            &inner,
+            &local_b,
+            n_e,
+        )
+        .expect("prove MoE compact certificate");
+
+        let public = PearlPublicProofParams {
+            block_header: header,
+            mining_config: config,
+            hash_a: commitments.h_a,
+            hash_b: commitments.h_b,
+            hash_jackpot: run.ticket.jackpot_hash,
+            m: m as u32,
+            n: n as u32,
+            t_rows: 0,
+            t_cols: 0,
+        };
+        let statement = PearlMergePublicStatementShape {
+            block_header: header.to_bytes(),
+            public_data: public.to_public_data().unwrap(),
+            expected_aux_commitment: aux_commitment,
+            aux: aux.clone(),
+        };
+        let cert_bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
+                .unwrap();
+        let certificate = AiPowCertificateShape {
+            version: AI_POW_CERT_VERSION,
+            zk_params: run.zk_params,
+            found_idx: 0,
+            trace_height: run.trace_height,
+            commitments: run.commitments,
+            public_inputs: run.pis.clone(),
+            certificate: AiProofNode::Bytes(cert_bytes),
+        };
+        let moe_art = PearlMergeMoeArtifact {
+            moe: PearlMoeParams {
+                expert_idx: expert_idx as u16,
+                routing_offsets: routing.routing_offsets.clone(),
+                hash_routing: run.ticket.commitment.routing_root,
+                outer_indices: run.ticket.outer_indices.clone(),
+            },
+            routing_data: routing.routing_data.clone(),
+        };
+        let artifact = PearlMergeAiPowArtifactShape {
+            statement,
+            aux_inclusion,
+            certificate,
+            moe: Some(moe_art),
+        };
+
+        const LOOSE_TARGET: [u8; 32] = [0xffu8; 32];
+        let ctx = |target: &'static [u8; 32]| PearlMergeAiPowVerifierContext {
+            candidate_nock_block_commitment: &aux.nock_block_commitment,
+            a_row_major: &a,
+            b_col_major: &b,
+            nockchain_target: target,
+            max_pattern_len: 4096,
+        };
+        let expected_digest = run.verifier_key_digest();
+
+        // Happy path: the node MoE branch verifies the full artifact end-to-end.
+        let pre = verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+            &artifact,
+            ctx(&LOOSE_TARGET),
+            &run.verifier_context,
+            &expected_digest,
+            CertificateNounLimits::default(),
+        )
+        .expect("MoE artifact verifies through the node branch");
+        assert_eq!(pre.work.jackpot_hash, run.ticket.jackpot_hash);
+        assert_eq!(pre.aux_commitment, aux_commitment);
+
+        // Adversarial 1 — forged routing_data breaks the routing-consistency binding.
+        let mut forged = artifact.clone();
+        forged.moe.as_mut().unwrap().routing_data[0] ^= 1;
+        assert!(
+            verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+                &forged,
+                ctx(&LOOSE_TARGET),
+                &run.verifier_context,
+                &expected_digest,
+                CertificateNounLimits::default(),
+            )
+            .is_err(),
+            "forged routing must reject",
+        );
+
+        // Adversarial 2 — unmet difficulty (target 0 ⇒ adjusted target 0).
+        const ZERO_TARGET: [u8; 32] = [0u8; 32];
+        assert!(
+            verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+                &artifact,
+                ctx(&ZERO_TARGET),
+                &run.verifier_context,
+                &expected_digest,
+                CertificateNounLimits::default(),
+            )
+            .is_err(),
+            "unmet difficulty must reject",
+        );
+
+        // Adversarial 3 — routing a MoE artifact through the DENSE compact verify
+        // is rejected by the dispatch guard.
+        assert!(
+            verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
+                &artifact,
+                ctx(&LOOSE_TARGET),
+                &run.verifier_context,
+                &expected_digest,
+                CertificateNounLimits::default(),
+            )
+            .is_err(),
+            "dense verify must reject a MoE artifact",
+        );
+
+        eprintln!(
+            "MoE artifact e2e: OK — cert {} bytes, trace_height {}",
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
+                .unwrap()
+                .len(),
+            run.trace_height,
         );
     }
 

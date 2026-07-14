@@ -871,6 +871,37 @@ impl PearlPublicProofParams {
                 return Err(PearlCompatError::UnsupportedMoeConfig { e, top_k });
             }
         }
+        Self::from_public_data_core(block_header, bytes)
+    }
+
+    /// MoE-tolerant `public_data` parse — the counterpart of [`Self::from_public_data`]
+    /// for the MoE (GROUPED_GEMM) admission path.
+    ///
+    /// In our wire format a MoE statement's `public_data` is the SAME 164-byte core
+    /// as dense (`to_public_data` always emits `PEARL_PUBLIC_PROOF_PARAMS_SIZE`), with
+    /// the MoE discriminant carried in the mining-config trailer (bytes 20..24); the
+    /// per-expert routing data lives in the artifact nonce
+    /// (`PearlMergeMoeArtifact`), not here. This parses that core WITHOUT the MoE
+    /// fail-close, so the node MoE verify branch can reconstruct the public params.
+    ///
+    /// Soundness: like [`Self::sanity_check_allowing_moe`], this does NOT relax the
+    /// dense [`Self::from_public_data`] (which stays fail-closed on MoE). It is only
+    /// reached from the MoE compact verify path, which additionally requires the full
+    /// recursive certificate — a MoE ticket is never admitted on this parse alone.
+    pub fn from_public_data_allowing_moe(
+        block_header: PearlIncompleteBlockHeader,
+        bytes: &[u8],
+    ) -> Result<Self, PearlCompatError> {
+        Self::from_public_data_core(block_header, bytes)
+    }
+
+    /// Shared 164-byte dense-core parse for both [`Self::from_public_data`] (after
+    /// its MoE fail-close) and [`Self::from_public_data_allowing_moe`]. The core
+    /// layout is MoE-independent; only the mining-config trailer differs.
+    fn from_public_data_core(
+        block_header: PearlIncompleteBlockHeader,
+        bytes: &[u8],
+    ) -> Result<Self, PearlCompatError> {
         if bytes.len() != PEARL_PUBLIC_PROOF_PARAMS_SIZE {
             return Err(PearlCompatError::BadPublicParamsLen(bytes.len()));
         }

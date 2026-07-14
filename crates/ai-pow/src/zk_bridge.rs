@@ -1572,6 +1572,115 @@ pub fn prove_pearl_merge_recursive_certificate(
 ///    `l0_program` to equal it (`l0_program_matches`). Without this,
 ///    `verify_recursive_certificate` would prove the statement for the prover's
 ///    *own* program, which could have opened a prover-favorable strip.
+/// A MoE (GROUPED_GEMM) **compact** recursive-certificate prove run (M2). Carries
+/// everything a caller needs to assemble the node artifact + verify: the compact
+/// certificate, verifier context, public inputs, ZK params, trace height, the
+/// matrix commitments, and the MoE ticket (for `hash_jackpot` / `routing_root` /
+/// `outer_indices`).
+pub struct PearlMoeCompactProveRun {
+    pub compact_cert: ai_pow_zk::recursion::AiPowCompactBatchRecursiveCertificate,
+    pub verifier_context: ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    pub pis: CompositePublicInputs,
+    pub zk_params: ZkParams,
+    pub trace_height: usize,
+    pub commitments: ZkPublicCommitments,
+    pub ticket: crate::pearl_compat::PearlMoeTicket,
+}
+
+impl PearlMoeCompactProveRun {
+    pub fn verifier_key_digest(
+        &self,
+    ) -> ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest {
+        *self.compact_cert.verifier_key_digest()
+    }
+}
+
+/// Build a MoE (GROUPED_GEMM) **compact** recursive certificate (M2) — the public
+/// counterpart of the dense [`prove_pearl_merge_compact_recursive_certificate`].
+///
+/// Evaluate the MoE ticket (routing splice → `s_A`, grouped tile → jackpot), prove
+/// the Layer-0 grouped tile over the routing-spliced schedule
+/// (`from_indices(outer_indices, expert-columns)`), wrap it as a
+/// `ChainVerifiedCompositeProof`, and drive the compact prover — the identical
+/// program-generic path the dense compact prover uses (P0's program-commitment
+/// fold is MoE-aware for free). `kappa`/`h_a`/`h_b` are supplied by the caller
+/// (derived from the Pearl statement) so the node's re-derivation matches.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_pearl_moe_compact_recursive_certificate(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    let k = params.k as usize;
+    let r = params.noise_rank as usize;
+    // dot_product_length == k for the standard Pearl band (rank | k).
+    let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+        kappa, h_a, h_b, a_row_major, b_col_major, routing, expert_idx, inner_a_rows, local_b_cols,
+        n_e, k, r, k,
+    )
+    .map_err(BridgeError::PearlMergeStatement)?;
+
+    let zctx = ZkProverContext {
+        a: a_row_major,
+        b: b_col_major,
+        params: *params,
+        kappa: *kappa,
+        h_a_chunk: *h_a,
+        h_b_chunk: *h_b,
+        s_a: ticket.s_a,
+        s_b: ticket.s_b,
+        jackpot_key: ticket.s_a,
+    };
+    let zk_params = zk_params_from(params);
+    let strip_schedule = StripIndexSchedule::from_indices(
+        &zk_params,
+        ticket.outer_indices.clone(),
+        ticket.b_cols_global.clone(),
+    )
+    .map_err(BridgeError::ZkParamsInvalid)?;
+
+    let (artifact, prover_program, _) =
+        prove_ai_pow_scheduled_full_with_context(&zctx, params, 0, 0, &strip_schedule, |_| {}, None)?;
+    let ZkProofArtifact {
+        proof,
+        pis,
+        trace_height,
+    } = artifact;
+
+    let verified_l0 = unsafe {
+        // SAFETY: the MoE ticket + routing splice + explicit strip schedule are
+        // computed here from the caller's authenticated inputs; the node re-derives
+        // and re-binds all of them (`verify_pearl_moe_compact_recursive_certificate`).
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+            prover_program,
+            proof,
+            &pis,
+        )
+    };
+    let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
+
+    Ok(PearlMoeCompactProveRun {
+        compact_cert: run.compact_cert,
+        verifier_context: run.verifier_context,
+        pis,
+        zk_params,
+        trace_height,
+        commitments: ZkPublicCommitments {
+            h_a_chunk: *h_a,
+            h_b_chunk: *h_b,
+        },
+        ticket,
+    })
+}
+
 /// 5. **Recursive certificate verification** (`verify_recursive_certificate`).
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pearl_moe_recursive_certificate(
