@@ -546,13 +546,34 @@ unmet difficulty rejects.
    same-shape block. **Shared with dense** (puzzle-variant-agnostic; the per-block
    schedule is bound separately via the P0 commitment fold). What remains is only
    the thin startup wrapper + choosing the canonical production shape.
-2. **The Hoon→Rust jet** wrapping `verify_ai_pow_block_artifact_jam` (+ the
-   activation gate + target/commitment plumbing from consensus state, + a Rust-side
-   cached setup from #1), replacing the two `inner.hoon` fail-closes; rebuild the
-   kernel jam → binary (per `hoon-jam-builds`). **This is the remaining consensus
-   linchpin** — soundness-critical cross-language wiring to be landed in careful
-   validated stages (KAT-first, jet-table registration, jam rebuild), per R1.
-3. Block-level acceptance + integration tests.
+2. **The Hoon→Rust jet** wrapping `verify_ai_pow_block_artifact_jam` — **the
+   remaining consensus linchpin**, and (investigated 2026-07-13) a **multi-crate
+   VM/consensus project**, not a one-file wire. Concrete architecture:
+   - **A new jet crate is required.** `zkvm-jetpack` (where the STARK jets live,
+     `hot.rs` → `Vec<HotEntry>`) depends **only on `nockvm`** — it cannot reach
+     `ai-pow-miner`'s verify logic. So the AI-PoW verify jet needs a **new crate**
+     (e.g. `ai-pow-jets`) depending on `ai-pow-miner` + `nockvm`, exposing
+     `produce_ai_pow_hot_state() -> Vec<HotEntry>` (no circular dep — `ai-pow-zk`
+     does not use `zkvm-jetpack`).
+   - **Wire it into the kernel hot state.** `crates/nockchain/src/lib.rs` boots the
+     dumbnet kernel with `hot_state: &[HotEntry]`; the new jet set must be appended
+     there.
+   - **The jet function** decodes the noun args (jammed artifact + block
+     commitment + target), obtains the **cached setup** (#1, built once — a jet is
+     stateless, so the context lives in Rust-side global/once state), calls
+     `verify_ai_pow_block_artifact_jam`, returns a boolean noun.
+   - **Jet-consistency.** A `~/`-hinted Hoon arm (`++ai-pow-verify`) must formally
+     match the Rust jet's result, or the jet is unsound. `check-pow`/`do-pow`
+     (`inner.hoon`) call it, replacing the two fail-closes (+ activation gate +
+     target/commitment plumbing from consensus state).
+   - **Rebuild + validate.** Rebuild the kernel jam → binary (per
+     `hoon-jam-builds`), then a `roswell` integration test that a real `%ai-pow`
+     block is accepted and a forged one rejected — KAT-first on the jet function.
+   **Shared with dense** — dense `%ai-pow` verify has the identical unwired-jet gap;
+   this is whole-feature consensus integration, not a MoE-parity task. Per R1 it is
+   soundness-critical invasive work to land in careful validated stages, not a
+   session-tail rush (a mis-matched jet or mis-cached setup = forgeable blocks).
+3. Block-level acceptance + integration tests (the `roswell` test above).
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
