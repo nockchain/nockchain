@@ -749,6 +749,41 @@ mod tests {
         );
     }
 
+    /// §6(b)-R-b — the PINNED path (CRIT-1 program pin + §4.D keystone
+    /// JACKPOT_MSG==FOLD_STATE + the §6(b)-R-b keystone FOLD_XSTEP==TR_NEW)
+    /// verifies for a stripe-major R-b trace at num_stripes=128 (> the old
+    /// STRIPE_MAX=64), with `sx_bound=false` (the SX 64-lane keystone is
+    /// inactive for R-b; the §6(b)-R-b keystone binds the fold input to the
+    /// per-stripe reduce). This exercises the keystones the base
+    /// `CompositeFullAir` proof cannot.
+    #[test]
+    fn rb_stripe_major_pinned_verifies() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 128usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        // §4.D: the jackpot-hash block sets last-row JACKPOT_MSG == M.
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let pis_v = pis.to_vec();
+        let program = extract_program(&trace.matrix);
+        let air = CompositeFullAirPinned::new_with(program.clone(), false);
+        let (pp, vk) = composite_setup(&cfg, &program);
+        let proof = prove_with_preprocessed(&cfg, &air, trace.matrix, &pis_v, Some(&pp));
+        verify_with_preprocessed(&cfg, &air, &proof, &pis_v, Some(&vk))
+            .expect("R-b pinned (sx_bound=false) at num_stripes 128 must verify");
+    }
+
     /// HIGH-2.2 §6(b) end-to-end regression via the production
     /// Route-A path: the **full useful-work chain** —
     /// `place_useful_work_chain` (sub-block-major matmul sweep +
