@@ -1,9 +1,35 @@
 # AI-PoW: arbitrary-model support (Pearl parity) — options & roadmap
 
-**Status:** design decision recorded. Chosen path: **(b) carry authenticated
-opened strips**, *pending a proof-size measurement that may flip the choice to
-(a)*. Both options remove the synthetic-matrix pin. This is a soundness-critical
-consensus change — implement in validated stages (R1).
+**Status:** **UPDATED 2026-07-14 after investigating (a) — recommendation flipped
+to (a).** Both options remove the synthetic-matrix pin. This is a
+soundness-critical consensus change — implement in validated stages (R1).
+
+> ## UPDATE: (a) is tractable and is the recommended path (investigation result)
+>
+> The circuit **already binds the jackpot to the matmul over the committed A/B**.
+> The pinned production AIR (`CompositeFullAirPinned`, `composite_full_air.rs`
+> ~299–373, active for `num_stripes ≤ STRIPE_MAX` = the PROD case) closes the full
+> chain `committed A/B → CUMSUM → SX_IN → SX_XR → FOLD_XSTEP → FoldChip →
+> FOLD_STATE → JACKPOT_MSG → BLAKE3 → hash_jackpot` (constraints: `JACKPOT_MSG ==
+> FOLD_STATE` on the last row; `Σ FOLD_STRIPE_SEL[s]·(FOLD_XSTEP − SX_XR[s]) = 0`;
+> `SX_IN == nxt.CUMSUM_TILE`). `hash_jackpot` is already a **public input** (PI
+> index 52..60). So:
+> - **(a) is NOT a circuit change.** No new sub-AIR. The jackpot binding is done.
+> - The off-circuit `compute_moe_tile` + synth re-derivation is **redundant** with
+>   the proof for the jackpot; its only unique job is enforcing `H_A/H_B == synth`
+>   — the pin we are removing.
+> - **(a) is a verifier-side simplification:** verify the recursive cert, read the
+>   proven `hash_jackpot` PI, check `≤ target`, accept the miner-committed
+>   `H_A/H_B`; delete the synth recompute. **~0 artifact-size delta.**
+> - **The one real dependency is D6/M2** — the recursive cert must be verified
+>   against a **canonical verifier context** derived from the pinned program (not
+>   the prover's supplied context). The current off-circuit recompute is precisely
+>   the workaround for the not-yet-closed D6 binding. **D6 is needed regardless**
+>   (compact-route soundness + valid-cert acceptance), so (a) rides on it and then
+>   deletes the synth workaround — it does not add work beyond D6.
+>
+> Net: (a) has no circuit cost, ~0 size cost, and converges with the D6 work
+> already on the critical path. (b) below is retained for the record.
 
 **Date:** 2026-07-14
 **Owner decision needed:** confirm (b) after Stage 0 measures the real size delta;
@@ -203,21 +229,43 @@ source (arbitrary model), keeping synth available as a default/test source.
 
 ---
 
-## 7. Option (a) — what to investigate before committing to (b)
+## 7. Option (a) investigation — RESULT (2026-07-14): tractable, no circuit change
 
-Because (b)'s size hit is large (§5.3), scope (a) properly first:
+Findings (see the UPDATE box at the top for the summary):
 
-1. Does the composite AIR already compute the jackpot hash in-circuit
-   (`RowClass::JackpotHash`, `canonical.rs`)? (Strong prior: yes.)
-2. Is that hash exposed as a **bound public input**, or only used internally? If
-   internal, the change is: expose it + add the `≤ target` field comparison — a
-   public-input + one-constraint change, not a new sub-AIR.
-3. Does the difficulty target need to be an in-circuit public input (dynamic per
-   block), and does that interact with the recursive folding?
-4. Estimate the added constraints / proof time vs. today.
+1. The jackpot hash is computed in-circuit (`RowClass::JackpotHash` /
+   `place_jackpot_hash_block`, `BLAKE3(JACKPOT_MSG, key=COMMITMENT_HASH)`).
+2. It is a **bound public input** (`hash_jackpot`, PI 52..60) — and critically,
+   `JACKPOT_MSG` is **constrained to the fold/matmul output** in the pinned
+   production AIR (`composite_full_air.rs` ~299–373): `JACKPOT_MSG == FOLD_STATE`
+   (last row) and `FOLD_XSTEP == SX_XR[stripe]` with `SX_IN == nxt.CUMSUM_TILE`,
+   closing `committed A/B → … → hash_jackpot` for `num_stripes ≤ STRIPE_MAX` (the
+   PROD path, `sx_bound=true`). So the jackpot is already proven over the committed
+   matrices. **No new sub-AIR.**
+3. The difficulty target stays a **node-side** check (`hash_jackpot ≤ target`),
+   read from the proven PI — it is not an in-circuit input, so no folding
+   interaction.
+4. Added constraints/proof time vs today: **none** (circuit unchanged).
 
-If (a) turns out to be a bounded public-input/constraint change, it is the
-better path: ~0 size delta and it preserves the compact certificate's purpose.
+**The gating dependency is D6/M2, not the circuit.** To drop the off-circuit
+`compute_moe_tile` + synth and trust the in-circuit `hash_jackpot`, the recursive
+cert must be verified against a **canonical verifier context** derived from the
+pinned program (not the prover's supplied `verifier_context`,
+`recursion.rs:1865`). D6 has a documented wall (the compact cert omits the L0
+`BatchProof` a naive context-builder wants), with two known paths: (i) build the
+context witness-free from `canonical_program_for_strip_schedule` + shape, or
+(ii) bind the program's preprocessed-commitment into the verifier-key digest. D6
+is required regardless — for compact-route soundness and for valid-cert
+acceptance — so (a) rides on it and then deletes the synth workaround.
+
+### Revised recommendation
+
+**Go (a).** Sequence: **close D6 (canonical verifier-context builder)** → then the
+`%ai-pow` verify becomes: verify recursive cert against the canonical context,
+read `hash_jackpot` PI, check `≤ target`, accept miner-committed `H_A/H_B`, delete
+synth + `compute_moe_tile`. Arbitrary models, ~0 size delta, and it closes the
+standing valid-cert-acceptance residual in the same stroke. Option (b) below is
+retained only as a fallback if D6 proves intractable.
 
 ---
 
