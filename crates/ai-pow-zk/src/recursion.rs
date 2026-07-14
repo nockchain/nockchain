@@ -1828,7 +1828,22 @@ pub fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_p
     verified: &ChainVerifiedCompositeProof<'_>,
 ) -> Result<CompactBatchCertificateRun, VerificationError> {
     prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_inner(
-        zk_params, profile, verified, None,
+        zk_params, profile, verified, None, true,
+    )
+}
+
+/// §6(b)-R-b — explicit-`sx_bound` variant. The R-b stripe-major path
+/// proves the composite with `sx_bound = false` (the SX 64-lane keystone
+/// is inactive; the §6(b)-R-b keystone binds the fold input), so the
+/// recursion's L1 verifier circuit must be built over the same AIR flag.
+pub fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_sx(
+    zk_params: &crate::params::ZkParams,
+    profile: &crate::circuit::CircuitConfig,
+    verified: &ChainVerifiedCompositeProof<'_>,
+    sx_bound: bool,
+) -> Result<CompactBatchCertificateRun, VerificationError> {
+    prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_inner(
+        zk_params, profile, verified, None, sx_bound,
     )
 }
 
@@ -1851,6 +1866,7 @@ pub fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_p
         profile,
         verified,
         Some(cache),
+        true,
     )
 }
 
@@ -1859,13 +1875,14 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
     profile: &crate::circuit::CircuitConfig,
     verified: &ChainVerifiedCompositeProof<'_>,
     prover_cache: Option<&AiPowCompactBatchProverCache>,
+    sx_bound: bool,
 ) -> Result<CompactBatchCertificateRun, VerificationError> {
     use std::time::Instant;
 
     let cfg = crate::composite_proof::build_config(zk_params, profile);
     let t = Instant::now();
-    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), true);
-    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, true);
+    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
+    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
     let built = build_composite_l1_verifier_circuit(
         &cfg,
         &air,
@@ -2149,7 +2166,9 @@ fn _composite_conforms_to_recursive_air() {
 mod tests {
 
     use super::*;
-    use crate::composite_proof::{build_config, composite_prove_pinned_logup, logup_common_for};
+    use crate::composite_proof::{
+        build_config, composite_prove_pinned_logup, composite_prove_pinned_logup_sx, logup_common_for,
+    };
     use crate::composite_public::CompositePublicInputs;
     use crate::composite_trace::CompositeTrace;
     use crate::params::ZkParams;
@@ -2164,6 +2183,75 @@ mod tests {
             tile: 2,
             difficulty_bits: 0,
         }
+    }
+
+    /// §6(b)-R-b — the FULL COMPACT-CERT path for num_stripes > 64. Builds a
+    /// stripe-major R-b composite trace (num_stripes=96, past STRIPE_MAX=64) +
+    /// its positioned producer store, proves the L0 with `sx_bound=false`, then
+    /// runs the FULL recursion (`_sx` variant, sx_bound=false) to a compact
+    /// batch recursive certificate, and verifies the decoded certificate
+    /// against its verifier context + the canonical L0 program commitment.
+    /// This is the consensus-path validation: R-b verifies end-to-end through
+    /// the compact cert at num_stripes > 64.
+    #[test]
+    fn rb_compact_batch_recursive_certificate_at_num_stripes_over_64() {
+        let zk = test_zk_params();
+        let profile = CircuitConfig::TEST_PEARL;
+        let cfg = build_config(&zk, &profile);
+
+        let ch: [u32; 8] = core::array::from_fn(|i| 0xB100 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 96usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline(1 << 14);
+        let h = trace.height();
+        let (rows_used, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let store_chunks =
+            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
+        let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
+        for (i, chunk) in store_chunks.iter().enumerate() {
+            let id_base = if chunk.side_a { a_id_base } else { b_id_base };
+            let mat_id = crate::composite_trace::noised_chunk_id(id_base, k, &chunk.src)
+                .try_into()
+                .expect("positioned noised chunk id must fit in MAT_ID");
+            trace.place_noised_store_row(8 + rows_used + i, &chunk.bytes, mat_id);
+        }
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        // L0 proof with sx_bound = FALSE (R-b path).
+        let (proof, program) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, false);
+        let verified = unsafe {
+            ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+                program, proof, &pis,
+            )
+        };
+        // Full recursion with sx_bound = FALSE.
+        let run = prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_sx(
+            &zk, &profile, &verified, false,
+        )
+        .expect("R-b compact batch recursive certificate must prove");
+
+        let bytes = encode_compact_batch_recursive_certificate(&run.compact_cert)
+            .expect("encode R-b compact cert");
+        let decoded =
+            decode_compact_batch_recursive_certificate(&bytes).expect("decode R-b compact cert");
+        let commit = canonical_l0_program_commitment_vals(&zk, &profile, &verified.program);
+        assert!(!commit.is_empty(), "L0 program must have a preprocessed commitment");
+        verify_compact_batch_recursive_certificate_with_context(
+            &run.verifier_context,
+            decoded,
+            &pis,
+            &commit,
+        )
+        .expect("decoded R-b compact cert (num_stripes 96) must verify");
     }
 
     /// S3d — end-to-end: a real composite batch-STARK proof is
