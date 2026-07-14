@@ -89,6 +89,27 @@ pub fn row_schedule(
 /// divergence). All offsets are params-pure (CR.0a
 /// `strip_opening_rows` + A1 `tile_chunk_range` + the §6(b) sweep
 /// formula + the 16|r co-located store=0 + fold/jackpot offsets).
+/// §6(b)-G3 — max segments = ⌈max_num_stripes / STRIPE_MAX⌉ =
+/// ⌈512 / 64⌉ = 8 (Pearl's num_stripes ceiling ÷ the pinned lane count).
+pub(crate) const MAX_SEGMENTS: usize = 8;
+
+/// §6(b)-G3 — the `[sweep, +4 gap, fold]` region for ONE ≤`STRIPE_MAX`
+/// stripe segment. `num_stripes > STRIPE_MAX` is folded as
+/// `⌈num_stripes/STRIPE_MAX⌉` of these, INTERLEAVED (each segment's fold
+/// immediately follows its sweep, before the next segment's SEG_RESET),
+/// so the 64-lane StripeXor register is reused per segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct SegmentLayout {
+    /// First §6(b) sweep row of this segment.
+    pub sweep_start: usize,
+    /// One past this segment's last sweep row.
+    pub store_start: usize,
+    /// First FoldChip row of this segment (`store_start + 4`).
+    pub fold_start: usize,
+    /// One past this segment's last fold row.
+    pub fold_end: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ScheduleLayout {
     /// A-side strip-opening row count (`[0, na)` = StripOpenA).
@@ -96,21 +117,59 @@ pub(crate) struct ScheduleLayout {
     /// End of strip-opening (`[na, mh_end)` = StripOpenB; row
     /// `mh_end` is the Pad gap).
     pub mh_end: usize,
-    /// First §6(b) sweep row (`mh_end + 3`).
+    /// First §6(b) sweep row (`mh_end + 3`) — `== segments[0].sweep_start`.
     pub sweep_start: usize,
-    /// One past the last sweep row (`sweep_start + sweep_rows`).
+    /// One past segment 0's last sweep row (`== segments[0].store_start`).
     pub store_start: usize,
-    /// First FoldChip row (`store_start + 4`; 16|r ⇒ 0 separate
-    /// store rows).
+    /// First FoldChip row of segment 0 (`== segments[0].fold_start`).
     pub fold_start: usize,
-    /// One past the last fold row (`fold_start + num_stripes`).
+    /// One past segment 0's last fold row (`== segments[0].fold_end`).
     pub fold_end: usize,
     /// First jackpot-hash row (`trace_len - 8`).
     pub jpot_start: usize,
+    /// §6(b)-G3 — number of active stripe segments (`⌈num_stripes/64⌉`; 1
+    /// for the pre-G3 single-segment path).
+    pub num_segments: usize,
+    /// §6(b)-G3 — per-segment `[sweep, fold]` regions; only
+    /// `[0, num_segments)` are valid. The single-field accessors above
+    /// mirror `segments[0]` (unchanged for the single-segment path).
+    pub segments: [SegmentLayout; MAX_SEGMENTS],
 }
 
 impl ScheduleLayout {
-    /// The [`RowClass`] of `row_idx` (the *one* classification).
+    /// §6(b)-G3 — if `r` is a Fold row, return `(segment, local_stripe)`
+    /// where `local_stripe = r - segments[segment].fold_start ∈ 0..64`
+    /// (the per-segment stripe index the CONTROL_PREP / FOLD_STRIPE_SEL
+    /// pin uses). `None` on non-fold rows.
+    pub fn fold_segment_and_local(&self, r: usize) -> Option<(usize, usize)> {
+        for g in 0..self.num_segments {
+            let seg = &self.segments[g];
+            if (seg.fold_start..seg.fold_end).contains(&r) {
+                return Some((g, r - seg.fold_start));
+            }
+        }
+        None
+    }
+
+    /// §6(b)-G3 — if `r` is a Sweep row, return `(segment, sweep_offset)`
+    /// where `sweep_offset = r - segments[segment].sweep_start`. `None`
+    /// on non-sweep rows.
+    pub fn sweep_segment_and_offset(&self, r: usize) -> Option<(usize, usize)> {
+        for g in 0..self.num_segments {
+            let seg = &self.segments[g];
+            if (seg.sweep_start..seg.store_start).contains(&r) {
+                return Some((g, r - seg.sweep_start));
+            }
+        }
+        None
+    }
+}
+
+impl ScheduleLayout {
+    /// The [`RowClass`] of `row_idx` (the *one* classification). §6(b)-G3:
+    /// Sweep/Fold are matched against ALL `num_segments` segments (for the
+    /// single-segment path `segments[0]` == the single fields, so this is
+    /// identical to the pre-G3 classification).
     pub fn class_of(&self, r: usize) -> RowClass {
         if r < self.na {
             RowClass::StripOpenA
@@ -118,9 +177,9 @@ impl ScheduleLayout {
             RowClass::StripOpenB
         } else if r == self.mh_end + 1 || r == self.mh_end + 2 {
             RowClass::KeyPin
-        } else if (self.sweep_start..self.store_start).contains(&r) {
+        } else if self.sweep_segment_and_offset(r).is_some() {
             RowClass::Sweep
-        } else if (self.fold_start..self.fold_end).contains(&r) {
+        } else if self.fold_segment_and_local(r).is_some() {
             RowClass::Fold
         } else if r >= self.jpot_start {
             RowClass::JackpotHash
@@ -189,30 +248,61 @@ pub(crate) fn schedule_layout_for_strip_schedule(
     // Key-pin: row mh_end is the gap; mh_end+1 = JOB_KEY,
     // mh_end+2 = COMMITMENT_HASH; sweep_start = mh_end+3.
     let sweep_start = mh_end + 3;
-    // §6(b)-G1/G2 sweep = (h/TILE_H) · (w/TILE_H) · num_stripes ·
-    // ⌈r/TILE_D⌉ (== place_useful_work_chain_hw's rows_used).
-    let sweep_rows = (h_tile / TILE_H) * (w_tile / TILE_H) * num_stripes * r.div_ceil(TILE_D);
-    let store_start = sweep_start + sweep_rows;
-    // 16|r: producers are the co-located StripOpen leaf round-0
-    // rows ⇒ ZERO separate store rows. fold_start =
-    // store_start + 0 + 4.
-    let fold_start = store_start + 4;
-    let fold_end = fold_start + num_stripes;
+    // §6(b)-G1/G2 sweep-rows-PER-STRIPE = (h/TILE_H) · (w/TILE_H) ·
+    // ⌈r/TILE_D⌉; a stripe segment of `stripes_g` stripes uses
+    // `sweep_per_stripe · stripes_g` sweep rows (== place_useful_work_
+    // chain_hw's rows_used for that segment).
+    let sweep_per_stripe = (h_tile / TILE_H) * (w_tile / TILE_H) * r.div_ceil(TILE_D);
+
+    // §6(b)-G3 — INTERLEAVED segments of ≤ STRIPE_MAX stripes:
+    // `[seg sweep][+4 store gap][seg fold]` back to back, so each
+    // segment's fold reads its own StripeXor register before the next
+    // segment's SEG_RESET. Single segment (num_stripes ≤ STRIPE_MAX) ⇒
+    // one region identical to the pre-G3 layout.
+    let stripe_max = crate::composite_layout::STRIPE_MAX;
+    let num_segments = num_stripes.div_ceil(stripe_max).max(1);
+    assert!(
+        num_segments <= MAX_SEGMENTS,
+        "num_stripes={num_stripes} ⇒ {num_segments} segments exceeds MAX_SEGMENTS={MAX_SEGMENTS}"
+    );
+    let mut segments = [SegmentLayout::default(); MAX_SEGMENTS];
+    let mut cursor = sweep_start;
+    for (g, seg) in segments.iter_mut().enumerate().take(num_segments) {
+        let stripes_g = (num_stripes - g * stripe_max).min(stripe_max);
+        let seg_sweep_start = cursor;
+        let seg_store_start = seg_sweep_start + sweep_per_stripe * stripes_g;
+        // 16|r: producers co-located in StripOpen ⇒ 0 separate store
+        // rows; the +4 is the store/transition gap (Pad).
+        let seg_fold_start = seg_store_start + 4;
+        let seg_fold_end = seg_fold_start + stripes_g;
+        *seg = SegmentLayout {
+            sweep_start: seg_sweep_start,
+            store_start: seg_store_start,
+            fold_start: seg_fold_start,
+            fold_end: seg_fold_end,
+        };
+        cursor = seg_fold_end;
+    }
+    let last = segments[num_segments - 1];
 
     assert!(
-        trace_len >= 8 && fold_end <= trace_len - 8,
-        "schedule overflows trace_len={trace_len} (fold_end={fold_end})"
+        trace_len >= 8 && last.fold_end <= trace_len - 8,
+        "schedule overflows trace_len={trace_len} (fold_end={})",
+        last.fold_end
     );
     let jpot_start = trace_len - 8;
 
     ScheduleLayout {
         na,
         mh_end,
-        sweep_start,
-        store_start,
-        fold_start,
-        fold_end,
+        // Single-field accessors mirror segment 0 (the pre-G3 view).
+        sweep_start: segments[0].sweep_start,
+        store_start: segments[0].store_start,
+        fold_start: segments[0].fold_start,
+        fold_end: segments[0].fold_end,
         jpot_start,
+        num_segments,
+        segments,
     }
 }
 
@@ -1254,6 +1344,72 @@ mod tests {
         assert_eq!(from_explicit.width, from_public.width);
         assert_eq!(from_explicit.height(), from_public.height());
         assert_eq!(from_explicit.values, from_public.values);
+    }
+
+    /// §6(b)-G3 — `num_stripes > STRIPE_MAX` splits into interleaved
+    /// `[sweep, fold]` segments; single-field accessors mirror segment 0,
+    /// and `class_of` / the local-index helpers resolve each segment.
+    #[test]
+    fn schedule_layout_segments_over_stripe_max() {
+        let sm = crate::composite_layout::STRIPE_MAX; // 64
+        let p = ZkParams {
+            m: 512,
+            k: 2048, // num_stripes = k/r = 128 = 2·STRIPE_MAX ⇒ 2 full segments
+            n: 512,
+            noise_rank: 16,
+            tile: 8,
+            difficulty_bits: 0,
+        };
+        let len = 1 << 13;
+        let l = schedule_layout(&p, 0, 0, len);
+        assert_eq!(l.num_segments, 2);
+        // Single-field accessors mirror segment 0 (pre-G3 view).
+        assert_eq!(l.sweep_start, l.segments[0].sweep_start);
+        assert_eq!(l.store_start, l.segments[0].store_start);
+        assert_eq!(l.fold_start, l.segments[0].fold_start);
+        assert_eq!(l.fold_end, l.segments[0].fold_end);
+        // Each full segment folds exactly STRIPE_MAX stripes.
+        for g in 0..2 {
+            assert_eq!(l.segments[g].fold_end - l.segments[g].fold_start, sm);
+        }
+        // Interleaved + contiguous: seg0.fold_end == seg1.sweep_start.
+        assert_eq!(l.segments[0].fold_end, l.segments[1].sweep_start);
+        // sweep-per-stripe = (h/2)(w/2)·⌈r/16⌉ = 4·4·1 = 16 (square tile=8).
+        assert_eq!(l.segments[0].store_start - l.segments[0].sweep_start, 16 * sm);
+        // class_of + local-index helpers resolve segment 1.
+        let r1 = l.segments[1].fold_start + 5;
+        assert!(matches!(l.class_of(r1), RowClass::Fold));
+        assert_eq!(l.fold_segment_and_local(r1), Some((1, 5)));
+        assert!(matches!(l.class_of(l.segments[1].sweep_start), RowClass::Sweep));
+        assert_eq!(
+            l.sweep_segment_and_offset(l.segments[1].sweep_start + 3),
+            Some((1, 3))
+        );
+        // Fold rows keep GLOBAL stripe order: seg1 local 5 = global stripe 69,
+        // and 69 % 16 == 5 == 69-64 (64 % 16 == 0 alignment the FoldChip needs).
+        assert_eq!((sm + 5) % 16, 5 % 16);
+    }
+
+    /// §6(b)-G3 — a partial trailing segment (`num_stripes` not a multiple
+    /// of `STRIPE_MAX`).
+    #[test]
+    fn schedule_layout_segments_partial_last() {
+        let p = ZkParams {
+            m: 512,
+            k: 1600, // num_stripes = 100 = 64 + 36
+            n: 512,
+            noise_rank: 16,
+            tile: 8,
+            difficulty_bits: 0,
+        };
+        let len = 1 << 13;
+        let l = schedule_layout(&p, 0, 0, len);
+        assert_eq!(l.num_segments, 2);
+        assert_eq!(l.segments[0].fold_end - l.segments[0].fold_start, 64);
+        assert_eq!(l.segments[1].fold_end - l.segments[1].fold_start, 36);
+        assert_eq!(l.segments[0].fold_end, l.segments[1].sweep_start);
+        // Last fold row is the last stripe; the JackpotHash suffix follows.
+        assert!(l.segments[1].fold_end <= l.jpot_start);
     }
 
     #[test]
