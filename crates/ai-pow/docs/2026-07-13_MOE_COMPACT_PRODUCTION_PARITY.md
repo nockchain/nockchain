@@ -675,20 +675,19 @@ unmet difficulty rejects.
      boot builder is written + validated; it just needs the production constants.
    - Rebuild the jam: `make assets/dumb.jam` — **verified 2026-07-13: the full
      kernel with the arm + `check-pow` wiring rebuilds successfully** (19 MB jam).
-   > **⚠️ Activation-gating soundness detail (surfaced by the jam rebuild).**
-   > `check-pow` is `|= pag=page:t` — a pure function of the page with **no access
-   > to `constants.k`**, so it cannot itself gate `%ai-pow` by
-   > `ai-pow-activation-height` (95,000). The wiring as written verifies `%ai-pow`
-   > at ANY height; a pre-activation `%ai-pow` block would then be wrongly accepted
-   > (if a valid proof) or crash the node (jet uninitialized → `!!`) — a DoS worse
-   > than today's `%.n`. **Before landing, verify** that the proof-version/height
-   > mechanism (`block-id-to-proof-version`) already rejects a `%ai-pow` pow whose
-   > height is below activation *before* `check-pow` runs; if not, the activation
-   > gate must be added in the caller (`heard-block`, which has `k`) or `check-pow`
-   > must take the activation height as a parameter. This is the THIRD
-   > soundness-critical detail found only by building the integration (after the
-   > representation binding and the jam-padding hash) — concrete evidence this is
-   > careful-staged consensus work, not mechanical wiring.
+   > **✅ Activation-gating — verified SAFE (2026-07-13).** `check-pow` is
+   > `|= pag=page:t` with no `constants.k` access, so it cannot gate by activation
+   > height itself — but it does not need to. `heard-block` calls
+   > `validate-page-without-txs-da:con` (consensus.hoon) **before** `check-pow`, and
+   > that validator enforces
+   > `(proof-version-valid-at-height (pow-artifact-to-proof-version (need pow)) height)`
+   > → a `%ai-pow` pow (version %3) below `ai-pow-activation-height` (95,000) is
+   > rejected there with `%proof-version-invalid` and **never reaches `check-pow`**.
+   > So the wiring is safe: `check-pow`'s `%ai-pow` branch only ever runs at valid
+   > (post-activation) heights, where every node is required to carry the jet. (An
+   > initial jam-rebuild pass flagged a crash-DoS risk here; tracing the validator
+   > showed the gate is already upstream — the risk does not exist. The `check-pow`
+   > edit needs no activation change.)
    - Integration test: boot the kernel (jet + setup injected), submit a real
      `%ai-pow` block → accepted; a forged one → rejected. **Requires a full
      `page:t` block fixture** (`check-pow` runs inside `heard-block` after
