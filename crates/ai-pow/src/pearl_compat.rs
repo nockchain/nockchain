@@ -27,7 +27,7 @@ use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, n
 use crate::matmul::{
     compute_pattern_tile_trace_from_slices, compute_tile, BlockNoise, Matrices, TileState,
 };
-use crate::params::{MatmulParams, ParamError, PEARL_HW_MAX, PEARL_HW_MIN, STRIPE_MAX};
+use crate::params::{MatmulParams, ParamError, PEARL_HW_MAX, PEARL_HW_MIN, PEARL_STRIPE_MAX};
 use crate::prng;
 use crate::tile_hash::hash_le_target;
 
@@ -1197,7 +1197,11 @@ pub fn validate_pearl_merge_config_for_recursive_prover(
         ));
     }
     validate_recursive_params_for_pearl_schedule(params)?;
-    if (params.k / params.noise_rank) as usize > STRIPE_MAX {
+    // §6(b)-R-b: admit the full Pearl stripe band. num_stripes ≤
+    // STRIPE_MAX proves sub-block-major; (STRIPE_MAX, PEARL_STRIPE_MAX]
+    // proves via the R-b stripe-major path. Pearl's ceiling 512 is
+    // implied by the §4.8 envelope; the check is defense-in-depth.
+    if (params.k / params.noise_rank) as usize > PEARL_STRIPE_MAX {
         return Err(PearlCompatError::PublicParamEnvelope);
     }
     config.to_bytes()?;

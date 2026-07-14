@@ -6627,6 +6627,47 @@ mod tests {
         }
     }
 
+    /// §6(b)-R-b Stage C — the **real consensus entry**
+    /// (`prove_and_verify_for_block`, `require_prod_envelope = true`)
+    /// admits AND proves+verifies a wide-stripe Pearl shape that the old
+    /// `> STRIPE_MAX = 64` cap rejected. This shape is fully §4.8-valid
+    /// (`r = 128 ∈ [PEARL_R_MIN, PEARL_R_MAX]`, `16r ≤ k ≤ 4r²`, `64 | k`,
+    /// `h·w = 64 ∈ [32,256]`, single tile) with `num_stripes = 65 >
+    /// STRIPE_MAX`, and `r = 128 ⇒ ⌈r/16⌉ = 8` chunks per sub-block (the
+    /// R-b `chunks > 1` production path). Passing here means the lifted
+    /// admission (Stage C), the R-b prover (Stage B), and the R-b
+    /// canonical verifier (Stage A) compose end-to-end on the mineable
+    /// path — no `require_prod_envelope = false` escape hatch.
+    #[test]
+    fn rb_stage_c_wide_stripe_admits_and_proves_via_consensus_entry() {
+        use crate::synth::synth_matrices;
+        let params = MatmulParams {
+            m: 8,
+            k: 8320, // 65 · 128; 16·128 ≤ 8320 ≤ 4·128², 64 | 8320
+            n: 8,
+            noise_rank: 128,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        // Consensus-admissible under the LIFTED cap (was TooManyStripes).
+        params
+            .validate_prod_envelope()
+            .expect("wide-stripe shape must be consensus-admissible post-Stage-C");
+        assert_eq!(params.num_stripes(), 65);
+        assert_eq!(params.num_tiles(), 1, "single-tile full-matmul proof");
+        assert_eq!((params.noise_rank as usize).div_ceil(16), 8, "R-b chunks>1");
+
+        let (a, b) = synth_matrices(b"rb-stage-c-consensus", &params);
+        let ctx = BlockContext::build(b"rb-stage-c-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        // The real production entry — require_prod_envelope = true.
+        let out = prove_and_verify_for_block(&ctx, &params, TEST_NONCE, 0).unwrap_or_else(|e| {
+            panic!("wide-stripe consensus prove+verify must succeed end-to-end: {e:?}")
+        });
+        assert!(out.sweep_in_circuit, "R-b sweep must be in-circuit");
+        assert!(out.pis.hash_a.iter().any(|&w| w != 0));
+    }
+
     /// **§4.C.2 c-exact cx.2 — the position-exact adversarial.**
     /// The soundness statement of the g=1 co-location flip: on a
     /// 16|r `P16` *real bridge trace*, a co-located leaf round-0

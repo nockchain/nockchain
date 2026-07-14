@@ -76,11 +76,27 @@ pub const PEARL_HW_MAX: u64 = 256;
 /// `validate()`-allowed `t·k`; sub-second on the production envelope).
 pub const SPOT_CHECKS_MAX: u32 = 256;
 
-/// §6(b) in-circuit matmul-sweep stripe capacity. This mirrors
-/// `ai-pow-zk::composite_layout::STRIPE_MAX`, but lives here so the
-/// `ai-pow` consensus parameter envelope does not require the optional
-/// `zk` dependency.
+/// §6(b) in-circuit matmul-sweep stripe capacity for the
+/// SUB-BLOCK-MAJOR path (the fixed StripeXor 64-lane register). This
+/// mirrors `ai-pow-zk::composite_layout::STRIPE_MAX`, but lives here so
+/// the `ai-pow` consensus parameter envelope does not require the
+/// optional `zk` dependency. It is the ROUTING threshold, not the
+/// admission ceiling: `num_stripes ≤ STRIPE_MAX` proves sub-block-major
+/// (`sx_bound=true`); `> STRIPE_MAX` proves via the §6(b)-R-b
+/// stripe-major path (`place_useful_work_chain_rb`, `sx_bound=false`,
+/// the params-pure R-b canonical program) — no fixed-lane register, so
+/// arbitrary num_stripes fold in-circuit.
 pub const STRIPE_MAX: usize = 64;
+
+/// Pearl's num_stripes ceiling — the consensus ADMISSION cap. Pearl has
+/// no explicit stripe cap; `num_stripes = k/r ≤ 512` emerges from the
+/// §4.8 envelope (`k ≤ 4r²` ∧ `k ≤ PEARL_K_MAX = 2¹⁶` ∧ `r ≥ PEARL_R_MIN
+/// = 32`): `k/r ≤ min(4r, 2¹⁶/r)`, maximized at `r = 128` ⇒ 512. So this
+/// bound is already implied by the rest of `validate_prod_envelope`;
+/// the explicit check is defense-in-depth (and documents that the
+/// R-b path is validated up to Pearl's real maximum, not the old
+/// STRIPE_MAX=64 SX-register narrowing).
+pub const PEARL_STRIPE_MAX: usize = 512;
 
 /// Parameters of a Pearl-style matmul PoW puzzle.
 ///
@@ -366,16 +382,16 @@ impl MatmulParams {
         if (self.tile as u64) * (self.tile as u64) > PEARL_HW_MAX {
             return Err(ParamError::TileTooLarge);
         }
-        // num_stripes = k / noise_rank must fit the §6(b) in-circuit
-        // matmul-sweep capacity (`STRIPE_MAX` SX-register lanes). A
-        // config with num_stripes > STRIPE_MAX falls back to the
-        // off-circuit `compute_tile_trace` path where `sx_bound` is
-        // false and the matmul→fold keystone is gated off — the
-        // matmul would NOT be proven in-circuit. The consensus
-        // envelope rejects such configs outright (raise noise_rank
-        // so k/r <= STRIPE_MAX). The real Llama mineable GEMMs have
-        // k/r = 4096/64 = 64 = STRIPE_MAX ⇒ in-circuit.
-        if (self.num_stripes() as usize) > STRIPE_MAX {
+        // num_stripes = k / noise_rank. Both the sub-block-major path
+        // (`≤ STRIPE_MAX`, SX 64-lane register) and the §6(b)-R-b
+        // stripe-major path (`> STRIPE_MAX`, no fixed-lane register)
+        // prove the matmul→fold binding IN-CIRCUIT, so the full Pearl
+        // band is admissible up to Pearl's ceiling `PEARL_STRIPE_MAX =
+        // 512` (already implied by `k ≤ 4r²` ∧ `k ≤ 2¹⁶`; the explicit
+        // check is defense-in-depth). This lifts the historical
+        // `> STRIPE_MAX = 64` narrowing that rejected the wide-stripe
+        // Pearl shapes the R-b path now proves.
+        if (self.num_stripes() as usize) > PEARL_STRIPE_MAX {
             return Err(ParamError::TooManyStripes);
         }
         Ok(())
@@ -675,6 +691,58 @@ mod tests {
         p.validate().unwrap();
         assert_eq!(p.num_tiles(), 96);
         assert_eq!(p.num_tiles_padded(), 128);
+    }
+
+    /// §6(b)-R-b Stage C — the admission cap now lets the FULL Pearl
+    /// stripe band through (`num_stripes ∈ (STRIPE_MAX, PEARL_STRIPE_MAX]`),
+    /// which the historical `> STRIPE_MAX = 64` narrowing rejected. The
+    /// R-b stripe-major path proves these in-circuit (Stage A/B/D).
+    #[test]
+    fn validate_prod_envelope_admits_wide_stripe_band() {
+        // num_stripes = 96 > STRIPE_MAX — previously `TooManyStripes`.
+        let p96 = MatmulParams {
+            m: 8,
+            k: 12288, // 96 · 128
+            n: 8,
+            noise_rank: 128,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        assert_eq!(p96.num_stripes(), 96);
+        assert!(p96.num_stripes() as usize > STRIPE_MAX);
+        p96.validate_prod_envelope()
+            .expect("num_stripes=96 must now be consensus-admissible (R-b path)");
+
+        // Pearl's ceiling: num_stripes = 512 (r=128, k=4r²=2¹⁶). The
+        // MAXIMUM the §4.8 envelope allows.
+        let p512 = MatmulParams {
+            m: 8,
+            k: 65536, // 512 · 128 = 4·128²
+            n: 8,
+            noise_rank: 128,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        assert_eq!(p512.num_stripes(), 512);
+        assert_eq!(p512.num_stripes() as usize, PEARL_STRIPE_MAX);
+        p512
+            .validate_prod_envelope()
+            .expect("num_stripes=512 (Pearl's ceiling) must be admissible");
+
+        // The envelope (`k ≤ 4r²` ∧ `k ≤ PEARL_K_MAX`) already caps
+        // num_stripes at 512: no envelope-valid shape can exceed it, so
+        // the explicit PEARL_STRIPE_MAX guard is unreachable-by-envelope
+        // defense-in-depth. Sample the r-range and confirm.
+        for &r in &[32u32, 64, 128, 256, 512, 1024] {
+            let k_max = (4 * (r as u64) * (r as u64)).min(PEARL_K_MAX as u64) as u32;
+            let ns_max = k_max / r;
+            assert!(
+                (ns_max as usize) <= PEARL_STRIPE_MAX,
+                "envelope-max num_stripes {ns_max} at r={r} must be ≤ {PEARL_STRIPE_MAX}"
+            );
+        }
     }
 
     /// H1 (DoS/overflow audit): `num_tiles()` must compute the tile
