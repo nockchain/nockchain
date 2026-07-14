@@ -406,4 +406,63 @@ mod tests {
             "a block committed to a different noun must be rejected",
         );
     }
+
+    /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
+    /// Pearl admits a BAND of puzzle shapes; nockchain must verify all of them.
+    /// A single embedded boot setup only suffices if the verifier-key digest is
+    /// INVARIANT across shapes. This builds setups at several distinct shapes
+    /// (varying k / hw / m,n — the axes that drive L0 trace height) and prints
+    /// each digest, then asserts nothing (observational) so the run always shows
+    /// the full table. If every digest is equal ⇒ one setup covers the band; if
+    /// they differ ⇒ we need a per-shape setup table (or fixed-height padding).
+    #[test]
+    #[ignore = "builds several real compact proofs (~2-4 min); opt-in diagnostic"]
+    fn digest_shape_dependence_probe() {
+        use crate::setup::build_verifier_setup;
+        // MoE routing needs m/e >= hw and n/e >= hw (each expert must have >= hw
+        // rows/cols to fill the opened tile), so base at m=n=16, e=2, hw=8.
+        let base = MatmulParams {
+            m: 16, k: 1024, n: 16, noise_rank: 64, tile: 8, spot_checks: 1, difficulty_bits: 0,
+        };
+        // (label, params, hw, e, top_k). num_stripes = k/noise_rank; the pinned AIR
+        // caps it at STRIPE_MAX=64. Span the band from num_stripes=8 to the max 64,
+        // across k / rank / hw / m,n, to confirm ONE digest covers nockchain's whole
+        // accept-band.
+        let shapes: [(&str, MatmulParams, u32, usize, usize); 7] = [
+            ("stripes16 base m16 k1024 r64 hw8", base, 8, 2, 1),
+            ("stripes8 k512 r64", MatmulParams { k: 512, ..base }, 8, 2, 1),
+            ("stripes16 k512 r32", MatmulParams { k: 512, noise_rank: 32, ..base }, 8, 2, 1),
+            ("stripes32 k2048 r64", MatmulParams { k: 2048, ..base }, 8, 2, 1),
+            ("stripes64 k2048 r32 (MAX)", MatmulParams { k: 2048, noise_rank: 32, ..base }, 8, 2, 1),
+            ("stripes64 k4096 r64 (MAX)", MatmulParams { k: 4096, ..base }, 8, 2, 1),
+            ("hw16 m32 n32", MatmulParams { m: 32, n: 32, ..base }, 16, 2, 1),
+        ];
+        let mut digests = Vec::new();
+        for (label, params, hw, e, top_k) in shapes {
+            match build_verifier_setup(&params, hw, e, top_k) {
+                Ok(setup) => {
+                    let hex: String =
+                        setup.digest_bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    eprintln!("SHAPE-DIGEST [{label}] = {hex}");
+                    digests.push((label, Some(hex)));
+                }
+                Err(e) => {
+                    eprintln!("SHAPE-DIGEST [{label}] = BUILD-ERROR: {e}");
+                    digests.push((label, None));
+                }
+            }
+        }
+        let distinct: std::collections::BTreeSet<_> =
+            digests.iter().filter_map(|(_, d)| d.clone()).collect();
+        eprintln!(
+            "SHAPE-DIGEST SUMMARY: {} shapes built, {} DISTINCT digest(s) ⇒ {}",
+            digests.iter().filter(|(_, d)| d.is_some()).count(),
+            distinct.len(),
+            if distinct.len() <= 1 {
+                "SHAPE-INDEPENDENT (one setup covers all)"
+            } else {
+                "SHAPE-DEPENDENT (need a per-shape setup table)"
+            },
+        );
+    }
 }

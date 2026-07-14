@@ -406,10 +406,15 @@ mod tests {
 
     /// The chip's proven final state matches the reference for a
     /// spread of sequence lengths: 1, exactly STATE_LEN (no wrap),
-    /// the real TEST_SMALL `num_stripes`=16, and > 16 (slot wrap).
+    /// the real TEST_SMALL `num_stripes`=16, and > 16 (slot wrap),
+    /// through the full Pearl num_stripes ceiling (512 = rank128/k65536).
+    /// This proves the 16-register round-robin fold is already
+    /// num_stripes-agnostic — the Pearl-parity widening needs NO
+    /// FoldChip change; only the StripeXor x_step computation (its
+    /// 64-lane XR) caps num_stripes.
     #[test]
     fn final_state_matches_reference_over_lengths() {
-        for len in [1usize, 8, 16, 17, 40, 64] {
+        for len in [1usize, 8, 16, 17, 40, 64, 65, 128, 256, 512] {
             let xs: Vec<i32> = (0..len as i32)
                 .map(|i| i.wrapping_mul(0x9E37_79B1u32 as i32) ^ (i << 5) ^ 0x5A5A)
                 .collect();
@@ -432,6 +437,11 @@ mod tests {
                 .map(|i| i.wrapping_mul(2_000_003))
                 .collect::<Vec<_>>(),
             (0..40i32)
+                .map(|i| i.wrapping_mul(0x9E37_79B1u32 as i32) ^ (i << 5))
+                .collect::<Vec<_>>(),
+            // Pearl num_stripes ceiling (512): the 16-register round-robin
+            // fold proves+verifies unchanged at the full band width.
+            (0..512i32)
                 .map(|i| i.wrapping_mul(0x9E37_79B1u32 as i32) ^ (i << 5))
                 .collect::<Vec<_>>(),
         ] {
