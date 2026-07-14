@@ -312,3 +312,61 @@ is the anti-grind, and the seed is not a consensus requirement.
 - In-circuit jackpot (option a): `ai-pow-zk::canonical.rs` `RowClass::JackpotHash`.
 - Noise (anti-grind, already present): `ai-pow::fiat_shamir.rs` (`noise_seed_a/b`),
   `BlockNoise`.
+
+---
+
+## Status — option (a) IMPLEMENTED, validated, and adversarially audited (2026-07-14)
+
+Option (a) is done: `%ai-pow` (dense AND MoE) accepts **arbitrary miner-chosen
+matrices** via the COMPACT certificate, with **no synthetic-matrix pin** anywhere on
+the production verify path. The in-circuit jackpot binding (`JACKPOT_MSG == FOLD_STATE`
+in the pinned `CompositeFullAirPinned`) already existed; (a) simply makes the node
+**trust the proven `hash_jackpot`/tile** instead of recomputing a tile off-circuit
+from a pinned synthetic model.
+
+Commits: Stage 1 `d29c8020` (MoE), Stage 2+3 `be4eeaa2` (dense compact + synth removal),
+audit `<this branch>` (forged raw-tile de-risk).
+
+Change surface:
+- `ai-pow::pearl_compat.rs::verify_pearl_compatible_work_committed` — matrix-free dense
+  work precheck (committed `H_A`/`H_B`, public-pattern rows/cols, difficulty on the
+  authenticated `hash_jackpot`, no tile recompute).
+- `ai-pow-miner::certificate_noun.rs::precheck_ai_pow_pearl_merge_artifact_statement_committed`
+  — dense node precheck; `precheck_pearl_merge_bound_public_inputs` gained a
+  `check_jackpot` flag (FALSE on the compact node path — the raw tile PI is proof-bound
+  in-circuit; `hash_jackpot` is always bound, tying difficulty to the proof).
+- MoE compact verify drops the `a/b` matrix args and binds
+  `digest(pis.hash_jackpot) == public_params.hash_jackpot`.
+- `verify_ai_pow_block_artifact` (jet core) drops `synth_matrices(AI_POW_PROD_SYNTH_SEED)`
+  and passes empty matrix slices; both compact dispatch paths ignore them.
+
+Validation: e2e node-branch verify (dense 103s, MoE 27s) through the synth-free jet
+core; de-risk forged `hash_jackpot` AND forged raw-tile `jackpot` both reject (25s);
+ai-pow-jets real-proof KATs (3) accept a real block through the jet core + reject
+garbage; fast node suite 137+9; ai-pow-zk green; roswell binary rebuilt clean.
+
+Adversarial audit (2 passes, clean):
+1. Difficulty gate — proven `hash_jackpot` == authenticated `hash_jackpot` ≤ target
+   (no forge). 2. Matrices — matmul bound to committed `H_A`/`H_B` via `kappa`.
+3. Favorable-strip — schedule from the public pattern, bound via canonical
+   `l0_program_commitment` (+ MoE routing binding). 4. Verifier context — node-built
+   canonical setup + `cert.digest == canonical digest`. 5. Dense-skipped raw tile —
+   proof-bound (de-risk forged-tile reject). Code-level: `expected` pis built entirely
+   from tile-INDEPENDENT commitments (`pearl_merge_recursive_public_inputs_from_work`);
+   the only tile-dependent field (`pis.jackpot`) is default + skipped.
+
+### Precise residual (NOT part of (a); pre-existing; blocks LIVE acceptance)
+
+The compact verifier **setup is not injected** in any production binary — no callers
+of `ai-pow-jets::init_ai_pow_verifier_setup` outside its definition + tests. With
+`SETUP` empty and a well-formed compact artifact, the jet `BAIL_FAIL`s. This blocks
+LIVE acceptance of ANY real `%ai-pow` compact cert (dense/MoE, synth/arbitrary alike)
+— it is orthogonal to (a). Remaining steps:
+1. Pin the canonical production params (`{hw, e, top_k}`) — a **consensus decision**,
+   since the setup/verifier-key digest commits to them.
+2. At node boot (jet-registration point), build the setup once via
+   `ai-pow-jets::setup::build_verifier_setup(prod_params)` (proves one canonical block)
+   and inject with `init_ai_pow_verifier_setup`. Decide boot-compute vs embed-precomputed
+   (boot latency tradeoff).
+3. Full-binary e2e: a real block verifies live (not just via the test harness that
+   supplies the setup directly).
