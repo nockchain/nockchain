@@ -62,6 +62,8 @@ const DEFAULT_PEARL_GATEWAY_REFRESH_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_BACKOFF_INITIAL_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_BACKOFF_MAX_MS: u64 = 30_000;
 const DEFAULT_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+// The canonical production synth seed now lives in `ai_pow::synth` so a consensus
+// verifier re-derives the same matrices. This CLI default is a `str` view of it.
 const DEFAULT_SYNTH_SEED: &str = "ai-pow-prod-v1";
 const DEFAULT_MATMUL_PARAMS: MatmulParams = MatmulParams {
     m: 8,
@@ -207,7 +209,7 @@ fn build_puzzle_inputs(args: &Args) -> Result<AiPuzzleInputs> {
         .map_err(|e| anyhow!("matmul params invalid: {e}"))?;
     validate_pearl_recursive_cli_params(params)?;
 
-    let (a, b) = ai_pow::synth::synth_matrices(DEFAULT_SYNTH_SEED.as_bytes(), &params);
+    let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
 
     let a = Arc::new(a);
     let b = Arc::new(b);
@@ -374,7 +376,7 @@ mod tests {
         let puzzle = build_puzzle_inputs(&args).expect("default Pearl gateway config");
         assert_eq!(puzzle.params, DEFAULT_MATMUL_PARAMS);
         let (expected_a, expected_b) =
-            ai_pow::synth::synth_matrices(DEFAULT_SYNTH_SEED.as_bytes(), &puzzle.params);
+            ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &puzzle.params);
         assert_eq!(puzzle.a.as_slice(), expected_a.as_slice());
         assert_eq!(puzzle.b.as_slice(), expected_b.as_slice());
         puzzle

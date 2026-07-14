@@ -3065,6 +3065,103 @@ pub fn verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_digest_bytes_and_
     )
 }
 
+/// Outcome of the self-contained consensus verifier
+/// [`verify_ai_pow_block_artifact_jam`]: which puzzle variant verified, plus its
+/// precheck (for the caller to persist work commitments / aux binding).
+#[derive(Debug, Clone)]
+pub enum AiPowBlockVerifyOutcome {
+    Dense(PearlMergeMiningPrecheck),
+    Moe(PearlMergeMoeMiningPrecheck),
+}
+
+/// **Self-contained consensus verifier** for a jammed `%ai-pow` compact block
+/// artifact — the single entrypoint the Hoon `check-pow`/`do-pow` jet calls (D4).
+///
+/// Unlike the lower-level `verify_..._jam_with_context` entries, this does NOT
+/// require the caller to supply the matrices: it **derives the canonical `(A, B)`
+/// from the protocol seed** (`ai_pow::synth::AI_POW_PROD_SYNTH_SEED`) and the
+/// block's own `params` (`m`/`k`/`n` from the authenticated statement). That is
+/// what makes `A`/`B` non-grindable and needs no external model distribution — a
+/// consensus node holds only the block, the seed constant, and the compact
+/// verifier setup. It then dispatches on the nonce tag (`AIM1` → MoE, `AIP1` →
+/// dense) to the corresponding node verify branch.
+///
+/// The caller still supplies the trusted compact verifier setup
+/// (`compact_context` + `expected_verifier_key_digest_bytes`) — deterministic
+/// from the production params and built/cached once at node startup (shared with
+/// dense; see the parity doc §4 D4/S1) — and the consensus-derived
+/// `candidate_nock_block_commitment` + `nockchain_target`.
+///
+/// # Soundness
+///
+/// The matrices are re-derived here, NOT taken from the prover, so a miner cannot
+/// grind a favorable `(A, B)`: any proof built over different matrices fails the
+/// `HASH_A`/`HASH_B` public-input binding (dense) or the routing/jackpot binding
+/// (MoE). This is the canonical-matrix rule the AI-PoW soundness argument
+/// requires (see `ai_pow::synth`).
+pub fn verify_ai_pow_block_artifact_jam(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    let artifact = decode_ai_pow_pearl_merge_artifact_jam(jammed, limits)?;
+
+    // Reconstruct the block's matmul dims from the AUTHENTICATED statement, then
+    // re-derive the canonical matrices from the protocol seed. (MoE-tolerant parse:
+    // the dense `from_public_data` fail-closes on a MoE trailer.)
+    let header = PearlIncompleteBlockHeader::from_bytes(&artifact.statement.block_header)?;
+    let public_params =
+        PearlPublicProofParams::from_public_data_allowing_moe(header, &artifact.statement.public_data)?;
+    let synth_params = MatmulParams {
+        m: public_params.m,
+        k: public_params.mining_config.common_dim,
+        n: public_params.n,
+        noise_rank: u32::from(public_params.mining_config.rank),
+        tile: artifact.certificate.zk_params.tile,
+        spot_checks: 1,
+        difficulty_bits: artifact.certificate.zk_params.difficulty_bits,
+    };
+    let (a, b) =
+        ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &synth_params);
+
+    let expected_verifier_key_digest =
+        ai_pow_zk::recursion::compact_batch_verifier_key_digest_from_bytes(
+            expected_verifier_key_digest_bytes,
+        )
+        .map_err(|e| CertificateNounError::CompactVerifierKeyDigestEncoding(e.to_string()))?;
+    let context = PearlMergeAiPowVerifierContext {
+        candidate_nock_block_commitment,
+        a_row_major: &a,
+        b_col_major: &b,
+        nockchain_target,
+        max_pattern_len,
+    };
+
+    if artifact.moe.is_some() {
+        let pre = verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+            &artifact,
+            context,
+            compact_context,
+            &expected_verifier_key_digest,
+            limits,
+        )?;
+        Ok(AiPowBlockVerifyOutcome::Moe(pre))
+    } else {
+        let pre = verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
+            &artifact,
+            context,
+            compact_context,
+            &expected_verifier_key_digest,
+            limits,
+        )?;
+        Ok(AiPowBlockVerifyOutcome::Dense(pre))
+    }
+}
+
 #[derive(Debug)]
 struct DecodeState {
     limits: CertificateNounLimits,
@@ -7869,20 +7966,11 @@ mod tests {
             difficulty_bits: 0,
         };
 
-        // Deterministic int7-range matrices (no RNG — resume-safe).
-        let synth = |seed: u64, len: usize| -> Vec<i8> {
-            let mut s = seed | 1;
-            (0..len)
-                .map(|_| {
-                    s ^= s << 13;
-                    s ^= s >> 7;
-                    s ^= s << 17;
-                    ((s % 16) as i8) - 8
-                })
-                .collect()
-        };
-        let a = synth(0xA11CE, m * 1024);
-        let b = synth(0xB0B, n * 1024);
+        // CANONICAL matrices — the protocol seed + these params, exactly as a
+        // consensus verifier re-derives them (validates verify_ai_pow_block_artifact_jam).
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        assert_eq!(a.len(), m * 1024);
+        assert_eq!(b.len(), n * 1024);
 
         // Valid aux binding + the block header it fixes.
         let aux = pearl_test_aux();
@@ -8060,6 +8148,41 @@ mod tests {
             )
             .is_err(),
             "dense jam entry must reject a MoE artifact",
+        );
+
+        // The SELF-CONTAINED consensus entrypoint (the jet target): it re-derives
+        // the canonical matrices from the protocol seed (NOT supplied here) + the
+        // block params, dispatches on the AIM1 tag, and verifies. This proves the
+        // a/b sourcing needs no external distribution.
+        let outcome = verify_ai_pow_block_artifact_jam(
+            &jammed,
+            CertificateNounLimits::default(),
+            &aux.nock_block_commitment,
+            &LOOSE_TARGET,
+            4096,
+            &run.verifier_context,
+            &expected_digest_bytes,
+        )
+        .expect("MoE block verifies through the self-contained consensus entrypoint");
+        match outcome {
+            AiPowBlockVerifyOutcome::Moe(p) => {
+                assert_eq!(p.work.jackpot_hash, run.ticket.jackpot_hash)
+            }
+            AiPowBlockVerifyOutcome::Dense(_) => panic!("MoE artifact routed to the dense outcome"),
+        }
+        // Consensus entrypoint also enforces difficulty (target 0 ⇒ reject).
+        assert!(
+            verify_ai_pow_block_artifact_jam(
+                &jammed,
+                CertificateNounLimits::default(),
+                &aux.nock_block_commitment,
+                &[0u8; 32],
+                4096,
+                &run.verifier_context,
+                &expected_digest_bytes,
+            )
+            .is_err(),
+            "consensus entrypoint must reject an unmet difficulty target",
         );
 
         // Adversarial 1 — forged routing_data breaks the routing-consistency binding.

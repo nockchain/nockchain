@@ -1,11 +1,29 @@
 //! Deterministic synthesis of input matrices `(A, B)` from a seed.
 //!
-//! Used by tests and benches to construct Pearl-valid input matrices
-//! without external data. **Not** for use as the actual miner input —
-//! real miners supply their own `A` and `B`.
+//! Used by tests/benches to construct Pearl-valid matrices without external
+//! data, **and** as the production miner's default matrix source — the
+//! `ai-pow-mine` binary defaults to `synth_matrices(AI_POW_PROD_SYNTH_SEED, ..)`.
+//!
+//! # Canonical-matrix soundness (audit)
+//!
+//! For AI-PoW to be sound, the matrices `A`/`B` a block's proof is built over
+//! **must be canonically pinned** by the protocol — otherwise a miner grinds a
+//! favorable `(A, B)` and the difficulty target loses meaning. The natural,
+//! consensus-derivable pin is `synth_matrices(AI_POW_PROD_SYNTH_SEED, params)`:
+//! every verifying node re-derives the identical matrices from the public seed +
+//! the block's `params`, with no external model distribution. A verifier that
+//! accepts a block MUST verify its proof against these canonical matrices (see
+//! `ai-pow-miner::verify_ai_pow_block_artifact_jam`). Whether production instead
+//! pins *external* weights is a protocol decision; the production binary's synth
+//! default is the derivable, sound choice and the one consensus must enforce.
 
 use crate::params::MatmulParams;
 use crate::prng;
+
+/// The canonical production synth seed. The `ai-pow-mine` binary defaults to it,
+/// and a consensus verifier re-derives `(A, B)` from it (see the module docs) so
+/// no external matrix distribution is needed. Changing it is a hard fork.
+pub const AI_POW_PROD_SYNTH_SEED: &[u8] = b"ai-pow-prod-v1";
 
 /// Deterministically build `(A, B)` of shapes matching `params`, with
 /// every entry in `[-64, 63]`. Different `seed` bytes produce uncorrelated
