@@ -371,6 +371,37 @@ impl<AB: AirBuilder<F = crate::Val>> Air<AB> for CompositeFullAirPinned {
             }
             builder.assert_zero(bind);
         }
+
+        // §6(b)-R-b keystone — the stripe-major analogue of the SX
+        // keystone. On the transition OUT of a stripe's last reduce row
+        // (`cur.TR_IS_ACTIVE`) into its fold row (`next.FOLD_IS_FOLD`),
+        // bind the fold input to the reduce's COMPLETED per-stripe x_step
+        // (`cur.TR_NEW` = ⊕ over all sub-blocks of the accumulator after
+        // that stripe). Closes `committed A/B → dot → TA_ACC → TileReduce
+        // → FOLD_XSTEP → FoldChip`. Vacuous on SX / pre-R-b traces
+        // (`TR_IS_ACTIVE = 0`). Degree 3 (gate·gate·linear). The fold
+        // schedule (FOLD_IS_FOLD, slot) is CRIT-1-pinned in CONTROL_PREP,
+        // so a prover cannot relocate fold rows off the reduce boundaries.
+        {
+            let (tr_active, tr_new): (AB::Var, AB::Var) = {
+                let main = builder.main();
+                let cur = main.current_slice();
+                (
+                    cur[crate::composite_layout::TR_IS_ACTIVE],
+                    cur[crate::composite_layout::TR_NEW],
+                )
+            };
+            let (nxt_is_fold, nxt_fx): (AB::Var, AB::Var) = {
+                let main = builder.main();
+                let nxt = main.next_slice();
+                (
+                    nxt[crate::composite_layout::FOLD_IS_FOLD],
+                    nxt[crate::composite_layout::FOLD_XSTEP],
+                )
+            };
+            let mut tb = builder.when_transition();
+            tb.assert_zero(tr_active.into() * nxt_is_fold.into() * (nxt_fx.into() - tr_new.into()));
+        }
     }
 }
 
@@ -462,6 +493,46 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
         // supersedes the SX 64-lane path.
         crate::chips::tile_accum::TileAccumChip::eval_composite(builder);
         crate::chips::tile_reduce::TileReduceChip::eval_composite(builder);
+
+        // §6(b)-R-b — bind the TileAccum input `TA_DOT` to the matmul
+        // chip's tile dot (the SAME degree-2 `Σ A_unpack·B_unpack` the
+        // `MatmulCumsumChip` folds into CUMSUM_TILE). On an R-b sweep row
+        // the noised LogUp bus still binds A_NOISED/B_NOISED to the
+        // committed producer store (the row stays matmul-active), so this
+        // ties the held h·w accumulator's per-stripe dot to the committed
+        // matrices — closing `committed A/B → dot → TA_DOT → TA_ACC →
+        // TileReduce`. Gated by `TA_IS_ACTIVE` (degree 3: gate·(deg-2 dot));
+        // vacuous on pre-R-b traces (`TA_IS_ACTIVE = 0`).
+        {
+            use crate::composite_layout::{
+                A_NOISED_UNPACK_START, B_NOISED_UNPACK_START, TA_DOT_START, TA_IS_ACTIVE, TILE_D,
+                TILE_H,
+            };
+            let (ta_active, ta_dot, a_u, b_u): (
+                AB::Var,
+                [AB::Var; TILE_H * TILE_H],
+                [AB::Var; TILE_H * TILE_D],
+                [AB::Var; TILE_H * TILE_D],
+            ) = {
+                let main = builder.main();
+                let cur = main.current_slice();
+                (
+                    cur[TA_IS_ACTIVE],
+                    core::array::from_fn(|k| cur[TA_DOT_START + k]),
+                    core::array::from_fn(|i| cur[A_NOISED_UNPACK_START + i]),
+                    core::array::from_fn(|i| cur[B_NOISED_UNPACK_START + i]),
+                )
+            };
+            for i in 0..TILE_H {
+                for j in 0..TILE_H {
+                    let mut dot: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
+                    for d in 0..TILE_D {
+                        dot = dot + a_u[i * TILE_D + d].into() * b_u[j * TILE_D + d].into();
+                    }
+                    builder.assert_zero(ta_active.into() * (ta_dot[i * TILE_H + j].into() - dot));
+                }
+            }
+        }
 
         // M-S1 (§4.C.11) — matmul-input pack-link. On every matmul
         // row (`IS_RESET_CUMSUM + IS_UPDATE_CUMSUM`) the packed
