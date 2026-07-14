@@ -101,6 +101,11 @@ pub struct RowDescriptor {
     /// generalized-C3 leaf word-pair selector). For
     /// non-C3-leaf rows, `0`.
     pub msg_pair: u8,
+    /// §6(b)-G3 — 1 on the first StripeXor sweep row of a stripe
+    /// segment `g > 0` (pinned into `CONTROL_PREP` at bit 2^61 — the
+    /// verifier-fixed StripeXor register reset). For the single-segment
+    /// path and every other row, `false`.
+    pub seg_reset: bool,
 }
 
 impl RowDescriptor {
@@ -119,6 +124,7 @@ impl RowDescriptor {
             fold_slot: 0,
             fold_stripe: 0,
             msg_pair: 0,
+            seg_reset: false,
         }
     }
 }
@@ -142,7 +148,13 @@ pub fn fill_preprocessed_row(row_idx: usize, desc: &RowDescriptor, row: &mut [Va
     // CONTROL_PREP: pack selectors + mat_id + (HIGH-2.2 §6/§6(b)-G2)
     // the FoldChip schedule (is_fold, slot, stripe).
     let control_prep = ControlChip::pack_control_prep_full(
-        &desc.selectors, desc.mat_id, desc.is_fold, desc.fold_slot, desc.fold_stripe, desc.msg_pair,
+        &desc.selectors,
+        desc.mat_id,
+        desc.is_fold,
+        desc.fold_slot,
+        desc.fold_stripe,
+        desc.msg_pair,
+        desc.seg_reset,
     );
     row[CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(control_prep);
 
@@ -187,8 +199,13 @@ pub fn build_preprocessed_columns(program: &[RowDescriptor], total_rows: usize) 
             RowDescriptor::padding()
         };
         let control_prep = ControlChip::pack_control_prep_full(
-            &desc.selectors, desc.mat_id, desc.is_fold, desc.fold_slot, desc.fold_stripe,
+            &desc.selectors,
+            desc.mat_id,
+            desc.is_fold,
+            desc.fold_slot,
+            desc.fold_stripe,
             desc.msg_pair,
+            desc.seg_reset,
         );
         // PROGRAM_COLS order = [CONTROL_PREP,
         // NOISE_PACKED_PREP+0..8, CV_OR_TWEAK_PREP, AB_ID_PREP,

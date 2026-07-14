@@ -119,6 +119,13 @@ pub const MSG_PAIR_BIT: usize = FOLD_STRIPE_BIT + FOLD_STRIPE_BITS; // 58
 /// Number of bits the C3 word-pair index occupies (`0..=7`).
 pub const MSG_PAIR_BITS: usize = 3;
 
+/// §6(b)-G3 — bit offset of the 1-bit `SX_SEG_RESET` flag inside
+/// `CONTROL_PREP`, immediately after the 3-bit `msg_pair` (top bit 60).
+/// Pinning it makes the StripeXor per-segment reset verifier-fixed (a
+/// prover cannot zero the 64-lane register mid-accumulation to forge
+/// `x_steps`). Top packed bit `61 < 64` ⇒ Goldilocks-safe.
+pub const SEG_RESET_BIT: usize = MSG_PAIR_BIT + MSG_PAIR_BITS; // 61
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ControlChip;
 
@@ -229,7 +236,19 @@ impl ControlChip {
             let w = <AB::F as PrimeCharacteristicRing>::from_u32(p as u32);
             pair_idx = pair_idx + cur[MSG_PAIR_SEL_START + p] * w;
         }
-        acc = acc + pair_idx * pow; // 2^58 (3-bit pair ⇒ 58..61)
+        acc = acc + pair_idx * pow.clone(); // 2^58 (3-bit pair ⇒ 58..61)
+
+        // §6(b)-G3 — pin the 1-bit `SX_SEG_RESET` at bit 2^61. This makes
+        // the StripeXor per-segment reset verifier-fixed (via the CRIT-1
+        // `CONTROL_PREP` preprocessed pin), so a prover cannot toggle the
+        // reset to zero the 64-lane register mid-accumulation and forge
+        // `x_steps`. Zero on every single-segment trace (`SX_SEG_RESET`
+        // pinned to 0 there) ⇒ +0 ⇒ `CONTROL_PREP` byte-identical.
+        let two_pow_pair = <AB::F as PrimeCharacteristicRing>::from_u32(1u32 << MSG_PAIR_BITS);
+        pow = pow * two_pow_pair; // pow = 2^61
+        let seg_reset: AB::Var = cur[crate::composite_layout::SX_SEG_RESET];
+        builder.assert_bool(seg_reset);
+        acc = acc + seg_reset * pow; // 2^61
 
         builder.assert_eq(control_prep, acc);
     }
@@ -242,7 +261,7 @@ impl ControlChip {
     /// `msg_pair = 0`) — byte-identical to the pre-HIGH-2.2-§6
     /// packing for every non-fold / non-C3-leaf row.
     pub fn pack_control_prep(selectors: &[bool; NUM_SELECTORS], mat_id: u32) -> u64 {
-        Self::pack_control_prep_full(selectors, mat_id, false, 0, 0, 0)
+        Self::pack_control_prep_full(selectors, mat_id, false, 0, 0, 0, false)
     }
 
     /// HIGH-2.2 §6 / §6(b)-G2 — pack 21 selectors + MAT_ID **plus**
@@ -262,6 +281,7 @@ impl ControlChip {
         fold_slot: u8,
         fold_stripe: u8,
         msg_pair: u8,
+        seg_reset: bool,
     ) -> u64 {
         debug_assert!(
             (fold_slot as usize) < FOLD_SLOT_SEL_LEN,
@@ -286,6 +306,7 @@ impl ControlChip {
         packed |= ((fold_slot as u64) & ((1u64 << FOLD_SLOT_BITS) - 1)) << FOLD_SLOT_BIT;
         packed |= ((fold_stripe as u64) & ((1u64 << FOLD_STRIPE_BITS) - 1)) << FOLD_STRIPE_BIT;
         packed |= ((msg_pair as u64) & ((1u64 << MSG_PAIR_BITS) - 1)) << MSG_PAIR_BIT;
+        packed |= (seg_reset as u64) << SEG_RESET_BIT;
         packed
     }
 
@@ -520,6 +541,7 @@ mod tests {
                 &[false; NUM_SELECTORS], 0, true, packed_slot as u8,
                 slot as u8, // fold_stripe (consistent with the one-hot)
                 0,          // msg_pair (not a C3-leaf row)
+                false,      // seg_reset
             ));
     }
 
@@ -557,7 +579,7 @@ mod tests {
         };
         assert_eq!(ControlChip::pack_control_prep(&s, 0x1234), old);
         assert_eq!(
-            ControlChip::pack_control_prep_full(&s, 0x1234, false, 0, 0, 0),
+            ControlChip::pack_control_prep_full(&s, 0x1234, false, 0, 0, 0, false),
             old
         );
     }
@@ -635,7 +657,7 @@ mod tests {
         trace.values[base + FOLD_STRIPE_SEL_START + 5] = <Val as QuotientMap<u64>>::from_int(1);
         // … but CONTROL_PREP packs stripe = 7.
         trace.values[base + CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(
-            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, true, 5, 7, 0),
+            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, true, 5, 7, 0, false),
         );
         let proof = prove::<AiPowStarkConfig, _>(&cfg, &air, trace, &[]);
         assert!(
@@ -662,7 +684,7 @@ mod tests {
         trace.values[base + MSG_PAIR_SEL_START + 2] = <Val as QuotientMap<u64>>::from_int(1);
         // … but CONTROL_PREP packs msg_pair = 5 (no fold activity).
         trace.values[base + CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(
-            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, false, 0, 0, 5),
+            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, false, 0, 0, 5, false),
         );
         let proof = prove::<AiPowStarkConfig, _>(&cfg, &air, trace, &[]);
         assert!(
@@ -681,7 +703,7 @@ mod tests {
         let mut trace = build_uniform_trace(16, &s, 0);
         let base = 10 * TOTAL_TRACE_WIDTH;
         trace.values[base + CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(
-            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, true, 3, 3, 0),
+            ControlChip::pack_control_prep_full(&[false; NUM_SELECTORS], 0, true, 3, 3, 0, false),
         );
         // FOLD_IS_FOLD / FOLD_SLOT_SEL / FOLD_STRIPE_SEL left at 0.
         let proof = prove::<AiPowStarkConfig, _>(&cfg, &air, trace, &[]);

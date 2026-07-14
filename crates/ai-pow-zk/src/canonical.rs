@@ -1563,7 +1563,7 @@ mod tests {
             assert_eq!(l.class_of(row), RowClass::KeyPin);
             let mut sel = [false; NUM_SELECTORS];
             sel[sel_idx] = true;
-            let want_cp = ControlChip::pack_control_prep_full(&sel, 0, false, 0, 0, 0);
+            let want_cp = ControlChip::pack_control_prep_full(&sel, 0, false, 0, 0, 0, false);
             // PROGRAM_COLS[0] = CONTROL_PREP.
             assert_eq!(
                 prog.values[row * w].as_canonical_u64(),
@@ -1614,7 +1614,7 @@ mod tests {
                 sel[9] = true; // IS_LAST_ROUND
                 sel[6] = true; // IS_HASH_JACKPOT
             }
-            let want_cp = ControlChip::pack_control_prep_full(&sel, 0, false, 0, 0, 0);
+            let want_cp = ControlChip::pack_control_prep_full(&sel, 0, false, 0, 0, 0, false);
             // PROGRAM_COLS: [0]=CONTROL_PREP, [1..9]=NOISE×8,
             // [9]=CV_OR_TWEAK_PREP, [10]=AB_ID, then A/B IDs,
             // final=STARK_ROW_IDX.

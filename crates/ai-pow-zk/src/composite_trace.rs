@@ -1694,6 +1694,7 @@ impl CompositeTrace {
                     slot as u8,
                     t as u8, // §6(b)-G2: the stripe index (= fold-row t)
                     0,       // §4.C.2 c-exact: fold rows are not C3-leaf rows
+                    false,   // §6(b)-G3: reset is on sweep rows, not fold rows
                 ));
             row[FOLD_IS_FOLD] = <Val as QuotientMap<u64>>::from_int(1);
             row[FOLD_SLOT_SEL_START + slot] = <Val as QuotientMap<u64>>::from_int(1);

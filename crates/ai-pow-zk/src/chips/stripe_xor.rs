@@ -200,20 +200,13 @@ impl StripeXorChip {
     /// on every non-stripe-xor row (`SX_IS_ACTIVE = 0`), so all
     /// existing traces (all-zero SX columns) are unaffected.
     pub fn eval_composite<AB: AirBuilder>(builder: &mut AB) {
-        // §6(b)-G3 Stage 2: run the SEGMENTED constraint set. The
-        // `SX_SEG_RESET` column is pinned to 0 here (single-segment,
-        // `num_stripes ≤ STRIPE_MAX`), so `eval_at_segmented` reduces
-        // EXACTLY to the pre-G3 `eval_at` constraints — the composite
-        // is behaviorally unchanged. Stage 3 replaces this hard pin
-        // with a `CONTROL_PREP` bit so the reset can fire (verifier-
-        // fixed) at each segment boundary.
-        {
-            let seg_reset = {
-                let main = builder.main();
-                main.current_slice()[crate::composite_layout::SX_SEG_RESET]
-            };
-            builder.assert_zero(seg_reset);
-        }
+        // §6(b)-G3: run the SEGMENTED constraint set. `SX_SEG_RESET` is
+        // made VERIFIER-FIXED by `ControlChip` (pinned into the CRIT-1
+        // `CONTROL_PREP` preprocessed column at bit 2^61), so a prover
+        // cannot toggle it to zero the register mid-accumulation. The
+        // canonical program sets it only on segment-boundary sweep rows
+        // (`g > 0`); the single-segment path pins it to 0 everywhere, so
+        // `eval_at_segmented` reduces EXACTLY to the pre-G3 constraints.
         Self::eval_at_segmented(builder, &Self::COMPOSITE_OFFSETS);
 
         // SX_IN ← matmul accumulator-after-step (cross-row, gated).
