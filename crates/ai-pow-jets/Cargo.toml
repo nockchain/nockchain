@@ -11,6 +11,7 @@ ai-pow-zk = { path = "../ai-pow-zk", features = ["recursion"] }
 ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
 nockvm.workspace = true
 nockvm_macros.workspace = true
+blake3.workspace = true
 either.workspace = true
 once_cell.workspace = true
 tracing.workspace = true

@@ -70,36 +70,47 @@ fn atom_to_32(noun: Noun, space: &NounSpace) -> Option<[u8; 32]> {
     Some(out)
 }
 
-/// Verify a decoded `%ai-pow` block artifact given an explicit setup. This is the
-/// jet's load-bearing core, factored out so it is unit-testable without the boot
-/// cache. The `sample` is `[artifact=ai-pow-artifact commit=@ target=@]`.
+/// Derive the 32-byte Nockchain block commitment from the kernel's
+/// `block-commitment:page:t` **noun** exactly as the miner does
+/// (`ai-pow-miner::derive_job_inputs`): `BLAKE3(jam(commitment-noun))`.
+///
+/// This is the soundness-critical representation binding: the kernel's commitment
+/// is a tip5 5-`belt` digest (a structured noun), NOT a 32-byte atom, so the jet
+/// canonicalizes it the same way the prover did. `nockvm::serialization::jam`
+/// (here) and `NounSlab::jam` (the miner) are the same canonical jam, so the
+/// BLAKE3 inputs — and thus the commitments — match.
+pub fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -> [u8; 32] {
+    let jammed = nockvm::serialization::jam(stack, noun);
+    let space = stack.noun_space();
+    let handle = jammed.in_space(&space);
+    let full = handle.as_ne_bytes();
+    // `as_ne_bytes` is word-padded; the miner hashes `NounSlab::jam()` which is the
+    // canonical (trailing-zero-trimmed) jam. Trim to the same significant length so
+    // BLAKE3 matches — a padding mismatch here would reject every valid block.
+    let sig_len = full.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    *blake3::hash(&full[..sig_len]).as_bytes()
+}
+
+/// Verify a decoded `%ai-pow` block artifact given the resolved 32-byte block
+/// commitment + target and an explicit setup. This is the jet's load-bearing
+/// core, factored out so it is unit-testable without the boot cache.
 ///
 /// Returns `Ok(true)` iff the block verifies, `Ok(false)` if it is well-formed but
 /// invalid (bad proof / unmet difficulty / wrong commitment / tampered artifact),
-/// and `Err(JetErr)` only if the sample is structurally malformed (not a valid
-/// triple) — the one case that legitimately falls back to the Hoon arm.
-pub fn ai_pow_verify_with_setup(
+/// and `Err(JetErr)` only if the artifact noun cannot even be slotted.
+pub fn ai_pow_verify_core(
     space: &NounSpace,
-    sample: Noun,
+    artifact_noun: Noun,
+    commit: [u8; 32],
+    target: [u8; 32],
     setup: &AiPowVerifierSetup,
 ) -> Result<bool, JetErr> {
-    // sample = [artifact commit target]  ⇒  head=2, commit=6, target=7
-    let artifact_noun = slot(sample, 2, space)?;
-    let commit_noun = slot(sample, 6, space)?;
-    let target_noun = slot(sample, 7, space)?;
-
     let limits = CertificateNounLimits::default();
     let artifact = match decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, space, limits) {
         Ok(a) => a,
         // A malformed artifact noun is a rejected block, not a jet failure.
         Err(_) => return Ok(false),
     };
-    let (Some(commit), Some(target)) =
-        (atom_to_32(commit_noun, space), atom_to_32(target_noun, space))
-    else {
-        return Ok(false);
-    };
-
     match verify_ai_pow_block_artifact(
         &artifact,
         limits,
@@ -114,19 +125,33 @@ pub fn ai_pow_verify_with_setup(
     }
 }
 
-/// The AI-PoW verify jet. Sample: `[artifact commit target]`; result: loobean.
+/// The AI-PoW verify jet. Sample:
+/// `[artifact=ai-pow-artifact commit=block-commitment:page:t target=@]`
+/// — `commit` is the STRUCTURED commitment noun (canonicalized here via
+/// `commit_from_noun`), `target` the `merge:bignum` LE atom the Hoon arm passes.
+/// Result: loobean.
 ///
 /// Requires [`init_ai_pow_verifier_setup`] to have run at boot; if not, it bails to
 /// the (stubbed) Hoon arm — which, for a jet-required arm, surfaces the boot bug
 /// rather than silently accepting.
 pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let space = context.stack.noun_space();
+    // sample = [artifact commit target]  ⇒  head=2, commit=6, target=7
     let sample = slot(subject, 6, &space)?;
+    let artifact_noun = slot(sample, 2, &space)?;
+    let commit_noun = slot(sample, 6, &space)?;
+    let target_noun = slot(sample, 7, &space)?;
+    let Some(target) = atom_to_32(target_noun, &space) else {
+        return Ok(NO);
+    };
     let Some(setup) = SETUP.get() else {
         // Setup not injected at boot — cannot verify; fall back (surfaces the bug).
         return Err(BAIL_FAIL);
     };
-    let verified = ai_pow_verify_with_setup(&space, sample, setup)?;
+    // Canonicalize the structured commitment noun (mutates the stack via jam).
+    let commit = commit_from_noun(&mut context.stack, commit_noun);
+    let space = context.stack.noun_space();
+    let verified = ai_pow_verify_core(&space, artifact_noun, commit, target, setup)?;
     Ok(if verified { YES } else { NO })
 }
 
@@ -153,28 +178,48 @@ mod tests {
     use ai_pow::params::MatmulParams;
     use ai_pow_miner::certificate_noun::build_ai_pow_pearl_merge_moe_artifact_noun_from_node;
     use nockapp::noun::slab::NounSlab;
-    use nockapp::IndirectAtomExt;
-    use nockvm::noun::{IndirectAtom, NounAllocator, T};
+    use nockvm::noun::NounAllocator;
 
-    /// Build the jet sample noun `[artifact commit target]` from a jammed artifact.
-    fn build_sample(jammed: nockapp::Bytes, commit: [u8; 32], target: [u8; 32]) -> NounSlab {
-        let mut slab = NounSlab::new();
-        let artifact_root = slab.cue_into(jammed).expect("cue artifact");
-        let commit_atom =
-            <IndirectAtom as IndirectAtomExt>::from_bytes(&mut slab, &commit).as_noun();
-        let target_atom =
-            <IndirectAtom as IndirectAtomExt>::from_bytes(&mut slab, &target).as_noun();
-        let sample = T(&mut slab, &[artifact_root, commit_atom, target_atom]);
-        slab.set_root(sample);
+    /// Cue a jammed artifact into a fresh slab and return `(slab, root)`.
+    fn cue_artifact(jammed: nockapp::Bytes) -> NounSlab {
+        let mut slab: NounSlab = NounSlab::new();
+        let root = slab.cue_into(jammed).expect("cue artifact");
+        slab.set_root(root);
         slab
     }
 
-    /// KAT (real proving, ~25s): a real MoE `%ai-pow` block, presented as the
-    /// structured jet sample `[artifact commit target]`, verifies through the jet
-    /// CORE; a wrong block commitment and an unmet difficulty are rejected
-    /// (`Ok(false)`, not a jet error). Validates the jet noun plumbing (slot axes,
-    /// atom extraction, decode-from-noun) end-to-end over the already-validated
-    /// `verify_ai_pow_block_artifact`, and exercises `setup::prove_canonical_moe_block`.
+    /// **Soundness KAT (fast, no proving): the commit representation binding.**
+    /// The jet derives the 32-byte block commitment as `BLAKE3(jam(commit-noun))`
+    /// via `nockvm::serialization::jam`; the miner (`derive_job_inputs`) uses
+    /// `BLAKE3(NounSlab::jam(..))`. These must be byte-identical — including the
+    /// trailing-zero trimming — or every valid block is rejected. This pins that.
+    #[test]
+    fn commit_from_noun_matches_miner_derivation() {
+        use nockvm::mem::NockStack;
+        use nockvm::noun::{D, T};
+        for payload in [D(0), D(1), D(0xdead_beef_u64), D(0xff00_u64)] {
+            // Miner path: build the noun in a NounSlab, hash its canonical jam.
+            let mut slab: NounSlab = NounSlab::new();
+            let s = T(&mut slab, &[D(1), D(2), D(3), payload]);
+            slab.set_root(s);
+            let miner = *blake3::hash(&slab.jam()).as_bytes();
+
+            // Jet path: the same logical noun in a NockStack, via commit_from_noun.
+            let mut stack = NockStack::new(8 << 20, 0);
+            let k = T(&mut stack, &[D(1), D(2), D(3), payload]);
+            let jet = commit_from_noun(&mut stack, k);
+
+            assert_eq!(
+                jet, miner,
+                "jet BLAKE3(nockvm jam) must equal miner BLAKE3(NounSlab::jam)",
+            );
+        }
+    }
+
+    /// KAT (real proving, ~25s): a real MoE `%ai-pow` block artifact verifies
+    /// through the jet CORE; a wrong commitment and an unmet difficulty are
+    /// rejected (`Ok(false)`, not a jet error). Validates the artifact decode-from-
+    /// noun + verify dispatch over the already-validated `verify_ai_pow_block_artifact`.
     #[test]
     #[ignore = "real MoE compact proof (~25s); opt-in"]
     fn ai_pow_verify_jet_core_accepts_real_block_and_rejects_tampering() {
@@ -190,7 +235,7 @@ mod tests {
         let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
             .expect("prove canonical MoE block");
 
-        let artifact_slab = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
             &block.statement,
             &block.aux_inclusion,
             &block.moe_art,
@@ -201,8 +246,8 @@ mod tests {
             &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
-        .expect("build MoE artifact noun");
-        let jammed = artifact_slab.jam();
+        .expect("build MoE artifact noun")
+        .jam();
 
         let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
             &block.run.verifier_key_digest(),
@@ -215,30 +260,23 @@ mod tests {
         let commit = block.commit;
         let loose_target = [0xffu8; 32];
 
-        // Valid block → verified.
-        let slab = build_sample(jammed.clone(), commit, loose_target);
+        let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
+
         assert!(
-            matches!(ai_pow_verify_with_setup(&space, root, &setup), Ok(true)),
+            matches!(ai_pow_verify_core(&space, root, commit, loose_target, &setup), Ok(true)),
             "real MoE block must verify through the jet core",
         );
-
-        // Wrong block commitment → rejected (Ok(false), not a jet error).
-        let slab_bad = build_sample(jammed.clone(), [0x99u8; 32], loose_target);
-        let space_bad = slab_bad.noun_space();
-        let root_bad = unsafe { *slab_bad.root() };
         assert!(
-            matches!(ai_pow_verify_with_setup(&space_bad, root_bad, &setup), Ok(false)),
+            matches!(
+                ai_pow_verify_core(&space, root, [0x99u8; 32], loose_target, &setup),
+                Ok(false)
+            ),
             "wrong block commitment must be rejected",
         );
-
-        // Unmet difficulty (target 0) → rejected.
-        let slab_t = build_sample(jammed, commit, [0u8; 32]);
-        let space_t = slab_t.noun_space();
-        let root_t = unsafe { *slab_t.root() };
         assert!(
-            matches!(ai_pow_verify_with_setup(&space_t, root_t, &setup), Ok(false)),
+            matches!(ai_pow_verify_core(&space, root, commit, [0u8; 32], &setup), Ok(false)),
             "unmet difficulty must be rejected",
         );
     }
