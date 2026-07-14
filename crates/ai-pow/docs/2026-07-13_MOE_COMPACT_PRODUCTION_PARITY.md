@@ -535,24 +535,29 @@ verifies through it **without the matrices being supplied** (it re-derives them)
 unmet difficulty rejects.
 
 **Precise residual (exact, actionable) — all derivable, none "missing infra":**
-1. **Verifier-setup builder** (`compact_context` + `verifier_key_digest`): these are
-   **deterministic from the production `params`** (the L1 circuit's
-   `circuit_prover_data` + the L2 metadata/FRI shape), but are currently produced
-   as a by-product of *proving* (`recursion.rs:1942`). A consensus node needs a
-   `build_compact_verifier_setup(params) -> (context, digest)` that builds them
-   once at startup (the `AiPowCompactBatchProverCache` machinery already models the
-   reusable setup). **Shared with dense** — the dense jam verify takes the same
-   `compact_context`. This is unbuilt *derivable code*, not missing infrastructure.
+1. **Verifier-setup builder** (`compact_context` + `verifier_key_digest`) — ✅
+   **soundness VALIDATED 2026-07-13.** These are produced as a by-product of proving
+   (`recursion.rs:1942`), and the test
+   `moe_compact_verifier_setup_is_proof_independent` proves they are
+   **proof-INDEPENDENT**: two blocks of identical shape but different `kappa` yield
+   the SAME `verifier_key_digest`, and block A verifies against block B's context.
+   So a node builds the setup **once at startup** (prove one canonical block; the
+   prove entrypoints already return `(context, digest)`) and reuses it for every
+   same-shape block. **Shared with dense** (puzzle-variant-agnostic; the per-block
+   schedule is bound separately via the P0 commitment fold). What remains is only
+   the thin startup wrapper + choosing the canonical production shape.
 2. **The Hoon→Rust jet** wrapping `verify_ai_pow_block_artifact_jam` (+ the
-   activation gate + target/commitment plumbing from consensus state), replacing
-   the two `inner.hoon` fail-closes; rebuild the kernel jam → binary (per
-   `hoon-jam-builds`).
+   activation gate + target/commitment plumbing from consensus state, + a Rust-side
+   cached setup from #1), replacing the two `inner.hoon` fail-closes; rebuild the
+   kernel jam → binary (per `hoon-jam-builds`). **This is the remaining consensus
+   linchpin** — soundness-critical cross-language wiring to be landed in careful
+   validated stages (KAT-first, jet-table registration, jam rebuild), per R1.
 3. Block-level acceptance + integration tests.
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
-**Rust side of the boundary — including canonical `A`/`B` derivation — is complete
-+ validated for both dense and MoE**;
+**Rust side of the boundary — canonical `A`/`B` derivation AND the proof-independent
+setup — is complete + validated for both dense and MoE**;
 this residual is entirely the consensus-integration + model/trusted-setup
 infrastructure.
 
@@ -624,7 +629,7 @@ From the compact-recursive production pipeline:
 | **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
 | **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** + unmet-difficulty rejects validated on the compact verify logic AND the end-to-end node branch |
 | **M4** envelope + parse guards | ✅ **done + validated** — `sanity_check_allowing_moe` + `from_public_data_allowing_moe` (both prerequisites for M3; dense paths byte-identical; 6+ tests, regression green). **Admission guard** (`validate_pearl_merge_config_for_recursive_prover`, comment now stale) 🔒 still LAST — the only MoE fail-close left |
-| **D4/S1** Hoon↔Rust consensus wiring | 🟡 **Rust jet target BUILT + validated** — `verify_ai_pow_block_artifact_jam` re-derives canonical A/B from the protocol seed (no model distribution — earlier "model wall" retracted, §4 D4/S1), dispatches on the tag, verifies (real-proof validated; difficulty rejects). Residual (shared with dense, all derivable): a `params→(compact_context,digest)` verifier-setup builder + the Hoon jet + kernel-jam rebuild. Hoon `check-pow`/`do-pow` still fail-close correctly until the jet lands |
+| **D4/S1** Hoon↔Rust consensus wiring | 🟡 **Rust side DONE + validated** — `verify_ai_pow_block_artifact_jam` re-derives canonical A/B from the protocol seed (no model distribution; "model wall" retracted, §4 D4/S1), dispatches on the tag, verifies (real-proof validated; difficulty rejects); the verifier setup is **proof-independent** (validated — build-once-at-startup is sound). **Remaining: the Hoon jet + kernel-jam rebuild** (consensus linchpin, staged per R1). Hoon `check-pow`/`do-pow` still fail-close correctly until it lands |
 
 ---
 
