@@ -134,6 +134,24 @@ pub(crate) struct ScheduleLayout {
     /// `[0, num_segments)` are valid. The single-field accessors above
     /// mirror `segments[0]` (unchanged for the single-segment path).
     pub segments: [SegmentLayout; MAX_SEGMENTS],
+    /// R-b (stripe-major, `num_stripes > STRIPE_MAX`) — when `true`,
+    /// the sweep region is a SINGLE contiguous stripe-major block with
+    /// one FoldChip row interleaved after each stripe's sub-block sweep
+    /// (mirrors `composite_trace::place_useful_work_chain_rb`). The
+    /// segmented sub-block-major fields above are NOT used; `class_of`
+    /// / `row_descriptor` dispatch to the R-b path. `false` on the
+    /// legacy ≤`STRIPE_MAX` path (all fields below `Default`).
+    pub rb: bool,
+    /// R-b — rows per stripe = `n_sb · chunks + 1` (the `+1` is the
+    /// interleaved fold row). The R-b region is
+    /// `[sweep_start, sweep_start + rb_num_stripes · rb_per_stripe)`.
+    pub rb_per_stripe: usize,
+    /// R-b — `num_stripes` (`k / r`), the stripe count.
+    pub rb_num_stripes: usize,
+    /// R-b — sub-blocks per stripe = `(h/TILE_H)·(w/TILE_H)`.
+    pub rb_n_sb: usize,
+    /// R-b — `⌈r/TILE_D⌉` micro-steps per sub-block.
+    pub rb_chunks: usize,
 }
 
 impl ScheduleLayout {
@@ -171,6 +189,9 @@ impl ScheduleLayout {
     /// single-segment path `segments[0]` == the single fields, so this is
     /// identical to the pre-G3 classification).
     pub fn class_of(&self, r: usize) -> RowClass {
+        if self.rb {
+            return self.class_of_rb(r);
+        }
         if r < self.na {
             RowClass::StripOpenA
         } else if r < self.mh_end {
@@ -186,6 +207,71 @@ impl ScheduleLayout {
         } else {
             RowClass::Pad
         }
+    }
+
+    /// R-b classification: the sweep region is a single stripe-major
+    /// block; within each stripe's `rb_per_stripe` rows the first
+    /// `n_sb·chunks` are `Sweep`, the last is the interleaved `Fold`.
+    fn class_of_rb(&self, r: usize) -> RowClass {
+        let region_end = self.sweep_start + self.rb_num_stripes * self.rb_per_stripe;
+        if r < self.na {
+            RowClass::StripOpenA
+        } else if r < self.mh_end {
+            RowClass::StripOpenB
+        } else if r == self.mh_end + 1 || r == self.mh_end + 2 {
+            RowClass::KeyPin
+        } else if (self.sweep_start..region_end).contains(&r) {
+            let within = (r - self.sweep_start) % self.rb_per_stripe;
+            if within < self.rb_n_sb * self.rb_chunks {
+                RowClass::Sweep
+            } else {
+                RowClass::Fold
+            }
+        } else if r >= self.jpot_start {
+            RowClass::JackpotHash
+        } else {
+            RowClass::Pad
+        }
+    }
+
+    /// R-b — if `r` is a Sweep row, return `(stripe, sb, chunk)`
+    /// (stripe-major nested loop, sub-block-major within the stripe).
+    /// `None` on non-sweep / non-R-b rows.
+    fn rb_sweep_coords(&self, r: usize) -> Option<(usize, usize, usize)> {
+        if !self.rb {
+            return None;
+        }
+        let region_end = self.sweep_start + self.rb_num_stripes * self.rb_per_stripe;
+        if !(self.sweep_start..region_end).contains(&r) {
+            return None;
+        }
+        let local = r - self.sweep_start;
+        let stripe = local / self.rb_per_stripe;
+        let within = local % self.rb_per_stripe;
+        if within >= self.rb_n_sb * self.rb_chunks {
+            return None; // fold row
+        }
+        let sb = within / self.rb_chunks;
+        let chunk = within % self.rb_chunks;
+        Some((stripe, sb, chunk))
+    }
+
+    /// R-b — if `r` is a Fold row, return its `stripe` index. `None`
+    /// on non-fold / non-R-b rows.
+    fn rb_fold_stripe(&self, r: usize) -> Option<usize> {
+        if !self.rb {
+            return None;
+        }
+        let region_end = self.sweep_start + self.rb_num_stripes * self.rb_per_stripe;
+        if !(self.sweep_start..region_end).contains(&r) {
+            return None;
+        }
+        let local = r - self.sweep_start;
+        let within = local % self.rb_per_stripe;
+        if within < self.rb_n_sb * self.rb_chunks {
+            return None; // sweep row
+        }
+        Some(local / self.rb_per_stripe)
     }
 }
 
@@ -303,6 +389,93 @@ pub(crate) fn schedule_layout_for_strip_schedule(
         jpot_start,
         num_segments,
         segments,
+        rb: false,
+        rb_per_stripe: 0,
+        rb_num_stripes: 0,
+        rb_n_sb: 0,
+        rb_chunks: 0,
+    }
+}
+
+/// R-b (stripe-major) params-pure schedule for `num_stripes >
+/// STRIPE_MAX`. Mirrors `composite_trace::place_useful_work_chain_rb`:
+/// a SINGLE contiguous region `[sweep_start, sweep_start +
+/// num_stripes · (n_sb·chunks + 1))` where each stripe contributes
+/// `n_sb·chunks` matmul-active sweep rows (sub-block-major within the
+/// stripe) followed by ONE interleaved FoldChip row. The prefix
+/// (strip-opening + key-pin) and suffix (jackpot-hash) are identical
+/// to the legacy layout; only the sweep/fold region differs. 16|r
+/// co-location ⇒ 0 separate store rows (producers co-located in
+/// StripOpen). Panics on the same invariants as
+/// `schedule_layout_for_strip_schedule` plus `num_stripes > 0`.
+pub(crate) fn schedule_layout_rb(
+    params: &ZkParams,
+    strip_schedule: &StripIndexSchedule,
+    trace_len: usize,
+) -> ScheduleLayout {
+    assert_eq!(
+        params.noise_rank % 16,
+        0,
+        "schedule_layout_rb is params-pure only on the 16|r co-location path"
+    );
+    let h_tile = strip_schedule.a_indices.len();
+    let w_tile = strip_schedule.b_indices.len();
+    assert!(
+        h_tile % TILE_H == 0 && w_tile % TILE_H == 0,
+        "schedule_layout_rb requires h_tile,w_tile divisible by TILE_H"
+    );
+    let k = params.k as usize;
+    let r = params.noise_rank as usize;
+    let num_stripes = k / r;
+    let stripe_max = crate::composite_layout::STRIPE_MAX;
+    assert!(
+        num_stripes > stripe_max,
+        "schedule_layout_rb is the num_stripes>{stripe_max} path; got {num_stripes}"
+    );
+
+    // Prefix: identical strip-opening + key-pin accounting.
+    let ((_ca0, _ca1, a_nc), (_cb0, _cb1, b_nc)) = strip_schedule
+        .chunk_ranges(params)
+        .expect("schedule_layout_rb requires valid strip chunk ranges");
+    let (a_chunks, _) =
+        crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.a_indices, k, a_nc * 1024);
+    let (b_chunks, _) =
+        crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.b_indices, k, b_nc * 1024);
+    let na = strip_opening_rows_set(&a_chunks, a_nc);
+    let nb = strip_opening_rows_set(&b_chunks, b_nc);
+    let mh_end = na + nb;
+    let sweep_start = mh_end + 3;
+
+    let n_sbi = h_tile / TILE_H;
+    let n_sbj = w_tile / TILE_H;
+    let n_sb = n_sbi * n_sbj;
+    let chunks = r.div_ceil(TILE_D).max(1);
+    let rb_per_stripe = n_sb * chunks + 1;
+    let region_end = sweep_start + num_stripes * rb_per_stripe;
+
+    assert!(
+        trace_len >= 8 && region_end <= trace_len - 8,
+        "R-b schedule overflows trace_len={trace_len} (region_end={region_end})"
+    );
+    let jpot_start = trace_len - 8;
+
+    ScheduleLayout {
+        na,
+        mh_end,
+        sweep_start,
+        // Region end doubles as store_start/fold_start/fold_end for the
+        // bounds check; the R-b classifier uses the rb_* fields, not these.
+        store_start: region_end,
+        fold_start: region_end,
+        fold_end: region_end,
+        jpot_start,
+        num_segments: 1,
+        segments: [SegmentLayout::default(); MAX_SEGMENTS],
+        rb: true,
+        rb_per_stripe,
+        rb_num_stripes: num_stripes,
+        rb_n_sb: n_sb,
+        rb_chunks: chunks,
     }
 }
 
@@ -619,7 +792,17 @@ pub fn canonical_program_for_strip_schedule(
     }
     validate_strip_indices("A", &strip_schedule.a_indices, params.m)?;
     validate_strip_indices("B", &strip_schedule.b_indices, params.n)?;
-    let l = schedule_layout_for_strip_schedule(params, strip_schedule, trace_len);
+    // §6(b)-R-b: `num_stripes > STRIPE_MAX` uses the stripe-major
+    // schedule (the segmented sub-block-major layout has no prover —
+    // it hit the per-sub-block CUMSUM-continuity wall). The choice is
+    // params-pure (`k/r`), so prover and verifier agree; ≤STRIPE_MAX is
+    // byte-identical to before (the validated production path).
+    let num_stripes = params.k as usize / params.noise_rank as usize;
+    let l = if num_stripes > crate::composite_layout::STRIPE_MAX {
+        schedule_layout_rb(params, strip_schedule, trace_len)
+    } else {
+        schedule_layout_for_strip_schedule(params, strip_schedule, trace_len)
+    };
     let sp = StripPlan::build_for_strip_schedule(params, strip_schedule);
     let program: Vec<RowDescriptor> = (0..trace_len)
         .map(|r| row_descriptor(r, l.class_of(r), &l, &sp, params, bp))
@@ -1061,15 +1244,37 @@ fn row_descriptor(
             let r = params.noise_rank as usize;
             let num_stripes = params.k as usize / r;
             let chunks = r.div_ceil(TILE_D).max(1);
-            let per = num_stripes * chunks;
-            let sweep_offset = row_idx - layout.sweep_start;
-            let subblock = sweep_offset / per;
-            let within = sweep_offset % per;
-            let step = within / chunks;
-            let chunk = within % chunks;
             let n_sbj = sp.w_tile / TILE_H;
-            let sbi = subblock / n_sbj;
-            let sbj = subblock % n_sbj;
+            // §6(b)-R-b: stripe-major sweep (`place_useful_work_chain_rb`).
+            // The row → (stripe, sub-block, chunk) mapping and the
+            // `IS_RESET_CUMSUM` rule differ from the segmented
+            // sub-block-major path: R-b resets the matmul CUMSUM ONCE
+            // (the very first sweep row, `stripe==0 && sb==0 && chunk==0`)
+            // and accumulates as a harmless byproduct thereafter; the
+            // per-stripe x_step is carried by the TileReduce lane, not
+            // the matmul CUMSUM. `ids_for` (the positioned `noised_packed`
+            // keys) is identical to the segmented path — same tile strips,
+            // stripe-major order (LogUp is a multiset ⇒ order-independent).
+            let (step, sbi, sbj, chunk, is_reset) = if layout.rb {
+                let (stripe, sb, chunk) = layout
+                    .rb_sweep_coords(row_idx)
+                    .expect("R-b Sweep class ⇒ rb_sweep_coords is Some");
+                let sbi = sb / n_sbj;
+                let sbj = sb % n_sbj;
+                let is_reset = stripe == 0 && sb == 0 && chunk == 0;
+                (stripe, sbi, sbj, chunk, is_reset)
+            } else {
+                let per = num_stripes * chunks;
+                let sweep_offset = row_idx - layout.sweep_start;
+                let subblock = sweep_offset / per;
+                let within = sweep_offset % per;
+                let step = within / chunks;
+                let chunk = within % chunks;
+                let sbi = subblock / n_sbj;
+                let sbj = subblock % n_sbj;
+                let is_reset = step == 0 && chunk == 0;
+                (step, sbi, sbj, chunk, is_reset)
+            };
             let lo = step * r;
             let c0 = chunk * TILE_D;
             let w = (r - c0).min(TILE_D);
@@ -1103,7 +1308,6 @@ fn row_descriptor(
             };
             let a_ids = ids_for(true, sbi * TILE_H);
             let b_ids = ids_for(false, sbj * TILE_H);
-            let is_reset = step == 0 && chunk == 0;
             let mut selectors = [false; NUM_SELECTORS];
             selectors[if is_reset { 0 } else { 1 }] = true;
             RowDescriptor {
@@ -1115,15 +1319,29 @@ fn row_descriptor(
             }
         }
         RowClass::Fold => {
-            // CR.5: `place_fold_chain` row `offset` (0..num_stripes)
-            // — no selectors; CONTROL_PREP packs is_fold=1,
-            // fold_slot = offset%16, fold_stripe = offset (§6(b)-G2
-            // SX_XR lane). mat_id=0; FOLD_* are chip columns.
-            let offset = row_idx - layout.fold_start;
+            // CR.5: FoldChip row. CONTROL_PREP packs is_fold=1,
+            // fold_slot, fold_stripe; mat_id=0; FOLD_* are chip columns.
+            let (fold_slot, fold_stripe) = if layout.rb {
+                // §6(b)-R-b: one interleaved fold row per stripe, folding
+                // that stripe's TileReduce x_step into slot `stripe%16`.
+                // `fold_stripe = 0` ALWAYS (FOLD_STRIPE_SEL[0]=1 satisfies
+                // FoldChip's one-hot without activating the disabled SX
+                // 64-lane keystone; sx_bound=false for R-b) — mirrors
+                // `place_useful_work_chain_rb`'s fold row.
+                let stripe = layout
+                    .rb_fold_stripe(row_idx)
+                    .expect("R-b Fold class ⇒ rb_fold_stripe is Some");
+                ((stripe % 16) as u8, 0u8)
+            } else {
+                // Segmented §6(b)-G2: fold_slot = offset%16,
+                // fold_stripe = offset (the SX_XR lane).
+                let offset = row_idx - layout.fold_start;
+                ((offset % 16) as u8, offset as u8)
+            };
             RowDescriptor {
                 is_fold: true,
-                fold_slot: (offset % 16) as u8,
-                fold_stripe: offset as u8,
+                fold_slot,
+                fold_stripe,
                 ..RowDescriptor::padding()
             }
         }
@@ -1233,6 +1451,90 @@ mod tests {
             kappa: [0u8; 32],
             s_a: [0u8; 32],
             s_b: [0u8; 32],
+        }
+    }
+
+    /// §6(b)-R-b node-verify linchpin — the canonical (verifier-rebuilt,
+    /// params-pure) program for `num_stripes > STRIPE_MAX` is
+    /// BYTE-IDENTICAL to `extract_program` of an honest stripe-major
+    /// trace (`place_useful_work_chain_rb`) on every sweep+fold row.
+    /// The node commits to THIS canonical program, so it MUST match what
+    /// the R-b prover builds — a divergence would reject a legitimate
+    /// >64 certificate (or, if the divergence were in the prover's favour,
+    /// admit a forged schedule). Origin tile (0,0), 16|r ⇒ `ca0=0` ⇒ the
+    /// canonical `ids_for` (`indices[j]-ca0`) equals the trace's
+    /// tile-local lane. PROGRAM_COLS are position-derived (not
+    /// value-derived), so an all-zero matrix suffices to fix the schedule.
+    #[test]
+    fn cr_rb_canonical_program_eq_extract_on_sweep_fold() {
+        use crate::composite_full_air::{extract_program, PROGRAM_COLS};
+        use crate::composite_trace::CompositeTrace;
+
+        let w = PROGRAM_COLS.len();
+        for &num_stripes in &[65usize, 96, 128] {
+            let r = 16u32;
+            let k = num_stripes as u32 * r;
+            let params = ZkParams {
+                m: 8,
+                k,
+                n: 8,
+                noise_rank: r,
+                tile: 8,
+                difficulty_bits: 0,
+            };
+            let bp = bp0();
+            let sched = StripIndexSchedule::from_block_public(&params, &bp).expect("origin tile");
+            // The R-b region size is trace_len-independent; probe it, then
+            // size the trace to the next power of two that fits.
+            let probe = schedule_layout_rb(&params, &sched, 1 << 22);
+            let region_end = probe.sweep_start + probe.rb_num_stripes * probe.rb_per_stripe;
+            let trace_len =
+                ((region_end + 8).next_power_of_two()).max(crate::composite_layout::MIN_STARK_LEN);
+
+            let canon =
+                canonical_program(&params, &bp, trace_len).expect("R-b canonical program builds");
+            assert_eq!(canon.width(), w, "canonical program width = PROGRAM_COLS");
+
+            let l = schedule_layout_rb(&params, &sched, trace_len);
+            assert!(l.rb, "params num_stripes>STRIPE_MAX ⇒ rb layout");
+            let (h_tile, w_tile, kk) = (8usize, 8usize, k as usize);
+            let a_prime = vec![0i8; h_tile * kk];
+            let b_prime = vec![0i8; w_tile * kk];
+            let mut trace = CompositeTrace::baseline(trace_len);
+            trace.place_useful_work_chain_rb(
+                l.sweep_start,
+                &a_prime,
+                &b_prime,
+                h_tile,
+                w_tile,
+                r as usize,
+                num_stripes,
+            );
+            let extracted = extract_program(&trace.matrix);
+
+            let (mut nsweep, mut nfold) = (0usize, 0usize);
+            for row in l.sweep_start..region_end {
+                match l.class_of(row) {
+                    RowClass::Sweep => nsweep += 1,
+                    RowClass::Fold => nfold += 1,
+                    other => panic!("row {row} in R-b region classified {other:?}"),
+                }
+                for c in 0..w {
+                    assert_eq!(
+                        canon.values[row * w + c],
+                        extracted.values[row * w + c],
+                        "R-b canonical != extract at row {row} col {c} \
+                         (num_stripes={num_stripes}, class={:?})",
+                        l.class_of(row),
+                    );
+                }
+            }
+            assert_eq!(nfold, num_stripes, "one fold row per stripe");
+            assert_eq!(
+                nsweep,
+                num_stripes * l.rb_n_sb * l.rb_chunks,
+                "sweep row count = num_stripes·n_sb·chunks"
+            );
         }
     }
 
