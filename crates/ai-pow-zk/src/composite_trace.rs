@@ -1970,6 +1970,234 @@ impl CompositeTrace {
         (rows_used, xr)
     }
 
+    /// §6(b)-R-b — STRIPE-MAJOR sweep. Holds the full `h·w` tile
+    /// accumulator across stripes (in `TA_ACC`), reduces each stripe to
+    /// its `x_step` (in `TR_*`), and folds it IMMEDIATELY into `FOLD_*`
+    /// on an interleaved fold row — so there is NO 64-lane register and
+    /// `num_stripes` is UNBOUNDED (the point of R-b). Each
+    /// `(stripe, sub-block, chunk)` micro-step reuses
+    /// [`Self::place_matmul_step`] for the matmul cols (CUMSUM byproduct +
+    /// noised inputs + CONTROL_PREP), then writes `TA_*` (accumulate the
+    /// sub-block's 4 cells) and, on the sub-block's last chunk, `TR_*`
+    /// (XOR the completed sub-block accumulator into the per-stripe lane).
+    /// Returns `(rows_used, final_M)`. `M` (the 16-word fold state) is the
+    /// `TileState` the jackpot hash consumes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_useful_work_chain_rb(
+        &mut self,
+        row_start: usize,
+        a_prime_rows: &[i8],
+        b_prime_cols: &[i8],
+        h_tile: usize,
+        w_tile: usize,
+        r: usize,
+        num_stripes: usize,
+    ) -> (usize, [u32; 16]) {
+        use crate::composite_layout::{
+            CONTROL_PREP, FOLD_IS_FOLD, FOLD_MCUR_BITS_START, FOLD_SLOT_SEL_START,
+            FOLD_STATE_START, FOLD_STRIPE_SEL_START, FOLD_XOR_OUT, FOLD_XSTEP, FOLD_XSTEP_BITS_START,
+            TA_ACC_START, TA_DOT_START, TA_IS_ACTIVE, TA_IS_RESET, TA_SB_SEL_START, TR_IN_BITS_START,
+            TR_IN_START, TR_IS_ACTIVE, TR_NEW, TR_NEW_BITS_START, TR_Q_START, TR_STRIPE_RESET,
+            TR_XSTEP, TR_XSTEP_BITS_START,
+        };
+        use p3_field::integers::QuotientMap;
+
+        let chunks = r.div_ceil(TILE_D).max(1);
+        let k = if h_tile == 0 { 0 } else { a_prime_rows.len() / h_tile };
+        assert_eq!(a_prime_rows.len(), h_tile * k, "a_prime_rows must be h*k");
+        assert_eq!(b_prime_cols.len(), w_tile * k, "b_prime_cols must be w*k");
+        let n_sbi = h_tile / TILE_H;
+        let n_sbj = w_tile / TILE_H;
+        let n_sb = n_sbi * n_sbj;
+        assert!(n_sb * 4 <= 256, "h·w = {} exceeds MAX_CELLS=256", n_sb * 4);
+        let trace_h = self.height();
+
+        let set_bits = |row: &mut [Val], at: usize, v: u32| {
+            for i in 0..32 {
+                row[at + i] = <Val as QuotientMap<u64>>::from_int(((v >> i) & 1) as u64);
+            }
+        };
+
+        let mut c_blk = vec![0i32; n_sb * 4]; // held h·w accumulator
+        let mut m = [0u32; 16]; // fold state
+        let mut carry = [0i32; CUMSUM_LEN]; // matmul CUMSUM byproduct
+        // The TileReduce lane THREADS through every row (passthrough on
+        // non-reduce rows; = NEW after a reduce). It is forced to 0 only
+        // ENTERING a stripe's first reduce row (STRIPE_RESET disables the
+        // passthrough into it), so each stripe's x_step starts fresh.
+        let mut v = 0u32;
+        let mut row = row_start;
+
+        for step in 0..num_stripes {
+            let lo = step * r;
+            for sbi in 0..n_sbi {
+                for sbj in 0..n_sbj {
+                    let sb = sbi * n_sbj + sbj;
+                    for chunk in 0..chunks {
+                        assert!(row < trace_h - 1, "R-b sweep overflows trace");
+                        let c0 = chunk * TILE_D;
+                        let w = (r - c0).min(TILE_D);
+                        let mut a_blk = [[0i8; TILE_D]; TILE_H];
+                        let mut b_blk = [[0i8; TILE_D]; TILE_H];
+                        for di in 0..TILE_H {
+                            let rr = (sbi * TILE_H + di) * k + lo + c0;
+                            a_blk[di][..w].copy_from_slice(&a_prime_rows[rr..rr + w]);
+                        }
+                        for dj in 0..TILE_H {
+                            let cc = (sbj * TILE_H + dj) * k + lo + c0;
+                            b_blk[dj][..w].copy_from_slice(&b_prime_cols[cc..cc + w]);
+                        }
+                        // matmul cols (CUMSUM byproduct — is_reset on the very
+                        // first row, accumulates after). The byproduct value is
+                        // irrelevant to R-b; only that the recurrence + noised
+                        // pack-link hold on these matmul-active rows.
+                        let is_reset = step == 0 && sb == 0 && chunk == 0;
+                        carry = self.place_matmul_step(row, &a_blk, &b_blk, is_reset, !is_reset, &carry);
+
+                        // the 4-cell dot for this micro-step.
+                        let mut dot = [0i32; 4];
+                        for di in 0..TILE_H {
+                            for dj in 0..TILE_H {
+                                let mut acc = 0i32;
+                                for d in 0..TILE_D {
+                                    acc = acc.wrapping_add((a_blk[di][d] as i32) * (b_blk[dj][d] as i32));
+                                }
+                                dot[di * TILE_H + dj] = acc;
+                            }
+                        }
+
+                        let base = row * TOTAL_TRACE_WIDTH;
+                        let rs = &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH];
+                        // TA: accumulate the selected sub-block; reset on its
+                        // first appearance (stripe 0, chunk 0).
+                        let ta_reset = step == 0 && chunk == 0;
+                        rs[TA_IS_ACTIVE] = <Val as QuotientMap<u64>>::from_int(1);
+                        if ta_reset {
+                            rs[TA_IS_RESET] = <Val as QuotientMap<u64>>::from_int(1);
+                        }
+                        rs[TA_SB_SEL_START + sb] = <Val as QuotientMap<u64>>::from_int(1);
+                        for p in 0..4 {
+                            rs[TA_DOT_START + p] = <Val as QuotientMap<i64>>::from_int(dot[p] as i64);
+                        }
+                        for c in 0..n_sb * 4 {
+                            rs[TA_ACC_START + c] = <Val as QuotientMap<i64>>::from_int(c_blk[c] as i64);
+                        }
+                        // FoldChip M passthrough: FOLD_STATE threads through
+                        // every row (M changes only on fold rows), so sweep
+                        // rows carry the current state.
+                        for s in 0..16 {
+                            rs[FOLD_STATE_START + s] = <Val as QuotientMap<u64>>::from_int(m[s] as u64);
+                        }
+                        for p in 0..4 {
+                            let cell = sb * 4 + p;
+                            c_blk[cell] = if ta_reset { dot[p] } else { c_blk[cell].wrapping_add(dot[p]) };
+                        }
+
+                        // TR lane threads on EVERY row. `entering` is the lane
+                        // value entering this row: forced to 0 on a stripe's
+                        // first reduce row (STRIPE_RESET disables the passthrough
+                        // into it), else the threaded `v`.
+                        let is_reduce = chunk == chunks - 1;
+                        let is_reset_row = is_reduce && sb == 0;
+                        let entering = if is_reset_row { 0u32 } else { v };
+                        rs[TR_XSTEP] = <Val as QuotientMap<u64>>::from_int(entering as u64);
+                        set_bits(rs, TR_XSTEP_BITS_START, entering);
+                        if is_reduce {
+                            rs[TR_IS_ACTIVE] = <Val as QuotientMap<u64>>::from_int(1);
+                            if is_reset_row {
+                                rs[TR_STRIPE_RESET] = <Val as QuotientMap<u64>>::from_int(1);
+                            }
+                            let mut xin = 0u32;
+                            for p in 0..4 {
+                                let cv = c_blk[sb * 4 + p];
+                                rs[TR_IN_START + p] = <Val as QuotientMap<i64>>::from_int(cv as i64);
+                                set_bits(rs, TR_IN_BITS_START + p * 32, cv as u32);
+                                xin ^= cv as u32;
+                            }
+                            let new = entering ^ xin;
+                            rs[TR_NEW] = <Val as QuotientMap<u64>>::from_int(new as u64);
+                            set_bits(rs, TR_NEW_BITS_START, new);
+                            for i in 0..32 {
+                                let mut col_sum: u32 = (entering >> i) & 1;
+                                for p in 0..4 {
+                                    col_sum += (c_blk[sb * 4 + p] as u32 >> i) & 1;
+                                }
+                                let q = (col_sum - ((new >> i) & 1)) / 2;
+                                rs[TR_Q_START + i] = <Val as QuotientMap<u64>>::from_int(q as u64);
+                            }
+                            v = new;
+                        }
+                        row += 1;
+                    }
+                }
+            }
+
+            // Interleaved fold row: fold x_step[step] (== `xstep`) into slot
+            // step%16. FOLD_STRIPE_SEL[0]=1 satisfies FoldChip's one-hot
+            // (Σ == FOLD_IS_FOLD); the SX §6(b) keystone is disabled
+            // (sx_bound=false) for R-b, and the §6(b)-R-b keystone binds
+            // FOLD_XSTEP to the previous row's TR_NEW.
+            assert!(row < trace_h - 1, "R-b fold overflows trace");
+            let slot = step % 16;
+            let base = row * TOTAL_TRACE_WIDTH;
+            ControlChip.fill_row(&[false; crate::chips::control::NUM_SELECTORS], 0, &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH]);
+            let cp = ControlChip::pack_control_prep_full(
+                &[false; crate::chips::control::NUM_SELECTORS],
+                0,
+                true,
+                slot as u8,
+                0, // fold_stripe = 0 (FOLD_STRIPE_SEL[0])
+                0,
+                false,
+            );
+            let rs = &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH];
+            rs[CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(cp);
+            // matmul CUMSUM passthrough across the fold row (is_reset =
+            // is_update = 0 here ⇒ nxt.CUMSUM == cur.CUMSUM).
+            for c in 0..CUMSUM_LEN {
+                rs[crate::composite_layout::CUMSUM_TILE_START + c] =
+                    <Val as QuotientMap<i64>>::from_int(carry[c] as i64);
+            }
+            rs[FOLD_IS_FOLD] = <Val as QuotientMap<u64>>::from_int(1);
+            rs[FOLD_SLOT_SEL_START + slot] = <Val as QuotientMap<u64>>::from_int(1);
+            rs[FOLD_STRIPE_SEL_START] = <Val as QuotientMap<u64>>::from_int(1);
+            rs[FOLD_XSTEP] = <Val as QuotientMap<u64>>::from_int(v as u64);
+            set_bits(rs, FOLD_XSTEP_BITS_START, v);
+            for s in 0..16 {
+                rs[FOLD_STATE_START + s] = <Val as QuotientMap<u64>>::from_int(m[s] as u64);
+            }
+            set_bits(rs, FOLD_MCUR_BITS_START, m[slot]);
+            let folded = m[slot].rotate_left(13) ^ v;
+            rs[FOLD_XOR_OUT] = <Val as QuotientMap<u64>>::from_int(folded as u64);
+            // TR lane passthrough across the fold row (TR_IS_ACTIVE = 0).
+            rs[TR_XSTEP] = <Val as QuotientMap<u64>>::from_int(v as u64);
+            set_bits(rs, TR_XSTEP_BITS_START, v);
+            // TileAccum passthrough (no sub-block selected ⇒ ACC unchanged).
+            for c in 0..n_sb * 4 {
+                rs[TA_ACC_START + c] = <Val as QuotientMap<i64>>::from_int(c_blk[c] as i64);
+            }
+            m[slot] = folded;
+            row += 1;
+        }
+
+        let rows_used = row - row_start;
+        // Passthrough the final fold state + CUMSUM + TR lane to the tail.
+        self.fill_cumsum_passthrough(row, &carry);
+        for rr in row..trace_h {
+            let base = rr * TOTAL_TRACE_WIDTH;
+            let rs = &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH];
+            for s in 0..16 {
+                rs[FOLD_STATE_START + s] = <Val as QuotientMap<u64>>::from_int(m[s] as u64);
+            }
+            rs[TR_XSTEP] = <Val as QuotientMap<u64>>::from_int(v as u64);
+            set_bits(rs, TR_XSTEP_BITS_START, v);
+            for c in 0..n_sb * 4 {
+                rs[TA_ACC_START + c] = <Val as QuotientMap<i64>>::from_int(c_blk[c] as i64);
+            }
+        }
+        (rows_used, m)
+    }
+
     /// M-S1 (§4.C.11) — enumerate the **distinct** 8-i8 micro-tile
     /// chunks the [`place_useful_work_chain`] sweep consumes, in
     /// first-seen (deterministic) order.

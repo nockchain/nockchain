@@ -675,6 +675,39 @@ mod tests {
             .expect("§6(b) useful-work chain must verify through unit CompositeFullAir");
     }
 
+    /// §6(b)-R-b — the STRIPE-MAJOR sweep (`place_useful_work_chain_rb`:
+    /// held h·w accumulator + per-stripe reduce + interleaved fold)
+    /// satisfies the base `CompositeFullAir` (matmul recurrence + noised
+    /// pack-link + TileAccum + TileReduce + TA_DOT binding + FoldChip).
+    /// This is the first R-b composite proof — the activation of the two
+    /// standalone-validated R-b chips inside the real composite AIR.
+    #[test]
+    fn rb_stripe_major_useful_work_chain_unit() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let (t, r) = (8usize, 4usize);
+        // num_stripes 16 (≤ STRIPE_MAX, result-equivalent) AND 128, 256 —
+        // both FAR past the old STRIPE_MAX=64 cap the sub-block-major
+        // StripeXor path could never exceed. This is R-b's whole point:
+        // arbitrary num_stripes with no 64-lane register.
+        for num_stripes in [16usize, 128, 256] {
+            let k = num_stripes * r;
+            let a_prime: Vec<i8> = (0..(t * k) as i32)
+                .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+                .collect();
+            let b_prime: Vec<i8> = (0..(t * k) as i32)
+                .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+                .collect();
+            let mut trace = CompositeTrace::baseline_min();
+            let (_rows, _m) =
+                trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+            let pis = CompositePublicInputs::derive_from_trace(&trace);
+            let proof = composite_prove(&cfg, trace, &pis);
+            composite_verify(&cfg, &proof, &pis).unwrap_or_else(|e| {
+                panic!("R-b stripe-major sweep (num_stripes={num_stripes}) must verify: {e:?}")
+            });
+        }
+    }
+
     /// HIGH-2.2 §6(b) end-to-end regression via the production
     /// Route-A path: the **full useful-work chain** —
     /// `place_useful_work_chain` (sub-block-major matmul sweep +
