@@ -4418,6 +4418,38 @@ mod tests {
             "forged routing must be rejected on the compact node path (M7)"
         );
 
+        // (a) DE-RISK — arbitrary-model soundness. The node will TRUST the proven
+        // `hash_jackpot` PI for the difficulty check and DROP the off-circuit tile
+        // recompute (which is what pins matrices to synth). That is sound only if a
+        // forged `hash_jackpot` is rejected by the proof. The pis feed the statement
+        // digest (`compact_batch_l1_public_values_for_statement`), so a tampered
+        // `hash_jackpot` ⇒ statement mismatch ⇒ reject — WITHOUT any matrix recompute.
+        let node_cert_jp = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode for forged-jackpot test");
+        let mut forged_pis = pis.clone();
+        forged_pis.hash_jackpot[0] ^= 1;
+        assert!(
+            verify_pearl_moe_compact_recursive_certificate(
+                &run.verifier_context,
+                node_cert_jp,
+                &forged_pis,
+                &params,
+                &kappa,
+                &h_a,
+                &h_b,
+                &mining_config,
+                &moe_params,
+                m as u32,
+                0,
+                0,
+                &routing.routing_data,
+                4096,
+            )
+            .is_err(),
+            "a forged hash_jackpot PI must be rejected by the proof (the (a) soundness \
+             invariant that lets the node trust hash_jackpot and drop the synth recompute)"
+        );
+
         assert!(
             bytes.len() < 150_000,
             "MoE compact cert should stay within the relaxed size gate: {}",
