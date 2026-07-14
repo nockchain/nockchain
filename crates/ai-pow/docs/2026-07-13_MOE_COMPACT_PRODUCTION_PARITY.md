@@ -610,17 +610,28 @@ unmet difficulty rejects.
    difficulty reject. `verify_ai_pow_block_artifact_jam` refactored to expose the
    shape-based `verify_ai_pow_block_artifact` (no re-jam).
 
-   **Branch (b) Stage 2 — remaining (the Hoon wiring + jam rebuild):**
-   - `build_production_verifier_setup()` — prove one canonical block at the fixed
-     production params at boot → `(context, digest)` → `init_ai_pow_verifier_setup`.
-   - The stubbed Hoon `++ai-pow-verify` arm + `~/` hint; **fix the jet path** in
-     `produce_ai_pow_hot_state` to match the hint's `~%` parent chain (validate at
-     runtime — a mis-chained hint prints).
+   **Branch (b) Stage 2 — boot setup builder DONE + validated 2026-07-13.**
+   `ai_pow_jets::setup::build_verifier_setup(params, hw, e, top_k)` proves one
+   canonical block and returns the `(context, digest)` for
+   `init_ai_pow_verifier_setup`; `prove_canonical_moe_block` is the shared canonical
+   block. Sound because the setup is proof-independent (validated). The jet-core KAT
+   now runs through it (real proof ~24 s).
+
+   **Branch (b) Stage 2 — remaining: the Hoon consensus-kernel change (all Rust it
+   calls is built + validated).** This is the one remaining unit for block
+   acceptance, and it lands + validates together (a half-wired `check-pow` or stale
+   jam is worse than a clean subset, per R1):
+   - The stubbed Hoon `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!` — the
+     jet is mandatory) taking `[artifact commit target]` → loobean; **fix the jet
+     path** in `produce_ai_pow_hot_state` to match the arm's `~%` parent chain
+     (validate at runtime — a mis-chained hint prints).
    - Register `produce_ai_pow_hot_state` in the nockchain kernel `hot_state`
-     (`nockchain/src/lib.rs`); wire `check-pow`/`do-pow` (`inner.hoon`) to call the
-     arm with `[artifact commit target]`, replacing the two fail-closes.
-   - Rebuild the kernel jam → binary (per `hoon-jam-builds`); a `roswell`
-     integration test: a real `%ai-pow` block is accepted, a forged one rejected.
+     (`nockchain/src/lib.rs`) + build+inject the setup at boot
+     (`build_verifier_setup` → `init_ai_pow_verifier_setup`).
+   - Wire `check-pow`/`do-pow` (`inner.hoon`) to extract `[artifact commit target]`
+     from the page and call the arm, replacing the two fail-closes.
+   - Rebuild the kernel jam → binary (per `hoon-jam-builds`); an integration test
+     that a real `%ai-pow` block is accepted and a forged one rejected.
    Shared with dense (the jet dispatches on the tag; both variants covered).
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
