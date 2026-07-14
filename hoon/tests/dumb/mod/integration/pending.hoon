@@ -562,8 +562,12 @@
   ?>  !(~(con-excluded k-by:h nockchain) stranded id.raw1)
   ?>  =(~ (~(con-invariants k-by:h nockchain) stranded))
   ::
-  ::  boot: +load runs the repair over the loaded state
-  =/  repaired  (~(repair-orphans k-by:h nockchain) stranded)
+  ::  Boot the node on the new kernel: this drives the REAL +load, not the repair
+  ::  arm directly, so it also proves +load actually runs the repair. If the
+  ::  wiring were wrong -- or heaviest-chain.d were empty at load -- the repair
+  ::  would find no orphans, quietly no-op, and every stranded tx would stay
+  ::  stranded while the logs looked fine.
+  =/  repaired  (~(boot-with k-by:h nockchain) stranded)
   ::
   ::  the dead block's claim is gone and the tx is back in the mempool, where
   ::  the miner and the re-gossip can finally see it again

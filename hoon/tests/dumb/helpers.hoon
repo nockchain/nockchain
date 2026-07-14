@@ -909,6 +909,23 @@
     ^-  consensus-state
     (~(repair-orphaned-claims dcon c bc) heaviest-chain:der)
   ::
+  ::  +boot-with: run the kernel's REAL +load over a given consensus state, the
+  ::  way the runtime does when a new kernel is swapped in over existing state.
+  ::
+  ::    Calling +repair-orphaned-claims directly (via +repair-orphans above) only
+  ::    proves the repair logic works. This proves +load actually RUNS it, which
+  ::    is the part that can silently fail: if the wiring were wrong, or if
+  ::    heaviest-chain.d were not populated at load time, the repair would find
+  ::    no orphans, no-op, and leave every stranded tx stranded -- while the logs
+  ::    looked perfectly healthy. That is the failure this exercises.
+  ++  boot-with
+    |=  c=consensus-state
+    ^-  consensus-state
+    =/  ks  internal.outer.nockchain
+    =.  c.ks  c
+    =/  booted  (load:nockchain [%0 desk-hash.outer.nockchain ks])
+    ;;(consensus-state c.internal.outer.booted)
+  ::
   ::  membership probes against a bare consensus-state (rather than the kernel)
   ++  con-excluded
     |=  [c=consensus-state =tx-id:t]
