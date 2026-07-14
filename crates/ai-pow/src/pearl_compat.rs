@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::commit::matrix_commitment;
-use crate::fiat_shamir::{noise_seed_a, noise_seed_b};
+use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
 use crate::matmul::{
     compute_pattern_tile_trace_from_slices, compute_tile, BlockNoise, Matrices, TileState,
 };
@@ -1665,6 +1665,158 @@ pub fn verify_pearl_moe_routing_binding(
         }
     }
     Ok(())
+}
+
+/// The MoE analogue of [`PearlCompatibleWorkPrecheck`]: the node's cheap, pre-proof
+/// verification of a GROUPED_GEMM ticket. Carries the work commitments and the
+/// recomputed routing-spliced seeds so the caller can drive the recursive verify
+/// without recomputing them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMoeWorkPrecheck {
+    pub commitments: PearlWorkCommitments,
+    /// Routing-spliced noise seeds (NOT the dense `commitments.s_a`/`s_b`).
+    pub s_a: [u8; 32],
+    pub s_b: [u8; 32],
+    /// The opened **global** B-columns for this expert (public-pattern + offset).
+    pub b_cols_global: Vec<u32>,
+    /// The node-recomputed opened-tile jackpot (bound `== public_params.hash_jackpot`).
+    pub jackpot_hash: [u8; 32],
+    pub pearl_target: [u8; 32],
+    pub nockchain_target: [u8; 32],
+    pub nockchain_adjusted_target: [u8; 32],
+}
+
+/// Node-side MoE (GROUPED_GEMM) work verification — the MoE counterpart of
+/// [`verify_pearl_compatible_work`].
+///
+/// The dense `verify_pearl_compatible_work` cannot be reused for MoE: it goes
+/// through `sanity_check`, which fail-closes MoE. This mirrors its structure with
+/// the MoE-aware envelope and the MoE tile:
+///   1. `sanity_check_allowing_moe` (M4 envelope — accepts a valid MoE config).
+///   2. difficulty target derivation + matrix-input validation.
+///   3. `kappa`/`h_a`/`h_b` from `derive_pearl_work_commitments` (identical to dense).
+///   4. `verify_pearl_moe_routing_binding` — binds `routing_data` to `hash_routing`,
+///      validates the offsets/tokens/spans + the opened-row gather.
+///   5. recompute the routing-spliced `s_A`/`s_B` (same formula the PI-validated
+///      `verify_pearl_moe_compact_recursive_certificate` uses) and the opened
+///      global B-columns (`moe_expert_b_cols_global`, per-expert clamp).
+///   6. **the jackpot/difficulty binding** — recompute the opened tile with
+///      [`compute_moe_tile`] from the PUBLIC opened schedule + the spliced seeds,
+///      require `jackpot_hash == public_params.hash_jackpot`, then
+///      `hash_le_target(jackpot, nockchain_adjusted_target)`.
+///
+/// # Soundness — why the recomputed jackpot IS the proven one
+///
+/// Step 6 recomputes the tile from the node's OWN `a`/`b` (context) and the spliced
+/// seeds. The recursive verify separately binds `h_A = commit(a)`, `h_B = commit(b)`,
+/// `s_A` (routing splice), `kappa` via public inputs, and the opened rows/columns via
+/// the P0/D6 program-commitment fold. So the tile the node recomputes here is exactly
+/// the tile the certificate proves — hence checking its jackpot against the difficulty
+/// target here is a sound consensus gate. This function does the *difficulty* half; the
+/// caller MUST still run `verify_pearl_moe_compact_recursive_certificate` for the
+/// *proof* half. (Neither MoE recursive verify checks difficulty — by design, exactly
+/// as the dense split keeps difficulty in `verify_pearl_compatible_work`.)
+#[allow(clippy::too_many_arguments)]
+pub fn verify_pearl_moe_compatible_work(
+    public_params: &PearlPublicProofParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    moe: &PearlMoeParams,
+    routing_data: &[u32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+) -> Result<PearlMoeWorkPrecheck, PearlCompatError> {
+    // (1) MoE-aware envelope (M4). Rejects an out-of-envelope base shape or an
+    // out-of-range MoE config; accepts a valid MoE config (dense sanity_check would
+    // fail-close here).
+    public_params.sanity_check_allowing_moe()?;
+    let cfg = public_params
+        .mining_config
+        .moe()
+        .ok_or(PearlCompatError::MoePublicMissingConfig)?;
+
+    // (2) Difficulty targets + matrix-input validation (identical to the dense path).
+    let pearl_target = public_params.pearl_adjusted_target()?;
+    let nockchain_adjusted_target = public_params.nockchain_adjusted_target(nockchain_target)?;
+    validate_public_matrix_inputs(a_row_major, b_col_major, public_params)?;
+
+    // (3) Work commitments kappa/h_a/h_b (dense-identical; the dense s_a/s_b in
+    // `commitments` are NOT used for MoE — the routing splice below replaces them).
+    let sigma = public_params.block_header.to_bytes();
+    let mu = public_params.mining_config.to_bytes()?;
+    let commitments = derive_pearl_work_commitments(&sigma, &mu, a_row_major, b_col_major);
+
+    // (4) Routing-consistency binding: routing_data commits to moe.hash_routing, the
+    // offsets/tokens/spans are well-formed, and the opened rows are the expert's
+    // routed tokens. MUST precede the splice — it is what makes moe.hash_routing
+    // trustworthy as the routing root.
+    verify_pearl_moe_routing_binding(
+        &commitments.kappa,
+        &public_params.mining_config,
+        moe,
+        public_params.m,
+        public_params.t_rows,
+        routing_data,
+        max_pattern_len,
+    )?;
+
+    // (5) Recompute the routing-spliced seeds (same formula as the PI-validated
+    // `verify_pearl_moe_compact_recursive_certificate`) and the opened global
+    // B-columns (per-expert `local < n_e` clamp, audit N1).
+    let routing_offsets_le: Vec<u8> = moe
+        .routing_offsets
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    let hash_offsets = matrix_commitment(&routing_offsets_le, &commitments.kappa);
+    let hash_routing = moe_hash_routing(&moe.hash_routing, &hash_offsets);
+    let hash_activations = moe_hash_activations(&commitments.h_a, &hash_routing);
+    let s_b = noise_seed_b(&commitments.kappa, &commitments.h_b);
+    let s_a = noise_seed_a(&s_b, &hash_activations);
+    let b_cols_global = moe_expert_b_cols_global(
+        &public_params.mining_config,
+        cfg.e,
+        public_params.n,
+        moe.expert_idx,
+        public_params.t_cols,
+        max_pattern_len,
+    )?;
+
+    // (6) Jackpot/difficulty binding: recompute the opened tile and bind its jackpot
+    // to the public statement + the difficulty target. `compute_moe_tile` reproduces
+    // the proven tile (see soundness note); a mismatch means the statement's
+    // `hash_jackpot` is not the tile's real output.
+    let k = public_params.mining_config.common_dim as usize;
+    let r = public_params.mining_config.rank as usize;
+    let dot_product_len = public_params.mining_config.dot_product_length()?;
+    let (_tile_state, jackpot_hash) = compute_moe_tile(
+        a_row_major,
+        b_col_major,
+        &moe.outer_indices,
+        &b_cols_global,
+        &s_a,
+        &s_b,
+        k,
+        r,
+        dot_product_len,
+    );
+    if jackpot_hash != public_params.hash_jackpot {
+        return Err(PearlCompatError::JackpotHashMismatch);
+    }
+    if !hash_le_target(&jackpot_hash, &nockchain_adjusted_target) {
+        return Err(PearlCompatError::NockchainTargetNotMet);
+    }
+
+    Ok(PearlMoeWorkPrecheck {
+        commitments,
+        s_a,
+        s_b,
+        b_cols_global,
+        jackpot_hash,
+        pearl_target,
+        nockchain_target: *nockchain_target,
+        nockchain_adjusted_target,
+    })
 }
 
 /// Recompute the opened **global** B-columns for a MoE expert tile from the PUBLIC
