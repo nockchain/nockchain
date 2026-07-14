@@ -656,8 +656,17 @@ unmet difficulty rejects.
    > target-atom]` interface is transparent (structured commit + structured
    > artifact; only the nonce + cert body + target are atoms).
    - The stubbed `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!`) as a sibling
-     of `check-pow`; **set the jet path** in `produce_ai_pow_hot_state` to that
-     arm's `~%` parent chain (validate at runtime — a mis-chained hint prints).
+     of `check-pow`. **The arm + `check-pow` wiring COMPILE (hoonc-verified against
+     the full kernel, 2026-07-13).**
+   > **Jet `~%` chain (investigated 2026-07-13).** `ai-pow-verify` is the FIRST jet
+   > under the `%dumb-inner` core (`inner.hoon:20`: `~% %dumb-inner ..ut ~`) — no
+   > existing dumbnet-core jet template (grep: none). Jet paths are
+   > `[K_138, <~%-labeled core chain from the hoon root>, arm]` (cf. `zkvm-jetpack`'s
+   > `[K_138, one, two, tri, qua, pen, zeke, ext-field, fpadd]`), so the path is
+   > `[K_138, <labels enclosing ut → dumb-inner>, dumb-inner, ai-pow-verify]`. Per
+   > `hoon-jam-builds`, **hoonc compiling does NOT prove the chain matches** — it is
+   > validated only by rebuilding the jam and observing the jet fire at runtime (a
+   > mis-chained hint prints). This is the one remaining runtime-iterated step.
    - Register `produce_ai_pow_hot_state` in `nockchain/src/main.rs` (extend
      `produce_prover_hot_state()`); at boot call
      `ai_pow_jets::setup::build_verifier_setup(..)` → `init_ai_pow_verifier_setup`.
