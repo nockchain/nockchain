@@ -1147,6 +1147,41 @@ pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_node(
     Ok(slab)
 }
 
+/// Build a **MoE** (`AIM1`) Pearl-merge `%ai-pow` artifact noun (M1 encoder) — the
+/// GROUPED_GEMM counterpart of [`build_ai_pow_pearl_merge_artifact_noun_from_node`].
+///
+/// Identical framing (`[%ai-pow nonce cert]`) except the opaque nonce is the MoE
+/// nonce ([`encode_pearl_merge_ai_pow_nonce_moe`]): the dense statement + aux
+/// framing verbatim, retagged `AIM1`, with the Pearl MoE tail
+/// (`expert_idx ‖ routing_offsets ‖ hash_routing ‖ outer_indices`) + the DoS-capped
+/// `routing_data` appended. Decodes back through
+/// [`decode_ai_pow_pearl_merge_artifact_noun`] (which dispatches on the tag) into a
+/// `PearlMergeAiPowArtifactShape` carrying `moe: Some(..)`, ready for the node MoE
+/// verify branch.
+pub(crate) fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+    statement: &PearlMergePublicStatementShape,
+    aux_inclusion: &PearlAuxInclusionProof,
+    moe: &PearlMergeMoeArtifact,
+    zk_params: &ZkParams,
+    found_idx: u32,
+    trace_height: usize,
+    commitments: &ZkPublicCommitments,
+    pis: &CompositePublicInputs,
+    certificate: &AiProofNode,
+) -> Result<NounSlab, CertificateNounError> {
+    let nonce = encode_pearl_merge_ai_pow_nonce_moe(statement, aux_inclusion, moe)?;
+    validate_pearl_merge_statement_aux_inclusion(statement, aux_inclusion)?;
+
+    let mut slab = NounSlab::new();
+    let nonce = build_ai_pow_nonce_noun(&mut slab, &nonce);
+    let certificate = encode_ai_pow_certificate_noun(
+        &mut slab, zk_params, found_idx, trace_height, commitments, pis, certificate,
+    );
+    let root = T(&mut slab, &[D(tas!(b"ai-pow")), nonce, certificate]);
+    slab.set_root(root);
+    Ok(slab)
+}
+
 /// Derive the exact `%ai-pow` recursive metadata for one successful
 /// Pearl-compatible ticket attempt.
 ///
@@ -7910,6 +7945,42 @@ mod tests {
         .expect("MoE artifact verifies through the node branch");
         assert_eq!(pre.work.jackpot_hash, run.ticket.jackpot_hash);
         assert_eq!(pre.aux_commitment, aux_commitment);
+
+        // M1 encoder round-trip: build the MoE artifact NOUN, jam it, decode it back
+        // through the bounded parser, and confirm it (a) equals the directly-built
+        // shape and (b) verifies through the node MoE branch. Closes the full
+        // encode → jam → decode → verify artifact path for MoE.
+        let noun_slab = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &artifact.statement,
+            &artifact.aux_inclusion,
+            artifact.moe.as_ref().unwrap(),
+            &artifact.certificate.zk_params,
+            artifact.certificate.found_idx,
+            artifact.certificate.trace_height,
+            &artifact.certificate.commitments,
+            &artifact.certificate.public_inputs,
+            &artifact.certificate.certificate,
+        )
+        .expect("build MoE artifact noun");
+        let jammed = noun_slab.jam();
+        let decoded =
+            decode_ai_pow_pearl_merge_artifact_jam(&jammed, CertificateNounLimits::default())
+                .expect("decode MoE artifact jam");
+        assert_eq!(
+            decoded, artifact,
+            "decoded MoE artifact noun must equal the directly-built shape",
+        );
+        assert!(decoded.moe.is_some(), "decoded artifact must carry the MoE tail");
+        let pre_noun =
+            verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+                &decoded,
+                ctx(&LOOSE_TARGET),
+                &run.verifier_context,
+                &expected_digest,
+                CertificateNounLimits::default(),
+            )
+            .expect("MoE artifact decoded from its noun verifies through the node branch");
+        assert_eq!(pre_noun.work.jackpot_hash, run.ticket.jackpot_hash);
 
         // Adversarial 1 — forged routing_data breaks the routing-consistency binding.
         let mut forged = artifact.clone();
