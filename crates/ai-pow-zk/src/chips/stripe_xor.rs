@@ -122,7 +122,20 @@ pub mod cols {
     /// `Q_LEN = 32` vs the prior 64 — 32 columns reclaimed.
     pub const Q: usize = NEW_SEL_BITS + NEW_SEL_BITS_LEN;
     pub const Q_LEN: usize = 32;
-    pub const ROW_W: usize = Q + Q_LEN;
+    /// §6(b)-G3 SEGMENT RESET — a **verifier-fixed** (preprocessed in
+    /// the composite) boolean marking the first row of each ≤`STATE_LEN`
+    /// stripe segment. On a reset row the register entering the row is
+    /// forced to 0 (fresh accumulation), and the cross-row passthrough
+    /// INTO a reset row is disabled, so a prior segment's `XR` never
+    /// carries in. This is what lets `num_stripes > STATE_LEN` be folded
+    /// as `⌈num_stripes/STATE_LEN⌉` segments through the SAME 64-lane
+    /// register: each segment reuses lanes `0..STATE_LEN` for its local
+    /// stripe indices, and the FoldChip (16-slot round-robin) consumes
+    /// each segment's `x_steps` before the next segment resets. MUST be
+    /// verifier-owned (a prover that could set it freely would zero the
+    /// register mid-accumulation and forge `x_steps`).
+    pub const SEG_RESET: usize = Q + Q_LEN;
+    pub const ROW_W: usize = SEG_RESET + 1;
 }
 
 /// Zero-sized chip type.
@@ -142,6 +155,8 @@ pub struct StripeXorOffsets {
     pub new_sel: usize,
     pub new_sel_bits: usize,
     pub q: usize,
+    /// §6(b)-G3 per-segment reset flag (verifier-fixed).
+    pub seg_reset: usize,
 }
 
 impl StripeXorChip {
@@ -155,6 +170,7 @@ impl StripeXorChip {
         new_sel: cols::NEW_SEL,
         new_sel_bits: cols::NEW_SEL_BITS,
         q: cols::Q,
+        seg_reset: cols::SEG_RESET,
     };
 
     /// Composite-trace offsets (HIGH-2.2 §6(b) wiring) — the
@@ -170,6 +186,14 @@ impl StripeXorChip {
         new_sel: crate::composite_layout::SX_NEW_SEL,
         new_sel_bits: crate::composite_layout::SX_NEW_SEL_BITS_START,
         q: crate::composite_layout::SX_Q_START,
+        // §6(b)-G3 Stage 2 TODO: wire a dedicated preprocessed
+        // `SX_SEG_RESET` composite column here and call
+        // `eval_reset_at` from `eval_composite`. Until then the
+        // composite runs a SINGLE segment (num_stripes ≤ STATE_LEN),
+        // `eval_composite` does NOT emit the reset constraints, and
+        // this placeholder is never read. `SX_IS_ACTIVE` is a safe
+        // stand-in (any valid column) precisely because it is unread.
+        seg_reset: crate::composite_layout::SX_IS_ACTIVE,
     };
 
     /// Composite-layout entry point: the chip-internal XOR
@@ -206,9 +230,42 @@ impl StripeXorChip {
         }
     }
 
-    /// Emit the stripe-XOR constraints at the given offsets.
+    /// Emit the stripe-XOR constraints at the given offsets. Single-
+    /// segment (`reset_aware = false`) — the exact pre-G3 behavior the
+    /// composite uses (`num_stripes ≤ STATE_LEN`, one accumulation).
     pub fn eval_at<AB: AirBuilder>(builder: &mut AB, off: &StripeXorOffsets) {
+        Self::eval_at_impl(builder, off, false);
+    }
+
+    /// §6(b)-G3 segmented entry point: the stripe-XOR constraints PLUS
+    /// the per-segment `SEG_RESET` boundary — the register is forced to
+    /// 0 entering each reset row and the passthrough INTO a reset row is
+    /// disabled, so `⌈num_stripes/STATE_LEN⌉` segments accumulate
+    /// independently through the same 64 lanes. `SEG_RESET` MUST be a
+    /// verifier-fixed column (preprocessed in the composite).
+    pub fn eval_at_segmented<AB: AirBuilder>(builder: &mut AB, off: &StripeXorOffsets) {
+        Self::eval_at_impl(builder, off, true);
+    }
+
+    /// Emit the stripe-XOR constraints at the given offsets.
+    fn eval_at_impl<AB: AirBuilder>(builder: &mut AB, off: &StripeXorOffsets, reset_aware: bool) {
         let two = <AB::F as PrimeCharacteristicRing>::TWO;
+
+        // ---- §6(b)-G3 SEG_RESET boolean + register-zero-on-reset ----
+        // Only when reset-aware (segmented). SEG_RESET is verifier-fixed;
+        // on a reset row the register ENTERING the row must be all-zero
+        // (a fresh segment). `SEG_RESET · XR[s] = 0` (degree 2).
+        if reset_aware {
+            let (reset, xr): (AB::Var, [AB::Var; cols::XR_LEN]) = {
+                let main = builder.main();
+                let cur = main.current_slice();
+                (cur[off.seg_reset], core::array::from_fn(|s| cur[off.xr + s]))
+            };
+            builder.assert_bool(reset);
+            for s in 0..cols::XR_LEN {
+                builder.assert_zero(reset.into() * xr[s].into());
+            }
+        }
 
         // ---- IS_ACTIVE boolean — UNGATED ----
         // The activity selector gates the data-validation
@@ -376,10 +433,13 @@ impl StripeXorChip {
                     cur[off.new_sel].into(),
                 )
             };
-            let nxt_xr: [AB::Var; cols::XR_LEN] = {
+            let (nxt_xr, nxt_reset): ([AB::Var; cols::XR_LEN], AB::Var) = {
                 let main = builder.main();
                 let nxt = main.next_slice();
-                core::array::from_fn(|s| nxt[off.xr + s])
+                (
+                    core::array::from_fn(|s| nxt[off.xr + s]),
+                    nxt[off.seg_reset],
+                )
             };
 
             let mut tb = builder.when_transition();
@@ -387,21 +447,34 @@ impl StripeXorChip {
             // Selected lane: Σ_s LANE_SEL[s]·XR_next[s] == NEW_SEL
             // (on an active row exactly one LANE_SEL is 1; on a
             // padding row the sum is 0 and NEW_SEL recomposes 0).
+            // Unaffected by reset: the row PRECEDING a reset row is
+            // always SX-inactive (sel = 0 ⇒ this is 0 == 0), and a
+            // reset row's own accumulation is governed by the NEXT
+            // transition, from XR = 0 (pinned by the reset constraint).
             let mut res_sel: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..cols::XR_LEN {
                 res_sel = res_sel + sel[s].into() * nxt_xr[s].into();
             }
             tb.assert_eq(res_sel, new_sel);
 
-            // Non-selected lanes pass through unchanged. On a
-            // padding row every LANE_SEL is 0 ⇒ all lanes pass
-            // through ⇒ the final register propagates to the last
-            // row (where the §6(b) binding reads it).
+            // Non-selected lanes pass through unchanged — EXCEPT into a
+            // reset row, where the passthrough is disabled so the prior
+            // segment's register does not carry in (§6(b)-G3). With
+            // `reset_aware = false` this is the exact pre-G3 constraint
+            // (`nxt_reset` unread). On a padding row every LANE_SEL is 0
+            // ⇒ all lanes pass through ⇒ the final register propagates
+            // to the last row (where the §6(b) binding reads it).
             for s in 0..cols::XR_LEN {
                 let one_minus_sel: AB::Expr =
                     <AB::Expr as PrimeCharacteristicRing>::ONE - sel[s].into();
                 let diff: AB::Expr = nxt_xr[s].into() - cur_xr[s].into();
-                tb.assert_zero(one_minus_sel * diff);
+                if reset_aware {
+                    let not_reset: AB::Expr =
+                        <AB::Expr as PrimeCharacteristicRing>::ONE - nxt_reset.into();
+                    tb.assert_zero(not_reset * one_minus_sel * diff);
+                } else {
+                    tb.assert_zero(one_minus_sel * diff);
+                }
             }
         }
     }
@@ -415,7 +488,11 @@ impl<F> BaseAir<F> for StripeXorChip {
 
 impl<AB: AirBuilder<F = Val>> Air<AB> for StripeXorChip {
     fn eval(&self, builder: &mut AB) {
-        StripeXorChip::eval_at(builder, &StripeXorChip::LOCAL_OFFSETS);
+        // §6(b)-G3: the standalone chip runs the SEGMENTED constraint
+        // set. A single-segment trace (SEG_RESET all-zero) reduces
+        // EXACTLY to the pre-G3 constraints, so every prior test still
+        // holds; multi-segment traces additionally exercise the reset.
+        StripeXorChip::eval_at_segmented(builder, &StripeXorChip::LOCAL_OFFSETS);
     }
 }
 
@@ -503,6 +580,100 @@ pub fn build_trace(events: &[(usize, [i32; IN_LEN])]) -> RowMajorMatrix<Val> {
     RowMajorMatrix::new(flat, cols::ROW_W)
 }
 
+/// §6(b)-G3 — build a SEGMENTED standalone trace: `segments[g]` is
+/// the visitation sequence for stripe-segment `g` (≤ `STATE_LEN`
+/// stripes). Each segment's first active row carries `SEG_RESET = 1`
+/// (register zeroed entering it); after each segment a single
+/// SX-inactive GAP row holds that segment's final register (mirroring
+/// the composite's fold rows, where the §6(b) binding reads it) before
+/// the next segment resets. Returns `(trace, gap_rows)` with
+/// `gap_rows[g]` the row that carries segment `g`'s final register.
+pub fn build_trace_segmented(
+    segments: &[&[(usize, [i32; IN_LEN])]],
+) -> (RowMajorMatrix<Val>, Vec<usize>) {
+    use p3_field::integers::QuotientMap;
+
+    assert!(!segments.is_empty(), "segments must be non-empty");
+    let total_events: usize = segments.iter().map(|s| s.len()).sum();
+    assert!(total_events > 0, "segments must contain events");
+    let n = (total_events + segments.len() + 1).next_power_of_two().max(4);
+    let mut flat = vec![Val::default(); n * cols::ROW_W];
+
+    let set_bits = |row: &mut [Val], at: usize, v: u32| {
+        for i in 0..32 {
+            row[at + i] = <Val as QuotientMap<u64>>::from_int(((v >> i) & 1) as u64);
+        }
+    };
+
+    let mut xr = [0u32; STATE_LEN];
+    let mut row_idx = 0usize;
+    let mut gap_rows = Vec::with_capacity(segments.len());
+
+    for seg in segments {
+        for (ev_i, &(lane, in4)) in seg.iter().enumerate() {
+            assert!(lane < STATE_LEN, "lane out of range");
+            if ev_i == 0 {
+                xr = [0u32; STATE_LEN]; // fresh segment
+            }
+            let row = &mut flat[row_idx * cols::ROW_W..(row_idx + 1) * cols::ROW_W];
+            row[cols::IS_ACTIVE] = <Val as QuotientMap<u64>>::from_int(1);
+            row[cols::LANE_SEL + lane] = <Val as QuotientMap<u64>>::from_int(1);
+            if ev_i == 0 {
+                row[cols::SEG_RESET] = <Val as QuotientMap<u64>>::from_int(1);
+            }
+            let mut xin = 0u32;
+            for c in 0..IN_LEN {
+                let u = in4[c] as u32;
+                row[cols::IN + c] = <Val as QuotientMap<i64>>::from_int(in4[c] as i64);
+                set_bits(row, cols::IN_BITS + c * 32, u);
+                xin ^= u;
+            }
+            for s in 0..STATE_LEN {
+                row[cols::XR + s] = <Val as QuotientMap<u64>>::from_int(xr[s] as u64);
+            }
+            let sel_val = xr[lane];
+            set_bits(row, cols::XR_SEL_BITS, sel_val);
+            let new_sel = sel_val ^ xin;
+            row[cols::NEW_SEL] = <Val as QuotientMap<u64>>::from_int(new_sel as u64);
+            set_bits(row, cols::NEW_SEL_BITS, new_sel);
+            for i in 0..32 {
+                let mut col_sum: u32 = (sel_val >> i) & 1;
+                for c in 0..IN_LEN {
+                    col_sum += (in4[c] as u32 >> i) & 1;
+                }
+                let q = (col_sum - ((new_sel >> i) & 1)) / 2;
+                row[cols::Q + i] = <Val as QuotientMap<u64>>::from_int(q as u64);
+            }
+            xr[lane] = new_sel;
+            row_idx += 1;
+        }
+        // GAP row (SX-inactive): holds this segment's final register.
+        let row = &mut flat[row_idx * cols::ROW_W..(row_idx + 1) * cols::ROW_W];
+        for s in 0..STATE_LEN {
+            row[cols::XR + s] = <Val as QuotientMap<u64>>::from_int(xr[s] as u64);
+        }
+        gap_rows.push(row_idx);
+        row_idx += 1;
+    }
+
+    // Trailing padding rows: passthrough the last segment's register.
+    for r in row_idx..n {
+        let row = &mut flat[r * cols::ROW_W..(r + 1) * cols::ROW_W];
+        for s in 0..STATE_LEN {
+            row[cols::XR + s] = <Val as QuotientMap<u64>>::from_int(xr[s] as u64);
+        }
+    }
+
+    (RowMajorMatrix::new(flat, cols::ROW_W), gap_rows)
+}
+
+/// Read the `STATE_LEN`-lane register carried by an arbitrary row.
+pub fn register_at_row(trace: &RowMajorMatrix<Val>, row: usize) -> [u32; STATE_LEN] {
+    use p3_field::PrimeField64;
+    let base = row * cols::ROW_W;
+    core::array::from_fn(|s| trace.values[base + cols::XR + s].as_canonical_u64() as u32)
+}
+
 /// Read the final `STATE_LEN`-lane register from a built trace's
 /// last row (the value the §6(b) composite binding reads).
 pub fn final_register(trace: &RowMajorMatrix<Val>) -> [u32; STATE_LEN] {
@@ -583,6 +754,75 @@ mod tests {
             verify::<AiPowStarkConfig, _>(&c, &StripeXorChip, &proof, &[])
                 .unwrap_or_else(|e| panic!("honest stripe-xor trace must verify: {e:?}"));
         }
+    }
+
+    /// §6(b)-G3 — build one visitation segment (sub-block-major).
+    fn seg_events(seed: u64, n_sb: usize, n_stripes: usize) -> Vec<(usize, [i32; IN_LEN])> {
+        let raw = lcg(seed, n_sb * n_stripes * IN_LEN);
+        let mut ev = Vec::new();
+        for sb in 0..n_sb {
+            for step in 0..n_stripes {
+                let base = (sb * n_stripes + step) * IN_LEN;
+                ev.push((step, core::array::from_fn(|k| raw[base + k])));
+            }
+        }
+        ev
+    }
+
+    /// §6(b)-G3 SEGMENTED reset: `⌈num_stripes/64⌉` segments accumulate
+    /// INDEPENDENTLY through the same 64 lanes — each segment's final
+    /// register (read at its gap row) equals that segment's standalone
+    /// reference, and the whole segmented trace proves + verifies. Spans
+    /// up to 8×64 = 512 stripes (Pearl's num_stripes ceiling).
+    #[test]
+    fn segmented_reset_isolates_segments_and_verifies() {
+        let c = cfg();
+        for (n_seg, stripes, n_sb) in [(2usize, 64usize, 4usize), (8, 64, 1), (3, 40, 2)] {
+            let owned: Vec<Vec<(usize, [i32; IN_LEN])>> = (0..n_seg)
+                .map(|g| seg_events(0x51E9 ^ (g as u64) ^ ((stripes as u64) << 8), n_sb, stripes))
+                .collect();
+            let refs: Vec<[u32; STATE_LEN]> = owned.iter().map(|e| ref_stripe_xor(e)).collect();
+            let segs: Vec<&[(usize, [i32; IN_LEN])]> = owned.iter().map(|e| e.as_slice()).collect();
+            let (trace, gaps) = build_trace_segmented(&segs);
+            for g in 0..n_seg {
+                assert_eq!(
+                    register_at_row(&trace, gaps[g]),
+                    refs[g],
+                    "n_seg={n_seg} stripes={stripes}: segment {g} register vs its INDEPENDENT reference",
+                );
+            }
+            let proof = prove::<AiPowStarkConfig, _>(&c, &StripeXorChip, trace, &[]);
+            verify::<AiPowStarkConfig, _>(&c, &StripeXorChip, &proof, &[])
+                .unwrap_or_else(|e| panic!("honest segmented trace (n_seg={n_seg}) must verify: {e:?}"));
+        }
+    }
+
+    /// The SEG_RESET boundary is load-bearing: clearing it on a
+    /// segment's first row re-enables the passthrough from the prior
+    /// segment's (non-zero) register into a row whose trace register is
+    /// 0 ⇒ the passthrough equation breaks ⇒ reject. (Full soundness —
+    /// SEG_RESET being verifier-fixed so a prover cannot instead CARRY
+    /// the register — is the composite's preprocessed-pin obligation.)
+    #[test]
+    fn rejects_cleared_segment_reset() {
+        let c = cfg();
+        let owned = [seg_events(1, 4, 64), seg_events(2, 4, 64)];
+        let segs: Vec<&[(usize, [i32; IN_LEN])]> = owned.iter().map(|e| e.as_slice()).collect();
+        let (mut trace, _gaps) = build_trace_segmented(&segs);
+        // Segment 1's first active row = row (64*4) + 1 gap = 257.
+        let seg1_first = 4 * 64 + 1;
+        assert_eq!(
+            trace.values[seg1_first * cols::ROW_W + cols::SEG_RESET],
+            <Val as QuotientMap<u64>>::from_int(1),
+            "row {seg1_first} should be segment 1's reset row",
+        );
+        trace.values[seg1_first * cols::ROW_W + cols::SEG_RESET] =
+            <Val as QuotientMap<u64>>::from_int(0);
+        let proof = prove::<AiPowStarkConfig, _>(&c, &StripeXorChip, trace, &[]);
+        assert!(
+            verify::<AiPowStarkConfig, _>(&c, &StripeXorChip, &proof, &[]).is_err(),
+            "clearing a SEG_RESET boundary must break the segmented trace",
+        );
     }
 
     /// Independent re-derivation: XOR-by-lane via explicit per-bit
