@@ -306,4 +306,104 @@ mod tests {
             "unmet difficulty must be rejected",
         );
     }
+
+    /// KAT (real proving, ~25s): the ACCEPTANCE path with the block commitment
+    /// derived exactly as the jet derives it in consensus — `commit_from_noun`
+    /// (BLAKE3 of the nockvm jam) of a realistic block-commitment noun (a tip5
+    /// 5-belt digest), NOT an arbitrary 32-byte constant. We prove a real cert
+    /// against that noun-derived commit and confirm the jet-core ACCEPTS it, then
+    /// confirm a different commitment noun (⇒ different commit) is rejected. This
+    /// closes the `block-commitment noun → commit_from_noun → prove → verify=%.y`
+    /// loop that the live +check-pow path exercises, with real proving — the
+    /// acceptance-direction analog of `commit_from_noun_matches_miner_derivation`.
+    #[test]
+    #[ignore = "real MoE compact proof (~25s); opt-in"]
+    fn jet_commit_from_noun_seeds_a_cert_the_core_accepts() {
+        use nockvm::mem::NockStack;
+        use nockvm::noun::{D, T};
+
+        let params = MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+
+        // A realistic block-commitment noun: a tip5 noun-digest is 5 belts.
+        let mut stack = NockStack::new(8 << 20, 0);
+        // Arbitrary belts (< 2^63 so they are valid direct atoms; the noun is
+        // only jammed+hashed, so the exact values don't matter).
+        let commit_noun = T(
+            &mut stack,
+            &[
+                D(0x0123_4567_89ab_cdef),
+                D(0x1122_3344_5566_7788),
+                D(0x2233_4455_6677_8899),
+                D(0x3344_5566_7788_99aa),
+                D(0x4455_6677_8899_aabb),
+            ],
+        );
+        // The jet's own commitment derivation (BLAKE3 of the nockvm jam).
+        let commit = commit_from_noun(&mut stack, commit_noun);
+
+        // Prove a real cert bound to that noun-derived commit (the miner's job).
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, commit)
+            .expect("prove canonical MoE block for the noun-derived commit");
+        assert_eq!(
+            block.commit, commit,
+            "the proved cert must commit to the jet-derived commitment",
+        );
+
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &block.statement,
+            &block.aux_inclusion,
+            &block.moe_art,
+            &block.certificate.zk_params,
+            block.certificate.found_idx,
+            block.certificate.trace_height,
+            &block.certificate.commitments,
+            &block.certificate.public_inputs,
+            &block.certificate.certificate,
+        )
+        .expect("build MoE artifact noun")
+        .jam();
+
+        let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            &block.run.verifier_key_digest(),
+        )
+        .to_vec();
+        let setup = AiPowVerifierSetup {
+            context: block.run.verifier_context,
+            digest_bytes,
+        };
+
+        let slab = cue_artifact(jammed);
+        let space = slab.noun_space();
+        let root = unsafe { *slab.root() };
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+            root,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode artifact noun");
+
+        let loose_target = [0xffu8; 32];
+        // ACCEPT: the jet-derived commit matches the cert's commitment.
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            "real block must verify when the commit is derived from its commitment noun",
+        );
+        // REJECT: a different commitment noun yields a different commit.
+        let mut stack2 = NockStack::new(8 << 20, 0);
+        let other_noun = T(&mut stack2, &[D(1), D(2), D(3), D(4), D(5)]);
+        let other_commit = commit_from_noun(&mut stack2, other_noun);
+        assert_ne!(other_commit, commit, "distinct nouns ⇒ distinct commits");
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, other_commit, loose_target, &setup), Ok(false)),
+            "a block committed to a different noun must be rejected",
+        );
+    }
 }
