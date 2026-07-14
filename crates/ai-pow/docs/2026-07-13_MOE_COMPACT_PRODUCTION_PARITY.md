@@ -58,10 +58,12 @@ track lives in one place.
      dispatches dense proving; a MoE loop (routing/expert selection + the MoE
      prove entrypoint) is the miner-side counterpart. A miner workstream, not the
      puzzle's prove/verify parity.
-  2. **D4/S1 consensus wiring:** Hoon `inner.hoon` must call the (now-ready) Rust
-     jam-boundary verifier — **shared with dense**; no `%ai-pow` block, dense or
-     MoE, is accepted until this lands. The Rust side of the boundary is done for
-     both.
+  2. **D4/S1 consensus wiring:** the Rust jet target
+     (`verify_ai_pow_block_artifact_jam`, which re-derives canonical A/B from the
+     protocol seed — **no model distribution**) is **built + validated**. Remaining:
+     a `params→(compact_context,digest)` verifier-setup builder + the Hoon jet +
+     kernel-jam rebuild — **shared with dense**, all derivable (no missing infra).
+     No `%ai-pow` block, dense or MoE, is accepted until the jet lands.
 - **Nothing is mis-accepted today:** MoE is fail-closed at the admission guard,
   the new MoE envelope/parse/verify are not wired into admission, and no `%ai-pow`
   path is wired into consensus (Hoon rejects `%ai-pow`). This is a *build-forward*
@@ -500,50 +502,57 @@ program.
 > closed until D4/S1 (Hoon↔Rust consensus wiring, shared with dense) is ready;
 > lifting them is the final staged step, per R1.
 
-### D4/S1 — Hoon↔Rust consensus wiring — 🧱 **BLOCKED on shared infrastructure (concrete R1 wall, investigated 2026-07-13)**
+### D4/S1 — Hoon↔Rust consensus wiring — 🟡 **Rust jet target BUILT + validated; remaining is the verifier-setup builder + the Hoon jet (shared with dense)**
 
-Block-level acceptance of any `%ai-pow` block (dense **or** MoE) is gated here, and
-the gate is a **genuine infrastructure wall**, not a code-wiring gap. Investigated
-directly:
+> **⚠️ Correction (2026-07-13): an earlier revision of this section wrongly called
+> D4 a "model-distribution wall." That was wrong and is retracted.** The matrices
+> are **not** external model weights: the production miner synths them
+> deterministically from a **constant seed** (`ai_pow_mine.rs`:
+> `synth_matrices(DEFAULT_SYNTH_SEED="ai-pow-prod-v1", params)`), so a consensus
+> node **re-derives the identical `A`/`B`** from the seed + the block's `params`.
+> No model distribution is needed. The `run.rs` "local-state inputs" framing +
+> `synth.rs`'s stale "real miners supply their own A/B" comment misled the first
+> pass; the production default is synth, and canonical-synth `A`/`B` is exactly
+> what AI-PoW soundness requires (else a miner grinds favorable matrices).
 
-- **Two Hoon fail-closes, both correct today.** `inner.hoon`:
-  - `check-pow` (`~line 1146`): `?: ?=([%ai-pow *] u.pow) %.n` — block validation
-    fail-closes `%ai-pow` ("until recursive AI-PoW certificate verification is
-    wired").
-  - `do-pow` (`~line 1631–1644`): the `%ai-pow` arm has the activation-height gate
-    wired but ends `'%ai-pow verifier not wired; rejected'`.
-  These are **sound**: a stub returning `%.y` would let a forged `%ai-pow` block
-  satisfy consensus. The fail-close is the correct state until the real verifier +
-  its context exist.
-- **No AI-PoW verifier jet exists in Hoon** (grep: none) — nothing bridges
-  `check-pow`/`do-pow` to the (now-ready) Rust jam-boundary verifier
-  (`verify_ai_pow_pearl_merge_compact[_moe]_artifact_jam_*`).
-- **Consensus state carries no verifier context.** `kernel-state`/`constants`
-  (`lib/types.hoon`) hold no matrices, model weights, or trusted setup. But the
-  Rust verifier REQUIRES `a_row_major` + `b_col_major` (the AI **model weights** —
-  the miner loads these as external "local-state inputs", `run.rs:270,320`),
-  `nockchain_target`, and the compact `verifier_context` + `verifier_key_digest`
-  (the recursive-proof **trusted setup**).
+Block-level acceptance of any `%ai-pow` block (dense **or** MoE) is gated in
+`inner.hoon`:
+- `check-pow` (`~line 1146`): `?: ?=([%ai-pow *] u.pow) %.n` — block validation
+  fail-closes `%ai-pow`.
+- `do-pow` (`~line 1631–1644`): the `%ai-pow` arm has the activation gate but ends
+  `'%ai-pow verifier not wired; rejected'`.
+Both are **sound today** — a stub returning `%.y` would let a forged block pass, so
+the fail-close is correct until the real verifier is wired.
 
-**Why this is an R1 wall, not avoidable by "just wiring the jet":** every verifying
-node must obtain the *same* model matrices (large, version-pinned) and the *same*
-trusted setup, sourced canonically from consensus. That distribution/pinning
-mechanism **does not exist** in the codebase and cannot be invented ad hoc without
-a soundness-critical systems design — a wrong choice (e.g. hardcoding
-`synth_matrices`, or an unpinned model) makes blocks either forgeable or
-unverifiable. This is **shared with dense** (identical block for dense `%ai-pow`)
-and is therefore a whole-feature infrastructure workstream, **not a MoE-parity
-gap**.
+**DONE this session — the Rust jet target.**
+`verify_ai_pow_block_artifact_jam` (`certificate_noun.rs`) is the single
+self-contained entrypoint the Hoon jet calls: it decodes the jammed artifact,
+reconstructs `m`/`k`/`n` from the authenticated statement, **re-derives the
+canonical `A`/`B`** from `AI_POW_PROD_SYNTH_SEED` (now a shared protocol constant
+in `ai_pow::synth`, no external input), dispatches on the `AIM1`/`AIP1` tag, and
+runs the node verify branch. Validated end-to-end (real MoE proof): a block
+verifies through it **without the matrices being supplied** (it re-derives them);
+unmet difficulty rejects.
 
-**Precise residual (exact, actionable):** (1) design + build canonical
-consensus-side sourcing of the model matrices (`A`/`B`) + trusted setup
-(`compact_context`/`verifier_key_digest`) — model versioning/pinning/distribution;
-(2) add the Hoon→Rust AI-PoW verifier **jet** calling
-`verify_ai_pow_pearl_merge_compact[_moe]_artifact_jam_with_digest_bytes_and_context`
-(dispatching on the `AIM1`/`AIP1` nonce tag) at the DoS-safe jam boundary;
-(3) replace the two `inner.hoon` fail-closes with that jet, rebuild the kernel jam
-→ binary (per `hoon-jam-builds`); (4) block-level acceptance + integration tests.
-The **Rust side of the boundary is complete + validated for both dense and MoE**;
+**Precise residual (exact, actionable) — all derivable, none "missing infra":**
+1. **Verifier-setup builder** (`compact_context` + `verifier_key_digest`): these are
+   **deterministic from the production `params`** (the L1 circuit's
+   `circuit_prover_data` + the L2 metadata/FRI shape), but are currently produced
+   as a by-product of *proving* (`recursion.rs:1942`). A consensus node needs a
+   `build_compact_verifier_setup(params) -> (context, digest)` that builds them
+   once at startup (the `AiPowCompactBatchProverCache` machinery already models the
+   reusable setup). **Shared with dense** — the dense jam verify takes the same
+   `compact_context`. This is unbuilt *derivable code*, not missing infrastructure.
+2. **The Hoon→Rust jet** wrapping `verify_ai_pow_block_artifact_jam` (+ the
+   activation gate + target/commitment plumbing from consensus state), replacing
+   the two `inner.hoon` fail-closes; rebuild the kernel jam → binary (per
+   `hoon-jam-builds`).
+3. Block-level acceptance + integration tests.
+
+Items 1–2 are **shared with dense** (the block, the setup, and the jet are
+puzzle-variant-agnostic except the tag dispatch, which is done). The
+**Rust side of the boundary — including canonical `A`/`B` derivation — is complete
++ validated for both dense and MoE**;
 this residual is entirely the consensus-integration + model/trusted-setup
 infrastructure.
 
@@ -615,7 +624,7 @@ From the compact-recursive production pipeline:
 | **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
 | **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** + unmet-difficulty rejects validated on the compact verify logic AND the end-to-end node branch |
 | **M4** envelope + parse guards | ✅ **done + validated** — `sanity_check_allowing_moe` + `from_public_data_allowing_moe` (both prerequisites for M3; dense paths byte-identical; 6+ tests, regression green). **Admission guard** (`validate_pearl_merge_config_for_recursive_prover`, comment now stale) 🔒 still LAST — the only MoE fail-close left |
-| **D4/S1** Hoon↔Rust consensus wiring | 🧱 **BLOCKED — shared infrastructure wall** (§4 D4/S1). Hoon `check-pow`/`do-pow` fail-close `%ai-pow` **correctly** (a stub would be forgeable); no verifier jet + no consensus-side sourcing of the model matrices / trusted setup exist. Shared with dense; the Rust jam-boundary verifier is done for both. Residual is model-distribution + trusted-setup + the jet — a whole-feature systems workstream, not a MoE-parity gap |
+| **D4/S1** Hoon↔Rust consensus wiring | 🟡 **Rust jet target BUILT + validated** — `verify_ai_pow_block_artifact_jam` re-derives canonical A/B from the protocol seed (no model distribution — earlier "model wall" retracted, §4 D4/S1), dispatches on the tag, verifies (real-proof validated; difficulty rejects). Residual (shared with dense, all derivable): a `params→(compact_context,digest)` verifier-setup builder + the Hoon jet + kernel-jam rebuild. Hoon `check-pow`/`do-pow` still fail-close correctly until the jet lands |
 
 ---
 
