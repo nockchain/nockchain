@@ -573,7 +573,25 @@ unmet difficulty rejects.
    this is whole-feature consensus integration, not a MoE-parity task. Per R1 it is
    soundness-critical invasive work to land in careful validated stages, not a
    session-tail rush (a mis-matched jet or mis-cached setup = forgeable blocks).
-3. Block-level acceptance + integration tests (the `roswell` test above).
+
+   > **⚠️ Decisive architecture fork (investigated 2026-07-13) — the jet is NOT a
+   > drop-in.** nockchain's existing consensus verify (`check-pow` → `verify:nv`,
+   > `/common/nock-verifier`) is a **Hoon** STARK verifier (the STARK engine is
+   > ~8,800 lines of Hoon in `ztd/*.hoon`) with `zkvm-jetpack` jetting only the
+   > *primitives* (field ops, NTT, Tip5) — **semantically transparent** (Hoon is the
+   > spec; jets just accelerate). AI-PoW's compact **recursive**-STARK verify is a
+   > large Rust-only system (recursion + FRI + batch STARK). To follow the same
+   > consensus pattern it needs EITHER **(a)** a Hoon recursive-STARK verifier
+   > (re-implementing `ai-pow-zk`'s verifier in Hoon — comparable in scale to the
+   > existing multi-thousand-line Hoon STARK engine; a major project), OR **(b)** a
+   > **jet-required** consensus arm with no Hoon equivalent — which breaks the
+   > transparency model every current nockchain verifier uses and needs a
+   > consensus-framework policy decision (are jet-required arms allowed in block
+   > acceptance?). **This fork must be decided before the jet is built, is shared
+   > with dense, and is far beyond "MoE compact parity."** It is the concrete wall
+   > that scopes block-level acceptance as its own architectural workstream.
+3. Block-level acceptance + integration tests (the `roswell` test above), after the
+   fork above is resolved.
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
