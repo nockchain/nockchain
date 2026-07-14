@@ -3012,6 +3012,59 @@ pub fn verify_ai_pow_pearl_merge_compact_artifact_jam_with_digest_bytes_and_cont
     )
 }
 
+/// Verify a jammed **MoE** (`AIM1`) Pearl-merge `%ai-pow` compact artifact — the
+/// GROUPED_GEMM counterpart of
+/// [`verify_ai_pow_pearl_merge_compact_artifact_jam_with_context`], and the jam
+/// boundary the consensus dispatcher calls for a MoE artifact.
+///
+/// The dense jam entry hardcodes the dense nonce decoder + dense statement
+/// precheck (which fail-closes on a MoE trailer), so MoE needs its own boundary.
+/// This cues + bounded-decodes the full artifact (the decoder dispatches on the
+/// `AIM1` tag into `moe: Some(..)`) and runs the node MoE verify branch.
+///
+/// The eventual consensus dispatcher peeks the 4-byte nonce tag (`AIM1` vs `AIP1`)
+/// to choose this entry vs the dense one; the two return distinct precheck types.
+pub fn verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_context(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    context: PearlMergeAiPowVerifierContext<'_>,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
+) -> Result<PearlMergeMoeMiningPrecheck, CertificateNounError> {
+    let artifact = decode_ai_pow_pearl_merge_artifact_jam(jammed, limits)?;
+    if artifact.moe.is_none() {
+        return Err(CertificateNounError::Shape(
+            "expected a MoE (AIM1) artifact on the MoE jam verify path",
+        ));
+    }
+    verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+        &artifact,
+        context,
+        compact_context,
+        expected_verifier_key_digest,
+        limits,
+    )
+}
+
+/// Byte-digest form of
+/// [`verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_context`].
+pub fn verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_digest_bytes_and_context(
+    jammed: &[u8],
+    limits: CertificateNounLimits,
+    context: PearlMergeAiPowVerifierContext<'_>,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+) -> Result<PearlMergeMoeMiningPrecheck, CertificateNounError> {
+    let expected_verifier_key_digest =
+        ai_pow_zk::recursion::compact_batch_verifier_key_digest_from_bytes(
+            expected_verifier_key_digest_bytes,
+        )
+        .map_err(|e| CertificateNounError::CompactVerifierKeyDigestEncoding(e.to_string()))?;
+    verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_context(
+        jammed, limits, context, compact_context, &expected_verifier_key_digest,
+    )
+}
+
 #[derive(Debug)]
 struct DecodeState {
     limits: CertificateNounLimits,
@@ -7981,6 +8034,33 @@ mod tests {
             )
             .expect("MoE artifact decoded from its noun verifies through the node branch");
         assert_eq!(pre_noun.work.jackpot_hash, run.ticket.jackpot_hash);
+
+        // The jam boundary the consensus dispatcher calls: verify straight from the
+        // jammed bytes through the MoE jam entry.
+        let expected_digest_bytes =
+            ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&expected_digest);
+        let pre_jam =
+            verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with_digest_bytes_and_context(
+                &jammed,
+                CertificateNounLimits::default(),
+                ctx(&LOOSE_TARGET),
+                &run.verifier_context,
+                &expected_digest_bytes,
+            )
+            .expect("MoE artifact verifies through the jam boundary entry");
+        assert_eq!(pre_jam.work.jackpot_hash, run.ticket.jackpot_hash);
+        // The dense jam entry must reject a MoE artifact (tag dispatch).
+        assert!(
+            verify_ai_pow_pearl_merge_compact_artifact_jam_with_digest_bytes_and_context(
+                &jammed,
+                CertificateNounLimits::default(),
+                ctx(&LOOSE_TARGET),
+                &run.verifier_context,
+                &expected_digest_bytes,
+            )
+            .is_err(),
+            "dense jam entry must reject a MoE artifact",
+        );
 
         // Adversarial 1 — forged routing_data breaks the routing-consistency binding.
         let mut forged = artifact.clone();
