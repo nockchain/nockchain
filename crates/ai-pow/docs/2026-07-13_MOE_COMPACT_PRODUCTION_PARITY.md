@@ -617,22 +617,41 @@ unmet difficulty rejects.
    block. Sound because the setup is proof-independent (validated). The jet-core KAT
    now runs through it (real proof ~24 s).
 
-   **Branch (b) Stage 2 — remaining: the Hoon consensus-kernel change (all Rust it
-   calls is built + validated).** This is the one remaining unit for block
-   acceptance, and it lands + validates together (a half-wired `check-pow` or stale
-   jam is worse than a clean subset, per R1):
-   - The stubbed Hoon `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!` — the
-     jet is mandatory) taking `[artifact commit target]` → loobean; **fix the jet
-     path** in `produce_ai_pow_hot_state` to match the arm's `~%` parent chain
-     (validate at runtime — a mis-chained hint prints).
-   - Register `produce_ai_pow_hot_state` in the nockchain kernel `hot_state`
-     (`nockchain/src/lib.rs`) + build+inject the setup at boot
-     (`build_verifier_setup` → `init_ai_pow_verifier_setup`).
-   - Wire `check-pow`/`do-pow` (`inner.hoon`) to extract `[artifact commit target]`
-     from the page and call the arm, replacing the two fail-closes.
-   - Rebuild the kernel jam → binary (per `hoon-jam-builds`); an integration test
-     that a real `%ai-pow` block is accepted and a forged one rejected.
-   Shared with dense (the jet dispatches on the tag; both variants covered).
+   **Branch (b) Stage 2 — remaining: the Hoon consensus-kernel change — one
+   ALL-OR-NOTHING validated unit (investigated to the implementation boundary
+   2026-07-13; all Rust it calls is built + validated).**
+
+   > **⚠️ Coupling + stub-safety finding — why this cannot be partially landed.**
+   > The jet-required stub must be `!!` (crash), NOT `%.n`: if the stub were `%.n`,
+   > a node lacking the jet would *reject* `%ai-pow` while a jetted node *accepts*
+   > it — a **consensus split**. With `!!`, a node lacking the jet **crashes**
+   > (fail-safe: it halts rather than forking). But that means rebuilding the kernel
+   > jam with the `check-pow` wiring **without** also injecting the boot setup makes
+   > the jet `BAIL_FAIL` (setup uninit) → fall through to `!!` → **consensus crashes
+   > on every `%ai-pow` block** — strictly worse than today's `%.n`. Therefore the
+   > Hoon arm + jet registration + boot setup-inject + jam rebuild must land
+   > together, validated by the integration test. No safe partial landing exists;
+   > per R1 this is committed only once the integration test is green.
+
+   Exact wiring (verified against `inner.hoon` + `page:t`):
+   - `check-pow` (`inner.hoon ~1146`): replace `?: ?=([%ai-pow *] u.pow) %.n` with
+     `(ai-pow-verify u.pow (block-commitment:page:t pag) ~(target get:page:t pag))`
+     — `u.pow` is `[%ai-pow ai-pow-artifact]` (the transparent artifact noun), the
+     commitment + target come from the page accessors already used at
+     `inner.hoon:840-841`.
+   - The stubbed `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!`) as a sibling
+     of `check-pow`; **set the jet path** in `produce_ai_pow_hot_state` to that
+     arm's `~%` parent chain (validate at runtime — a mis-chained hint prints).
+   - Register `produce_ai_pow_hot_state` in `nockchain/src/lib.rs` `hot_state`;
+     at boot call `ai_pow_jets::setup::build_verifier_setup(..)` → `init_ai_pow_verifier_setup`.
+   - Rebuild the jam: `make assets/dumb.jam` (`hoonc … hoon/apps/dumbnet/outer.hoon hoon`),
+     then the `nockchain` binary.
+   - Integration test: boot the kernel (jet + setup injected), submit a real
+     `%ai-pow` block → accepted; a forged one → rejected.
+   Shared with dense (the jet dispatches on the tag; both variants covered). This is
+   a coupled multi-slow-step (jam rebuild + ~25 s boot prove + block fixture)
+   consensus change — the maximal correct subset (all Rust) is landed + validated;
+   this unit is the precise residual, per R1.
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
