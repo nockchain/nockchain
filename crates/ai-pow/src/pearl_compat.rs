@@ -1710,7 +1710,8 @@ pub struct PearlMoeWorkPrecheck {
     pub s_b: [u8; 32],
     /// The opened **global** B-columns for this expert (public-pattern + offset).
     pub b_cols_global: Vec<u32>,
-    /// The node-recomputed opened-tile jackpot (bound `== public_params.hash_jackpot`).
+    /// The authenticated statement jackpot (`public_params.hash_jackpot`); the caller
+    /// binds it `== pis.hash_jackpot` (the proof-bound tile output).
     pub jackpot_hash: [u8; 32],
     pub pearl_target: [u8; 32],
     pub nockchain_target: [u8; 32],
@@ -1722,36 +1723,35 @@ pub struct PearlMoeWorkPrecheck {
 ///
 /// The dense `verify_pearl_compatible_work` cannot be reused for MoE: it goes
 /// through `sanity_check`, which fail-closes MoE. This mirrors its structure with
-/// the MoE-aware envelope and the MoE tile:
+/// the MoE-aware envelope, over ARBITRARY miner-chosen matrices (Pearl parity):
 ///   1. `sanity_check_allowing_moe` (M4 envelope — accepts a valid MoE config).
-///   2. difficulty target derivation + matrix-input validation.
-///   3. `kappa`/`h_a`/`h_b` from `derive_pearl_work_commitments` (identical to dense).
+///   2. difficulty target derivation + the difficulty gate on the authenticated,
+///      proven `hash_jackpot` (no matrix-input validation — matrices are witness).
+///   3. `kappa` from the header/config; `h_a`/`h_b` are the miner's block-COMMITTED
+///      matrix commitments (`public_params.hash_a`/`hash_b`), NOT re-derived from a
+///      fixed matrix set.
 ///   4. `verify_pearl_moe_routing_binding` — binds `routing_data` to `hash_routing`,
 ///      validates the offsets/tokens/spans + the opened-row gather.
 ///   5. recompute the routing-spliced `s_A`/`s_B` (same formula the PI-validated
 ///      `verify_pearl_moe_compact_recursive_certificate` uses) and the opened
 ///      global B-columns (`moe_expert_b_cols_global`, per-expert clamp).
-///   6. **the jackpot/difficulty binding** — recompute the opened tile with
-///      [`compute_moe_tile`] from the PUBLIC opened schedule + the spliced seeds,
-///      require `jackpot_hash == public_params.hash_jackpot`, then
-///      `hash_le_target(jackpot, nockchain_adjusted_target)`.
 ///
-/// # Soundness — why the recomputed jackpot IS the proven one
+/// # Soundness — why no tile recompute is owed (option (a), arbitrary models)
 ///
-/// Step 6 recomputes the tile from the node's OWN `a`/`b` (context) and the spliced
-/// seeds. The recursive verify separately binds `h_A = commit(a)`, `h_B = commit(b)`,
-/// `s_A` (routing splice), `kappa` via public inputs, and the opened rows/columns via
-/// the P0/D6 program-commitment fold. So the tile the node recomputes here is exactly
-/// the tile the certificate proves — hence checking its jackpot against the difficulty
-/// target here is a sound consensus gate. This function does the *difficulty* half; the
-/// caller MUST still run `verify_pearl_moe_compact_recursive_certificate` for the
-/// *proof* half. (Neither MoE recursive verify checks difficulty — by design, exactly
-/// as the dense split keeps difficulty in `verify_pearl_compatible_work`.)
+/// The recursive certificate proves the opened tile's `hash_jackpot` in-circuit,
+/// bound to the committed `H_A`/`H_B` (`JACKPOT_MSG == FOLD_STATE`, the strip
+/// openings authenticated against the commitments, `s_A` via the routing splice, and
+/// the opened rows/columns via the P0/D6 program-commitment fold). So `pis.hash_jackpot`
+/// IS the tile's real output over the miner's committed matrices — no synth
+/// re-derivation and no off-circuit `compute_moe_tile` are needed (or possible without
+/// the model). This function does the model-agnostic *difficulty + commitment* half;
+/// the caller MUST run `verify_pearl_moe_compact_recursive_certificate` for the *proof*
+/// half AND bind `pis.hash_jackpot == public_params.hash_jackpot` so the gated statement
+/// value equals the proven one. The commitment-keyed noise is the anti-grind (Pearl
+/// `ffi/mine.rs`), so arbitrary/degenerate matrices are safe.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pearl_moe_compatible_work(
     public_params: &PearlPublicProofParams,
-    a_row_major: &[i8],
-    b_col_major: &[i8],
     moe: &PearlMoeParams,
     routing_data: &[u32],
     nockchain_target: &[u8; 32],
@@ -1766,16 +1766,36 @@ pub fn verify_pearl_moe_compatible_work(
         .moe()
         .ok_or(PearlCompatError::MoePublicMissingConfig)?;
 
-    // (2) Difficulty targets + matrix-input validation (identical to the dense path).
+    // (2) Difficulty targets + the difficulty gate on the AUTHENTICATED, PROVEN
+    // jackpot. The recursive certificate binds `pis.hash_jackpot` to the matmul over
+    // the committed `H_A`/`H_B` (the caller runs it AND binds
+    // `pis.hash_jackpot == public_params.hash_jackpot`), so gating the statement's
+    // jackpot here is a sound consensus difficulty gate WITHOUT recomputing the tile.
+    // Matrices are miner-chosen (Pearl parity); the commitment-keyed noise is the
+    // anti-grind, so no matrix recompute or non-degeneracy check is owed.
     let pearl_target = public_params.pearl_adjusted_target()?;
     let nockchain_adjusted_target = public_params.nockchain_adjusted_target(nockchain_target)?;
-    validate_public_matrix_inputs(a_row_major, b_col_major, public_params)?;
+    if !hash_le_target(&public_params.hash_jackpot, &nockchain_adjusted_target) {
+        return Err(PearlCompatError::NockchainTargetNotMet);
+    }
 
-    // (3) Work commitments kappa/h_a/h_b (dense-identical; the dense s_a/s_b in
-    // `commitments` are NOT used for MoE — the routing splice below replaces them).
+    // (3) Work commitments from the COMMITTED matrix roots. `H_A`/`H_B` are the miner's
+    // block-committed matrix commitments (authenticated in `public_params`), not
+    // re-derived from a fixed matrix set; `kappa` is from the header/config. The dense
+    // `s_a`/`s_b` here are unused for MoE (the routing splice below replaces them).
     let sigma = public_params.block_header.to_bytes();
     let mu = public_params.mining_config.to_bytes()?;
-    let commitments = derive_pearl_work_commitments(&sigma, &mu, a_row_major, b_col_major);
+    let kappa = pearl_kappa(&sigma, &mu);
+    let h_a = public_params.hash_a;
+    let h_b = public_params.hash_b;
+    let (dense_s_a, dense_s_b) = pearl_noise_seeds(&kappa, &h_a, &h_b);
+    let commitments = PearlWorkCommitments {
+        kappa,
+        h_a,
+        h_b,
+        s_a: dense_s_a,
+        s_b: dense_s_b,
+    };
 
     // (4) Routing-consistency binding: routing_data commits to moe.hash_routing, the
     // offsets/tokens/spans are well-formed, and the opened rows are the expert's
@@ -1813,37 +1833,17 @@ pub fn verify_pearl_moe_compatible_work(
         max_pattern_len,
     )?;
 
-    // (6) Jackpot/difficulty binding: recompute the opened tile and bind its jackpot
-    // to the public statement + the difficulty target. `compute_moe_tile` reproduces
-    // the proven tile (see soundness note); a mismatch means the statement's
-    // `hash_jackpot` is not the tile's real output.
-    let k = public_params.mining_config.common_dim as usize;
-    let r = public_params.mining_config.rank as usize;
-    let dot_product_len = public_params.mining_config.dot_product_length()?;
-    let (_tile_state, jackpot_hash) = compute_moe_tile(
-        a_row_major,
-        b_col_major,
-        &moe.outer_indices,
-        &b_cols_global,
-        &s_a,
-        &s_b,
-        k,
-        r,
-        dot_product_len,
-    );
-    if jackpot_hash != public_params.hash_jackpot {
-        return Err(PearlCompatError::JackpotHashMismatch);
-    }
-    if !hash_le_target(&jackpot_hash, &nockchain_adjusted_target) {
-        return Err(PearlCompatError::NockchainTargetNotMet);
-    }
-
+    // (6) No off-circuit tile recompute. `pis.hash_jackpot` is bound to the matmul
+    // over the committed `H_A`/`H_B` by the recursive certificate; the caller binds
+    // the statement's `hash_jackpot` to it. The difficulty gate (step 2) then holds
+    // for the proven tile — model-agnostically. `jackpot_hash` in the return is the
+    // authenticated statement value the caller ties to the proof.
     Ok(PearlMoeWorkPrecheck {
         commitments,
         s_a,
         s_b,
         b_cols_global,
-        jackpot_hash,
+        jackpot_hash: public_params.hash_jackpot,
         pearl_target,
         nockchain_target: *nockchain_target,
         nockchain_adjusted_target,

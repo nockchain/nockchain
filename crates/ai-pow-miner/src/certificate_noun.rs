@@ -2436,13 +2436,24 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_l
         PearlPublicProofParams::from_public_data_allowing_moe(header, &statement.public_data)?;
     let work = verify_pearl_moe_compatible_work(
         &public_params,
-        context.a_row_major,
-        context.b_col_major,
         &moe_art.moe,
         &moe_art.routing_data,
         context.nockchain_target,
         context.max_pattern_len,
     )?;
+
+    // (a) Bind the difficulty-gated statement jackpot to the PROVEN jackpot. Step (5)'s
+    // recursive certificate proves `pis.hash_jackpot` is the opened tile's real output
+    // over the miner's committed `H_A`/`H_B`; requiring the authenticated statement's
+    // `hash_jackpot` (which +verify_pearl_moe_compatible_work gates on the target) to
+    // equal it makes the difficulty gate hold for the proven tile. This replaces the old
+    // off-circuit tile recompute (which pinned matrices to synth) — matrices are now
+    // miner-chosen, Pearl-parity, with the commitment-keyed noise as the anti-grind.
+    if digest_words_to_bytes(&artifact.certificate.public_inputs.hash_jackpot)
+        != public_params.hash_jackpot
+    {
+        return Err(PearlCompatError::JackpotHashMismatch.into());
+    }
 
     // (3) Reconstruct MatmulParams from the AUTHENTICATED statement dims (m/n/k/r).
     // `tile`/`difficulty_bits` are proof-system metadata not carried in the Pearl

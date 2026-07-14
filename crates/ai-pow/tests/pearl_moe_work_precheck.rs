@@ -1,18 +1,21 @@
 //! M3 (node-side) — `verify_pearl_moe_compatible_work`: the node's cheap,
-//! pre-proof MoE (GROUPED_GEMM) work verification, and specifically its
-//! **jackpot/difficulty binding** (the one genuinely-new soundness gate on the
-//! MoE compact path).
+//! pre-proof MoE (GROUPED_GEMM) work verification, over ARBITRARY miner-chosen
+//! matrices (option (a), Pearl parity — no synth pin).
 //!
-//! The recursive verify (`verify_pearl_moe_compact_recursive_certificate`) binds
-//! matmul correctness + opened schedule + routing-spliced seeds, but — like the
-//! dense recursive verify — does NOT check difficulty. That gate is the node
-//! precheck's job: recompute the opened tile from the PUBLIC schedule + the
-//! spliced seeds and require `jackpot == hash_jackpot`, then `jackpot ≤ target`.
+//! The precheck is model-agnostic: it takes the miner's COMMITTED matrix roots
+//! (`public_params.hash_a`/`hash_b`) — never re-deriving matrices — validates the
+//! MoE envelope + the routing-consistency binding, recomputes the routing-spliced
+//! `s_A`/`s_B` from those commitments, and gates difficulty on the authenticated
+//! `hash_jackpot`. It does NOT recompute the tile: the recursive certificate
+//! (`verify_pearl_moe_compact_recursive_certificate`) proves `pis.hash_jackpot` is
+//! the opened tile's real output over the committed matrices, and the node caller
+//! binds `pis.hash_jackpot == public_params.hash_jackpot`. The commitment-keyed
+//! noise (Pearl `ffi/mine.rs`) is the anti-grind, so arbitrary/degenerate matrices
+//! are safe.
 //!
-//! These tests validate that binding WITHOUT a recursive proof by cross-checking
-//! the precheck's recomputed jackpot/seeds against `compute_pearl_moe_ticket`
-//! (the same tile the miner commits to, validated independently in
-//! `pearl_moe_tile.rs`). The recursive-proof half is covered by
+//! These tests use matrices from a non-production seed (an arbitrary model) and
+//! verify the precheck binds their COMMITMENTS and the routing splice. The
+//! proof-half + the forged-`hash_jackpot` rejection are covered by
 //! `zk_bridge::real_moe_compact_recursive_certificate_proves_and_verifies`.
 
 use ai_pow::pearl_compat::{
@@ -77,13 +80,12 @@ fn moe_config() -> PearlMiningConfig {
 /// committed MoE ticket, the public statement, and the MoE artifact params.
 /// Returns everything a caller needs to exercise `verify_pearl_moe_compatible_work`.
 struct Fixture {
-    a: Vec<i8>,
-    b: Vec<i8>,
     routing_data: Vec<u32>,
     public_params: PearlPublicProofParams,
     moe: PearlMoeParams,
     ticket_jackpot: [u8; 32],
     ticket_s_a: [u8; 32],
+    committed_h_a: [u8; 32],
 }
 
 fn build_fixture() -> Fixture {
@@ -147,28 +149,26 @@ fn build_fixture() -> Fixture {
     };
 
     Fixture {
-        a,
-        b,
         routing_data: routing.routing_data.clone(),
         public_params,
         moe,
         ticket_jackpot: ticket.jackpot_hash,
         ticket_s_a: ticket.s_a,
+        committed_h_a: commitments.h_a,
     }
 }
 
 const LOOSE_TARGET: [u8; 32] = [0xffu8; 32];
 
-/// Happy path: the node precheck recomputes exactly the miner's committed jackpot
-/// and routing-spliced `s_A`, binds them to the public statement, and passes the
-/// (loose) difficulty target.
+/// Happy path (arbitrary model): the precheck binds the miner's COMMITTED matrix
+/// roots (never a synth re-derivation), recomputes the routing-spliced `s_A` from
+/// them, surfaces the authenticated jackpot, and passes the (loose) difficulty
+/// target. `committed_h_a` is the commitment of the non-production-seed matrices.
 #[test]
-fn moe_work_precheck_recomputes_and_binds_jackpot() {
+fn moe_work_precheck_binds_committed_commitments_and_splice() {
     let f = build_fixture();
     let pre = verify_pearl_moe_compatible_work(
         &f.public_params,
-        &f.a,
-        &f.b,
         &f.moe,
         &f.routing_data,
         &LOOSE_TARGET,
@@ -177,35 +177,30 @@ fn moe_work_precheck_recomputes_and_binds_jackpot() {
     .expect("valid MoE work must verify");
 
     assert_eq!(
-        pre.jackpot_hash, f.ticket_jackpot,
-        "node-recomputed jackpot must equal the miner's committed tile jackpot"
+        pre.commitments.h_a, f.committed_h_a,
+        "precheck must bind the miner's COMMITTED H_A (model-agnostic), not a synth one"
+    );
+    assert_eq!(
+        pre.commitments.h_a, f.public_params.hash_a,
+        "committed H_A comes straight from the authenticated statement"
     );
     assert_eq!(
         pre.s_a, f.ticket_s_a,
-        "node-recomputed routing-spliced s_A must equal the ticket's s_A"
+        "routing-spliced s_A (from the committed H_A + routing) must equal the ticket's"
     );
-    assert_eq!(pre.jackpot_hash, f.public_params.hash_jackpot);
+    assert_eq!(
+        pre.jackpot_hash, f.public_params.hash_jackpot,
+        "precheck surfaces the authenticated statement jackpot (caller binds it to the proof)"
+    );
+    assert_eq!(pre.jackpot_hash, f.ticket_jackpot);
 }
 
-/// A tampered `hash_jackpot` (statement claims a jackpot the tile does not produce)
-/// is rejected — the node binds the recomputed tile, not the prover's claim.
-#[test]
-fn moe_work_precheck_rejects_wrong_hash_jackpot() {
-    let mut f = build_fixture();
-    f.public_params.hash_jackpot[0] ^= 0x01;
-    assert_eq!(
-        verify_pearl_moe_compatible_work(
-            &f.public_params,
-            &f.a,
-            &f.b,
-            &f.moe,
-            &f.routing_data,
-            &LOOSE_TARGET,
-            MAX_PATTERN_LEN,
-        ),
-        Err(PearlCompatError::JackpotHashMismatch),
-    );
-}
+// NOTE: a tampered `hash_jackpot` is no longer a precheck concern (there is no tile
+// recompute over a fixed matrix set). It is caught by (i) the recursive certificate,
+// which proves `pis.hash_jackpot` (zk_bridge de-risk: a forged value rejects), and
+// (ii) the node caller, which binds `pis.hash_jackpot == public_params.hash_jackpot`.
+// A statement jackpot ABOVE target is still rejected here — see
+// `moe_work_precheck_rejects_unmet_difficulty`.
 
 /// A jackpot that does not meet difficulty (target = 0 ⇒ adjusted target 0) is
 /// rejected with `NockchainTargetNotMet`.
@@ -216,8 +211,6 @@ fn moe_work_precheck_rejects_unmet_difficulty() {
     assert_eq!(
         verify_pearl_moe_compatible_work(
             &f.public_params,
-            &f.a,
-            &f.b,
             &f.moe,
             &f.routing_data,
             &zero_target,
@@ -237,8 +230,6 @@ fn moe_work_precheck_rejects_forged_routing() {
     assert!(
         verify_pearl_moe_compatible_work(
             &f.public_params,
-            &f.a,
-            &f.b,
             &f.moe,
             &bad,
             &LOOSE_TARGET,
@@ -258,8 +249,6 @@ fn moe_work_precheck_rejects_dense_config() {
     assert!(
         verify_pearl_moe_compatible_work(
             &f.public_params,
-            &f.a,
-            &f.b,
             &f.moe,
             &f.routing_data,
             &LOOSE_TARGET,
