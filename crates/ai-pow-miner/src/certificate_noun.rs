@@ -8237,6 +8237,159 @@ mod tests {
         );
     }
 
+    /// Build + prove a MoE block distinguished only by `nock_commit` (⇒ a distinct
+    /// header ⇒ distinct `kappa` ⇒ distinct proof), holding the puzzle SHAPE
+    /// (params, schedule, trace-height) fixed. Returns the prove run + the jammed
+    /// artifact. Used to validate that the compact verifier setup is
+    /// proof-INDEPENDENT (D4 setup builder).
+    #[cfg(test)]
+    fn prove_moe_block_for_setup_test(
+        nock_commit: [u8; 32],
+    ) -> (ai_pow::zk_bridge::PearlMoeCompactProveRun, Vec<u8>) {
+        use ai_pow::pearl_compat::derive_pearl_work_commitments;
+        use ai_pow::pearl_moe_routing::build_routing_data;
+        use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate;
+
+        let (m, n, e, top_k, n_e) = (64usize, 64usize, 2usize, 1usize, 32usize);
+        let params = MatmulParams {
+            m: m as u32,
+            k: 1024,
+            n: n as u32,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+
+        let mut aux = pearl_test_aux();
+        aux.nock_block_commitment = nock_commit;
+        let aux_commitment = aux.commitment().unwrap();
+        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux_commitment);
+        let config = PearlMiningConfig {
+            common_dim: 1024,
+            rank: 64,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: pearl_test_pattern(8),
+            cols_pattern: pearl_test_pattern(8),
+            reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+        let commitments =
+            derive_pearl_work_commitments(&header.to_bytes(), &config.to_bytes().unwrap(), &a, &b);
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+        let inner: Vec<u32> = config
+            .rows_pattern
+            .indices_with_offset_bounded(0, 4096)
+            .unwrap();
+        let local_b: Vec<u32> = config
+            .cols_pattern
+            .indices_with_offset_bounded(0, 4096)
+            .unwrap();
+        let run = prove_pearl_moe_compact_recursive_certificate(
+            &params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+            &inner, &local_b, n_e,
+        )
+        .expect("prove MoE compact certificate for setup test");
+
+        let public = PearlPublicProofParams {
+            block_header: header,
+            mining_config: config,
+            hash_a: commitments.h_a,
+            hash_b: commitments.h_b,
+            hash_jackpot: run.ticket.jackpot_hash,
+            m: m as u32,
+            n: n as u32,
+            t_rows: 0,
+            t_cols: 0,
+        };
+        let statement = PearlMergePublicStatementShape {
+            block_header: header.to_bytes(),
+            public_data: public.to_public_data().unwrap(),
+            expected_aux_commitment: aux_commitment,
+            aux,
+        };
+        let cert_bytes =
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
+                .unwrap();
+        let certificate = AiPowCertificateShape {
+            version: AI_POW_CERT_VERSION,
+            zk_params: run.zk_params,
+            found_idx: 0,
+            trace_height: run.trace_height,
+            commitments: run.commitments,
+            public_inputs: run.pis.clone(),
+            certificate: AiProofNode::Bytes(cert_bytes),
+        };
+        let moe_art = PearlMergeMoeArtifact {
+            moe: PearlMoeParams {
+                expert_idx: 0,
+                routing_offsets: routing.routing_offsets.clone(),
+                hash_routing: run.ticket.commitment.routing_root,
+                outer_indices: run.ticket.outer_indices.clone(),
+            },
+            routing_data: routing.routing_data.clone(),
+        };
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &statement,
+            &aux_inclusion,
+            &moe_art,
+            &certificate.zk_params,
+            certificate.found_idx,
+            certificate.trace_height,
+            &certificate.commitments,
+            &certificate.public_inputs,
+            &certificate.certificate,
+        )
+        .expect("build MoE artifact noun for setup test")
+        .jam()
+        .to_vec();
+        (run, jammed)
+    }
+
+    /// D4 setup builder — **proof-independence of the compact verifier setup.**
+    ///
+    /// A consensus node must build the compact verifier `context` + `verifier_key_digest`
+    /// ONCE (from the fixed production params) and reuse it for every incoming block —
+    /// it cannot re-run the prover per block. That is sound iff the setup is
+    /// determined by the puzzle SHAPE (params/trace-height), NOT the specific proof.
+    /// This proves it: two MoE blocks of identical shape but different `kappa`
+    /// (different aux) produce the SAME `verifier_key_digest`, and block A's jammed
+    /// artifact verifies through the consensus entrypoint using block B's
+    /// independently-built `verifier_context`.
+    #[test]
+    #[ignore = "runs two real MoE compact proofs (~50s); opt-in"]
+    fn moe_compact_verifier_setup_is_proof_independent() {
+        let (run_a, jam_a) = prove_moe_block_for_setup_test([0x42u8; 32]);
+        let (run_b, _jam_b) = prove_moe_block_for_setup_test([0x99u8; 32]);
+
+        // The verifier-key digest depends only on the puzzle shape, not the proof.
+        assert_eq!(
+            run_a.verifier_key_digest(),
+            run_b.verifier_key_digest(),
+            "compact verifier-key digest must be proof-INDEPENDENT (same shape ⇒ same setup)",
+        );
+
+        // Block A verifies against block B's INDEPENDENTLY-built context + digest —
+        // i.e. a node that built its setup from any canonical prove verifies all
+        // same-shape blocks. This is what makes a build-once startup setup sound.
+        let digest_b_bytes =
+            ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                &run_b.verifier_key_digest(),
+            );
+        let outcome = verify_ai_pow_block_artifact_jam(
+            &jam_a,
+            CertificateNounLimits::default(),
+            &[0x42u8; 32],
+            &[0xffu8; 32],
+            4096,
+            &run_b.verifier_context,
+            &digest_b_bytes,
+        )
+        .expect("block A verifies against block B's independently-built verifier setup");
+        assert!(matches!(outcome, AiPowBlockVerifyOutcome::Moe(_)));
+    }
+
     // ===================================================================
     // M1: MoE (GROUPED_GEMM) `ai-pow-nonce` codec.
     //
