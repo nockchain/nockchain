@@ -534,6 +534,42 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
             }
         }
 
+        // §6(b)-R-b SOUNDNESS — bind the reduce input `TR_IN` to the ACTIVE
+        // sub-block's accumulator AFTER this row's update, i.e. the
+        // one-hot-`TA_SB_SEL`-selected sub-block's `TA_ACC` on the NEXT row
+        // (the TileAccum recurrence has just written the updated cells
+        // there). Without this a prover could feed TileReduce an arbitrary
+        // `TR_IN` and forge the per-stripe x_step; with it, the reduced
+        // value is provably the held accumulator's sub-block after the
+        // stripe. Gated by `TR_IS_ACTIVE` (vacuous pre-R-b). Degree 3.
+        {
+            use crate::composite_layout::{
+                TA_ACC_START, TA_SB_SEL_LEN, TA_SB_SEL_START, TR_IN_START, TR_IS_ACTIVE,
+            };
+            let (tr_active, tr_in, sb_sel): (AB::Var, [AB::Var; 4], [AB::Var; TA_SB_SEL_LEN]) = {
+                let main = builder.main();
+                let cur = main.current_slice();
+                (
+                    cur[TR_IS_ACTIVE],
+                    core::array::from_fn(|p| cur[TR_IN_START + p]),
+                    core::array::from_fn(|s| cur[TA_SB_SEL_START + s]),
+                )
+            };
+            let nxt_acc: [[AB::Var; 4]; TA_SB_SEL_LEN] = {
+                let main = builder.main();
+                let nxt = main.next_slice();
+                core::array::from_fn(|s| core::array::from_fn(|p| nxt[TA_ACC_START + s * 4 + p]))
+            };
+            let mut tb = builder.when_transition();
+            for p in 0..4 {
+                let mut sel_acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
+                for s in 0..TA_SB_SEL_LEN {
+                    sel_acc = sel_acc + sb_sel[s].into() * nxt_acc[s][p].into();
+                }
+                tb.assert_zero(tr_active.into() * (tr_in[p].into() - sel_acc));
+            }
+        }
+
         // M-S1 (§4.C.11) — matmul-input pack-link. On every matmul
         // row (`IS_RESET_CUMSUM + IS_UPDATE_CUMSUM`) the packed
         // `A_NOISED[c]` / `B_NOISED[c]` cells equal the base-256

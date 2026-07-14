@@ -708,6 +708,47 @@ mod tests {
         }
     }
 
+    /// §6(b)-R-b soundness — a tampered TileReduce input on a reduce row
+    /// must reject. Guards the `TR_IN == TA_ACC[active_sb]` bind (+ the
+    /// TileReduce bit-reconstruction): a prover cannot feed the reduce a
+    /// per-stripe contribution other than the held accumulator's.
+    #[test]
+    fn rb_tampered_reduce_input_rejects() {
+        use crate::composite_layout::{TOTAL_TRACE_WIDTH, TR_IN_START, TR_IS_ACTIVE};
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let (t, r, num_stripes) = (8usize, 4usize, 16usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let _ = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        // Tamper TR_IN[0] on the first reduce row.
+        let h = trace.matrix.values.len() / TOTAL_TRACE_WIDTH;
+        let mut target = None;
+        for rr in 0..h {
+            if trace.matrix.values[rr * TOTAL_TRACE_WIDTH + TR_IS_ACTIVE].as_canonical_u64() == 1 {
+                target = Some(rr);
+                break;
+            }
+        }
+        let rr = target.expect("a reduce row must exist");
+        trace.matrix.values[rr * TOTAL_TRACE_WIDTH + TR_IN_START] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0xDEAD_BEEF);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let proof = composite_prove(&cfg, trace, &pis);
+        assert!(
+            composite_verify(&cfg, &proof, &pis).is_err(),
+            "tampered reduce input (≠ held accumulator) must reject",
+        );
+    }
+
     /// HIGH-2.2 §6(b) end-to-end regression via the production
     /// Route-A path: the **full useful-work chain** —
     /// `place_useful_work_chain` (sub-block-major matmul sweep +
