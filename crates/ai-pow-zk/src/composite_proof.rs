@@ -784,6 +784,52 @@ mod tests {
             .expect("R-b pinned (sx_bound=false) at num_stripes 128 must verify");
     }
 
+    /// §6(b)-R-b — the full Route-A LogUp path (CRIT-1 pin + the
+    /// `noised_packed`/range/i8u8 LogUp bus + keystones) for a stripe-major
+    /// R-b trace at num_stripes=128, `sx_bound=false`. The R-b sweep's
+    /// `place_matmul_step` writes A/B-NOISED consumers; the bus balances
+    /// against the co-located producer store the sweep also emits.
+    #[test]
+    fn rb_stripe_major_logup_verifies() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x9C00 + i as u32);
+        // num_stripes=96 (> the old STRIPE_MAX=64). The per-query positioned
+        // producer store for R-b is large, so this fits a 1<<14 trace.
+        let (t, r, num_stripes) = (8usize, 4usize, 96usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline(1 << 14);
+        let h = trace.height();
+        let (rows_used, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        // noised_packed producer store — the R-b sweep now emits positioned
+        // MAT_IDs (place_matmul_step_with_ids), so the bus balances against the
+        // same positioned chunk keys. place_noised_store_row sets only the
+        // store cols, preserving the sweep's FOLD_STATE/TR/TA passthrough.
+        let store_chunks =
+            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        let store_start = 8 + rows_used;
+        let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
+        let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
+        for (i, chunk) in store_chunks.iter().enumerate() {
+            let id_base = if chunk.side_a { a_id_base } else { b_id_base };
+            let mat_id = crate::composite_trace::noised_chunk_id(id_base, k, &chunk.src)
+                .try_into()
+                .expect("positioned noised chunk id must fit in MAT_ID");
+            trace.place_noised_store_row(store_start + i, &chunk.bytes, mat_id);
+        }
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let (proof, program) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, false);
+        composite_verify_pinned_logup_sx(&cfg, &program, &proof, &pis, false)
+            .expect("R-b Route-A LogUp at num_stripes 128 must verify");
+    }
+
     /// HIGH-2.2 §6(b) end-to-end regression via the production
     /// Route-A path: the **full useful-work chain** —
     /// `place_useful_work_chain` (sub-block-major matmul sweep +

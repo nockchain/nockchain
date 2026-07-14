@@ -2011,6 +2011,10 @@ impl CompositeTrace {
         let n_sb = n_sbi * n_sbj;
         assert!(n_sb * 4 <= 256, "h·w = {} exceeds MAX_CELLS=256", n_sb * 4);
         let trace_h = self.height();
+        // Positioned noised-chunk ID bases (for the LogUp bus). Contiguous
+        // tile ⇒ opened lane == tile-local index.
+        let a_id_base = NOISED_CHUNK_ID_BASE;
+        let b_id_base = a_id_base + ((h_tile * k).div_ceil(8)) as u64;
 
         let set_bits = |row: &mut [Val], at: usize, v: u32| {
             for i in 0..32 {
@@ -2052,7 +2056,29 @@ impl CompositeTrace {
                         // irrelevant to R-b; only that the recurrence + noised
                         // pack-link hold on these matmul-active rows.
                         let is_reset = step == 0 && sb == 0 && chunk == 0;
-                        carry = self.place_matmul_step(row, &a_blk, &b_blk, is_reset, !is_reset, &carry);
+                        // Positioned noised-chunk IDs so the LogUp bus binds
+                        // A/B-NOISED to the committed producer store (contiguous
+                        // tile: lane = index). Mirrors place_useful_work_chain_hw.
+                        let ids_for = |side_a: bool, sb_base: usize| -> [u64; A_ID_LEN] {
+                            let id_base = if side_a { a_id_base } else { b_id_base };
+                            core::array::from_fn(|jc| {
+                                let mut src = [None; 8];
+                                for mm in 0..8 {
+                                    let f = jc * 8 + mm;
+                                    let (di, col) = (f / TILE_D, f % TILE_D);
+                                    if col < w {
+                                        src[mm] =
+                                            Some(((sb_base + di) as u32, (lo + c0 + col) as u32));
+                                    }
+                                }
+                                noised_chunk_id(id_base, k, &src)
+                            })
+                        };
+                        let a_ids = ids_for(true, sbi * TILE_H);
+                        let b_ids = ids_for(false, sbj * TILE_H);
+                        carry = self.place_matmul_step_with_ids(
+                            row, &a_blk, &b_blk, &a_ids, &b_ids, is_reset, !is_reset, &carry,
+                        );
 
                         // the 4-cell dot for this micro-step.
                         let mut dot = [0i32; 4];
