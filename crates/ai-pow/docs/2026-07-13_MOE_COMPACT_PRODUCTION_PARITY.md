@@ -633,17 +633,33 @@ unmet difficulty rejects.
    > together, validated by the integration test. No safe partial landing exists;
    > per R1 this is committed only once the integration test is green.
 
-   Exact wiring (verified against `inner.hoon` + `page:t`):
+   Exact wiring (verified against `inner.hoon` + `page:t`; **attempted 2026-07-13,
+   hoonc-compiled, hit the representation wall below**):
    - `check-pow` (`inner.hoon ~1146`): replace `?: ?=([%ai-pow *] u.pow) %.n` with
-     `(ai-pow-verify u.pow (block-commitment:page:t pag) ~(target get:page:t pag))`
-     — `u.pow` is `[%ai-pow ai-pow-artifact]` (the transparent artifact noun), the
-     commitment + target come from the page accessors already used at
-     `inner.hoon:840-841`.
+     a call to `ai-pow-verify` on `u.pow` (`[%ai-pow ai-pow-artifact]`, the
+     transparent artifact noun) + the page's commitment + target.
+   > **⚠️ Soundness-critical representation binding (the concrete wall the attempt
+   > surfaced).** The naive `[commit=@ target=@]` sample does NOT type-check: the
+   > page's `target` is a **structured `bignum:bn`** (`ztd/three.hoon`), and
+   > `block-commitment:page:t` is a **tip5 hash**, not a bare atom. The Hoon arm
+   > must convert BOTH to the exact **32-byte little-endian atoms** the Rust verify
+   > expects (`candidate_nock_block_commitment` = `aux.nock_block_commitment`;
+   > `nockchain_target` = the 256-bit target LE). A wrong conversion (endianness,
+   > limb order, hash serialization) mis-verifies — accepts a wrong block or rejects
+   > a valid one. This binding must be pinned + validated by the integration test;
+   > it is exactly the soundness-critical detail R1 says not to rush. The jet's
+   > `atom_to_32` assumes a ≤32-byte LE atom, so the conversion lives in the Hoon
+   > arm (or the jet gains a `bignum`/hash decoder — the Hoon-side conversion keeps
+   > the jet interface simple + transparent).
    - The stubbed `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!`) as a sibling
      of `check-pow`; **set the jet path** in `produce_ai_pow_hot_state` to that
      arm's `~%` parent chain (validate at runtime — a mis-chained hint prints).
-   - Register `produce_ai_pow_hot_state` in `nockchain/src/lib.rs` `hot_state`;
-     at boot call `ai_pow_jets::setup::build_verifier_setup(..)` → `init_ai_pow_verifier_setup`.
+   - Register `produce_ai_pow_hot_state` in `nockchain/src/main.rs` (extend
+     `produce_prover_hot_state()`); at boot call
+     `ai_pow_jets::setup::build_verifier_setup(..)` → `init_ai_pow_verifier_setup`.
+     **Blocker: the boot setup needs the FINALIZED production puzzle shape**
+     (`params`/`hw`/`e`/`top_k`) — not pinned yet (pre-activation, height 95k). The
+     boot builder is written + validated; it just needs the production constants.
    - Rebuild the jam: `make assets/dumb.jam` (`hoonc … hoon/apps/dumbnet/outer.hoon hoon`),
      then the `nockchain` binary.
    - Integration test: boot the kernel (jet + setup injected), submit a real
