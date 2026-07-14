@@ -1158,7 +1158,7 @@ pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_node(
 /// [`decode_ai_pow_pearl_merge_artifact_noun`] (which dispatches on the tag) into a
 /// `PearlMergeAiPowArtifactShape` carrying `moe: Some(..)`, ready for the node MoE
 /// verify branch.
-pub(crate) fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+pub fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
     statement: &PearlMergePublicStatementShape,
     aux_inclusion: &PearlAuxInclusionProof,
     moe: &PearlMergeMoeArtifact,
@@ -3109,13 +3109,40 @@ pub fn verify_ai_pow_block_artifact_jam(
     expected_verifier_key_digest_bytes: &[u8],
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
     let artifact = decode_ai_pow_pearl_merge_artifact_jam(jammed, limits)?;
+    verify_ai_pow_block_artifact(
+        &artifact,
+        limits,
+        candidate_nock_block_commitment,
+        nockchain_target,
+        max_pattern_len,
+        compact_context,
+        expected_verifier_key_digest_bytes,
+    )
+}
 
+/// Shape-based core of [`verify_ai_pow_block_artifact_jam`] — verifies an
+/// already-decoded artifact. This is the entrypoint the **jet** uses after
+/// decoding the (transparent) `%ai-pow` artifact noun via
+/// [`decode_ai_pow_pearl_merge_artifact_noun`], avoiding a re-jam. It re-derives
+/// the canonical `(A, B)` from the protocol seed + the block's authenticated
+/// params (never the prover), then dispatches on the nonce tag.
+pub fn verify_ai_pow_block_artifact(
+    artifact: &PearlMergeAiPowArtifactShape,
+    limits: CertificateNounLimits,
+    candidate_nock_block_commitment: &[u8; 32],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest_bytes: &[u8],
+) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
     // Reconstruct the block's matmul dims from the AUTHENTICATED statement, then
     // re-derive the canonical matrices from the protocol seed. (MoE-tolerant parse:
     // the dense `from_public_data` fail-closes on a MoE trailer.)
     let header = PearlIncompleteBlockHeader::from_bytes(&artifact.statement.block_header)?;
-    let public_params =
-        PearlPublicProofParams::from_public_data_allowing_moe(header, &artifact.statement.public_data)?;
+    let public_params = PearlPublicProofParams::from_public_data_allowing_moe(
+        header,
+        &artifact.statement.public_data,
+    )?;
     let synth_params = MatmulParams {
         m: public_params.m,
         k: public_params.mining_config.common_dim,
@@ -3143,7 +3170,7 @@ pub fn verify_ai_pow_block_artifact_jam(
 
     if artifact.moe.is_some() {
         let pre = verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
-            &artifact,
+            artifact,
             context,
             compact_context,
             &expected_verifier_key_digest,
@@ -3152,7 +3179,7 @@ pub fn verify_ai_pow_block_artifact_jam(
         Ok(AiPowBlockVerifyOutcome::Moe(pre))
     } else {
         let pre = verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
-            &artifact,
+            artifact,
             context,
             compact_context,
             &expected_verifier_key_digest,

@@ -1,0 +1,22 @@
+[package]
+name = "ai-pow-jets"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Consensus verifier jet for the AI-PoW (%ai-pow) puzzle: a Rust jet that verifies a decoded compact recursive certificate, with a stubbed Hoon arm (Branch b). The artifact noun stays transparent to Hoon; only the recursive-STARK verify is native."
+
+[dependencies]
+ai-pow = { path = "../ai-pow", features = ["zk"] }
+ai-pow-zk = { path = "../ai-pow-zk", features = ["recursion"] }
+ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
+nockvm.workspace = true
+nockvm_macros.workspace = true
+either.workspace = true
+once_cell.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+nockapp = { path = "../nockapp" }
+
+[lints]
+workspace = true

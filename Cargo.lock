@@ -72,6 +72,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-pow-jets"
+version = "0.1.0"
+dependencies = [
+ "ai-pow",
+ "ai-pow-miner",
+ "ai-pow-zk",
+ "either",
+ "nockapp",
+ "nockvm",
+ "nockvm_macros",
+ "once_cell",
+ "tracing",
+]
+
+[[package]]
 name = "ai-pow-miner"
 version = "0.1.0"
 dependencies = [
