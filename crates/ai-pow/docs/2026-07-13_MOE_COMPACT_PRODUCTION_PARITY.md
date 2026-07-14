@@ -673,14 +673,31 @@ unmet difficulty rejects.
      **Blocker: the boot setup needs the FINALIZED production puzzle shape**
      (`params`/`hw`/`e`/`top_k`) — not pinned yet (pre-activation, height 95k). The
      boot builder is written + validated; it just needs the production constants.
-   - Rebuild the jam: `make assets/dumb.jam` (`hoonc … hoon/apps/dumbnet/outer.hoon hoon`),
-     then the `nockchain` binary.
+   - Rebuild the jam: `make assets/dumb.jam` — **verified 2026-07-13: the full
+     kernel with the arm + `check-pow` wiring rebuilds successfully** (19 MB jam).
+   > **⚠️ Activation-gating soundness detail (surfaced by the jam rebuild).**
+   > `check-pow` is `|= pag=page:t` — a pure function of the page with **no access
+   > to `constants.k`**, so it cannot itself gate `%ai-pow` by
+   > `ai-pow-activation-height` (95,000). The wiring as written verifies `%ai-pow`
+   > at ANY height; a pre-activation `%ai-pow` block would then be wrongly accepted
+   > (if a valid proof) or crash the node (jet uninitialized → `!!`) — a DoS worse
+   > than today's `%.n`. **Before landing, verify** that the proof-version/height
+   > mechanism (`block-id-to-proof-version`) already rejects a `%ai-pow` pow whose
+   > height is below activation *before* `check-pow` runs; if not, the activation
+   > gate must be added in the caller (`heard-block`, which has `k`) or `check-pow`
+   > must take the activation height as a parameter. This is the THIRD
+   > soundness-critical detail found only by building the integration (after the
+   > representation binding and the jam-padding hash) — concrete evidence this is
+   > careful-staged consensus work, not mechanical wiring.
    - Integration test: boot the kernel (jet + setup injected), submit a real
-     `%ai-pow` block → accepted; a forged one → rejected.
+     `%ai-pow` block → accepted; a forged one → rejected. **Requires a full
+     `page:t` block fixture** (`check-pow` runs inside `heard-block` after
+     `check-page-without-txs`), or a dedicated test poke that invokes `check-pow`.
    Shared with dense (the jet dispatches on the tag; both variants covered). This is
-   a coupled multi-slow-step (jam rebuild + ~25 s boot prove + block fixture)
-   consensus change — the maximal correct subset (all Rust) is landed + validated;
-   this unit is the precise residual, per R1.
+   a coupled multi-slow-step consensus change with multiple soundness-critical
+   details (representation binding ✅ resolved; activation gating, crash-safety,
+   jet ~% chain — remaining) — the maximal correct subset (all Rust + the binding)
+   is landed + validated; this unit is the precise residual, per R1.
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
