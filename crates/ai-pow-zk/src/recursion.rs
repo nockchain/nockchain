@@ -1870,6 +1870,26 @@ pub fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_p
     )
 }
 
+/// §6(b)-R-b — cached-setup variant with an explicit `sx_bound`. The
+/// R-b stripe-major L0 proof (`sx_bound = false`) requires the L1
+/// verifier circuit be built over the same AIR flag; the prover cache
+/// is setup-only and does not affect the binding.
+pub fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache_sx(
+    zk_params: &crate::params::ZkParams,
+    profile: &crate::circuit::CircuitConfig,
+    verified: &ChainVerifiedCompositeProof<'_>,
+    cache: &AiPowCompactBatchProverCache,
+    sx_bound: bool,
+) -> Result<CompactBatchCertificateRun, VerificationError> {
+    prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_inner(
+        zk_params,
+        profile,
+        verified,
+        Some(cache),
+        sx_bound,
+    )
+}
+
 fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_inner(
     zk_params: &crate::params::ZkParams,
     profile: &crate::circuit::CircuitConfig,

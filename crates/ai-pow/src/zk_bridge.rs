@@ -548,13 +548,19 @@ fn prove_compact_batch_from_verified_l0(
     verified_l0: &ai_pow_zk::recursion::ChainVerifiedCompositeProof<'_>,
     cache: Option<&AiPowCompactRecursiveProverCache>,
 ) -> Result<ai_pow_zk::recursion::CompactBatchCertificateRun, BridgeError> {
+    // §6(b)-R-b: the L1 verifier circuit must be built over the same AIR
+    // keystone flag the L0 proof used — `sx_bound = false` for the R-b
+    // stripe-major path (`num_stripes > STRIPE_MAX`), `true` for the
+    // sub-block-major path. Derived from the trusted (verified) params.
+    let sx_bound = (zk_params.k / zk_params.noise_rank) as usize <= crate::params::STRIPE_MAX;
     if let Some(cache) = cache {
         let cached =
-            ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache(
+            ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache_sx(
                 zk_params,
                 &CircuitConfig::for_layer0_trace(verified_l0.trace_height()),
                 verified_l0,
                 &cache.inner,
+                sx_bound,
             );
         match cached {
             Ok(run) => return Ok(run),
@@ -563,10 +569,11 @@ fn prove_compact_batch_from_verified_l0(
         }
     }
 
-    ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof(
+    ai_pow_zk::recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_sx(
         zk_params,
         &CircuitConfig::for_layer0_trace(verified_l0.trace_height()),
         verified_l0,
+        sx_bound,
     )
     .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))
 }
@@ -6666,6 +6673,46 @@ mod tests {
         });
         assert!(out.sweep_in_circuit, "R-b sweep must be in-circuit");
         assert!(out.pis.hash_a.iter().any(|&w| w != 0));
+    }
+
+    /// §6(b)-R-b Stage E — the FULL production **compact recursive
+    /// certificate** (the consensus wire cert a block carries) for a
+    /// wide-stripe shape (`num_stripes > STRIPE_MAX`). Exercises the
+    /// whole pipeline through `prove_ai_pow_compact_recursive_certificate`:
+    /// R-b L0 prove (sx_bound=false) → chain-verify → L1 verifier circuit
+    /// (built over the SAME sx_bound=false AIR — the Stage-E threading) →
+    /// L2 compact + the internal compact verify. A wrong sx_bound in the
+    /// recursion would fail to reproduce the L0 AIR and error here. This
+    /// is the production analog of the S7 unit cert (which built the L0
+    /// trace directly); here the miner's real prover produces it.
+    /// Heavy (L1/L2 recursion); `r = 64 ⇒ ⌈r/16⌉ = 4` chunks keeps the
+    /// L0 trace modest.
+    #[test]
+    fn rb_stage_e_wide_stripe_compact_recursive_certificate() {
+        use crate::synth::synth_matrices;
+        let params = MatmulParams {
+            m: 8,
+            k: 4160, // 65 · 64; 16·64 ≤ 4160 ≤ 4·64², 64 | 4160
+            n: 8,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params
+            .validate_prod_envelope()
+            .expect("wide-stripe compact-cert shape must be admissible");
+        assert_eq!(params.num_stripes(), 65);
+        assert_eq!(params.num_tiles(), 1);
+        let target = crate::tile_hash::difficulty_target(&params);
+        let (a, b) = synth_matrices(b"rb-stage-e-cert", &params);
+        let ctx = BlockContext::build(b"rb-stage-e-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        // Produces AND internally compact-verifies the L2 certificate.
+        let run = prove_ai_pow_compact_recursive_certificate(&ctx, &params, TEST_NONCE, &target, 0)
+            .unwrap_or_else(|e| {
+                panic!("R-b wide-stripe compact recursive certificate must prove+verify: {e:?}")
+            });
+        assert_eq!(run.zk_params.k / run.zk_params.noise_rank, 65, "num_stripes bound");
     }
 
     /// **§4.C.2 c-exact cx.2 — the position-exact adversarial.**
