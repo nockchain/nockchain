@@ -2207,6 +2207,70 @@ pub fn verify_pearl_compatible_work(
     })
 }
 
+/// Matrix-free dense work verification for the COMPACT node verify (option (a):
+/// arbitrary miner-chosen matrices, Pearl parity — no synthetic-matrix pin).
+///
+/// The dense counterpart of [`verify_pearl_moe_compatible_work`]. It takes the
+/// miner's block-COMMITTED matrix roots (`public_params.hash_a`/`hash_b`) instead
+/// of re-deriving them from a fixed matrix set, sources the opened rows/columns
+/// from the PUBLIC pattern, and gates difficulty on the authenticated
+/// `hash_jackpot`. It does NOT recompute the tile: the compact recursive
+/// certificate proves `pis.hash_jackpot`/`pis.jackpot` are the opened tile's real
+/// output over the committed matrices, and the node caller binds
+/// `pis.hash_jackpot == public_params.hash_jackpot` (and does not re-check the
+/// off-circuit `pis.jackpot`). The commitment-keyed noise is the anti-grind (Pearl
+/// `ffi/mine.rs`), so arbitrary/degenerate matrices are safe.
+///
+/// The returned `ticket.tile_state` is the zero default — unused by the node
+/// (proof-bound, not recomputed); `a_rows`/`b_cols` come from the public pattern
+/// (used to rebuild the canonical schedule); `jackpot_hash` is the authenticated
+/// statement value. Only the COMPACT node path uses this; the matrix-holding
+/// producer + the intermediate checkpoint keep `verify_pearl_compatible_work`.
+pub fn verify_pearl_compatible_work_committed(
+    public_params: &PearlPublicProofParams,
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+) -> Result<PearlCompatibleWorkPrecheck, PearlCompatError> {
+    public_params.sanity_check()?;
+
+    let pearl_target = public_params.pearl_adjusted_target()?;
+    let nockchain_adjusted_target = public_params.nockchain_adjusted_target(nockchain_target)?;
+    if !hash_le_target(&public_params.hash_jackpot, &nockchain_adjusted_target) {
+        return Err(PearlCompatError::NockchainTargetNotMet);
+    }
+
+    let sigma = public_params.block_header.to_bytes();
+    let mu = public_params.mining_config.to_bytes()?;
+    let kappa = pearl_kappa(&sigma, &mu);
+    let h_a = public_params.hash_a;
+    let h_b = public_params.hash_b;
+    let (s_a, s_b) = pearl_noise_seeds(&kappa, &h_a, &h_b);
+    let commitments = PearlWorkCommitments {
+        kappa,
+        h_a,
+        h_b,
+        s_a,
+        s_b,
+    };
+
+    let a_rows = public_params.a_rows_indices_bounded(max_pattern_len)?;
+    let b_cols = public_params.b_cols_indices_bounded(max_pattern_len)?;
+    let ticket = PearlPatternTicket {
+        a_rows,
+        b_cols,
+        tile_state: TileState::default(),
+        jackpot_hash: public_params.hash_jackpot,
+    };
+
+    Ok(PearlCompatibleWorkPrecheck {
+        commitments,
+        ticket,
+        pearl_target,
+        nockchain_target: *nockchain_target,
+        nockchain_adjusted_target,
+    })
+}
+
 /// Decode Pearl's persisted/wire public statement bytes and run the complete
 /// shared-work precheck.
 ///

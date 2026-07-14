@@ -29,7 +29,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    verify_pearl_aux_inclusion, verify_pearl_merge_public_statement_bytes,
+    verify_pearl_aux_inclusion, verify_pearl_compatible_work_committed,
+    verify_pearl_merge_public_statement_bytes,
     verify_pearl_merge_public_statement_bytes_with_aux_inclusion, PearlAuxInclusionProof,
     verify_pearl_moe_compatible_work, PearlCompatError, PearlIncompleteBlockHeader,
     PearlMergeMiningPrecheck, PearlMergePublicStatement, PearlMergeTicketAttempt,
@@ -1339,7 +1340,9 @@ pub fn pearl_merge_recursive_certificate_parts_from_ticket_public_inputs(
     let mut parts = pearl_merge_recursive_certificate_parts_from_ticket(
         attempt, a_row_major, b_col_major, max_pattern_len,
     )?;
-    precheck_pearl_merge_bound_public_inputs(public_inputs, &parts.public_inputs)?;
+    // Miner producer path: it holds the matrices and built the tile, so bind the
+    // full pis including the raw `jackpot` tile PI.
+    precheck_pearl_merge_bound_public_inputs(public_inputs, &parts.public_inputs, true)?;
     parts.public_inputs = public_inputs.clone();
     Ok(parts)
 }
@@ -2013,8 +2016,74 @@ pub fn precheck_ai_pow_pearl_merge_artifact_statement_with_context(
         context.b_col_major, context.nockchain_target, context.max_pattern_len,
         &artifact.aux_inclusion,
     )?;
+    // Tile-based precheck (context carries the matrices): bind the full pis
+    // including the raw `jackpot` tile PI. The matrix-free compact node path uses
+    // `precheck_ai_pow_pearl_merge_artifact_statement_committed` instead.
     precheck_pearl_merge_certificate_public_inputs(
-        &artifact.certificate, &artifact.statement, &precheck,
+        &artifact.certificate, &artifact.statement, &precheck, true,
+    )?;
+    Ok(precheck)
+}
+
+/// Matrix-free dense statement precheck for the option-(a) **COMPACT** node verify
+/// (arbitrary miner-chosen matrices, Pearl parity — no synthetic-matrix pin).
+///
+/// Mirrors the MoE compact node path: aux binding + `verify_pearl_compatible_work_
+/// committed` (the miner's COMMITTED `H_A`/`H_B`, opened rows/cols from the public
+/// pattern, difficulty on the authenticated `hash_jackpot`, NO tile recompute) +
+/// the pis binding WITHOUT the raw `jackpot` tile PI. The compact recursive
+/// certificate proves `pis.jackpot`/`pis.hash_jackpot` in-circuit over the committed
+/// matrices; the `hash_jackpot` PI comparison here (from the authenticated
+/// statement) ties the difficulty gate to the proven tile. The commitment-keyed
+/// noise is the anti-grind, so arbitrary/degenerate matrices are safe.
+pub fn precheck_ai_pow_pearl_merge_artifact_statement_committed(
+    artifact: &PearlMergeAiPowArtifactShape,
+    context: &PearlMergeAiPowVerifierContext<'_>,
+) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
+    let statement = &artifact.statement;
+
+    // (1) Aux binding (matrix-free) — identical to the MoE compact path.
+    let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
+    verify_pearl_aux_inclusion(
+        &header,
+        &statement.expected_aux_commitment,
+        &artifact.aux_inclusion,
+    )?;
+    if statement.aux.nock_block_commitment != *context.candidate_nock_block_commitment {
+        return Err(CertificateNounError::PearlMergeStatement(
+            PearlCompatError::NockchainAuxBlockCommitmentMismatch,
+        ));
+    }
+    let aux_commitment = statement.aux.commitment()?;
+    if aux_commitment != statement.expected_aux_commitment {
+        return Err(CertificateNounError::PearlMergeStatement(
+            PearlCompatError::NockchainAuxCommitmentMismatch,
+        ));
+    }
+
+    // (2) Matrix-free work: committed H_A/H_B + public-pattern rows/cols + difficulty.
+    // `from_public_data` (dense) fail-closes on a MoE trailer, matching this path's
+    // dense-only contract (the caller also rejects `artifact.moe.is_some()`).
+    let public_params =
+        PearlPublicProofParams::from_public_data(header, &statement.public_data)?;
+    let work = verify_pearl_compatible_work_committed(
+        &public_params,
+        context.nockchain_target,
+        context.max_pattern_len,
+    )?;
+    let precheck = PearlMergeMiningPrecheck {
+        work,
+        aux: statement.aux.clone(),
+        aux_commitment,
+    };
+
+    // (3) Bind the pis WITHOUT the raw `jackpot` tile PI (proof-bound); `hash_jackpot`
+    // (from the authenticated statement) is still bound, tying difficulty to the proof.
+    precheck_pearl_merge_certificate_public_inputs(
+        &artifact.certificate,
+        &artifact.statement,
+        &precheck,
+        false,
     )?;
     Ok(precheck)
 }
@@ -2058,7 +2127,7 @@ pub fn precheck_ai_pow_pearl_merge_artifact_metadata_with_context(
         &artifact.aux_inclusion,
     )?;
     precheck_pearl_merge_certificate_metadata(
-        &artifact.certificate, &artifact.statement, &precheck,
+        &artifact.certificate, &artifact.statement, &precheck, true,
     )?;
     Ok(precheck)
 }
@@ -2348,7 +2417,10 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limit
             "dense compact verify called on a MoE (AIM1) artifact; use the MoE verify path",
         ));
     }
-    let precheck = precheck_ai_pow_pearl_merge_artifact_statement_with_context(artifact, context)?;
+    // Option (a): matrix-free precheck (arbitrary miner-chosen matrices). The tile
+    // is proof-bound, not recomputed from a fixed matrix set. See
+    // `precheck_ai_pow_pearl_merge_artifact_statement_committed`.
+    let precheck = precheck_ai_pow_pearl_merge_artifact_statement_committed(artifact, &context)?;
     // P0/D6: derive the canonical L0 program commitment from the opened schedule
     // the precheck rebuilt (never from the prover) and bind it into the compact
     // verify — a certificate proven over a different program fails the statement
@@ -2383,8 +2455,9 @@ pub struct PearlMergeMoeMiningPrecheck {
 ///   1. reconstruct + **aux-bind** the statement (identical to the dense prefix:
 ///      aux inclusion, `nock_block_commitment`, `aux_commitment`);
 ///   2. [`verify_pearl_moe_compatible_work`] — MoE-aware envelope + routing
-///      binding + **jackpot/difficulty binding** (recompute the opened tile,
-///      require `jackpot == hash_jackpot`, then meets target);
+///      binding + difficulty gate on the authenticated `hash_jackpot` over the
+///      miner's COMMITTED matrices (no tile recompute; option (a), arbitrary
+///      models), then the caller binds `pis.hash_jackpot == public_params.hash_jackpot`;
 ///   3. reconstruct `MatmulParams` from the **authenticated** statement dims
 ///      (requiring the certificate's `zk_params` to agree), then
 ///      [`verify_pearl_moe_compact_recursive_certificate`] — routing/PI/schedule
@@ -2614,6 +2687,7 @@ fn precheck_pearl_merge_certificate_public_inputs(
     certificate: &AiPowCertificateShape,
     statement: &PearlMergePublicStatementShape,
     precheck: &PearlMergeMiningPrecheck,
+    check_jackpot: bool,
 ) -> Result<(), CertificateNounError> {
     let metadata = AiPowCertificateMetadata {
         version: certificate.version,
@@ -2623,13 +2697,14 @@ fn precheck_pearl_merge_certificate_public_inputs(
         commitments: certificate.commitments.clone(),
         public_inputs: certificate.public_inputs.clone(),
     };
-    precheck_pearl_merge_certificate_metadata(&metadata, statement, precheck)
+    precheck_pearl_merge_certificate_metadata(&metadata, statement, precheck, check_jackpot)
 }
 
 fn precheck_pearl_merge_certificate_metadata(
     metadata: &AiPowCertificateMetadata,
     statement: &PearlMergePublicStatementShape,
     precheck: &PearlMergeMiningPrecheck,
+    check_jackpot: bool,
 ) -> Result<(), CertificateNounError> {
     let block_header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
     let public_params =
@@ -2720,13 +2795,24 @@ fn precheck_pearl_merge_certificate_metadata(
     let expected_public_inputs = pearl_merge_recursive_public_inputs_from_work(
         &precheck.work.commitments, &precheck.work.ticket,
     );
-    precheck_pearl_merge_bound_public_inputs(&metadata.public_inputs, &expected_public_inputs)?;
+    precheck_pearl_merge_bound_public_inputs(
+        &metadata.public_inputs,
+        &expected_public_inputs,
+        check_jackpot,
+    )?;
     Ok(())
 }
 
 fn precheck_pearl_merge_bound_public_inputs(
     got: &CompositePublicInputs,
     expected: &CompositePublicInputs,
+    // `check_jackpot`: whether to bind the raw tile PI `jackpot`. TRUE for the
+    // matrix-holding paths (the miner producer + the intermediate checkpoint) that
+    // recompute the tile off-circuit. FALSE for the option-(a) COMPACT node verify,
+    // whose `expected` has no tile (matrices are miner-chosen); there the compact
+    // recursive certificate binds `pis.jackpot` in-circuit, and `hash_jackpot`
+    // (checked below) ties the difficulty gate to the proven tile.
+    check_jackpot: bool,
 ) -> Result<(), CertificateNounError> {
     if got.hash_a != expected.hash_a {
         return Err(CertificateNounError::PearlMergePublicInputMismatch(
@@ -2748,7 +2834,7 @@ fn precheck_pearl_merge_bound_public_inputs(
             "public-inputs.commitment-hash",
         ));
     }
-    if got.jackpot != expected.jackpot {
+    if check_jackpot && got.jackpot != expected.jackpot {
         return Err(CertificateNounError::PearlMergePublicInputMismatch(
             "public-inputs.jackpot",
         ));
@@ -3134,9 +3220,10 @@ pub fn verify_ai_pow_block_artifact_jam(
 /// Shape-based core of [`verify_ai_pow_block_artifact_jam`] — verifies an
 /// already-decoded artifact. This is the entrypoint the **jet** uses after
 /// decoding the (transparent) `%ai-pow` artifact noun via
-/// [`decode_ai_pow_pearl_merge_artifact_noun`], avoiding a re-jam. It re-derives
-/// the canonical `(A, B)` from the protocol seed + the block's authenticated
-/// params (never the prover), then dispatches on the nonce tag.
+/// [`decode_ai_pow_pearl_merge_artifact_noun`], avoiding a re-jam. Option (a): the
+/// matrices are miner-chosen (arbitrary model, Pearl parity — no synthetic pin); it
+/// verifies against the block's COMMITTED `H_A`/`H_B` with the tile proven
+/// in-circuit, needing no model, then dispatches on the nonce tag (dense/MoE).
 pub fn verify_ai_pow_block_artifact(
     artifact: &PearlMergeAiPowArtifactShape,
     limits: CertificateNounLimits,
@@ -3146,26 +3233,12 @@ pub fn verify_ai_pow_block_artifact(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest_bytes: &[u8],
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
-    // Reconstruct the block's matmul dims from the AUTHENTICATED statement, then
-    // re-derive the canonical matrices from the protocol seed. (MoE-tolerant parse:
-    // the dense `from_public_data` fail-closes on a MoE trailer.)
-    let header = PearlIncompleteBlockHeader::from_bytes(&artifact.statement.block_header)?;
-    let public_params = PearlPublicProofParams::from_public_data_allowing_moe(
-        header,
-        &artifact.statement.public_data,
-    )?;
-    let synth_params = MatmulParams {
-        m: public_params.m,
-        k: public_params.mining_config.common_dim,
-        n: public_params.n,
-        noise_rank: u32::from(public_params.mining_config.rank),
-        tile: artifact.certificate.zk_params.tile,
-        spot_checks: 1,
-        difficulty_bits: artifact.certificate.zk_params.difficulty_bits,
-    };
-    let (a, b) =
-        ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &synth_params);
-
+    // Option (a): the matrices are miner-chosen (arbitrary model, Pearl parity — no
+    // synthetic-matrix pin). The compact node verifies (dense + MoE) bind to the
+    // miner's block-COMMITTED H_A/H_B and prove the opened tile in-circuit, so NO
+    // matrices are re-derived here; the verifier never needs the model. The context's
+    // matrix slices are empty (the compact paths ignore them; only the intermediate
+    // checkpoint verify, which this production path does not call, reads them).
     let expected_verifier_key_digest =
         ai_pow_zk::recursion::compact_batch_verifier_key_digest_from_bytes(
             expected_verifier_key_digest_bytes,
@@ -3173,8 +3246,8 @@ pub fn verify_ai_pow_block_artifact(
         .map_err(|e| CertificateNounError::CompactVerifierKeyDigestEncoding(e.to_string()))?;
     let context = PearlMergeAiPowVerifierContext {
         candidate_nock_block_commitment,
-        a_row_major: &a,
-        b_col_major: &b,
+        a_row_major: &[],
+        b_col_major: &[],
         nockchain_target,
         max_pattern_len,
     };
