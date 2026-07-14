@@ -67,7 +67,7 @@
 
 use ai_pow_zk::canonical::StripIndexSchedule;
 use ai_pow_zk::composite_proof::{
-    build_config, composite_prove_pinned_logup, composite_verify_pow_pinned_logup,
+    build_config, composite_prove_pinned_logup_sx, composite_verify_pow_pinned_logup_sx,
 };
 use ai_pow_zk::{
     AiPowBatchProof, AiPowProgram, CircuitConfig, CompositePublicInputs, CompositeTrace,
@@ -2336,8 +2336,16 @@ fn verify_ai_pow_tiled_with_statement(
         &zk_params, &verified.strip_schedule, &bp, artifact.trace_height,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
-    composite_verify_pow_pinned_logup(&cfg, &canonical, &artifact.proof, &artifact.pis, target)
-        .map_err(BridgeError::Pow)
+    // §6(b)-R-b: `sx_bound` is verifier-derived from the trusted
+    // (chain-pinned) params — `num_stripes ≤ STRIPE_MAX` ⇒ the SX
+    // 64-lane keystone is live; `>` ⇒ the R-b path (keystone off,
+    // TileReduce + FOLD_XSTEP==TR_NEW binding). The canonical program
+    // above is already the params-pure R-b schedule for `>STRIPE_MAX`.
+    let sx_bound = (params.num_stripes() as usize) <= crate::params::STRIPE_MAX;
+    composite_verify_pow_pinned_logup_sx(
+        &cfg, &canonical, &artifact.proof, &artifact.pis, target, sx_bound,
+    )
+    .map_err(BridgeError::Pow)
 }
 
 fn verified_block_public(verified: &VerifiedZkStatement) -> ai_pow_zk::canonical::BlockPublic {
@@ -2672,6 +2680,14 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     let w_tile = strip_schedule.b_indices.len();
     let r = params.noise_rank as usize;
     let num_stripes = params.num_stripes() as usize;
+    // §6(b)-R-b: `num_stripes > STRIPE_MAX` uses the stripe-major
+    // useful-work chain (`place_useful_work_chain_rb`) with the SX
+    // 64-lane keystone OFF (`sx_bound = false`); the per-stripe x_step
+    // is bound by the TileReduce lane + the §6(b)-R-b keystone
+    // (FOLD_XSTEP == TR_NEW), and the canonical verifier program is the
+    // params-pure R-b schedule (Stage A). `≤ STRIPE_MAX` is unchanged:
+    // sub-block-major sweep + `place_fold_chain`, `sx_bound = true`.
+    let sx_bound = num_stripes <= crate::params::STRIPE_MAX;
     // `t·k` row-major A-strips / col-major B-strips for the tile
     // (the `compute_tile_from_slices` layout).
     let a_strips: Vec<i8> = strip_schedule
@@ -2748,7 +2764,26 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // `validate_prod_envelope` rejects `num_stripes > STRIPE_MAX`
     // and the trace is sized to the sweep by `expected_layer0_rows`;
     // `place_useful_work_chain` self-asserts both invariants.
-    let real_m = {
+    // The positioned `noised_packed` producer store is placed AFTER
+    // the sweep region (its A/B-NOISED columns are disjoint from the
+    // sweep's SX/CUMSUM passthrough). Shared by both paths — the
+    // consumed chunk positions are identical, only the sweep ORDER
+    // differs, and the LogUp bus is a multiset (order-independent).
+    let place_store = |trace: &mut CompositeTrace, store_start: usize| -> Result<usize, BridgeError> {
+        if coloc {
+            return Ok(0); // producers are the co-located leaf round-0 rows
+        }
+        for (i, s) in store_srcs.iter().enumerate() {
+            let (plain, noise) = plain_noise(s);
+            let id_base = if s.side_a { a_id_base } else { b_id_base };
+            let mat_id = ai_pow_zk::composite_trace::noised_chunk_id(id_base, kk2, &s.src)
+                .try_into()
+                .map_err(|_| BridgeError::CommitmentMismatch("NOISED_PACKED id overflow"))?;
+            trace.place_noised_store_row_split(store_start + i, &plain, &noise, mat_id);
+        }
+        Ok(n_store)
+    };
+    let real_m = if sx_bound {
         let sweep_start = mh_end + 3;
         // B5b: opened row/col lanes = covering-range positions (index − chunk
         // base), matching the strip-opening producer keys and the canonical
@@ -2767,27 +2802,27 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
         let (rows_used, x_steps) = trace.place_useful_work_chain_hw_indexed(
             sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes, &a_lanes, &b_lanes,
         );
-        // Store rows live in the post-sweep passthrough region
-        // (place AFTER the sweep so its SX/CUMSUM passthrough on
-        // `[sweep_start+rows_used, h)` is already written — this
-        // only adds disjoint columns); the fold chain follows.
         let store_start = sweep_start + rows_used;
-        let placed = if coloc {
-            0 // producers are the co-located leaf round-0 rows
-        } else {
-            for (i, s) in store_srcs.iter().enumerate() {
-                let (plain, noise) = plain_noise(s);
-                let id_base = if s.side_a { a_id_base } else { b_id_base };
-                let mat_id = ai_pow_zk::composite_trace::noised_chunk_id(id_base, kk2, &s.src)
-                    .try_into()
-                    .map_err(|_| BridgeError::CommitmentMismatch("NOISED_PACKED id overflow"))?;
-                trace.place_noised_store_row_split(store_start + i, &plain, &noise, mat_id);
-            }
-            n_store
-        };
+        let placed = place_store(&mut trace, store_start)?;
         let fold_start = store_start + placed + 4;
         let xs: Vec<i32> = x_steps[..num_stripes].iter().map(|&u| u as i32).collect();
         trace.place_fold_chain(fold_start, &xs)
+    } else {
+        // §6(b)-R-b: stripe-major useful-work chain with the FoldChip row
+        // INTERLEAVED after each stripe's sub-block sweep (one call, no
+        // separate `place_fold_chain`). It returns the FoldChip state M
+        // directly — that IS `real_m`. The single-tile full-matmul proof
+        // requires `num_tiles == 1` ⇒ the attested tile is (0,0) ⇒ the
+        // opened lanes are tile-local `[0,1,…]`, which is exactly what
+        // `place_useful_work_chain_rb` uses (== `index − ca0` for the
+        // origin tile), matching the canonical R-b program.
+        let sweep_start = mh_end + 3;
+        let (rows_used, m) = trace.place_useful_work_chain_rb(
+            sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes,
+        );
+        let store_start = sweep_start + rows_used;
+        let _placed = place_store(&mut trace, store_start)?;
+        m
     };
 
     // C4 — final jackpot-hash block (trace's last 8 rows). Native mode uses
@@ -2846,15 +2881,20 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // bound to a different program and rejected vs the canonical
     // VK (ai-pow-zk `routea_*` regression suite). Cost ≈ 1.23x
     // the uni-stark pinned path (2026-05-15_HIGH2_2_DESIGN.md §4.C.10).
-    // §6(b)/G1+G2 keystone is always live: the in-circuit matmul
-    // sweep is the only matmul path (the off-circuit fallback was
-    // deleted), so `sx_bound` is unconditionally `true`.
+    // §6(b)/G1+G2 keystone `sx_bound`: `true` for `num_stripes ≤
+    // STRIPE_MAX` (the SX 64-lane keystone forces the sub-block-major
+    // matmul→fold binding); `false` for the §6(b)-R-b stripe-major path
+    // (`num_stripes > STRIPE_MAX`), where the SX 64-lane keystone is off
+    // and the per-stripe x_step is instead bound by the TileReduce lane
+    // + the §6(b)-R-b keystone (FOLD_XSTEP == TR_NEW) — both proven
+    // in-circuit. Verifier-set from the trusted params (`k/r`), never
+    // the proof.
     // §4.C.2 c-exact position-exact adversarial seam: no-op in
     // production (the wrapper passes `|_| {}`); a test tampers a
     // co-located leaf row's committed plain here, after the PI
     // checks, so the only defect is the tampered cell.
     tamper(&mut trace);
-    let (proof, prover_program) = composite_prove_pinned_logup(&cfg, trace, &pis);
+    let (proof, prover_program) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, sx_bound);
     let artifact = ZkProofArtifact {
         proof,
         pis,
@@ -2897,8 +2937,10 @@ pub(crate) fn prove_and_verify_tiled_full<F: FnOnce(&mut CompositeTrace)>(
             &zk_params,
             &CircuitConfig::for_layer0_trace(artifact.trace_height),
         );
-        composite_verify_pow_pinned_logup(
-            &cfg, &prover_program, &artifact.proof, &artifact.pis, target,
+        // §6(b)-R-b: params-derived keystone flag (see the coloc path).
+        let sx_bound = (params.num_stripes() as usize) <= crate::params::STRIPE_MAX;
+        composite_verify_pow_pinned_logup_sx(
+            &cfg, &prover_program, &artifact.proof, &artifact.pis, target, sx_bound,
         )
         .map_err(BridgeError::Pow)?;
     }
@@ -6524,6 +6566,65 @@ mod tests {
             out.pis.hash_a.iter().any(|&w| w != 0),
             "HASH_A PI must be the real committed-matrix commitment"
         );
+    }
+
+    /// §6(b)-R-b Stage D — the **full production prove+pow-verify path**
+    /// for `num_stripes > STRIPE_MAX`. This is the end-to-end mineable
+    /// path (16|r co-location ⇒ `coloc=true` ⇒ 0 separate store rows,
+    /// the canonical params-pure verifier program) at a stripe count
+    /// the old sub-block-major sweep could NEVER exceed:
+    ///   - the prover routes to `place_useful_work_chain_rb`
+    ///     (stripe-major, interleaved fold, `sx_bound=false`);
+    ///   - the R-b sweep's `noised_packed` consumers balance against the
+    ///     SAME co-located leaf producers as ≤64 (same chunk positions,
+    ///     stripe-major order; LogUp is a multiset);
+    ///   - the verifier rebuilds the R-b canonical program (Stage A) and
+    ///     `composite_verify_pow_pinned_logup_sx(sx_bound=false)` accepts.
+    /// `require_prod_envelope=false` bypasses the not-yet-lifted
+    /// admission cap (Stage C); `num_tiles==1` (m=n=tile) keeps it on the
+    /// single-tile full-matmul proof (attested tile (0,0) ⇒ tile-local
+    /// lanes match the canonical). Boundary (65 = STRIPE_MAX+1) AND a
+    /// deep value (96) are both proven.
+    #[test]
+    fn rb_stage_d_production_prove_verify_over_stripe_max() {
+        use crate::synth::synth_matrices;
+        for &num_stripes in &[65usize, 96] {
+            let k = (num_stripes * 16) as u32;
+            let params = MatmulParams {
+                m: 8,
+                k,
+                n: 8,
+                noise_rank: 16,
+                tile: 8,
+                spot_checks: 1,
+                difficulty_bits: 0,
+            };
+            params
+                .validate()
+                .unwrap_or_else(|e| panic!("R-b params (ns={num_stripes}) must validate(): {e:?}"));
+            assert!(
+                params.num_stripes() as usize > crate::params::STRIPE_MAX,
+                "test must exceed STRIPE_MAX"
+            );
+            assert_eq!(params.noise_rank % 16, 0, "16|r ⇒ coloc path");
+            assert_eq!(params.num_tiles(), 1, "single-tile full-matmul proof");
+
+            let (a, b) = synth_matrices(b"rb-stage-d", &params);
+            let ctx =
+                BlockContext::build(b"rb-stage-d-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+            let out = prove_and_verify_for_block_inner(&ctx, &params, TEST_NONCE, 0, false)
+                .unwrap_or_else(|e| {
+                    panic!("R-b production prove+pow-verify (num_stripes={num_stripes}) must succeed: {e:?}")
+                });
+            assert!(
+                out.sweep_in_circuit,
+                "R-b sweep must be in-circuit (num_stripes={num_stripes})"
+            );
+            assert!(
+                out.pis.hash_a.iter().any(|&w| w != 0),
+                "HASH_A PI must be the real committed-matrix commitment"
+            );
+        }
     }
 
     /// **§4.C.2 c-exact cx.2 — the position-exact adversarial.**
