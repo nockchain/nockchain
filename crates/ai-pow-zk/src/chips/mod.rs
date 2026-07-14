@@ -39,5 +39,6 @@ pub mod matmul;
 pub mod range_table;
 pub mod stark_row;
 pub mod stripe_xor;
+pub mod tile_accum;
 pub mod tile_reduce;
 pub mod xstep;
