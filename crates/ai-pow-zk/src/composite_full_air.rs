@@ -456,6 +456,13 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
         // final XR lane.
         crate::chips::stripe_xor::StripeXorChip::eval_composite(builder);
 
+        // §6(b)-R-b (stripe-major, Pearl-parity arbitrary num_stripes):
+        // the held h·w accumulator + the 1-lane per-stripe reduce. Vacuous
+        // until the stripe-major sweep populates TA_*/TR_*; it then
+        // supersedes the SX 64-lane path.
+        crate::chips::tile_accum::TileAccumChip::eval_composite(builder);
+        crate::chips::tile_reduce::TileReduceChip::eval_composite(builder);
+
         // M-S1 (§4.C.11) — matmul-input pack-link. On every matmul
         // row (`IS_RESET_CUMSUM + IS_UPDATE_CUMSUM`) the packed
         // `A_NOISED[c]` / `B_NOISED[c]` cells equal the base-256

@@ -88,6 +88,21 @@ impl TileAccumChip {
         n_sb: MAX_SB,
     };
 
+    /// Composite-trace offsets (§6(b)-R-b). Vacuous when all TA_* are 0.
+    pub const COMPOSITE_OFFSETS: TileAccumOffsets = TileAccumOffsets {
+        is_active: crate::composite_layout::TA_IS_ACTIVE,
+        is_reset: crate::composite_layout::TA_IS_RESET,
+        sb_sel: crate::composite_layout::TA_SB_SEL_START,
+        dot: crate::composite_layout::TA_DOT_START,
+        acc: crate::composite_layout::TA_ACC_START,
+        n_sb: MAX_SB,
+    };
+
+    /// Composite entry point. Vacuous on all pre-R-b traces.
+    pub fn eval_composite<AB: AirBuilder>(builder: &mut AB) {
+        Self::eval_at(builder, &Self::COMPOSITE_OFFSETS);
+    }
+
     /// Emit the accumulator constraints at the given offsets.
     pub fn eval_at<AB: AirBuilder>(builder: &mut AB, off: &TileAccumOffsets) {
         // ---- IS_ACTIVE / IS_RESET boolean; SB_SEL one-hot (Σ==IS_ACTIVE) ----

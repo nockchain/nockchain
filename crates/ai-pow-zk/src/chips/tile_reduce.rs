@@ -119,6 +119,24 @@ impl TileReduceChip {
         q: cols::Q,
     };
 
+    /// Composite-trace offsets (§6(b)-R-b). Vacuous when all TR_* are 0.
+    pub const COMPOSITE_OFFSETS: TileReduceOffsets = TileReduceOffsets {
+        is_active: crate::composite_layout::TR_IS_ACTIVE,
+        stripe_reset: crate::composite_layout::TR_STRIPE_RESET,
+        in_cells: crate::composite_layout::TR_IN_START,
+        in_bits: crate::composite_layout::TR_IN_BITS_START,
+        xstep: crate::composite_layout::TR_XSTEP,
+        xstep_bits: crate::composite_layout::TR_XSTEP_BITS_START,
+        new: crate::composite_layout::TR_NEW,
+        new_bits: crate::composite_layout::TR_NEW_BITS_START,
+        q: crate::composite_layout::TR_Q_START,
+    };
+
+    /// Composite entry point. Vacuous on all pre-R-b traces.
+    pub fn eval_composite<AB: AirBuilder>(builder: &mut AB) {
+        Self::eval_at(builder, &Self::COMPOSITE_OFFSETS);
+    }
+
     /// Emit the reduce constraints at the given offsets.
     pub fn eval_at<AB: AirBuilder>(builder: &mut AB, off: &TileReduceOffsets) {
         let two = <AB::F as PrimeCharacteristicRing>::TWO;

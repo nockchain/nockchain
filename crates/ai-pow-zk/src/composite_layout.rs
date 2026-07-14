@@ -622,13 +622,57 @@ pub const MSG_PAIR_SEL_END: usize = MSG_PAIR_SEL_START + MSG_PAIR_SEL_LEN;
 pub const SX_SEG_RESET: usize = MSG_PAIR_SEL_END;
 
 // =====================================================================
+//  §6(b)-R-b — stripe-major hold + reduce (Pearl-parity arbitrary
+//  num_stripes). These REPLACE the sub-block-major SX 64-lane path once
+//  the stripe-major sweep is wired; during the destructive swap both
+//  coexist (SX retires at the end). TileAccumChip / TileReduceChip
+//  `eval_composite` read these; on any trace where they are 0 the chips
+//  are vacuous.
+// =====================================================================
+
+/// TileAccum: active `(stripe, sub-block)` micro-step selector.
+pub const TA_IS_ACTIVE: usize = SX_SEG_RESET + 1;
+/// TileAccum: stripe-0 reset selector.
+pub const TA_IS_RESET: usize = TA_IS_ACTIVE + 1;
+/// TileAccum: one-hot sub-block selector (`h·w/4 ≤ 64`).
+pub const TA_SB_SEL_START: usize = TA_IS_RESET + 1;
+pub const TA_SB_SEL_LEN: usize = 64; // MAX_SB
+/// TileAccum: the selected sub-block's stripe dot (`TILE_H² = 4` cells).
+pub const TA_DOT_START: usize = TA_SB_SEL_START + TA_SB_SEL_LEN;
+pub const TA_DOT_LEN: usize = 4;
+/// TileAccum: the held `h·w` accumulator (`≤ 256`).
+pub const TA_ACC_START: usize = TA_DOT_START + TA_DOT_LEN;
+pub const TA_ACC_LEN: usize = 256; // MAX_CELLS
+pub const TA_END: usize = TA_ACC_START + TA_ACC_LEN;
+
+/// TileReduce: active reduce-row selector.
+pub const TR_IS_ACTIVE: usize = TA_END;
+/// TileReduce: per-stripe reset selector.
+pub const TR_STRIPE_RESET: usize = TR_IS_ACTIVE + 1;
+/// TileReduce: the 4 accumulator cells folded this row.
+pub const TR_IN_START: usize = TR_STRIPE_RESET + 1;
+pub const TR_IN_LEN: usize = 4;
+pub const TR_IN_BITS_START: usize = TR_IN_START + TR_IN_LEN;
+pub const TR_IN_BITS_LEN: usize = 128;
+/// TileReduce: the running 1-lane x_step entering this row.
+pub const TR_XSTEP: usize = TR_IN_BITS_START + TR_IN_BITS_LEN;
+pub const TR_XSTEP_BITS_START: usize = TR_XSTEP + 1;
+pub const TR_XSTEP_BITS_LEN: usize = 32;
+pub const TR_NEW: usize = TR_XSTEP_BITS_START + TR_XSTEP_BITS_LEN;
+pub const TR_NEW_BITS_START: usize = TR_NEW + 1;
+pub const TR_NEW_BITS_LEN: usize = 32;
+pub const TR_Q_START: usize = TR_NEW_BITS_START + TR_NEW_BITS_LEN;
+pub const TR_Q_LEN: usize = 32;
+pub const TR_END: usize = TR_Q_START + TR_Q_LEN;
+
+// =====================================================================
 //  Total trace width
 // =====================================================================
 
 /// Total trace width: pinned end-of-layout cursor. Phases 3+ extend
 /// chip-internal sub-columns but must not exceed this without bumping
 /// the constant.
-pub const TOTAL_TRACE_WIDTH: usize = SX_SEG_RESET + 1;
+pub const TOTAL_TRACE_WIDTH: usize = TR_END;
 
 #[cfg(test)]
 mod tests {
@@ -691,8 +735,10 @@ mod tests {
             + 1 /* SX_SEG_RESET (§6(b)-G3) */;
         let fold_stripe_sel = FOLD_STRIPE_SEL_LEN; // 64
         let msg_pair_sel = MSG_PAIR_SEL_LEN; // 8
+        // §6(b)-R-b stripe-major block (TA_* + TR_*, contiguous).
+        let r_b = TR_END - TA_IS_ACTIVE; // 558
 
-        let groups: [(&str, usize); 15] = [
+        let groups: [(&str, usize); 16] = [
             ("range_tables", range_tables),
             ("control", control),
             ("input_unpacking", input_unpacking),
@@ -708,6 +754,7 @@ mod tests {
             ("sx_stripe", sx),
             ("fold_stripe_sel", fold_stripe_sel),
             ("msg_pair_sel", msg_pair_sel),
+            ("r_b_stripe_major", r_b),
         ];
 
         let sum: usize = groups.iter().map(|(_, n)| *n).sum();
@@ -750,6 +797,8 @@ mod tests {
         assert_eq!(sx, 167);
         assert_eq!(fold_stripe_sel, 64);
         assert_eq!(msg_pair_sel, 8);
+        // §6(b)-R-b: TA (1+1+64+4+256=326) + TR (1+1+4+128+1+32+1+32+32=232).
+        assert_eq!(r_b, 558);
 
         // (b) the 15 groups exactly partition the trace.
         assert_eq!(
@@ -763,17 +812,20 @@ mod tests {
         // bit-decomposition rows) are full 32-bit bit-decompositions
         // of the XOR-side state cells — the single largest reducible
         // structure in the inner AIR.
+        // §6(b)-R-b widened the trace with the h·w accumulator block, so
+        // blake3_round is now ~43% (was ~49.5%). The threshold tracks the
+        // R-b-widened reality; blake3_round is still the dominant group.
         assert!(
-            blake3_round * 100 >= TOTAL_TRACE_WIDTH * 49,
-            "blake3_round ({blake3_round}) should be ≥49% of the {TOTAL_TRACE_WIDTH}-col trace"
+            blake3_round * 100 >= TOTAL_TRACE_WIDTH * 42,
+            "blake3_round ({blake3_round}) should be ≥42% of the {TOTAL_TRACE_WIDTH}-col trace"
         );
         // §M-S5b Path A column-overlay folded the SX bit/data runs
         // into blake3_round, shrinking the trace; the block-own
         // `sx_stripe` group is now small and the two-group share is
         // ≈64% of the smaller trace (was ≈68% pre-overlay).
         assert!(
-            (blake3_round + sx) * 100 >= TOTAL_TRACE_WIDTH * 60,
-            "blake3_round + sx_stripe should be ≥60% of the trace"
+            (blake3_round + sx) * 100 >= TOTAL_TRACE_WIDTH * 49,
+            "blake3_round + sx_stripe should be ≥49% of the R-b-widened trace"
         );
     }
 
@@ -1060,9 +1112,13 @@ mod tests {
             ),
             (
                 SX_SEG_RESET + 1,
-                TOTAL_TRACE_WIDTH,
-                "SX_SEG_RESET → TOTAL_TRACE_WIDTH",
+                TA_IS_ACTIVE,
+                "SX_SEG_RESET → TA_IS_ACTIVE",
             ),
+            (TA_ACC_START + TA_ACC_LEN, TA_END, "TA_ACC → TA_END"),
+            (TA_END, TR_IS_ACTIVE, "TA_END → TR_IS_ACTIVE"),
+            (TR_Q_START + TR_Q_LEN, TR_END, "TR_Q → TR_END"),
+            (TR_END, TOTAL_TRACE_WIDTH, "TR_END → TOTAL_TRACE_WIDTH"),
         ];
         for &(end, next, name) in checkpoints {
             assert_eq!(end, next, "layout discontinuity at {name}: {end} != {next}");
@@ -1128,7 +1184,7 @@ mod tests {
             "TOTAL_TRACE_WIDTH suspiciously small: {TOTAL_TRACE_WIDTH}"
         );
         assert!(
-            TOTAL_TRACE_WIDTH < 2200,
+            TOTAL_TRACE_WIDTH < 2600,
             "TOTAL_TRACE_WIDTH suspiciously large: {TOTAL_TRACE_WIDTH} — check for unintended column duplication"
         );
     }
