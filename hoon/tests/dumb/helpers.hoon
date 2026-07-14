@@ -882,6 +882,67 @@
   ::
   ++  con  ;;(consensus-state c.internal.outer.nockchain)
   ::
+  ::  the derived state, whose .heaviest-chain is the canonical
+  ::  page-number -> block-id index used to tell an orphaned block from one on
+  ::  the heaviest chain.
+  ++  der  ;;(derived-state d.internal.outer.nockchain)
+  ::
+  ::  +strand-tx-on-block: put a tx back exactly the way the OLD kernel left it
+  ::  -- still held in raw-txs, still claimed by .bid, absent from excluded-txs.
+  ::
+  ::    Reproduces the pre-fix stranded state, which the current kernel will no
+  ::    longer produce on its own (+release-orphaned-branch frees the tx at reorg
+  ::    time). Note the result still satisfies +apt: the tx IS in exactly one of
+  ::    blocks-needed-by / excluded-txs. Nothing is structurally broken -- the
+  ::    claim is simply never released -- which is why the bug went unnoticed.
+  ++  strand-tx-on-block
+    |=  [=tx-id:t =block-id:t]
+    ^-  consensus-state
+    =/  c=consensus-state  con
+    =.  blocks-needed-by.c  (~(put h-ju blocks-needed-by.c) tx-id block-id)
+    =.  excluded-txs.c  (~(del h-in excluded-txs.c) tx-id)
+    c
+  ::
+  ::  +repair-orphans: the one-time repair +load runs on boot
+  ++  repair-orphans
+    |=  c=consensus-state
+    ^-  consensus-state
+    (~(repair-orphaned-claims dcon c bc) heaviest-chain:der)
+  ::
+  ::  membership probes against a bare consensus-state (rather than the kernel)
+  ++  con-excluded
+    |=  [c=consensus-state =tx-id:t]
+    (~(has h-in excluded-txs.c) tx-id)
+  ::
+  ++  con-claimed
+    |=  [c=consensus-state =tx-id:t]
+    (~(has h-by blocks-needed-by.c) tx-id)
+  ::
+  ++  con-raw-tx
+    |=  [c=consensus-state =tx-id:t]
+    (~(has h-by raw-txs.c) tx-id)
+  ::
+  ++  con-invariants
+    |=  c=consensus-state
+    ^-  (unit @tas)
+    ~(apt dcon c bc)
+  ::
+  ::  +consensus-invariants: the consensus state's own +apt check, as an oracle.
+  ::
+  ::    ~ means every structural invariant holds; a term names the one that
+  ::    broke. The interesting ones here are the raw-txs partition:
+  ::      %txs-fell-through-cracks  a raw-tx in NEITHER blocks-needed-by nor
+  ::                                excluded-txs -- stranded: unmineable,
+  ::                                un-re-gossiped, un-droppable.
+  ::      %excluded-txs-arent       a raw-tx in BOTH -- claimed by a block yet
+  ::                                also offered to the miner.
+  ::      %extra-excluded-txs       an excluded-tx we do not actually hold.
+  ::    Any code that moves txs between those sets should be asserted against
+  ::    this, not just against hand-picked membership checks.
+  ++  consensus-invariants
+    ^-  (unit @tas)
+    ~(apt dcon con bc)
+  ::
   ++  has-raw-tx
     |=  =tx-id:t
     (~(has h-by raw-txs:con) tx-id)

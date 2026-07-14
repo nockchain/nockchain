@@ -825,6 +825,157 @@
   =.  c  con
   (reject-pending-block block-id)
 ::
+::  Orphaned blocks: a block that is in .blocks (fully validated and accepted)
+::  but is not the block the heaviest chain holds at its height.
+::
+::  +accept-block claims every tx in a block: blocks-needed-by += block, and
+::  the tx leaves excluded-txs (the mempool). +reject-pending-block releases
+::  those claims for a PENDING block, but nothing ever released them for an
+::  ACCEPTED one. So when an accepted block lost a chain race its txs were
+::  stranded forever: invisible to the miner (whose candidate set is
+::  excluded-txs plus pending-block txs), never re-gossiped (that walks
+::  excluded-txs), never dropped (+drop-tx refuses anything still in
+::  blocks-needed-by), and with their inputs pinned in spent-by, so not even a
+::  replacement tx could spend those notes.
+::
+::  +release-orphaned-branch below is the release path. It runs on every reorg
+::  and walks ONLY the abandoned branch (O(reorg depth)), so no event ever pays
+::  for the size of the chain.
+::
+::  NOTE: this frees the transactions, but deliberately does NOT delete the
+::  orphaned block itself -- .blocks / .balance / .txs still hold it, exactly as
+::  they always have. Reclaiming that memory would mean deleting a block only
+::  once no plausible reorg can restore it (~14 days), and so remembering WHICH
+::  blocks were orphaned and WHEN. There is nowhere to keep that: .blocks is
+::  keyed by block-id with no height or orphaned-at index, so finding those
+::  blocks later would mean walking every block inside an event -- which we will
+::  not do at any cadence. Doing it properly needs a new index in consensus
+::  state; until then the memory is left alone rather than paid for with a
+::  chain-sized walk.
+::
+::  +release-orphan-claims: give a block's txs back to the mempool.
+::
+::    INVARIANT (types.hoon): every key of .raw-txs is in EXACTLY ONE of
+::    .blocks-needed-by / .excluded-txs. So a tx that no block claims any more,
+::    and that we still hold, MUST go back into excluded-txs -- the same restore
+::    +reject-pending-block performs. A tx also carried by another block (the
+::    common reorg case, where the winning block includes the very same tx)
+::    keeps that block's claim and correctly stays out of the mempool.
+++  release-orphan-claims
+  ~/  %release-orphan-claims
+  |=  =block-id:t
+  ^-  consensus-state:dk
+  =/  lp  (~(get h-by blocks.c) block-id)
+  ?~  lp  c
+  =/  pag=page:t  (to-page:local-page:t u.lp)
+  =/  cur-height=page-number:t  get-cur-height
+  %-  ~(rep z-in ~(tx-ids get:page:t pag))
+  |=  [=tx-id:t c=_c]
+  =.  ^c  c
+  =.  blocks-needed-by.c  (~(del h-ju blocks-needed-by.c) tx-id block-id)
+  ::  another block still carries it: it stays claimed, and out of the mempool
+  ?:  (~(has h-by blocks-needed-by.c) tx-id)  c
+  ::  we no longer hold the tx, so there is nothing to give back
+  ?.  (~(has h-by raw-txs.c) tx-id)  c
+  ::  Refresh heard-at. The tx was first heard before the block that carried it
+  ::  was mined, so on its original heard-at the tx-retention sweep (which keeps
+  ::  only ~4 blocks of mempool history, and runs later in this same
+  ::  +garbage-collect) would drop it on sight -- an orphaned tx would be
+  ::  evicted instead of re-mined. Giving it the current height restores it with
+  ::  a full retention window, so it is re-gossiped and re-offered to the miner.
+  ::  It gets this lease once: it is now in excluded-txs, so no later release
+  ::  can refresh it again, and it ages out normally if it stays unmined.
+  =/  [=raw-tx:t heard-at=@]  (~(got h-by raw-txs.c) tx-id)
+  =.  raw-txs.c  (~(put h-by raw-txs.c) tx-id [raw-tx cur-height])
+  =.  excluded-txs.c  (~(put h-in excluded-txs.c) tx-id)
+  c
+::
+::  +release-orphaned-branch: on a reorg, hand back the txs of every block on
+::  the branch we just abandoned.
+::
+::    Walks parents from the OLD heaviest block until it reaches a block the
+::    (already updated) heaviest chain agrees with -- the common ancestor. That
+::    is O(reorg depth), not O(chain), so no event ever pays for the size of the
+::    chain, and it needs no extra state. The orphaned blocks themselves stay in
+::    .blocks, exactly as they always have, so a chain that later reorgs back
+::    onto this branch is unaffected.
+++  release-orphaned-branch
+  ~/  %release-orphaned-branch
+  |=  [old-heavy=block-id:t heaviest-chain=(z-map page-number:t block-id:t)]
+  ^-  consensus-state:dk
+  =/  cur=block-id:t  old-heavy
+  |-
+  ^-  consensus-state:dk
+  =/  lp  (~(get h-by blocks.c) cur)
+  ::  ran off the end of what we know: nothing further to release
+  ?~  lp  c
+  =/  block-height=page-number:t  ~(height get:local-page:t u.lp)
+  =/  canonical=(unit block-id:t)  (~(get z-by heaviest-chain) block-height)
+  ::  we cannot say what the heaviest chain holds here, so we cannot prove this
+  ::  block is orphaned. stop rather than release a tx that is really mined.
+  ?~  canonical  c
+  ::  reached the common ancestor: this block is on the new chain too
+  ?:  =(u.canonical cur)  c
+  ::  orphaned: release its txs, then continue up the abandoned branch
+  =.  c  (release-orphan-claims cur)
+  =/  parent=block-id:t  ~(parent get:local-page:t u.lp)
+  ::  genesis has no parent to walk to
+  ?:  =(*page-number:t block-height)  c
+  $(cur parent)
+::
+::  +repair-orphaned-claims: BOOT-ONLY. Release every orphaned block's claim on
+::  its transactions.
+::
+::    A node that ran the old kernel is carrying transactions stranded by reorgs
+::    that happened before +release-orphaned-branch existed: still held in
+::    raw-txs, still claimed by a block that is no longer on the heaviest chain,
+::    and therefore unmineable, un-re-gossiped, un-droppable, with their inputs
+::    pinned in spent-by so not even a replacement tx can spend those notes.
+::    +release-orphaned-branch cannot reach them -- it only walks the branch a
+::    LIVE reorg abandons, and those reorgs are long past. This is the one-time
+::    repair that frees them, and it is why the fix is not merely prospective.
+::
+::    Restored txs land in excluded-txs, so the first +garbage-collect after boot
+::    applies the usual spent-input check to them: any whose notes the canonical
+::    chain has since spent (most of them -- they were re-mined on the winning
+::    chain) are dropped outright, which also frees their inputs from spent-by.
+::    Only the genuinely unmined ones stay, to be re-gossiped and mined.
+::
+::    This walks all of .blocks. That is exactly why it lives in +load and
+::    nowhere else: a boot already pays to load the whole state, whereas a
+::    steady-state event must never pay for the size of the chain.
+++  repair-orphaned-claims
+  ~/  %repair-orphaned-claims
+  |=  heaviest-chain=(z-map page-number:t block-id:t)
+  ^-  consensus-state:dk
+  ::  no chain yet, so nothing can be orphaned. Tested with `=(~ ...)` rather
+  ::  than `?~`: `?~` would narrow .c's type to one whose heaviest-block is known
+  ::  non-null, and the roll below seeds its accumulator from `_c` -- so the full
+  ::  consensus-state that +release-orphan-claims returns would no longer nest.
+  ?:  =(~ heaviest-block.c)  c
+  =/  orphans=(list block-id:t)
+    %-  ~(rep h-by blocks.c)
+    |=  [[=block-id:t lp=local-page:t] orphans=(list block-id:t)]
+    ^-  (list block-id:t)
+    =/  block-height=page-number:t  ~(height get:local-page:t lp)
+    =/  canonical=(unit block-id:t)  (~(get z-by heaviest-chain) block-height)
+    ::  we cannot say which block the heaviest chain holds at this height, so we
+    ::  cannot prove this one is orphaned. Releasing a tx that is really mined
+    ::  would hand it back to the miner as if unspent, so absence of evidence
+    ::  keeps the claim.
+    ?~  canonical  orphans
+    ?:  =(u.canonical block-id)  orphans
+    [block-id orphans]
+  =/  log-message
+    %^  cat  3
+      'repair-orphaned-claims: releasing txs of orphaned blocks: '
+    (rsh [3 2] (scot %ui (lent orphans)))
+  ~>  %slog.[0 log-message]
+  %+  roll  orphans
+  |=  [=block-id:t con=_c]
+  =.  c  con
+  (release-orphan-claims block-id)
+::
 ::  Are the inputs already spent by another transaction we know of?
 ++  inputs-spent
   ~/  %inputs-spent
@@ -954,5 +1105,10 @@
     `(min u.retain 4)
   ~>  %slog.[0 (cat 3 'garbage-collect: excluded-txs count ' (rsh [3 2] (scot %ui ~(wyt h-in excluded-txs.c))))]
   =.  c  (drop-dropable-blocks retain)
+  ::  Txs of a freshly orphaned branch are handed back to the mempool at reorg
+  ::  time by +release-orphaned-branch, which runs before this. They land in
+  ::  excluded-txs, so the sweep below applies to them like any other mempool
+  ::  tx: if the winning chain spent their inputs via some other tx they are
+  ::  dropped here rather than parked in the mempool unspendable.
   (drop-dropable-txs tx-retain)
 --

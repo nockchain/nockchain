@@ -39,6 +39,16 @@
     |^
     =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-9 arg)))
     =.  c.k  ~>  %bout  check-and-repair:con
+    ::  One-time repair of transactions stranded by reorgs that predate
+    ::  +release-orphaned-branch. The old kernel never released an ACCEPTED
+    ::  block's claim on its txs, so a tx carried by a block that later lost a
+    ::  chain race stayed in blocks-needed-by forever: unmineable, never
+    ::  re-gossiped, never dropped, its inputs pinned in spent-by so no
+    ::  replacement tx could spend those notes either. The reorgs that stranded
+    ::  them are long past, so the live release path cannot reach them -- only
+    ::  this can. Walking every block is acceptable here and only here: a boot
+    ::  already pays to load the whole state, an event must not.
+    =.  c.k  ~>  %bout  (repair-orphaned-claims:con heaviest-chain.d.k)
     ~|  %v1-phase-must-be-lte-asert-phase
     ?>  (lte v1-phase.constants.k asert-phase.constants.k)
     k
@@ -1379,13 +1389,40 @@
           ==
         [orphaned-block-span reorg-span effs]
       ::
+      ::  Update derived state BEFORE garbage collection, which needs the
+      ::  canonical page-number -> block-id index (heaviest-chain.d.k) to tell
+      ::  an orphaned block from one on the heaviest chain. On a reorg this
+      ::  index only names the winning chain once +update has run, so
+      ::  collecting first would classify blocks against the chain we just
+      ::  left. +update walks the heaviest chain's parents, which garbage
+      ::  collection never drops, and nothing between here and the old call
+      ::  site reads d.k -- so it is safe to hoist.
+      =.  d.k  (update:der c.k pag)
+      ::
+      ::  The reorg above abandoned the branch ending at .old-heavy. Hand that
+      ::  branch's transactions back to the mempool. +accept-block claimed every
+      ::  tx for the block that carried it, and until now nothing ever released
+      ::  an ACCEPTED block's claim (only +reject-pending-block, for pending
+      ::  ones) -- so every tx on an orphaned branch was stranded for good:
+      ::  invisible to the miner, never re-gossiped, never garbage collected,
+      ::  and with its inputs pinned in spent-by so no replacement tx could
+      ::  spend those notes either. Releasing here (rather than waiting for
+      ::  +sweep-orphan-blocks) is what makes an orphaned tx promptly mineable
+      ::  again. The blocks themselves stay in .blocks until the sweep retires
+      ::  them, so a chain that reorgs back is unaffected.
+      =?  c.k  is-reorg
+        ?~  old-heavy  c.k
+        (release-orphaned-branch:con u.old-heavy heaviest-chain.d.k)
+      ::
       ::  Garbage collect pending blocks and excluded transactions.
       ::  Garbage collection only runs when we receive a new heaviest
       ::  block, since that's when the block height advances and we can
       ::  determine what's expired. Pending blocks are removed based on
       ::  elapsed heaviest blocks since they were heard. Excluded txs are
       ::  removed based on the same criteria with the added check that they
-      ::  they aren't spent in the current heaviest chain.
+      ::  they aren't spent in the current heaviest chain -- which is also what
+      ::  drops a tx just handed back by +release-orphaned-branch above, if the
+      ::  winning chain spent its inputs via some other tx.
       =?  c.k  is-new-heaviest
         (garbage-collect:con retain.a.k)
       ::
@@ -1400,8 +1437,6 @@
       ::  tell the miner about the new block
       =.  m.k  (heard-new-block:min c.k now)
       ::
-      ::  update derived state
-      =.  d.k  (update:der c.k pag)
       ?.  =(old-heavy heaviest-block.c.k)
         =^  mining-effs  k  do-mine
         =.  effs  (weld mining-effs effs)
