@@ -42,15 +42,30 @@ track lives in one place.
   `compute_moe_tile` and binds difficulty — the gate the recursive verify omits.
   Validated proof-free (cross-check vs `compute_pearl_moe_ticket`) AND through a
   real end-to-end node proof with a statement-derived kappa.
-- **What actually remains:** (1) lift the one stale admission guard
-  (`validate_pearl_merge_config_for_recursive_prover`) so the miner can
-  prove+submit MoE; (2) the MoE artifact **encoder** (M1 builder) for a full noun
-  round-trip; (3) **D4/S1** Hoon↔Rust consensus wiring (shared with dense — no
-  `%ai-pow` block, dense or MoE, is accepted until this lands).
+- **Rust-side MoE compact PARITY (with dense) is ACHIEVED + validated end-to-end.**
+  MoE now does everything dense does on the compact path: prove
+  (`prove_pearl_moe_compact_recursive_certificate`), node verify
+  (`verify_decoded_ai_pow_pearl_merge_compact_moe_artifact`), artifact codec
+  (encode+decode), and the jam-boundary verify entry — all exercised by a single
+  real-proof test (mine-inputs → prove → build noun → jam → decode → node verify →
+  jam-boundary verify) with adversarial rejects. The soundness-critical additions
+  (jackpot/difficulty binding, P0/D6 opened-schedule fold) are validated.
+- **What remains is SHARED with dense, not a MoE-parity gap** — two integration
+  workstreams, both staged last per R1:
+  1. **Miner enablement:** lift the stale MoE fail-close in
+     `validate_pearl_merge_config_for_recursive_prover` **and** wire the MoE
+     search/prove path into the mining loop (`run.rs`) — the dense miner loop
+     dispatches dense proving; a MoE loop (routing/expert selection + the MoE
+     prove entrypoint) is the miner-side counterpart. A miner workstream, not the
+     puzzle's prove/verify parity.
+  2. **D4/S1 consensus wiring:** Hoon `inner.hoon` must call the (now-ready) Rust
+     jam-boundary verifier — **shared with dense**; no `%ai-pow` block, dense or
+     MoE, is accepted until this lands. The Rust side of the boundary is done for
+     both.
 - **Nothing is mis-accepted today:** MoE is fail-closed at the admission guard,
-  the new MoE envelope/parse are not wired into admission, and the compact
-  node-verify path is not wired into consensus (Hoon rejects `%ai-pow`). This is a
-  *build-forward* plan, not a live-vulnerability fix.
+  the new MoE envelope/parse/verify are not wired into admission, and no `%ai-pow`
+  path is wired into consensus (Hoon rejects `%ai-pow`). This is a *build-forward*
+  plan, not a live-vulnerability fix.
 
 ---
 
@@ -545,7 +560,8 @@ From the compact-recursive production pipeline:
 | MoE routing-consistency binding | ✅ done (`verify_pearl_moe_routing_binding`, ~10 adversarial) |
 | MoE opened-schedule binding (diagnostic-L1) | ✅ done (`l0_program_matches`) |
 | **D6 / P0** compact opened-schedule binding | ✅ **IMPLEMENTED + VALIDATED** — program-commitment **digest fold** (§4 P0). Circuit folds the L0 program commitment into the L1 statement digest; node derives the canonical commitment witness-free from the opened schedule and binds it. Validated with real proving: honest round-trip verifies + wrong-commitment rejects (21.99 s); full node round-trip at production scale (47.68 s, 122.68 KiB). D6 gap closed. |
-| **M1** MoE artifact noun | 🟡 codec + DoS cap (16 tests) **and** artifact **decode dispatch** landed — `PearlMergeAiPowArtifactShape.moe` populated from an `AIM1` nonce, dense `AIP1` byte-identical. Artifact **builders** (encode side) remain (not needed to validate M3) |
+| **M1** MoE artifact noun | ✅ **DONE** — codec + DoS cap (16 tests), decode dispatch (`AIM1`→`moe: Some`), **and the encoder** (`build_ai_pow_pearl_merge_moe_artifact_noun_from_node`). Full encode→jam→decode→verify round-trip validated in the end-to-end real-proof test; dense `AIP1` byte-identical |
+| **Jam boundary** (consensus dispatch point) | ✅ **DONE** — `verify_ai_pow_pearl_merge_compact_moe_artifact_jam_with[_digest_bytes]_and_context`: cue+decode dispatches on the `AIM1` tag → node MoE branch. Validated from jammed bytes end-to-end; the dense jam entry rejects a MoE artifact |
 | **M2** MoE compact prove | ✅ **done + validated** — MoE Layer-0 wraps + drives `prove_compact_batch_from_verified_l0` (program-generic); real proving 26.38 s, 125,237-byte cert |
 | **M3** MoE compact node verify | ✅ **DONE + VALIDATED END-TO-END** — `verify_decoded_ai_pow_pearl_merge_compact_moe_artifact` runs aux binding + MoE envelope/parse + routing binding + **jackpot/difficulty binding** (`compute_moe_tile`, the difficulty gate the recursive verify omits) + `verify_pearl_moe_compact_recursive_certificate`. Real end-to-end proof through the node boundary with a **statement-derived kappa** (24.5s, 124 KB); forged-routing + unmet-difficulty + dense-verify-on-MoE all reject. |
 | **M5** MoE compact size/latency | ✅ measured — 124–125 KB / ~24–26s at m=64–128,k=1024; production-scale MoE still to measure |
