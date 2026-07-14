@@ -243,4 +243,92 @@
   %+  expect-eq
     !>(%.n)
   !>((~(has-raw-tx k-by:h-med nockchain) tx-id))
+::
+::  re-broadcast gating for a tx we already hold. see +heard-tx and
+::  +local-tx-submission in apps/dumbnet/inner.hoon: re-hearing a tx that is
+::  already in raw-txs never re-adds it to the mempool, but whether we
+::  re-announce it depends on which driver the poke came from.
+::
+::  +setup-v1-spendable-tx: a valid v1 tx spending the coinbase of a 2-block
+::  chain, plus the kernel that chain lives in. same construction as
+::  +test-v1-mempool-accept-valid above, factored out so the re-broadcast
+::  tests below start from a tx the mempool is known to accept.
+++  setup-v1-spendable-tx
+  ^-  [_nockchain:h raw-tx:t]
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 2 nockchain)
+  =/  page-v1=page:t  (snag 1 pages)
+  =/  bal  ~(get-cur-balance k-by:h nockchain)
+  =/  coin=nnote:t
+    (get-coinbase-from-balance:v1:h page-v1 bal)
+  =/  pks=(list schnorr-pubkey:t)
+    ~(tap z-in:zoon pubkeys.p:default-keys-1:h)
+  =/  m=@  (lent pks)
+  =/  [root=hash:t sc=spend-condition:v1:t *]
+    (make-coinbase-lock:v1:h m pks)
+  =/  fee=coins:t  0
+  =/  sed=seed:v1:t
+    (make-seed:v1:h root (sub assets.coin fee) (hash:nnote:t coin))
+  =/  seds=seeds:v1:t  (~(put z-in:zoon *seeds:v1:t) sed)
+  =/  sp1=spend-1:v1:t
+    %*  .  *spend-1:v1:t
+      witness  *witness:v1:t
+      seeds    seds
+      fee  fee
+    ==
+  =/  sig-h=hash:t  (sig-hash:spend-1:v1:t sp1)
+  =/  pk=schnorr-pubkey:t  (snag 0 pks)
+  =/  wit=witness:t
+    (make-pkh-witness:v1:h root sc sig-h ~[[s:default-keys-1:h pk]])
+  =/  sp1=spend-1:v1:t  sp1(witness wit)
+  =/  nam=nname:t  ~(name get:nnote:t coin)
+  =/  sps=spends:v1:t  (~(put z-by:zoon *spends:v1:t) nam [%1 sp1])
+  [nockchain (new:raw-tx:v1:t sps)]
+::
+::  an operator re-submitting a tx over grpc (`nockchain-wallet send-tx` on a
+::  tx that is already in our mempool) MUST re-gossip it. this is the only way
+::  to re-announce a tx the rest of the network has dropped -- a non-mining
+::  node never otherwise re-gossips a tx it already holds, so without this the
+::  tx is stuck in our mempool forever and every resend is a silent no-op.
+++  test-v1-mempool-grpc-resend-re-gossips
+  =+  [nockchain raw]=setup-v1-spendable-tx
+  =/  =cause:h  [%fact %0 %heard-tx raw]
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  ::  first submission: a new tx, so it is accepted and gossiped
+  =^  effs-1=(list effect:h)  nockchain
+    (pok-on-wire:h grpc-wire:h cause nockchain)
+  ::  we now hold it, so the resend takes the already-seen branch
+  ?>  (~(has-raw-tx k-by:h nockchain) tx-id)
+  ::  resend over the same grpc wire: must gossip again
+  =^  effs-2=(list effect:h)  nockchain
+    (pok-on-wire:h grpc-wire:h cause nockchain)
+  %+  expect-eq
+    !>([%.y %.y %.y])
+  !>  :*  (~(has z-in:zoon (filter-heard-tx-effects:h effs-1)) raw)
+          (~(has z-in:zoon (filter-heard-tx-effects:h effs-2)) raw)
+          ::  still in the mempool, and never double-added
+          (~(has-raw-tx k-by:h nockchain) tx-id)
+      ==
+::
+::  a peer re-gossiping a tx we already hold MUST NOT be re-gossiped back out.
+::  this dedup is what terminates gossip loops: if we re-announced every tx a
+::  peer sent us that we already had, it would bounce between peers forever.
+++  test-v1-mempool-peer-resend-does-not-re-gossip
+  =+  [nockchain raw]=setup-v1-spendable-tx
+  =/  =cause:h  [%fact %0 %heard-tx raw]
+  =/  tx-id=tx-id:t  ~(id get:raw-tx:t raw)
+  ::  first time we hear it from a peer: new tx, accepted and gossiped onward
+  =^  effs-1=(list effect:h)  nockchain
+    (pok-on-wire:h libp2p-gossip-wire:h cause nockchain)
+  ?>  (~(has-raw-tx k-by:h nockchain) tx-id)
+  ::  peer sends it again: we must stay silent
+  =^  effs-2=(list effect:h)  nockchain
+    (pok-on-wire:h libp2p-gossip-wire:h cause nockchain)
+  %+  expect-eq
+    !>([%.y %.n %.y])
+  !>  :*  (~(has z-in:zoon (filter-heard-tx-effects:h effs-1)) raw)
+          (~(has z-in:zoon (filter-heard-tx-effects:h effs-2)) raw)
+          (~(has-raw-tx k-by:h nockchain) tx-id)
+      ==
 --

@@ -1096,15 +1096,34 @@
       ::
       ::  check if we already have raw-tx
       ?:  (has-raw-tx:con ~(id get:raw-tx:t raw))
-        :: do almost nothing (idempotency), we already have it
-        :: but do tell the runtime we've already seen it
+        ::  we already hold this tx, so we never re-add it to the mempool.
+        ::  whether we re-announce it depends on who told us about it.
+        ::
+        ::  from a peer (%libp2p): stay silent apart from %seen. this is the
+        ::  gossip-loop terminator -- if we re-gossiped every tx a peer sent
+        ::  us that we already had, the tx would bounce between peers forever.
+        ::
+        ::  from the local grpc driver (%grpc): this is an operator
+        ::  re-submission (`nockchain-wallet send-tx`), so re-gossip it. no
+        ::  peer sent it to us, so no loop can form. this is the only way to
+        ::  re-announce a tx the network has since dropped: a non-mining node
+        ::  otherwise never re-gossips a tx it already holds (the excluded-txs
+        ::  and candidate-block re-gossip paths are both mining-only), so
+        ::  without this every resend is a silent no-op and a tx stuck in our
+        ::  mempool can never be revived.
+        =/  re-gossip=?  (local-tx-submission wir)
         =/  log-message
           %^  cat  3
-           'heard-tx: Transaction id already seen: '
+            ?:  re-gossip
+              'heard-tx: Transaction id already seen, re-broadcasting: '
+            'heard-tx: Transaction id already seen: '
           id-b58
         ~>  %slog.[1 log-message]
+        =/  seen=(list effect:dk)
+          [%seen %tx ~(id get:raw-tx:t raw)]~
         :_  k
-        [%seen %tx ~(id get:raw-tx:t raw)]~
+        ?.  re-gossip  seen
+        [[%gossip %0 %heard-tx raw] seen]
       ::
       ::  check if the raw-tx contents are in base field
       ?.  (based:raw-tx:t raw)
@@ -1432,6 +1451,21 @@
       ?.  ?=([%poke %libp2p ver=@ typ=?(%gossip %response) %peer-id id=@ *] pole)
         ~
       (some id.pole)
+    ::
+    ::  +local-tx-submission: did this poke come from the local grpc driver?
+    ::
+    ::    true only for the %grpc wire, which the grpc driver stamps on pokes
+    ::    it makes on behalf of a local client (e.g. `nockchain-wallet
+    ::    send-tx`). a tx gossiped to us by a peer arrives on a %libp2p wire
+    ::    and is never a local submission. used by +heard-tx to decide whether
+    ::    re-hearing a tx we already hold should re-announce it; answering
+    ::    %.y for a peer-sourced wire would create an infinite gossip loop.
+    ++  local-tx-submission
+      ~/  %local-tx-submission
+      |=  wir=wire
+      ^-  ?
+      =/  =(pole)  wir
+      ?=([%poke %grpc ver=@ *] pole)
     ::
     ++  handle-command
       ~/  %handle-command

@@ -781,6 +781,25 @@
   =/  =input  *input
   [/poke/sys/0 input(cause cau)]
 ::
+++  build-ovum-on-wire
+  |=  [wir=path cau=cause]
+  ^-  ovum
+  =/  =input  *input
+  [wir input(cause cau)]
+::
+::  the wire the grpc driver stamps on a poke it makes for a local client,
+::  e.g. `nockchain-wallet send-tx` (cf. +create-grpc-wire in the rust
+::  nockapp-grpc crate, which yields source %grpc / version 1). +heard-tx
+::  treats this as an operator submission and will re-gossip a tx it already
+::  holds. cf. +local-tx-submission in apps/dumbnet/inner.hoon.
+++  grpc-wire  `path`/poke/grpc/1
+::
+::  the wire the libp2p driver stamps on a tx a peer gossiped to us (cf.
+::  +Libp2pWire in the rust nockchain-libp2p-io crate: source %libp2p,
+::  version 1, tags [verb %peer-id <base58 peer id>]). +heard-tx must NOT
+::  re-gossip a tx it already holds when it arrives on this wire.
+++  libp2p-gossip-wire  `path`/poke/libp2p/1/gossip/peer-id/peer
+::
 ++  pok
   |=  [cau=cause nockchain=_nockchain]
   =^  effs=(list *)  nockchain
@@ -789,6 +808,16 @@
   ::  the wally desk-hash is type u(@uvI)
   =<  [- +(desk-hash.outer [~ *@uvI])]
   (poke:nockchain *@ (build-ovum cau))
+  [;;((list effect) effs) nockchain]
+::
+::  +pok-on-wire: +pok, but stamping a caller-chosen wire on the ovum, so a
+::  test can exercise the kernel's wire-dependent behaviour (which driver a
+::  poke came from) rather than always speaking on the default %sys wire.
+++  pok-on-wire
+  |=  [wir=path cau=cause nockchain=_nockchain]
+  =^  effs=(list *)  nockchain
+  =<  [- +(desk-hash.outer [~ *@uvI])]
+  (poke:nockchain *@ (build-ovum-on-wire wir cau))
   [;;((list effect) effs) nockchain]
 ::
 ++  init-nockchain
