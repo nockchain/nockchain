@@ -587,11 +587,41 @@ unmet difficulty rejects.
    > **jet-required** consensus arm with no Hoon equivalent — which breaks the
    > transparency model every current nockchain verifier uses and needs a
    > consensus-framework policy decision (are jet-required arms allowed in block
-   > acceptance?). **This fork must be decided before the jet is built, is shared
-   > with dense, and is far beyond "MoE compact parity."** It is the concrete wall
-   > that scopes block-level acceptance as its own architectural workstream.
-3. Block-level acceptance + integration tests (the `roswell` test above), after the
-   fork above is resolved.
+   > acceptance?).
+   >
+   > **DECIDED (user, 2026-07-13): Branch (b)** — a full Rust verify jet with a
+   > stubbed Hoon arm, *provided the data representation stays somewhat transparent
+   > to Hoon* (the artifact sample is the structured `ai-pow-artifact` noun; only
+   > the opaque nonce + cert body are byte-atoms; the result is a loobean).
+
+   **Branch (b) Stage 1 — DONE + VALIDATED 2026-07-13 (the Rust verify jet).** New
+   crate `ai-pow-jets`:
+   - `ai_pow_verify_jet(context, subject)` — sample `[artifact commit target]`,
+     result loobean. Re-derives canonical `(A,B)` from the protocol seed
+     (non-grindable), dispatches on the tag, verifies.
+   - `ai_pow_verify_with_setup` — the load-bearing core, unit-testable: slot axes +
+     atom extraction + `decode_ai_pow_pearl_merge_artifact_noun` +
+     `verify_ai_pow_block_artifact`. Malformed sample → `JetErr` (legit Hoon
+     fallback); invalid block → `Ok(false)`, never a jet failure.
+   - proof-independent setup boot-injected via `init_ai_pow_verifier_setup`.
+   - `produce_ai_pow_hot_state()` — the `HotEntry` set.
+   Validated by a real-proof KAT (~24 s): a real MoE `%ai-pow` block verifies
+   through the jet core via the transparent noun sample; wrong commitment + unmet
+   difficulty reject. `verify_ai_pow_block_artifact_jam` refactored to expose the
+   shape-based `verify_ai_pow_block_artifact` (no re-jam).
+
+   **Branch (b) Stage 2 — remaining (the Hoon wiring + jam rebuild):**
+   - `build_production_verifier_setup()` — prove one canonical block at the fixed
+     production params at boot → `(context, digest)` → `init_ai_pow_verifier_setup`.
+   - The stubbed Hoon `++ai-pow-verify` arm + `~/` hint; **fix the jet path** in
+     `produce_ai_pow_hot_state` to match the hint's `~%` parent chain (validate at
+     runtime — a mis-chained hint prints).
+   - Register `produce_ai_pow_hot_state` in the nockchain kernel `hot_state`
+     (`nockchain/src/lib.rs`); wire `check-pow`/`do-pow` (`inner.hoon`) to call the
+     arm with `[artifact commit target]`, replacing the two fail-closes.
+   - Rebuild the kernel jam → binary (per `hoon-jam-builds`); a `roswell`
+     integration test: a real `%ai-pow` block is accepted, a forged one rejected.
+   Shared with dense (the jet dispatches on the tag; both variants covered).
 
 Items 1–2 are **shared with dense** (the block, the setup, and the jet are
 puzzle-variant-agnostic except the tag dispatch, which is done). The
@@ -668,7 +698,7 @@ From the compact-recursive production pipeline:
 | **M6** k≠1024 keying | ✅ **validated** — MoE compact prove+verify at k=4096 (row spans 4 chunks); node-commitment binds; adversarial rejects (real proving 45.47s) |
 | **M7** adversarial on compact | ✅ wrong-commitment + **forged-routing** + unmet-difficulty rejects validated on the compact verify logic AND the end-to-end node branch |
 | **M4** envelope + parse guards | ✅ **done + validated** — `sanity_check_allowing_moe` + `from_public_data_allowing_moe` (both prerequisites for M3; dense paths byte-identical; 6+ tests, regression green). **Admission guard** (`validate_pearl_merge_config_for_recursive_prover`, comment now stale) 🔒 still LAST — the only MoE fail-close left |
-| **D4/S1** Hoon↔Rust consensus wiring | 🟡 **Rust side DONE + validated** — `verify_ai_pow_block_artifact_jam` re-derives canonical A/B from the protocol seed (no model distribution; "model wall" retracted, §4 D4/S1), dispatches on the tag, verifies (real-proof validated; difficulty rejects); the verifier setup is **proof-independent** (validated — build-once-at-startup is sound). **Remaining: the Hoon jet + kernel-jam rebuild** (consensus linchpin, staged per R1). Hoon `check-pow`/`do-pow` still fail-close correctly until it lands |
+| **D4/S1** Hoon↔Rust consensus wiring | 🟡 **Branch (b) chosen; Stage 1 DONE + validated** — new `ai-pow-jets` crate: the Rust verify jet (`ai_pow_verify_jet`) with a transparent `[artifact commit target]` sample, canonical-A/B re-derivation, tag dispatch, proof-independent boot-injected setup. Real-proof KAT green (block accepts; wrong commitment + unmet difficulty reject). **Stage 2 remaining:** boot setup builder + stubbed Hoon `++ai-pow-verify` arm/hint + jet-path fix + `check-pow`/`do-pow` wiring + kernel-jam rebuild + roswell integration test. Hoon fail-closes correct until Stage 2 lands |
 
 ---
 
