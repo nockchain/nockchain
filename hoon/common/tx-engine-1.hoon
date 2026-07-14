@@ -234,7 +234,14 @@
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
         ?:  ?=([%ai-pow *] u.pow.pag)
-          [leaf+%ai-pow leaf+(jam u.pow.pag)]
+          ::  Commit to the %ai-pow certificate belt-safely: jam it and hash the
+          ::  jam as a list of 32-bit belts. `leaf+(jam ..)` was wrong — a leaf
+          ::  is a single tip5 belt (< goldilocks prime), but any real cert's jam
+          ::  is far larger, so +hash-noun-varlen's +leaf-sequence (which does not
+          ::  rip) fed the whole atom to +belt-to-u32s and crashed `?> (lth sam p)`
+          ::  on every %ai-pow block. `(rip 5 ..)` splits into <2^32 belts, each
+          ::  valid. Mirrors the zk arm's `[leaf+tag hash+<digest>]` shape.
+          [leaf+%ai-pow hash+(hash-belts-list:tip5 (rip 5 (jam u.pow.pag)))]
         =/  prf=form:proof  (need ((soft form:proof) u.pow.pag))
         [leaf+~ hash+(hash-proof:v0 prf)]
     (hashable-block-commitment pag)
