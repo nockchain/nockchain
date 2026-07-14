@@ -31,9 +31,10 @@ use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
     verify_pearl_aux_inclusion, verify_pearl_merge_public_statement_bytes,
     verify_pearl_merge_public_statement_bytes_with_aux_inclusion, PearlAuxInclusionProof,
-    PearlCompatError, PearlIncompleteBlockHeader, PearlMergeMiningPrecheck,
-    PearlMergePublicStatement, PearlMergeTicketAttempt, PearlMiningConfig, PearlMoeParams,
-    PearlNockchainAux, PearlPatternTicket, PearlPublicProofParams, PearlWorkCommitments,
+    verify_pearl_moe_compatible_work, PearlCompatError, PearlIncompleteBlockHeader,
+    PearlMergeMiningPrecheck, PearlMergePublicStatement, PearlMergeTicketAttempt,
+    PearlMiningConfig, PearlMoeParams, PearlMoeWorkPrecheck, PearlNockchainAux, PearlPatternTicket,
+    PearlPublicProofParams, PearlWorkCommitments,
     PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
     PEARL_INCOMPLETE_BLOCK_HEADER_SIZE, PEARL_MINING_CONFIG_SIZE, PEARL_MOE_MAX_NUM_EXPERTS,
     PEARL_MOE_MAX_OUTER_INDICES, PEARL_MOE_MAX_ROUTING_ENTRIES, PEARL_PUBLIC_PROOF_PARAMS_SIZE,
@@ -42,8 +43,9 @@ use ai_pow::pearl_compat::{
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
 use ai_pow::zk_bridge::{
     expected_layer0_rows_for_strip_schedule, verify_ai_pow_full_matmul_production_statement,
-    zk_params_from_matmul, AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun,
-    BridgeError, ZkPublicCommitments,
+    verify_pearl_moe_compact_recursive_certificate, zk_params_from_matmul,
+    AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun, BridgeError,
+    ZkPublicCommitments,
 };
 use ai_pow_zk::canonical::StripIndexSchedule;
 use ai_pow_zk::{CompositePublicInputs, ZkParams};
@@ -2302,6 +2304,15 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limit
     expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
+    // Dense compact verify: a MoE (AIM1) artifact MUST NOT be routed here. The
+    // statement precheck already fail-closes on a MoE `public_data` (via
+    // `sanity_check`), but reject explicitly for a precise error — MoE uses
+    // `verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits`.
+    if artifact.moe.is_some() {
+        return Err(CertificateNounError::Shape(
+            "dense compact verify called on a MoE (AIM1) artifact; use the MoE verify path",
+        ));
+    }
     let precheck = precheck_ai_pow_pearl_merge_artifact_statement_with_context(artifact, context)?;
     // P0/D6: derive the canonical L0 program commitment from the opened schedule
     // the precheck rebuilt (never from the prover) and bind it into the compact
@@ -2317,6 +2328,152 @@ pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limit
         &l0_program_commitment,
     )?;
     Ok(precheck)
+}
+
+/// Node-side MoE (GROUPED_GEMM) precheck result: the MoE work verification plus
+/// the aux binding, mirroring [`PearlMergeMiningPrecheck`] for the MoE path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMergeMoeMiningPrecheck {
+    pub work: PearlMoeWorkPrecheck,
+    pub aux: PearlNockchainAux,
+    pub aux_commitment: [u8; 32],
+}
+
+/// Verify a decoded **MoE** (`AIM1`) Pearl-merge `%ai-pow` compact artifact
+/// (`e > 0`) — the MoE counterpart of
+/// [`verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits`].
+///
+/// The dense function cannot handle MoE (its statement precheck fail-closes on a
+/// MoE `public_data`). This runs the MoE-aware verification:
+///   1. reconstruct + **aux-bind** the statement (identical to the dense prefix:
+///      aux inclusion, `nock_block_commitment`, `aux_commitment`);
+///   2. [`verify_pearl_moe_compatible_work`] — MoE-aware envelope + routing
+///      binding + **jackpot/difficulty binding** (recompute the opened tile,
+///      require `jackpot == hash_jackpot`, then meets target);
+///   3. reconstruct `MatmulParams` from the **authenticated** statement dims
+///      (requiring the certificate's `zk_params` to agree), then
+///      [`verify_pearl_moe_compact_recursive_certificate`] — routing/PI/schedule
+///      binding + the compact proof verify (with the P0/D6 program-commitment
+///      fold).
+///
+/// The caller must pass the trusted expected compact verifier-key digest, exactly
+/// as for the dense path. MoE block admission additionally remains gated behind
+/// the recursive-prover acceptance guard + the Hoon↔Rust consensus wiring (M4
+/// admission half + D4/S1); this function is the soundness-complete verify the
+/// eventual dispatcher calls for `artifact.moe.is_some()`.
+pub fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+    artifact: &PearlMergeAiPowArtifactShape,
+    context: PearlMergeAiPowVerifierContext<'_>,
+    compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    expected_verifier_key_digest: &ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest,
+    limits: CertificateNounLimits,
+) -> Result<PearlMergeMoeMiningPrecheck, CertificateNounError> {
+    let moe_art = artifact.moe.as_ref().ok_or(CertificateNounError::Shape(
+        "MoE compact verify requires a MoE (AIM1) artifact",
+    ))?;
+    let statement = &artifact.statement;
+
+    // (1) Aux binding — identical to the dense `verify_pearl_merge_mining_public_data`
+    // prefix: the Nockchain candidate block is committed into the Pearl header via
+    // the aux inclusion + commitment. (`?` auto-converts PearlCompatError.)
+    let header = PearlIncompleteBlockHeader::from_bytes(&statement.block_header)?;
+    verify_pearl_aux_inclusion(
+        &header,
+        &statement.expected_aux_commitment,
+        &artifact.aux_inclusion,
+    )?;
+    if statement.aux.nock_block_commitment != *context.candidate_nock_block_commitment {
+        return Err(CertificateNounError::PearlMergeStatement(
+            PearlCompatError::NockchainAuxBlockCommitmentMismatch,
+        ));
+    }
+    let aux_commitment = statement.aux.commitment()?;
+    if aux_commitment != statement.expected_aux_commitment {
+        return Err(CertificateNounError::PearlMergeStatement(
+            PearlCompatError::NockchainAuxCommitmentMismatch,
+        ));
+    }
+
+    // (2) Public params from the authenticated statement, then the MoE work
+    // precheck (envelope + routing-consistency + jackpot/difficulty binding).
+    let public_params = PearlPublicProofParams::from_public_data(header, &statement.public_data)?;
+    let work = verify_pearl_moe_compatible_work(
+        &public_params,
+        context.a_row_major,
+        context.b_col_major,
+        &moe_art.moe,
+        &moe_art.routing_data,
+        context.nockchain_target,
+        context.max_pattern_len,
+    )?;
+
+    // (3) Reconstruct MatmulParams from the AUTHENTICATED statement dims (m/n/k/r).
+    // `tile`/`difficulty_bits` are proof-system metadata not carried in the Pearl
+    // statement, so take them from the certificate — but require its dims to agree
+    // with the authenticated statement, so a prover cannot mis-declare the shape
+    // (any residual disagreement is caught by the P0 program-commitment fold).
+    let zk = &artifact.certificate.zk_params;
+    if zk.m != public_params.m
+        || zk.n != public_params.n
+        || zk.k != public_params.mining_config.common_dim
+        || zk.noise_rank != u32::from(public_params.mining_config.rank)
+    {
+        return Err(CertificateNounError::Shape(
+            "compact certificate zk_params disagree with the authenticated MoE statement dims",
+        ));
+    }
+    let params = MatmulParams {
+        m: public_params.m,
+        k: public_params.mining_config.common_dim,
+        n: public_params.n,
+        noise_rank: u32::from(public_params.mining_config.rank),
+        tile: zk.tile,
+        // ZkParams carries no `spot_checks`; the MoE verify does not read it.
+        spot_checks: 1,
+        difficulty_bits: zk.difficulty_bits,
+    };
+
+    // (4) Verifier-key digest checks + decode the compact certificate.
+    if compact_context.verifier_key_digest() != expected_verifier_key_digest {
+        return Err(CertificateNounError::CompactVerifierKeyDigestMismatch(
+            "verifier-context",
+        ));
+    }
+    let cert = ai_pow_compact_recursive_certificate_from_node_with_limits(
+        &artifact.certificate.certificate,
+        limits,
+    )?;
+    if cert.verifier_key_digest() != expected_verifier_key_digest {
+        return Err(CertificateNounError::CompactVerifierKeyDigestMismatch(
+            "certificate",
+        ));
+    }
+
+    // (5) Proof half: routing-consistency + expert-column recompute + routing-spliced
+    // s_A/PI binding + the P0/D6 opened-schedule commitment fold + compact verify.
+    verify_pearl_moe_compact_recursive_certificate(
+        compact_context,
+        cert,
+        &artifact.certificate.public_inputs,
+        &params,
+        &work.commitments.kappa,
+        &work.commitments.h_a,
+        &work.commitments.h_b,
+        &public_params.mining_config,
+        &moe_art.moe,
+        public_params.m,
+        public_params.t_rows,
+        public_params.t_cols,
+        &moe_art.routing_data,
+        context.max_pattern_len,
+    )
+    .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
+
+    Ok(PearlMergeMoeMiningPrecheck {
+        work,
+        aux: statement.aux.clone(),
+        aux_commitment,
+    })
 }
 
 /// Byte-digest form of
