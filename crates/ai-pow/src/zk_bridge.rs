@@ -4450,6 +4450,35 @@ mod tests {
              invariant that lets the node trust hash_jackpot and drop the synth recompute)"
         );
 
+        // (a) DE-RISK — the raw tile PI `jackpot`. The DENSE compact node verify skips
+        // the off-circuit `jackpot` comparison entirely (option (a)); a forged raw tile
+        // must therefore be rejected by the proof (it feeds the same statement digest).
+        let node_cert_j = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+            .expect("decode for forged-tile test");
+        let mut forged_tile = pis.clone();
+        forged_tile.jackpot[0] ^= 1;
+        assert!(
+            verify_pearl_moe_compact_recursive_certificate(
+                &run.verifier_context,
+                node_cert_j,
+                &forged_tile,
+                &params,
+                &kappa,
+                &h_a,
+                &h_b,
+                &mining_config,
+                &moe_params,
+                m as u32,
+                0,
+                0,
+                &routing.routing_data,
+                4096,
+            )
+            .is_err(),
+            "a forged raw-tile `jackpot` PI must be rejected by the proof (the dense (a) \
+             path trusts it in-circuit and does not re-check it off-circuit)"
+        );
+
         assert!(
             bytes.len() < 150_000,
             "MoE compact cert should stay within the relaxed size gate: {}",
