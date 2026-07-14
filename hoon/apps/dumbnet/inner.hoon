@@ -1136,6 +1136,14 @@
          check-msg
          check-btc-hash
      ==
+    ::  +check-pow dispatches a version-%3 (%ai-pow) block to the door-level
+    ::  +ai-pow-verify arm (the mandatory Rust jet; see its doc at the top of
+    ::  %dumb-inner). Sample: the transparent structured artifact
+    ::  `[%ai-pow nonce certificate]`, the structured block-commitment noun
+    ::  (jammed + BLAKE3'd inside the jet to match the miner), and the target as a
+    ::  `merge:bignum` LE atom. Safe: `validate-page-without-txs-da` rejects
+    ::  pre-activation `%ai-pow` (via `proof-version-valid-at-height`) before
+    ::  `check-pow` runs.
     ++  check-pow
       ~/  %check-pow
       |=  pag=page:t
@@ -1144,9 +1152,8 @@
       ?~  pow
         %.n
       ?:  ?=([%ai-pow *] u.pow)
-        ::  Fail closed until recursive AI-PoW certificate verification is
-        ::  wired. Height-gating alone is not proof verification.
-        %.n
+        %+  ai-pow-verify:mine  u.pow
+        [(block-commitment:page:t pag) (merge:bignum:t ~(target get:page:t pag))]
       =/  prf=proof:sp  (need ((soft proof:sp) u.pow))
       ::
       ::  validate that powork puzzle in the proof is correct.

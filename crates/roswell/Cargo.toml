@@ -22,3 +22,4 @@ noun-serde.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 tracing.workspace = true
 zkvm-jetpack.workspace = true
+ai-pow-jets.workspace = true

@@ -21,7 +21,7 @@
 
 use ai_pow_miner::certificate_noun::{
     decode_ai_pow_pearl_merge_artifact_noun, verify_ai_pow_block_artifact, AiPowBlockVerifyOutcome,
-    CertificateNounLimits,
+    CertificateNounLimits, PearlMergeAiPowArtifactShape,
 };
 use ai_pow_zk::recursion::AiPowCompactBatchVerifierContext;
 use nockvm::interpreter::Context;
@@ -91,28 +91,19 @@ pub fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -> [u8; 
     *blake3::hash(&full[..sig_len]).as_bytes()
 }
 
-/// Verify a decoded `%ai-pow` block artifact given the resolved 32-byte block
-/// commitment + target and an explicit setup. This is the jet's load-bearing
-/// core, factored out so it is unit-testable without the boot cache.
-///
-/// Returns `Ok(true)` iff the block verifies, `Ok(false)` if it is well-formed but
-/// invalid (bad proof / unmet difficulty / wrong commitment / tampered artifact),
-/// and `Err(JetErr)` only if the artifact noun cannot even be slotted.
+/// Verify an already-decoded `%ai-pow` block artifact given the resolved 32-byte
+/// block commitment + target and an explicit setup. Factored out so it is
+/// unit-testable without the boot cache. Returns `Ok(true)` iff the block verifies,
+/// `Ok(false)` if it is well-formed but invalid.
 pub fn ai_pow_verify_core(
-    space: &NounSpace,
-    artifact_noun: Noun,
+    artifact: &PearlMergeAiPowArtifactShape,
     commit: [u8; 32],
     target: [u8; 32],
     setup: &AiPowVerifierSetup,
 ) -> Result<bool, JetErr> {
     let limits = CertificateNounLimits::default();
-    let artifact = match decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, space, limits) {
-        Ok(a) => a,
-        // A malformed artifact noun is a rejected block, not a jet failure.
-        Err(_) => return Ok(false),
-    };
     match verify_ai_pow_block_artifact(
-        &artifact,
+        artifact,
         limits,
         &commit,
         &target,
@@ -131,9 +122,12 @@ pub fn ai_pow_verify_core(
 /// `commit_from_noun`), `target` the `merge:bignum` LE atom the Hoon arm passes.
 /// Result: loobean.
 ///
-/// Requires [`init_ai_pow_verifier_setup`] to have run at boot; if not, it bails to
-/// the (stubbed) Hoon arm — which, for a jet-required arm, surfaces the boot bug
-/// rather than silently accepting.
+/// The artifact is decoded BEFORE the boot setup is required: a malformed/garbage
+/// `%ai-pow` artifact is a rejected block (`NO`) that needs no setup — so a garbage
+/// block cannot crash a node whose setup is still building, and the jet is
+/// unit-testable end-to-end without a ~25 s setup prove. A *well-formed* artifact
+/// with no setup injected does bail to the stubbed Hoon arm (`!!`) — the
+/// jet-required design surfaces the boot bug rather than silently accepting.
 pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let space = context.stack.noun_space();
     // sample = [artifact commit target]  ⇒  head=2, commit=6, target=7
@@ -141,32 +135,57 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let artifact_noun = slot(sample, 2, &space)?;
     let commit_noun = slot(sample, 6, &space)?;
     let target_noun = slot(sample, 7, &space)?;
+
+    // Decode first — garbage is a rejected block, not a jet failure, and needs no
+    // setup. `PearlMergeAiPowArtifactShape` is an owned decode, so it survives the
+    // stack mutation from `commit_from_noun` below.
+    let limits = CertificateNounLimits::default();
+    let artifact = match decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits) {
+        Ok(a) => a,
+        Err(_) => return Ok(NO),
+    };
     let Some(target) = atom_to_32(target_noun, &space) else {
         return Ok(NO);
     };
     let Some(setup) = SETUP.get() else {
-        // Setup not injected at boot — cannot verify; fall back (surfaces the bug).
+        // Well-formed artifact but setup not injected — fall back (surfaces the bug).
         return Err(BAIL_FAIL);
     };
     // Canonicalize the structured commitment noun (mutates the stack via jam).
     let commit = commit_from_noun(&mut context.stack, commit_noun);
-    let space = context.stack.noun_space();
-    let verified = ai_pow_verify_core(&space, artifact_noun, commit, target, setup)?;
+    let verified = ai_pow_verify_core(&artifact, commit, target, setup)?;
     Ok(if verified { YES } else { NO })
 }
 
 /// Hot-state entry set for the AI-PoW verify jet. Appended to the nockchain kernel
 /// hot state alongside `zkvm-jetpack`'s prover jets.
 ///
-/// NOTE: the jet **path** below is provisional — it must match the `~%`/`~/` hint
-/// chain of the stubbed Hoon `++ai-pow-verify` arm once that arm lands (Stage 2).
-/// Registration is validated at runtime (a mis-chained hint prints at build/call).
+/// The Hoon `++ai-pow-verify` (`~/ %ai-pow-verify`) lives in the shared
+/// `/common/pow` lib under a `~% %pow-lib ..ut ~` root (it cannot be a kernel
+/// door arm — the `fort` mold fixes %dumb-inner to load/peek/poke — nor a
+/// `|^`-nested arm, which fails cold registration). `..ut` resolves to the
+/// hoon.hoon std-library prefix `[one two tri qua pen]` (confirmed by the
+/// `%zeke`-anchored jets, e.g. cheetah `ser-a-pt`, which sit at
+/// `[one two tri qua pen zeke ..]`). So `%pow-lib` sits at
+/// `[one two tri qua pen pow-lib]` and the jetted arm at
+/// `[one two tri qua pen pow-lib ai-pow-verify]`. Axis `1` is the `~/`-gate
+/// convention (matches every base58 / ec-point `|=` jet). Runtime-validated by
+/// the roswell `test-ai-pow-verify-jet-fires` unit test.
 pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
     use either::Either::Left;
     use nockvm::jets::hot::K_138;
     vec![(
-        &[K_138, Left(b"one"), Left(b"ai-pow-verify")],
-        6,
+        &[
+            K_138,
+            Left(b"one"),
+            Left(b"two"),
+            Left(b"tri"),
+            Left(b"qua"),
+            Left(b"pen"),
+            Left(b"pow-lib"),
+            Left(b"ai-pow-verify"),
+        ],
+        1,
         ai_pow_verify_jet,
     )]
 }
@@ -260,23 +279,30 @@ mod tests {
         let commit = block.commit;
         let loose_target = [0xffu8; 32];
 
+        // Decode the artifact noun to the shape (what the jet does before verify).
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+            root,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode artifact noun");
 
         assert!(
-            matches!(ai_pow_verify_core(&space, root, commit, loose_target, &setup), Ok(true)),
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
             "real MoE block must verify through the jet core",
         );
         assert!(
             matches!(
-                ai_pow_verify_core(&space, root, [0x99u8; 32], loose_target, &setup),
+                ai_pow_verify_core(&artifact, [0x99u8; 32], loose_target, &setup),
                 Ok(false)
             ),
             "wrong block commitment must be rejected",
         );
         assert!(
-            matches!(ai_pow_verify_core(&space, root, commit, [0u8; 32], &setup), Ok(false)),
+            matches!(ai_pow_verify_core(&artifact, commit, [0u8; 32], &setup), Ok(false)),
             "unmet difficulty must be rejected",
         );
     }

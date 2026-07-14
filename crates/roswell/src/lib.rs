@@ -285,13 +285,22 @@ pub struct Roswell {
     pub app: NockApp,
 }
 
+/// The single shared jet registry roswell + nockchain must both use: the STARK
+/// prover jets plus the AI-PoW consensus verify jet (`~/ %ai-pow-verify`). Both
+/// binaries call this so the jet matches identically in tests and in production.
+pub fn produce_full_hot_state() -> Vec<HotEntry> {
+    let mut hs = produce_prover_hot_state();
+    hs.extend(ai_pow_jets::produce_ai_pow_hot_state());
+    hs
+}
+
 impl Roswell {
     pub fn new(nockapp: NockApp) -> Self {
         Self { app: nockapp }
     }
 
     pub async fn boot(boot_cli: BootCli) -> Result<Self, NockAppError> {
-        Self::boot_with_hot_state(boot_cli, &produce_prover_hot_state()).await
+        Self::boot_with_hot_state(boot_cli, &produce_full_hot_state()).await
     }
 
     pub async fn boot_with_hot_state(

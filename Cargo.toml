@@ -321,6 +321,9 @@ path = "crates/wallet-tx-builder"
 [workspace.dependencies.zkvm-jetpack]
 path = "crates/zkvm-jetpack"
 
+[workspace.dependencies.ai-pow-jets]
+path = "crates/ai-pow-jets"
+
 [patch.crates-io]
 op-alloy-consensus = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-consensus" }
 op-alloy-network = { git = "https://github.com/ethereum-optimism/optimism", rev = "0c6a03eac768122819c05b71f233bba1e90cf426", package = "op-alloy-network" }

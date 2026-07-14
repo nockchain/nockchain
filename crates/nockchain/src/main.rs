@@ -22,7 +22,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cli = nockchain::NockchainCli::parse_with_default_stack_size(boot::NockStackSize::Large);
     boot::init_default_tracing(&cli.nockapp_cli);
 
-    let prover_hot_state = produce_prover_hot_state();
+    // Shared jet registry: the STARK prover jets + the AI-PoW consensus verify
+    // jet. roswell must extend the identical set (crates/roswell) so `check-pow`'s
+    // `~/ %ai-pow-verify` matches in both binaries.
+    let mut prover_hot_state = produce_prover_hot_state();
+    prover_hot_state.extend(ai_pow_jets::produce_ai_pow_hot_state());
 
     let api_config = if let Some(addr) = cli.bind_public_grpc_addr {
         NockchainAPIConfig::EnablePublicServer(addr)

@@ -615,9 +615,15 @@
   =/  check-pow-hash=?
     =/  pow  (need ~(pow get:page:t pag))
     ?:  ?=([%ai-pow *] pow)
-      ::  Fail closed until recursive AI-PoW certificate verification is
-      ::  wired. A typed certificate is not itself a target check.
-      %.n
+      ::  Defer the AI-PoW work-meets-target check to +check-pow, whose
+      ::  `%ai-pow` branch runs `++ai-pow-verify` (the recursive-certificate
+      ::  jet), which binds the certificate to `(block-commitment .. target)`
+      ::  and so subsumes this cheap target gate. Deferral is sound: this arm
+      ::  (+validate-page-without-txs) doc-excludes "validating the powork",
+      ::  and its sole caller +heard-block runs +check-pow immediately after,
+      ::  admitting a block to consensus state ONLY once BOTH pass. Returning
+      ::  %.n here would instead reject every %ai-pow block, valid included.
+      %.y
     =/  prf=proof:sp  (need ((soft proof:sp) pow))
     %-  check-target:mine
     :_  ~(target get:page:t pag)

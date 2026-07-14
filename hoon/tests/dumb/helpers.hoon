@@ -126,6 +126,15 @@
     genesis-target-atom  max-tip5-atom:tip5
     pow-len              1
   ==
+::  provable variant with AI-PoW active from genesis: lets a low-height page
+::  carry a version-%3 (%ai-pow) pow so `check-pow`'s `%ai-pow` branch (the
+::  mandatory `ai-pow-verify` jet) runs. `ai-pow-activation-height=0` avoids the
+::  activation-boundary ASERT re-anchor, so ordinary provable blocks stay valid;
+::  `proof-version-valid-at-height` then accepts %3 at every height.
+++  bc-ai-pow-provable
+  %*  .  bc-pending-provable
+    ai-pow-activation-height  0
+  ==
 ::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
 ::  limit, but poke-able through the kernel. The oversize-tx mempool test
 ::  drives +init-nockchain / +add-n-pages-integration, both of which poke
@@ -658,6 +667,44 @@
     ?^  -.new-page
       new-page(digest new-digest)
     new-page(digest new-digest)
+  new-page
+::
+::  +make-ai-pow-garbage-page: like +make-empty-page but stamps a GARBAGE
+::  version-%3 (%ai-pow) pow instead of the mock zk proof, so a poked
+::  %heard-block reaches +check-pow's `%ai-pow` branch (the mandatory
+::  ++ai-pow-verify jet). `page:t` is `$^(page:v0 page:v1)`, so mutation must
+::  branch on `?^ -.new-page` (cell head ⇒ v0, atom head ⇒ v1). +new-candidate
+::  builds a v1 page (atom head), so the v1 (FALSE) branch runs at runtime and
+::  gets the `[%ai-pow 0 0]` pow — v1's pow is `(unit *)`, which accepts it. The
+::  v0 (TRUE) branch is dead but must still type-check, and v0's pow is a
+::  narrower `(unit proof:v0)` that `[%ai-pow ..]` cannot nest into, so it keeps
+::  `mock-pow` there. The artifact is deliberately undecodable ⇒ jet returns %.n.
+++  make-ai-pow-garbage-page
+  |=  parent=page:t
+  ^-  page:t
+  =/  s=sig:t  p:default-keys-1
+  =/  =shares:t  (sig-to-shares:v1 s 1)
+  =/  new-page
+    %-  new-candidate:page:t
+    :*  parent
+        *@da
+        ~(target get:page:t parent)
+        shares
+        phase.zk-asert.bc
+    ==
+  =/  new-timestamp  (add ~(timestamp get:page:t parent) 600)
+  =.  new-page
+    ?^  -.new-page
+      new-page(timestamp new-timestamp)
+    new-page(timestamp new-timestamp)
+  =.  new-page
+    ?^  -.new-page
+      new-page(pow mock-pow)
+    new-page(pow `[%ai-pow 0 0])
+  =.  new-page
+    ?^  -.new-page
+      new-page(digest (compute-digest:page:t new-page))
+    new-page(digest (compute-digest:page:t new-page))
   new-page
 ::
 ++  make-default-coinbase
