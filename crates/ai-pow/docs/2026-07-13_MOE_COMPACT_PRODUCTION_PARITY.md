@@ -638,19 +638,23 @@ unmet difficulty rejects.
    - `check-pow` (`inner.hoon ~1146`): replace `?: ?=([%ai-pow *] u.pow) %.n` with
      a call to `ai-pow-verify` on `u.pow` (`[%ai-pow ai-pow-artifact]`, the
      transparent artifact noun) + the page's commitment + target.
-   > **⚠️ Soundness-critical representation binding (the concrete wall the attempt
-   > surfaced).** The naive `[commit=@ target=@]` sample does NOT type-check: the
-   > page's `target` is a **structured `bignum:bn`** (`ztd/three.hoon`), and
-   > `block-commitment:page:t` is a **tip5 hash**, not a bare atom. The Hoon arm
-   > must convert BOTH to the exact **32-byte little-endian atoms** the Rust verify
-   > expects (`candidate_nock_block_commitment` = `aux.nock_block_commitment`;
-   > `nockchain_target` = the 256-bit target LE). A wrong conversion (endianness,
-   > limb order, hash serialization) mis-verifies — accepts a wrong block or rejects
-   > a valid one. This binding must be pinned + validated by the integration test;
-   > it is exactly the soundness-critical detail R1 says not to rush. The jet's
-   > `atom_to_32` assumes a ≤32-byte LE atom, so the conversion lives in the Hoon
-   > arm (or the jet gains a `bignum`/hash decoder — the Hoon-side conversion keeps
-   > the jet interface simple + transparent).
+   > **✅ Soundness-critical representation binding — RESOLVED + VALIDATED 2026-07-13.**
+   > The naive `[commit=@ target=@]` sample does NOT type-check: the page's `target`
+   > is a **structured `bignum:bn`** and `block-commitment:page:t` is a **tip5
+   > 5-`belt` digest**, not bare atoms. Traced the exact binding the miner uses
+   > (`ai-pow-miner::derive_job_inputs`):
+   > - `nock_block_commitment = BLAKE3(jam(block-commitment-noun))`
+   > - `nockchain_target = merge:bignum` (LE atom)
+   >
+   > Implemented: the Hoon arm passes the **structured** commit noun +
+   > `(merge:bignum:t ~(target get:page:t pag))`; the jet's `commit_from_noun` does
+   > `BLAKE3(nockvm jam)` **trimmed to the canonical length** (nockvm jam is
+   > word-padded vs `NounSlab::jam` — an untrimmed BLAKE3 would reject every valid
+   > block). Validated: `commit_from_noun_matches_miner_derivation` proves the jet's
+   > `BLAKE3(nockvm jam)` == miner's `BLAKE3(NounSlab::jam)` across padding edge
+   > cases; the real-proof jet KAT stays green. The `sample = [artifact commit-noun
+   > target-atom]` interface is transparent (structured commit + structured
+   > artifact; only the nonce + cert body + target are atoms).
    - The stubbed `++ai-pow-verify` arm (`~/ %ai-pow-verify`, body `!!`) as a sibling
      of `check-pow`; **set the jet path** in `produce_ai_pow_hot_state` to that
      arm's `~%` parent chain (validate at runtime — a mis-chained hint prints).
