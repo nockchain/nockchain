@@ -688,10 +688,21 @@ unmet difficulty rejects.
    > initial jam-rebuild pass flagged a crash-DoS risk here; tracing the validator
    > showed the gate is already upstream — the risk does not exist. The `check-pow`
    > edit needs no activation change.)
-   - Integration test: boot the kernel (jet + setup injected), submit a real
-     `%ai-pow` block → accepted; a forged one → rejected. **Requires a full
-     `page:t` block fixture** (`check-pow` runs inside `heard-block` after
-     `check-page-without-txs`), or a dedicated test poke that invokes `check-pow`.
+   - Integration test — **harness traced 2026-07-13.** Boot the dumb kernel via
+     `SerfThread::<SaveableCheckpoint>::new(KERNEL, None, hot_state, ..)` (pattern:
+     `nockchain/tests/open_prover_bench.rs`) with
+     `hot_state = produce_prover_hot_state() ++ produce_ai_pow_hot_state()`, inject
+     the setup, then `serf.poke(heard-block-wire, block-slab)`. **The block fixture
+     is the crux:** `check-pow` runs inside `heard-block` *after*
+     `validate-page-without-txs-da` (which needs a valid parent chain), and `%ai-pow`
+     is gated to height ≥ 95,000. So the test needs EITHER (a) a **test kernel with
+     a lowered `ai-pow-activation-height`** + a constructed valid block-1 (genesis
+     parent, empty txs, valid coinbase/target/work/epoch, and a real `%ai-pow`
+     artifact proven against `BLAKE3(jam(block-1's block-commitment))`), OR (b) a
+     dedicated test poke/peek that invokes `check-pow` directly on a supplied page.
+     Option (a) is a bounded but substantial fixture (one block + one real prove);
+     option (b) is a small kernel test-surface add. The one runtime-unvalidated
+     piece the test confirms is the jet `~%` chain firing.
    Shared with dense (the jet dispatches on the tag; both variants covered). This is
    a coupled multi-slow-step consensus change with multiple soundness-critical
    details (representation binding ✅ resolved; activation gating, crash-safety,
