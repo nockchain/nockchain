@@ -690,6 +690,123 @@ mod jet_tests {
         );
     }
 
+    /// Probe: generate ONLY the largest (2^20) bucket, capturing the full error if
+    /// it fails. Used to confirm the power-of-two-tile fix and rule out OOM.
+    #[test]
+    #[ignore = "proves the 2^20 bucket (~10 min); opt-in"]
+    fn boot_generate_largest_bucket_2_20() {
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        let shape = *buckets.last().expect("at least one bucket");
+        let th = crate::setup::canonical_moe_trace_height(&shape.params, shape.hw, shape.e, shape.top_k)
+            .expect("cheap height");
+        assert_eq!(th.trailing_zeros(), 20, "largest bucket must be 2^20");
+        eprintln!(
+            "proving 2^20 shape: m={} k={} n={} r={} tile={} hw={}",
+            shape.params.m, shape.params.k, shape.params.n, shape.params.noise_rank,
+            shape.params.tile, shape.hw,
+        );
+        let seed = crate::setup::build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
+            .expect("2^20 seed must generate");
+        eprintln!("2^20 seed OK: trace_height=2^{}", seed.trace_height().trailing_zeros());
+    }
+
+    /// Diagnostic: print every production bucket shape (cheap, no proving).
+    #[test]
+    fn print_production_bucket_shapes() {
+        for b in crate::setup::production_verifier_setup_buckets() {
+            let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap();
+            eprintln!(
+                "2^{}: m={} k={} n={} r={} tile={} | hw={} e={} top_k={} ns={}",
+                th.trailing_zeros(),
+                b.params.m,
+                b.params.k,
+                b.params.n,
+                b.params.noise_rank,
+                b.params.tile,
+                b.hw,
+                b.e,
+                b.top_k,
+                b.params.k / b.params.noise_rank,
+            );
+        }
+    }
+
+    /// C4 CLOSER (generates the memory-feasible buckets 2^13..2^19; ~6 min): the
+    /// first-boot table minus the top bucket. Proves one canonical block per bucket,
+    /// logs each seed's trace height + serialized size (the L0 program grows with
+    /// trace height), round-trips the whole set through a data-dir cache file,
+    /// rebuilds them (no proving), and asserts coverage of 2^13..2^19.
+    ///
+    /// NOTE: the top bucket 2^20 is EXCLUDED here because proving a 2^20-row
+    /// (~1M-row) trace + its recursion OOMs a 32 GB machine (SIGKILL) — see
+    /// `boot_generate_largest_bucket_2_20`. Generating the full §4.8 band at boot
+    /// needs a large-RAM node, or the table is pre-generated offline and the ~75 MB
+    /// cache distributed. The pipeline is identical for 2^20; only the memory scale
+    /// differs.
+    #[test]
+    #[ignore = "generates buckets 2^13..2^19 (~6 min); opt-in — closes C4 (feasible subset)"]
+    fn boot_generate_production_table_feasible_buckets() {
+        use std::collections::BTreeSet;
+        const MAX_DB: u32 = 19; // exclude 2^20 (OOMs a 32 GB machine)
+        let buckets: Vec<_> = crate::setup::production_verifier_setup_buckets()
+            .into_iter()
+            .filter(|b| {
+                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
+                    .map(|h| h.trailing_zeros() <= MAX_DB)
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(buckets.len(), 7, "expected 7 feasible buckets (2^13..2^19)");
+
+        let mut seeds = Vec::new();
+        let mut total_bytes = 0usize;
+        for (i, shape) in buckets.iter().enumerate() {
+            let seed = crate::setup::build_verifier_setup_seed(
+                &shape.params,
+                shape.hw,
+                shape.e,
+                shape.top_k,
+            )
+            .unwrap_or_else(|e| panic!("bucket {i} generation failed: {e}"));
+            let sz = bincode::serde::encode_to_vec(&seed, bincode::config::standard())
+                .expect("serialize seed")
+                .len();
+            total_bytes += sz;
+            eprintln!(
+                "bucket {i}: trace_height=2^{} seed={} bytes (cum {:.1} MiB)",
+                seed.trace_height().trailing_zeros(),
+                sz,
+                total_bytes as f64 / (1024.0 * 1024.0),
+            );
+            seeds.push(seed);
+        }
+        eprintln!(
+            "FEASIBLE TABLE: {} buckets, total seed cache = {:.1} MiB",
+            seeds.len(),
+            total_bytes as f64 / (1024.0 * 1024.0),
+        );
+
+        let log2s: BTreeSet<u32> =
+            seeds.iter().map(|s| s.trace_height().trailing_zeros()).collect();
+        assert_eq!(log2s.len(), 7, "7 distinct-height buckets (2^13..2^19)");
+        for db in 13u32..=MAX_DB {
+            assert!(log2s.contains(&db), "table must cover 2^{db}");
+        }
+
+        // Round-trip the whole set through a data-dir cache file + rebuild.
+        let tmp = std::env::temp_dir().join(format!("ai-pow-fulltable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = crate::setup::verifier_setup_seed_cache_path(&tmp);
+        crate::setup::save_verifier_setup_seeds(&path, &seeds).expect("save table");
+        let cache_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        eprintln!("cache file on disk = {:.1} MiB", cache_bytes as f64 / (1024.0 * 1024.0));
+        let table = crate::setup::load_verifier_setup_table(&path).expect("load+rebuild table");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(table.len(), 7, "rebuilt table has 7 buckets");
+        let tl2: BTreeSet<u32> = table.iter().map(|s| s.trace_height.trailing_zeros()).collect();
+        assert_eq!(tl2, log2s, "rebuilt table covers the same 7 buckets");
+    }
+
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
     /// Pearl admits a BAND of puzzle shapes; nockchain must verify all of them.
     /// A single embedded boot setup only suffices if the verifier-key digest is

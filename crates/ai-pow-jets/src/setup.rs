@@ -575,6 +575,10 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
     const E: usize = 2;
     const TOP_K: usize = 1;
     let mut by_bucket: BTreeMap<usize, VerifierSetupBucketShape> = BTreeMap::new();
+    // Prefer the SMALLEST opened tile `hw` that reaches each height (less opened work
+    // ⇒ less proving memory/time). The setup is height-keyed and schedule-independent,
+    // so one representative per height covers blocks mined at any valid shape of that
+    // height (dense or MoE, any tile).
     for &hw in &[8u32, 12, 16, 24, 32, 48, 64, 96, 128] {
         let mn = E as u32 * hw;
         for &r in &[32u32, 64, 128, 256, 512, 1024] {
