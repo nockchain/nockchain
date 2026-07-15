@@ -979,6 +979,108 @@ mod tests {
             .expect("R-b Route-A LogUp at num_stripes 128 must verify");
     }
 
+    /// §6(b)-R-b ADVERSARIAL — the `noised_packed` LogUp bus binds the
+    /// R-b sweep's matmul inputs to the committed producer store. The
+    /// R-b sweep consumes `(mat_id, packed A/B-NOISED)` on each step; the
+    /// store publishes the producers (in production, co-located with the
+    /// strip-opening ⇒ bound to HASH_A/B via C3, i.e. the committed
+    /// matrix). If the two disagree the bus does not balance. Tampering
+    /// ONE store chunk's published value (producer ≠ the value the sweep
+    /// consumed) MUST reject — so a malicious prover cannot sweep matmul
+    /// inputs that differ from the committed matrix. This audits the bus
+    /// on the R-b stripe-major path (same multiset binding as ≤64, but the
+    /// consumers are emitted in stripe-major order).
+    #[test]
+    fn rb_logup_tampered_matmul_binding_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x9C00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 96usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline(1 << 14);
+        let h = trace.height();
+        let (rows_used, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let mut store_chunks =
+            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        // FORGE: corrupt EVERY producer's PUBLISHED value (keep the mat_id
+        // position keys). Each store row now produces (id, wrong) while
+        // the R-b sweep still consumes (id, real). The noised_packed bus
+        // key includes the value, so every CONSUMED position loses its
+        // matching producer ⇒ the bus cannot balance. (Corrupting every
+        // chunk, not one, sidesteps the fact that enumerate emits some
+        // unconsumed producers whose MAT_FREQ is 0.)
+        for c in store_chunks.iter_mut() {
+            c.bytes[0] = c.bytes[0].wrapping_add(1);
+        }
+        let store_start = 8 + rows_used;
+        let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
+        let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
+        for (i, chunk) in store_chunks.iter().enumerate() {
+            let id_base = if chunk.side_a { a_id_base } else { b_id_base };
+            let mat_id = crate::composite_trace::noised_chunk_id(id_base, k, &chunk.src)
+                .try_into()
+                .expect("positioned noised chunk id must fit in MAT_ID");
+            trace.place_noised_store_row(store_start + i, &chunk.bytes, mat_id);
+        }
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let (proof, program) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, false);
+        assert!(
+            composite_verify_pinned_logup_sx(&cfg, &program, &proof, &pis, false).is_err(),
+            "a store producer ≠ the R-b sweep's consumed matmul input MUST \
+             unbalance the noised_packed bus and reject",
+        );
+    }
+
+    /// §6(b)-R-b ADVERSARIAL — the §4.D keystone `JACKPOT_MSG == FOLD_STATE`
+    /// binds the PoW digest to the R-b fold-chain OUTPUT. The jackpot hash
+    /// (HASH_JACKPOT, the PoW value) is computed over JACKPOT_MSG, which
+    /// the keystone forces to equal the final FoldChip state M produced by
+    /// the R-b sweep+fold. If a prover could hash a DIFFERENT M' (e.g. a
+    /// low-difficulty message) while the trace's fold produced M, the PoW
+    /// would be unbound from the work. Placing the jackpot block over a
+    /// fold state ≠ the trace's real M MUST reject on the pinned path.
+    #[test]
+    fn rb_pinned_tampered_jackpot_msg_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 128usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        // FORGE: hash a jackpot message from a DIFFERENT fold state than
+        // the trace's real M (flip one lane). The §4.D keystone
+        // JACKPOT_MSG == FOLD_STATE must catch the mismatch.
+        let mut m_forged = m;
+        m_forged[0] ^= 0x1;
+        let _ = trace.place_jackpot_hash_block(h - 8, &m_forged, &ch);
+
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let pis_v = pis.to_vec();
+        let program = extract_program(&trace.matrix);
+        let air = CompositeFullAirPinned::new_with(program.clone(), false);
+        let (pp, vk) = composite_setup(&cfg, &program);
+        let proof = prove_with_preprocessed(&cfg, &air, trace.matrix, &pis_v, Some(&pp));
+        assert!(
+            verify_with_preprocessed(&cfg, &air, &proof, &pis_v, Some(&vk)).is_err(),
+            "a jackpot message from M' ≠ the R-b fold state M MUST reject — \
+             §4.D binds the PoW digest to the real fold-chain output",
+        );
+    }
+
     /// HIGH-2.2 §6(b) end-to-end regression via the production
     /// Route-A path: the **full useful-work chain** —
     /// `place_useful_work_chain` (sub-block-major matmul sweep +
