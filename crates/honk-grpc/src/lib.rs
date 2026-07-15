@@ -8,8 +8,9 @@ use std::sync::{mpsc, Arc};
 
 use anyhow::{bail, Context, Result};
 use honk::workspace::{
-    ArtifactMode, WorkspaceCompileError, WorkspaceCompileOutput, WorkspaceCompileRequest,
-    WorkspaceCompiler, WorkspaceConfig, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
+    ArtifactMode, WorkspaceArena, WorkspaceCompileError, WorkspaceCompileOutput,
+    WorkspaceCompileRequest, WorkspaceCompiler, WorkspaceConfig, WorkspaceDiagnostic,
+    WorkspaceDiagnosticKind,
 };
 use honk_grpc_proto::v1::honk_compiler_server::{HonkCompiler, HonkCompilerServer};
 use honk_grpc_proto::v1::{self as pb};
@@ -56,6 +57,97 @@ enum ActorReply {
     Panicked(String),
 }
 
+enum CompilerEpochExit {
+    InputsChanged,
+    Closed,
+    Exhausted,
+}
+
+struct CompilerActorState {
+    pending: Option<CompileCommand>,
+    ready_sender: Option<mpsc::SyncSender<std::result::Result<(), String>>>,
+    completed: Arc<AtomicU64>,
+    max_compiles: u64,
+    cache_invalidated: bool,
+    exhausted: Option<oneshot::Sender<()>>,
+}
+
+fn signal_exhausted(exhausted: &mut Option<oneshot::Sender<()>>) {
+    if let Some(exhausted) = exhausted.take() {
+        let _ = exhausted.send(());
+    }
+}
+
+fn run_compiler_epoch(
+    compiler: &mut WorkspaceCompiler<'_>,
+    receiver: &mpsc::Receiver<CompileCommand>,
+    state: &mut CompilerActorState,
+) -> CompilerEpochExit {
+    if let Some(ready_sender) = state.ready_sender.take() {
+        let _ = ready_sender.send(Ok(()));
+    }
+
+    loop {
+        let command = match state.pending.take() {
+            Some(command) => command,
+            None => match receiver.recv() {
+                Ok(command) => command,
+                Err(_) => return CompilerEpochExit::Closed,
+            },
+        };
+
+        let inputs_changed = panic::catch_unwind(AssertUnwindSafe(|| compiler.inputs_changed()));
+        if matches!(inputs_changed, Ok(Ok(true))) {
+            state.pending = Some(command);
+            return CompilerEpochExit::InputsChanged;
+        }
+
+        let compile_index = state.completed.fetch_add(1, Ordering::Relaxed) + 1;
+        let restart_required = state.max_compiles != 0 && compile_index >= state.max_compiles;
+        let result = match inputs_changed {
+            Ok(Ok(false)) => panic::catch_unwind(AssertUnwindSafe(|| {
+                compiler.compile_current(&command.request)
+            })),
+            Ok(Ok(true)) => unreachable!("handled above"),
+            Ok(Err(error)) => Ok(Err(error)),
+            Err(payload) => Err(payload),
+        };
+
+        match result {
+            Ok(Ok(mut output)) => {
+                output.cache_invalidated = state.cache_invalidated;
+                state.cache_invalidated = false;
+                let _ = command.reply.send(ActorReply::Completed {
+                    result: Ok(output),
+                    compile_index,
+                    restart_required,
+                });
+            }
+            Ok(Err(error)) => {
+                let _ = command.reply.send(ActorReply::Completed {
+                    result: Err(error),
+                    compile_index,
+                    restart_required,
+                });
+            }
+            Err(payload) => {
+                let _ = command
+                    .reply
+                    .send(ActorReply::Panicked(panic_payload_message(
+                        payload.as_ref(),
+                    )));
+                signal_exhausted(&mut state.exhausted);
+                return CompilerEpochExit::Exhausted;
+            }
+        }
+
+        if restart_required {
+            signal_exhausted(&mut state.exhausted);
+            return CompilerEpochExit::Exhausted;
+        }
+    }
+}
+
 impl CompilerHandle {
     fn spawn(config: DaemonConfig, exhausted: oneshot::Sender<()>) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<CompileCommand>(COMMAND_QUEUE_CAPACITY);
@@ -68,62 +160,73 @@ impl CompilerHandle {
             .name("honk-compiler".to_string())
             .stack_size(config.worker_stack_bytes)
             .spawn(move || {
-                let compiler = panic::catch_unwind(AssertUnwindSafe(|| {
-                    WorkspaceCompiler::new(config.workspace)
-                }));
-                let mut compiler = match compiler {
-                    Ok(Ok(compiler)) => {
-                        let _ = ready_sender.send(Ok(()));
-                        compiler
-                    }
-                    Ok(Err(error)) => {
-                        let _ = ready_sender.send(Err(error.to_string()));
-                        return;
-                    }
-                    Err(payload) => {
-                        let _ = ready_sender.send(Err(format!(
-                            "compiler initialization panicked: {}",
-                            panic_payload_message(payload.as_ref())
-                        )));
-                        return;
-                    }
+                let workspace_config = config.workspace;
+                let mut state = CompilerActorState {
+                    pending: None,
+                    ready_sender: Some(ready_sender),
+                    completed: actor_completed,
+                    max_compiles,
+                    cache_invalidated: false,
+                    exhausted: Some(exhausted),
                 };
-                let mut exhausted = Some(exhausted);
 
-                while let Ok(command) = receiver.recv() {
-                    let compile_index = actor_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                    let restart_required = max_compiles != 0 && compile_index >= max_compiles;
-                    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-                        compiler.compile(&command.request)
+                loop {
+                    let mut arena = WorkspaceArena::new();
+                    let epoch = panic::catch_unwind(AssertUnwindSafe(|| {
+                        arena.with_compiler(workspace_config.clone(), |compiler| {
+                            run_compiler_epoch(compiler, &receiver, &mut state)
+                        })
                     }));
 
-                    match result {
-                        Ok(result) => {
+                    match epoch {
+                        Ok(Ok(CompilerEpochExit::InputsChanged)) => {
+                            // The compiler is dropped before `arena` at the end of
+                            // this iteration. The next epoch replays the request
+                            // that observed the edit against entirely fresh noun
+                            // storage and caches.
+                            state.cache_invalidated = true;
+                        }
+                        Ok(Ok(CompilerEpochExit::Closed | CompilerEpochExit::Exhausted)) => break,
+                        Ok(Err(error)) => {
+                            if let Some(ready_sender) = state.ready_sender.take() {
+                                let _ = ready_sender.send(Err(error.to_string()));
+                                break;
+                            }
+
+                            let command = match state.pending.take() {
+                                Some(command) => command,
+                                None => match receiver.recv() {
+                                    Ok(command) => command,
+                                    Err(_) => break,
+                                },
+                            };
+                            let compile_index = state.completed.fetch_add(1, Ordering::Relaxed) + 1;
+                            let restart_required =
+                                state.max_compiles != 0 && compile_index >= state.max_compiles;
                             let _ = command.reply.send(ActorReply::Completed {
-                                result,
+                                result: Err(error),
                                 compile_index,
                                 restart_required,
                             });
+                            if restart_required {
+                                signal_exhausted(&mut state.exhausted);
+                                break;
+                            }
                         }
                         Err(payload) => {
-                            let _ =
-                                command
-                                    .reply
-                                    .send(ActorReply::Panicked(panic_payload_message(
-                                        payload.as_ref(),
-                                    )));
-                            if let Some(exhausted) = exhausted.take() {
-                                let _ = exhausted.send(());
+                            let message = panic_payload_message(payload.as_ref());
+                            if let Some(ready_sender) = state.ready_sender.take() {
+                                let _ = ready_sender.send(Err(format!(
+                                    "compiler initialization panicked: {message}"
+                                )));
+                            } else if let Some(command) = state.pending.take() {
+                                let _ = command.reply.send(ActorReply::Panicked(message));
+                                signal_exhausted(&mut state.exhausted);
+                            } else {
+                                signal_exhausted(&mut state.exhausted);
                             }
                             break;
                         }
-                    }
-
-                    if restart_required {
-                        if let Some(exhausted) = exhausted.take() {
-                            let _ = exhausted.send(());
-                        }
-                        break;
                     }
                 }
             })
