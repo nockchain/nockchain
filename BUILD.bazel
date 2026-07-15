@@ -52,6 +52,11 @@ alias(
     actual = "//crates/honk-grpc:honkd",
 )
 
+alias(
+    name = "honk-lsp",
+    actual = "//crates/honk-lsp:honk-lsp-bin",
+)
+
 # All kernel jam files compiled from Hoon sources via rules_hoon.
 alias(
     name = "kernels",

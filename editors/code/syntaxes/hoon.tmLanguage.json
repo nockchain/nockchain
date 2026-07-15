@@ -1,0 +1,88 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Hoon",
+  "scopeName": "source.hoon",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#runes" },
+    { "include": "#constants" },
+    { "include": "#terms" },
+    { "include": "#auras" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-colon.hoon",
+          "match": "::.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.single.hoon",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            { "name": "constant.character.escape.hoon", "match": "\\\\." }
+          ]
+        },
+        {
+          "name": "string.quoted.double.hoon",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.hoon", "match": "\\\\." }
+          ]
+        }
+      ]
+    },
+    "runes": {
+      "patterns": [
+        {
+          "name": "keyword.operator.rune.hoon",
+          "match": "(?<!\\S)(?:[!#$%&*+,-./:;<=>?@^_|~]{2})(?!\\S)"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.hoon",
+          "match": "(?<![A-Za-z0-9_-])(?:~|\\.?(?:y|n))(?![A-Za-z0-9_-])"
+        }
+      ]
+    },
+    "terms": {
+      "patterns": [
+        {
+          "name": "constant.other.term.hoon",
+          "match": "%[a-z][a-z0-9-]*"
+        },
+        {
+          "name": "entity.name.function.arm.hoon",
+          "match": "(?<=\\+\\+  )[a-z][a-z0-9-]*"
+        }
+      ]
+    },
+    "auras": {
+      "patterns": [
+        {
+          "name": "storage.type.aura.hoon",
+          "match": "@[a-zA-Z]*"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hoon",
+          "match": "(?<![A-Za-z0-9])(?:0x[0-9a-fA-F]+|[0-9]+(?:\\.[0-9]+)*)(?![A-Za-z0-9])"
+        }
+      ]
+    }
+  }
+}

@@ -9,37 +9,36 @@ cargo_lint_sources()
 exports_files(["Cargo.toml"])
 
 rust_library(
-    name = "honk-grpc",
+    name = "honk-lsp",
     srcs = glob(
         ["src/**/*.rs"],
         exclude = ["src/bin/**"],
     ),
     aliases = aliases(),
-    crate_name = "honk_grpc",
+    crate_name = "honk_lsp",
     edition = "2021",
     deps = [
         "//crates/honk:honk_lib",
-        "//crates/honk-grpc-proto:honk-grpc-proto",
         "//crates/honk-service:honk-service",
     ] + all_crate_deps(),
 )
 
 rust_binary(
-    name = "honkd",
-    srcs = ["src/bin/honkd.rs"],
+    name = "honk-lsp-bin",
+    srcs = ["src/bin/honk-lsp.rs"],
     aliases = aliases(),
-    crate_name = "honkd",
-    crate_root = "src/bin/honkd.rs",
+    crate_name = "honk_lsp_bin",
+    crate_root = "src/bin/honk-lsp.rs",
     edition = "2021",
     deps = [
-        ":honk-grpc",
-        "//crates/honk:honk_lib",
+        ":honk-lsp",
+        "//crates/honk-service:honk-service",
     ] + all_crate_deps(),
 )
 
 rust_test(
-    name = "honk_grpc_unit_tests",
+    name = "honk_lsp_unit_tests",
     size = "small",
     timeout = "short",
-    crate = ":honk-grpc",
+    crate = ":honk-lsp",
 )
