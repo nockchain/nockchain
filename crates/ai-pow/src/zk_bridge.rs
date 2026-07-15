@@ -3149,6 +3149,83 @@ mod tests {
         assert_send_sync::<AiPowCompactRecursiveProverCache>();
     }
 
+    /// Boot-setup Stage B — enumerate the Pearl-envelope Layer-0 trace-height
+    /// buckets. The verifier-setup table (supporting the FULL Pearl band) needs
+    /// ONE `build_verifier_setup` per distinct `required_trace_len` a consensus-
+    /// valid shape can produce. This sweeps the §4.8 envelope and collects the
+    /// distinct buckets, asserting the count is small and bounded (so the boot
+    /// table is tractable to precompute + embed). FAST (pure sizing, no proving).
+    #[test]
+    fn boot_setup_trace_height_buckets_are_small_and_bounded() {
+        use std::collections::BTreeSet;
+        let mut buckets: BTreeSet<usize> = BTreeSet::new();
+        let mut checked = 0usize;
+        for &r in &[32u32, 64, 128, 256, 512, 1024] {
+            let k_lo = 16 * r;
+            let k_hi = (4u64 * r as u64 * r as u64).min(crate::params::PEARL_K_MAX as u64) as u32;
+            // Sample k across the band (multiples of 64, num_stripes ≤ 512).
+            let mut ks: Vec<u32> = Vec::new();
+            let mut k = (k_lo + 63) / 64 * 64;
+            while k <= k_hi {
+                if (k / r) as usize <= crate::params::PEARL_STRIPE_MAX {
+                    ks.push(k);
+                }
+                // step in ~1/4-band increments to sample without exploding.
+                k += ((k_hi - k_lo) / 4).max(64) / 64 * 64 + 64;
+            }
+            if let Some(&last) = ks.last() {
+                if last != k_hi && (k_hi / r) as usize <= crate::params::PEARL_STRIPE_MAX {
+                    ks.push(k_hi / 64 * 64);
+                }
+            }
+            for &k in &ks {
+                for &tile in &[6u32, 8, 10, 12, 14, 16] {
+                    let params = MatmulParams {
+                        m: tile,
+                        k,
+                        n: tile,
+                        noise_rank: r,
+                        tile,
+                        spot_checks: 1,
+                        difficulty_bits: 0,
+                    };
+                    if params.validate_prod_envelope().is_err() {
+                        continue;
+                    }
+                    let zk = zk_params_from(&params);
+                    let sched = match StripIndexSchedule::from_tile(&zk, 0, 0) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let th = match expected_layer0_rows_for_strip_schedule(&params, &sched) {
+                        Ok(b) => b.required_trace_len(),
+                        Err(_) => continue,
+                    };
+                    buckets.insert(th);
+                    checked += 1;
+                }
+            }
+        }
+        eprintln!(
+            "Pearl-envelope trace-height buckets ({} shapes checked): {:?} (log2: {:?})",
+            checked,
+            buckets,
+            buckets.iter().map(|b| b.trailing_zeros()).collect::<Vec<_>>()
+        );
+        assert!(checked > 0, "the sweep must cover some consensus-valid shapes");
+        // The boot table has one setup per bucket — must stay small & tractable.
+        assert!(
+            buckets.len() <= 12,
+            "Pearl trace-height buckets ({}) must be a small bounded set for the boot table: {:?}",
+            buckets.len(),
+            buckets
+        );
+        assert!(
+            *buckets.iter().next().unwrap() >= ai_pow_zk::composite_layout::MIN_STARK_LEN,
+            "all buckets >= MIN_STARK_LEN"
+        );
+    }
+
     fn single_tile_prod_params() -> MatmulParams {
         MatmulParams {
             m: 8,

@@ -402,13 +402,23 @@ trace log-height, not one value. **Landed the data-structure + lookup:**
   ai-pow-jets suite green.
 **End-to-end validation pending Stage B/C** (the table is empty until injected).
 
+### Boot-setup TABLE — Stage B DONE (2026-07-15)
+Enumerated the Pearl §4.8 envelope's Layer-0 trace-height buckets
+(`boot_setup_trace_height_buckets_are_small_and_bounded`, FAST): **exactly 8
+buckets = 2^13 … 2^20** (degree_bits 13–20) across 114 sampled consensus-valid
+shapes. `CircuitConfig::for_layer0_trace` has no max-degree cap
+(`prod_adaptive` adapts the FRI profile to any degree_bits), so all 8 are
+provable/verifiable — no envelope cap needed. ⇒ **The boot table is exactly 8
+`AiPowVerifierSetup` entries**, one per bucket. Small and tractable to precompute
++ embed.
+
 ### Remaining (post-decision), in dependency order
-1. **Stage B** — enumerate the Pearl-envelope trace-height buckets (the shape band
-   → distinct padded degree_bits; per the probe, a small set) and **precompute**
-   one `build_verifier_setup` per bucket. **Stage C** — serialize + embed the
-   table (or a deterministic build step), and call `init_ai_pow_verifier_setup`
-   with it at node boot (nockchain + roswell). Then a cert at each bucket verifies
-   against its injected setup (end-to-end). [§3.2#1; Stage A done]
+1. **Stage C** (boot-setup, the last integration linchpin) — precompute the **8**
+   `build_verifier_setup` entries (one per 2^13…2^20 bucket; ~2min each offline),
+   serialize + embed (or a deterministic build step), and call
+   `init_ai_pow_verifier_setup(table)` at node boot (nockchain + roswell). Then a
+   cert at each bucket verifies against its injected setup (end-to-end). [§3.2#1;
+   Stages A+B done]
 2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
