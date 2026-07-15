@@ -424,14 +424,36 @@ So "precompute + embed a blob" is NOT available. Two options:
   BAIL_FALLs to the Hoon stub until the bucket is present). Cost: ~8×2min ≈ 16min
   of proving **per boot**, during which `%ai-pow` blocks can't be verified.
   Simplest; heavy boot.
-- **(b) Derive context without proving.** Add a path that compiles the L1/L2
-  verifier circuits and extracts `(circuit_prover_data, metadata, fri_shape,
-  digest)` WITHOUT running the compact proof (the context is deterministic from
-  the trace-height bucket's canonical program). Fast boot; needs new
-  derivation code in `ai-pow-zk::recursion` (a real, bounded task). **Preferred.**
-DECISION NEEDED: (a) build-at-boot vs (b) derive-without-proving. Then wire
-`init_ai_pow_verifier_setup(table_of_8)` into nockchain + roswell boot, and
-validate a cert per bucket verifies against its injected setup.
+- **(b) Derive context without proving — NOT AVAILABLE (de-risked 2026-07-15).**
+  The L1 verifier circuit is built OVER a concrete L0 proof
+  (`build_composite_l1_verifier_circuit(&cfg, &air, &verified.proof, …)`,
+  recursion.rs:1916), and `l2_prep = build_compact_batch_l2_over_l1_prep(
+  &l1_outer_proof)` derives from the L1 PROOF. So `circuit_prover_data` cannot be
+  compiled without a proof — the context genuinely requires proving one canonical
+  block per bucket. No compile-only shortcut.
+- **(b') Precompute offline + embed.** Prove the 8 canonical blocks OFFLINE
+  (once), serialize the contexts, embed the bytes, deserialize + inject at boot.
+  **De-risked 2026-07-15: NOT cheap.** `CircuitProverData` (plonky3-recursion
+  `circuit-prover/src/batch_stark_prover.rs`) has NO `Serialize` and wraps
+  `ProverData<SC>` (STARK prover data: commitments/LDEs) + preprocessed columns —
+  so this needs a substantial UPSTREAM `Serialize`/`Deserialize` addition to
+  `CircuitProverData` + `ProverData<SC>`. The memory's "embed a precomputed setup"
+  framing requires this upstream work.
+DECISION (owner, 2026-07-15): **(b') — make the setup serializable + cache it.**
+16 min/boot is unacceptable. Precompute the 8-bucket table offline (prove 8
+canonical blocks once), serialize + cache to disk, deserialize + inject at boot
+(fast). Requires:
+- Upstream `Serialize`/`Deserialize` on `CircuitProverData<SC>` (+ its inner
+  `ProverData<SC>`, `NonPrimitivePreprocessedMap`) in plonky3-recursion.
+- `Serialize`/`Deserialize` on `AiPowCompactBatchVerifierContext` (+ `metadata`,
+  `fri_shape`; `Arc` via serde `rc` or serialize the inner) and `AiPowVerifierSetup`.
+- A cache path: `build_verifier_setup_table()` → serialize to a cache file (built
+  offline / first-run); boot loads + `init_ai_pow_verifier_setup(table)`.
+- Validate: serialize → deserialize → a cert per bucket verifies against the
+  round-tripped setup.
+Staged (R1): C1 upstream serde + round-trip; C2 context/setup serde + round-trip;
+C3 table cache build+load; C4 boot wiring (nockchain + roswell) + per-bucket
+end-to-end.
 
 ### Remaining (post-decision), in dependency order
 1. **Stage C** — resolve the (a)/(b) decision above; build the 8-bucket table;
