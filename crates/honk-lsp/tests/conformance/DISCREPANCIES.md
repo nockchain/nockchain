@@ -9,13 +9,13 @@
 - **Tests affected:** ranged `textDocument/didChange` (not advertised).
 - **Review date:** 2026-07-15.
 
-## DISC-002: Cooperative request cancellation is not implemented
+## DISC-002: Whole-parse cancellation is cooperative
 
 - **Reference:** LSP permits `$/cancelRequest`; cancellation still requires a response.
-- **Implementation:** Honk ignores cancellation notifications. Compiler checks are isolated on a worker and stale results are suppressed by document generation.
-- **Impact:** CPU work already in progress completes, but obsolete diagnostics are not published and the protocol loop remains responsive.
-- **Resolution:** ACCEPTED pending safe compiler cancellation points.
-- **Tests affected:** `$/cancelRequest` during a honk check.
+- **Implementation:** Honk immediately completes a cancelled semantic request with `RequestCanceled`, marks its worker job cancelled, and suppresses any later result. Cancellation is checked before and after the existing whole-document parser call; that call has no internal cancellation points.
+- **Impact:** A parse already in progress may consume CPU until it returns, but it cannot block JSON-RPC handling or publish a cancelled result.
+- **Resolution:** INVESTIGATING; add internal cancellation points only with the future editor-specific incremental parser path.
+- **Tests affected:** `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` and `client_cancellation_completes_the_semantic_request_once`.
 - **Review date:** 2026-07-15.
 
 ## DISC-003: Structural semantic capability surface
@@ -31,7 +31,7 @@
 
 - **Reference:** Interactive language servers should keep edit-to-query latency low as documents and workspaces grow.
 - **Implementation:** Identical path/version/content requests hit the semantic snapshot cache. A changed document is currently reparsed in full and its traced AST is serialized once to build editor side tables; stable IDs are then reconciled with the preceding snapshot.
-- **Impact:** Results and invalidation are correct, but changed-document work scales with document size and runs synchronously on the protocol thread.
-- **Resolution:** INVESTIGATING; move snapshot construction to a cancellable semantic worker, then replace full rebuilds with dependency- and node-granular invalidation without changing the CLI/compiler path.
+- **Impact:** Results and invalidation are correct and the protocol thread remains responsive, but changed-document work still scales with document size.
+- **Resolution:** INVESTIGATING; replace full rebuilds with dependency- and node-granular invalidation without changing the CLI/compiler path.
 - **Tests affected:** semantic-query latency under sustained edits; functional conformance is unaffected.
 - **Review date:** 2026-07-15.

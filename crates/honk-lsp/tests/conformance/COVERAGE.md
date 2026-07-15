@@ -1,7 +1,7 @@
 # Honk LSP conformance coverage
 
 Specification baseline: Language Server Protocol 3.17. The server intentionally
-implements a narrow diagnostics-first capability set and remains compatible with
+implements a narrow diagnostics-and-structural-semantics capability set and remains compatible with
 clients that implement later, capability-negotiated LSP versions.
 
 | Area | Requirement | Level | Test | Status |
@@ -19,7 +19,9 @@ clients that implement later, capability-negotiated LSP versions.
 | Document symbols | Advertised symbols use hierarchical `DocumentSymbol` responses and valid enclosing/selection ranges | MUST for advertised capability | `document_symbols_and_hover_use_current_unsaved_snapshot` | Passing |
 | Hover | Advertised hover responds from the current unsaved document snapshot | MUST for advertised capability | semantic conformance integration test | Passing |
 | Positions | Semantic queries translate UTF-16 positions without splitting surrogate pairs | MUST for negotiated positions | `semantic_positions_round_trip_as_utf16` | Passing |
-| Cancellation | `$/cancelRequest` may be ignored by a synchronous server | MAY | documented behavior | Accepted divergence |
+| Cancellation | `$/cancelRequest` completes the pending request exactly once and suppresses its result | base protocol contract | unit cancellation test + process responsiveness test | Passing |
+| Responsiveness | Semantic indexing does not block unrelated JSON-RPC handling | implementation invariant | `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` | Passing |
+| Freshness | Semantic results are validated against the current version and content before publication | implementation invariant | `stale_semantic_results_are_server_cancelled` | Passing |
 
 Coverage claim applies only to the rows above, not to the full LSP feature set.
 Completion, navigation, references, formatting, semantic tokens, pull
