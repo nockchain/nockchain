@@ -203,7 +203,47 @@ fn document_symbols_and_hover_use_current_unsaved_snapshot() {
     assert!(hover_json.to_string().contains("answer"));
     assert!(hover_json.to_string().contains("++"));
 
-    shutdown_server(&client, server_thread, 4);
+    let inferred_deadline = Instant::now() + Duration::from_secs(30);
+    let mut request_id = 4;
+    let inferred_hover = loop {
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(request_id),
+                    "textDocument/hover".to_string(),
+                    json!({
+                        "textDocument": { "uri": entry_uri },
+                        "position": { "line": 2, "character": 2 }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request inferred-type hover");
+        let hover = serde_json::from_value::<Option<Hover>>(receive_response(&client, request_id))
+            .expect("inferred-type hover response");
+        if hover.as_ref().is_some_and(|hover| {
+            serde_json::to_string(&hover.contents)
+                .expect("hover JSON")
+                .contains("Inferred type")
+        }) {
+            break hover.expect("checked above");
+        }
+        assert!(
+            Instant::now() < inferred_deadline,
+            "compiler-owned inferred type did not become available"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(
+        serde_json::to_string(&inferred_hover.contents)
+            .expect("inferred hover JSON")
+            .contains("@"),
+        "constant expression should have an atom-shaped inferred type"
+    );
+
+    shutdown_server(&client, server_thread, request_id + 1);
 }
 
 #[test]

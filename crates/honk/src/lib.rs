@@ -23,7 +23,9 @@ use nockvm::noun::{Noun, NounAllocator, NounSpace, D, T};
 
 use crate::arm_map::ArmMap;
 use crate::errors::Result;
-pub use crate::errors::{CompilerErrorKind, CompilerErrorLocation, CompilerErrorMetadata};
+pub use crate::errors::{
+    CompilerErrorKind, CompilerErrorLocation, CompilerErrorMetadata, CompilerSemanticFact,
+};
 use crate::native::NativeCompiler;
 use crate::types::TypeNoun;
 

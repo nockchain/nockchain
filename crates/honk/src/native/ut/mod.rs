@@ -34,10 +34,13 @@ use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
 use smallvec::SmallVec;
 
-use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
+use crate::errors::{
+    CompilerError, CompilerErrorLocation, CompilerErrorMetadata, CompilerSemanticFact, Result,
+};
 use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
+use crate::native::ir::leaf::Leaf;
 use crate::native::ir::semi_dag::{SemiArena, SemiId, SemiNode};
 use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
@@ -290,6 +293,9 @@ pub struct Ut<'a> {
     // - recursion guards: in-progress arm state and wet `rib`
     pub vet: bool,
     dbug_locations: Vec<CompilerErrorLocation>,
+    semantic_type_recording: bool,
+    semantic_type_facts: Vec<CompilerSemanticFact>,
+    semantic_type_fact_keys: HashSet<(String, u64, u64, u64, u64)>,
     // Memoization tables. New cache keys should derive semantic/memo state from the helper
     // accessors below rather than hand-assembling context tuples at each cache surface.
     // Recursion / in-progress guards. These are not caches; they constrain valid memo reuse and
@@ -2129,6 +2135,9 @@ impl<'a> Ut<'a> {
             cx: Context::new(),
             vet: true,
             dbug_locations: Vec::new(),
+            semantic_type_recording: false,
+            semantic_type_facts: Vec::new(),
+            semantic_type_fact_keys: HashSet::new(),
             arm_in_progress: HashSet::new(),
             arm_goal_in_progress: Vec::new(),
             arm_placeholder_play_in_progress: HashSet::new(),
@@ -2392,6 +2401,17 @@ impl<'a> Ut<'a> {
 
     pub fn set_vet(&mut self, vet: bool) {
         self.vet = vet;
+    }
+
+    pub fn begin_semantic_type_recording(&mut self) {
+        self.semantic_type_facts.clear();
+        self.semantic_type_fact_keys.clear();
+        self.semantic_type_recording = true;
+    }
+
+    pub fn finish_semantic_type_recording(&mut self) -> Vec<CompilerSemanticFact> {
+        self.semantic_type_recording = false;
+        std::mem::take(&mut self.semantic_type_facts)
     }
 
     /// Run `f` with `vet` forced off, restoring the previous value afterward
@@ -4233,6 +4253,9 @@ impl<'a> Ut<'a> {
         let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
+                if let Hoon::Dbug(spot, _) = gen {
+                    self.record_semantic_type(spot, &cached.0);
+                }
                 return Ok(cached);
             }
         }
@@ -4495,6 +4518,83 @@ impl<'a> Ut<'a> {
             };
         }
         Some(node)
+    }
+
+    const SEMANTIC_TYPE_FACT_LIMIT: usize = 100_000;
+
+    fn record_semantic_type(&mut self, spot: &Spot, ty: &NRc<NTy>) {
+        if !self.semantic_type_recording
+            || self.semantic_type_facts.len() >= Self::SEMANTIC_TYPE_FACT_LIMIT
+        {
+            return;
+        }
+        let location = Self::location_from_spot(spot);
+        let (Some(file), Some(start_line), Some(start_col), Some(end_line), Some(end_col)) = (
+            location.file.clone(),
+            location.start_line,
+            location.start_col,
+            location.end_line,
+            location.end_col,
+        ) else {
+            return;
+        };
+        if !self
+            .semantic_type_fact_keys
+            .insert((file, start_line, start_col, end_line, end_col))
+        {
+            return;
+        }
+        self.semantic_type_facts.push(CompilerSemanticFact {
+            location,
+            type_summary: Self::semantic_type_summary(ty, 0),
+        });
+    }
+
+    fn semantic_type_summary(ty: &NRc<NTy>, depth: usize) -> String {
+        if depth >= 4 {
+            return "…".to_string();
+        }
+        match &**ty {
+            NTy::Void => "%void".to_string(),
+            NTy::Noun => "*".to_string(),
+            NTy::Atom { aura, .. } => Self::semantic_leaf_term(aura)
+                .filter(|aura| !aura.is_empty())
+                .map_or_else(|| "@".to_string(), |aura| format!("@{aura}")),
+            NTy::Cell(head, tail) => format!(
+                "[{} {}]",
+                Self::semantic_type_summary(head, depth + 1),
+                Self::semantic_type_summary(tail, depth + 1)
+            ),
+            NTy::Core { payload, garb, .. } => {
+                let payload = Self::semantic_type_summary(payload, depth + 1);
+                garb.nym.as_deref().map_or_else(
+                    || format!("core({payload})"),
+                    |name| format!("{name}({payload})"),
+                )
+            }
+            NTy::Face { tool, inner } => {
+                let inner = Self::semantic_type_summary(inner, depth + 1);
+                Self::semantic_leaf_term(tool).map_or_else(
+                    || format!("face({inner})"),
+                    |name| format!("{name}={inner}"),
+                )
+            }
+            NTy::Hint { payload, .. } => Self::semantic_type_summary(payload, depth + 1),
+            NTy::Fork { .. } => "%fork".to_string(),
+            NTy::Hold { .. } => "%hold".to_string(),
+        }
+    }
+
+    fn semantic_leaf_term(leaf: &Leaf) -> Option<String> {
+        let Leaf::Direct(value) = leaf else {
+            return None;
+        };
+        let bytes = value.to_le_bytes();
+        let end = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len());
+        std::str::from_utf8(&bytes[..end]).ok().map(str::to_string)
     }
 
     fn decorate_error(&self, err: CompilerError) -> CompilerError {
@@ -8506,6 +8606,7 @@ impl<'a> Ut<'a> {
         let result = self.mint(sut, gol, inner);
         self.dbug_locations.pop();
         let (ty, formula) = result?;
+        self.record_semantic_type(spot, &ty);
         let spot_noun = spot_to_noun(self.slab, spot)?;
         let hint_inner = T(self.slab, &[D(1), spot_noun]);
         let spot_tag = term_to_noun(self.slab, "spot");
