@@ -1013,6 +1013,16 @@ fn build_context_with_shared_prelude(
     subject_type_jam: Option<&[u8]>,
 ) -> Result<NativeBuildContext<'static>> {
     let slab = Box::leak(Box::new(NounSlab::new()));
+    build_context_with_shared_prelude_in(cli, prelude, prelude_source, subject_type_jam, slab)
+}
+
+fn build_context_with_shared_prelude_in<'arena>(
+    cli: &Cli,
+    prelude: &Hoon,
+    prelude_source: &str,
+    subject_type_jam: Option<&[u8]>,
+    slab: &'arena mut NounSlab,
+) -> Result<NativeBuildContext<'arena>> {
     let mut ut = Ut::new(slab);
     let canonical_hoon_138 = prelude_source.as_bytes() == EMBEDDED_HOON_138_SOURCE;
     let have_embedded_cold = !EMBEDDED_HONC_COLD_138_JAM.is_empty();
@@ -1308,25 +1318,63 @@ async fn compile_batch_with_shared_prelude(
     Ok(())
 }
 
+/// Owns the noun storage for one persistent compiler epoch.
+///
+/// The closure API prevents a [`WorkspaceCompiler`] (and therefore any noun or
+/// cache entry borrowing this slab) from escaping the arena's lifetime. Drop an
+/// arena to reclaim every noun allocated during that epoch.
+pub struct WorkspaceArena {
+    slab: NounSlab,
+}
+
+impl WorkspaceArena {
+    pub fn new() -> Self {
+        Self {
+            slab: NounSlab::new(),
+        }
+    }
+
+    pub fn with_compiler<R>(
+        &mut self,
+        config: WorkspaceConfig,
+        use_compiler: impl FnOnce(&mut WorkspaceCompiler<'_>) -> R,
+    ) -> std::result::Result<R, WorkspaceCompileError> {
+        let mut compiler = WorkspaceCompiler::new(config, &mut self.slab)?;
+        Ok(use_compiler(&mut compiler))
+    }
+}
+
+impl Default for WorkspaceArena {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Persistent, transport-neutral front end to the existing file compiler.
 ///
-/// This type is intentionally `!Send`: it owns compiler nouns and `Rc`-backed
-/// state. Servers should construct and use it on one dedicated compiler thread,
-/// then communicate with that thread using Send-safe request/result values.
-pub struct WorkspaceCompiler {
+/// This type is intentionally `!Send`: it borrows compiler nouns and contains
+/// `Rc`-backed state. Servers should construct and use it on one dedicated
+/// compiler thread, then communicate with that thread using Send-safe values.
+/// Source changes must be handled by dropping the surrounding
+/// [`WorkspaceArena`] and constructing a fresh epoch.
+pub struct WorkspaceCompiler<'arena> {
     config: WorkspaceConfig,
     config_fingerprint: blake3::Hash,
     dependency_layout_fingerprint: blake3::Hash,
-    builder: NativeBuildContext<'static>,
+    builder: NativeBuildContext<'arena>,
 }
 
-impl WorkspaceCompiler {
-    pub fn new(config: WorkspaceConfig) -> std::result::Result<Self, WorkspaceCompileError> {
+impl<'arena> WorkspaceCompiler<'arena> {
+    fn new(
+        config: WorkspaceConfig,
+        slab: &'arena mut NounSlab,
+    ) -> std::result::Result<Self, WorkspaceCompileError> {
         let config_fingerprint =
             workspace_config_fingerprint(&config).map_err(WorkspaceCompileError::from_dyn)?;
         let dependency_layout_fingerprint = workspace_layout_fingerprint(&config.dependencies)
             .map_err(WorkspaceCompileError::from_dyn)?;
-        let builder = build_workspace_context(&config).map_err(WorkspaceCompileError::from_dyn)?;
+        let builder =
+            build_workspace_context(&config, slab).map_err(WorkspaceCompileError::from_dyn)?;
         Ok(Self {
             config,
             config_fingerprint,
@@ -1339,10 +1387,11 @@ impl WorkspaceCompiler {
         &self.config
     }
 
-    pub fn compile(
-        &mut self,
-        request: &WorkspaceCompileRequest,
-    ) -> std::result::Result<WorkspaceCompileOutput, WorkspaceCompileError> {
+    /// Returns whether this epoch's source or configuration inputs changed.
+    ///
+    /// A true result invalidates the whole epoch. The caller must drop the
+    /// compiler and its [`WorkspaceArena`] before compiling the request.
+    pub fn inputs_changed(&mut self) -> std::result::Result<bool, WorkspaceCompileError> {
         let current_config_fingerprint =
             workspace_config_fingerprint(&self.config).map_err(WorkspaceCompileError::from_dyn)?;
         let current_dependency_layout_fingerprint =
@@ -1352,21 +1401,17 @@ impl WorkspaceCompiler {
             .builder
             .workspace_files_changed()
             .map_err(WorkspaceCompileError::from_dyn)?;
-        let cache_invalidated = current_config_fingerprint != self.config_fingerprint
+        Ok(current_config_fingerprint != self.config_fingerprint
             || current_dependency_layout_fingerprint != self.dependency_layout_fingerprint
-            || observed_input_changed;
+            || observed_input_changed)
+    }
 
-        if cache_invalidated {
-            // Rebuilding is conservative by design. It prevents source-dependent
-            // path/content/Ut state from crossing an edit boundary while leaving
-            // the ordinary CLI and batch cache lifecycle completely unchanged.
-            let builder =
-                build_workspace_context(&self.config).map_err(WorkspaceCompileError::from_dyn)?;
-            self.builder = builder;
-            self.config_fingerprint = current_config_fingerprint;
-            self.dependency_layout_fingerprint = current_dependency_layout_fingerprint;
-        }
-
+    /// Compiles against the current epoch after the caller has checked
+    /// [`Self::inputs_changed`].
+    pub fn compile_current(
+        &mut self,
+        request: &WorkspaceCompileRequest,
+    ) -> std::result::Result<WorkspaceCompileOutput, WorkspaceCompileError> {
         self.builder
             .observe_workspace_file(&request.entry)
             .map_err(WorkspaceCompileError::from_dyn)?;
@@ -1387,7 +1432,7 @@ impl WorkspaceCompiler {
 
         Ok(WorkspaceCompileOutput {
             artifact,
-            cache_invalidated,
+            cache_invalidated: false,
         })
     }
 }
@@ -1443,7 +1488,10 @@ fn workspace_layout_fingerprint(root: &Path) -> Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
-fn build_workspace_context(config: &WorkspaceConfig) -> Result<NativeBuildContext<'static>> {
+fn build_workspace_context<'arena>(
+    config: &WorkspaceConfig,
+    slab: &'arena mut NounSlab,
+) -> Result<NativeBuildContext<'arena>> {
     let cli = Cli {
         entry: None,
         directory: config.dependencies.clone(),
@@ -1461,11 +1509,12 @@ fn build_workspace_context(config: &WorkspaceConfig) -> Result<NativeBuildContex
     let prelude_dbug = cli.dbug && !native_parity_enabled();
     let prelude_expr = parse_prelude_hoon(&cli.prelude, prelude_dbug, true)?;
     let subject_type_jam = cli.sut_jam.as_ref().map(fs::read).transpose()?;
-    let mut builder = build_context_with_shared_prelude(
+    let mut builder = build_context_with_shared_prelude_in(
         &cli,
         &prelude_expr,
         &prelude_source,
         subject_type_jam.as_deref(),
+        slab,
     )?;
     builder.enable_workspace_mode();
     Ok(builder)
