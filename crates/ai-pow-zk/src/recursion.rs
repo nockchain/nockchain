@@ -2379,14 +2379,17 @@ mod tests {
             "cached (l1_proof, metadata) must be small (< 8 MiB); got {} bytes",
             small.len()
         );
-        // RESIDUAL (rebuild): `rebuild_compact_verifier_context` reconstructs the
-        // tree via `build_compact_batch_l2_over_l1_prep`, which needs the L1
-        // proof's `stark_common.lookups` (one per AIR instance). Those are dropped
-        // by `BatchStarkProof`'s serde (`Lookups` is not Serialize) and are
-        // DETERMINISTIC from the L1 AIRs — so the rebuild must reconstruct them
-        // (the L1 verifier already rebuilds lookups "from the AIRs reconstructed
-        // from proof metadata"). Wiring that reconstruction is the remaining step;
-        // the size-practical cache + the rebuild primitive are in place.
+        // RESIDUAL (rebuild, confirmed content-dependent): the rebuild's
+        // `build_compact_batch_l2_over_l1_prep` needs the L1 proof's
+        // `stark_common.lookups` — and their CONTENT (per-lookup cumulated
+        // values/multiplicities), not just the count (default `Lookups` of the
+        // right count fails with "Too many expected cumulated values"). These are
+        // dropped by `BatchStarkProof`'s serde (`Lookups` is not Serialize) but are
+        // DETERMINISTIC from the L1 verifier-circuit AIRs. To finish C3', either
+        // (a) rebuild them from the L1 AIRs (build the config-determined L1 tables
+        // + `Lookups::from_air`), or (b) make `Lookups` serializable and cache them
+        // alongside the L1 proof. Both are bounded. `rebuild_compact_verifier_context`
+        // + the small cache are in place; this is the one remaining piece.
     }
 
     /// S3d — end-to-end: a real composite batch-STARK proof is
