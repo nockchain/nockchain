@@ -89,12 +89,13 @@ resolves imports, and type-checks/mints the requested entry, but does not
 evaluate, shape, or jam an artifact. `compile` and all CLI/batch paths retain
 their established artifact behavior.
 
-That editor check also enables a scoped type observer in `Ut`. Existing `dbug`
-spots report their inferred native type as an owned source location and bounded
-structural string. The observer is disabled by default, is switched off before
-the check returns (including compile errors), and never exports an `NTy`, noun,
-`Rc`, or arena reference. Artifact-producing service calls and ordinary
-CLI/batch compilation never enable it.
+That editor check also enables a scoped semantic observer in `Ut`. Existing
+`dbug` spots report their inferred native type as an owned source location and
+bounded structural string. Exact core-arm resolution records a second owned
+fact containing the use and definition locations. The observer is disabled by
+default, is switched off before the check returns (including compile errors),
+and never exports an `NTy`, noun, `Rc`, or arena reference. Artifact-producing
+service calls and ordinary CLI/batch compilation never enable it.
 
 `honk-service::semantic` is a second, deliberately noun-free editor path. It
 parses an open document with the existing debug-spot annotations and derives a
@@ -118,7 +119,10 @@ Document symbols identify `++`, `+$`, `+*`, and `+|` arms. Hover identifies
 those structural definitions and traced Hoon syntax, then merges the narrowest
 compiler type fact for the same open-document version when one is available.
 An edit immediately drops the prior facts; failed or stale checks cannot
-publish them. Definition and reference resolution are not yet implemented.
+publish them. Go-to-definition follows compiler-resolved core arms and imported
+gates, including definitions in other files. Local faces and bindings do not
+yet carry declaration provenance through native types, and references are not
+implemented.
 
 ## Invalidation and lifetime
 
@@ -160,9 +164,9 @@ The implemented first layer uses the current immutable `Hoon` tree plus stable
 session-local node IDs and side tables for spans, structural symbols, and
 editor-only state. This preserves the exact AST consumed by the shipping
 compiler and lets editor annotations have independent lifetimes. Inferred types
-now cross the compiler boundary through a second owned, location-keyed side
-table rather than by mutating the legacy tree. Resolved names and references
-should follow the same rule.
+and core-arm resolutions now cross the compiler boundary through owned,
+location-keyed side tables rather than by mutating the legacy tree. Local
+binding provenance and references should follow the same rule.
 
 If later phases genuinely need several tree shapes with one shared grammar, the
 Haskell idea worth borrowing is Trees That Grow (or an HKD-style extension

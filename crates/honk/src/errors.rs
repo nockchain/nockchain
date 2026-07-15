@@ -45,6 +45,15 @@ pub struct CompilerSemanticFact {
     pub type_summary: String,
 }
 
+/// Owned editor-only provenance for a compiler-resolved arm reference.
+/// Locations and the arm name are detached from compiler nouns and arenas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerResolutionFact {
+    pub use_location: CompilerErrorLocation,
+    pub definition_location: CompilerErrorLocation,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CompilerErrorMetadata {
     pub location: Option<CompilerErrorLocation>,

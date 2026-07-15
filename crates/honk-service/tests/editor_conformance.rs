@@ -76,6 +76,15 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
             && fact.location.start_line.is_some()
             && fact.location.start_col.is_some()
     }));
+    assert!(
+        !baseline_check.resolution_facts.is_empty(),
+        "a fresh editor check should return owned arm-resolution facts"
+    );
+    assert!(baseline_check.resolution_facts.iter().all(|fact| {
+        !fact.name.is_empty()
+            && fact.use_location.start_line.is_some()
+            && fact.definition_location.start_line.is_some()
+    }));
     let baseline = compiler
         .compile(request(&entry))
         .await

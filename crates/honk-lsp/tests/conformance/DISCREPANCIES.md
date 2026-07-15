@@ -21,9 +21,9 @@
 ## DISC-003: Limited semantic capability surface
 
 - **Reference:** LSP defines many optional language features.
-- **Implementation:** Honk advertises document symbols and hover backed by an editor-only parsed side table. After a successful compiler check, hover also selects the narrowest current debug spot and displays its owned inferred-type summary. Resolved definitions are not yet available.
-- **Impact:** No completion, navigation, references, formatting, semantic tokens, or pull diagnostics yet.
-- **Resolution:** INVESTIGATING; extend features only as additional owned semantic side tables become available.
+- **Implementation:** Honk advertises document symbols and hover backed by an editor-only parsed side table. After a successful compiler check, hover selects the narrowest current debug spot and displays its owned inferred-type summary. Go-to-definition uses a second owned compiler side table for resolved core arms and imported gates. Native types do not yet retain source provenance for local face or binding declarations.
+- **Impact:** Definition requests for local faces and bindings return null. No completion, references, formatting, semantic tokens, or pull diagnostics yet.
+- **Resolution:** INVESTIGATING; add declaration provenance at the native resolution boundary without changing the compiler AST or ordinary CLI/batch results.
 - **Tests affected:** all unadvertised optional feature requests.
 - **Review date:** 2026-07-15.
 

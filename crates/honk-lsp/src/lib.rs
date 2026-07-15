@@ -11,7 +11,7 @@ use honk::workspace::{
     WorkspaceCheckRequest, WorkspaceCompileError, WorkspaceConfig, WorkspaceDiagnostic,
     WorkspaceDiagnosticKind,
 };
-use honk::{CompilerErrorLocation, CompilerSemanticFact};
+use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
     range_from_one_based_spot, SemanticHover, SemanticNodeId, SemanticSession, SemanticSymbol,
     SemanticSymbolKind, SemanticTextRange,
@@ -23,14 +23,17 @@ use lsp_types::notification::{
     DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, LogMessage,
     Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
-use lsp_types::request::{DocumentSymbolRequest, HoverRequest, Request as LspRequest};
+use lsp_types::request::{
+    DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as LspRequest,
+};
 use lsp_types::{
     CancelParams, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, LogMessageParams,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf, Position, PositionEncodingKind,
-    PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, Location, LogMessageParams, MarkupContent, MarkupKind,
+    MessageType, NumberOrString, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
+    Range, ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind,
     TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
     TextDocumentSyncSaveOptions, Uri,
 };
@@ -100,6 +103,7 @@ enum WorkerEvent {
         target: PathBuf,
         diagnostic: Option<WorkspaceDiagnostic>,
         semantic_facts: Vec<CompilerSemanticFact>,
+        resolution_facts: Vec<CompilerResolutionFact>,
     },
     Error {
         generation: u64,
@@ -153,10 +157,17 @@ struct DocumentTypeFacts {
     facts: Vec<CompilerSemanticFact>,
 }
 
+struct DocumentResolutionFacts {
+    version: i32,
+    target: PathBuf,
+    facts: Vec<CompilerResolutionFact>,
+}
+
 #[derive(Default)]
 struct SemanticState {
     pending: HashMap<RequestId, PendingSemanticRequest>,
     type_facts: HashMap<PathBuf, DocumentTypeFacts>,
+    resolution_facts: HashMap<PathBuf, DocumentResolutionFacts>,
 }
 
 pub fn run_stdio(config: LspConfig) -> Result<()> {
@@ -212,13 +223,15 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         )),
         document_symbol_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         experimental: Some(serde_json::json!({
             "honk": {
                 "lspBaseline": LSP_BASELINE_VERSION,
                 "artifactFreeChecks": true,
                 "fullDocumentSync": true,
                 "semanticSnapshots": true,
-                "semanticWorker": true
+                "semanticWorker": true,
+                "compilerResolutionFacts": true
             }
         })),
         ..ServerCapabilities::default()
@@ -265,8 +278,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
     let mut shutdown = false;
     while !shutdown {
         drain_worker_events(
-            &connection, &state, &resolved, &event_receiver, &mut published,
-            &mut semantics.type_facts,
+            &connection, &state, &resolved, &event_receiver, &mut published, &mut semantics,
         )?;
         drain_semantic_events(
             &connection, &state, &semantic_event_receiver, &mut semantics.pending,
@@ -278,7 +290,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                     shutdown = true;
                 } else {
                     handle_request(
-                        &connection, &state, &semantic_sender, &mut semantics.pending, request,
+                        &connection, &state, &resolved, &semantic_sender, &mut semantics, request,
                     )?;
                 }
             }
@@ -436,6 +448,7 @@ fn handle_notification(
                 "document was reopened with new contents",
             )?;
             semantics.type_facts.remove(&path);
+            semantics.resolution_facts.clear();
             schedule_check(trigger);
         }
         DidChangeTextDocument::METHOD => {
@@ -484,6 +497,7 @@ fn handle_notification(
                 "document changed before the semantic query completed",
             )?;
             semantics.type_facts.remove(&path);
+            semantics.resolution_facts.clear();
             schedule_check(trigger);
         }
         DidCloseTextDocument::METHOD => {
@@ -504,6 +518,7 @@ fn handle_notification(
                 "document closed before the semantic query completed",
             )?;
             semantics.type_facts.remove(&path);
+            semantics.resolution_facts.clear();
             let _ = semantic_sender.send(SemanticCommand::Close(path));
             publish_diagnostics(
                 connection,
@@ -527,6 +542,7 @@ fn handle_notification(
                 let mut snapshot = lock_snapshot(state)?;
                 snapshot.generation = snapshot.generation.saturating_add(1);
             }
+            semantics.resolution_facts.clear();
             schedule_check(trigger);
         }
         CancelNotification::METHOD => {
@@ -553,8 +569,9 @@ fn handle_notification(
 fn handle_request(
     connection: &Connection,
     state: &Arc<Mutex<EditorSnapshot>>,
+    config: &ResolvedConfig,
     semantic_sender: &Sender<SemanticCommand>,
-    pending_semantics: &mut HashMap<RequestId, PendingSemanticRequest>,
+    semantics: &mut SemanticState,
     request: Request,
 ) -> Result<()> {
     match request.method.as_str() {
@@ -590,7 +607,7 @@ fn handle_request(
             enqueue_semantic_query(
                 connection,
                 semantic_sender,
-                pending_semantics,
+                &mut semantics.pending,
                 request.id,
                 path,
                 document,
@@ -637,12 +654,70 @@ fn handle_request(
             enqueue_semantic_query(
                 connection,
                 semantic_sender,
-                pending_semantics,
+                &mut semantics.pending,
                 request.id,
                 path,
                 document,
                 SemanticQuery::Hover { byte_offset },
             )?;
+        }
+        GotoDefinition::METHOD => {
+            let params: GotoDefinitionParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid definition parameters: {error}"),
+                    );
+                }
+            };
+            let text_document = &params.text_document_position_params.text_document;
+            let position = params.text_document_position_params.position;
+            let document = match open_document(state, &text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid definition URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let definition = match definition_at(
+                &semantics.resolution_facts, &path, document.version, &document.text, byte_offset,
+            ) {
+                Some((target, location)) => {
+                    let snapshot = lock_snapshot(state)?.clone();
+                    match compiler_definition_to_lsp(
+                        &snapshot, &target, &config.workspace.dependencies, &location,
+                    ) {
+                        Ok(location) => location.map(GotoDefinitionResponse::Scalar),
+                        Err(error) => {
+                            warn!(%error, "compiler definition location is unavailable");
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
+            connection
+                .sender
+                .send(Response::new_ok(request.id, serde_json::to_value(definition)?).into())?;
         }
         _ => {
             return send_request_error(
@@ -975,6 +1050,116 @@ fn inferred_type_at(
         .min_by_key(|(range, _)| range.end.saturating_sub(range.start))
 }
 
+fn definition_at(
+    resolution_facts: &HashMap<PathBuf, DocumentResolutionFacts>,
+    path: &Path,
+    version: i32,
+    source: &str,
+    byte_offset: u32,
+) -> Option<(PathBuf, CompilerErrorLocation)> {
+    let document = resolution_facts.get(path)?;
+    if document.version != version {
+        return None;
+    }
+    document
+        .facts
+        .iter()
+        .flat_map(|fact| {
+            compiler_resolution_use_ranges(source, fact)
+                .into_iter()
+                .map(move |range| (range, fact))
+        })
+        .filter(|(range, _)| range.contains(byte_offset))
+        .min_by_key(|(range, _)| range.end.saturating_sub(range.start))
+        .map(|(_, fact)| (document.target.clone(), fact.definition_location.clone()))
+}
+
+fn compiler_resolution_use_ranges(
+    source: &str,
+    fact: &CompilerResolutionFact,
+) -> Vec<SemanticTextRange> {
+    let location = &fact.use_location;
+    let Some(enclosing) = (|| {
+        range_from_one_based_spot(
+            source, location.start_line?, location.start_col?, location.end_line?,
+            location.end_col?,
+        )
+    })() else {
+        return Vec::new();
+    };
+    if fact.name == "$" {
+        return vec![enclosing];
+    }
+    let Ok(start) = usize::try_from(enclosing.start) else {
+        return Vec::new();
+    };
+    let Ok(end) = usize::try_from(enclosing.end) else {
+        return Vec::new();
+    };
+    let Some(haystack) = source.get(start..end) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
+    for (relative, _) in haystack.match_indices(&fact.name) {
+        let match_start = start + relative;
+        let match_end = match_start + fact.name.len();
+        let is_term_byte =
+            |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-';
+        let left_boundary = match_start == 0 || !is_term_byte(source.as_bytes()[match_start - 1]);
+        let right_boundary =
+            match_end == source.len() || !is_term_byte(source.as_bytes()[match_end]);
+        if left_boundary && right_boundary {
+            ranges.push(SemanticTextRange {
+                start: u32::try_from(match_start).expect("enclosing semantic range is u32-sized"),
+                end: u32::try_from(match_end).expect("enclosing semantic range is u32-sized"),
+            });
+        }
+    }
+    if ranges.is_empty() {
+        vec![enclosing]
+    } else {
+        ranges
+    }
+}
+
+fn compiler_definition_to_lsp(
+    snapshot: &EditorSnapshot,
+    target: &Path,
+    dependencies: &Path,
+    location: &CompilerErrorLocation,
+) -> Result<Option<Location>> {
+    let path = compiler_location_path(Some(location), target, dependencies);
+    let open_document = snapshot.documents.get(&path).or_else(|| {
+        let canonical = path.canonicalize().ok()?;
+        snapshot.documents.iter().find_map(|(candidate, document)| {
+            (candidate.canonicalize().ok().as_deref() == Some(canonical.as_path()))
+                .then_some(document)
+        })
+    });
+    let (uri, source) = match open_document {
+        Some(document) => (document.uri.clone(), document.text.clone()),
+        None => (
+            file_path_to_uri(&path)?,
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read definition source {}", path.display()))?,
+        ),
+    };
+    let Some(range) = range_from_one_based_spot(
+        &source,
+        location
+            .start_line
+            .context("definition has no start line")?,
+        location
+            .start_col
+            .context("definition has no start column")?,
+        location.end_line.context("definition has no end line")?,
+        location.end_col.context("definition has no end column")?,
+    ) else {
+        return Ok(None);
+    };
+    Ok(semantic_range_to_lsp(&source, range).map(|range| Location::new(uri, range)))
+}
+
 fn semantic_symbols_to_lsp(symbols: &[SemanticSymbol], source: &str) -> Vec<DocumentSymbol> {
     let mut children = HashMap::<Option<SemanticNodeId>, Vec<&SemanticSymbol>>::new();
     for symbol in symbols {
@@ -1184,9 +1369,9 @@ fn check_worker_loop(
                 entry: target.clone(),
             }))
             .context("honk editor check request failed")?;
-        let (diagnostic, semantic_facts) = match output.result {
-            Ok(check) => (None, check.semantic_facts),
-            Err(WorkspaceCompileError { diagnostic }) => (Some(diagnostic), Vec::new()),
+        let (diagnostic, semantic_facts, resolution_facts) = match output.result {
+            Ok(check) => (None, check.semantic_facts, check.resolution_facts),
+            Err(WorkspaceCompileError { diagnostic }) => (Some(diagnostic), Vec::new(), Vec::new()),
         };
         events
             .send(WorkerEvent::Checked {
@@ -1194,6 +1379,7 @@ fn check_worker_loop(
                 target,
                 diagnostic,
                 semantic_facts,
+                resolution_facts,
             })
             .context("LSP event loop stopped")?;
 
@@ -1262,7 +1448,7 @@ fn drain_worker_events(
     config: &ResolvedConfig,
     events: &Receiver<WorkerEvent>,
     published: &mut HashSet<String>,
-    type_facts: &mut HashMap<PathBuf, DocumentTypeFacts>,
+    semantics: &mut SemanticState,
 ) -> Result<()> {
     loop {
         match events.try_recv() {
@@ -1271,6 +1457,7 @@ fn drain_worker_events(
                 target,
                 diagnostic,
                 semantic_facts,
+                resolution_facts,
             }) => {
                 let snapshot = lock_snapshot(state)?.clone();
                 if generation != snapshot.generation {
@@ -1283,7 +1470,8 @@ fn drain_worker_events(
                 }
                 clear_published(connection, published)?;
                 if let Some(diagnostic) = diagnostic {
-                    type_facts.clear();
+                    semantics.type_facts.clear();
+                    semantics.resolution_facts.clear();
                     let (uri, lsp_diagnostic) = workspace_diagnostic_to_lsp(
                         &diagnostic, &target, &config.workspace.dependencies,
                     )?;
@@ -1297,7 +1485,11 @@ fn drain_worker_events(
                 } else {
                     update_type_facts(
                         &snapshot, &target, &config.workspace.dependencies, semantic_facts,
-                        type_facts,
+                        &mut semantics.type_facts,
+                    );
+                    update_resolution_facts(
+                        &snapshot, &target, &config.workspace.dependencies, resolution_facts,
+                        &mut semantics.resolution_facts,
                     );
                 }
             }
@@ -1307,7 +1499,8 @@ fn drain_worker_events(
             }) => {
                 let current = lock_snapshot(state)?.generation;
                 if generation == u64::MAX || generation == current {
-                    type_facts.clear();
+                    semantics.type_facts.clear();
+                    semantics.resolution_facts.clear();
                     clear_published(connection, published)?;
                     send_show_message(connection, MessageType::ERROR, message)?;
                 }
@@ -1361,6 +1554,49 @@ fn update_type_facts(
             _ if current
                 .get(path)
                 .is_some_and(|facts| facts.version != document.version) =>
+            {
+                current.remove(path);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn update_resolution_facts(
+    snapshot: &EditorSnapshot,
+    target: &Path,
+    dependencies: &Path,
+    facts: Vec<CompilerResolutionFact>,
+    current: &mut HashMap<PathBuf, DocumentResolutionFacts>,
+) {
+    let mut by_path = HashMap::<PathBuf, Vec<CompilerResolutionFact>>::new();
+    let canonical_target = target.canonicalize().ok();
+    for fact in facts {
+        let path = compiler_location_path_with_canonical_target(
+            Some(&fact.use_location),
+            target,
+            canonical_target.as_deref(),
+            dependencies,
+        );
+        if snapshot.documents.contains_key(&path) {
+            by_path.entry(path).or_default().push(fact);
+        }
+    }
+    for (path, document) in &snapshot.documents {
+        match by_path.remove(path) {
+            Some(facts) if !facts.is_empty() => {
+                current.insert(
+                    path.clone(),
+                    DocumentResolutionFacts {
+                        version: document.version,
+                        target: target.to_path_buf(),
+                        facts,
+                    },
+                );
+            }
+            _ if current.get(path).is_some_and(|facts| {
+                facts.version != document.version || facts.target != target
+            }) =>
             {
                 current.remove(path);
             }
@@ -1539,16 +1775,17 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    use honk::{CompilerErrorLocation, CompilerSemanticFact};
+    use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
     use lsp_server::{Connection, ErrorCode, Message, RequestId, ResponseKind};
     use lsp_types::Position;
 
     use super::{
-        byte_to_lsp_position, cancel_semantic_request, drain_semantic_events, drain_worker_events,
-        file_path_to_uri, inferred_type_at, lsp_position_to_byte, uri_to_file_path,
-        workspace_diagnostic_to_lsp, DocumentTypeFacts, EditorSnapshot, OpenDocument,
-        PendingSemanticRequest, ResolvedConfig, SemanticEvent, SemanticQueryResult, WorkerEvent,
-        WorkspaceConfig, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
+        byte_to_lsp_position, cancel_semantic_request, definition_at, drain_semantic_events,
+        drain_worker_events, file_path_to_uri, inferred_type_at, lsp_position_to_byte,
+        uri_to_file_path, workspace_diagnostic_to_lsp, DocumentResolutionFacts, DocumentTypeFacts,
+        EditorSnapshot, OpenDocument, PendingSemanticRequest, ResolvedConfig, SemanticEvent,
+        SemanticQueryResult, SemanticState, WorkerEvent, WorkspaceConfig, WorkspaceDiagnostic,
+        WorkspaceDiagnosticKind,
     };
 
     #[test]
@@ -1636,6 +1873,79 @@ mod tests {
     }
 
     #[test]
+    fn definition_uses_the_narrowest_current_compiler_resolution() {
+        let path = PathBuf::from("/tmp/use.hoon");
+        let target = PathBuf::from("/tmp/entry.hoon");
+        let source = "(helper answer)\n";
+        let offset =
+            u32::try_from(source.find("answer").expect("answer offset")).expect("small source");
+        let wide_definition = CompilerErrorLocation {
+            file: Some("lib/helper.hoon".to_string()),
+            start_line: Some(1),
+            start_col: Some(1),
+            end_line: Some(2),
+            end_col: Some(3),
+            ..CompilerErrorLocation::default()
+        };
+        let narrow_definition = CompilerErrorLocation {
+            file: Some("lib/answer.hoon".to_string()),
+            start_line: Some(4),
+            start_col: Some(3),
+            end_line: Some(4),
+            end_col: Some(9),
+            ..CompilerErrorLocation::default()
+        };
+        let wide_definition_for_assertion = wide_definition.clone();
+        let facts = HashMap::from([(
+            path.clone(),
+            DocumentResolutionFacts {
+                version: 7,
+                target: target.clone(),
+                facts: vec![
+                    CompilerResolutionFact {
+                        use_location: CompilerErrorLocation {
+                            start_line: Some(1),
+                            start_col: Some(1),
+                            end_line: Some(1),
+                            end_col: Some(16),
+                            ..CompilerErrorLocation::default()
+                        },
+                        definition_location: wide_definition,
+                        name: "helper".to_string(),
+                    },
+                    CompilerResolutionFact {
+                        use_location: CompilerErrorLocation {
+                            start_line: Some(1),
+                            start_col: Some(9),
+                            end_line: Some(1),
+                            end_col: Some(15),
+                            ..CompilerErrorLocation::default()
+                        },
+                        definition_location: narrow_definition.clone(),
+                        name: "answer".to_string(),
+                    },
+                ],
+            },
+        )]);
+
+        assert_eq!(
+            definition_at(&facts, &path, 7, source, offset),
+            Some((target, narrow_definition))
+        );
+        let helper_offset =
+            u32::try_from(source.find("helper").expect("helper offset")).expect("small source");
+        assert_eq!(
+            definition_at(&facts, &path, 7, source, helper_offset),
+            Some((
+                PathBuf::from("/tmp/entry.hoon"),
+                wide_definition_for_assertion
+            ))
+        );
+        assert!(definition_at(&facts, &path, 7, source, 7).is_none());
+        assert!(definition_at(&facts, &path, 8, source, offset).is_none());
+    }
+
+    #[test]
     fn stale_worker_generation_does_not_publish_diagnostics() {
         let (server, client) = Connection::memory();
         let state = Arc::new(Mutex::new(EditorSnapshot {
@@ -1653,6 +1963,7 @@ mod tests {
                     location: None,
                 }),
                 semantic_facts: Vec::new(),
+                resolution_facts: Vec::new(),
             })
             .expect("worker event");
         let config = ResolvedConfig {
@@ -1669,10 +1980,10 @@ mod tests {
             check_delay: Duration::ZERO,
         };
         let mut published = std::collections::HashSet::new();
-        let mut type_facts = HashMap::new();
+        let mut semantics = SemanticState::default();
 
         drain_worker_events(
-            &server, &state, &config, &receiver, &mut published, &mut type_facts,
+            &server, &state, &config, &receiver, &mut published, &mut semantics,
         )
         .expect("drain stale event");
 
