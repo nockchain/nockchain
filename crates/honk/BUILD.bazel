@@ -16,8 +16,20 @@ rust_library(
         exclude = ["src/bin/**"],
     ),
     aliases = aliases(),
+    compile_data = [
+        "//hoon/common:hoon.hoon",
+        "assets/honc-type-138.jam",
+        "assets/honc-formula-138.jam",
+        "assets/hoonc-octs-type-138.jam",
+    ],
     crate_name = "honk",
     edition = "2021",
+    rustc_env = {
+        "HONK_HOON_138_SOURCE": "$(location //hoon/common:hoon.hoon)",
+        "HONK_HONC_TYPE_138_JAM": "$(location assets/honc-type-138.jam)",
+        "HONK_HONC_FORMULA_138_JAM": "$(location assets/honc-formula-138.jam)",
+        "HONK_HOONC_OCTS_TYPE_138_JAM": "$(location assets/hoonc-octs-type-138.jam)",
+    },
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
     ] + all_crate_deps(proc_macro = True),
@@ -41,31 +53,13 @@ rust_binary(
     name = "honk",
     srcs = ["src/bin/honk.rs"],
     aliases = aliases(),
-    compile_data = [
-        "//hoon/common:hoon.hoon",
-        "assets/honc-type-138.jam",
-        "assets/honc-formula-138.jam",
-        "assets/hoonc-octs-type-138.jam",
-    ],
     crate_name = "honk",
     crate_root = "src/bin/honk.rs",
     edition = "2021",
-    rustc_env = {
-        "HONK_HOON_138_SOURCE": "$(location //hoon/common:hoon.hoon)",
-        "HONK_HONC_TYPE_138_JAM": "$(location assets/honc-type-138.jam)",
-        "HONK_HONC_FORMULA_138_JAM": "$(location assets/honc-formula-138.jam)",
-        "HONK_HOONC_OCTS_TYPE_138_JAM": "$(location assets/hoonc-octs-type-138.jam)",
-    },
     proc_macro_deps = [
         "//crates/nockvm/rust/nockvm_macros",
     ] + all_crate_deps(proc_macro = True),
     deps = [
         ":honk_lib",
-        "//crates/hatch",
-        "//crates/honc-cold-138",
-        "//crates/hoonc:hoonc_lib",
-        "//crates/nockapp",
-        "//crates/nockvm/rust/nockvm",
-        "//crates/zkvm-jetpack",
     ] + all_crate_deps(),
 )

@@ -4580,12 +4580,44 @@ dependencies = [
  "nockvm",
  "num-bigint",
  "stacker",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "walkdir",
  "zkvm-jetpack",
+]
+
+[[package]]
+name = "honk-grpc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "honk",
+ "honk-grpc-proto",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "tonic-health",
+ "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "honk-grpc-proto"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "prost 0.14.4",
+ "protoc-bin-vendored",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

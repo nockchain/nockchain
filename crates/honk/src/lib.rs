@@ -12,6 +12,7 @@ pub mod errors;
 pub mod native;
 pub mod pipeline;
 pub mod types;
+pub mod workspace;
 
 use hatch::ast::hoon::Hoon;
 use nockapp::noun::slab::NounSlab;

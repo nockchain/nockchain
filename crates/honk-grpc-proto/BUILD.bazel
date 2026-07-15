@@ -1,0 +1,83 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+filegroup(
+    name = "proto_files",
+    srcs = glob(["proto/**/*.proto"]),
+)
+
+rust_library(
+    name = "honk_grpc_codegen_lib",
+    srcs = ["build.rs"],
+    aliases = aliases(),
+    crate_root = "build.rs",
+    edition = "2021",
+    deps = all_crate_deps(
+        build = True,
+        normal = True,
+    ),
+)
+
+rust_binary(
+    name = "honk_grpc_codegen",
+    srcs = ["build.rs"],
+    aliases = aliases(),
+    compile_data = glob(["proto/**/*.proto"]),
+    crate_root = "build.rs",
+    data = glob(["proto/**/*.proto"]),
+    edition = "2021",
+    deps = [
+        ":honk_grpc_codegen_lib",
+    ] + all_crate_deps(
+        build = True,
+        proc_macro = True,
+    ),
+)
+
+genrule(
+    name = "generate_honk_proto",
+    srcs = glob(["proto/**/*.proto"]),
+    outs = [
+        "generated/honk.compiler.v1.rs",
+        "generated/honk_descriptor.bin",
+    ],
+    cmd = """
+    EXEC_ROOT=$$PWD
+    CODEGEN_BIN=$$(realpath $(location :honk_grpc_codegen))
+    OUT_DIR=$$(dirname $(location generated/honk_descriptor.bin))
+    mkdir -p $$OUT_DIR/proto
+    for f in $(SRCS); do \
+      rel=$$(echo $$f | sed -E 's|^.*/proto/||'); \
+      mkdir -p $$OUT_DIR/proto/$$(dirname $$rel); \
+      cp $$f $$OUT_DIR/proto/$$rel; \
+    done
+    cd $$OUT_DIR
+    PROTOC=$$EXEC_ROOT/$(execpath //tools/protoc:protoc) \
+    OUT_DIR=. $$CODEGEN_BIN
+    test -f honk_descriptor.bin
+    """,
+    tools = [
+        ":honk_grpc_codegen",
+        "//tools/protoc",
+    ],
+)
+
+rust_library(
+    name = "honk-grpc-proto",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = [":generate_honk_proto"],
+    crate_name = "honk_grpc_proto",
+    edition = "2021",
+    rustc_env = {
+        "OUT_DIR": "../generated",
+    },
+    deps = all_crate_deps(),
+)
