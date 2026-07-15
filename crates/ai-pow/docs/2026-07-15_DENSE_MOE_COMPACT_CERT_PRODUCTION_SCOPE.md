@@ -412,13 +412,31 @@ provable/verifiable — no envelope cap needed. ⇒ **The boot table is exactly 
 `AiPowVerifierSetup` entries**, one per bucket. Small and tractable to precompute
 + embed.
 
+### Boot-setup Stage C — SCOPED (2026-07-15), needs a design decision
+The verifier `context` is built as a byproduct of the compact prove
+(`recursion.rs:1989`, `circuit_prover_data = Arc::clone(l2_prep.circuit_prover_data)`)
+and is **NOT serializable** (`Arc<CircuitProverData>`; the struct doc:
+"production must derive or pin it from trusted code/config/verifier-key state").
+So "precompute + embed a blob" is NOT available. Two options:
+- **(a) Build at boot.** Spawn a background task that runs `build_verifier_setup`
+  for the 8 buckets and calls `init_ai_pow_verifier_setup` when done. The jet
+  ALREADY tolerates a still-building table (decode-first; a well-formed cert
+  BAIL_FALLs to the Hoon stub until the bucket is present). Cost: ~8×2min ≈ 16min
+  of proving **per boot**, during which `%ai-pow` blocks can't be verified.
+  Simplest; heavy boot.
+- **(b) Derive context without proving.** Add a path that compiles the L1/L2
+  verifier circuits and extracts `(circuit_prover_data, metadata, fri_shape,
+  digest)` WITHOUT running the compact proof (the context is deterministic from
+  the trace-height bucket's canonical program). Fast boot; needs new
+  derivation code in `ai-pow-zk::recursion` (a real, bounded task). **Preferred.**
+DECISION NEEDED: (a) build-at-boot vs (b) derive-without-proving. Then wire
+`init_ai_pow_verifier_setup(table_of_8)` into nockchain + roswell boot, and
+validate a cert per bucket verifies against its injected setup.
+
 ### Remaining (post-decision), in dependency order
-1. **Stage C** (boot-setup, the last integration linchpin) — precompute the **8**
-   `build_verifier_setup` entries (one per 2^13…2^20 bucket; ~2min each offline),
-   serialize + embed (or a deterministic build step), and call
-   `init_ai_pow_verifier_setup(table)` at node boot (nockchain + roswell). Then a
-   cert at each bucket verifies against its injected setup (end-to-end). [§3.2#1;
-   Stages A+B done]
+1. **Stage C** — resolve the (a)/(b) decision above; build the 8-bucket table;
+   inject at boot (nockchain + roswell); validate a cert per bucket. [§3.2#1;
+   Stages A+B done, C scoped]
 2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
