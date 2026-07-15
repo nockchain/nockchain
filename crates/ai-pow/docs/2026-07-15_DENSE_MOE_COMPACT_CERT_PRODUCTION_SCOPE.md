@@ -604,12 +604,27 @@ NOT `prover_only`.
      trace-height SHAPE without a real proof — a few seconds at boot, no cache
      file). Cleaner long-term; a deeper recursion-internals refactor.
 
+### Stage C4 — CLOSED (2026-07-15)
+The full boot verifier-setup pipeline is wired + validated end-to-end.
+- **Consensus cap `AI_POW_MAX_TRACE_HEIGHT = 2^19`** (user decision): the §4.8
+  envelope reaches 2^20, but generating the 2^20 setup (proving a ~1M-row trace +
+  its recursion) OOMs a 32 GB machine. Consensus rejects `%ai-pow` blocks with
+  trace height > 2^19 (jet rejects BEFORE the setup lookup ⇒ clean `NO`, not a
+  BAIL_FAIL on the absent top bucket; `verify_ai_pow_block_artifact` rejects as
+  defense-in-depth). The accept-band is the seven buckets 2^13..2^19 — all feasible
+  on a commodity node.
+- **Boot:** `install_or_build_verifier_setup` (nockchain) loads the cache if
+  present, else GENERATES + caches + injects, and SHUTS DOWN on failure (not
+  fail-closed). roswell (tool) uses the lenient load-only path.
+- **VALIDATED:** `boot_generate_full_production_table` proves all 7 buckets →
+  caches to a data-dir file (**39.4 MiB total on disk**) → loads + rebuilds all 7
+  (no proving) → covers 2^13..2^19. Passed in 996 s (~16.6 min one-time). Plus the
+  seed roundtrip (verify a block vs the disk-loaded rebuilt setup; over-cap block
+  rejected), one-bucket generation, cheap coverage + cap tests.
+
 ### Remaining (post-decision), in dependency order
-1. **Stage C4** — the rebuild primitive (C1/C2/C3') is DONE + validated (option (a),
-   rebuild L1 lookups from AIRs; < 8 MiB cache; verifies against rebuilt context).
-   Remaining: build the 8-bucket table (2^13..2^20); serialize the small blobs to a
-   cache file in the nockapp data dir; inject at boot (nockchain + roswell); validate
-   a cert per bucket. [§3.2#1; Stages A+B+C1/C2/C3' done]
+1. **Stage C4 — DONE** (see above). Optional follow-up: an offline pre-gen tool so
+   operators can ship the ~40 MB cache instead of each node generating (~16 min).
 2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
