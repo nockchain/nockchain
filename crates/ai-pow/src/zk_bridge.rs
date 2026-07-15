@@ -4121,6 +4121,92 @@ mod tests {
         .expect("opened rows are expert 0's routed tokens (routing binding)");
     }
 
+    /// §6(b)-R-b + MoE, WIDE-`k` end-to-end (2026-07-15 vetting) — the R-b
+    /// lane-awareness fix on the REAL production scheduled/MoE path. The MoE
+    /// ticket opens a NON-CONTIGUOUS `outer_indices` gather (routing), and at
+    /// `num_stripes = k/r = 2048/16 = 128 > STRIPE_MAX` the scheduled prover
+    /// routes to `place_useful_work_chain_rb_indexed` with the opened lanes. If
+    /// the lanes were tile-local (the pre-fix bug), the `noised_packed` bus
+    /// would not balance and the proof would fail. Asserts the L0 jackpot PI
+    /// equals the off-circuit MoE grouped tile — i.e. the wide-`k` R-b circuit
+    /// computed the correct grouped tile over the non-contiguous routed tokens.
+    /// Opt-in (a real proof).
+    #[test]
+    #[ignore = "real MoE wide-stripe (ns=128) grouped-tile Layer-0 proof"]
+    fn real_moe_grouped_tile_layer0_proof_wide_stripes() {
+        use crate::commit::matrix_commitment;
+        use crate::pearl_moe_routing::build_routing_data;
+
+        // r=16 (16|r ⇒ coloc), k=2048 ⇒ num_stripes = 128 > STRIPE_MAX.
+        let (m, k, n_e, e, r) = (128usize, 2048usize, 64usize, 2usize, 16usize);
+        let top_k = 1usize;
+        let params = MatmulParams {
+            m: m as u32,
+            k: k as u32,
+            n: (n_e * e) as u32,
+            noise_rank: r as u32,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        assert_eq!(params.num_stripes() as usize, 128);
+        assert!(params.num_stripes() as usize > crate::params::STRIPE_MAX);
+        let (a, b) = synth_matrices(b"moe-grouped-tile-widek", &params);
+
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+
+        let kappa = [0x41u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+
+        let expert_idx = 0usize;
+        let inner: Vec<u32> = (0..8).collect();
+        let local_b: Vec<u32> = (0..8).collect();
+        let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+            &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+        )
+        .expect("MoE ticket");
+        // Non-contiguous routed rows (NOT tile-local [0..8)).
+        assert!(ticket.outer_indices.windows(2).all(|w| w[0] < w[1]));
+
+        let zctx = ZkProverContext {
+            a: &a,
+            b: &b,
+            params,
+            kappa,
+            h_a_chunk: h_a,
+            h_b_chunk: h_b,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+            jackpot_key: ticket.s_a,
+        };
+        let zk = zk_params_from(&params);
+        let strip_schedule = StripIndexSchedule::from_indices(
+            &zk,
+            ticket.outer_indices.clone(),
+            ticket.b_cols_global.clone(),
+        )
+        .expect("MoE strip schedule");
+        let (artifact, _prog, _) = prove_ai_pow_scheduled_full_with_context(
+            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+        )
+        .expect("prove wide-k MoE grouped tile Layer-0 (R-b indexed path)");
+
+        assert_eq!(
+            artifact.pis.jackpot,
+            tile_state_words(&ticket.tile_state),
+            "wide-k R-b Layer-0 jackpot PI must equal the off-circuit MoE grouped tile \
+             (proves the lane-indexed noised_packed IDs are correct for the routing gather)"
+        );
+        assert_eq!(
+            ai_pow_zk::hash_jackpot_le_bytes(&artifact.pis.hash_jackpot),
+            ticket.jackpot_hash
+        );
+    }
+
     /// **B5d — full MoE recursive certificate (Layer-0 → Layer-1 → verify).**
     ///
     /// Wraps the MoE grouped-tile Layer-0 proof in the recursive certificate

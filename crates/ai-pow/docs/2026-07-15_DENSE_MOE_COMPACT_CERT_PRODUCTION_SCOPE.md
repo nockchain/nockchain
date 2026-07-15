@@ -295,3 +295,48 @@ Adversarial audit before consensus-load-bearing. Ranked:
 Each step touching consensus (setup injection, gate lift, do-pow accept) is
 soundness-critical and invasive → stage it, KAT/adversarial-first, validate per
 stage (R1).
+
+---
+
+## 6. Progress log
+
+### 2026-07-15
+- **Scope mapped** (this document): dense + MoE compact-cert present state, the
+  four chain-integration seams, and the two scope decisions.
+- **Decision captured:** MoE ships the off-circuit routing binding (lift the
+  gate + vet); dense matches Pearl (one ticket per cert — already true on the
+  scheduled/merge path).
+- **Dense tile-model question RESOLVED** (§3.1): production scheduled/merge path
+  is one-ticket-per-cert, Pearl-consistent; the `num_tiles>1` fail-closed is
+  native-path-only. No aggregate circuit needed.
+- **✅ FIXED — R-b lane-awareness for non-contiguous wide-k tickets** (§3.4,
+  commit 08820020): the num_stripes>64 R-b prover now uses opened lanes on the
+  production scheduled/merge path, so Pearl periodic patterns + MoE
+  `outer_indices` gathers work at wide `k`. Validated by a canonical==extract
+  KAT on a non-contiguous pattern at ns 96/128. Fixed the stale `TooManyStripes`
+  message too.
+- **Boot-setup injection scoped** (§3.2#1): `build_verifier_setup` runs
+  `prove_canonical_moe_block` (expensive) → the setup must be PRECOMPUTED offline
+  and embedded, keyed to the pinned consensus params. `init_ai_pow_verifier_setup`
+  populates the `SETUP` OnceCell (`ai-pow-jets/src/lib.rs:46,53`); no production
+  caller today. This is the original deferred task.
+
+### CRITICAL-PATH DECISION (blocks the integration work)
+Pin the **canonical production consensus params** — `MatmulParams` shape
+(within the num_stripes ≤ 512 band) + `{hw, e, top_k}` for MoE. The
+verifier-key/setup digest commits to these, so they must be chosen before the
+boot setup can be precomputed/embedded and before `do-pow`/`%mine-ai` can be
+flipped. Everything in §3.2 depends on this.
+
+### Remaining (post-decision), in dependency order
+1. Precompute + embed the verifier setup for the pinned params; call
+   `init_ai_pow_verifier_setup` at node boot (nockchain + roswell). [§3.2#1]
+2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
+3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
+4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
+5. Vetting A2 (MoE off-circuit routing forgeries through the FULL compact cert),
+   A3 (recursion commitment fold on scheduled/merge), A4 (setup digest binds the
+   pinned params), A5 (wire/decode DoS). [§4]
+6. R-b fix end-to-end on the production scheduled path at ns>64 (canonical
+   KAT done; a full scheduled prove+verify at ns>64 with a non-contiguous
+   schedule remains — extends A1).
