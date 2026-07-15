@@ -7349,6 +7349,81 @@ mod tests {
         );
     }
 
+    /// §6(b)-R-b ADVERSARIAL (Stage A) — the R-b canonical program pin
+    /// binds for `num_stripes > STRIPE_MAX`. The verifier rebuilds the
+    /// params-pure R-b canonical program (stripe-major schedule) and
+    /// commits to IT, not the prover's. A malicious prover who submits a
+    /// trace with a DIFFERENT R-b program column (e.g. a fabricated
+    /// selector/schedule) must be rejected — otherwise a forged schedule
+    /// could zero out a keystone. This is the CR.6 forge test extended to
+    /// the R-b `>64` path (the Stage-A soundness linchpin). The Pad row
+    /// is located by scanning for an all-zero PROGRAM_COL row (row_schedule
+    /// is the segmented test-only view, not the R-b verify schedule).
+    #[test]
+    fn rb_canonical_program_pin_rejects_forge_over_stripe_max() {
+        use ai_pow_zk::composite_layout::{CONTROL_PREP, NOISE_PACKED_PREP, TOTAL_TRACE_WIDTH};
+
+        use crate::synth::synth_matrices;
+
+        // num_stripes = 96 > STRIPE_MAX (16|r coloc, single tile).
+        let params = MatmulParams {
+            m: 8,
+            k: 1536, // 96 · 16
+            n: 8,
+            noise_rank: 16,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params.validate().unwrap();
+        assert!(params.num_stripes() as usize > crate::params::STRIPE_MAX);
+        let (a, b) = synth_matrices(b"rb-forge", &params);
+        let ctx = BlockContext::build(b"rb-forge-blk", TEST_NONCE, &a, &b, &params).expect("ctx");
+        let target = crate::tile_hash::difficulty_target(&params);
+
+        // Honest control: the R-b canonical-VK verify accepts a genuine
+        // wide-stripe proof (Stage A/B end-to-end).
+        prove_and_verify_tiled_tamper(&ctx, &params, TEST_NONCE, &target, 0, 0, |_| {})
+            .expect("honest R-b (>64) proof must verify vs the R-b canonical program");
+
+        // Forge: bump NOISE_PACKED_PREP on an all-zero-PROGRAM_COL Pad row.
+        // Canonically 0 there; no chip constraint binds it on a Pad row ⇒
+        // the ONLY defect is prover_program ≠ R-b canonical.
+        let res = prove_and_verify_tiled_tamper(
+            &ctx,
+            &params,
+            TEST_NONCE,
+            &target,
+            0,
+            0,
+            |t: &mut CompositeTrace| {
+                let zero = ai_pow_zk::Val::default();
+                let h = t.height();
+                // CONTROL_PREP==0 ⟺ Pad: every live class (StripOpen,
+                // KeyPin, Sweep, Fold, JackpotHash) sets a selector /
+                // is_fold, so CONTROL_PREP is nonzero on all of them.
+                let pad = (0..h)
+                    .find(|&r| t.matrix.values[r * TOTAL_TRACE_WIDTH + CONTROL_PREP] == zero)
+                    .expect("R-b trace has a Pad row (CONTROL_PREP==0)");
+                let nz = *t
+                    .matrix
+                    .values
+                    .iter()
+                    .find(|&&v| v != zero)
+                    .expect("trace has a nonzero cell");
+                // NOISE_PACKED_PREP is canonically 0 on a Pad row and no
+                // chip constraint binds it there ⇒ the ONLY defect is
+                // prover_program ≠ R-b canonical.
+                t.matrix.values[pad * TOTAL_TRACE_WIDTH + NOISE_PACKED_PREP] = nz;
+            },
+        );
+        assert!(
+            res.is_err(),
+            "a wide-stripe (>64) trace whose PROGRAM_COL ≠ the params-pure \
+             R-b canonical MUST be rejected by the canonical-VK verify"
+        );
+    }
+
     /// **Goal part 1 — the matmul is proven IN-CIRCUIT for the real
     /// production parameters.** For the real shipped Llama mineable
     /// GEMMs `num_stripes = k/r = 4096/64 = 64 = STRIPE_MAX`, so the

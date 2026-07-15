@@ -749,6 +749,54 @@ mod tests {
         );
     }
 
+    /// §6(b)-R-b ADVERSARIAL — the held TileAccum accumulator must be fed
+    /// the GENUINE matmul products. `TA_DOT` on each sweep row is bound
+    /// (`TA_DOT == dot(A_NOISED_UNPACK, B_NOISED_UNPACK)`) so a prover
+    /// cannot inject a fabricated per-step dot into the accumulator (and
+    /// thus a fake x_step). Tampering `TA_DOT` on an active sweep row MUST
+    /// reject. Together with `TR_IN==TA_ACC` (accumulator→reduce) and
+    /// `FOLD_XSTEP==TR_NEW` (reduce→fold), this closes the full R-b chain
+    /// matmul-dot → accumulator → reduce → fold → jackpot, each link
+    /// adversarially bound with the SX 64-lane keystone OFF.
+    #[test]
+    fn rb_tampered_dot_rejects() {
+        use crate::composite_layout::{TA_DOT_START, TA_IS_ACTIVE, TOTAL_TRACE_WIDTH};
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let (t, r, num_stripes) = (8usize, 4usize, 16usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let _ = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        // Tamper TA_DOT[0] on the first active sweep row.
+        let h = trace.matrix.values.len() / TOTAL_TRACE_WIDTH;
+        let mut rr = None;
+        for row in 0..h {
+            if trace.matrix.values[row * TOTAL_TRACE_WIDTH + TA_IS_ACTIVE].as_canonical_u64() == 1 {
+                rr = Some(row);
+                break;
+            }
+        }
+        let rr = rr.expect("R-b trace has an active TileAccum sweep row");
+        let cell = rr * TOTAL_TRACE_WIDTH + TA_DOT_START;
+        let orig = trace.matrix.values[cell].as_canonical_u64();
+        trace.matrix.values[cell] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(orig.wrapping_add(1));
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let proof = composite_prove(&cfg, trace, &pis);
+        assert!(
+            composite_verify(&cfg, &proof, &pis).is_err(),
+            "tampered TA_DOT (≠ real matmul dot) must reject",
+        );
+    }
+
     /// §6(b)-R-b — the PINNED path (CRIT-1 program pin + §4.D keystone
     /// JACKPOT_MSG==FOLD_STATE + the §6(b)-R-b keystone FOLD_XSTEP==TR_NEW)
     /// verifies for a stripe-major R-b trace at num_stripes=128 (> the old
@@ -782,6 +830,107 @@ mod tests {
         let proof = prove_with_preprocessed(&cfg, &air, trace.matrix, &pis_v, Some(&pp));
         verify_with_preprocessed(&cfg, &air, &proof, &pis_v, Some(&vk))
             .expect("R-b pinned (sx_bound=false) at num_stripes 128 must verify");
+    }
+
+    /// §6(b)-R-b ADVERSARIAL — the keystone that REPLACES the disabled
+    /// SX 64-lane keystone when `sx_bound=false`. With the SX keystone
+    /// off, the ONLY thing binding each stripe's FoldChip input to the
+    /// genuine per-stripe reduce is the §6(b)-R-b keystone
+    /// `FOLD_XSTEP == TR_NEW` (the previous row's TileReduce output). If
+    /// a malicious prover could fabricate `FOLD_XSTEP` (a fake x_step
+    /// without the real matmul reduce), the PoW digest would not be
+    /// bound to the real work. Tampering `FOLD_XSTEP` on a fold row MUST
+    /// make the pinned proof fail to verify — proving the keystone is
+    /// live under `sx_bound=false` (the R-b soundness linchpin).
+    #[test]
+    fn rb_pinned_tampered_fold_xstep_rejects() {
+        use crate::composite_layout::{FOLD_IS_FOLD, FOLD_XSTEP, TOTAL_TRACE_WIDTH};
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 128usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+
+        // Tamper FOLD_XSTEP on the FIRST fold row (FOLD_IS_FOLD==1) to a
+        // value ≠ the row's TR_NEW — the §6(b)-R-b keystone must catch it.
+        let mut fold_row = None;
+        for rr in 0..h {
+            if trace.matrix.values[rr * TOTAL_TRACE_WIDTH + FOLD_IS_FOLD].as_canonical_u64() == 1 {
+                fold_row = Some(rr);
+                break;
+            }
+        }
+        let rr = fold_row.expect("R-b trace has a fold row");
+        let cell = rr * TOTAL_TRACE_WIDTH + FOLD_XSTEP;
+        let orig = trace.matrix.values[cell].as_canonical_u64();
+        trace.matrix.values[cell] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(orig ^ 0x5A5A);
+
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let pis_v = pis.to_vec();
+        let program = extract_program(&trace.matrix);
+        let air = CompositeFullAirPinned::new_with(program.clone(), false);
+        let (pp, vk) = composite_setup(&cfg, &program);
+        let proof = prove_with_preprocessed(&cfg, &air, trace.matrix, &pis_v, Some(&pp));
+        assert!(
+            verify_with_preprocessed(&cfg, &air, &proof, &pis_v, Some(&vk)).is_err(),
+            "tampered FOLD_XSTEP (≠ TR_NEW) MUST reject — the §6(b)-R-b \
+             keystone binds the fold input to the real reduce under sx_bound=false"
+        );
+    }
+
+    /// §6(b)-R-b ADVERSARIAL — the `sx_bound` flag is load-bearing and
+    /// verifier-set. An R-b trace (built with the SX 64-lane keystone
+    /// OFF; FOLD_STRIPE_SEL[0]=1 satisfies FoldChip's one-hot without
+    /// activating the SX lanes) does NOT satisfy the `sx_bound=true` AIR
+    /// (which additionally forces `FOLD_XSTEP == SX_XR[stripe]`). So an
+    /// R-b proof verified under the WRONG flag (`sx_bound=true`) MUST
+    /// reject — confirming the verifier's params-derived flag
+    /// (`num_stripes > STRIPE_MAX ⇒ false`) is essential and a prover
+    /// cannot substitute the other AIR.
+    #[test]
+    fn rb_pinned_wrong_sx_bound_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 128usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let pis_v = pis.to_vec();
+        let program = extract_program(&trace.matrix);
+        // Honest R-b proof under the CORRECT flag.
+        let air_false = CompositeFullAirPinned::new_with(program.clone(), false);
+        let (pp, _vk) = composite_setup(&cfg, &program);
+        let proof = prove_with_preprocessed(&cfg, &air_false, trace.matrix, &pis_v, Some(&pp));
+        // Verifying the SAME proof under sx_bound=true MUST reject: the
+        // stronger AIR's SX keystone is unsatisfied by an R-b trace.
+        let air_true = CompositeFullAirPinned::new_with(program.clone(), true);
+        let (_pp2, vk_true) = composite_setup(&cfg, &program);
+        assert!(
+            verify_with_preprocessed(&cfg, &air_true, &proof, &pis_v, Some(&vk_true)).is_err(),
+            "an R-b proof (sx_bound=false) MUST NOT verify under sx_bound=true"
+        );
     }
 
     /// §6(b)-R-b — the full Route-A LogUp path (CRIT-1 pin + the
