@@ -313,9 +313,26 @@ impl Roswell {
             }
         }
         boot_cli.stack_size = NockStackSize::Huge;
+        // Resolve the effective data dir the same way `boot::setup` does, BEFORE it
+        // moves `boot_cli`, so we can load the AI-PoW verifier-setup cache from it.
+        let data_dir = boot_cli
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| nockapp::default_data_dir("roswell"));
         let kernel = boot::setup(KERNEL, boot_cli, hot_state, "roswell", None)
             .await
             .map_err(|err| NockAppError::OtherError(format!("failed to boot Roswell: {err}")))?;
+        // Load the AI-PoW verifier-setup table from the data dir IF a cache is
+        // present (fast: load seeds + rebuild; no proving). roswell is a
+        // conformance/CLI tool, not the consensus node, so it does NOT prove a table
+        // at boot (that would stall every harness boot) — it uses the lenient loader
+        // and only errors on a corrupt cache. The consensus node (nockchain)
+        // generates-or-shuts-down; both share the identical verify jet + rebuild.
+        let n = ai_pow_jets::setup::install_verifier_setup_from_cache(&data_dir)
+            .map_err(|e| NockAppError::OtherError(format!("AI-PoW verifier-setup: {e}")))?;
+        if n > 0 {
+            tracing::info!("AI-PoW verifier-setup table loaded: {n} bucket(s)");
+        }
         Ok(Self::new(kernel))
     }
 

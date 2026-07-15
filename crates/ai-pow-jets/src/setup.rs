@@ -113,26 +113,56 @@ fn setup_aux_inclusion(
     )
 }
 
-/// Prove a single canonical MoE block at the given shape. `hw` is the opened-tile
-/// side (`h = w = hw`); `e`/`top_k` the MoE config. Panics-free (returns errors).
-pub fn prove_canonical_moe_block(
+/// The canonical MoE-block inputs derived from a `(params, hw, e, top_k)` shape —
+/// the synthesized matrices, work commitments, routing, opened tile indices, and
+/// the block-statement scaffolding. Shared by [`prove_canonical_moe_block`] (which
+/// then proves + assembles) and [`canonical_moe_trace_height`] (which only needs
+/// the prove-inputs to predict the trace height), so the two can never disagree
+/// about which bucket a shape lands in.
+struct CanonicalMoeInputs {
+    a: Vec<i8>,
+    b: Vec<i8>,
+    commitments: ai_pow::pearl_compat::PearlWorkCommitments,
+    routing: ai_pow::pearl_moe_routing::RoutingData,
+    inner: Vec<u32>,
+    local_b: Vec<u32>,
+    n_e: usize,
+    m: usize,
+    n: usize,
+    config: PearlMiningConfig,
+    header: PearlIncompleteBlockHeader,
+    aux: PearlNockchainAux,
+    aux_commitment: [u8; 32],
+    aux_inclusion: PearlAuxInclusionProof,
+}
+
+/// The matrix-FREE part of the canonical MoE inputs: the mining config, routing,
+/// and opened tile indices — everything the trace height depends on. Kept separate
+/// from the (large) synthesized matrices so [`canonical_moe_trace_height`] can sweep
+/// candidate shapes cheaply, while [`canonical_moe_inputs`] adds the matrices +
+/// commitments for the actual prove. Both derive the schedule identically.
+struct CanonicalMoeSchedule {
+    config: PearlMiningConfig,
+    routing: ai_pow::pearl_moe_routing::RoutingData,
+    inner: Vec<u32>,
+    local_b: Vec<u32>,
+    n_e: usize,
+    m: usize,
+    n: usize,
+}
+
+fn canonical_moe_schedule(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
-    nock_commit: [u8; 32],
-) -> Result<CanonicalBlock, SetupError> {
+) -> Result<CanonicalMoeSchedule, SetupError> {
     let m = params.m as usize;
     let n = params.n as usize;
     if e == 0 || n % e != 0 {
         return Err(SetupError(format!("n={n} not divisible by e={e}")));
     }
     let n_e = n / e;
-    let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
-
-    let aux = setup_aux(nock_commit);
-    let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
-    let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment);
     let config = PearlMiningConfig {
         common_dim: params.k,
         rank: params.noise_rank as u16,
@@ -141,9 +171,6 @@ pub fn prove_canonical_moe_block(
         cols_pattern: setup_pattern(hw),
         reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
     };
-    let mu = config.to_bytes().map_err(err("config bytes"))?;
-    let commitments = derive_pearl_work_commitments(&header.to_bytes(), &mu, &a, &b);
-
     let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
     let routing = build_routing_data(&topk, m, top_k, e).map_err(err("routing"))?;
     let inner = config
@@ -154,6 +181,106 @@ pub fn prove_canonical_moe_block(
         .cols_pattern
         .indices_with_offset_bounded(0, 4096)
         .map_err(err("local_b"))?;
+    Ok(CanonicalMoeSchedule {
+        config,
+        routing,
+        inner,
+        local_b,
+        n_e,
+        m,
+        n,
+    })
+}
+
+fn canonical_moe_inputs(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+) -> Result<CanonicalMoeInputs, SetupError> {
+    let CanonicalMoeSchedule {
+        config,
+        routing,
+        inner,
+        local_b,
+        n_e,
+        m,
+        n,
+    } = canonical_moe_schedule(params, hw, e, top_k)?;
+
+    let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
+    let aux = setup_aux(nock_commit);
+    let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
+    let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment);
+    let mu = config.to_bytes().map_err(err("config bytes"))?;
+    let commitments = derive_pearl_work_commitments(&header.to_bytes(), &mu, &a, &b);
+
+    Ok(CanonicalMoeInputs {
+        a,
+        b,
+        commitments,
+        routing,
+        inner,
+        local_b,
+        n_e,
+        m,
+        n,
+        config,
+        header,
+        aux,
+        aux_commitment,
+        aux_inclusion,
+    })
+}
+
+/// The Layer-0 trace height a canonical MoE block at `(params, hw, e, top_k)` would
+/// have — WITHOUT proving AND without synthesizing the (large) matrices. Lets
+/// [`production_verifier_setup_buckets`] cheaply select one shape per trace-height
+/// bucket. Equal to the height the full prove yields.
+pub fn canonical_moe_trace_height(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+) -> Result<usize, SetupError> {
+    let s = canonical_moe_schedule(params, hw, e, top_k)?;
+    ai_pow::zk_bridge::pearl_moe_canonical_trace_height(
+        params,
+        &s.routing,
+        0,
+        &s.inner,
+        &s.local_b,
+        s.n_e,
+    )
+    .map_err(err("moe canonical trace height"))
+}
+
+/// Prove a single canonical MoE block at the given shape. `hw` is the opened-tile
+/// side (`h = w = hw`); `e`/`top_k` the MoE config. Panics-free (returns errors).
+pub fn prove_canonical_moe_block(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+) -> Result<CanonicalBlock, SetupError> {
+    let CanonicalMoeInputs {
+        a,
+        b,
+        commitments,
+        routing,
+        inner,
+        local_b,
+        n_e,
+        m,
+        n,
+        config,
+        header,
+        aux,
+        aux_commitment,
+        aux_inclusion,
+    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit)?;
 
     let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
         params,
@@ -324,6 +451,78 @@ pub fn load_verifier_setup_table(
         .collect()
 }
 
+/// BOOT installer: ensure the AI-PoW verifier-setup table is installed, or FAIL.
+///
+/// - If the data-dir cache exists: load + rebuild (no proving) + inject — the
+///   fast path, seconds not minutes.
+/// - If it does NOT exist: GENERATE it (prove one canonical block per `buckets`
+///   entry — a one-time boot delay), cache it to the data dir, then load + rebuild
+///   + inject. The node "sits there and generates one" on first boot, then boots
+///   fast forever after.
+///
+/// Returns the number of buckets installed. **Any failure is returned as `Err` and
+/// is FATAL** — the caller must shut the node down: a node with no valid verifier
+/// setup cannot validate `%ai-pow` blocks and must not run. Idempotent: if the
+/// table is already installed in-process (e.g. a second boot in a test harness),
+/// returns `Ok` without regenerating.
+pub fn install_or_build_verifier_setup(
+    data_dir: &std::path::Path,
+    buckets: &[VerifierSetupBucketShape],
+) -> Result<usize, SetupError> {
+    if crate::ai_pow_verifier_setup_initialized() {
+        return Ok(0);
+    }
+    let path = verifier_setup_seed_cache_path(data_dir);
+    if !path.exists() {
+        if buckets.is_empty() {
+            return Err(SetupError(
+                "no verifier-setup cache and no bucket shapes to generate one from".to_string(),
+            ));
+        }
+        // One-time generation: one real compact proof per bucket, then cache.
+        build_and_cache_verifier_setup_seeds(&path, buckets)?;
+    }
+    let table = load_verifier_setup_table(&path)?;
+    if table.is_empty() {
+        return Err(SetupError(
+            "verifier-setup table is empty after build/load".to_string(),
+        ));
+    }
+    let n = table.len();
+    crate::init_ai_pow_verifier_setup(table).map_err(|()| {
+        SetupError(
+            "verifier-setup table rejected (empty / duplicate buckets) or already initialized"
+                .to_string(),
+        )
+    })?;
+    Ok(n)
+}
+
+/// Lenient loader for non-consensus tools (e.g. roswell): if the data-dir cache
+/// exists, load + rebuild (no proving) + inject and return the bucket count;
+/// otherwise return `Ok(0)` WITHOUT generating one. Unlike
+/// [`install_or_build_verifier_setup`], this never proves at boot (so it never
+/// stalls a tool/test harness) and never shuts down on a missing cache — it only
+/// errors on a corrupt cache or rebuild failure. Idempotent.
+pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<usize, SetupError> {
+    if crate::ai_pow_verifier_setup_initialized() {
+        return Ok(0);
+    }
+    let path = verifier_setup_seed_cache_path(data_dir);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let table = load_verifier_setup_table(&path)?;
+    let n = table.len();
+    crate::init_ai_pow_verifier_setup(table).map_err(|()| {
+        SetupError(
+            "verifier-setup table rejected (empty / duplicate buckets) or already initialized"
+                .to_string(),
+        )
+    })?;
+    Ok(n)
+}
+
 /// One production trace-height bucket: the puzzle shape that lands in it. The boot
 /// table has one entry per reachable Pearl trace height (shapes sharing a height
 /// share a setup — the setup is height-keyed, not shape-keyed).
@@ -356,4 +555,53 @@ pub fn build_and_cache_verifier_setup_seeds(
         seeds.push(seed);
     }
     save_verifier_setup_seeds(path, &seeds)
+}
+
+/// The production trace-height bucket set the boot generator must cover: one
+/// canonical MoE shape per reachable Layer-0 trace-height bucket (the §4.8 envelope
+/// heights 2^13..2^20). Derived by sweeping consensus-valid MoE shapes and keeping,
+/// for each distinct trace height (computed WITHOUT proving via
+/// [`canonical_moe_trace_height`]), the first (cheapest) representative. One setup
+/// per height covers BOTH dense and MoE blocks (the setup is height-keyed and
+/// schedule-independent), so this MoE-derived table serves the whole accept-band.
+///
+/// The height climbs with the opened tile side `hw`, `k`, and `num_stripes = k/r`;
+/// `m = n = e·hw` is the minimal MoE-valid width (each of `e` experts gets exactly
+/// `hw` rows/cols) and `m,n` do not affect the trace height. Coverage of the full
+/// 2^13..2^20 band is asserted cheaply (no proving) in
+/// `production_verifier_setup_buckets_cover_the_envelope`.
+pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
+    use std::collections::BTreeMap;
+    const E: usize = 2;
+    const TOP_K: usize = 1;
+    let mut by_bucket: BTreeMap<usize, VerifierSetupBucketShape> = BTreeMap::new();
+    for &hw in &[8u32, 12, 16, 24, 32, 48, 64, 96, 128] {
+        let mn = E as u32 * hw;
+        for &r in &[32u32, 64, 128, 256, 512, 1024] {
+            for &num_stripes in &[16u32, 32, 48, 64, 96, 128, 192, 256, 384, 512] {
+                let k = num_stripes * r;
+                let params = MatmulParams {
+                    m: mn,
+                    k,
+                    n: mn,
+                    noise_rank: r,
+                    tile: hw,
+                    spot_checks: 1,
+                    difficulty_bits: 0,
+                };
+                if params.validate_prod_envelope().is_err() {
+                    continue;
+                }
+                if let Ok(th) = canonical_moe_trace_height(&params, hw, E, TOP_K) {
+                    by_bucket.entry(th).or_insert(VerifierSetupBucketShape {
+                        params,
+                        hw,
+                        e: E,
+                        top_k: TOP_K,
+                    });
+                }
+            }
+        }
+    }
+    by_bucket.into_values().collect()
 }

@@ -34,9 +34,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         NockchainAPIConfig::DisablePublicServer
     };
 
+    // Resolve the node data dir the same way `boot::setup` does (explicit
+    // --data-dir, else `./.data.nockchain`) BEFORE `cli` is moved into
+    // `init_with_kernel`, so we can load the AI-PoW verifier-setup cache from it.
+    let data_dir = cli
+        .nockapp_cli
+        .data_dir
+        .clone()
+        .unwrap_or_else(|| nockapp::default_data_dir("nockchain"));
+
     let mut nockchain =
         nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
             .await?;
+
+    // Install the AI-PoW compact verifier-setup table from the data dir BEFORE
+    // processing any block. If the cache is present this is fast (load seeds +
+    // rebuild; no proving); if it is absent the node GENERATES the table once
+    // (a one-time boot delay), caches it, and injects it. A node with no valid
+    // verifier setup cannot validate %ai-pow blocks, so a generation failure is
+    // FATAL — we propagate the error and shut down rather than run blind.
+    let buckets = ai_pow_jets::setup::production_verifier_setup_buckets();
+    if !ai_pow_jets::setup::verifier_setup_seed_cache_path(&data_dir).exists() {
+        tracing::info!(
+            "no AI-PoW verifier-setup cache at {}; generating it now (one-time; cached afterwards)…",
+            ai_pow_jets::setup::verifier_setup_seed_cache_path(&data_dir).display(),
+        );
+    }
+    let n = ai_pow_jets::setup::install_or_build_verifier_setup(&data_dir, &buckets)?;
+    tracing::info!("AI-PoW verifier-setup table installed: {n} trace-height bucket(s)");
+
     nockchain.run().await?;
     Ok(())
 }

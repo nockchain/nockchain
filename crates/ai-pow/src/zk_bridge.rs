@@ -1729,6 +1729,36 @@ fn prove_pearl_moe_l0_and_ticket(
     Ok((proof, prover_program, pis, zk_params, trace_height, ticket))
 }
 
+/// The Layer-0 trace height a canonical MoE block at this shape WOULD have —
+/// computed WITHOUT proving AND without the (large) synthesized matrices. The
+/// opened schedule (`outer_indices` from routing + `inner_a_rows`; `b_cols_global`
+/// from `local_b_cols` + the expert offset) is derived from routing/patterns only —
+/// NOT matrix values — so the boot-setup table builder can sweep many candidate
+/// shapes cheaply to pick one per trace-height bucket. This is exactly the height
+/// the full prove yields (`expected_layer0_rows_for_strip_schedule` is the
+/// consensus-side predictor at `certificate_noun.rs`).
+pub fn pearl_moe_canonical_trace_height(
+    params: &MatmulParams,
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+) -> Result<usize, BridgeError> {
+    let outer_indices = routing
+        .outer_indices(expert_idx, inner_a_rows)
+        .map_err(|e| BridgeError::ZkParamsInvalid(format!("moe routing outer_indices: {e:?}")))?;
+    let b_cols_global: Vec<u32> = local_b_cols
+        .iter()
+        .map(|&c| c + (expert_idx * n_e) as u32)
+        .collect();
+    let zk_params = zk_params_from(params);
+    let strip_schedule =
+        StripIndexSchedule::from_indices(&zk_params, outer_indices, b_cols_global)
+            .map_err(BridgeError::ZkParamsInvalid)?;
+    Ok(expected_layer0_rows_for_strip_schedule(params, &strip_schedule)?.required_trace_len())
+}
+
 /// Boot-setup variant of [`prove_pearl_moe_compact_recursive_certificate`]:
 /// identical proving, but ALSO returns the small serializable
 /// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] — the L0

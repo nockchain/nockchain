@@ -65,6 +65,13 @@ pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<&'static AiPowVe
     SETUP.get()?.iter().find(|s| s.trace_height == trace_height)
 }
 
+/// Whether the boot verifier-setup table has already been injected. Boot uses this
+/// to stay idempotent — a second boot in the same process (e.g. a test harness)
+/// must not treat "already installed" as a fatal generation failure.
+pub fn ai_pow_verifier_setup_initialized() -> bool {
+    SETUP.get().is_some()
+}
+
 /// Inject the compact verifier-setup TABLE once at node boot — one entry per
 /// Pearl trace-height bucket. Each setup is deterministic from its trace height
 /// and proof-independent (prove one canonical block per bucket; see
@@ -255,6 +262,62 @@ mod tests {
             !setup_table_heights_valid(&[8192, 16384, 8192]),
             "duplicate bucket rejected (a cert must resolve to exactly one setup)"
         );
+    }
+
+    /// The boot installer is generate-or-shutdown: with NO cache file and NO bucket
+    /// shapes to generate from, it returns `Err` (fatal — the caller shuts the node
+    /// down) rather than silently booting without a verifier setup. It must not
+    /// touch the global setup OnceCell in this failure path. (Cheap: no proving.)
+    #[test]
+    fn boot_installer_no_cache_no_buckets_is_fatal() {
+        assert!(
+            !crate::ai_pow_verifier_setup_initialized(),
+            "precondition: no setup installed in this test process",
+        );
+        let empty_dir =
+            std::env::temp_dir().join(format!("ai-pow-jets-no-cache-{}", std::process::id()));
+        // No cache file present AND no bucket shapes ⇒ cannot generate ⇒ fatal.
+        let result = crate::setup::install_or_build_verifier_setup(&empty_dir, &[]);
+        assert!(
+            result.is_err(),
+            "no cache + no buckets must be a fatal error (generate-or-shutdown)",
+        );
+        assert!(
+            !crate::ai_pow_verifier_setup_initialized(),
+            "failed install must not have injected a table",
+        );
+    }
+
+    /// The production bucket set (what boot generates) must cover the full §4.8
+    /// accept-band 2^13..2^20, one distinct-height representative each — else valid
+    /// `%ai-pow` blocks at an uncovered height would have no setup and be rejected.
+    /// Cheap: heights are computed WITHOUT proving (no synthesized matrices).
+    #[test]
+    fn production_verifier_setup_buckets_cover_the_envelope() {
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        assert!(!buckets.is_empty(), "must return at least one bucket");
+        let mut log2s: Vec<u32> = Vec::new();
+        for b in &buckets {
+            let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
+                .expect("cheap trace height");
+            assert!(th.is_power_of_two(), "bucket height {th} must be a power of two");
+            assert!(th >= 1 << 13, "bucket height {th} must be >= MIN_STARK_LEN (2^13)");
+            log2s.push(th.trailing_zeros());
+        }
+        log2s.sort_unstable();
+        let distinct: std::collections::BTreeSet<u32> = log2s.iter().copied().collect();
+        eprintln!("production buckets (log2 heights): {log2s:?}");
+        assert_eq!(
+            distinct.len(),
+            buckets.len(),
+            "buckets must have distinct trace heights",
+        );
+        for db in 13u32..=20 {
+            assert!(
+                distinct.contains(&db),
+                "production buckets must cover 2^{db}; covered = {distinct:?}",
+            );
+        }
     }
 }
 

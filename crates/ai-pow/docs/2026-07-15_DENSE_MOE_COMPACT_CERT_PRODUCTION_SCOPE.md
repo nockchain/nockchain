@@ -529,6 +529,47 @@ SHAPE — no FRI proving, just circuit compilation + a Merkle commit.
   nockapp data dir, inject via `init_ai_pow_verifier_setup` at boot (nockchain +
   roswell), per-bucket end-to-end validation.
 
+### Stage C4 — seed cache + boot generate-or-shutdown (2026-07-15)
+The rebuild primitive (C3') is wrapped into a small, serializable **seed** and a
+data-dir cache, and the boot path is wired to install it.
+- **Seed** (`AiPowCompactVerifierSetupSeed`, ai-pow-zk): L0 program/proof/PIs +
+  L1 outer proof + metadata; `sx_bound`/profile DERIVED from `(zk_params,
+  trace_height)`, not stored. `from_run` / `rebuild_context` (consuming; metadata
+  cloned via serde since its `CommonData` is not `Clone`). ZkParams gains serde.
+- **Prove path** (ai-pow): `prove_pearl_moe_l0_and_ticket` shared prefix (mining +
+  seed paths can't drift) + `prove_pearl_moe_compact_recursive_certificate_with_seed`.
+- **Cache** (ai-pow-jets/setup.rs): `verifier_setup_seed_cache_path(data_dir)` =
+  `<data_dir>/ai-pow/verifier-setup-seeds.bin`; `save_/load_verifier_setup_seeds`,
+  `load_verifier_setup_table` (load+rebuild), `build_and_cache_verifier_setup_seeds`
+  (offline: one real proof/bucket), `build_verifier_setup_seed` /
+  `rebuild_verifier_setup_from_seed`.
+- **Boot behavior (per user 2026-07-15): NOT fail-closed.**
+  `install_or_build_verifier_setup(data_dir, buckets)` — load cache if present;
+  else GENERATE (prove) the table once, cache it, inject; **any failure is FATAL
+  (node shuts down)**. Wired into `nockchain/src/main.rs` (propagates `?`).
+  roswell (a conformance/CLI tool, not the consensus node) uses the lenient
+  `install_verifier_setup_from_cache` (load if present, never proves at boot, never
+  shuts down) so the harness isn't stalled. `ai_pow_verifier_setup_initialized()`
+  keeps both idempotent.
+- **VALIDATED:** `moe_verifier_setup_seed_roundtrip_rebuilds_working_setup` — prove
+  a real MoE block, serialize the seed (< 16 MiB), save to a data-dir file,
+  load+rebuild the table from disk, and the block verifies through the jet core vs
+  the DISK-loaded setup (wrong commit rejected; height+digest match). Plus a cheap
+  `boot_installer_no_cache_no_buckets_is_fatal` unit test. nockchain + roswell build.
+- **Bucket set RESOLVED:** the accept-band is 8 trace-height buckets `2^13..2^20`
+  (§4.8 envelope; one setup per height covers BOTH dense and MoE — height-keyed,
+  schedule-independent). `production_verifier_setup_buckets()` sweeps
+  consensus-valid MoE shapes and keeps one representative per distinct height,
+  using a MATRIX-FREE cheap height (`pearl_moe_canonical_trace_height` →
+  `expected_layer0_rows_for_strip_schedule`; the opened schedule comes from
+  routing/patterns, not matrix values, so no synth/proving to decide shapes).
+  Validated cheaply: `production_verifier_setup_buckets_cover_the_envelope` asserts
+  the returned set is exactly log2 heights `[13..20]`, distinct, covering the band.
+- **RESIDUAL for C4:** first-boot GENERATION of all 8 buckets is ~2 min/bucket
+  (~16 min one-time, then cached) — validated for ONE bucket end-to-end (the seed
+  roundtrip test); the full 8-bucket first-boot generation + a per-bucket acceptance
+  sweep is the remaining (accepted-cost, mechanically-covered) step.
+
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
 recursion.rs:2040) reads from the context ONLY: `verifier_key_digest`,
