@@ -476,6 +476,29 @@ Remaining: C3 (build the 8-bucket table, serialize to a cache file **in the
 nockapp data dir** with a sane path), C4 (boot wiring in nockchain + roswell +
 per-bucket end-to-end).
 
+### Stage C1/C2 VALIDATED + SIZE FINDING (2026-07-15, commit 357d5f7f)
+- **Round-trip proven correct:** serialize → deserialize the verifier context,
+  and a real R-b compact cert STILL verifies against the DESERIALIZED context
+  (`rb_compact_batch_recursive_certificate_at_num_stripes_over_64`). The
+  earlier "hang" was a recompile — serialize/deserialize is 307/397 ms.
+- **SIZE FINDING (measured):** the context serializes to **866 MB per bucket**
+  (×8 ≈ 7 GB) — because the compact verifier is PATH-PRUNED and carries the
+  preprocessed PCS prover data (a Merkle tree). Caching that is wrong: the tree
+  is just the commitment of the small, deterministic preprocessed columns.
+- **C3' (the size-practical form) — supersedes plain C3:** do NOT serialize the
+  tree.
+  - (a) Cache only the small preprocessed columns + CommonData; on load REBUILD
+    the tree via a preprocessed commit (no proving).
+  - (b) Build the whole verifier setup AT BOOT from the circuit definition via
+    the preprocessed commit — a few-seconds "small boot delay", NO cache file.
+    (This is the earlier "small delay in boot" idea, now viable: the EXPENSIVE
+    part is the FRI prove, which the VERIFIER setup does not need — only the
+    cheap preprocessed commit.)
+  - Both need the preprocessed-commit path wired (bounded work; the build site
+    that first commits `prover_only.preprocessed_prover_data` is in the
+    batch-stark prover setup, not yet located precisely). Preferred: (b) —
+    no artifact to manage, deterministic, small boot delay.
+
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
 recursion.rs:2040) reads from the context ONLY: `verifier_key_digest`,
