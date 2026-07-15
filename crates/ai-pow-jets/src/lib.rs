@@ -655,6 +655,41 @@ mod jet_tests {
         );
     }
 
+    /// KAT (real proving, ~40s): the boot GENERATION path end to end for one
+    /// bucket. Take the cheapest production bucket shape, `build_and_cache` it
+    /// (prove + write the seed cache to a data-dir file), then `load_verifier_setup_table`
+    /// (load + rebuild, no proving) and confirm the rebuilt setup lands at exactly
+    /// the height `production_verifier_setup_buckets` predicted (matrix-free). This
+    /// is what a fresh node does on first boot when it has no cache. Does NOT touch
+    /// the global setup OnceCell (so it can't perturb the cheap boot-installer tests).
+    #[test]
+    #[ignore = "real MoE compact proof + generate/cache/load (~40s); opt-in"]
+    fn boot_generate_and_cache_one_bucket_roundtrips() {
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        let shape = *buckets.first().expect("at least one production bucket");
+        let expected_h =
+            crate::setup::canonical_moe_trace_height(&shape.params, shape.hw, shape.e, shape.top_k)
+                .expect("cheap predicted height");
+
+        let tmp = std::env::temp_dir().join(format!("ai-pow-genboot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let path = crate::setup::verifier_setup_seed_cache_path(&tmp);
+
+        // Generate (prove) + cache the one-bucket table to the data-dir file.
+        crate::setup::build_and_cache_verifier_setup_seeds(&path, &[shape])
+            .expect("generate + cache one bucket");
+        assert!(path.exists(), "cache file must be written under the data dir");
+
+        // Load + rebuild (no proving) — the fast subsequent-boot path.
+        let table = crate::setup::load_verifier_setup_table(&path).expect("load + rebuild table");
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(table.len(), 1, "one-bucket table");
+        assert_eq!(
+            table[0].trace_height, expected_h,
+            "generated+rebuilt bucket lands at the matrix-free predicted height",
+        );
+    }
+
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
     /// Pearl admits a BAND of puzzle shapes; nockchain must verify all of them.
     /// A single embedded boot setup only suffices if the verifier-key digest is

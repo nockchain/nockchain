@@ -565,10 +565,15 @@ data-dir cache, and the boot path is wired to install it.
   routing/patterns, not matrix values, so no synth/proving to decide shapes).
   Validated cheaply: `production_verifier_setup_buckets_cover_the_envelope` asserts
   the returned set is exactly log2 heights `[13..20]`, distinct, covering the band.
+- **Generation path VALIDATED (one bucket):** `boot_generate_and_cache_one_bucket_roundtrips`
+  takes the cheapest production bucket, `build_and_cache` (prove) → writes the seed
+  cache to a data-dir file → `load_verifier_setup_table` (rebuild, no proving) →
+  the bucket lands at exactly the matrix-free predicted height. This is precisely
+  what a fresh node does on first boot; the 8-bucket run is the same loop ×8.
 - **RESIDUAL for C4:** first-boot GENERATION of all 8 buckets is ~2 min/bucket
-  (~16 min one-time, then cached) — validated for ONE bucket end-to-end (the seed
-  roundtrip test); the full 8-bucket first-boot generation + a per-bucket acceptance
-  sweep is the remaining (accepted-cost, mechanically-covered) step.
+  (~16 min one-time, then cached) — the one-bucket flow is validated end-to-end and
+  the full run is mechanically the same loop; a full 8-bucket first-boot generation
+  + a per-bucket acceptance sweep is the remaining (accepted-cost) step.
 
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
