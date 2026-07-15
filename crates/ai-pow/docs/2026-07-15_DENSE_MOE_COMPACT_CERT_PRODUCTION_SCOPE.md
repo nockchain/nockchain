@@ -625,7 +625,21 @@ The full boot verifier-setup pipeline is wired + validated end-to-end.
 ### Remaining (post-decision), in dependency order
 1. **Stage C4 — DONE** (see above). Optional follow-up: an offline pre-gen tool so
    operators can ship the ~40 MB cache instead of each node generating (~16 min).
-2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
+2. **`do-pow` accept + `%mine-ai` emit — DONE (compiles/builds/loads + verify path
+   validated; commit 6775554).** `inner.hoon`: version-3 candidates emit
+   `[%mine-ai %3 commit target pow-len]` (the ai-pow-miner already consumes it);
+   `do-pow` `%ai-pow` sets the artifact (via `set-pow` — a v1 page has an atom
+   version head, so the FALSE branch stores it verbatim, no `soft proof:sp`), then
+   `check-pow` → the capped `ai-pow-verify` jet, then `set-digest` + `heard-block`;
+   a stale/forged cert fails verification ⇒ clean reject (no liar-crash).
+   `assets/dumb.jam` + `assets/roswell.jam` rebuilt; nockchain + roswell binaries
+   build. Kernel loads cleanly (no hint-registration error). Roswell
+   `test-ai-pow-verify-jet-fires` + `test-ai-pow-block-rejected` PASS — the latter
+   rejects a bad `%ai-pow` block via `heard-block → check-pow → ai-pow-verify`
+   ("Failed PoW check"), validating the reject wiring the accept flip relies on.
+   RESIDUAL: the full POSITIVE accept e2e (a valid mined block admitted through
+   `do-pow → heard-block` on a v3-activation chain with an injected setup table) —
+   structurally mirrors the validated reject path.
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
 5. Vetting A2 (MoE off-circuit routing forgeries through the FULL compact cert),
