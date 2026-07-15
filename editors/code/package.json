@@ -1,0 +1,139 @@
+{
+  "name": "honk-hoon",
+  "displayName": "Honk Hoon",
+  "description": "Hoon diagnostics powered directly by the honk compiler",
+  "version": "0.1.0",
+  "publisher": "nockchain",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nockchain/nockchain.git",
+    "directory": "editors/code"
+  },
+  "private": true,
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    },
+    "virtualWorkspaces": {
+      "supported": false
+    }
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:hoon",
+    "onCommand:honk.restartServer"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "compile": "tsc -p tsconfig.json && esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js --sourcemap",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run compile && node --test test/*.test.cjs",
+    "package": "npm run compile && vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.1",
+    "typescript": "5.9.3",
+    "vscode-languageclient": "10.1.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "hoon",
+        "aliases": [
+          "Hoon",
+          "hoon"
+        ],
+        "extensions": [
+          ".hoon"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hoon",
+        "scopeName": "source.hoon",
+        "path": "./syntaxes/hoon.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "honk.restartServer",
+        "title": "Honk: Restart Language Server"
+      },
+      {
+        "command": "honk.showOutput",
+        "title": "Honk: Show Language Server Output"
+      }
+    ],
+    "configuration": {
+      "title": "Honk",
+      "properties": {
+        "honk.server.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the honk-lsp executable. Empty searches this repository's target directories, then PATH."
+        },
+        "honk.preludePath": {
+          "type": "string",
+          "default": "",
+          "description": "Compiler prelude path. Relative paths and ${workspaceFolder} are resolved against the workspace."
+        },
+        "honk.dependenciesPath": {
+          "type": "string",
+          "default": "",
+          "description": "Hoon dependency root. Defaults to <workspace>/hoon when available."
+        },
+        "honk.entryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional stable entry to check whenever any open Hoon document changes."
+        },
+        "honk.subjectTypeJamPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional precompiled subject type jam passed to honk."
+        },
+        "honk.dbug": {
+          "type": "boolean",
+          "default": true,
+          "description": "Compile with source debug metadata."
+        },
+        "honk.vet": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable compiler vetting."
+        },
+        "honk.checkDelayMilliseconds": {
+          "type": "number",
+          "default": 150,
+          "minimum": 0,
+          "description": "Quiet period before checking the latest editor state."
+        },
+        "honk.maxChecks": {
+          "type": "number",
+          "default": 256,
+          "minimum": 0,
+          "description": "Checks before rotating compiler state. Zero disables rotation."
+        },
+        "honk.workerStackBytes": {
+          "type": "number",
+          "default": 4294967296,
+          "minimum": 1048576,
+          "description": "Native compiler worker stack size in bytes."
+        }
+      }
+    }
+  }
+}

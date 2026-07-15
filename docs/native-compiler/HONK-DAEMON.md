@@ -1,10 +1,11 @@
 # Honk daemon architecture
 
-`honkd` is the persistent, loopback-only compiler process for editor and tool
-integration. It reuses the same native workspace compiler as the established
-`honk` single-entry and batch commands. The ordinary CLI remains the reference
-path: this change does not alter parser behavior, Hoon ASTs, type checking,
-minting, evaluation, or artifact serialization.
+`honkd` is the persistent, loopback-only gRPC compiler process for tool
+integration. `honk-lsp` is the direct stdio JSON-RPC adapter for editors. Both
+reuse the same native workspace service as the established `honk` single-entry
+and batch commands. The ordinary CLI remains the reference path: editor support
+does not alter parser behavior, Hoon ASTs, type checking, minting, evaluation,
+or artifact serialization.
 
 ## Running it
 
@@ -23,6 +24,19 @@ bazel run //:honkd -- \
   --prelude hoon/common/hoon.hoon \
   --deps-dir hoon
 ```
+
+For an editor/LSP client:
+
+```text
+cargo run --release -p honk-lsp -- \
+  --prelude hoon/common/hoon.hoon \
+  --deps-dir hoon
+```
+
+The VS Code extension lives in `editors/code`. It launches `honk-lsp` over
+stdio, contributes the Hoon language/grammar, forwards file-watch events, and
+offers compiler path, prelude, dependency-root, entry, debounce, and process
+rotation settings. It never launches or connects to `honkd`.
 
 The default listener is `127.0.0.1:0`. On startup, the process writes one JSON
 readiness record to stdout containing the selected address, protocol name, and
@@ -43,20 +57,37 @@ There should not be an LSP-to-gRPC network hop. The intended endpoint shape is:
 ```text
 gRPC client ── tonic adapter ──┐
                               ├── workspace domain service ── compiler actor
-editor ── LSP JSON-RPC adapter ┘
+editor ── stdio LSP adapter ──┘
 ```
 
-The shared layer is the Rust domain model in `honk::workspace`: workspace
-configuration, artifact mode, compile request/result, source location, and
-diagnostic. Protobuf messages are converted at the gRPC boundary. A future LSP
-adapter should convert LSP documents, ranges, and diagnostics at its own
-boundary and invoke the same in-process compiler actor. Protobuf and LSP types
-should not depend on each other; their semantics, tests, and transport rules are
-different even when they describe the same compile operation.
+The shared actor and session API live in `honk-service`; the compiler domain
+model lives in `honk::workspace`. Together they define workspace configuration,
+artifact mode, compile/check request/results, document updates and revisions,
+source locations, diagnostics, and cache statistics. Protobuf messages are
+converted at the gRPC boundary. LSP documents, paths, ranges, and diagnostics
+are converted in `honk-lsp`, which invokes `honk_service::CompilerHandle`
+directly. Protobuf and LSP types do not depend on each other; their semantics,
+tests, and transport rules differ even when they describe the same operation.
 
 The compiler remains on one dedicated OS thread because its noun and `Rc`
 state is intentionally not `Send`. Async RPC handlers only own a bounded,
 Send-safe request channel.
+
+The shared service (not the current compile-only gRPC surface) supports open
+editor documents as full-text, monotonically versioned overlays. Each accepted
+update advances a workspace revision; compile and check results identify the
+revision they used. The LSP adapter independently versions its input and
+never publishes a result for an older generation. Open documents shadow disk
+reads, including imports that do not exist on disk yet. Closing a document
+restores filesystem semantics. Notifications received during a long check are
+coalesced into the latest full snapshot. The first snapshot seeds compiler
+construction directly, avoiding a throwaway filesystem-only epoch before the
+first unsaved check.
+
+The service exposes a separate artifact-free `check` operation. It parses,
+resolves imports, and type-checks/mints the requested entry, but does not
+evaluate, shape, or jam an artifact. `compile` and all CLI/batch paths retain
+their established artifact behavior.
 
 ## Invalidation and lifetime
 
@@ -67,22 +98,30 @@ separate workspace mode:
 - Dependency-directory layout is fingerprinted so create/delete/rename changes,
   including a new higher-precedence import candidate, invalidate the context.
 - An unchanged request can reuse path caches.
-- If an observed entry, direct dependency, transitive dependency, data file,
-  prelude, or supplied subject-type jam changes, the daemon builds a fresh
-  compiler context before compiling again.
+- The editor-only source-overlay path records direct and reverse dependency
+  edges. A content-only edit to an existing file invalidates that path and its
+  transitive dependents while preserving unrelated cached dependency vases.
+- Cache statistics report path hits, misses, and invalidated paths per
+  successful operation; the differential editor test requires all three.
+- Prelude, subject-type, compiler-option, create/delete/rename, and import-layout
+  changes still build a fresh compiler context before checking again.
 - Content-only cache reuse across different paths is disabled in workspace mode
   because path-derived spots and import context can differ.
 
-Rebuilding the whole context is conservative but principled: no undocumented
-source-dependent `Ut` state crosses an edit boundary. The ordinary CLI and batch
-paths never enable workspace mode and retain their prior cache behavior.
+Fine-grained reuse is constrained to cached dependency products. Entry files
+are still rebuilt for every operation, cross-call `miss` memo persistence stays
+disabled, and per-mint transient `Ut` state is cleared through the existing
+compiler boundary. The ordinary CLI and batch paths never enable mutable source
+snapshots or dependency-graph invalidation and retain their prior cache
+behavior.
 
-The existing compiler context intentionally leaks its slab for noun lifetime
-safety. Until that ownership model is replaced, `honkd` bounds process lifetime
-to 256 accepted compile requests by default. The final response sets
+`WorkspaceArena` owns the noun slab for an epoch and lends it to the compiler
+through a closure, so dropping an invalidated epoch reclaims all of its nouns
+without allowing noun-bearing state to escape. `honkd` still bounds process
+lifetime to 256 accepted compile requests by default as an operational defense
+against other long-lived allocator/cache growth. The final response sets
 `restart_required`, then the server shuts down gracefully so a client or editor
-host can relaunch it and let the OS reclaim the arena. `--max-compiles 0`
-disables rotation for controlled use.
+host can relaunch it. `--max-compiles 0` disables rotation for controlled use.
 
 ## Toward LSP and annotated trees
 

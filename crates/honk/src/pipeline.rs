@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use chumsky::Parser;
@@ -111,6 +112,29 @@ pub fn resolve_native_imports(
     resolver.resolve_imports_for(path, true)
 }
 
+/// Read-only source view used by persistent editor sessions.
+///
+/// The established CLI path continues to use [`resolve_native_imports`] and
+/// direct filesystem access. This trait is an explicit, daemon-only boundary
+/// for compiling open documents whose contents may not yet exist on disk.
+pub trait NativeSourceView {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    fn read_to_string(&self, path: &Path) -> io::Result<String>;
+    fn is_file(&self, path: &Path) -> bool;
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+}
+
+pub fn resolve_native_imports_with_source(
+    path: &Path,
+    deps_dir: &Path,
+    scope_mode: ScopeMode,
+    source: &dyn NativeSourceView,
+) -> Result<Vec<ResolvedNativeImport>> {
+    let wer_base = wer_base_dir_for_mode(path, deps_dir, scope_mode);
+    let resolver = NativeImportResolver::new_with_source(wer_base, true, scope_mode, source);
+    resolver.resolve_imports_for(path, true)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ImportKind {
     Lib,
@@ -142,15 +166,16 @@ pub struct ResolvedNativeImport {
     pub path: PathBuf,
 }
 
-struct NativeImportResolver {
+struct NativeImportResolver<'source> {
     wer_base: PathBuf,
     dbug: bool,
     scope_mode: ScopeMode,
     cache: HashMap<PathBuf, ast::Hoon>,
     visiting: HashSet<PathBuf>,
+    source: Option<&'source dyn NativeSourceView>,
 }
 
-impl NativeImportResolver {
+impl<'source> NativeImportResolver<'source> {
     fn new(wer_base: PathBuf, dbug: bool, scope_mode: ScopeMode) -> Self {
         Self {
             wer_base,
@@ -158,11 +183,53 @@ impl NativeImportResolver {
             scope_mode,
             cache: HashMap::new(),
             visiting: HashSet::new(),
+            source: None,
+        }
+    }
+
+    fn new_with_source(
+        wer_base: PathBuf,
+        dbug: bool,
+        scope_mode: ScopeMode,
+        source: &'source dyn NativeSourceView,
+    ) -> Self {
+        Self {
+            wer_base,
+            dbug,
+            scope_mode,
+            cache: HashMap::new(),
+            visiting: HashSet::new(),
+            source: Some(source),
+        }
+    }
+
+    fn source(&self) -> Option<&dyn NativeSourceView> {
+        self.source
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        match self.source() {
+            Some(source) => source.read_to_string(path),
+            None => std::fs::read_to_string(path),
+        }
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        match self.source() {
+            Some(source) => source.is_file(path),
+            None => path.is_file(),
+        }
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        match self.source() {
+            Some(source) => source.canonicalize(path),
+            None => path.canonicalize(),
         }
     }
 
     fn parse(&mut self, path: &Path) -> Result<ast::Hoon> {
-        let canonical = path.canonicalize()?;
+        let canonical = self.canonicalize(path)?;
         if let Some(cached) = self.cache.get(&canonical) {
             return Ok(cached.clone());
         }
@@ -184,7 +251,7 @@ impl NativeImportResolver {
     }
 
     fn parse_uncached(&mut self, path: &Path, is_root: bool) -> Result<ast::Hoon> {
-        let source = std::fs::read_to_string(path)?;
+        let source = self.read_to_string(path)?;
         let source = sanitize_urbit_sys_header(self.scope_mode, path, source.as_str());
         let wer = hoon_path_for_any(path, &self.wer_base);
         let mut expr =
@@ -219,7 +286,7 @@ impl NativeImportResolver {
     }
 
     fn resolve_imports_for(&self, path: &Path, is_root: bool) -> Result<Vec<ResolvedNativeImport>> {
-        let source = std::fs::read_to_string(path)?;
+        let source = self.read_to_string(path)?;
         let source = sanitize_urbit_sys_header(self.scope_mode, path, source.as_str());
         let mut imports = parse_leading_imports(source.as_str())?;
         let synthetic = self.synthetic_urbit_scope_imports(path, is_root);
@@ -274,7 +341,7 @@ impl NativeImportResolver {
                     candidate.set_file_name(format!("{file_name}.hoon"));
                 }
                 let path = self.wer_base.join(candidate);
-                if path.is_file() {
+                if self.is_file(&path) {
                     return Ok(path);
                 }
             }
@@ -293,7 +360,7 @@ impl NativeImportResolver {
                     }
                     candidate.push(format!("{stem}.{extension}"));
                     let path = self.wer_base.join(candidate);
-                    if path.is_file() {
+                    if self.is_file(&path) {
                         return Ok(path);
                     }
                 }
@@ -309,7 +376,7 @@ impl NativeImportResolver {
                 };
                 for candidate in suffix_path_candidates(prefix, suffix) {
                     let path = self.wer_base.join(candidate);
-                    if path.is_file() {
+                    if self.is_file(&path) {
                         return Ok(path);
                     }
                 }
@@ -886,10 +953,11 @@ mod tests {
     use super::{
         hyphen_segment_variants, parse_leading_imports, parse_native_hoon_with_mode,
         parse_native_hoon_with_wer_and_dbug, parse_roots_for_mode, sanitize_urbit_sys_header,
-        suffix_path_candidates, vendored_hoon_sys_path, ImportKind, NativeImportResolver,
-        ScopeMode, ScopedImport,
+        suffix_path_candidates, vendored_hoon_sys_path, ImportKind, NativeImportKind,
+        NativeImportResolver, ScopeMode, ScopedImport,
     };
     use crate::errors::CompilerError;
+    use crate::workspace::WorkspaceSourceSnapshot;
 
     fn temp_path(name: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -932,6 +1000,27 @@ mod tests {
         assert!(location.end_col.is_some(), "end col should exist");
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn overlay_resolves_import_that_does_not_exist_on_disk() {
+        let root = temp_path("virtual-import-root");
+        fs::create_dir_all(&root).expect("temporary dependency root");
+        let entry = root.join("demo.hoon");
+        fs::write(&entry, "/+  ghost\n42\n").expect("entry source");
+        let ghost = root.join("lib/ghost.hoon");
+        let sources =
+            WorkspaceSourceSnapshot::try_new(1, [(ghost.clone(), "|=(a=@ a)\n".to_string())])
+                .expect("source snapshot");
+
+        let imports =
+            super::resolve_native_imports_with_source(&entry, &root, ScopeMode::Standard, &sources)
+                .expect("virtual import should resolve");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].kind, NativeImportKind::Hoon);
+        assert_eq!(imports[0].path, ghost);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

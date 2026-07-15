@@ -1,0 +1,25 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//:lints/cargo_lint_sources.bzl", "cargo_lint_sources")
+
+package(default_visibility = ["//visibility:public"])
+
+cargo_lint_sources()
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "honk-service",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "honk_service",
+    edition = "2021",
+    deps = ["//crates/honk:honk_lib"] + all_crate_deps(),
+)
+
+rust_test(
+    name = "honk_service_unit_tests",
+    size = "small",
+    timeout = "short",
+    crate = ":honk-service",
+)

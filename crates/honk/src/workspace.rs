@@ -4,8 +4,9 @@ use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::{cmp, env, fmt, fs, process};
+use std::{cmp, env, fmt, fs, io, process};
 
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
@@ -63,6 +64,119 @@ pub struct WorkspaceConfig {
     pub vet: bool,
 }
 
+/// Immutable editor-document view for one compiler epoch.
+///
+/// Open documents shadow the filesystem. The snapshot is accepted only by the
+/// explicit overlay workspace constructor; ordinary CLI, batch, and gRPC file
+/// compilation continue to use the established filesystem-only path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceSourceSnapshot {
+    revision: u64,
+    documents: HashMap<PathBuf, Arc<str>>,
+}
+
+impl WorkspaceSourceSnapshot {
+    pub fn try_new(
+        revision: u64,
+        documents: impl IntoIterator<Item = (PathBuf, String)>,
+    ) -> io::Result<Self> {
+        let mut normalized = HashMap::new();
+        for (path, text) in documents {
+            normalized.insert(normalize_workspace_document_path(&path)?, Arc::from(text));
+        }
+        Ok(Self {
+            revision,
+            documents: normalized,
+        })
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.documents.is_empty()
+    }
+
+    fn document(&self, path: &Path) -> io::Result<Option<&Arc<str>>> {
+        let path = normalize_workspace_document_path(path)?;
+        Ok(self.documents.get(&path))
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.documents.keys()
+    }
+
+    fn read_bytes(&self, path: &Path) -> io::Result<Vec<u8>> {
+        match self.document(path)? {
+            Some(text) => Ok(text.as_bytes().to_vec()),
+            None => fs::read(path),
+        }
+    }
+
+    fn read_text(&self, path: &Path) -> io::Result<String> {
+        match self.document(path)? {
+            Some(text) => Ok(text.to_string()),
+            None => fs::read_to_string(path),
+        }
+    }
+
+    fn is_file_at(&self, path: &Path) -> bool {
+        matches!(self.document(path), Ok(Some(_))) || path.is_file()
+    }
+
+    fn canonical_path(&self, path: &Path) -> io::Result<PathBuf> {
+        let normalized = normalize_workspace_document_path(path)?;
+        if self.documents.contains_key(&normalized) {
+            Ok(normalized)
+        } else {
+            path.canonicalize()
+        }
+    }
+}
+
+impl pipeline::NativeSourceView for WorkspaceSourceSnapshot {
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        self.read_bytes(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.read_text(path)
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        self.is_file_at(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.canonical_path(path)
+    }
+}
+
+pub fn normalize_workspace_document_path(path: &Path) -> io::Result<PathBuf> {
+    if let Ok(canonical) = path.canonicalize() {
+        return Ok(canonical);
+    }
+
+    let mut out = if path.is_absolute() {
+        PathBuf::new()
+    } else {
+        env::current_dir()?
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(Path::new("/")),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(part) => out.push(part),
+        }
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceCompileRequest {
     pub entry: PathBuf,
@@ -70,11 +184,47 @@ pub struct WorkspaceCompileRequest {
     pub directory_files: Option<Vec<PathBuf>>,
 }
 
+/// Artifact-free editor check request.
+///
+/// Keeping this distinct from [`WorkspaceCompileRequest`] prevents editor
+/// latency work from changing the established CLI/batch artifact path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceCheckRequest {
+    pub entry: PathBuf,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceCompileOutput {
     pub artifact: Vec<u8>,
     /// True when changed compiler inputs forced a fresh compiler context.
     pub cache_invalidated: bool,
+    pub cache_stats: WorkspaceCacheStats,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceCheckOutput {
+    /// True when changed compiler inputs invalidated cached editor state.
+    pub cache_invalidated: bool,
+    pub cache_stats: WorkspaceCacheStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WorkspaceCacheStats {
+    pub path_hits: u64,
+    pub path_misses: u64,
+    pub invalidated_paths: u64,
+}
+
+impl WorkspaceCacheStats {
+    fn since(self, before: Self) -> Self {
+        Self {
+            path_hits: self.path_hits.saturating_sub(before.path_hits),
+            path_misses: self.path_misses.saturating_sub(before.path_misses),
+            invalidated_paths: self
+                .invalidated_paths
+                .saturating_sub(before.invalidated_paths),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -811,6 +961,25 @@ fn parse_build_leaf(
     )?)
 }
 
+fn parse_build_leaf_source(
+    path: &Path,
+    deps_dir: &Path,
+    source: &str,
+    is_entry: bool,
+    absolute_entry_wer: bool,
+    dbug: bool,
+) -> Result<Hoon> {
+    let _parse_log = TimedHoonPathLog::new(path, HoonLogOperation::Parse);
+    let wer = if is_entry {
+        build_entry_wer(path, deps_dir, absolute_entry_wer)
+    } else {
+        build_import_wer(path, deps_dir)
+    };
+    Ok(pipeline::parse_native_hoon_source_without_docs(
+        path, source, wer, dbug,
+    )?)
+}
+
 fn hoonc_wrapper_source(first_line: usize, body: &str) -> String {
     let mut source = "\n".repeat(first_line.saturating_sub(1));
     source.push_str(body);
@@ -1342,6 +1511,21 @@ impl WorkspaceArena {
         let mut compiler = WorkspaceCompiler::new(config, &mut self.slab)?;
         Ok(use_compiler(&mut compiler))
     }
+
+    /// Construct an editor epoch whose open documents shadow the filesystem.
+    ///
+    /// This is deliberately separate from [`Self::with_compiler`] so the
+    /// shipping CLI/batch path cannot accidentally acquire editor semantics.
+    pub fn with_source_snapshot<R>(
+        &mut self,
+        config: WorkspaceConfig,
+        sources: WorkspaceSourceSnapshot,
+        use_compiler: impl FnOnce(&mut WorkspaceCompiler<'_>) -> R,
+    ) -> std::result::Result<R, WorkspaceCompileError> {
+        let mut compiler =
+            WorkspaceCompiler::new_with_source_snapshot(config, sources, &mut self.slab)?;
+        Ok(use_compiler(&mut compiler))
+    }
 }
 
 impl Default for WorkspaceArena {
@@ -1359,9 +1543,11 @@ impl Default for WorkspaceArena {
 /// [`WorkspaceArena`] and constructing a fresh epoch.
 pub struct WorkspaceCompiler<'arena> {
     config: WorkspaceConfig,
+    sources: Option<WorkspaceSourceSnapshot>,
     config_fingerprint: blake3::Hash,
     dependency_layout_fingerprint: blake3::Hash,
     builder: NativeBuildContext<'arena>,
+    reported_cache_stats: WorkspaceCacheStats,
 }
 
 impl<'arena> WorkspaceCompiler<'arena> {
@@ -1377,9 +1563,33 @@ impl<'arena> WorkspaceCompiler<'arena> {
             build_workspace_context(&config, slab).map_err(WorkspaceCompileError::from_dyn)?;
         Ok(Self {
             config,
+            sources: None,
             config_fingerprint,
             dependency_layout_fingerprint,
             builder,
+            reported_cache_stats: WorkspaceCacheStats::default(),
+        })
+    }
+
+    fn new_with_source_snapshot(
+        config: WorkspaceConfig,
+        sources: WorkspaceSourceSnapshot,
+        slab: &'arena mut NounSlab,
+    ) -> std::result::Result<Self, WorkspaceCompileError> {
+        let config_fingerprint = workspace_config_fingerprint_with_sources(&config, &sources)
+            .map_err(WorkspaceCompileError::from_dyn)?;
+        let dependency_layout_fingerprint =
+            workspace_layout_fingerprint_with_sources(&config.dependencies, &sources)
+                .map_err(WorkspaceCompileError::from_dyn)?;
+        let builder = build_workspace_context_with_sources(&config, &sources, slab)
+            .map_err(WorkspaceCompileError::from_dyn)?;
+        Ok(Self {
+            config,
+            sources: Some(sources),
+            config_fingerprint,
+            dependency_layout_fingerprint,
+            builder,
+            reported_cache_stats: WorkspaceCacheStats::default(),
         })
     }
 
@@ -1392,11 +1602,18 @@ impl<'arena> WorkspaceCompiler<'arena> {
     /// A true result invalidates the whole epoch. The caller must drop the
     /// compiler and its [`WorkspaceArena`] before compiling the request.
     pub fn inputs_changed(&mut self) -> std::result::Result<bool, WorkspaceCompileError> {
-        let current_config_fingerprint =
-            workspace_config_fingerprint(&self.config).map_err(WorkspaceCompileError::from_dyn)?;
-        let current_dependency_layout_fingerprint =
-            workspace_layout_fingerprint(&self.config.dependencies)
-                .map_err(WorkspaceCompileError::from_dyn)?;
+        let current_config_fingerprint = match &self.sources {
+            Some(sources) => workspace_config_fingerprint_with_sources(&self.config, sources),
+            None => workspace_config_fingerprint(&self.config),
+        }
+        .map_err(WorkspaceCompileError::from_dyn)?;
+        let current_dependency_layout_fingerprint = match &self.sources {
+            Some(sources) => {
+                workspace_layout_fingerprint_with_sources(&self.config.dependencies, sources)
+            }
+            None => workspace_layout_fingerprint(&self.config.dependencies),
+        }
+        .map_err(WorkspaceCompileError::from_dyn)?;
         let observed_input_changed = self
             .builder
             .workspace_files_changed()
@@ -1406,12 +1623,62 @@ impl<'arena> WorkspaceCompiler<'arena> {
             || observed_input_changed)
     }
 
+    /// Applies a new editor snapshot without rebuilding the compiler when the
+    /// change is limited to contents of existing workspace files.
+    ///
+    /// Returns `false` when configuration or directory layout changed; callers
+    /// must then discard this epoch. This method is only reachable through the
+    /// explicit editor/source-overlay path. CLI and batch compilation never
+    /// mutate a compiler epoch.
+    pub fn update_source_snapshot(
+        &mut self,
+        sources: WorkspaceSourceSnapshot,
+    ) -> std::result::Result<bool, WorkspaceCompileError> {
+        let Some(current_sources) = self.sources.as_ref() else {
+            // The filesystem-only constructor deliberately cannot acquire
+            // overlay semantics in place.
+            return Ok(false);
+        };
+        let next_config_fingerprint =
+            workspace_config_fingerprint_with_sources(&self.config, &sources)
+                .map_err(WorkspaceCompileError::from_dyn)?;
+        let next_layout_fingerprint =
+            workspace_layout_fingerprint_with_sources(&self.config.dependencies, &sources)
+                .map_err(WorkspaceCompileError::from_dyn)?;
+        if next_config_fingerprint != self.config_fingerprint
+            || next_layout_fingerprint != self.dependency_layout_fingerprint
+        {
+            return Ok(false);
+        }
+
+        let mut candidate_paths = current_sources.paths().cloned().collect::<HashSet<_>>();
+        candidate_paths.extend(sources.paths().cloned());
+        let mut changed_paths = Vec::new();
+        for path in candidate_paths {
+            let old = current_sources
+                .read_bytes(&path)
+                .map_err(|error| WorkspaceCompileError::from_dyn(Box::new(error)))?;
+            let new = sources
+                .read_bytes(&path)
+                .map_err(|error| WorkspaceCompileError::from_dyn(Box::new(error)))?;
+            if old != new {
+                changed_paths.push(path);
+            }
+        }
+
+        self.builder
+            .update_workspace_sources(sources.clone(), &changed_paths);
+        self.sources = Some(sources);
+        Ok(true)
+    }
+
     /// Compiles against the current epoch after the caller has checked
     /// [`Self::inputs_changed`].
     pub fn compile_current(
         &mut self,
         request: &WorkspaceCompileRequest,
     ) -> std::result::Result<WorkspaceCompileOutput, WorkspaceCompileError> {
+        let cache_stats_before = self.reported_cache_stats;
         self.builder
             .observe_workspace_file(&request.entry)
             .map_err(WorkspaceCompileError::from_dyn)?;
@@ -1430,9 +1697,36 @@ impl<'arena> WorkspaceCompiler<'arena> {
             .map_err(WorkspaceCompileError::from_dyn)?;
         pad_hoonc_jam_atom_bytes(&mut artifact);
 
+        let cache_stats = self.builder.cache_stats.since(cache_stats_before);
+        self.reported_cache_stats = self.builder.cache_stats;
         Ok(WorkspaceCompileOutput {
             artifact,
             cache_invalidated: false,
+            cache_stats,
+        })
+    }
+
+    /// Type-checks an entry without evaluating, shaping, or jamming an artifact.
+    ///
+    /// This is an editor-only sibling of [`Self::compile_current`]. The
+    /// ordinary CLI/batch path continues to call the artifact-producing method.
+    pub fn check_current(
+        &mut self,
+        request: &WorkspaceCheckRequest,
+    ) -> std::result::Result<WorkspaceCheckOutput, WorkspaceCompileError> {
+        let cache_stats_before = self.reported_cache_stats;
+        self.builder
+            .observe_workspace_file(&request.entry)
+            .map_err(WorkspaceCompileError::from_dyn)?;
+        self.builder
+            .compile_entry(&request.entry)
+            .map_err(WorkspaceCompileError::from_dyn)?;
+
+        let cache_stats = self.builder.cache_stats.since(cache_stats_before);
+        self.reported_cache_stats = self.builder.cache_stats;
+        Ok(WorkspaceCheckOutput {
+            cache_invalidated: false,
+            cache_stats,
         })
     }
 }
@@ -1443,6 +1737,27 @@ fn workspace_config_fingerprint(config: &WorkspaceConfig) -> Result<blake3::Hash
     hasher.update(config.prelude.as_os_str().as_encoded_bytes());
     hasher.update(b"\0");
     hasher.update(&fs::read(&config.prelude)?);
+    hasher.update(b"\0dependencies\0");
+    hasher.update(config.dependencies.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0subject-type\0");
+    if let Some(subject_type_jam) = &config.subject_type_jam {
+        hasher.update(subject_type_jam.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+        hasher.update(&fs::read(subject_type_jam)?);
+    }
+    hasher.update(&[u8::from(config.dbug), u8::from(config.vet)]);
+    Ok(hasher.finalize())
+}
+
+fn workspace_config_fingerprint_with_sources(
+    config: &WorkspaceConfig,
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<blake3::Hash> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"honk-workspace-overlay-config-v1\0");
+    hasher.update(config.prelude.as_os_str().as_encoded_bytes());
+    hasher.update(b"\0");
+    hasher.update(&sources.read_bytes(&config.prelude)?);
     hasher.update(b"\0dependencies\0");
     hasher.update(config.dependencies.as_os_str().as_encoded_bytes());
     hasher.update(b"\0subject-type\0");
@@ -1488,6 +1803,32 @@ fn workspace_layout_fingerprint(root: &Path) -> Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
+fn workspace_layout_fingerprint_with_sources(
+    root: &Path,
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<blake3::Hash> {
+    let disk_fingerprint = workspace_layout_fingerprint(root)?;
+    let root = root.canonicalize()?;
+    let mut overlay_paths = sources
+        .paths()
+        // Opening a document that already exists does not change import
+        // resolution. Only virtual editor files extend the workspace layout.
+        .filter(|path| !path.exists())
+        .filter_map(|path| path.strip_prefix(&root).ok())
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    overlay_paths.sort();
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"honk-workspace-overlay-layout-v1\0");
+    hasher.update(disk_fingerprint.as_bytes());
+    for path in overlay_paths {
+        hasher.update(path.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+    }
+    Ok(hasher.finalize())
+}
+
 fn build_workspace_context<'arena>(
     config: &WorkspaceConfig,
     slab: &'arena mut NounSlab,
@@ -1517,6 +1858,44 @@ fn build_workspace_context<'arena>(
         slab,
     )?;
     builder.enable_workspace_mode();
+    Ok(builder)
+}
+
+fn build_workspace_context_with_sources<'arena>(
+    config: &WorkspaceConfig,
+    sources: &WorkspaceSourceSnapshot,
+    slab: &'arena mut NounSlab,
+) -> Result<NativeBuildContext<'arena>> {
+    let cli = Cli {
+        entry: None,
+        directory: config.dependencies.clone(),
+        output: None,
+        prelude: config.prelude.clone(),
+        sut_jam: config.subject_type_jam.clone(),
+        mode: CompileMode::Standard,
+        batch_manifest: None,
+        wrapper_asset_dump: None,
+        native_wrapper_asset_dump: None,
+        dbug: config.dbug,
+        vet: config.vet,
+    };
+    let prelude_source = sources.read_text(&cli.prelude)?;
+    let prelude_dbug = cli.dbug && !native_parity_enabled();
+    let prelude_expr = pipeline::parse_native_hoon_source(
+        &cli.prelude,
+        prelude_source.as_str(),
+        Vec::new(),
+        prelude_dbug,
+    )?;
+    let subject_type_jam = cli.sut_jam.as_ref().map(fs::read).transpose()?;
+    let mut builder = build_context_with_shared_prelude_in(
+        &cli,
+        &prelude_expr,
+        &prelude_source,
+        subject_type_jam.as_deref(),
+        slab,
+    )?;
+    builder.enable_workspace_sources(sources.clone());
     Ok(builder)
 }
 
@@ -1604,7 +1983,11 @@ struct NativeBuildContext<'a> {
     cache: HashMap<PathCacheKey, NativeVase>,
     content_cache: HashMap<ContentCacheKey, NativeVase>,
     workspace_mode: bool,
+    workspace_sources: Option<WorkspaceSourceSnapshot>,
     observed_files: HashMap<PathBuf, blake3::Hash>,
+    dependencies: HashMap<PathBuf, HashSet<PathBuf>>,
+    reverse_dependencies: HashMap<PathBuf, HashSet<PathBuf>>,
+    cache_stats: WorkspaceCacheStats,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
     empty_trap_vase: Noun,
@@ -1638,7 +2021,11 @@ impl<'a> NativeBuildContext<'a> {
             cache: HashMap::new(),
             content_cache: HashMap::new(),
             workspace_mode: false,
+            workspace_sources: None,
             observed_files: HashMap::new(),
+            dependencies: HashMap::new(),
+            reverse_dependencies: HashMap::new(),
+            cache_stats: WorkspaceCacheStats::default(),
             visiting: HashSet::new(),
             wrappers: ExactWrapperBatteries::empty(),
             empty_trap_vase: D(0),
@@ -1650,12 +2037,104 @@ impl<'a> NativeBuildContext<'a> {
         self.workspace_mode = true;
     }
 
+    fn enable_workspace_sources(&mut self, sources: WorkspaceSourceSnapshot) {
+        self.workspace_mode = true;
+        self.workspace_sources = Some(sources);
+    }
+
+    fn update_workspace_sources(
+        &mut self,
+        sources: WorkspaceSourceSnapshot,
+        changed_paths: &[PathBuf],
+    ) {
+        self.workspace_sources = Some(sources);
+
+        let mut invalidated = changed_paths.iter().cloned().collect::<HashSet<_>>();
+        let mut pending = changed_paths.to_vec();
+        while let Some(path) = pending.pop() {
+            if let Some(dependents) = self.reverse_dependencies.get(&path) {
+                for dependent in dependents {
+                    if invalidated.insert(dependent.clone()) {
+                        pending.push(dependent.clone());
+                    }
+                }
+            }
+        }
+        for path in invalidated {
+            if self.cache.remove(&path).is_some() {
+                self.cache_stats.invalidated_paths =
+                    self.cache_stats.invalidated_paths.saturating_add(1);
+            }
+        }
+        for path in changed_paths {
+            self.observed_files.remove(path);
+        }
+    }
+
+    fn record_dependencies(
+        &mut self,
+        path: &Path,
+        imports: &[pipeline::ResolvedNativeImport],
+    ) -> Result<()> {
+        if !self.workspace_mode {
+            return Ok(());
+        }
+        let path = self.source_canonicalize(path)?;
+        let dependencies = imports
+            .iter()
+            .map(|import| self.source_canonicalize(&import.path))
+            .collect::<io::Result<HashSet<_>>>()?;
+
+        if let Some(previous) = self.dependencies.insert(path.clone(), dependencies.clone()) {
+            for dependency in previous {
+                let remove_entry =
+                    if let Some(dependents) = self.reverse_dependencies.get_mut(&dependency) {
+                        dependents.remove(&path);
+                        dependents.is_empty()
+                    } else {
+                        false
+                    };
+                if remove_entry {
+                    self.reverse_dependencies.remove(&dependency);
+                }
+            }
+        }
+        for dependency in dependencies {
+            self.reverse_dependencies
+                .entry(dependency)
+                .or_default()
+                .insert(path.clone());
+        }
+        Ok(())
+    }
+
+    fn source_read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        match &self.workspace_sources {
+            Some(sources) => sources.read_bytes(path),
+            None => fs::read(path),
+        }
+    }
+
+    fn source_read_to_string(&self, path: &Path) -> io::Result<String> {
+        match &self.workspace_sources {
+            Some(sources) => sources.read_text(path),
+            None => fs::read_to_string(path),
+        }
+    }
+
+    fn source_canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        match &self.workspace_sources {
+            Some(sources) => sources.canonical_path(path),
+            None => path.canonicalize(),
+        }
+    }
+
     fn observe_workspace_file(&mut self, path: &Path) -> Result<()> {
         if !self.workspace_mode {
             return Ok(());
         }
-        let canonical = path.canonicalize()?;
-        let fingerprint = blake3::hash(&fs::read(&canonical)?);
+        let canonical = self.source_canonicalize(path)?;
+        let fingerprint = blake3::hash(&self.source_read(&canonical)?);
         self.observed_files.insert(canonical, fingerprint);
         Ok(())
     }
@@ -1665,7 +2144,7 @@ impl<'a> NativeBuildContext<'a> {
             return Ok(false);
         }
         for (path, expected) in &self.observed_files {
-            match fs::read(path) {
+            match self.source_read(path) {
                 Ok(bytes) if blake3::hash(&bytes) == *expected => {}
                 Ok(_) => return Ok(true),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -2153,7 +2632,7 @@ impl<'a> NativeBuildContext<'a> {
         // recursion blowup, so dropping cross-call persistence costs no real
         // time (all six kernels stay byte-exact and compile in <60s).
         self.ut.set_miss_memo_persistence(false);
-        let canonical = path.canonicalize()?;
+        let canonical = self.source_canonicalize(path)?;
         match self.compile_path_uncached(path, true, false, false, true, true)? {
             NativeCompileOutput::Product(product) => Ok(product),
             NativeCompileOutput::Vase(_) => Err(format!(
@@ -2173,8 +2652,11 @@ impl<'a> NativeBuildContext<'a> {
     }
 
     fn compile_path(&mut self, path: &Path, need_eval: bool) -> Result<SubjectVase> {
-        let canonical = path.canonicalize()?;
-        let content_key = hoon_source_content_key(path)?;
+        let canonical = self.source_canonicalize(path)?;
+        let content_key = match &self.workspace_sources {
+            Some(sources) => blake3::hash(&sources.read_bytes(path)?),
+            None => hoon_source_content_key(path)?,
+        };
         let cache_key = canonical.clone();
         let content_cache_key = content_key;
         if self.workspace_mode {
@@ -2185,6 +2667,7 @@ impl<'a> NativeBuildContext<'a> {
             if need_eval && cached.eval_value.is_none() {
                 // Recompile with evaluation if an earlier deferred-only pass cached the trap.
             } else {
+                self.cache_stats.path_hits = self.cache_stats.path_hits.saturating_add(1);
                 return Ok(Self::subject_vase_from_cached(&cached));
             }
         }
@@ -2195,6 +2678,7 @@ impl<'a> NativeBuildContext<'a> {
                     // Recompile with evaluation if an earlier deferred-only pass cached the trap.
                 } else {
                     self.cache.insert(cache_key.clone(), cached.clone());
+                    self.cache_stats.path_hits = self.cache_stats.path_hits.saturating_add(1);
                     return Ok(Self::subject_vase_from_cached(&cached));
                 }
             }
@@ -2203,11 +2687,14 @@ impl<'a> NativeBuildContext<'a> {
             self.cache.remove(&cache_key);
         } else if let Some(cached) = self.cache.get(&cache_key) {
             let cached = cached.clone();
+            self.cache_stats.path_hits = self.cache_stats.path_hits.saturating_add(1);
             return Ok(Self::subject_vase_from_cached(&cached));
         }
         if !self.visiting.insert(canonical.clone()) {
             return Err(format!("cyclic native dependency at {}", canonical.display()).into());
         }
+
+        self.cache_stats.path_misses = self.cache_stats.path_misses.saturating_add(1);
 
         let result = self.compile_path_uncached(path, false, need_eval, false, false, false);
         self.visiting.remove(&canonical);
@@ -2245,13 +2732,23 @@ impl<'a> NativeBuildContext<'a> {
     ) -> Result<NativeCompileOutput> {
         let _compile_log = TimedHoonPathLog::new(path, HoonLogOperation::Compile);
         trace_native(format!("compiling {}", path.display()));
-        let imports = trace_timed(format!("resolving imports {}", path.display()), || {
-            Ok(pipeline::resolve_native_imports(
-                path,
-                &self.directory,
-                ScopeMode::Standard,
-            )?)
-        })?;
+        let imports = trace_timed(
+            format!("resolving imports {}", path.display()),
+            || match &self.workspace_sources {
+                Some(sources) => Ok(pipeline::resolve_native_imports_with_source(
+                    path,
+                    &self.directory,
+                    ScopeMode::Standard,
+                    sources,
+                )?),
+                None => Ok(pipeline::resolve_native_imports(
+                    path,
+                    &self.directory,
+                    ScopeMode::Standard,
+                )?),
+            },
+        )?;
+        self.record_dependencies(path, &imports)?;
         let mut imported_vases = Vec::new();
         let imports_need_eval = evaluate_value || needs_subject;
         for import in imports {
@@ -2270,11 +2767,29 @@ impl<'a> NativeBuildContext<'a> {
             Ok(self.subject_type(&imported_vases))
         })?;
         let expr = trace_timed(format!("parsing leaf {label}"), || {
-            parse_build_leaf(
-                path, &self.directory, canonical_entry_dbug, absolute_entry_wer, self.dbug,
-            )
+            match &self.workspace_sources {
+                Some(_) => {
+                    let source = self.source_read_to_string(path)?;
+                    parse_build_leaf_source(
+                        path,
+                        &self.directory,
+                        source.as_str(),
+                        canonical_entry_dbug,
+                        absolute_entry_wer,
+                        self.dbug,
+                    )
+                }
+                None => parse_build_leaf(
+                    path, &self.directory, canonical_entry_dbug, absolute_entry_wer, self.dbug,
+                ),
+            }
         })?;
-        let override_value = native_value_override(&mut self.eval_context, path, &self.directory)?;
+        let override_value = match &self.workspace_sources {
+            Some(sources) => native_value_override_with_source(
+                &mut self.eval_context, path, &self.directory, sources,
+            )?,
+            None => native_value_override(&mut self.eval_context, path, &self.directory)?,
+        };
         let subject_trap = if override_value.is_none() {
             Some(self.subject_trap(&imported_vases)?)
         } else {
@@ -2396,9 +2911,9 @@ impl<'a> NativeBuildContext<'a> {
     }
 
     fn data_vase(&mut self, path: &Path, need_eval: bool) -> Result<SubjectVase> {
-        let bytes = fs::read(path)?;
+        let bytes = self.source_read(path)?;
         if self.workspace_mode {
-            let canonical = path.canonicalize()?;
+            let canonical = self.source_canonicalize(path)?;
             self.observed_files.insert(canonical, blake3::hash(&bytes));
         }
 
@@ -2553,7 +3068,12 @@ impl<'a> NativeBuildContext<'a> {
         entry: &Path,
         directory_files: Option<&[PathBuf]>,
     ) -> Result<u32> {
-        directory_mug_with_files(entry, &self.directory, directory_files)
+        match &self.workspace_sources {
+            Some(sources) => directory_mug_with_files_and_sources(
+                entry, &self.directory, directory_files, sources,
+            ),
+            None => directory_mug_with_files(entry, &self.directory, directory_files),
+        }
     }
 
     fn value_trap(&mut self, vase_trap: Noun, mode: CompileMode) -> Result<Noun> {
@@ -3201,6 +3721,19 @@ fn native_value_override(
     Ok(None)
 }
 
+fn native_value_override_with_source(
+    context: &mut Context,
+    path: &Path,
+    directory: &Path,
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<Option<Noun>> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
+        validate_softed_constraints_pins_with_source(path, directory, sources)?;
+        return Ok(Some(softed_constraints_value(context, directory)?));
+    }
+    Ok(None)
+}
+
 fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()> {
     let checks = [
         (
@@ -3222,6 +3755,47 @@ fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()>
     let mut stale = Vec::new();
     for (file, expected, label) in checks {
         let actual = blake3::hash(&fs::read(&file)?).to_hex();
+        if actual.as_str() != expected {
+            stale.push(format!("{label}: actual {actual}, pinned {expected}"));
+        }
+    }
+    if !stale.is_empty() {
+        return Err(format!(
+            "softed-constraints native shortcut is stale ({}). honk substitutes a fixed cued \
+             jam pair for this exact content; re-validate byte parity and update the pins in \
+             honk.rs.",
+            stale.join("; "),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_softed_constraints_pins_with_source(
+    path: &Path,
+    directory: &Path,
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<()> {
+    let checks = [
+        (
+            path.to_path_buf(),
+            SOFTED_CONSTRAINTS_SOURCE_B3,
+            "softed-constraints.hoon source",
+        ),
+        (
+            directory.join("jams/constraints-0-1.jam"),
+            CONSTRAINTS_0_1_JAM_B3,
+            "jams/constraints-0-1.jam",
+        ),
+        (
+            directory.join("jams/constraints-2.jam"),
+            CONSTRAINTS_2_JAM_B3,
+            "jams/constraints-2.jam",
+        ),
+    ];
+    let mut stale = Vec::new();
+    for (file, expected, label) in checks {
+        let actual = blake3::hash(&sources.read_bytes(&file)?).to_hex();
         if actual.as_str() != expected {
             stale.push(format!("{label}: actual {actual}, pinned {expected}"));
         }
@@ -4147,6 +4721,105 @@ fn directory_mug_with_files(
     Ok(slab_mug(map, &space))
 }
 
+fn directory_mug_with_files_and_sources(
+    entry: &Path,
+    deps_dir: &Path,
+    files: Option<&[PathBuf]>,
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<u32> {
+    let directory = deps_dir.canonicalize()?;
+    let target_key = entry_path_for_hoon(entry, deps_dir)?;
+    let target_contents = sources.read_bytes(entry)?;
+    let allowed_files = files
+        .map(|files| hoonc_directory_allowed_paths_with_sources(&directory, files, sources))
+        .transpose()?;
+
+    let mut entries = Vec::new();
+    let mut included = HashSet::new();
+    for entry_result in WalkDir::new(&directory)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(hoonc::is_valid_file_or_dir)
+    {
+        let dir_entry = entry_result?;
+        if !dir_entry.metadata()?.is_file() {
+            continue;
+        }
+        let path = dir_entry.path();
+        let stripped = path.strip_prefix(&directory).map_err(|_| {
+            format!(
+                "dependency path does not share base prefix: {}",
+                path.display()
+            )
+        })?;
+        let path_str = format!("/{}", stripped.to_string_lossy());
+        if let Some(allowed_files) = &allowed_files {
+            if !allowed_files.contains(&path_str) {
+                continue;
+            }
+        }
+        included.insert(path_str.clone());
+        entries.push((path_str, sources.read_bytes(path)?));
+    }
+
+    let mut virtual_entries = Vec::new();
+    for path in sources.paths() {
+        let Ok(stripped) = path.strip_prefix(&directory) else {
+            continue;
+        };
+        if !is_hoonc_source_path(stripped) {
+            continue;
+        }
+        let path_str = format!("/{}", stripped.to_string_lossy());
+        if included.contains(&path_str) {
+            continue;
+        }
+        if let Some(allowed_files) = &allowed_files {
+            if !allowed_files.contains(&path_str) {
+                continue;
+            }
+        }
+        included.insert(path_str.clone());
+        virtual_entries.push((path_str, sources.read_bytes(path)?));
+    }
+    virtual_entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.extend(virtual_entries);
+
+    let mut slab: NounSlab<NockJammer> = NounSlab::new();
+    let mut map = D(0);
+    let key = hoon_path_text_to_noun(&mut slab, &target_key)?;
+    let value = Atom::from_value(&mut slab, target_contents)?.as_noun();
+    map = map_put_mug(&mut slab, map, key, value)?;
+
+    for (path, contents) in entries.into_iter().rev() {
+        let key = hoon_path_text_to_noun(&mut slab, &path)?;
+        let value = Atom::from_value(&mut slab, contents)?.as_noun();
+        map = map_put_mug(&mut slab, map, key, value)?;
+    }
+
+    let space = slab.noun_space();
+    Ok(slab_mug(map, &space))
+}
+
+fn is_hoonc_source_path(path: &Path) -> bool {
+    const BLACKLISTED_DIRS: &[&str] = &["packages", "node_modules", ".git", "target"];
+    if path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|part| BLACKLISTED_DIRS.contains(&part))
+    }) {
+        return false;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            [".jock", ".hoon", ".txt", ".jam", ".html", ".css", ".js", ".jpg", ".png", ".gif"]
+                .iter()
+                .any(|extension| name.ends_with(extension))
+        })
+}
+
 fn noun_eq(a: Noun, b: Noun, space: &NounSpace) -> Result<bool> {
     let mut stack = Vec::with_capacity(64);
     stack.push((a, b));
@@ -4366,6 +5039,21 @@ fn hoonc_directory_allowed_paths(directory: &Path, files: &[PathBuf]) -> Result<
     let mut allowed = HashSet::with_capacity(files.len());
     for file in files {
         if !file.is_file() {
+            continue;
+        }
+        allowed.insert(hoonc_manifest_relative_path(directory, file)?);
+    }
+    Ok(allowed)
+}
+
+fn hoonc_directory_allowed_paths_with_sources(
+    directory: &Path,
+    files: &[PathBuf],
+    sources: &WorkspaceSourceSnapshot,
+) -> Result<HashSet<String>> {
+    let mut allowed = HashSet::with_capacity(files.len());
+    for file in files {
+        if !sources.is_file_at(file) {
             continue;
         }
         allowed.insert(hoonc_manifest_relative_path(directory, file)?);
