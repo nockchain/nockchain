@@ -499,22 +499,35 @@ per-bucket end-to-end).
     batch-stark prover setup, not yet located precisely). Preferred: (b) —
     no artifact to manage, deterministic, small boot delay.
 
-### Stage C3' — SIZE SOLVED + rebuild primitive (2026-07-15, commits 58f65edf, 04423c93)
-The context is REBUILT from the L1 outer proof, not the tree: the ~866 MB
-`circuit_prover_data` = `build_compact_batch_l2_over_l1_prep(l1_outer_proof)`,
-which reconstructs + commits the preprocessed deterministically from the L1 proof
-SHAPE — no proving.
-- Added `rebuild_compact_verifier_context(l1_outer_proof, metadata)`; exposed
-  `run.l1_outer_proof`, `pub AiPowL1OuterProof`, `context.metadata()`.
+### Stage C3' — SIZE SOLVED + rebuild primitive COMPLETE (2026-07-15)
+The context is REBUILT from small cached inputs, not the 866 MB tree: the
+`circuit_prover_data` = `build_compact_batch_l2_over_l1_prep(l1)`, which
+reconstructs + commits the preprocessed deterministically from the L1 proof
+SHAPE — no FRI proving, just circuit compilation + a Merkle commit.
+- `rebuild_compact_verifier_context(zk, profile, l0_program, l0_proof, l0_pis,
+  sx_bound, l1_outer_proof, metadata)` — no proving. Exposed `run.l1_outer_proof`,
+  `pub AiPowL1OuterProof`, `context.metadata()`.
 - **SIZE WIN PROVEN:** cached `(l1_outer_proof, metadata)` is **< 8 MiB** (vs 866
-  MB), asserted in the R-b compact-cert test. Boot caches ~KB-MB/bucket and
-  rebuilds the tree at boot (seconds, no proving) — the viable "small boot delay".
-- **ONE remaining piece:** `build_compact_batch_l2_over_l1_prep` needs the L1
-  proof's `stark_common.lookups` CONTENT (multiplicities; default-of-right-count
-  fails "Too many expected cumulated values"). Serde drops them (`Lookup` not
-  Serialize; `Lookups` no public ctor). Fix: rebuild from the L1 verifier-circuit
-  AIRs (`Lookups::from_air`, config/shape-determined). Then C4 (8-bucket table →
-  cache in nockapp data dir → boot inject in nockchain + roswell → per-bucket e2e).
+  MB), asserted in the R-b compact-cert test. Boot caches ~KB-MB/bucket (the small
+  blob + the canonical L0 program/proof/PIs) and rebuilds the tree at boot
+  (seconds, no proving) — the viable "small boot delay".
+- **LOOKUPS RESOLVED (the last piece):** `build_compact_batch_l2_over_l1_prep`
+  needs the L1 proof's `stark_common.lookups` CONTENT (multiplicities;
+  default-of-right-count fails "Too many expected cumulated values"), which serde
+  drops (`Lookup` not Serialize; `Lookups` no public ctor). The rebuild now
+  reconstructs the L1 `CommonData` (with content-exact `lookups` via
+  `Lookups::from_air`) by rebuilding the L1 verifier circuit from the cached L0
+  parts (`build_composite_l1_verifier_circuit` +
+  `l1_circuit_prover_data_with_config_and_table_packing`) and installing it on the
+  deserialized L1 proof before the L2 build. This is **option (a)** — rebuild from
+  the L1 AIRs; no serde changes to the git `p3-lookup` crate needed.
+- **VALIDATED end-to-end:** `rb_compact_batch_recursive_certificate_at_num_stripes_over_64`
+  now serde-round-trips the SMALL blob, calls `rebuild_compact_verifier_context`,
+  and verifies the decoded R-b compact cert against the REBUILT context (identical
+  accept to the freshly-proved context). Passes. This closes C3'.
+- **Next: C4** — build the 8-bucket table (2^13..2^20), cache the small blobs in the
+  nockapp data dir, inject via `init_ai_pow_verifier_setup` at boot (nockchain +
+  roswell), per-bucket end-to-end validation.
 
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
@@ -546,9 +559,11 @@ NOT `prover_only`.
      file). Cleaner long-term; a deeper recursion-internals refactor.
 
 ### Remaining (post-decision), in dependency order
-1. **Stage C** — resolve the (a)/(b) decision above; build the 8-bucket table;
-   inject at boot (nockchain + roswell); validate a cert per bucket. [§3.2#1;
-   Stages A+B done, C scoped]
+1. **Stage C4** — the rebuild primitive (C1/C2/C3') is DONE + validated (option (a),
+   rebuild L1 lookups from AIRs; < 8 MiB cache; verifies against rebuilt context).
+   Remaining: build the 8-bucket table (2^13..2^20); serialize the small blobs to a
+   cache file in the nockapp data dir; inject at boot (nockchain + roswell); validate
+   a cert per bucket. [§3.2#1; Stages A+B+C1/C2/C3' done]
 2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
