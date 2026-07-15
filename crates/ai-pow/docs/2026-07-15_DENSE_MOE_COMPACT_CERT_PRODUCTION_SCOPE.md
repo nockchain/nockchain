@@ -499,6 +499,23 @@ per-bucket end-to-end).
     batch-stark prover setup, not yet located precisely). Preferred: (b) —
     no artifact to manage, deterministic, small boot delay.
 
+### Stage C3' — SIZE SOLVED + rebuild primitive (2026-07-15, commits 58f65edf, 04423c93)
+The context is REBUILT from the L1 outer proof, not the tree: the ~866 MB
+`circuit_prover_data` = `build_compact_batch_l2_over_l1_prep(l1_outer_proof)`,
+which reconstructs + commits the preprocessed deterministically from the L1 proof
+SHAPE — no proving.
+- Added `rebuild_compact_verifier_context(l1_outer_proof, metadata)`; exposed
+  `run.l1_outer_proof`, `pub AiPowL1OuterProof`, `context.metadata()`.
+- **SIZE WIN PROVEN:** cached `(l1_outer_proof, metadata)` is **< 8 MiB** (vs 866
+  MB), asserted in the R-b compact-cert test. Boot caches ~KB-MB/bucket and
+  rebuilds the tree at boot (seconds, no proving) — the viable "small boot delay".
+- **ONE remaining piece:** `build_compact_batch_l2_over_l1_prep` needs the L1
+  proof's `stark_common.lookups` CONTENT (multiplicities; default-of-right-count
+  fails "Too many expected cumulated values"). Serde drops them (`Lookup` not
+  Serialize; `Lookups` no public ctor). Fix: rebuild from the L1 verifier-circuit
+  AIRs (`Lookups::from_air`, config/shape-determined). Then C4 (8-bucket table →
+  cache in nockapp data dir → boot inject in nockchain + roswell → per-bucket e2e).
+
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
 recursion.rs:2040) reads from the context ONLY: `verifier_key_digest`,
