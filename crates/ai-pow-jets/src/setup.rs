@@ -222,12 +222,14 @@ pub fn build_verifier_setup(
     top_k: usize,
 ) -> Result<AiPowVerifierSetup, SetupError> {
     let block = prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?;
+    let trace_height = block.run.trace_height;
     let digest_bytes =
         ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
             &block.run.verifier_key_digest(),
         )
         .to_vec();
     Ok(AiPowVerifierSetup {
+        trace_height,
         context: block.run.verifier_context,
         digest_bytes,
     })

@@ -36,22 +36,64 @@ pub mod setup;
 /// production admission envelope).
 pub const AI_POW_VERIFY_MAX_PATTERN_LEN: usize = 4096;
 
-/// The boot-injected, proof-independent compact verifier setup.
+/// The boot-injected, proof-independent compact verifier setup for ONE trace
+/// log-height bucket. The compact verifier setup (`context` + `digest`) is
+/// deterministic from the trace height (the padded Layer-0 degree_bits), NOT the
+/// full shape: many Pearl shapes share a bucket, and the Pearl envelope spans a
+/// small, bounded set of buckets (degree_bits ≤ ~19). Supporting EVERY Pearl
+/// combination therefore means a *table* of these, one per reachable bucket —
+/// see [`init_ai_pow_verifier_setup`].
 pub struct AiPowVerifierSetup {
+    /// The Layer-0 trace height (power of two) this setup verifies. A cert whose
+    /// `certificate.trace_height` equals this is verified with this setup.
+    pub trace_height: usize,
     pub context: AiPowCompactBatchVerifierContext,
     /// Canonical 40-byte verifier-key/setup digest.
     pub digest_bytes: Vec<u8>,
 }
 
-static SETUP: OnceCell<AiPowVerifierSetup> = OnceCell::new();
+/// The boot-injected verifier-setup TABLE — one [`AiPowVerifierSetup`] per Pearl
+/// trace-height bucket. Keyed lookup is by the cert's `trace_height`.
+static SETUP: OnceCell<Vec<AiPowVerifierSetup>> = OnceCell::new();
 
-/// Inject the compact verifier setup once at node boot. The setup is deterministic
-/// from the production params and proof-independent, so building it once (prove one
-/// canonical block; see `ai-pow-miner`) and reusing it for every block is sound.
+/// Resolve the setup for a given Layer-0 `trace_height` from the boot table.
+/// Returns `None` if the table is uninjected or has no bucket for `trace_height`
+/// (a full boot table covers every Pearl-envelope bucket, so a miss is a boot
+/// config error, not a valid block).
+pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<&'static AiPowVerifierSetup> {
+    SETUP.get()?.iter().find(|s| s.trace_height == trace_height)
+}
+
+/// Inject the compact verifier-setup TABLE once at node boot — one entry per
+/// Pearl trace-height bucket. Each setup is deterministic from its trace height
+/// and proof-independent (prove one canonical block per bucket; see
+/// `ai-pow-miner` / `build_verifier_setup`), so building the table once and
+/// reusing it for every block is sound. Rejects an empty table or duplicate
+/// trace-height buckets.
 ///
-/// Returns `Err` if already initialized (boot should call this exactly once).
-pub fn init_ai_pow_verifier_setup(setup: AiPowVerifierSetup) -> Result<(), ()> {
-    SETUP.set(setup).map_err(|_| ())
+/// Returns `Err` if already initialized (boot should call this exactly once) or
+/// if the table is empty / has duplicate buckets.
+pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(), ()> {
+    let heights: Vec<usize> = setups.iter().map(|s| s.trace_height).collect();
+    if !setup_table_heights_valid(&heights) {
+        return Err(());
+    }
+    SETUP.set(setups).map_err(|_| ())
+}
+
+/// A verifier-setup table is well-formed iff it is non-empty and has no duplicate
+/// trace-height bucket (each cert resolves to exactly one setup). Pure so the
+/// admission rule is unit-testable without constructing real setups.
+fn setup_table_heights_valid(heights: &[usize]) -> bool {
+    if heights.is_empty() {
+        return false;
+    }
+    for (i, &h) in heights.iter().enumerate() {
+        if heights[..i].contains(&h) {
+            return false; // duplicate bucket
+        }
+    }
+    true
 }
 
 /// Loobean helpers (`&`/yes = 0 = verified, `|`/no = 1 = rejected).
@@ -147,8 +189,12 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let Some(target) = atom_to_32(target_noun, &space) else {
         return Ok(NO);
     };
-    let Some(setup) = SETUP.get() else {
-        // Well-formed artifact but setup not injected — fall back (surfaces the bug).
+    // Resolve the setup for THIS cert's trace-height bucket from the boot table.
+    // A well-formed artifact whose bucket is absent (or the table uninjected)
+    // falls back to the stubbed Hoon arm (`!!`) — surfaces an incomplete boot
+    // table rather than silently rejecting a valid block. (A full table covers
+    // every Pearl-envelope bucket; the decode already rejected malformed shapes.)
+    let Some(setup) = ai_pow_verifier_setup_for(artifact.certificate.trace_height) else {
         return Err(BAIL_FAIL);
     };
     // Canonicalize the structured commitment noun (mutates the stack via jam).
@@ -192,6 +238,27 @@ pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The verifier-setup TABLE admission rule (supporting the full Pearl band):
+    /// non-empty, one setup per trace-height bucket, no duplicates.
+    #[test]
+    fn setup_table_admission_rule() {
+        assert!(!setup_table_heights_valid(&[]), "empty table rejected");
+        assert!(setup_table_heights_valid(&[8192]), "single bucket ok");
+        assert!(
+            setup_table_heights_valid(&[8192, 16384, 32768]),
+            "distinct buckets ok"
+        );
+        assert!(
+            !setup_table_heights_valid(&[8192, 16384, 8192]),
+            "duplicate bucket rejected (a cert must resolve to exactly one setup)"
+        );
+    }
+}
+
+#[cfg(test)]
+mod jet_tests {
     use super::*;
     use crate::setup::{prove_canonical_moe_block, CANONICAL_SETUP_COMMIT};
     use ai_pow::params::MatmulParams;
@@ -273,6 +340,7 @@ mod tests {
         )
         .to_vec();
         let setup = AiPowVerifierSetup {
+            trace_height: block.run.trace_height,
             context: block.run.verifier_context,
             digest_bytes,
         };
@@ -376,6 +444,7 @@ mod tests {
         )
         .to_vec();
         let setup = AiPowVerifierSetup {
+            trace_height: block.run.trace_height,
             context: block.run.verifier_context,
             digest_bytes,
         };

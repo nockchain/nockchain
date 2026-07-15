@@ -387,9 +387,28 @@ strength. [A2 substantially covered; residual: a forged-ROW-gather (outer_indice
 variant through the full cert — currently covered transitively by binding #1 +
 #4, an explicit test would be belt-and-suspenders.]
 
+### Boot-setup TABLE — Stage A DONE (2026-07-15)
+Supporting the full Pearl band means the verify-jet setup is a TABLE keyed by
+trace log-height, not one value. **Landed the data-structure + lookup:**
+- `AiPowVerifierSetup` gains `trace_height` (self-keying); `build_verifier_setup`
+  populates it from the proved canonical block (`block.run.trace_height`).
+- `SETUP: OnceCell<Vec<AiPowVerifierSetup>>` (a table); `init_ai_pow_verifier_setup`
+  takes the table and rejects empty / duplicate-bucket tables
+  (`setup_table_heights_valid`, unit-tested `setup_table_admission_rule`).
+- New `ai_pow_verifier_setup_for(trace_height)` resolves the bucket; the jet looks
+  up by `artifact.certificate.trace_height` and BAIL_FAILs on a miss (surfaces an
+  incomplete boot table; the decode already rejects malformed shapes).
+- Contained to `ai-pow-jets` (no other crate constructs the setup / calls init);
+  ai-pow-jets suite green.
+**End-to-end validation pending Stage B/C** (the table is empty until injected).
+
 ### Remaining (post-decision), in dependency order
-1. Precompute + embed the verifier setup for the pinned params; call
-   `init_ai_pow_verifier_setup` at node boot (nockchain + roswell). [§3.2#1]
+1. **Stage B** — enumerate the Pearl-envelope trace-height buckets (the shape band
+   → distinct padded degree_bits; per the probe, a small set) and **precompute**
+   one `build_verifier_setup` per bucket. **Stage C** — serialize + embed the
+   table (or a deterministic build step), and call `init_ai_pow_verifier_setup`
+   with it at node boot (nockchain + roswell). Then a cert at each bucket verifies
+   against its injected setup (end-to-end). [§3.2#1; Stage A done]
 2. Flip `do-pow` `%ai-pow` accept + emit `%mine-ai` candidate. [§3.2#2,#3]
 3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
