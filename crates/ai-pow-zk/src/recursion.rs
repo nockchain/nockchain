@@ -1220,8 +1220,12 @@ fn verify_recursive_certificate_inner(
     }
 
     let cfg = crate::composite_proof::build_config(zk_params, profile);
-    let air = CompositeFullAirWithLookupsPinned::new_with(cert.l0_program.clone(), true);
-    let pd = crate::composite_proof::logup_common_for(&cfg, &cert.l0_program, true);
+    // §6(b)-R-b: match the L0 keystone flag (sx_bound=false for the
+    // num_stripes>STRIPE_MAX stripe-major path). Verifier-derived from params.
+    let sx_bound =
+        (zk_params.k / zk_params.noise_rank) as usize <= crate::composite_layout::STRIPE_MAX;
+    let air = CompositeFullAirWithLookupsPinned::new_with(cert.l0_program.clone(), sx_bound);
+    let pd = crate::composite_proof::logup_common_for(&cfg, &cert.l0_program, sx_bound);
     let built = build_composite_l1_verifier_circuit(
         &cfg, &air, &cert.l0_proof, &pd.common, public_values, profile,
     )?;
@@ -1565,8 +1569,14 @@ pub fn prove_recursive_certificate_from_chain_verified_composite_proof(
 
     let cfg = crate::composite_proof::build_config(zk_params, profile);
     let t = Instant::now();
-    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), true);
-    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, true);
+    // §6(b)-R-b: the L1 verifier circuit must be built over the SAME AIR
+    // keystone flag the L0 proof used — `sx_bound = false` for the R-b
+    // stripe-major path (`num_stripes > STRIPE_MAX`), `true` otherwise.
+    // Derived from the trusted (verified) params; matches the compact path.
+    let sx_bound =
+        (zk_params.k / zk_params.noise_rank) as usize <= crate::composite_layout::STRIPE_MAX;
+    let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
+    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
     let built = build_composite_l1_verifier_circuit(
         &cfg,
         &air,

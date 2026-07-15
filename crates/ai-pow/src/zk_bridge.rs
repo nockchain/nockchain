@@ -4353,6 +4353,91 @@ mod tests {
         assert_eq!(pis.jackpot, tile_state_words(&ticket.tile_state));
     }
 
+    /// §6(b)-R-b + MoE WIDE-`k` canonical-program build (2026-07-15 vetting,
+    /// A1×A2) — FAST (no proof): the node-side canonical program that
+    /// `verify_pearl_moe_*` rebuilds for a `num_stripes = k/r = 2048/16 = 128 >
+    /// STRIPE_MAX` MoE ticket must BUILD (no `pack_ab_id` overflow). The verifier
+    /// rebuilds `canonical_program_for_strip_schedule` over the MoE opened
+    /// schedule (routing gather rows + expert columns); if it panics the node
+    /// cannot verify a wide-k MoE cert. This isolates the canonical-rebuild half
+    /// of the verify from the ~2min recursion.
+    #[test]
+    fn moe_widek_verify_canonical_program_builds() {
+        use crate::commit::matrix_commitment;
+        use crate::pearl_moe_routing::build_routing_data;
+
+        let (m, k, n_e, e, r) = (128usize, 2048usize, 64usize, 2usize, 16usize);
+        let top_k = 1usize;
+        let params = MatmulParams {
+            m: m as u32,
+            k: k as u32,
+            n: (n_e * e) as u32,
+            noise_rank: r as u32,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        assert_eq!(params.num_stripes() as usize, 128);
+        let (a, b) = synth_matrices(b"moe-widek-canon", &params);
+        let topk: Vec<u32> = (0..m).map(|t| (t % e) as u32).collect();
+        let routing = build_routing_data(&topk, m, top_k, e).unwrap();
+        let kappa = [0x41u8; 32];
+        let a_bytes: Vec<u8> = a.iter().map(|&v| v as u8).collect();
+        let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
+        let h_a = matrix_commitment(&a_bytes, &kappa);
+        let h_b = matrix_commitment(&b_bytes, &kappa);
+        let (expert_idx, inner, local_b) =
+            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
+            &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
+        )
+        .expect("MoE ticket");
+        let mining_config = crate::pearl_compat::PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: crate::pearl_compat::PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            cols_pattern: crate::pearl_compat::PearlPeriodicPattern::from_list(&[
+                0, 1, 2, 3, 4, 5, 6, 7,
+            ])
+            .unwrap(),
+            reserved: crate::pearl_compat::PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+        };
+        // The VERIFY recomputes b_cols_global (binding #2) — use THAT, not the
+        // ticket's, since it is what the node builds canonical over.
+        let verify_b_cols = crate::pearl_compat::moe_expert_b_cols_global(
+            &mining_config, e as u16, params.n, expert_idx as u16, 0, 4096,
+        )
+        .expect("expert b cols");
+        assert_eq!(verify_b_cols, ticket.b_cols_global, "verify recomputes the ticket's columns");
+
+        let zk_params = zk_params_from(&params);
+        let schedule = ai_pow_zk::canonical::StripIndexSchedule::from_indices(
+            &zk_params,
+            ticket.outer_indices.clone(),
+            verify_b_cols,
+        )
+        .expect("MoE strip schedule");
+        let trace_height = expected_layer0_rows_for_strip_schedule(&params, &schedule)
+            .expect("trace height")
+            .required_trace_len();
+        let bp = ai_pow_zk::canonical::BlockPublic {
+            tile_i: 0,
+            tile_j: 0,
+            kappa,
+            s_a: ticket.s_a,
+            s_b: ticket.s_b,
+        };
+        // The node-side rebuild — must not overflow pack_ab_id.
+        ai_pow_zk::canonical::canonical_program_for_strip_schedule(
+            &zk_params, &schedule, &bp, trace_height,
+        )
+        .expect("wide-k MoE canonical program must build (node verify rebuild)");
+    }
+
     /// M2 + M7 — MoE on the **compact** production certificate. The compact
     /// prover is program-generic, so the MoE Layer-0 (grouped tile + routing
     /// splice, opened over `outer_indices`/expert-columns) drives it directly,

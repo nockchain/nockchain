@@ -327,12 +327,65 @@ stage (R1).
   populates the `SETUP` OnceCell (`ai-pow-jets/src/lib.rs:46,53`); no production
   caller today. This is the original deferred task.
 
-### CRITICAL-PATH DECISION (blocks the integration work)
-Pin the **canonical production consensus params** — `MatmulParams` shape
-(within the num_stripes ≤ 512 band) + `{hw, e, top_k}` for MoE. The
-verifier-key/setup digest commits to these, so they must be chosen before the
-boot setup can be precomputed/embedded and before `do-pow`/`%mine-ai` can be
-flipped. Everything in §3.2 depends on this.
+### CRITICAL-PATH DECISION — RESOLVED (owner, 2026-07-15)
+**Support EVERY combination Pearl supports** — do NOT pin a single param set.
+Implication: the verifier setup is a **table keyed by trace log-height
+(degree_bits)**, not one shape (the setup digest depends on the padded trace
+height, which buckets many shapes together — see the digest-shape-dependence
+probe). Boot-setup injection must cover the full Pearl shape space's trace-height
+buckets. `build_verifier_setup` is per-bucket; the boot table enumerates the
+buckets Pearl's envelope can produce (bounded — degree_bits ≤ ~19).
+
+### VETTING DIRECTION (owner, 2026-07-15)
+Prioritize **A2 — MoE routing forgeries** through the FULL compact cert,
+**alongside Pearl parity for the off-circuit routing approach** (confirm the
+off-circuit binding captures exactly what Pearl binds in-circuit: opened tokens
+↔ committed routing).
+
+### A2 vetting — MoE off-circuit routing binding (2026-07-15)
+**Existing coverage is strong** and already through the FULL L1/compact cert
+(not just the precheck): `real_moe_recursive_certificate_proves_and_verifies`
+adversarially rejects forged routing (binding #1), forged h_a (PI binding #3),
+AND a shifted opened-column schedule (binding #4 — the "can't open other
+tokens/columns" soundness crux); `moe_compact_prove_verify_and_bind` rejects a
+wrong D6 commitment on the compact path. `pearl_moe_routing_binding.rs` covers
+the precheck forgeries comprehensively (cross-expert indices, tampered root,
+column bleed, top_k bounds, span>m, unsorted, DoS cap). **Gap: all at ns≤64.**
+- **Attempting a wide-k (ns=128) MoE full-cert adversarial test surfaced TWO
+  findings:**
+  - **✅ FIXED — L1-recursion sx_bound gap.** `prove_recursive_certificate_from_
+    chain_verified_composite_proof` (recursion.rs:1559) AND
+    `verify_recursive_certificate_inner` (:1205) hardcoded `sx_bound=true`, so the
+    INTERMEDIATE L1 (non-compact) recursion couldn't wrap/verify an R-b
+    (ns>STRIPE_MAX) L0 proof. Stage E threaded only the COMPACT path; this threads
+    the L1 path too (derive `sx_bound = k/r ≤ STRIPE_MAX` internally, no caller
+    changes; ≤64 unchanged). Correct-by-construction (mirrors Stage E).
+  - **✅ Node CAN rebuild wide-k MoE canonical** (`moe_widek_verify_canonical_
+    program_builds`, FAST, no proof): for the ns=128 MoE ticket
+    (outer_indices=[0,2,…,14], expert cols [0..8)), `canonical_program_for_strip_
+    schedule` builds without `pack_ab_id` overflow — over BOTH the ticket's and the
+    verify-recomputed columns. So the PRODUCTION compact verify's core rebuild step
+    works at wide-k MoE.
+  - **OPEN FINDING (non-production path) — L1 verify `pack_ab_id` overflow at
+    wide-k MoE.** `verify_pearl_moe_recursive_certificate` (the L1, non-compact
+    verify) panics at `pack_ab_id` for the ns=128 MoE cert — but NOT in the
+    canonical rebuild (that builds fine, above). It is inside the L1 verify
+    internals. **Production uses the COMPACT cert, not L1**, so this is not a
+    production blocker, but investigate (likely a pre-existing L1-path assumption).
+    The heavy full-cert wide-k MoE adversarial suite is deferred to the compact
+    path (see remaining #5).
+
+**Pearl-parity of the off-circuit approach:** the binding proves opened rows ==
+the expert's routed tokens under the public pattern from the committed routing
+(`outer_indices[u] == routing_data[expert_start + pattern[u]]`, `routing_root ==
+matrix_commitment(routing_data)`) + the opened schedule is bound to the cert
+(binding #4). This is the same *correspondence* Pearl binds — Pearl does it
+in-circuit over opened routing strips; we do it off-circuit with public
+`routing_data`. Equivalent soundness for the correspondence; the delta is
+routing privacy/wire-size (the documented Pearl-narrowing), not the binding
+strength. [A2 substantially covered; residual: a forged-ROW-gather (outer_indices)
+variant through the full cert — currently covered transitively by binding #1 +
+#4, an explicit test would be belt-and-suspenders.]
 
 ### Remaining (post-decision), in dependency order
 1. Precompute + embed the verifier setup for the pinned params; call
