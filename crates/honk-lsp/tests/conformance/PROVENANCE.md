@@ -5,7 +5,7 @@
 - Reviewed: 2026-07-15.
 - Wire implementation: `lsp-server` 0.9.0.
 - Protocol types: `lsp-types` 0.97.0.
-- Process command: `cargo test -p honk-lsp --test stdio_conformance`.
+- Process command: `cargo test -p honk-lsp --all-targets`.
 - Compiler behavior oracle: `honk-service/tests/editor_conformance.rs`, which compares disk, overlay, stale-version, parse-error, and close/reopen outcomes against the ordinary compiler path.
 
 There are no opaque golden fixtures in this slice. The process test generates

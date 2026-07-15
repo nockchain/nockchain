@@ -13,6 +13,8 @@
 | Document versions are monotonic | same plus `document_versions_are_strictly_monotonic` | Duplicate versions must return `StaleDocumentVersion` |
 | Results identify their document snapshot | same | Checks the global document revision on compile and check replies |
 | Closing documents restores filesystem semantics | same | Closes all buffers and requires byte-identical output to the initial disk compile |
+| Editor semantic state is separate from compiler noun ownership | `semantic_snapshot_indexes_arms_and_hover` | Builds traced syntax/arm side tables without a compiler arena or noun-bearing result |
+| Semantic IDs survive source movement and body edits | `symbol_ids_survive_position_and_body_changes` | Reconciles the same arm across two document revisions and requires the ID to remain stable |
 
 The gRPC adapter remains covered separately by
 `crates/honk-grpc/tests/daemon_conformance.rs`; it exercises the same service

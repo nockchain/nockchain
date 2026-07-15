@@ -1,7 +1,8 @@
 # Honk Hoon for VS Code
 
 This extension launches `honk-lsp` directly over stdio. It does not route LSP
-traffic through the gRPC daemon.
+traffic through the gRPC daemon. The current feature set includes unsaved-buffer
+diagnostics, structural hover, and hierarchical symbols for Hoon arms and molds.
 
 ## Development setup
 

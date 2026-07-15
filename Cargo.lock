@@ -4655,7 +4655,9 @@ name = "honk-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "honk",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

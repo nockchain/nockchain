@@ -16,8 +16,13 @@ clients that implement later, capability-negotiated LSP versions.
 | Diagnostics | Published diagnostics identify the checked document version | SHOULD | unsaved parse-error integration test | Passing |
 | Diagnostics | Closed documents have their diagnostics cleared | SHOULD | unsaved parse-error integration test | Passing |
 | Freshness | Results from an older document generation are not published | implementation invariant | `stale_worker_generation_does_not_publish_diagnostics` | Passing |
+| Document symbols | Advertised symbols use hierarchical `DocumentSymbol` responses and valid enclosing/selection ranges | MUST for advertised capability | `document_symbols_and_hover_use_current_unsaved_snapshot` | Passing |
+| Hover | Advertised hover responds from the current unsaved document snapshot | MUST for advertised capability | semantic conformance integration test | Passing |
+| Positions | Semantic queries translate UTF-16 positions without splitting surrogate pairs | MUST for negotiated positions | `semantic_positions_round_trip_as_utf16` | Passing |
 | Cancellation | `$/cancelRequest` may be ignored by a synchronous server | MAY | documented behavior | Accepted divergence |
 
 Coverage claim applies only to the rows above, not to the full LSP feature set.
-Completion, navigation, hover, formatting, symbols, semantic tokens, pull
-diagnostics, notebooks, and workspace folders are not advertised.
+Completion, navigation, references, formatting, semantic tokens, pull
+diagnostics, notebooks, and workspace folders are not advertised. Hover and
+document symbols currently expose structural syntax and arm information, not
+resolved names or inferred types.
