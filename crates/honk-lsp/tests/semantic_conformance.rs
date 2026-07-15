@@ -10,7 +10,10 @@ use lsp_server::{
     Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseKind,
 };
 use lsp_types::notification::{DidOpenTextDocument, Notification as LspNotification};
-use lsp_types::{DidOpenTextDocumentParams, DocumentSymbolResponse, Hover, TextDocumentItem, Uri};
+use lsp_types::{
+    DidOpenTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, Hover,
+    TextDocumentItem, Uri,
+};
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
@@ -52,15 +55,24 @@ fn start_server(
     root: &Path,
     check_delay_ms: u64,
 ) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
+    start_server_with_dependencies(root, &root.join("hoon"), check_delay_ms)
+}
+
+fn start_server_with_dependencies(
+    root: &Path,
+    dependencies: &Path,
+    check_delay_ms: u64,
+) -> (Connection, std::thread::JoinHandle<anyhow::Result<()>>) {
     let (server, client) = Connection::memory();
     let server_thread = std::thread::spawn({
         let root = root.to_path_buf();
+        let dependencies = dependencies.to_path_buf();
         move || {
             run_connection(
                 server,
                 LspConfig {
                     prelude: Some(root.join("hoon/common/hoon.hoon")),
-                    dependencies: Some(root.join("hoon")),
+                    dependencies: Some(dependencies),
                     entry: None,
                     subject_type_jam: None,
                     dbug: true,
@@ -92,6 +104,7 @@ fn start_server(
     let initialize = receive_response(&client, 1);
     assert_eq!(initialize["capabilities"]["documentSymbolProvider"], true);
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
+    assert_eq!(initialize["capabilities"]["definitionProvider"], true);
     assert_eq!(
         initialize["capabilities"]["experimental"]["honk"]["semanticWorker"],
         true
@@ -131,14 +144,15 @@ fn shutdown_server(
 }
 
 #[test]
-fn document_symbols_and_hover_use_current_unsaved_snapshot() {
+fn document_symbols_hover_and_definition_use_current_unsaved_snapshot() {
     let root = repository_root();
     let temp = TempDir::new().expect("temporary workspace");
     let entry = temp.path().join("symbols.hoon");
     std::fs::write(&entry, "42\n").expect("disk entry");
     let entry_url = url::Url::from_file_path(&entry).expect("entry file URI");
     let entry_uri = Uri::from_str(entry_url.as_str()).expect("entry LSP URI");
-    let source = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
+    let source =
+        "|%\n++  answer\n  42\n++  doubled\n  (add answer answer)\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
     let (client, server_thread) = start_server(&root, 0);
 
     client
@@ -176,11 +190,12 @@ fn document_symbols_and_hover_use_current_unsaved_snapshot() {
     let DocumentSymbolResponse::Nested(symbols) = symbols else {
         panic!("server must return hierarchical document symbols");
     };
-    assert_eq!(symbols.len(), 2);
+    assert_eq!(symbols.len(), 3);
     assert_eq!(symbols[0].name, "answer");
     assert_eq!(symbols[0].selection_range.start.line, 1);
     assert_eq!(symbols[0].selection_range.start.character, 4);
-    assert_eq!(symbols[1].name, "pair");
+    assert_eq!(symbols[1].name, "doubled");
+    assert_eq!(symbols[2].name, "pair");
 
     client
         .sender
@@ -242,6 +257,116 @@ fn document_symbols_and_hover_use_current_unsaved_snapshot() {
             .contains("@"),
         "constant expression should have an atom-shaped inferred type"
     );
+
+    let definition_request_id = request_id + 1;
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(definition_request_id),
+                "textDocument/definition".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": { "line": 4, "character": 8 }
+                }),
+            )
+            .into(),
+        )
+        .expect("request definition");
+    let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(receive_response(
+        &client, definition_request_id,
+    ))
+    .expect("definition response")
+    .expect("compiler-resolved definition");
+    let GotoDefinitionResponse::Scalar(definition) = definition else {
+        panic!("server must return a single definition location");
+    };
+    assert_eq!(definition.uri, entry_uri);
+    assert_eq!(definition.range.start.line, 2);
+    assert_eq!(definition.range.start.character, 2);
+
+    shutdown_server(&client, server_thread, definition_request_id + 1);
+}
+
+#[test]
+fn definition_navigates_to_an_imported_gate() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let lib = temp.path().join("lib");
+    std::fs::create_dir(&lib).expect("library directory");
+    let helper = lib.join("helper.hoon");
+    std::fs::write(&helper, "|=  [a=@ b=@]\n  (add a b)\n").expect("helper source");
+    let entry = temp.path().join("entry.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let helper_uri = Uri::from_str(
+        url::Url::from_file_path(&helper)
+            .expect("helper file URI")
+            .as_str(),
+    )
+    .expect("helper LSP URI");
+    let source = "/+  helper\n|=  [a=@ b=@]\n  (helper a b)\n";
+    let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut request_id = 2;
+    let definition = loop {
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(request_id),
+                    "textDocument/definition".to_string(),
+                    json!({
+                        "textDocument": { "uri": entry_uri },
+                        "position": { "line": 2, "character": 4 }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request imported definition");
+        let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(
+            receive_response(&client, request_id),
+        )
+        .expect("definition response");
+        if let Some(definition) = definition {
+            break definition;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compiler-resolved imported definition did not become available"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let GotoDefinitionResponse::Scalar(definition) = definition else {
+        panic!("server must return a single imported definition location");
+    };
+    assert_eq!(definition.uri, helper_uri);
+    assert_eq!(definition.range.start.line, 1);
+    assert_eq!(definition.range.start.character, 2);
 
     shutdown_server(&client, server_thread, request_id + 1);
 }
