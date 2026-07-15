@@ -6,7 +6,9 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 honk = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]

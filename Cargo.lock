@@ -4820,7 +4820,9 @@ name = "honk-service"
 version = "0.1.15"
 dependencies = [
  "anyhow",
+ "blake3",
  "honk",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -13022,4 +13024,3 @@ dependencies = [
 [[patch.unused]]
 name = "aws-runtime"
 version = "1.7.4"
-

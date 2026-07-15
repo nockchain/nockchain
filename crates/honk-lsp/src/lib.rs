@@ -11,20 +11,26 @@ use honk::workspace::{
     WorkspaceCheckRequest, WorkspaceCompileError, WorkspaceConfig, WorkspaceDiagnostic,
     WorkspaceDiagnosticKind,
 };
+use honk_service::semantic::{
+    SemanticNodeId, SemanticSession, SemanticSnapshot, SemanticSymbol, SemanticSymbolKind,
+    SemanticTextRange,
+};
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     DidSaveTextDocument, Exit, LogMessage, Notification as LspNotification, PublishDiagnostics,
     ShowMessage,
 };
+use lsp_types::request::{DocumentSymbolRequest, HoverRequest, Request as LspRequest};
 use lsp_types::{
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, InitializeParams, InitializeResult,
-    LogMessageParams, MessageType, NumberOrString, Position, PositionEncodingKind,
-    PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo, ShowMessageParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, LogMessageParams, MarkupContent, MarkupKind, MessageType,
+    NumberOrString, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
+    ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -149,11 +155,14 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 ..TextDocumentSyncOptions::default()
             },
         )),
+        document_symbol_provider: Some(OneOf::Left(true)),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         experimental: Some(serde_json::json!({
             "honk": {
                 "lspBaseline": LSP_BASELINE_VERSION,
                 "artifactFreeChecks": true,
-                "fullDocumentSync": true
+                "fullDocumentSync": true,
+                "semanticSnapshots": true
             }
         })),
         ..ServerCapabilities::default()
@@ -191,6 +200,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
     )?;
 
     let mut published = HashSet::<String>::new();
+    let mut semantics = SemanticSession::default();
     let mut shutdown = false;
     while !shutdown {
         drain_worker_events(
@@ -201,14 +211,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 if connection.handle_shutdown(&request)? {
                     shutdown = true;
                 } else {
-                    connection.sender.send(
-                        Response::new_err(
-                            request.id,
-                            ErrorCode::MethodNotFound as i32,
-                            format!("unsupported request: {}", request.method),
-                        )
-                        .into(),
-                    )?;
+                    handle_request(&connection, &state, &mut semantics, request)?;
                 }
             }
             Ok(Message::Notification(notification)) => {
@@ -217,6 +220,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 } else {
                     handle_notification(
                         &connection, &state, &trigger_sender, notification, &mut published,
+                        &mut semantics,
                     )?;
                 }
             }
@@ -322,6 +326,7 @@ fn handle_notification(
     trigger: &Sender<()>,
     notification: Notification,
     published: &mut HashSet<String>,
+    semantics: &mut SemanticSession,
 ) -> Result<()> {
     match notification.method.as_str() {
         DidOpenTextDocument::METHOD => {
@@ -391,6 +396,7 @@ fn handle_notification(
                 snapshot.active = snapshot.documents.keys().min().cloned();
             }
             drop(snapshot);
+            semantics.close(&path);
             publish_diagnostics(
                 connection,
                 params.text_document.uri.clone(),
@@ -424,6 +430,226 @@ fn handle_notification(
         }
     }
     Ok(())
+}
+
+fn handle_request(
+    connection: &Connection,
+    state: &Arc<Mutex<EditorSnapshot>>,
+    semantics: &mut SemanticSession,
+    request: Request,
+) -> Result<()> {
+    match request.method.as_str() {
+        DocumentSymbolRequest::METHOD => {
+            let params: DocumentSymbolParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid document symbol parameters: {error}"),
+                    );
+                }
+            };
+            let document = match open_document(state, &params.text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid document symbol URI: {error:#}"),
+                    );
+                }
+            };
+            let result = document.and_then(|(path, document)| {
+                match semantics.snapshot(&path, i64::from(document.version), &document.text) {
+                    Ok(snapshot) => Some(DocumentSymbolResponse::Nested(semantic_symbols_to_lsp(
+                        snapshot, &document.text,
+                    ))),
+                    Err(error) => {
+                        debug!(%error, path = %path.display(), "semantic snapshot unavailable");
+                        None
+                    }
+                }
+            });
+            connection
+                .sender
+                .send(Response::new_ok(request.id, result).into())?;
+        }
+        HoverRequest::METHOD => {
+            let params: HoverParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid hover parameters: {error}"),
+                    );
+                }
+            };
+            let text_document = &params.text_document_position_params.text_document;
+            let position = params.text_document_position_params.position;
+            let document = match open_document(state, &text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid hover URI: {error:#}"),
+                    );
+                }
+            };
+            let result = document.and_then(|(path, document)| {
+                let byte_offset = lsp_position_to_byte(&document.text, position)?;
+                let snapshot =
+                    match semantics.snapshot(&path, i64::from(document.version), &document.text) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            debug!(%error, path = %path.display(), "semantic snapshot unavailable");
+                            return None;
+                        }
+                    };
+                let hover = snapshot.hover(byte_offset)?;
+                Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: hover.markdown,
+                    }),
+                    range: semantic_range_to_lsp(&document.text, hover.range),
+                })
+            });
+            connection
+                .sender
+                .send(Response::new_ok(request.id, result).into())?;
+        }
+        _ => {
+            return send_request_error(
+                connection,
+                request.id,
+                ErrorCode::MethodNotFound,
+                format!("unsupported request: {}", request.method),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn send_request_error(
+    connection: &Connection,
+    id: lsp_server::RequestId,
+    code: ErrorCode,
+    message: String,
+) -> Result<()> {
+    connection
+        .sender
+        .send(Response::new_err(id, code as i32, message).into())?;
+    Ok(())
+}
+
+fn open_document(
+    state: &Arc<Mutex<EditorSnapshot>>,
+    uri: &Uri,
+) -> Result<Option<(PathBuf, OpenDocument)>> {
+    let path = uri_to_file_path(uri)?;
+    let document = lock_snapshot(state)?.documents.get(&path).cloned();
+    Ok(document.map(|document| (path, document)))
+}
+
+fn semantic_symbols_to_lsp(snapshot: &SemanticSnapshot, source: &str) -> Vec<DocumentSymbol> {
+    let mut children = HashMap::<Option<SemanticNodeId>, Vec<&SemanticSymbol>>::new();
+    for symbol in &snapshot.symbols {
+        children.entry(symbol.parent).or_default().push(symbol);
+    }
+
+    fn convert(
+        symbol: &SemanticSymbol,
+        source: &str,
+        children: &HashMap<Option<SemanticNodeId>, Vec<&SemanticSymbol>>,
+    ) -> DocumentSymbol {
+        let empty_range = || Range::new(Position::new(0, 0), Position::new(0, 0));
+        #[allow(deprecated)]
+        DocumentSymbol {
+            name: symbol.name.clone(),
+            detail: Some(symbol.detail.clone()),
+            kind: match symbol.kind {
+                SemanticSymbolKind::Arm => SymbolKind::FUNCTION,
+                SemanticSymbolKind::Mold => SymbolKind::STRUCT,
+            },
+            tags: None,
+            deprecated: None,
+            range: semantic_range_to_lsp(source, symbol.range).unwrap_or_else(empty_range),
+            selection_range: semantic_range_to_lsp(source, symbol.selection_range)
+                .unwrap_or_else(empty_range),
+            children: children.get(&Some(symbol.id)).map(|nested| {
+                nested
+                    .iter()
+                    .map(|child| convert(child, source, children))
+                    .collect()
+            }),
+        }
+    }
+
+    children
+        .remove(&None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|symbol| convert(symbol, source, &children))
+        .collect()
+}
+
+fn semantic_range_to_lsp(source: &str, range: SemanticTextRange) -> Option<Range> {
+    Some(Range::new(
+        byte_to_lsp_position(source, range.start)?,
+        byte_to_lsp_position(source, range.end)?,
+    ))
+}
+
+fn lsp_position_to_byte(source: &str, position: Position) -> Option<u32> {
+    let (start, end) = source_line_bounds(source, position.line)?;
+    let line = &source[start..end];
+    let target = usize::try_from(position.character).ok()?;
+    let mut utf16_column = 0usize;
+    for (byte, character) in line.char_indices() {
+        if utf16_column == target {
+            return u32::try_from(start + byte).ok();
+        }
+        utf16_column += character.len_utf16();
+        if utf16_column > target {
+            return None;
+        }
+    }
+    (utf16_column == target)
+        .then(|| u32::try_from(end).ok())
+        .flatten()
+}
+
+fn byte_to_lsp_position(source: &str, byte_offset: u32) -> Option<Position> {
+    let byte_offset = usize::try_from(byte_offset).ok()?;
+    if byte_offset > source.len() || !source.is_char_boundary(byte_offset) {
+        return None;
+    }
+    let prefix = &source[..byte_offset];
+    let line = u32::try_from(prefix.bytes().filter(|byte| *byte == b'\n').count()).ok()?;
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let character = u32::try_from(source[line_start..byte_offset].encode_utf16().count()).ok()?;
+    Some(Position::new(line, character))
+}
+
+fn source_line_bounds(source: &str, line: u32) -> Option<(usize, usize)> {
+    let mut start = 0usize;
+    for _ in 0..line {
+        start += source[start..].find('\n')? + 1;
+    }
+    let mut end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |relative| start + relative);
+    if end > start && source.as_bytes()[end - 1] == b'\r' {
+        end -= 1;
+    }
+    Some((start, end))
 }
 
 fn parse_notification<T: serde::de::DeserializeOwned>(notification: Notification) -> Result<T> {
@@ -817,11 +1043,12 @@ mod tests {
 
     use honk::CompilerErrorLocation;
     use lsp_server::Connection;
+    use lsp_types::Position;
 
     use super::{
-        drain_worker_events, file_path_to_uri, uri_to_file_path, workspace_diagnostic_to_lsp,
-        EditorSnapshot, ResolvedConfig, WorkerEvent, WorkspaceConfig, WorkspaceDiagnostic,
-        WorkspaceDiagnosticKind,
+        byte_to_lsp_position, drain_worker_events, file_path_to_uri, lsp_position_to_byte,
+        uri_to_file_path, workspace_diagnostic_to_lsp, EditorSnapshot, ResolvedConfig, WorkerEvent,
+        WorkspaceConfig, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
     };
 
     #[test]
@@ -852,6 +1079,20 @@ mod tests {
         assert_eq!(converted.range.start.line, 2);
         assert_eq!(converted.range.start.character, 4);
         assert_eq!(converted.range.end.character, 7);
+    }
+
+    #[test]
+    fn semantic_positions_round_trip_as_utf16() {
+        let source = "😀 |=  a=@\n42\n";
+        let rune_byte = u32::try_from(source.find('|').expect("rune byte")).expect("small source");
+        let position = byte_to_lsp_position(source, rune_byte).expect("LSP position");
+        assert_eq!(position, Position::new(0, 3));
+        assert_eq!(lsp_position_to_byte(source, position), Some(rune_byte));
+        assert_eq!(
+            lsp_position_to_byte(source, Position::new(0, 1)),
+            None,
+            "a position inside an UTF-16 surrogate pair must be rejected"
+        );
     }
 
     #[test]

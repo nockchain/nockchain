@@ -89,6 +89,25 @@ resolves imports, and type-checks/mints the requested entry, but does not
 evaluate, shape, or jam an artifact. `compile` and all CLI/batch paths retain
 their established artifact behavior.
 
+`honk-service::semantic` is a second, deliberately noun-free editor path. It
+parses an open document with the existing debug-spot annotations and derives a
+revisioned side table of syntax nodes, arm/mold symbols, byte ranges, hierarchy,
+and stable session-local node IDs. Matching symbols and unchanged traced
+fragments retain their IDs across document revisions. The LSP protocol thread
+owns this lightweight cache independently of the compiler actor, so hover and
+document-symbol requests do not queue behind a long type check.
+
+Snapshot cache hits avoid parsing when path, version, and content are unchanged.
+A changed document is still reparsed wholesale and its traced AST is serialized
+once to populate the side tables. That is correct invalidation, but not yet
+fine-grained incremental parsing; moving this rebuild onto a cancellable
+semantic worker is the next latency boundary.
+
+The current semantic queries are structural: document symbols identify `++`,
+`+$`, `+*`, and `+|` arms, while hover identifies those definitions and traced
+Hoon syntax. They do not yet claim inferred-type, definition, or reference
+resolution.
+
 ## Invalidation and lifetime
 
 The old batch cache assumes a finite, immutable input set. `honkd` uses a
@@ -125,11 +144,12 @@ host can relaunch it. `--max-compiles 0` disables rotation for controlled use.
 
 ## Toward LSP and annotated trees
 
-For initial LSP work, the least invasive representation is the current immutable
-`Hoon` tree plus stable node IDs and side tables for spans, resolved names,
-inferred types, references, and editor-only state. This preserves the exact AST
-consumed by the shipping compiler and lets editor annotations have independent
-lifetimes.
+The implemented first layer uses the current immutable `Hoon` tree plus stable
+session-local node IDs and side tables for spans, structural symbols, and
+editor-only state. This preserves the exact AST consumed by the shipping
+compiler and lets editor annotations have independent lifetimes. Resolved names,
+inferred types, and references should extend these tables rather than mutate the
+legacy tree.
 
 If later phases genuinely need several tree shapes with one shared grammar, the
 Haskell idea worth borrowing is Trees That Grow (or an HKD-style extension

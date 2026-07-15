@@ -14,6 +14,8 @@ use honk::workspace::{
 };
 use tokio::sync::oneshot;
 
+pub mod semantic;
+
 pub const DEFAULT_MAX_COMPILES: u64 = 256;
 pub const DEFAULT_WORKER_STACK_BYTES: usize = 4 * 1024 * 1024 * 1024;
 const COMMAND_QUEUE_CAPACITY: usize = 8;
