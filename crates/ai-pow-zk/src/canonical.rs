@@ -1538,6 +1538,79 @@ mod tests {
         }
     }
 
+    /// §6(b)-R-b node-verify linchpin, NON-CONTIGUOUS pattern ticket — the
+    /// Pearl-parity gap fix (2026-07-15). This is the production non-contiguous
+    /// case: a `from_indices` opened schedule (a Pearl periodic pattern; MoE
+    /// `outer_indices` gathers have the same non-contiguous shape). The opened
+    /// lanes (`index − covering-range base`) are NOT tile-local, so the R-b
+    /// prover MUST use the lane-indexed placement
+    /// (`place_useful_work_chain_rb_indexed`) to match the canonical program's
+    /// `ids_for` — the tile-local wrapper would MISMATCH (that was the bug).
+    /// Asserts canonical == extract(indexed R-b trace) cell-for-cell on every
+    /// sweep+fold row, at `num_stripes > STRIPE_MAX`.
+    #[test]
+    fn cr_rb_canonical_program_eq_extract_noncontiguous_indexed() {
+        use crate::composite_full_air::{extract_program, PROGRAM_COLS};
+        use crate::composite_trace::CompositeTrace;
+
+        let w = PROGRAM_COLS.len();
+        for &k in &[1536u32, 2048] {
+            let r = 16u32;
+            let num_stripes = (k / r) as usize; // 96, 128 — both > STRIPE_MAX
+            let params = ZkParams {
+                m: 64,
+                k,
+                n: 64,
+                noise_rank: r,
+                tile: 8,
+                difficulty_bits: 0,
+            };
+            // Non-contiguous Pearl-pattern opened rows/cols (h=w=8, h·w=64).
+            let a_indices = vec![0u32, 1, 8, 9, 16, 17, 24, 25];
+            let b_indices = vec![0u32, 1, 8, 9, 32, 33, 40, 41];
+            let sched = StripIndexSchedule::from_indices(&params, a_indices, b_indices)
+                .expect("valid Pearl-pattern schedule");
+            let bp = bp0();
+
+            let probe = schedule_layout_rb(&params, &sched, 1 << 22);
+            let region_end = probe.sweep_start + probe.rb_num_stripes * probe.rb_per_stripe;
+            let trace_len =
+                ((region_end + 8).next_power_of_two()).max(crate::composite_layout::MIN_STARK_LEN);
+
+            let canon = canonical_program_for_strip_schedule(&params, &sched, &bp, trace_len)
+                .expect("R-b canonical program builds for the pattern");
+
+            let l = schedule_layout_rb(&params, &sched, trace_len);
+            let (h_tile, w_tile, kk) = (8usize, 8usize, k as usize);
+            // Opened covering-range lanes (index − chunk base) — the SAME mapping
+            // the production scheduled prover passes to the indexed R-b chain.
+            let ((ca0, _, _), (cb0, _, _)) = sched.chunk_ranges(&params).expect("chunk ranges");
+            let a_lanes: Vec<usize> = sched.a_indices.iter().map(|&i| i as usize - ca0).collect();
+            let b_lanes: Vec<usize> = sched.b_indices.iter().map(|&i| i as usize - cb0).collect();
+            assert_ne!(a_lanes, (0..h_tile).collect::<Vec<_>>(), "lanes must be non-tile-local");
+
+            let a_prime = vec![0i8; h_tile * kk];
+            let b_prime = vec![0i8; w_tile * kk];
+            let mut trace = CompositeTrace::baseline(trace_len);
+            trace.place_useful_work_chain_rb_indexed(
+                l.sweep_start, &a_prime, &b_prime, h_tile, w_tile, r as usize, num_stripes, &a_lanes,
+                &b_lanes,
+            );
+            let extracted = extract_program(&trace.matrix);
+
+            for row in l.sweep_start..region_end {
+                for c in 0..w {
+                    assert_eq!(
+                        canon.values[row * w + c],
+                        extracted.values[row * w + c],
+                        "R-b(indexed) canonical != extract at row {row} col {c} \
+                         (non-contiguous pattern, num_stripes={num_stripes})",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn strip_index_schedule_from_tile_matches_legacy_tile_ranges() {
         let p = ZkParams {

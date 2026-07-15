@@ -1982,7 +1982,12 @@ impl CompositeTrace {
     /// (XOR the completed sub-block accumulator into the per-stripe lane).
     /// Returns `(rows_used, final_M)`. `M` (the 16-word fold state) is the
     /// `TileState` the jackpot hash consumes.
-    #[allow(clippy::too_many_arguments)]
+    /// Tile-local-lane wrapper for [`Self::place_useful_work_chain_rb_indexed`].
+    /// The opened lanes default to `[0,1,…]` — correct ONLY for a
+    /// contiguous-from-origin ticket (`a_indices[j] = j`, `ca0 = 0`). The
+    /// production scheduled/merge path (non-origin tiles, Pearl periodic
+    /// patterns, MoE routing gathers) MUST use the `_indexed` variant with the
+    /// covering-range lanes (`index − c_base`), matching the canonical program.
     pub fn place_useful_work_chain_rb(
         &mut self,
         row_start: usize,
@@ -1992,6 +1997,36 @@ impl CompositeTrace {
         w_tile: usize,
         r: usize,
         num_stripes: usize,
+    ) -> (usize, [u32; 16]) {
+        let a_lanes: Vec<usize> = (0..h_tile).collect();
+        let b_lanes: Vec<usize> = (0..w_tile).collect();
+        self.place_useful_work_chain_rb_indexed(
+            row_start, a_prime_rows, b_prime_cols, h_tile, w_tile, r, num_stripes, &a_lanes,
+            &b_lanes,
+        )
+    }
+
+    /// §6(b)-R-b stripe-major useful-work chain with EXPLICIT opened lanes.
+    /// `a_lanes[j]` / `b_lanes[j]` are the covering-range positions (`opened
+    /// index − chunk base`) of the tile-local row/col `j` — the SAME keys the
+    /// strip-opening producers publish and the canonical R-b program's `ids_for`
+    /// uses. This makes the `noised_packed` chunk IDs correct for ANY opened
+    /// schedule (non-origin tiles, Pearl periodic patterns, MoE `outer_indices`
+    /// gathers), not just contiguous-from-origin. Mirrors
+    /// [`Self::place_useful_work_chain_hw_indexed`]'s lane handling for the R-b
+    /// path. Returns `(rows_used, final_M)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_useful_work_chain_rb_indexed(
+        &mut self,
+        row_start: usize,
+        a_prime_rows: &[i8],
+        b_prime_cols: &[i8],
+        h_tile: usize,
+        w_tile: usize,
+        r: usize,
+        num_stripes: usize,
+        a_lanes: &[usize],
+        b_lanes: &[usize],
     ) -> (usize, [u32; 16]) {
         use crate::composite_layout::{
             CONTROL_PREP, FOLD_IS_FOLD, FOLD_MCUR_BITS_START, FOLD_SLOT_SEL_START,
@@ -2006,13 +2041,14 @@ impl CompositeTrace {
         let k = if h_tile == 0 { 0 } else { a_prime_rows.len() / h_tile };
         assert_eq!(a_prime_rows.len(), h_tile * k, "a_prime_rows must be h*k");
         assert_eq!(b_prime_cols.len(), w_tile * k, "b_prime_cols must be w*k");
+        assert_eq!(a_lanes.len(), h_tile, "a_lanes must have h_tile entries");
+        assert_eq!(b_lanes.len(), w_tile, "b_lanes must have w_tile entries");
         let n_sbi = h_tile / TILE_H;
         let n_sbj = w_tile / TILE_H;
         let n_sb = n_sbi * n_sbj;
         assert!(n_sb * 4 <= 256, "h·w = {} exceeds MAX_CELLS=256", n_sb * 4);
         let trace_h = self.height();
-        // Positioned noised-chunk ID bases (for the LogUp bus). Contiguous
-        // tile ⇒ opened lane == tile-local index.
+        // Positioned noised-chunk ID bases (for the LogUp bus).
         let a_id_base = NOISED_CHUNK_ID_BASE;
         let b_id_base = a_id_base + ((h_tile * k).div_ceil(8)) as u64;
 
@@ -2057,18 +2093,27 @@ impl CompositeTrace {
                         // pack-link hold on these matmul-active rows.
                         let is_reset = step == 0 && sb == 0 && chunk == 0;
                         // Positioned noised-chunk IDs so the LogUp bus binds
-                        // A/B-NOISED to the committed producer store (contiguous
-                        // tile: lane = index). Mirrors place_useful_work_chain_hw.
+                        // A/B-NOISED to the committed producer store. The lane is
+                        // the OPENED covering-range position (`a_lanes/b_lanes`),
+                        // matching the canonical program's `indices[j] − c_base`;
+                        // for a contiguous origin ticket this is just `sb_base+di`.
+                        // Mirrors place_useful_work_chain_hw_indexed.
                         let ids_for = |side_a: bool, sb_base: usize| -> [u64; A_ID_LEN] {
-                            let id_base = if side_a { a_id_base } else { b_id_base };
+                            let (lanes, id_base) = if side_a {
+                                (a_lanes, a_id_base)
+                            } else {
+                                (b_lanes, b_id_base)
+                            };
                             core::array::from_fn(|jc| {
                                 let mut src = [None; 8];
                                 for mm in 0..8 {
                                     let f = jc * 8 + mm;
                                     let (di, col) = (f / TILE_D, f % TILE_D);
                                     if col < w {
-                                        src[mm] =
-                                            Some(((sb_base + di) as u32, (lo + c0 + col) as u32));
+                                        src[mm] = Some((
+                                            lanes[sb_base + di] as u32,
+                                            (lo + c0 + col) as u32,
+                                        ));
                                     }
                                 }
                                 noised_chunk_id(id_base, k, &src)

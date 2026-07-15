@@ -2818,14 +2818,25 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
         // §6(b)-R-b: stripe-major useful-work chain with the FoldChip row
         // INTERLEAVED after each stripe's sub-block sweep (one call, no
         // separate `place_fold_chain`). It returns the FoldChip state M
-        // directly — that IS `real_m`. The single-tile full-matmul proof
-        // requires `num_tiles == 1` ⇒ the attested tile is (0,0) ⇒ the
-        // opened lanes are tile-local `[0,1,…]`, which is exactly what
-        // `place_useful_work_chain_rb` uses (== `index − ca0` for the
-        // origin tile), matching the canonical R-b program.
+        // directly — that IS `real_m`. Uses the EXPLICIT opened lanes
+        // (`index − c_base`, identical to the ≤64 branch), so the
+        // `noised_packed` IDs are correct for ANY opened schedule — non-origin
+        // tiles, Pearl periodic patterns, and MoE `outer_indices` gathers — not
+        // only contiguous-from-origin. Matches the canonical R-b program's
+        // `ids_for`.
         let sweep_start = mh_end + 3;
-        let (rows_used, m) = trace.place_useful_work_chain_rb(
-            sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes,
+        let a_lanes: Vec<usize> = strip_schedule
+            .a_indices
+            .iter()
+            .map(|&i| i as usize - ca0)
+            .collect();
+        let b_lanes: Vec<usize> = strip_schedule
+            .b_indices
+            .iter()
+            .map(|&i| i as usize - cb0)
+            .collect();
+        let (rows_used, m) = trace.place_useful_work_chain_rb_indexed(
+            sweep_start, &a_strips, &b_strips, h_tile, w_tile, r, num_stripes, &a_lanes, &b_lanes,
         );
         let store_start = sweep_start + rows_used;
         let _placed = place_store(&mut trace, store_start)?;

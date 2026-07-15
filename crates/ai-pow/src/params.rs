@@ -584,10 +584,10 @@ pub enum ParamError {
     #[error("tile^2 (= h·w) must be <= 256 (Pearl reference-prover per-tile cap)")]
     TileTooLarge,
     #[error(
-        "num_stripes (= k / noise_rank) must be <= STRIPE_MAX — the §6(b) \
-         in-circuit matmul-sweep capacity; a larger value forces the \
-         unsound off-circuit fallback (matmul not proven in-circuit). \
-         Raise noise_rank so k/r <= STRIPE_MAX."
+        "num_stripes (= k / noise_rank) must be <= PEARL_STRIPE_MAX = 512 \
+         (Pearl's §4.8 stripe ceiling). num_stripes <= STRIPE_MAX (64) proves \
+         sub-block-major; (64, 512] proves via the §6(b)-R-b stripe-major path \
+         (both in-circuit). A value > 512 is outside Pearl's envelope."
     )]
     TooManyStripes,
     #[error("noise_rank must be in 1..=k")]
