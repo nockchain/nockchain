@@ -310,11 +310,17 @@ stage (R1).
   is one-ticket-per-cert, Pearl-consistent; the `num_tiles>1` fail-closed is
   native-path-only. No aggregate circuit needed.
 - **✅ FIXED — R-b lane-awareness for non-contiguous wide-k tickets** (§3.4,
-  commit 08820020): the num_stripes>64 R-b prover now uses opened lanes on the
-  production scheduled/merge path, so Pearl periodic patterns + MoE
-  `outer_indices` gathers work at wide `k`. Validated by a canonical==extract
-  KAT on a non-contiguous pattern at ns 96/128. Fixed the stale `TooManyStripes`
+  commits 08820020, 5036ad96): the num_stripes>64 R-b prover now uses opened
+  lanes on the production scheduled/merge path, so Pearl periodic patterns + MoE
+  `outer_indices` gathers work at wide `k`. Fixed the stale `TooManyStripes`
   message too.
+- **✅ VETTING A1 COMPLETE** — R-b lane fix validated on BOTH non-contiguous
+  wide-k production paths: (1) dense pattern — canonical==extract KAT at ns
+  96/128 (`cr_rb_canonical_program_eq_extract_noncontiguous_indexed`); (2) MoE
+  routing — REAL end-to-end prove through the scheduled prover at ns 128, L0
+  jackpot PI == off-circuit MoE grouped tile
+  (`real_moe_grouped_tile_layer0_proof_wide_stripes`, #[ignore], ~9s). A1 in §4
+  is done.
 - **Boot-setup injection scoped** (§3.2#1): `build_verifier_setup` runs
   `prove_canonical_moe_block` (expensive) → the setup must be PRECOMPUTED offline
   and embedded, keyed to the pinned consensus params. `init_ai_pow_verifier_setup`
