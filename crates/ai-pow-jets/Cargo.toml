@@ -16,10 +16,10 @@ either.workspace = true
 once_cell.workspace = true
 tracing.workspace = true
 serde.workspace = true
+bincode = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 nockapp = { path = "../nockapp" }
-bincode = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

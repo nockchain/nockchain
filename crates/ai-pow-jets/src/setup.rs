@@ -278,3 +278,82 @@ pub fn rebuild_verifier_setup_from_seed(
         digest_bytes,
     })
 }
+
+/// The sane cache path inside the nockapp data dir for the boot verifier-setup
+/// seed table. Kept under an `ai-pow/` subdirectory so we do not litter the data
+/// dir with loose files — it sits alongside the other per-node persistence.
+pub fn verifier_setup_seed_cache_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("ai-pow").join("verifier-setup-seeds.bin")
+}
+
+/// Serialize a seed table to `path` (creating parent dirs as needed). The cached
+/// artifact is small — the seeds (KB-MB/bucket), NOT the rebuilt ~866 MB contexts.
+pub fn save_verifier_setup_seeds(
+    path: &std::path::Path,
+    seeds: &[AiPowCompactVerifierSetupSeed],
+) -> Result<(), SetupError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(err("create verifier-setup cache dir"))?;
+    }
+    let bytes = bincode::serde::encode_to_vec(seeds, bincode::config::standard())
+        .map_err(err("serialize verifier-setup seeds"))?;
+    std::fs::write(path, bytes).map_err(err("write verifier-setup cache"))?;
+    Ok(())
+}
+
+/// Load a seed table from `path` — the inverse of [`save_verifier_setup_seeds`].
+pub fn load_verifier_setup_seeds(
+    path: &std::path::Path,
+) -> Result<Vec<AiPowCompactVerifierSetupSeed>, SetupError> {
+    let bytes = std::fs::read(path).map_err(err("read verifier-setup cache"))?;
+    let (seeds, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        .map_err(err("deserialize verifier-setup seeds"))?;
+    Ok(seeds)
+}
+
+/// Load the cached seed table and REBUILD each seed into a full verifier setup
+/// (circuit compile + Merkle commit; NO FRI proving). This is the boot-time path:
+/// seconds per bucket, not the ~2 min of proving each would otherwise cost. The
+/// resulting table is ready for [`crate::init_ai_pow_verifier_setup`].
+pub fn load_verifier_setup_table(
+    path: &std::path::Path,
+) -> Result<Vec<AiPowVerifierSetup>, SetupError> {
+    load_verifier_setup_seeds(path)?
+        .into_iter()
+        .map(rebuild_verifier_setup_from_seed)
+        .collect()
+}
+
+/// One production trace-height bucket: the puzzle shape that lands in it. The boot
+/// table has one entry per reachable Pearl trace height (shapes sharing a height
+/// share a setup — the setup is height-keyed, not shape-keyed).
+#[derive(Clone, Copy, Debug)]
+pub struct VerifierSetupBucketShape {
+    pub params: MatmulParams,
+    pub hw: u32,
+    pub e: usize,
+    pub top_k: usize,
+}
+
+/// OFFLINE (expensive — one real compact proof per bucket): build the seed table
+/// for the given bucket shapes and cache it to `path`. Run this once (offline / on
+/// first boot); subsequent boots call [`load_verifier_setup_table`] and rebuild in
+/// seconds. Rejects duplicate trace-height buckets (each cert must resolve to
+/// exactly one setup), matching [`crate::init_ai_pow_verifier_setup`]'s admission.
+pub fn build_and_cache_verifier_setup_seeds(
+    path: &std::path::Path,
+    buckets: &[VerifierSetupBucketShape],
+) -> Result<(), SetupError> {
+    let mut seeds: Vec<AiPowCompactVerifierSetupSeed> = Vec::with_capacity(buckets.len());
+    for b in buckets {
+        let seed = build_verifier_setup_seed(&b.params, b.hw, b.e, b.top_k)?;
+        let h = seed.trace_height();
+        if seeds.iter().any(|s| s.trace_height() == h) {
+            return Err(SetupError(format!(
+                "duplicate trace-height bucket {h} in verifier-setup table"
+            )));
+        }
+        seeds.push(seed);
+    }
+    save_verifier_setup_seeds(path, &seeds)
+}

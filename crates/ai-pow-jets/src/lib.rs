@@ -568,6 +568,28 @@ mod jet_tests {
             ),
             "wrong block commitment must still be rejected against the rebuilt setup",
         );
+
+        // FILE cache path (C4b): save the seed to a data-dir-style cache file, load
+        // + rebuild the TABLE from disk, and verify the SAME block against the
+        // disk-loaded setup — the exact boot flow (cache in data dir → load →
+        // rebuild → verify), end to end through a real file.
+        let tmp_data_dir =
+            std::env::temp_dir().join(format!("ai-pow-jets-seedcache-{}", std::process::id()));
+        let cache_path = crate::setup::verifier_setup_seed_cache_path(&tmp_data_dir);
+        crate::setup::save_verifier_setup_seeds(&cache_path, std::slice::from_ref(&block.seed))
+            .expect("save seed cache to data-dir file");
+        let table =
+            crate::setup::load_verifier_setup_table(&cache_path).expect("load + rebuild seed table");
+        let _ = std::fs::remove_dir_all(&tmp_data_dir);
+        assert_eq!(table.len(), 1, "one-bucket table loaded from disk");
+        assert_eq!(
+            table[0].trace_height, block.run.trace_height,
+            "disk-loaded setup trace height matches the proved cert",
+        );
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &table[0]), Ok(true)),
+            "real MoE block must verify against the DISK-loaded rebuilt setup",
+        );
     }
 
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
