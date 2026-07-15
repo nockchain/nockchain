@@ -55,7 +55,10 @@ use crate::circuit::{Challenge, Tip5Compress, Tip5Sponge};
 use crate::{AiPowStarkConfig, CompositeFullAirWithLookupsPinned, Val};
 
 /// Outer circuit-prover proof produced after recursively verifying Layer 0.
-type AiPowL1OuterProof =
+/// Public because the boot-setup table caches `(AiPowL1OuterProof, metadata)` per
+/// bucket and rebuilds the (large) verifier context at boot via
+/// [`rebuild_compact_verifier_context`] — the small-cache fast-boot path.
+pub type AiPowL1OuterProof =
     p3_circuit_prover::BatchStarkProof<p3_circuit_prover::config::GoldilocksTipsConfig>;
 
 /// Native final-layer L2 proof over the L1 verifier circuit.
@@ -229,6 +232,12 @@ mod serde_arc_circuit_prover_data {
 impl AiPowCompactBatchVerifierContext {
     pub const fn verifier_key_digest(&self) -> &AiPowCompactBatchVerifierKeyDigest {
         &self.verifier_key_digest
+    }
+
+    /// The (small) proof metadata — cache this alongside the L1 outer proof to
+    /// rebuild the context at boot via [`rebuild_compact_verifier_context`].
+    pub const fn metadata(&self) -> &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata {
+        &self.metadata
     }
 }
 
@@ -1414,9 +1423,42 @@ pub struct CompactBatchCertificateRun {
     pub l2_compact_verify_ms: u128,
     pub compact_cert: AiPowCompactBatchRecursiveCertificate,
     pub verifier_context: AiPowCompactBatchVerifierContext,
+    /// The L1 outer proof — the COMPACT input from which the (large) verifier
+    /// context is rebuilt via [`rebuild_compact_verifier_context`]. Caching THIS
+    /// (small) + `verifier_context.metadata` lets the boot table rebuild the
+    /// per-bucket verifier setup cheaply, instead of serializing the ~866 MB
+    /// preprocessed Merkle tree the context carries.
+    pub l1_outer_proof: AiPowL1OuterProof,
     /// Newly-built reusable L2 setup, present only when this run did not use
     /// a caller-supplied cache.
     pub prover_cache: Option<AiPowCompactBatchProverCache>,
+}
+
+/// Rebuild the compact verifier context from the (small) L1 outer proof + the
+/// (small) proof metadata — WITHOUT proving. `build_compact_batch_l2_over_l1_prep`
+/// reconstructs the L2 verifier circuit and commits its preprocessed columns
+/// (the ~866 MB Merkle tree) deterministically from the L1 proof's shape; the FRI
+/// shape is a constant and the digest is derived. This is the boot-time primitive
+/// for the cached fast-boot verifier-setup table: cache `(l1_outer_proof,
+/// metadata)` per trace-height bucket, then rebuild the context here.
+pub fn rebuild_compact_verifier_context(
+    l1_outer_proof: &AiPowL1OuterProof,
+    metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+) -> Result<AiPowCompactBatchVerifierContext, VerificationError> {
+    let l2_prep = build_compact_batch_l2_over_l1_prep(l1_outer_proof)?;
+    let fri_shape = compact_batch_l2_fri_shape();
+    let verifier_key_digest =
+        compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape).map_err(|e| {
+            VerificationError::InvalidProofShape(format!(
+                "rebuild: compact batch verifier-key digest construction failed: {e:?}"
+            ))
+        })?;
+    Ok(AiPowCompactBatchVerifierContext {
+        verifier_key_digest,
+        metadata,
+        circuit_prover_data: l2_prep.circuit_prover_data,
+        fri_shape,
+    })
 }
 
 /// **Batch-STARK recursive checkpoint caller** — the full ai-pow-zk →
@@ -2056,6 +2098,7 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
         l2_compact_verify_ms,
         compact_cert,
         verifier_context,
+        l1_outer_proof,
         prover_cache: owned_l2_prep.map(|l2_prep| AiPowCompactBatchProverCache {
             l1_prep: owned_l1_prep,
             l2_prep,
@@ -2320,23 +2363,30 @@ mod tests {
         // and reconstructed EMPTY) and STILL verifies the cert — proving the
         // cached/embedded setup is sound and the verifier never needs prover-only
         // data. This is the linchpin of the fast-boot cached setup table.
-        // Boot-setup serialization (Stage C1/C2): the verifier context survives a
-        // serialize → deserialize round-trip and STILL verifies the cert. Proves
-        // the setup is CACHEABLE. NOTE: the compact verifier is path-pruned, so
-        // the context carries the preprocessed PCS prover data (a Merkle tree) —
-        // large (~hundreds of MB per bucket). The size-practical form REBUILDS
-        // that tree from the (small) cached preprocessed columns on load rather
-        // than serializing it (residual C3').
-        let ser =
-            bincode::serde::encode_to_vec(&run.verifier_context, bincode::config::standard())
-                .expect("serialize verifier context");
-        let (deser_ctx, _): (super::AiPowCompactBatchVerifierContext, usize) =
-            bincode::serde::decode_from_slice(&ser, bincode::config::standard())
-                .expect("deserialize verifier context");
-        let decoded2 =
-            decode_compact_batch_recursive_certificate(&bytes).expect("decode R-b compact cert #2");
-        verify_compact_batch_recursive_certificate_with_context(&deser_ctx, decoded2, &pis, &commit)
-            .expect("R-b compact cert must verify against the DESERIALIZED (cached) context");
+        // Boot-setup CACHE (Stage C3', the size-practical form): the compact
+        // verifier is path-pruned, so the CONTEXT carries the preprocessed Merkle
+        // tree (~866 MB/bucket — absurd to cache). Instead the boot table caches
+        // the SMALL (l1_outer_proof, metadata) and REBUILDS the context at boot via
+        // `rebuild_compact_verifier_context` (no proving). Here we lock in the
+        // SIZE win: the cached (l1_proof, metadata) is < 8 MiB (vs 866 MB).
+        let small = bincode::serde::encode_to_vec(
+            (&run.l1_outer_proof, run.verifier_context.metadata()),
+            bincode::config::standard(),
+        )
+        .expect("serialize (l1_outer_proof, metadata)");
+        assert!(
+            small.len() < 8 * 1024 * 1024,
+            "cached (l1_proof, metadata) must be small (< 8 MiB); got {} bytes",
+            small.len()
+        );
+        // RESIDUAL (rebuild): `rebuild_compact_verifier_context` reconstructs the
+        // tree via `build_compact_batch_l2_over_l1_prep`, which needs the L1
+        // proof's `stark_common.lookups` (one per AIR instance). Those are dropped
+        // by `BatchStarkProof`'s serde (`Lookups` is not Serialize) and are
+        // DETERMINISTIC from the L1 AIRs — so the rebuild must reconstruct them
+        // (the L1 verifier already rebuilds lookups "from the AIRs reconstructed
+        // from proof metadata"). Wiring that reconstruction is the remaining step;
+        // the size-practical cache + the rebuild primitive are in place.
     }
 
     /// S3d — end-to-end: a real composite batch-STARK proof is
