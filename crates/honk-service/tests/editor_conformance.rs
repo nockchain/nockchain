@@ -59,12 +59,6 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
     .expect("initialize compiler service");
     let compiler = service.handle();
 
-    let baseline = compiler
-        .compile(request(&entry))
-        .await
-        .expect("baseline response")
-        .result
-        .expect("baseline compile");
     let baseline_check = compiler
         .check(WorkspaceCheckRequest {
             entry: entry.clone(),
@@ -74,7 +68,30 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         .result
         .expect("baseline check");
     assert!(
-        baseline_check.cache_stats.path_hits >= 2,
+        !baseline_check.semantic_facts.is_empty(),
+        "a fresh editor check should return owned type facts"
+    );
+    assert!(baseline_check.semantic_facts.iter().all(|fact| {
+        !fact.type_summary.is_empty()
+            && fact.location.start_line.is_some()
+            && fact.location.start_col.is_some()
+    }));
+    let baseline = compiler
+        .compile(request(&entry))
+        .await
+        .expect("baseline response")
+        .result
+        .expect("baseline compile");
+    let cached_check = compiler
+        .check(WorkspaceCheckRequest {
+            entry: entry.clone(),
+        })
+        .await
+        .expect("cached check response")
+        .result
+        .expect("cached check");
+    assert!(
+        cached_check.cache_stats.path_hits >= 2,
         "artifact-free check should reuse compiled dependencies"
     );
 

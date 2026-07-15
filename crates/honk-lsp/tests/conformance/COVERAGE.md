@@ -17,7 +17,7 @@ clients that implement later, capability-negotiated LSP versions.
 | Diagnostics | Closed documents have their diagnostics cleared | SHOULD | unsaved parse-error integration test | Passing |
 | Freshness | Results from an older document generation are not published | implementation invariant | `stale_worker_generation_does_not_publish_diagnostics` | Passing |
 | Document symbols | Advertised symbols use hierarchical `DocumentSymbol` responses and valid enclosing/selection ranges | MUST for advertised capability | `document_symbols_and_hover_use_current_unsaved_snapshot` | Passing |
-| Hover | Advertised hover responds from the current unsaved document snapshot | MUST for advertised capability | semantic conformance integration test | Passing |
+| Hover | Advertised hover responds from the current unsaved document snapshot and adds compiler-owned inferred types when the matching check completes | MUST for advertised capability | `document_symbols_and_hover_use_current_unsaved_snapshot` | Passing |
 | Positions | Semantic queries translate UTF-16 positions without splitting surrogate pairs | MUST for negotiated positions | `semantic_positions_round_trip_as_utf16` | Passing |
 | Cancellation | `$/cancelRequest` completes the pending request exactly once and suppresses its result | base protocol contract | unit cancellation test + process responsiveness test | Passing |
 | Responsiveness | Semantic indexing does not block unrelated JSON-RPC handling | implementation invariant | `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` | Passing |
@@ -25,6 +25,7 @@ clients that implement later, capability-negotiated LSP versions.
 
 Coverage claim applies only to the rows above, not to the full LSP feature set.
 Completion, navigation, references, formatting, semantic tokens, pull
-diagnostics, notebooks, and workspace folders are not advertised. Hover and
-document symbols currently expose structural syntax and arm information, not
-resolved names or inferred types.
+diagnostics, notebooks, and workspace folders are not advertised. Document
+symbols remain structural. Hover combines structural syntax with an owned type
+summary at compiler debug spots; it does not yet resolve definitions or
+references.

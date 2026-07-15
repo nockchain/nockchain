@@ -35,7 +35,7 @@ use crate::native::hot::native_hot_state;
 use crate::native::noun::term_to_noun;
 use crate::native::ut::{ty_noun, Ut};
 use crate::pipeline::{NativeImportKind, ScopeMode};
-use crate::{pipeline, CompilerErrorKind, CompilerErrorLocation};
+use crate::{pipeline, CompilerErrorKind, CompilerErrorLocation, CompilerSemanticFact};
 
 type DynError = Box<dyn Error>;
 type Result<T> = std::result::Result<T, DynError>;
@@ -206,6 +206,10 @@ pub struct WorkspaceCheckOutput {
     /// True when changed compiler inputs invalidated cached editor state.
     pub cache_invalidated: bool,
     pub cache_stats: WorkspaceCacheStats,
+    /// Owned type summaries captured at existing debug spots by the
+    /// editor-only check path. Artifact-producing paths never enable this
+    /// observer.
+    pub semantic_facts: Vec<CompilerSemanticFact>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1718,15 +1722,20 @@ impl<'arena> WorkspaceCompiler<'arena> {
         self.builder
             .observe_workspace_file(&request.entry)
             .map_err(WorkspaceCompileError::from_dyn)?;
-        self.builder
+        self.builder.begin_semantic_type_recording();
+        let compile_result = self
+            .builder
             .compile_entry(&request.entry)
-            .map_err(WorkspaceCompileError::from_dyn)?;
+            .map_err(WorkspaceCompileError::from_dyn);
+        let semantic_facts = self.builder.finish_semantic_type_recording();
+        compile_result?;
 
         let cache_stats = self.builder.cache_stats.since(cache_stats_before);
         self.reported_cache_stats = self.builder.cache_stats;
         Ok(WorkspaceCheckOutput {
             cache_invalidated: false,
             cache_stats,
+            semantic_facts,
         })
     }
 }
@@ -2035,6 +2044,14 @@ impl<'a> NativeBuildContext<'a> {
 
     fn enable_workspace_mode(&mut self) {
         self.workspace_mode = true;
+    }
+
+    fn begin_semantic_type_recording(&mut self) {
+        self.ut.begin_semantic_type_recording();
+    }
+
+    fn finish_semantic_type_recording(&mut self) -> Vec<CompilerSemanticFact> {
+        self.ut.finish_semantic_type_recording()
     }
 
     fn enable_workspace_sources(&mut self, sources: WorkspaceSourceSnapshot) {

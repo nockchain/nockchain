@@ -24,6 +24,29 @@ impl SemanticTextRange {
     }
 }
 
+/// Convert Hatch's one-based debug-spot coordinates back to source bytes,
+/// including its tall-tape column normalization.
+pub fn range_from_one_based_spot(
+    source: &str,
+    start_line: u64,
+    start_column: u64,
+    end_line: u64,
+    end_column: u64,
+) -> Option<SemanticTextRange> {
+    if source.len() > u32::MAX as usize {
+        return None;
+    }
+    let lines = LineIndex::new(source);
+    let start = u32::try_from(lines.byte_offset(start_line, start_column)?).ok()?;
+    let end = u32::try_from(lines.byte_offset(end_line, end_column)?).ok()?;
+    Some(SemanticTextRange {
+        start,
+        end: end
+            .max(start.saturating_add(1))
+            .min(lines.source_len as u32),
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticNode {
     pub id: SemanticNodeId,
@@ -671,9 +694,26 @@ impl LineIndex {
 mod tests {
     use std::path::Path;
 
-    use super::{scan_arm_headers, LineIndex, SemanticSession, SemanticSymbolKind};
+    use super::{
+        range_from_one_based_spot, scan_arm_headers, LineIndex, SemanticSession,
+        SemanticSymbolKind, SemanticTextRange,
+    };
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
+
+    #[test]
+    fn compiler_spots_map_to_source_bytes() {
+        assert_eq!(
+            range_from_one_based_spot(SOURCE, 3, 3, 3, 5),
+            Some(SemanticTextRange {
+                start: u32::try_from(SOURCE.find("42").expect("constant offset"))
+                    .expect("small source"),
+                end: u32::try_from(SOURCE.find("42").expect("constant offset") + 2)
+                    .expect("small source"),
+            })
+        );
+        assert_eq!(range_from_one_based_spot(SOURCE, 0, 1, 1, 1), None);
+    }
 
     #[test]
     fn semantic_snapshot_indexes_arms_and_hover() {

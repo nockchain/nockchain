@@ -2,7 +2,8 @@
 
 This extension launches `honk-lsp` directly over stdio. It does not route LSP
 traffic through the gRPC daemon. The current feature set includes unsaved-buffer
-diagnostics, structural hover, and hierarchical symbols for Hoon arms and molds.
+diagnostics, hierarchical symbols for Hoon arms and molds, and structural hover
+augmented with inferred types after the matching compiler check completes.
 
 ## Development setup
 

@@ -18,12 +18,12 @@
 - **Tests affected:** `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` and `client_cancellation_completes_the_semantic_request_once`.
 - **Review date:** 2026-07-15.
 
-## DISC-003: Structural semantic capability surface
+## DISC-003: Limited semantic capability surface
 
 - **Reference:** LSP defines many optional language features.
-- **Implementation:** Honk advertises document symbols and hover backed by an editor-only parsed side table. Hover identifies syntax and arms but does not yet expose inferred types or resolved definitions.
+- **Implementation:** Honk advertises document symbols and hover backed by an editor-only parsed side table. After a successful compiler check, hover also selects the narrowest current debug spot and displays its owned inferred-type summary. Resolved definitions are not yet available.
 - **Impact:** No completion, navigation, references, formatting, semantic tokens, or pull diagnostics yet.
-- **Resolution:** INVESTIGATING; extend features only as resolved-name and inferred-type side tables become available.
+- **Resolution:** INVESTIGATING; extend features only as additional owned semantic side tables become available.
 - **Tests affected:** all unadvertised optional feature requests.
 - **Review date:** 2026-07-15.
 
