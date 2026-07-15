@@ -455,6 +455,35 @@ Staged (R1): C1 upstream serde + round-trip; C2 context/setup serde + round-trip
 C3 table cache build+load; C4 boot wiring (nockchain + roswell) + per-bucket
 end-to-end.
 
+### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
+The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
+recursion.rs:2040) reads from the context ONLY: `verifier_key_digest`,
+`metadata`, `fri_shape`, and `circuit_prover_data` (passed to
+`GoldilocksBlake3PathPrunedCompactVerifierContext::new`, :2091). It never touches
+the prover-only LDEs directly — and `ProverData = { common: CommonData (shared),
+prover_only }`, `CircuitProverData::common_data() -> &prover_data.common`. So the
+verifier fundamentally needs the **CommonData (preprocessed circuit commitment)**,
+NOT `prover_only`.
+- **A serializable projection ALREADY EXISTS:** `SerializedStarkCommon`
+  (circuit-prover/src/batch_stark_prover.rs:388, `#[derive(Serialize,Deserialize)]`,
+  `from_common`/`into_common`) — the preprocessed commitment + instance metas.
+- **Is building the context cheap (small boot delay) or does it need the prove?**
+  It is built as a byproduct of the pipeline: `context.circuit_prover_data =
+  l2_prep.circuit_prover_data`, and `l2_prep = build_compact_batch_l2_over_l1_prep(
+  &l1_outer_proof)` — it CONSUMES the L1 proof (which needs the L0 proof). So today
+  building the context needs ~most of the ~2min prove chain per bucket (~14-16min
+  for 8) — NOT a small delay. BUT the CommonData/metadata are SHAPE-determined
+  (depend only on the trace-height bucket, not proof values).
+⇒ Two fast-boot paths:
+  1. **Cache** (serialize the 8 contexts offline via `SerializedStarkCommon` +
+     metadata/fri_shape/digest; load in ms at boot). Pragmatic; the projection
+     primitive exists; needs the full CircuitProverData reconstruction path
+     (primitive/non-primitive columns beyond `SerializedStarkCommon` — TBD how much).
+  2. **Shape-only build** (refactor `build_composite_l1_verifier_circuit` /
+     `build_compact_batch_l2_over_l1_prep` to build the verifier context from the
+     trace-height SHAPE without a real proof — a few seconds at boot, no cache
+     file). Cleaner long-term; a deeper recursion-internals refactor.
+
 ### Remaining (post-decision), in dependency order
 1. **Stage C** — resolve the (a)/(b) decision above; build the 8-bucket table;
    inject at boot (nockchain + roswell); validate a cert per bucket. [§3.2#1;
