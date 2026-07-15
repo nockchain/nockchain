@@ -477,6 +477,99 @@ mod jet_tests {
         );
     }
 
+    /// KAT (real proving + rebuild, ~30s): the boot-setup SEED cache path — the
+    /// C4 linchpin. Prove a real MoE block, serialize its SMALL rebuild seed,
+    /// deserialize it, and rebuild the FULL verifier setup from it WITHOUT proving.
+    /// The real block must verify through the jet CORE against the REBUILT
+    /// (cached-seed) setup exactly as against the freshly-proved context, and a
+    /// wrong commit must still be rejected. Also asserts the serialized seed is
+    /// small (< 16 MiB) — the whole point of caching the seed, not the ~866 MB
+    /// context. This proves a boot node can cache seeds and rebuild working setups.
+    #[test]
+    #[ignore = "real MoE compact proof + rebuild (~30s); opt-in"]
+    fn moe_verifier_setup_seed_roundtrip_rebuilds_working_setup() {
+        use crate::setup::{
+            prove_canonical_moe_block, rebuild_verifier_setup_from_seed, CANONICAL_SETUP_COMMIT,
+        };
+        let params = MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
+            .expect("prove canonical MoE block");
+        let commit = block.commit;
+
+        // Serialize the SMALL seed; assert it is small (vs the ~866 MB context).
+        let seed_bytes = bincode::serde::encode_to_vec(&block.seed, bincode::config::standard())
+            .expect("serialize verifier-setup seed");
+        assert!(
+            seed_bytes.len() < 16 * 1024 * 1024,
+            "cached seed must be small (< 16 MiB); got {} bytes",
+            seed_bytes.len(),
+        );
+
+        // Build the block artifact noun (uses the freshly-proved cert; unchanged).
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &block.statement,
+            &block.aux_inclusion,
+            &block.moe_art,
+            &block.certificate.zk_params,
+            block.certificate.found_idx,
+            block.certificate.trace_height,
+            &block.certificate.commitments,
+            &block.certificate.public_inputs,
+            &block.certificate.certificate,
+        )
+        .expect("build MoE artifact noun")
+        .jam();
+
+        // BOOT path: deserialize the seed and REBUILD the setup (no proving).
+        let (seed2, _): (ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed, _) =
+            bincode::serde::decode_from_slice(&seed_bytes, bincode::config::standard())
+                .expect("deserialize verifier-setup seed");
+        let setup = rebuild_verifier_setup_from_seed(seed2).expect("rebuild setup from seed");
+        assert_eq!(
+            setup.trace_height, block.run.trace_height,
+            "rebuilt setup trace height matches the proved cert",
+        );
+        let proved_digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            &block.run.verifier_key_digest(),
+        )
+        .to_vec();
+        assert_eq!(
+            setup.digest_bytes, proved_digest,
+            "rebuilt setup digest matches the proved cert digest",
+        );
+
+        let slab = cue_artifact(jammed);
+        let space = slab.noun_space();
+        let root = unsafe { *slab.root() };
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+            root,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode artifact noun");
+
+        let loose_target = [0xffu8; 32];
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            "real MoE block must verify against the REBUILT (cached-seed) setup",
+        );
+        assert!(
+            matches!(
+                ai_pow_verify_core(&artifact, [0x99u8; 32], loose_target, &setup),
+                Ok(false)
+            ),
+            "wrong block commitment must still be rejected against the rebuilt setup",
+        );
+    }
+
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
     /// Pearl admits a BAND of puzzle shapes; nockchain must verify all of them.
     /// A single embedded boot setup only suffices if the verifier-key digest is

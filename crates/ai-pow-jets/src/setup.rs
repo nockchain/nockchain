@@ -18,7 +18,10 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::{prove_pearl_moe_compact_recursive_certificate, PearlMoeCompactProveRun};
+use ai_pow::zk_bridge::{
+    prove_pearl_moe_compact_recursive_certificate_with_seed, PearlMoeCompactProveRun,
+};
+use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 use ai_pow_miner::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
 };
@@ -53,6 +56,9 @@ pub struct CanonicalBlock {
     pub moe_art: PearlMergeMoeArtifact,
     pub certificate: AiPowCertificateShape,
     pub commit: [u8; 32],
+    /// The SMALL, serializable rebuild seed for this block's trace-height bucket —
+    /// the cacheable boot-setup input (see [`build_verifier_setup`]).
+    pub seed: AiPowCompactVerifierSetupSeed,
 }
 
 fn setup_pattern(len: u32) -> PearlPeriodicPattern {
@@ -149,7 +155,7 @@ pub fn prove_canonical_moe_block(
         .indices_with_offset_bounded(0, 4096)
         .map_err(err("local_b"))?;
 
-    let run = prove_pearl_moe_compact_recursive_certificate(
+    let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
         params,
         &a,
         &b,
@@ -210,6 +216,7 @@ pub fn prove_canonical_moe_block(
         moe_art,
         certificate,
         commit: nock_commit,
+        seed,
     })
 }
 
@@ -231,6 +238,43 @@ pub fn build_verifier_setup(
     Ok(AiPowVerifierSetup {
         trace_height,
         context: block.run.verifier_context,
+        digest_bytes,
+    })
+}
+
+/// Build ONLY the small, cacheable rebuild seed for the boot verifier setup, by
+/// proving one canonical MoE block at the given shape. The offline/boot table
+/// builder calls this per trace-height bucket and serializes the seeds; the large
+/// (~866 MB) verifier context that proving also produces is dropped here and
+/// rebuilt at boot from the seed (see [`rebuild_verifier_setup_from_seed`]). This
+/// is the size-practical form: a seed is KB-MB, so a full bucket table caches in
+/// tens of MB rather than gigabytes.
+pub fn build_verifier_setup_seed(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
+    Ok(prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?.seed)
+}
+
+/// Rebuild the full boot verifier setup from a cached seed WITHOUT proving — the
+/// boot-time counterpart of [`build_verifier_setup_seed`]. Rebuilds the compact
+/// verifier context (circuit compile + Merkle commit; seconds, no FRI proving) and
+/// pairs it with the trace height + the cached verifier-key digest. The result is
+/// byte-for-byte equivalent to the [`build_verifier_setup`] (direct-context) form,
+/// validated in `moe_verifier_setup_seed_roundtrip_rebuilds_working_setup`.
+pub fn rebuild_verifier_setup_from_seed(
+    seed: AiPowCompactVerifierSetupSeed,
+) -> Result<AiPowVerifierSetup, SetupError> {
+    let trace_height = seed.trace_height();
+    let digest_bytes = seed.verifier_key_digest_bytes.clone();
+    let context = seed
+        .rebuild_context()
+        .map_err(err("rebuild verifier context from seed"))?;
+    Ok(AiPowVerifierSetup {
+        trace_height,
+        context,
         digest_bytes,
     })
 }

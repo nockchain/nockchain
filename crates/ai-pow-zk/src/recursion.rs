@@ -239,6 +239,25 @@ impl AiPowCompactBatchVerifierContext {
     pub const fn metadata(&self) -> &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata {
         &self.metadata
     }
+
+    /// An OWNED copy of the proof metadata, obtained by a serde round-trip (the
+    /// metadata's `stark_common` is not `Clone`). This is exactly the projection
+    /// the boot-setup cache round-trips (the dropped `stark_common.lookups` are not
+    /// needed by the rebuild — see [`rebuild_compact_verifier_context`]), so it is
+    /// the correct owned metadata to place in an [`AiPowCompactVerifierSetupSeed`].
+    pub fn metadata_owned(
+        &self,
+    ) -> Result<p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata, VerificationError> {
+        let bytes = bincode::serde::encode_to_vec(&self.metadata, bincode::config::standard())
+            .map_err(|e| {
+                VerificationError::InvalidProofShape(format!("metadata serialize: {e:?}"))
+            })?;
+        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+            .map(|(m, _)| m)
+            .map_err(|e| {
+                VerificationError::InvalidProofShape(format!("metadata deserialize: {e:?}"))
+            })
+    }
 }
 
 /// Tip5 digest width (`DIGEST_ELEMS`), sponge `WIDTH`, sponge `RATE` —
@@ -1494,6 +1513,85 @@ pub fn rebuild_compact_verifier_context(
         circuit_prover_data: l2_prep.circuit_prover_data,
         fri_shape,
     })
+}
+
+/// The SMALL, serializable per-bucket seed for the boot verifier-setup table.
+///
+/// It carries exactly the inputs [`rebuild_compact_verifier_context`] needs to
+/// rebuild the (large, ~866 MB) compact verifier context WITHOUT proving: the L0
+/// program + proof + public inputs and the L1 outer proof + metadata. Sized in
+/// KB-MB (the L0 program + proof dominate), so a full 8-bucket table caches in
+/// tens of MB rather than gigabytes.
+///
+/// `sx_bound` and the FRI/circuit profile are pure functions of
+/// `(zk_params, trace_height)` and are DERIVED at rebuild, not stored — so a
+/// cached seed can never disagree with the prover about them. The trace height is
+/// the L0 program height (the preprocessed program has one row per trace row).
+#[derive(Serialize, Deserialize)]
+pub struct AiPowCompactVerifierSetupSeed {
+    pub zk_params: crate::params::ZkParams,
+    pub l0_program: crate::AiPowProgram,
+    pub l0_proof: BatchProof<AiPowStarkConfig>,
+    pub l0_public_inputs: crate::composite_public::CompositePublicInputs,
+    pub l1_outer_proof: AiPowL1OuterProof,
+    pub metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+    /// The canonical 40-byte compact verifier-key/setup digest bytes (cached so a
+    /// loader need not re-derive it; the rebuild re-derives + must match).
+    pub verifier_key_digest_bytes: Vec<u8>,
+}
+
+impl AiPowCompactVerifierSetupSeed {
+    /// The Layer-0 trace height this seed's setup verifies (= L0 program height).
+    pub fn trace_height(&self) -> usize {
+        use p3_matrix::Matrix;
+        self.l0_program.height()
+    }
+
+    /// Assemble a seed from a chain-verified L0 bundle + the run's L1 outer proof
+    /// and metadata. Consumes `verified_l0` (moves the L0 program/proof out; clones
+    /// the borrowed public inputs). Used only by the boot-setup table builder —
+    /// never on the per-block mining path, which discards these parts.
+    pub fn from_run(
+        zk_params: &crate::params::ZkParams,
+        verified_l0: ChainVerifiedCompositeProof<'_>,
+        l1_outer_proof: AiPowL1OuterProof,
+        metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+        verifier_key_digest_bytes: Vec<u8>,
+    ) -> Self {
+        let ChainVerifiedCompositeProof {
+            program,
+            proof,
+            public_inputs,
+        } = verified_l0;
+        Self {
+            zk_params: *zk_params,
+            l0_program: program,
+            l0_proof: proof,
+            l0_public_inputs: public_inputs.clone(),
+            l1_outer_proof,
+            metadata,
+            verifier_key_digest_bytes,
+        }
+    }
+
+    /// Rebuild the full compact verifier context (NO proving — circuit compile +
+    /// Merkle commit only). Consumes the seed. `sx_bound` and the profile are
+    /// derived from `(zk_params, trace_height)`, matching the prover exactly.
+    pub fn rebuild_context(self) -> Result<AiPowCompactBatchVerifierContext, VerificationError> {
+        let profile = crate::circuit::CircuitConfig::for_layer0_trace(self.trace_height());
+        let sx_bound = (self.zk_params.k / self.zk_params.noise_rank) as usize
+            <= crate::composite_layout::STRIPE_MAX;
+        rebuild_compact_verifier_context(
+            &self.zk_params,
+            &profile,
+            &self.l0_program,
+            &self.l0_proof,
+            &self.l0_public_inputs,
+            sx_bound,
+            self.l1_outer_proof,
+            self.metadata,
+        )
+    }
 }
 
 /// **Batch-STARK recursive checkpoint caller** — the full ai-pow-zk →

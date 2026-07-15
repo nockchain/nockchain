@@ -19,6 +19,7 @@ serde.workspace = true
 
 [dev-dependencies]
 nockapp = { path = "../nockapp" }
+bincode = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

@@ -78,6 +78,7 @@ dependencies = [
  "ai-pow",
  "ai-pow-miner",
  "ai-pow-zk",
+ "bincode 2.0.1",
  "blake3",
  "either",
  "nockapp",

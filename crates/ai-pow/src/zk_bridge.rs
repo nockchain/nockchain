@@ -1626,6 +1626,70 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
     local_b_cols: &[u32],
     n_e: usize,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    let (proof, prover_program, pis, zk_params, trace_height, ticket) =
+        prove_pearl_moe_l0_and_ticket(
+            params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
+            local_b_cols, n_e,
+        )?;
+
+    let verified_l0 = unsafe {
+        // SAFETY: the MoE ticket + routing splice + explicit strip schedule are
+        // computed here from the caller's authenticated inputs; the node re-derives
+        // and re-binds all of them (`verify_pearl_moe_compact_recursive_certificate`).
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+            prover_program,
+            proof,
+            &pis,
+        )
+    };
+    let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
+
+    Ok(PearlMoeCompactProveRun {
+        compact_cert: run.compact_cert,
+        verifier_context: run.verifier_context,
+        pis,
+        zk_params,
+        trace_height,
+        commitments: ZkPublicCommitments {
+            h_a_chunk: *h_a,
+            h_b_chunk: *h_b,
+        },
+        ticket,
+    })
+}
+
+/// Shared, soundness-critical L0-prove + MoE-ticket prefix for the MoE compact
+/// prove paths. Both the per-block mining path
+/// ([`prove_pearl_moe_compact_recursive_certificate`]) and the boot-setup seed
+/// path ([`prove_pearl_moe_compact_recursive_certificate_with_seed`]) call this so
+/// they can never drift on the ticket / routing-splice / strip-schedule derivation.
+/// Returns the L0 proof + canonical program + public inputs + derived
+/// `ZkParams`/trace-height and the MoE ticket. (The L1/L2 compact prove is done by
+/// each caller, since the `ChainVerifiedCompositeProof` borrows `pis`.)
+#[allow(clippy::too_many_arguments)]
+fn prove_pearl_moe_l0_and_ticket(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+) -> Result<
+    (
+        AiPowBatchProof,
+        AiPowProgram,
+        CompositePublicInputs,
+        ZkParams,
+        usize,
+        crate::pearl_compat::PearlMoeTicket,
+    ),
+    BridgeError,
+> {
     let k = params.k as usize;
     let r = params.noise_rank as usize;
     // dot_product_length == k for the standard Pearl band (rank | k).
@@ -1662,10 +1726,45 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
         trace_height,
     } = artifact;
 
+    Ok((proof, prover_program, pis, zk_params, trace_height, ticket))
+}
+
+/// Boot-setup variant of [`prove_pearl_moe_compact_recursive_certificate`]:
+/// identical proving, but ALSO returns the small serializable
+/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] — the L0
+/// program/proof/PIs + L1 outer proof + metadata from which the boot table
+/// rebuilds the compact verifier context WITHOUT proving. Used only to build the
+/// offline/boot setup table (one seed per trace-height bucket); NEVER on the
+/// per-block mining path, which discards these parts.
+#[allow(clippy::too_many_arguments)]
+pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+) -> Result<
+    (
+        PearlMoeCompactProveRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
+    let (proof, prover_program, pis, zk_params, trace_height, ticket) =
+        prove_pearl_moe_l0_and_ticket(
+            params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
+            local_b_cols, n_e,
+        )?;
+
     let verified_l0 = unsafe {
-        // SAFETY: the MoE ticket + routing splice + explicit strip schedule are
-        // computed here from the caller's authenticated inputs; the node re-derives
-        // and re-binds all of them (`verify_pearl_moe_compact_recursive_certificate`).
+        // SAFETY: as in `prove_pearl_moe_compact_recursive_certificate` — the
+        // ticket/routing/schedule are derived here and re-bound by the node verifier.
         ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
             prover_program,
             proof,
@@ -1674,7 +1773,27 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
     };
     let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
 
-    Ok(PearlMoeCompactProveRun {
+    // Capture the small rebuild inputs BEFORE moving the run's fields into the
+    // prove-run result. `verified_l0` is consumed into the seed (moving the L0
+    // program/proof out, cloning the borrowed PIs), which releases its borrow of
+    // `pis` so `pis` can move into the prove-run below.
+    let metadata = run
+        .verifier_context
+        .metadata_owned()
+        .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
+    let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+        run.compact_cert.verifier_key_digest(),
+    )
+    .to_vec();
+    let seed = ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed::from_run(
+        &zk_params,
+        verified_l0,
+        run.l1_outer_proof,
+        metadata,
+        digest_bytes,
+    );
+
+    let prove_run = PearlMoeCompactProveRun {
         compact_cert: run.compact_cert,
         verifier_context: run.verifier_context,
         pis,
@@ -1685,7 +1804,8 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
             h_b_chunk: *h_b,
         },
         ticket,
-    })
+    };
+    Ok((prove_run, seed))
 }
 
 /// 5. **Recursive certificate verification** (`verify_recursive_certificate`).
