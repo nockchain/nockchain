@@ -12,25 +12,26 @@ use honk::workspace::{
     WorkspaceDiagnosticKind,
 };
 use honk_service::semantic::{
-    SemanticNodeId, SemanticSession, SemanticSnapshot, SemanticSymbol, SemanticSymbolKind,
+    SemanticHover, SemanticNodeId, SemanticSession, SemanticSymbol, SemanticSymbolKind,
     SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
-    DidSaveTextDocument, Exit, LogMessage, Notification as LspNotification, PublishDiagnostics,
-    ShowMessage,
+    Cancel as CancelNotification, DidChangeTextDocument, DidChangeWatchedFiles,
+    DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument, Exit, LogMessage,
+    Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{DocumentSymbolRequest, HoverRequest, Request as LspRequest};
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, LogMessageParams, MarkupContent, MarkupKind, MessageType,
-    NumberOrString, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams, Range,
-    ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    CancelParams, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, LogMessageParams,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf, Position, PositionEncodingKind,
+    PublishDiagnosticsParams, Range, ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri,
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -104,6 +105,46 @@ enum WorkerEvent {
     },
 }
 
+enum SemanticCommand {
+    Query(SemanticJob),
+    Close(PathBuf),
+    Stop,
+}
+
+struct SemanticJob {
+    id: RequestId,
+    path: PathBuf,
+    version: i32,
+    source: Arc<str>,
+    query: SemanticQuery,
+    cancelled: Arc<AtomicBool>,
+}
+
+enum SemanticQuery {
+    DocumentSymbols,
+    Hover { byte_offset: u32 },
+}
+
+enum SemanticQueryResult {
+    DocumentSymbols(Vec<SemanticSymbol>),
+    Hover(Option<SemanticHover>),
+    Unavailable(String),
+}
+
+struct SemanticEvent {
+    id: RequestId,
+    path: PathBuf,
+    version: i32,
+    result: SemanticQueryResult,
+}
+
+struct PendingSemanticRequest {
+    path: PathBuf,
+    version: i32,
+    source: Arc<str>,
+    cancelled: Arc<AtomicBool>,
+}
+
 pub fn run_stdio(config: LspConfig) -> Result<()> {
     let (connection, io_threads) = Connection::stdio();
     run_connection(connection, config)?;
@@ -162,7 +203,8 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 "lspBaseline": LSP_BASELINE_VERSION,
                 "artifactFreeChecks": true,
                 "fullDocumentSync": true,
-                "semanticSnapshots": true
+                "semanticSnapshots": true,
+                "semanticWorker": true
             }
         })),
         ..ServerCapabilities::default()
@@ -198,20 +240,30 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         event_sender,
         Arc::clone(&stopping),
     )?;
+    let (semantic_sender, semantic_receiver) = crossbeam_channel::unbounded();
+    let (semantic_event_sender, semantic_event_receiver) = crossbeam_channel::unbounded();
+    let semantic_worker = spawn_semantic_worker(
+        semantic_receiver, semantic_event_sender, resolved.worker_stack_bytes,
+    )?;
 
     let mut published = HashSet::<String>::new();
-    let mut semantics = SemanticSession::default();
+    let mut pending_semantics = HashMap::<RequestId, PendingSemanticRequest>::new();
     let mut shutdown = false;
     while !shutdown {
         drain_worker_events(
             &connection, &state, &resolved, &event_receiver, &mut published,
+        )?;
+        drain_semantic_events(
+            &connection, &state, &semantic_event_receiver, &mut pending_semantics,
         )?;
         match connection.receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(Message::Request(request)) => {
                 if connection.handle_shutdown(&request)? {
                     shutdown = true;
                 } else {
-                    handle_request(&connection, &state, &mut semantics, request)?;
+                    handle_request(
+                        &connection, &state, &semantic_sender, &mut pending_semantics, request,
+                    )?;
                 }
             }
             Ok(Message::Notification(notification)) => {
@@ -220,7 +272,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
                 } else {
                     handle_notification(
                         &connection, &state, &trigger_sender, notification, &mut published,
-                        &mut semantics,
+                        &semantic_sender, &mut pending_semantics,
                     )?;
                 }
             }
@@ -232,14 +284,29 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         }
     }
 
+    cancel_all_semantic_requests(
+        &connection,
+        &mut pending_semantics,
+        ErrorCode::ServerCancelled,
+        "honk language server is shutting down",
+    )?;
+    let _ = semantic_sender.send(SemanticCommand::Stop);
     stopping.store(true, Ordering::Release);
     schedule_check(&trigger_sender);
-    check_worker.join().map_err(|payload| {
+    let check_result = check_worker.join().map_err(|payload| {
         anyhow!(
             "honk LSP check worker panicked: {}",
             panic_message(payload.as_ref())
         )
-    })?;
+    });
+    let semantic_result = semantic_worker.join().map_err(|payload| {
+        anyhow!(
+            "honk LSP semantic worker panicked: {}",
+            panic_message(payload.as_ref())
+        )
+    });
+    check_result?;
+    semantic_result?;
     Ok(())
 }
 
@@ -326,7 +393,8 @@ fn handle_notification(
     trigger: &Sender<()>,
     notification: Notification,
     published: &mut HashSet<String>,
-    semantics: &mut SemanticSession,
+    semantic_sender: &Sender<SemanticCommand>,
+    pending_semantics: &mut HashMap<RequestId, PendingSemanticRequest>,
 ) -> Result<()> {
     match notification.method.as_str() {
         DidOpenTextDocument::METHOD => {
@@ -336,7 +404,7 @@ fn handle_notification(
             snapshot.generation = snapshot.generation.saturating_add(1);
             snapshot.active = Some(path.clone());
             snapshot.documents.insert(
-                path,
+                path.clone(),
                 OpenDocument {
                     uri: params.text_document.uri,
                     version: params.text_document.version,
@@ -344,6 +412,13 @@ fn handle_notification(
                 },
             );
             drop(snapshot);
+            cancel_semantic_requests_for_path(
+                connection,
+                pending_semantics,
+                &path,
+                ErrorCode::ServerCancelled,
+                "document was reopened with new contents",
+            )?;
             schedule_check(trigger);
         }
         DidChangeTextDocument::METHOD => {
@@ -376,7 +451,7 @@ fn handle_notification(
             snapshot.generation = snapshot.generation.saturating_add(1);
             snapshot.active = Some(path.clone());
             snapshot.documents.insert(
-                path,
+                path.clone(),
                 OpenDocument {
                     uri: params.text_document.uri,
                     version: params.text_document.version,
@@ -384,6 +459,13 @@ fn handle_notification(
                 },
             );
             drop(snapshot);
+            cancel_semantic_requests_for_path(
+                connection,
+                pending_semantics,
+                &path,
+                ErrorCode::ServerCancelled,
+                "document changed before the semantic query completed",
+            )?;
             schedule_check(trigger);
         }
         DidCloseTextDocument::METHOD => {
@@ -396,7 +478,14 @@ fn handle_notification(
                 snapshot.active = snapshot.documents.keys().min().cloned();
             }
             drop(snapshot);
-            semantics.close(&path);
+            cancel_semantic_requests_for_path(
+                connection,
+                pending_semantics,
+                &path,
+                ErrorCode::ServerCancelled,
+                "document closed before the semantic query completed",
+            )?;
+            let _ = semantic_sender.send(SemanticCommand::Close(path));
             publish_diagnostics(
                 connection,
                 params.text_document.uri.clone(),
@@ -421,7 +510,17 @@ fn handle_notification(
             }
             schedule_check(trigger);
         }
-        "$/cancelRequest" | "$/setTrace" => {}
+        CancelNotification::METHOD => {
+            let params: CancelParams = parse_notification(notification)?;
+            cancel_semantic_request(
+                connection,
+                pending_semantics,
+                request_id(params.id),
+                ErrorCode::RequestCanceled,
+                "semantic request cancelled by the client",
+            )?;
+        }
+        "$/setTrace" => {}
         method if method.starts_with("$/") => {
             debug!(method, "ignoring optional LSP notification");
         }
@@ -435,7 +534,8 @@ fn handle_notification(
 fn handle_request(
     connection: &Connection,
     state: &Arc<Mutex<EditorSnapshot>>,
-    semantics: &mut SemanticSession,
+    semantic_sender: &Sender<SemanticCommand>,
+    pending_semantics: &mut HashMap<RequestId, PendingSemanticRequest>,
     request: Request,
 ) -> Result<()> {
     match request.method.as_str() {
@@ -462,20 +562,21 @@ fn handle_request(
                     );
                 }
             };
-            let result = document.and_then(|(path, document)| {
-                match semantics.snapshot(&path, i64::from(document.version), &document.text) {
-                    Ok(snapshot) => Some(DocumentSymbolResponse::Nested(semantic_symbols_to_lsp(
-                        snapshot, &document.text,
-                    ))),
-                    Err(error) => {
-                        debug!(%error, path = %path.display(), "semantic snapshot unavailable");
-                        None
-                    }
-                }
-            });
-            connection
-                .sender
-                .send(Response::new_ok(request.id, result).into())?;
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                pending_semantics,
+                request.id,
+                path,
+                document,
+                SemanticQuery::DocumentSymbols,
+            )?;
         }
         HoverRequest::METHOD => {
             let params: HoverParams = match serde_json::from_value(request.params) {
@@ -502,28 +603,27 @@ fn handle_request(
                     );
                 }
             };
-            let result = document.and_then(|(path, document)| {
-                let byte_offset = lsp_position_to_byte(&document.text, position)?;
-                let snapshot =
-                    match semantics.snapshot(&path, i64::from(document.version), &document.text) {
-                        Ok(snapshot) => snapshot,
-                        Err(error) => {
-                            debug!(%error, path = %path.display(), "semantic snapshot unavailable");
-                            return None;
-                        }
-                    };
-                let hover = snapshot.hover(byte_offset)?;
-                Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: hover.markdown,
-                    }),
-                    range: semantic_range_to_lsp(&document.text, hover.range),
-                })
-            });
-            connection
-                .sender
-                .send(Response::new_ok(request.id, result).into())?;
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                pending_semantics,
+                request.id,
+                path,
+                document,
+                SemanticQuery::Hover { byte_offset },
+            )?;
         }
         _ => {
             return send_request_error(
@@ -534,6 +634,54 @@ fn handle_request(
             );
         }
     }
+    Ok(())
+}
+
+fn enqueue_semantic_query(
+    connection: &Connection,
+    semantic_sender: &Sender<SemanticCommand>,
+    pending_semantics: &mut HashMap<RequestId, PendingSemanticRequest>,
+    id: RequestId,
+    path: PathBuf,
+    document: OpenDocument,
+    query: SemanticQuery,
+) -> Result<()> {
+    if pending_semantics.contains_key(&id) {
+        return send_request_error(
+            connection,
+            id,
+            ErrorCode::InvalidRequest,
+            "duplicate in-flight JSON-RPC request ID".to_string(),
+        );
+    }
+
+    let source = Arc::<str>::from(document.text);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let job = SemanticJob {
+        id: id.clone(),
+        path: path.clone(),
+        version: document.version,
+        source: Arc::clone(&source),
+        query,
+        cancelled: Arc::clone(&cancelled),
+    };
+    if semantic_sender.send(SemanticCommand::Query(job)).is_err() {
+        return send_request_error(
+            connection,
+            id,
+            ErrorCode::InternalError,
+            "honk semantic worker is unavailable".to_string(),
+        );
+    }
+    pending_semantics.insert(
+        id,
+        PendingSemanticRequest {
+            path,
+            version: document.version,
+            source,
+            cancelled,
+        },
+    );
     Ok(())
 }
 
@@ -558,9 +706,190 @@ fn open_document(
     Ok(document.map(|document| (path, document)))
 }
 
-fn semantic_symbols_to_lsp(snapshot: &SemanticSnapshot, source: &str) -> Vec<DocumentSymbol> {
+fn request_id(id: NumberOrString) -> RequestId {
+    match id {
+        NumberOrString::Number(id) => RequestId::from(id),
+        NumberOrString::String(id) => RequestId::from(id),
+    }
+}
+
+fn cancel_semantic_request(
+    connection: &Connection,
+    pending: &mut HashMap<RequestId, PendingSemanticRequest>,
+    id: RequestId,
+    code: ErrorCode,
+    message: &str,
+) -> Result<()> {
+    let Some(request) = pending.remove(&id) else {
+        return Ok(());
+    };
+    request.cancelled.store(true, Ordering::Release);
+    send_request_error(connection, id, code, message.to_string())
+}
+
+fn cancel_semantic_requests_for_path(
+    connection: &Connection,
+    pending: &mut HashMap<RequestId, PendingSemanticRequest>,
+    path: &Path,
+    code: ErrorCode,
+    message: &str,
+) -> Result<()> {
+    let ids = pending
+        .iter()
+        .filter(|(_, request)| request.path == path)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    for id in ids {
+        cancel_semantic_request(connection, pending, id, code, message)?;
+    }
+    Ok(())
+}
+
+fn cancel_all_semantic_requests(
+    connection: &Connection,
+    pending: &mut HashMap<RequestId, PendingSemanticRequest>,
+    code: ErrorCode,
+    message: &str,
+) -> Result<()> {
+    let ids = pending.keys().cloned().collect::<Vec<_>>();
+    for id in ids {
+        cancel_semantic_request(connection, pending, id, code, message)?;
+    }
+    Ok(())
+}
+
+fn spawn_semantic_worker(
+    commands: Receiver<SemanticCommand>,
+    events: Sender<SemanticEvent>,
+    stack_bytes: usize,
+) -> Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("honk-lsp-semantics".to_string())
+        .stack_size(stack_bytes)
+        .spawn(move || semantic_worker_loop(&commands, &events))
+        .context("failed to spawn honk LSP semantic worker")
+}
+
+fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<SemanticEvent>) {
+    let mut semantics = SemanticSession::default();
+    while let Ok(command) = commands.recv() {
+        match command {
+            SemanticCommand::Query(job) => {
+                let SemanticJob {
+                    id,
+                    path,
+                    version,
+                    source,
+                    query,
+                    cancelled,
+                } = job;
+                if cancelled.load(Ordering::Acquire) {
+                    continue;
+                }
+                let result = match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                    Ok(snapshot) => match query {
+                        SemanticQuery::DocumentSymbols => {
+                            SemanticQueryResult::DocumentSymbols(snapshot.symbols.clone())
+                        }
+                        SemanticQuery::Hover { byte_offset } => {
+                            SemanticQueryResult::Hover(snapshot.hover(byte_offset))
+                        }
+                    },
+                    Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                };
+                if cancelled.load(Ordering::Acquire) {
+                    continue;
+                }
+                if events
+                    .send(SemanticEvent {
+                        id,
+                        path,
+                        version,
+                        result,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            SemanticCommand::Close(path) => semantics.close(&path),
+            SemanticCommand::Stop => break,
+        }
+    }
+}
+
+fn drain_semantic_events(
+    connection: &Connection,
+    state: &Arc<Mutex<EditorSnapshot>>,
+    events: &Receiver<SemanticEvent>,
+    pending: &mut HashMap<RequestId, PendingSemanticRequest>,
+) -> Result<()> {
+    for event in events.try_iter() {
+        let Some(request) = pending.remove(&event.id) else {
+            continue;
+        };
+        if request.cancelled.load(Ordering::Acquire) {
+            continue;
+        }
+        if request.path != event.path || request.version != event.version {
+            send_request_error(
+                connection,
+                event.id,
+                ErrorCode::InternalError,
+                "semantic worker returned a mismatched document snapshot".to_string(),
+            )?;
+            continue;
+        }
+        let is_current = lock_snapshot(state)?
+            .documents
+            .get(&request.path)
+            .is_some_and(|document| {
+                document.version == request.version
+                    && document.text.as_str() == request.source.as_ref()
+            });
+        if !is_current {
+            request.cancelled.store(true, Ordering::Release);
+            send_request_error(
+                connection,
+                event.id,
+                ErrorCode::ServerCancelled,
+                "document changed before the semantic query completed".to_string(),
+            )?;
+            continue;
+        }
+
+        let result = match event.result {
+            SemanticQueryResult::DocumentSymbols(symbols) => {
+                serde_json::to_value(Some(DocumentSymbolResponse::Nested(
+                    semantic_symbols_to_lsp(&symbols, request.source.as_ref()),
+                )))?
+            }
+            SemanticQueryResult::Hover(hover) => serde_json::to_value(hover.map(|hover| Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: hover.markdown,
+                }),
+                range: semantic_range_to_lsp(request.source.as_ref(), hover.range),
+            }))?,
+            SemanticQueryResult::Unavailable(message) => {
+                debug!(
+                    path = %request.path.display(),
+                    %message,
+                    "semantic snapshot unavailable"
+                );
+                serde_json::Value::Null
+            }
+        };
+        connection
+            .sender
+            .send(Response::new_ok(event.id, result).into())?;
+    }
+    Ok(())
+}
+
+fn semantic_symbols_to_lsp(symbols: &[SemanticSymbol], source: &str) -> Vec<DocumentSymbol> {
     let mut children = HashMap::<Option<SemanticNodeId>, Vec<&SemanticSymbol>>::new();
-    for symbol in &snapshot.symbols {
+    for symbol in symbols {
         children.entry(symbol.parent).or_default().push(symbol);
     }
 
@@ -1037,18 +1366,22 @@ fn file_path_to_uri(path: &Path) -> Result<Uri> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use honk::CompilerErrorLocation;
-    use lsp_server::Connection;
+    use lsp_server::{Connection, ErrorCode, Message, RequestId, ResponseKind};
     use lsp_types::Position;
 
     use super::{
-        byte_to_lsp_position, drain_worker_events, file_path_to_uri, lsp_position_to_byte,
-        uri_to_file_path, workspace_diagnostic_to_lsp, EditorSnapshot, ResolvedConfig, WorkerEvent,
-        WorkspaceConfig, WorkspaceDiagnostic, WorkspaceDiagnosticKind,
+        byte_to_lsp_position, cancel_semantic_request, drain_semantic_events, drain_worker_events,
+        file_path_to_uri, lsp_position_to_byte, uri_to_file_path, workspace_diagnostic_to_lsp,
+        EditorSnapshot, OpenDocument, PendingSemanticRequest, ResolvedConfig, SemanticEvent,
+        SemanticQueryResult, WorkerEvent, WorkspaceConfig, WorkspaceDiagnostic,
+        WorkspaceDiagnosticKind,
     };
 
     #[test]
@@ -1133,5 +1466,92 @@ mod tests {
             .expect("drain stale event");
 
         assert!(client.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn client_cancellation_completes_the_semantic_request_once() {
+        let (server, client) = Connection::memory();
+        let id = RequestId::from(7);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut pending = HashMap::from([(
+            id.clone(),
+            PendingSemanticRequest {
+                path: PathBuf::from("/tmp/cancel.hoon"),
+                version: 1,
+                source: Arc::from("42\n"),
+                cancelled: Arc::clone(&cancelled),
+            },
+        )]);
+
+        cancel_semantic_request(
+            &server,
+            &mut pending,
+            id.clone(),
+            ErrorCode::RequestCanceled,
+            "cancelled",
+        )
+        .expect("cancel semantic request");
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(pending.is_empty());
+        let Message::Response(response) = client.receiver.recv().expect("cancel response") else {
+            panic!("expected a cancellation response");
+        };
+        assert_eq!(response.id, id);
+        let ResponseKind::Err { error } = response.response_kind else {
+            panic!("expected a cancellation error");
+        };
+        assert_eq!(error.code, ErrorCode::RequestCanceled as i32);
+        assert!(client.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_semantic_results_are_server_cancelled() {
+        let (server, client) = Connection::memory();
+        let path = PathBuf::from("/tmp/stale-semantic.hoon");
+        let uri = file_path_to_uri(&path).expect("file URI");
+        let state = Arc::new(Mutex::new(EditorSnapshot {
+            documents: HashMap::from([(
+                path.clone(),
+                OpenDocument {
+                    uri,
+                    version: 2,
+                    text: "43\n".to_string(),
+                },
+            )]),
+            ..EditorSnapshot::default()
+        }));
+        let id = RequestId::from(8);
+        let mut pending = HashMap::from([(
+            id.clone(),
+            PendingSemanticRequest {
+                path: path.clone(),
+                version: 1,
+                source: Arc::from("42\n"),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            },
+        )]);
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        sender
+            .send(SemanticEvent {
+                id: id.clone(),
+                path,
+                version: 1,
+                result: SemanticQueryResult::Hover(None),
+            })
+            .expect("semantic event");
+
+        drain_semantic_events(&server, &state, &receiver, &mut pending)
+            .expect("drain stale semantic event");
+
+        assert!(pending.is_empty());
+        let Message::Response(response) = client.receiver.recv().expect("stale response") else {
+            panic!("expected a stale-result response");
+        };
+        assert_eq!(response.id, id);
+        let ResponseKind::Err { error } = response.response_kind else {
+            panic!("expected a stale-result error");
+        };
+        assert_eq!(error.code, ErrorCode::ServerCancelled as i32);
     }
 }

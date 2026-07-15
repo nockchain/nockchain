@@ -93,15 +93,19 @@ their established artifact behavior.
 parses an open document with the existing debug-spot annotations and derives a
 revisioned side table of syntax nodes, arm/mold symbols, byte ranges, hierarchy,
 and stable session-local node IDs. Matching symbols and unchanged traced
-fragments retain their IDs across document revisions. The LSP protocol thread
-owns this lightweight cache independently of the compiler actor, so hover and
-document-symbol requests do not queue behind a long type check.
+fragments retain their IDs across document revisions. A dedicated semantic
+worker owns this cache independently of the compiler actor, so the LSP protocol
+thread never parses and hover or document-symbol requests do not queue behind a
+long type check.
 
 Snapshot cache hits avoid parsing when path, version, and content are unchanged.
 A changed document is still reparsed wholesale and its traced AST is serialized
 once to populate the side tables. That is correct invalidation, but not yet
-fine-grained incremental parsing; moving this rebuild onto a cancellable
-semantic worker is the next latency boundary.
+fine-grained incremental parsing. Requests carry cancellation tokens, stale
+versions and content are revalidated before publication, and cancellation
+always completes the JSON-RPC request exactly once. The existing parser call is
+not internally interruptible, so work already inside that call may finish in
+the background before its result is discarded.
 
 The current semantic queries are structural: document symbols identify `++`,
 `+$`, `+*`, and `+|` arms, while hover identifies those definitions and traced
