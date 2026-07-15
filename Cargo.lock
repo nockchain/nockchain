@@ -4755,6 +4755,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "honk-grpc"
+version = "0.1.15"
+dependencies = [
+ "anyhow",
+ "clap",
+ "honk",
+ "honk-grpc-proto",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tonic 0.14.6",
+ "tonic-health",
+ "tonic-reflection",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "honk-grpc-proto"
+version = "0.1.15"
+dependencies = [
+ "glob",
+ "prost 0.14.3",
+ "protoc-bin-vendored",
+ "tonic 0.14.6",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "honk-tools"
 version = "0.1.15"
 dependencies = [
