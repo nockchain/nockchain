@@ -84,6 +84,7 @@ dependencies = [
  "nockvm",
  "nockvm_macros",
  "once_cell",
+ "serde",
  "tracing",
 ]
 

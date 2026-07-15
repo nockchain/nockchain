@@ -43,6 +43,7 @@ pub const AI_POW_VERIFY_MAX_PATTERN_LEN: usize = 4096;
 /// small, bounded set of buckets (degree_bits ≤ ~19). Supporting EVERY Pearl
 /// combination therefore means a *table* of these, one per reachable bucket —
 /// see [`init_ai_pow_verifier_setup`].
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct AiPowVerifierSetup {
     /// The Layer-0 trace height (power of two) this setup verifies. A cert whose
     /// `certificate.trace_height` equals this is verified with this setup.

@@ -455,6 +455,27 @@ Staged (R1): C1 upstream serde + round-trip; C2 context/setup serde + round-trip
 C3 table cache build+load; C4 boot wiring (nockchain + roswell) + per-bucket
 end-to-end.
 
+### Boot-setup Stage C1+C2 — LANDED (2026-07-15), pending round-trip validation
+Made the compact verifier setup serializable so it can be cached (fast boot):
+- **C1** (`plonky3-recursion/circuit-prover`): `CircuitProverData` now derives
+  Serialize/Deserialize in its VERIFIER-ONLY projection — `CommonData` via
+  `SerializedStarkCommon`, `primitive_columns`, and `non_primitive_columns` (as a
+  Vec-of-pairs, since the crate is no_std and `HashMap` serde needs std). The
+  prover-only PCS LDEs are NOT serialized and are reconstructed EMPTY
+  (`ProverOnlyData::empty()`) on load — the verifier never reads them (it restores
+  omitted preprocessed openings from the columns + CommonData).
+- **C2** (`ai-pow-zk::recursion` + `ai-pow-jets`): `AiPowCompactBatchVerifierContext`
+  derives serde (Arc handled via an inner-value with-helper; metadata/fri_shape/
+  digest already serde); `AiPowVerifierSetup` derives serde (added `serde` dep to
+  ai-pow-jets).
+- All crates build clean. **Validation (running):** the R-b compact-cert test now
+  serializes→deserializes the verifier context and re-verifies the cert against the
+  DESERIALIZED context — proving the cached setup is sound and prover-only data is
+  genuinely unneeded.
+Remaining: C3 (build the 8-bucket table, serialize to a cache file **in the
+nockapp data dir** with a sane path), C4 (boot wiring in nockchain + roswell +
+per-bucket end-to-end).
+
 ### Stage C — de-risk deep-dive (2026-07-15): what the VERIFIER actually needs
 The compact verify (`verify_compact_batch_recursive_certificate_with_context`,
 recursion.rs:2040) reads from the context ONLY: `verifier_key_digest`,

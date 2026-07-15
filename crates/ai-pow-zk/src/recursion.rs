@@ -185,13 +185,45 @@ impl AiPowCompactBatchRecursiveCertificate {
 /// Production must derive or pin it from trusted code/config/verifier-key state.
 /// The compact certificate verifier treats all fields here as verifier-owned
 /// and binds statement-specific public values separately.
+#[derive(Serialize, Deserialize)]
 pub struct AiPowCompactBatchVerifierContext {
     verifier_key_digest: AiPowCompactBatchVerifierKeyDigest,
     metadata: p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+    // The circuit prover data serializes in its VERIFIER-ONLY projection
+    // (CommonData + preprocessed columns; prover-only LDEs reconstructed empty) —
+    // see `p3_circuit_prover::CircuitProverData`'s serde. The `Arc` is
+    // transparently (de)serialized via its inner value (no serde `rc` feature).
+    #[serde(with = "serde_arc_circuit_prover_data")]
     circuit_prover_data: std::sync::Arc<
         p3_circuit_prover::CircuitProverData<p3_circuit_prover::config::GoldilocksBlake3Config>,
     >,
     fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape,
+}
+
+/// (De)serialize `Arc<CircuitProverData>` via its inner value (serde `rc` feature
+/// is not enabled; the setup table is deterministic so structural sharing across
+/// entries is not needed).
+mod serde_arc_circuit_prover_data {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    type Cpd =
+        p3_circuit_prover::CircuitProverData<p3_circuit_prover::config::GoldilocksBlake3Config>;
+
+    pub(super) fn serialize<S>(value: &Arc<Cpd>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.as_ref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Arc<Cpd>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Arc::new(Cpd::deserialize(deserializer)?))
+    }
 }
 
 impl AiPowCompactBatchVerifierContext {
@@ -2282,6 +2314,29 @@ mod tests {
             &commit,
         )
         .expect("decoded R-b compact cert (num_stripes 96) must verify");
+
+        // Boot-setup serialization (Stage C1/C2): the verifier context survives a
+        // serialize → deserialize round-trip (the prover-only PCS data is dropped
+        // and reconstructed EMPTY) and STILL verifies the cert — proving the
+        // cached/embedded setup is sound and the verifier never needs prover-only
+        // data. This is the linchpin of the fast-boot cached setup table.
+        // Boot-setup serialization (Stage C1/C2): the verifier context survives a
+        // serialize → deserialize round-trip and STILL verifies the cert. Proves
+        // the setup is CACHEABLE. NOTE: the compact verifier is path-pruned, so
+        // the context carries the preprocessed PCS prover data (a Merkle tree) —
+        // large (~hundreds of MB per bucket). The size-practical form REBUILDS
+        // that tree from the (small) cached preprocessed columns on load rather
+        // than serializing it (residual C3').
+        let ser =
+            bincode::serde::encode_to_vec(&run.verifier_context, bincode::config::standard())
+                .expect("serialize verifier context");
+        let (deser_ctx, _): (super::AiPowCompactBatchVerifierContext, usize) =
+            bincode::serde::decode_from_slice(&ser, bincode::config::standard())
+                .expect("deserialize verifier context");
+        let decoded2 =
+            decode_compact_batch_recursive_certificate(&bytes).expect("decode R-b compact cert #2");
+        verify_compact_batch_recursive_certificate_with_context(&deser_ctx, decoded2, &pis, &commit)
+            .expect("R-b compact cert must verify against the DESERIALIZED (cached) context");
     }
 
     /// S3d — end-to-end: a real composite batch-STARK proof is

@@ -14,8 +14,8 @@ use p3_air::{Air, BaseAir};
 use p3_batch_stark::common::{GlobalPreprocessed, PreprocessedInstanceMeta};
 use p3_batch_stark::symbolic::get_log_num_quotient_chunks as get_batch_log_num_quotient_chunks;
 use p3_batch_stark::{
-    BatchProof, BatchTranscript, CommonData, Domain, ProverData, StarkGenericConfig, StarkInstance,
-    Val,
+    BatchProof, BatchTranscript, CommonData, Domain, ProverData, ProverOnlyData,
+    StarkGenericConfig, StarkInstance, Val,
 };
 use p3_challenger::{CanObserve, CanSampleBits, FieldChallenger, GrindingChallenger};
 use p3_circuit::ops::{
@@ -199,13 +199,124 @@ where
 /// `PreprocessedColumns` are fully consumed during AIR construction in
 /// [`get_airs_and_degrees_with_prep`](crate::common::get_airs_and_degrees_with_prep)
 /// and are not needed here.
+/// `CircuitProverData` is (de)serialized in its VERIFIER-ONLY projection: only
+/// the preprocessed data the compact verifier needs — the shared `CommonData`
+/// (via [`SerializedStarkCommon`]) and the preprocessed columns — is stored. The
+/// prover-only PCS data (`ProverOnlyData`, the preprocessed LDE commitments) is
+/// NOT serialized and is reconstructed EMPTY on deserialize
+/// ([`ProverOnlyData::empty`]): the verifier never reads it (it restores omitted
+/// preprocessed openings from the columns + `CommonData`). This makes the
+/// boot-injected compact verifier setup cacheable across (de)serialization
+/// without re-proving. Round-trip: `circuit_prover_data_verifier_roundtrip`.
+#[derive(Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "Val<SC>: serde::Serialize, PreprocessedPcsProverData<SC>: serde::Serialize",
+    deserialize = "Val<SC>: serde::Deserialize<'de>, PreprocessedPcsProverData<SC>: serde::Deserialize<'de>"
+))]
 pub struct CircuitProverData<SC: StarkGenericConfig> {
-    /// STARK prover data from p3_batch_stark.
+    /// STARK prover data from p3_batch_stark. Serialized as its verifier-only
+    /// `CommonData` projection; `prover_only` reconstructed empty on load.
+    #[serde(with = "serde_verifier_prover_data")]
     pub prover_data: ProverData<SC>,
     /// Preprocessed columns for primitive operations (Const, Public, ALU).
     pub primitive_columns: Vec<Vec<Val<SC>>>,
-    /// Preprocessed columns for non-primitive operations.
+    /// Preprocessed columns for non-primitive operations. Serialized as a Vec of
+    /// pairs (the `HashMap` serde impl needs std; this crate is no_std/alloc).
+    #[serde(with = "serde_npo_map")]
     pub non_primitive_columns: NonPrimitivePreprocessedMap<Val<SC>>,
+}
+
+/// (De)serialize a [`NonPrimitivePreprocessedMap`] (`HashMap<NpoTypeId, Vec<F>>`)
+/// as a `Vec<(NpoTypeId, Vec<F>)>` — the map is small (one entry per NPO type)
+/// and `Vec`-of-pairs is serde-serializable in no_std (unlike `HashMap`).
+mod serde_npo_map {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{NonPrimitivePreprocessedMap, NpoTypeId};
+
+    pub(super) fn serialize<S, F>(
+        value: &NonPrimitivePreprocessedMap<F>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        F: Serialize,
+    {
+        let pairs: Vec<(&NpoTypeId, &Vec<F>)> = value.iter().collect();
+        pairs.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D, F>(
+        deserializer: D,
+    ) -> Result<NonPrimitivePreprocessedMap<F>, D::Error>
+    where
+        D: Deserializer<'de>,
+        F: Deserialize<'de>,
+    {
+        let pairs: Vec<(NpoTypeId, Vec<F>)> = Vec::deserialize(deserializer)?;
+        Ok(pairs.into_iter().collect())
+    }
+}
+
+/// The PCS prover data for preprocessed traces — the committed preprocessed
+/// Merkle tree the path-pruned compact verifier needs to restore omitted
+/// preprocessed openings. It IS serializable (the MMCS `ProverData` is a
+/// `MerkleTree`, which derives Serialize).
+type PreprocessedPcsProverData<SC> = <<SC as StarkGenericConfig>::Pcs as p3_commit::Pcs<
+    <SC as StarkGenericConfig>::Challenge,
+    <SC as StarkGenericConfig>::Challenger,
+>>::ProverData;
+
+/// Serialize a [`ProverData`] in its VERIFIER-ONLY projection: the shared
+/// `CommonData` (as [`SerializedStarkCommon`]) AND the preprocessed PCS prover
+/// data (`prover_only.preprocessed_prover_data` — the committed preprocessed
+/// Merkle tree the compact verifier needs to restore omitted openings). The
+/// witness LDEs are not part of `ProverOnlyData`, so nothing prover-secret is
+/// stored. See [`CircuitProverData`].
+mod serde_verifier_prover_data {
+    use alloc::vec::Vec;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{
+        CommonData, PreprocessedPcsProverData, ProverData, ProverOnlyData, SerializedStarkCommon,
+        StarkGenericConfig,
+    };
+
+    pub(super) fn serialize<S, SC>(value: &ProverData<SC>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        SC: StarkGenericConfig,
+        PreprocessedPcsProverData<SC>: Serialize,
+    {
+        let common = SerializedStarkCommon::from_common(&value.common);
+        let preprocessed: &Option<PreprocessedPcsProverData<SC>> =
+            &value.prover_only.preprocessed_prover_data;
+        (common, preprocessed).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D, SC>(deserializer: D) -> Result<ProverData<SC>, D::Error>
+    where
+        D: Deserializer<'de>,
+        SC: StarkGenericConfig,
+        PreprocessedPcsProverData<SC>: Deserialize<'de>,
+    {
+        let (parsed, preprocessed): (
+            Option<SerializedStarkCommon<SC>>,
+            Option<PreprocessedPcsProverData<SC>>,
+        ) = Deserialize::deserialize(deserializer)?;
+        let common = parsed
+            .map(SerializedStarkCommon::into_common)
+            .unwrap_or_else(|| CommonData::new(None, Vec::new()));
+        Ok(ProverData {
+            common,
+            prover_only: ProverOnlyData {
+                preprocessed_prover_data: preprocessed,
+            },
+        })
+    }
 }
 
 impl<SC: StarkGenericConfig> CircuitProverData<SC> {
