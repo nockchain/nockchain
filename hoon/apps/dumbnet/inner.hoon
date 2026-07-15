@@ -841,17 +841,18 @@
     =/  commit  (block-commitment:page:t candidate-block.m.k)
     =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
     =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
-    =/  zk-effect
+    ::  Version %3 (AI-PoW) emits %mine-ai so the ai-pow-miner builds a compact
+    ::  recursive certificate; +do-pow verifies + accepts it (the recursive
+    ::  verifier is wired). Versions %0-%2 stay on %mine-zk. `height-to-proof-version`
+    ::  only returns %3 at/after the AI activation height, so this is activation-gated.
+    =/  mine-effect
       ?-  version
         %0  [%mine-zk %0 commit zk-target pow-len:t]
         %1  [%mine-zk %1 commit zk-target pow-len:t]
         %2  [%mine-zk %2 commit zk-target pow-len:t]
-        %3  ~|(%unexpected-v3-in-zk-effect !!)
+        %3  [%mine-ai %3 commit zk-target pow-len:t]
       ==
-    ::  AI mining remains fail-closed until the recursive-certificate
-    ::  verifier is wired into consensus. Emitting %mine-ai here would
-    ::  ask honest miners to build certificates that +do-pow must reject.
-    [zk-effect effs]
+    [mine-effect effs]
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
     ++  heard-genesis-block
@@ -1644,11 +1645,23 @@
           ?:  (lth candidate-height ai-pow-activation-height.constants.k)
             ~>  %slog.[0 'do-pow: %ai-pow pre-activation; rejected']
             [~ k]
-          ::  Fail closed until recursive certificate verification is
-          ::  wired. Persisting the typed certificate without verifying
-          ::  it would let a forged %ai-pow block satisfy consensus.
-          ~>  %slog.[0 'do-pow: %ai-pow verifier not wired; rejected']
+          ::  Set the AI-PoW artifact on the candidate, then verify it with
+          ::  +check-pow — which re-derives the block commitment + target from the
+          ::  candidate itself and runs the mandatory +ai-pow-verify jet against the
+          ::  boot-injected setup. A stale (mined for an old commitment) or forged
+          ::  certificate fails verification ⇒ clean reject (no liar-effect). Only a
+          ::  VERIFIED certificate is committed: set the digest and hand the block to
+          ::  +heard-block, which re-validates and accepts it.
+          =.  m.k  (set-pow:min pv.command)
+          ?.  (check-pow candidate-block.m.k)
+            ~>  %slog.[1 'do-pow: %ai-pow certificate failed verification; rejected']
             [~ k]
+          =.  m.k  set-digest:min
+          ::  Synthesize a `/poke/ai-pow-miner` wire — the block was produced by the
+          ::  ai-pow-miner puzzle path.
+          =^  heard-block-effs  k  (heard-block /poke/ai-pow-miner now candidate-block.m.k eny)
+          :_  k
+          heard-block-effs
         ==
       ::
       ++  do-set-mining-key
