@@ -48,6 +48,15 @@ use thiserror::Error;
 /// `k·(h+w)`. The cap that actually keeps one tile in one STARK is
 /// the reference prover's per-tile `h·w ≤ 256` ([`PEARL_HW_MAX`]).
 pub const PEARL_TRACE_BOUND: u64 = 1 << 22;
+/// **Consensus cap on the Layer-0 trace height for `%ai-pow` blocks (`2¹⁹`).**
+/// The §4.8 envelope's reachable Layer-0 heights span `2¹³ … 2²⁰`, but a node
+/// must hold a compact verifier setup for every accepted height, and building the
+/// `2²⁰` setup (proving a ~1M-row trace + its recursion) needs far more RAM than a
+/// commodity node has. Consensus therefore rejects any `%ai-pow` block whose
+/// Layer-0 trace height exceeds this cap, so the boot verifier-setup table is
+/// exactly the seven feasible buckets `2¹³ … 2¹⁹`. A block above the cap is
+/// invalid (rejected), independent of whether a setup happens to exist.
+pub const AI_POW_MAX_TRACE_HEIGHT: usize = 1 << 19;
 /// Pearl §4.8 common-dimension cap `k ≤ 2¹⁶`.
 pub const PEARL_K_MAX: u32 = 1 << 16;
 /// Pearl §4.8 noise-rank range `r ∈ {2⁵, …, 2¹⁰}` (32 ≤ r ≤ 1024).

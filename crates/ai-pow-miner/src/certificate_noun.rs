@@ -3233,6 +3233,15 @@ pub fn verify_ai_pow_block_artifact(
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
     expected_verifier_key_digest_bytes: &[u8],
 ) -> Result<AiPowBlockVerifyOutcome, CertificateNounError> {
+    // Consensus cap (defense-in-depth; the jet also rejects before its setup
+    // lookup): reject any block whose Layer-0 trace height exceeds
+    // AI_POW_MAX_TRACE_HEIGHT (2^19). The top-of-envelope 2^20 setup is not built
+    // (it needs a large-RAM node), so consensus caps the accept-band here.
+    if artifact.certificate.trace_height > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
+        return Err(CertificateNounError::LimitExceeded(
+            "ai-pow trace height above consensus cap",
+        ));
+    }
     // Option (a): the matrices are miner-chosen (arbitrary model, Pearl parity — no
     // synthetic-matrix pin). The compact node verifies (dense + MoE) bind to the
     // miner's block-COMMITTED H_A/H_B and prove the opened tile in-circuit, so NO

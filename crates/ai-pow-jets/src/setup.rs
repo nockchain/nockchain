@@ -597,6 +597,13 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
                     continue;
                 }
                 if let Ok(th) = canonical_moe_trace_height(&params, hw, E, TOP_K) {
+                    // Consensus caps the accept-band at AI_POW_MAX_TRACE_HEIGHT
+                    // (2^19); the top-of-envelope 2^20 setup is not built (large-RAM
+                    // only), and blocks above the cap are rejected. So the table is
+                    // exactly the seven feasible buckets 2^13..2^19.
+                    if th > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
+                        continue;
+                    }
                     by_bucket.entry(th).or_insert(VerifierSetupBucketShape {
                         params,
                         hw,

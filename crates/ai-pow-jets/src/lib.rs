@@ -197,11 +197,20 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let Some(target) = atom_to_32(target_noun, &space) else {
         return Ok(NO);
     };
+    // Consensus cap: the accept-band tops out at AI_POW_MAX_TRACE_HEIGHT (2^19).
+    // A block claiming a larger Layer-0 trace height is INVALID (rejected) — and we
+    // reject it here BEFORE the setup lookup so it is a clean `NO`, not a BAIL_FAIL
+    // on the (deliberately absent) top bucket. The boot table holds exactly the
+    // seven feasible buckets 2^13..2^19. (A false-small trace_height cannot help a
+    // forger: the compact proof only verifies against the setup for its true
+    // height, so an oversized proof fails against every in-band setup.)
+    if artifact.certificate.trace_height > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
+        return Ok(NO);
+    }
     // Resolve the setup for THIS cert's trace-height bucket from the boot table.
-    // A well-formed artifact whose bucket is absent (or the table uninjected)
-    // falls back to the stubbed Hoon arm (`!!`) — surfaces an incomplete boot
-    // table rather than silently rejecting a valid block. (A full table covers
-    // every Pearl-envelope bucket; the decode already rejected malformed shapes.)
+    // A well-formed IN-BAND artifact whose bucket is absent (or the table
+    // uninjected) falls back to the stubbed Hoon arm (`!!`) — surfaces an
+    // incomplete boot table rather than silently rejecting a valid block.
     let Some(setup) = ai_pow_verifier_setup_for(artifact.certificate.trace_height) else {
         return Err(BAIL_FAIL);
     };
@@ -288,20 +297,26 @@ mod tests {
         );
     }
 
-    /// The production bucket set (what boot generates) must cover the full §4.8
-    /// accept-band 2^13..2^20, one distinct-height representative each — else valid
-    /// `%ai-pow` blocks at an uncovered height would have no setup and be rejected.
-    /// Cheap: heights are computed WITHOUT proving (no synthesized matrices).
+    /// The production bucket set (what boot generates) must cover EXACTLY the
+    /// consensus accept-band 2^13..2^19 — one distinct-height representative each,
+    /// and NONE above the cap `AI_POW_MAX_TRACE_HEIGHT` (2^19). Blocks above the cap
+    /// are rejected by consensus, so no setup is built for them; in-band blocks must
+    /// each have a bucket. Cheap: heights computed WITHOUT proving.
     #[test]
-    fn production_verifier_setup_buckets_cover_the_envelope() {
+    fn production_verifier_setup_buckets_cover_the_capped_band() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         assert!(!buckets.is_empty(), "must return at least one bucket");
+        let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let mut log2s: Vec<u32> = Vec::new();
         for b in &buckets {
             let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
                 .expect("cheap trace height");
             assert!(th.is_power_of_two(), "bucket height {th} must be a power of two");
             assert!(th >= 1 << 13, "bucket height {th} must be >= MIN_STARK_LEN (2^13)");
+            assert!(
+                th <= ai_pow::params::AI_POW_MAX_TRACE_HEIGHT,
+                "bucket height {th} must be <= the consensus cap 2^{cap_db}",
+            );
             log2s.push(th.trailing_zeros());
         }
         log2s.sort_unstable();
@@ -312,7 +327,7 @@ mod tests {
             buckets.len(),
             "buckets must have distinct trace heights",
         );
-        for db in 13u32..=20 {
+        for db in 13u32..=cap_db {
             assert!(
                 distinct.contains(&db),
                 "production buckets must cover 2^{db}; covered = {distinct:?}",
@@ -612,7 +627,7 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+        let mut artifact = decode_ai_pow_pearl_merge_artifact_noun(
             root,
             &space,
             CertificateNounLimits::default(),
@@ -653,6 +668,15 @@ mod jet_tests {
             matches!(ai_pow_verify_core(&artifact, commit, loose_target, &table[0]), Ok(true)),
             "real MoE block must verify against the DISK-loaded rebuilt setup",
         );
+
+        // Consensus cap: bumping the claimed Layer-0 trace height above
+        // AI_POW_MAX_TRACE_HEIGHT (2^19) makes even this otherwise-valid block
+        // reject — the accept-band is capped and the top (2^20) setup is not built.
+        artifact.certificate.trace_height = ai_pow::params::AI_POW_MAX_TRACE_HEIGHT + 1;
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(false)),
+            "a block claiming trace_height above the consensus cap must be rejected",
+        );
     }
 
     /// KAT (real proving, ~40s): the boot GENERATION path end to end for one
@@ -690,26 +714,6 @@ mod jet_tests {
         );
     }
 
-    /// Probe: generate ONLY the largest (2^20) bucket, capturing the full error if
-    /// it fails. Used to confirm the power-of-two-tile fix and rule out OOM.
-    #[test]
-    #[ignore = "proves the 2^20 bucket (~10 min); opt-in"]
-    fn boot_generate_largest_bucket_2_20() {
-        let buckets = crate::setup::production_verifier_setup_buckets();
-        let shape = *buckets.last().expect("at least one bucket");
-        let th = crate::setup::canonical_moe_trace_height(&shape.params, shape.hw, shape.e, shape.top_k)
-            .expect("cheap height");
-        assert_eq!(th.trailing_zeros(), 20, "largest bucket must be 2^20");
-        eprintln!(
-            "proving 2^20 shape: m={} k={} n={} r={} tile={} hw={}",
-            shape.params.m, shape.params.k, shape.params.n, shape.params.noise_rank,
-            shape.params.tile, shape.hw,
-        );
-        let seed = crate::setup::build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
-            .expect("2^20 seed must generate");
-        eprintln!("2^20 seed OK: trace_height=2^{}", seed.trace_height().trailing_zeros());
-    }
-
     /// Diagnostic: print every production bucket shape (cheap, no proving).
     #[test]
     fn print_production_bucket_shapes() {
@@ -731,32 +735,20 @@ mod jet_tests {
         }
     }
 
-    /// C4 CLOSER (generates the memory-feasible buckets 2^13..2^19; ~6 min): the
-    /// first-boot table minus the top bucket. Proves one canonical block per bucket,
-    /// logs each seed's trace height + serialized size (the L0 program grows with
-    /// trace height), round-trips the whole set through a data-dir cache file,
-    /// rebuilds them (no proving), and asserts coverage of 2^13..2^19.
-    ///
-    /// NOTE: the top bucket 2^20 is EXCLUDED here because proving a 2^20-row
-    /// (~1M-row) trace + its recursion OOMs a 32 GB machine (SIGKILL) — see
-    /// `boot_generate_largest_bucket_2_20`. Generating the full §4.8 band at boot
-    /// needs a large-RAM node, or the table is pre-generated offline and the ~75 MB
-    /// cache distributed. The pipeline is identical for 2^20; only the memory scale
-    /// differs.
+    /// C4 CLOSER (generates the FULL production table; ~6 min): consensus caps the
+    /// accept-band at 2^19 (`AI_POW_MAX_TRACE_HEIGHT`), so the table is exactly the
+    /// seven buckets 2^13..2^19 — all feasible on a commodity node. Proves one
+    /// canonical block per bucket, logs each seed's trace height + serialized size
+    /// (the L0 program grows with trace height), round-trips the whole table through
+    /// a data-dir cache file, rebuilds them (no proving), and asserts coverage of
+    /// 2^13..2^19. This is exactly what a fresh node does on first boot.
     #[test]
-    #[ignore = "generates buckets 2^13..2^19 (~6 min); opt-in — closes C4 (feasible subset)"]
-    fn boot_generate_production_table_feasible_buckets() {
+    #[ignore = "generates the full 7-bucket table 2^13..2^19 (~6 min); opt-in — closes C4"]
+    fn boot_generate_full_production_table() {
         use std::collections::BTreeSet;
-        const MAX_DB: u32 = 19; // exclude 2^20 (OOMs a 32 GB machine)
-        let buckets: Vec<_> = crate::setup::production_verifier_setup_buckets()
-            .into_iter()
-            .filter(|b| {
-                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
-                    .map(|h| h.trailing_zeros() <= MAX_DB)
-                    .unwrap_or(false)
-            })
-            .collect();
-        assert_eq!(buckets.len(), 7, "expected 7 feasible buckets (2^13..2^19)");
+        let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        assert_eq!(buckets.len(), 7, "expected 7 capped buckets (2^13..2^19)");
 
         let mut seeds = Vec::new();
         let mut total_bytes = 0usize;
@@ -781,7 +773,7 @@ mod jet_tests {
             seeds.push(seed);
         }
         eprintln!(
-            "FEASIBLE TABLE: {} buckets, total seed cache = {:.1} MiB",
+            "FULL TABLE: {} buckets, total seed cache = {:.1} MiB",
             seeds.len(),
             total_bytes as f64 / (1024.0 * 1024.0),
         );
@@ -789,7 +781,7 @@ mod jet_tests {
         let log2s: BTreeSet<u32> =
             seeds.iter().map(|s| s.trace_height().trailing_zeros()).collect();
         assert_eq!(log2s.len(), 7, "7 distinct-height buckets (2^13..2^19)");
-        for db in 13u32..=MAX_DB {
+        for db in 13u32..=cap_db {
             assert!(log2s.contains(&db), "table must cover 2^{db}");
         }
 
