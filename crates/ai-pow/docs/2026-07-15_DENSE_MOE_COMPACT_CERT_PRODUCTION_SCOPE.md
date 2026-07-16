@@ -640,7 +640,27 @@ The full boot verifier-setup pipeline is wired + validated end-to-end.
    RESIDUAL: the full POSITIVE accept e2e (a valid mined block admitted through
    `do-pow → heard-block` on a v3-activation chain with an injected setup table) —
    structurally mirrors the validated reject path.
-3. End-to-end acceptance test: mine → submit → kernel validate → admit. [§3.2#4]
+3. **Positive accept e2e — DONE + a critical bug fixed (2026-07-16).**
+   `crates/nockchain/tests/ai_pow_accept_e2e.rs` boots the real dumb kernel in-process,
+   drives fakenet genesis (ai-pow-activation-height=1), mines the height-1 candidate,
+   proves a real compact MoE cert bound to its commitment, injects the matching setup
+   (rebuilt from the same proof's seed — no extra proving), and pokes `%pow %ai-pow`.
+   Asserts POSITIVE (valid cert admitted through do-pow → heard-block) + NEGATIVE
+   (wrong-commit cert rejected). Passes (~70s).
+   - **BUG FOUND + FIXED (jet target parse):** the verify jet parsed the PoW target
+     via `atom_to_32`, which rejects atoms > 32 bytes. Real block targets are
+     tip5-atom-sized (`merge:bignum` of `max_tip5_atom/2^bex`, up to ~2^320 / ~40
+     bytes), so the jet returned NO for EVERY real block — ai-pow consensus was
+     non-functional (all prior tests used a 32-byte loose target). Fixed with
+     `target_atom_to_32_saturating`: a target ≥ 2^256 is trivially met by the 256-bit
+     jackpot, so oversized targets clamp to `[0xff;32]` (equivalent for a 256-bit
+     jackpot; no false accepts/rejects). commit 0b53e3b3.
+   - **EMIT GAP FOUND + FIXED (2026-07-16):** the mining-candidate emission used the
+     legacy `height-to-proof-version` (caps at %2), so `%mine-ai` was never emitted
+     and production ai-pow-miners received no candidates. Fixed: post-activation the
+     node ALSO emits `%mine-ai` (same commitment/target) alongside `%mine-zk`, so
+     both puzzle types compete; do-pow admits whichever solves (pow-artifact version
+     discriminates). (dumb.jam rebuilt.)
 4. Lift the MoE admission gate + reconcile fail-closed doc-comments. [§3.3]
 5. Vetting A2 (MoE off-circuit routing forgeries through the FULL compact cert),
    A3 (recursion commitment fold on scheduled/merge), A4 (setup digest binds the

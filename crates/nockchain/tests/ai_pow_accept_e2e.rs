@@ -28,7 +28,7 @@ use nockchain::setup::{self, heard_fake_genesis_block, SetupCommand, FAKENET_GEN
 use nockchain_types::Seconds;
 use nockchain_math::belt::Belt;
 use nockchain_math::crypto::cheetah::A_GEN;
-use nockchain_mining_common::MiningCandidate;
+use nockchain_mining_common::{MiningCandidate, MiningCandidateKind};
 use nockchain_types::tx_engine::common::{Hash, SchnorrPubkey};
 use nockchain_types::fakenet_blockchain_constants;
 use nockvm::noun::{Atom, NounAllocator, D, T};
@@ -218,6 +218,14 @@ async fn ai_pow_valid_block_is_admitted() {
         .into_iter()
         .find_map(|s| MiningCandidate::from_effect_slab(s).ok().flatten())
         .expect("kernel emitted a %mine candidate");
+    // Post-activation the node must emit an %mine-ai candidate (the AI-PoW work
+    // effect). It is prepended ahead of the legacy %mine-zk effect, so the first
+    // decoded candidate is the AI one.
+    assert_eq!(
+        candidate.kind,
+        MiningCandidateKind::Ai,
+        "post AI-PoW activation the node must emit a %mine-ai candidate",
+    );
     let commit32: [u8; 32] = *blake3::hash(&candidate.block_header.jam()).as_bytes();
 
     let block = prove_canonical_moe_block(&params, 8, 2, 1, commit32).expect("prove ai-pow block");

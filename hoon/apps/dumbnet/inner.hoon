@@ -841,18 +841,25 @@
     =/  commit  (block-commitment:page:t candidate-block.m.k)
     =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
     =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
-    ::  Version %3 (AI-PoW) emits %mine-ai so the ai-pow-miner builds a compact
-    ::  recursive certificate; +do-pow verifies + accepts it (the recursive
-    ::  verifier is wired). Versions %0-%2 stay on %mine-zk. `height-to-proof-version`
-    ::  only returns %3 at/after the AI activation height, so this is activation-gated.
-    =/  mine-effect
+    ::  Always emit the ZK candidate (%mine-zk) for the zk-pow-miner.
+    ::  `height-to-proof-version` is the legacy oracle (caps at %2), so `version`
+    ::  is never %3 here; the %3 arm is unreachable but keeps the fork total.
+    =/  zk-effect
       ?-  version
         %0  [%mine-zk %0 commit zk-target pow-len:t]
         %1  [%mine-zk %1 commit zk-target pow-len:t]
         %2  [%mine-zk %2 commit zk-target pow-len:t]
-        %3  [%mine-ai %3 commit zk-target pow-len:t]
+        %3  [%mine-zk %2 commit zk-target pow-len:t]
       ==
-    [mine-effect effs]
+    ::  Post-activation, ALSO emit a %mine-ai candidate carrying the SAME block
+    ::  commitment + target, so the ai-pow-miner (which subscribes to %mine-ai)
+    ::  receives work. Both puzzle types are valid at post-activation heights
+    ::  (+proof-version-valid-at-height accepts %2 ZK or %3 AI), and +do-pow admits
+    ::  whichever a miner solves first — the pow-artifact's own version discriminates
+    ::  (+pow-artifact-to-proof-version), independent of the candidate's version field.
+    ?:  (gte candidate-height ai-pow-activation-height.constants.k)
+      [[%mine-ai %3 commit zk-target pow-len:t] zk-effect effs]
+    [zk-effect effs]
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
     ++  heard-genesis-block
