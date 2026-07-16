@@ -21,6 +21,7 @@
 |%
 ++  t  ~(. txe bc-ai-pow-provable:helpers)
 ++  hd  ~(. helpers bc-dual-puzzle:helpers)
+++  hc  ~(. helpers bc-ai-anchor-test:helpers)
 ::
 ::  A block at the AI anchor (bex 227) contributes work EQUAL to a block at the
 ::  ZK anchor (bex 291): the core equal-weight cross-puzzle invariant.
@@ -144,4 +145,16 @@
     !>([(merge:bignum expected-target) expected-work])
   !>  :-  (merge:bignum ~(target get:page:t ai-cand))
       (merge:bignum ~(accumulated-work get:page:t ai-cand))
+::
+::  ANCHOR BOOTSTRAP — +populate-ai-asert-anchor caches the AI ASERT anchor as
+::  the chain crosses the anchor height (2). At height 2 the cache is still empty;
+::  the first block above it (height 3) populates it, so the AI puzzle can
+::  retarget on mainnet without a hardcoded anchor timestamp.
+++  test-ai-anchor-populates
+  ^-  tang
+  =/  below  (build-typed-chain:hc ~[%zk %ai])       ::  tip height 2 == anchor
+  =/  above  (build-typed-chain:hc ~[%zk %ai %ai])    ::  tip height 3 > anchor
+  %+  expect-eq  !>([%.n %.y])
+  !>  :-  ?=(^ cached-ai-asert-anchor.der.below)
+      ?=(^ cached-ai-asert-anchor.der.above)
 --

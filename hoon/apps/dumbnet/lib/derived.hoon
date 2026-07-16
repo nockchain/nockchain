@@ -17,6 +17,7 @@
   ::  is read directly from consensus state's min-timestamps + targets
   ::  maps keyed by the parent block-id.
   =.  d  (populate-zk-asert-post-ai-anchor c pag)
+  =.  d  (populate-ai-asert-anchor c pag)
   :: update view of heaviest chain
   =/  heaviest-page=page:t
     ?:  =(~ heaviest-block.c)
@@ -61,6 +62,27 @@
   =/  anchor=cached-asert-anchor:dk
     [min-ts=u.parent-min-ts-opt target-atom=(merge:bignum:t u.parent-target-opt)]
   d(cached-zk-asert-post-ai-anchor `anchor)
+::  +populate-ai-asert-anchor: cache the AI ASERT anchor's median-of-11 timestamp
+::  the first time a block ABOVE the AI anchor height is heard (so the anchor is
+::  that block's parent, sitting at anchor-height). Mirrors the ZK arm above, but
+::  the AI anchor target is a hardcoded protocol constant, so only the timestamp
+::  is read from consensus state. Until this fires, +compute-target-ai-asert
+::  degenerates to the anchor target (no retarget); after, it retargets from the
+::  cached anchor. Idempotent — only the first crossing block populates it.
+++  populate-ai-asert-anchor
+  |=  [c=consensus-state:dk pag=page:t]
+  ^-  derived-state:dk
+  ?^  cached-ai-asert-anchor.d  d  ::  already cached, idempotent
+  =/  block-height=@  ~(height get:page:t pag)
+  ?:  (lte block-height anchor-height.ai-asert.blockchain-constants)
+    d  ::  at or below the anchor height: not yet past it
+  =/  parent-bid=block-id:t  ~(parent get:page:t pag)
+  =/  parent-min-ts-opt  (~(get h-by min-timestamps.c) parent-bid)
+  ?~  parent-min-ts-opt  d
+  =/  anchor=cached-asert-anchor:dk
+    :-  min-ts=u.parent-min-ts-opt
+    target-atom=anchor-target-atom.ai-asert.blockchain-constants
+  d(cached-ai-asert-anchor `anchor)
 ++  update-highest
   ~/  %update-highest
   |=  height=page-number:t

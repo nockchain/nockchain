@@ -148,6 +148,16 @@
     anchor-height.ai-asert         0
     anchor-min-timestamp.ai-asert  1
   ==
+::  Like bc-dual-puzzle but with the AI anchor at height 2 and NO hardcoded
+::  anchor timestamp, so +compute-target-ai-asert must read the anchor from the
+::  derived-state cache — exercising +populate-ai-asert-anchor as the chain
+::  crosses height 2.
+++  bc-ai-anchor-test
+  %*  .  bc-pending-provable
+    v1-phase                  1
+    ai-pow-activation-height  1
+    anchor-height.ai-asert    2
+  ==
 ::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
 ::  limit, but poke-able through the kernel. The oversize-tx mempool test
 ::  drives +init-nockchain / +add-n-pages-integration, both of which poke
@@ -246,20 +256,22 @@
 ::  without needing a real certificate or the prover.
 ++  build-typed-chain
   |=  types=(list ?(%zk %ai))
-  ^-  [con=consensus-state tip=page:t]
+  ^-  [con=consensus-state der=derived-state tip=page:t]
   =/  con=consensus-state  initial-consensus-state
+  =/  d=derived-state  der
   =/  parent=page:t  default-genesis-page
   |-
-  ?~  types  [con parent]
+  ?~  types  [con d parent]
   =/  new-page=page:t
     ?:  =(%ai i.types)
       (make-ai-pow-garbage-page parent)
     (make-empty-page parent)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) new-page)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
   ?>  ?=(%.y -.r)
-  =.  con  (~(accept-page dcon con der bc) new-page +.r *@da)
-  =.  con  (~(update-heaviest dcon con der bc) new-page)
-  $(types t.types, parent new-page, con con)
+  =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
+  =.  con  (~(update-heaviest dcon con d bc) new-page)
+  =.  d  (~(update dder d bc) con new-page)
+  $(types t.types, parent new-page, con con, d d)
 ::
 ++  default-genesis-page
   ^-  page:t
