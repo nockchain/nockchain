@@ -244,6 +244,32 @@
     ~  ::  exceeded the walk window
   $(cur-bid ~(parent get:local-page:t cur), hops +(hops))
 ::
+::  +count-same-type-since-anchor: number of `target-type` blocks strictly above
+::  `anchor-height` on the ancestry of `start-bid` (inclusive of start-bid). This
+::  is the per-puzzle subchain distance from the ASERT anchor: a puzzle's ASERT
+::  must retarget over ITS OWN blocks (each puzzle ideal 300s -> ~150s combined),
+::  not over global height — otherwise both puzzles would drive the GLOBAL cadence
+::  to their ideal and the chain would run at 2x the intended interval.
+::
+::    O(height - anchor-height) walk. Fine for the ASERT window; the fixed
+::    mainnet anchor (height 95,000) makes this grow with the chain, so a
+::    production deployment should cache a per-block subchain index (a local
+::    derived quantity) instead. Correctness here is independent of that
+::    optimization.
+++  count-same-type-since-anchor
+  |=  [start-bid=block-id:t target-type=?(%dumb-zkpow %ai-pow) anchor-height=@]
+  ^-  @
+  =/  count=@  0
+  =/  cur-bid=block-id:t  start-bid
+  |-
+  =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
+  ?:  (lte ~(height get:local-page:t cur) anchor-height)
+    count  ::  reached (or passed) the anchor level
+  =?  count  =(target-type (block-id-to-puzzle-type cur-bid))  +(count)
+  ?:  =(*page-number:t ~(height get:local-page:t cur))
+    count  ::  genesis, no further ancestry
+  $(cur-bid ~(parent get:local-page:t cur))
+::
 ::  +set-genesis-seal: set .genesis-seal
 ++  set-genesis-seal
   ~/  %set-genesis-seal
@@ -401,13 +427,22 @@
       ~|  %zk-asert-post-ai-anchor-cache-empty
       !!
     target-atom.u.cached-zk-asert-post-ai-anchor.d
+  ::  Regime 2 (post-AI) retargets over the ZK SUBCHAIN, mirroring the AI puzzle:
+  ::  count only ZK blocks since the regime-2 anchor and feed that as virtual
+  ::  heights (anchor index 0), so each puzzle targets its own ideal (300s) over
+  ::  its own blocks -> ~150s combined. Regime 1 (pre-AI, single puzzle) keeps
+  ::  global heights: there, global height == ZK-subchain length.
+  =/  block-anchor-height=@  ?:(is-post-ai-regime 0 anchor-height.params)
+  =/  block-height=@
+    ?.  is-post-ai-regime  child-height
+    +((count-same-type-since-anchor parent-digest %dumb-zkpow anchor-height.params))
   %-  chunk:bignum:t
   %-  compute-target:asert
   :*  anchor-target
       anchor-min-ts
-      anchor-height.params
+      block-anchor-height
       parent-min-ts
-      child-height
+      block-height
       ideal-block-time.params
       half-life.params
       max-target-atom:t
@@ -428,12 +463,10 @@
 ::  AI ASERT config. Same hardcoded-anchor pattern as compute-target-
 ::  zk-asert; reads its anchor params from ai-asert.blockchain-constants.
 ::
-::  TODO (Stage 6): .parent-digest should be the immediate parent's
-::  digest in the AI PUZZLE SUBCHAIN (the most recent prior %ai-pow
-::  block), not the global parent. Until the puzzle-types map +
-::  per-puzzle walker land, this function uses the global parent —
-::  meaning AI difficulty tracks global block cadence, not AI-only
-::  cadence. Correct once Stage 6 wires the per-puzzle lookups.
+::  .parent-digest is the child's nearest AI ancestor (the most recent prior
+::  %ai-pow block, via +find-same-type-ancestor at the call sites). Block
+::  distance is measured over the AI subchain (+count-same-type-since-anchor),
+::  so AI difficulty tracks AI-only cadence, not global block cadence.
 ++  compute-target-ai-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
@@ -461,13 +494,21 @@
   ?~  anchor-target-opt
     (chunk:bignum:t anchor-target-atom.params)
   =/  parent-min-ts=@  (~(got h-by min-timestamps.c) parent-digest)
+  ::  Retarget over the AI SUBCHAIN, not global height: the ASERT block distance
+  ::  is the number of AI blocks between the anchor and this child (parent-digest
+  ::  is the child's nearest AI ancestor, so child index = that count + 1). Feed
+  ::  it to +compute-target as virtual heights (anchor index 0, child index =
+  ::  count) while keeping the real timestamps — so the AI puzzle targets its own
+  ::  ideal-block-time (300s) over its own blocks, giving ~150s combined with ZK.
+  =/  blocks-since-anchor=@
+    +((count-same-type-since-anchor parent-digest %ai-pow anchor-height.params))
   %-  chunk:bignum:t
   %-  compute-target:asert
   :*  u.anchor-target-opt
       u.anchor-min-ts-opt
-      anchor-height.params
+      0
       parent-min-ts
-      child-height
+      blocks-since-anchor
       ideal-block-time.params
       half-life.params
       max-target-atom:t

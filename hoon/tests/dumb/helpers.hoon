@@ -135,6 +135,19 @@
   %*  .  bc-pending-provable
     ai-pow-activation-height  0
   ==
+::  Dual-puzzle test config: AI-PoW active from height 1 (so genesis stays
+::  pre-activation — +accept-block only reads a block's pow to record its version
+::  post-activation, and genesis carries pow=~), plus a hardcoded (non-degenerate)
+::  AI ASERT anchor at height 0 so +compute-target-ai-asert actually retargets
+::  rather than returning the anchor target. Used to check that AI difficulty
+::  tracks the AI SUBCHAIN cadence: interleaved ZK blocks must not shift it.
+++  bc-dual-puzzle
+  %*  .  bc-pending-provable
+    v1-phase                       1
+    ai-pow-activation-height       1
+    anchor-height.ai-asert         0
+    anchor-min-timestamp.ai-asert  1
+  ==
 ::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
 ::  limit, but poke-able through the kernel. The oversize-tx mempool test
 ::  drives +init-nockchain / +add-n-pages-integration, both of which poke
@@ -223,6 +236,30 @@
   =.  con  (~(update-heaviest dcon con der bc) new-page)
   =.  con  (~(garbage-collect dcon con der bc) retain)
   $(k +(k), prev-page new-page)
+::
+::  +build-typed-chain: accept a chain of the given puzzle types on genesis via
+::  the direct dcon path. ZK blocks carry a mock proof (+make-empty-page), AI
+::  blocks a placeholder %ai-pow artifact (+make-ai-pow-garbage-page); both are
+::  valid pre-asert (epoch target + ZK-normalized work). With
+::  ai-pow-activation-height=0, +accept-block records each block's puzzle version,
+::  so a test can walk the mixed chain (e.g. +count-same-type-since-anchor)
+::  without needing a real certificate or the prover.
+++  build-typed-chain
+  |=  types=(list ?(%zk %ai))
+  ^-  [con=consensus-state tip=page:t]
+  =/  con=consensus-state  initial-consensus-state
+  =/  parent=page:t  default-genesis-page
+  |-
+  ?~  types  [con parent]
+  =/  new-page=page:t
+    ?:  =(%ai i.types)
+      (make-ai-pow-garbage-page parent)
+    (make-empty-page parent)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) new-page)
+  ?>  ?=(%.y -.r)
+  =.  con  (~(accept-page dcon con der bc) new-page +.r *@da)
+  =.  con  (~(update-heaviest dcon con der bc) new-page)
+  $(types t.types, parent new-page, con con)
 ::
 ++  default-genesis-page
   ^-  page:t
