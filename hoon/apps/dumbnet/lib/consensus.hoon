@@ -923,30 +923,17 @@
   ?:  =(*page-number:t block-height)  c
   $(cur parent)
 ::
-::  +canonical-block-ids: the heaviest block and every one of its ancestors,
-::  walked from the tip through .blocks itself.
+::  +canonical-block-ids: the tip and its ancestors, walked through .blocks.
+::  ~ if the walk cannot reach genesis, ie .blocks is missing an ancestor of the
+::  tip and no block here can be called orphaned.
 ::
-::    Deliberately NOT taken from heaviest-chain.d, even though that index
-::    exists to answer exactly this. It is derived state, revised lazily: +update
-::    (derived.hoon) walks down from each new tip and STOPS at the first height
-::    that already agrees, and it never prunes entries ABOVE the tip. Heaviness
-::    is accumulated-work, not height (+compare-heaviness), so a reorg onto a
-::    chain with MORE work but LESS height lowers the tip and strands entries
-::    above it that still name blocks which are now orphans. derived.hoon's own
-::    TODO asks for a check that no block sits above the heaviest block's height;
-::    there is none.
+::    Walks parents rather than reading heaviest-chain.d, which cannot answer
+::    this: that index is never pruned above the tip, and heaviness is
+::    accumulated-work rather than height, so a reorg onto a shorter heavier
+::    chain leaves entries there naming blocks that are now orphans.
 ::
-::    That matters here and nowhere else. Classifying by a height lookup treats
-::    "heaviest-chain has no entry at this height" and "heaviest-chain names this
-::    block" as canonical -- fine for RELEASING a claim, where the conservative
-::    answer is to keep it, but wrong for DELETING, where it would retain a block
-::    on the strength of a stale entry while deleting that block's parent. The
-::    retained set has to be closed under every reference the kernel follows, and
-::    only true ancestry gives that.
-::
-::    Returns ~ when the walk cannot reach genesis, which means .blocks is
-::    missing an ancestor of the tip and nothing here can be trusted: the caller
-::    must then do nothing rather than delete on a partial answer.
+::    The result is closed under parent by construction. Callers deleting its
+::    complement depend on that.
 ++  canonical-block-ids
   ~/  %canonical-block-ids
   ^-  (unit (h-set block-id:t))
@@ -962,44 +949,21 @@
   ?:  =(*page-number:t ~(height get:local-page:t u.lp))  `acc
   $(cur ~(parent get:local-page:t u.lp))
 ::
-::  +delete-orphan-blocks: reclaim the state an orphaned block holds.
+::  +delete-orphan-blocks: drop every map entry keyed by an orphaned block.
 ::
-::    Deletes the block from every map keyed by its block-id: .blocks, .balance,
-::    .txs, .min-timestamps, .epoch-start, .targets. All six or none. The
-::    asymmetry that forces all-or-nothing is .balance: every other cross-map
-::    inconsistency crashes loudly, but +validate-page-with-txs reads
-::    balance[parent] with `get`, not `got` -- so a block left in .blocks whose
-::    .balance entry was dropped does not crash, it validates that block's
-::    children against an EMPTY utxo set and silently rejects every one.
+::    .orphans must be exactly the complement of +canonical-block-ids, so that
+::    what remains is closed under parent. .epoch-start reaches back up to
+::    blocks-per-epoch and +update-min-timestamps walks parents 11 deep, both
+::    with `got`, so any retained block naming a deleted one crashes the kernel
+::    as soon as a child of it arrives.
 ::
-::    Deletes EVERY block that is not an ancestor of the tip, never a window of
-::    them. What makes that safe is CLOSURE, not depth. The retained set is
-::    exactly +canonical-block-ids, which is built BY WALKING PARENTS, so every
-::    retained block's parent is retained too (up to genesis). Every reference
-::    the kernel chases with `got` therefore lands inside the retained set: a
-::    block's parent (+validate-page-without-txs), its .targets and .epoch-start
-::    (+accept-page), and the 11-deep parent walk in +update-min-timestamps.
+::    All six maps or none. A partial delete of .balance alone would not crash:
+::    +validate-page-with-txs reads balance[parent] with `get`, so the block's
+::    children validate against an empty utxo set and are silently rejected.
 ::
-::    Two designs that sound safer are not. A depth cutoff is the worse of them:
-::    a RETAINED orphan's .epoch-start reaches up to blocks-per-epoch (2.016)
-::    blocks back and its min-timestamps walk 11 back, and either can name an
-::    orphan the cutoff deleted. And classifying by a heaviest-chain height
-::    lookup has the same hole for a subtler reason -- see +canonical-block-ids.
-::    Only ancestry gives closure, so only ancestry is used.
-::
-::    Claims MUST already be released (+release-orphan-claims), for two reasons:
-::    a block-id left in .blocks-needed-by once its block is gone strands that
-::    tx forever (+apt then reports %txs-fell-through-cracks), and the release
-::    itself reads .blocks to find the block's txs, so it cannot run afterward.
-::
-::    A deleted block is not lost to the network. A child arriving fresh fails
-::    the parent check in +heard-block, which routes to the missing-parent path
-::    and re-requests the ancestors -- the same path as a branch this node never
-::    saw. The one child that does NOT take that route is one already sitting in
-::    .pending-blocks, which passed that check before the boot and is validated
-::    with no second one: it reads balance[parent] as ~, starts from an empty
-::    utxo set and is rejected as invalid. A misleading reason, but the correct
-::    verdict -- it descends from an orphan -- and it does not crash.
+::    Requires the claims already released (+release-orphan-claims): a block-id
+::    left in .blocks-needed-by strands its tx (+apt: %txs-fell-through-cracks),
+::    and the release reads .blocks to find the txs.
 ++  delete-orphan-blocks
   ~/  %delete-orphan-blocks
   |=  orphans=(list block-id:t)
@@ -1015,31 +979,20 @@
   =.  targets.c         (~(del h-by targets.c) block-id)
   c
 ::
-::  +repair-orphaned-claims: BOOT-ONLY. Release every orphaned block's claim on
-::  its transactions, then delete the block.
+::  +repair-orphaned-claims: BOOT-ONLY. Release the claims of every block that is
+::  not on the heaviest chain, then delete those blocks.
 ::
-::    A node that ran the old kernel is carrying transactions stranded by reorgs
-::    that happened before +release-orphaned-branch existed: still held in
-::    raw-txs, still claimed by a block that is no longer on the heaviest chain,
-::    and therefore unmineable, un-re-gossiped, un-droppable, with their inputs
-::    pinned in spent-by so not even a replacement tx can spend those notes.
-::    +release-orphaned-branch cannot reach them -- it only walks the branch a
-::    LIVE reorg abandons, and those reorgs are long past. This is the one-time
-::    repair that frees them, and it is why the fix is not merely prospective.
-::    It also catches what the live path silently misses: before +prune-above,
-::    a tip-lowering reorg released nothing at all (see derived.hoon).
+::    A tx claimed by a block no longer on the heaviest chain is unmineable,
+::    un-re-gossiped and un-droppable, with its inputs pinned in spent-by so no
+::    replacement can spend those notes. +release-orphaned-branch reaches only
+::    the branch a live reorg abandons; this reaches the rest.
 ::
-::    Restored txs land in excluded-txs, so the first +garbage-collect after boot
-::    applies the usual spent-input check to them: any whose notes the canonical
-::    chain has since spent (most of them -- they were re-mined on the winning
-::    chain) are dropped outright, which also frees their inputs from spent-by.
-::    Only the genuinely unmined ones stay, to be re-gossiped and mined.
+::    Released txs land in excluded-txs, where the next +garbage-collect applies
+::    the spent-input check and drops any the canonical chain has since spent.
 ::
-::    This makes TWO passes over the size of the chain: +canonical-block-ids
-::    walks the tip's ancestry, then the scan below walks all of .blocks. That
-::    is exactly why this lives in +load and nowhere else: a boot already pays
-::    to load the whole state, whereas a steady-state event must never pay for
-::    the size of the chain.
+::    Two passes over the size of the chain: the ancestry walk, then the .blocks
+::    scan. Boot-only for that reason -- an event must never pay for the size of
+::    the chain.
 ++  repair-orphaned-claims
   ~/  %repair-orphaned-claims
   ^-  consensus-state:dk
@@ -1050,24 +1003,15 @@
   ?:  =(~ heaviest-block.c)
     ~>  %slog.[0 'repair-orphaned-claims: no heaviest block yet, nothing to repair']
     c
-  ::  Establish what is canonical by ANCESTRY, not by a heaviest-chain height
-  ::  lookup. The release and the deletion must classify with the SAME set: a
-  ::  block deleted without its claims released strands those txs forever
-  ::  (+apt: %txs-fell-through-cracks), so the release cannot use a narrower
-  ::  notion of "orphan" than the deletion does. See +canonical-block-ids for
-  ::  why the derived index is not that set.
+  ::  the release and the delete must classify against one set: a block deleted
+  ::  without its claims released strands those txs (+apt:
+  ::  %txs-fell-through-cracks).
   ~>  %slog.[0 'repair-orphaned-claims: walking the heaviest chain']
   =/  canonical=(unit (h-set block-id:t))
     ~>  %bout  canonical-block-ids
   ?~  canonical
-    ::  the tip does not chain back to genesis through .blocks, so "not an
-    ::  ancestor of the tip" would be a claim about a chain we cannot see. Do
-    ::  nothing at all rather than release or delete on a partial answer.
     ~>  %slog.[1 'repair-orphaned-claims: heaviest chain does not reach genesis, skipping repair']
     c
-  ::  the scan below is the one O(chain) walk in this kernel, so it is announced
-  ::  before it starts: a boot that appears hung here is walking .blocks, and the
-  ::  %bout that follows says how long that took.
   ~>  %slog.[0 'repair-orphaned-claims: scanning .blocks for orphans']
   =/  mempool-before=@  ~(wyt h-in excluded-txs.c)
   =/  orphans=(list block-id:t)
@@ -1088,10 +1032,6 @@
     |=  [=block-id:t con=_c]
     =.  c  con
     (release-orphan-claims block-id)
-  ::  the mempool delta is the payoff: every tx a released claim handed back
-  ::  lands in excluded-txs, so this names how many stranded txs are mineable
-  ::  again. A zero delta with a non-zero orphan count is not a failure -- the
-  ::  winning chain may carry the same txs, or they may have aged out.
   =/  release-message
     %^  cat  3
       %^  cat  3
@@ -1101,9 +1041,7 @@
       '/'
     (rsh [3 2] (scot %ui ~(wyt h-in excluded-txs.repaired)))
   ~>  %slog.[0 release-message]
-  ::  every claim is released now, so the orphaned blocks themselves can go.
-  ::  This must follow the release: +release-orphan-claims reads .blocks to find
-  ::  each block's txs, and would find nothing once the block is deleted.
+  ::  must follow the release, which reads .blocks to find each block's txs
   =.  c  repaired
   ~>  %slog.[0 'repair-orphaned-claims: deleting orphaned blocks']
   ~>  %bout  (delete-orphan-blocks orphans)

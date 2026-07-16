@@ -579,13 +579,8 @@
           (~(con-invariants k-by:h nockchain) repaired)
       ==
 ::
-::  +load must delete an orphaned block outright, and must leave a block on the
-::  heaviest chain completely alone.
-::
-::    Deletion is all-or-nothing across every block-keyed map: .blocks alone is
-::    not enough, because a block retained in .blocks whose .balance entry was
-::    dropped silently rejects all of its children rather than crashing (see
-::    +con-block-residue). So both halves are asserted over the whole set.
+::  +load deletes an orphaned block from every block-keyed map, and leaves a
+::  block on the heaviest chain alone.
 ++  test-boot-deletes-orphaned-block
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
@@ -623,19 +618,8 @@
           (~(con-invariants k-by:h nockchain) booted)
       ==
 ::
-::  Deleting orphans must leave every cross-map reference in consensus state
-::  resolvable -- across a MULTI-BLOCK orphan branch, which is where a rule that
-::  deleted only some of a branch would show up.
-::
-::    +apt does not check any of this: it only checks the raw-txs partition. The
-::    references that matter here are the ones the kernel chases with `got`, so
-::    a break is a kernel crash rather than a wrong answer. See
-::    +con-referential-integrity.
-::
-::    The pre-boot assertion is the one that makes this test mean anything: it
-::    pins that a normal chain carrying a live orphan branch ALREADY satisfies
-::    the oracle, so a post-boot pass is attributable to the deletion being
-::    sound rather than to the oracle being vacuous.
+::  Deleting a multi-block orphan branch leaves every cross-map reference
+::  resolvable. The pre-boot assertion keeps the oracle from passing vacuously.
 ++  test-boot-deletion-preserves-referential-integrity
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
@@ -677,21 +661,10 @@
           (~(con-invariants k-by:h nockchain) booted)
       ==
 ::
-::  A block extending an orphan the boot deleted must be handled, not crash.
-::
-::    This is the property that makes deleting the block safe. Every cross-map
-::    read for a block's parent (.balance, .targets, .epoch-start, and the
-::    11-deep +update-min-timestamps walk) would either crash or -- worse, in
-::    .balance's case -- silently validate against an empty utxo set. None of
-::    them is reached, because +heard-block checks `has blocks[parent]` FIRST
-::    and routes a block with an unknown parent to the missing-parent path.
-::    Deleting a block therefore makes its children look exactly like a branch
-::    this node never saw, which is a case the kernel already handles.
-::
-::    Note this IS a deliberate behaviour change: before deletion the node held
-::    block-3, so block-4 validated and was stored as a non-heaviest block.
-::    Now block-4 is dropped. If that branch ever wins, +heard-block's
-::    missing-parent path re-requests the ancestors.
+::  A block arriving for a deleted orphan parent takes +heard-block's
+::  missing-parent path: not accepted, no crash. This is what keeps the deleted
+::  block's cross-map reads (.balance, .targets, .epoch-start, the 11-deep
+::  +update-min-timestamps walk) from ever being reached.
 ++  test-boot-deleted-orphan-child-is-handled
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
@@ -729,20 +702,9 @@
 ::  A block left PENDING across a boot that deletes its parent is rejected, not
 ::  crashed and not accepted.
 ::
-::    This is the one path that reaches +validate-page-with-txs with a deleted
-::    parent: +heard-block's `has blocks[parent]` check guards every block
-::    arriving fresh, but a block already in .pending-blocks (held only because
-::    its txs were missing) has ALREADY passed that check. When its last tx
-::    arrives, +process-block-with-txs validates it with no second parent check.
-::
-::    +validate-page-with-txs reads balance[parent] with `get`, so the deleted
-::    parent yields ~, the accumulator starts from an EMPTY utxo set, and every
-::    input lookup fails: the block is rejected as invalid rather than crashing.
-::    That verdict is reached for a misleading reason, but it is the correct
-::    verdict -- the block descends from an orphan, so it is not on the heaviest
-::    chain and must not be accepted. Consensus state stays sound either way.
-::    If that branch ever wins, the missing-parent path re-requests the whole
-::    branch from peers.
+::    The one path reaching +validate-page-with-txs with a deleted parent: a
+::    pending block passed +heard-block's parent check before the boot, and
+::    +process-block-with-txs makes no second one.
 ++  test-boot-deleted-orphan-pending-child-is-rejected
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain

@@ -926,13 +926,9 @@
     =/  booted  (load:nockchain [%0 desk-hash.outer.nockchain ks])
     ;;(consensus-state c.internal.outer.booted)
   ::
-  ::  +with-con: this node, running on the given consensus state.
-  ::
-  ::    +load returns the wrapper's outer core, whose shape does not nest with
-  ::    the +k-by door's sample, so a booted kernel cannot be poked directly.
-  ::    Feeding the post-load state back into THIS kernel is the way to poke a
-  ::    node as it stands after a boot -- e.g. to hand it a block whose parent
-  ::    the boot deleted.
+  ::  +with-con: this node, running on the given consensus state. Use to poke a
+  ::  node with a state +boot-with produced: +load returns the wrapper's outer
+  ::  core, which does not nest with the +k-by door's sample.
   ++  with-con
     |=  c=consensus-state
     ^-  _nockchain
@@ -961,16 +957,9 @@
   ::  +con-referential-integrity: every cross-map reference in .c resolves.
   ::  `~` means sound; each term names an invariant that broke.
   ::
-  ::    +apt checks only the raw-txs partition. NOTHING in the kernel checks
-  ::    that the block-keyed maps agree with each other -- and deleting blocks
-  ::    is precisely the operation that can break that agreement. Most of these
-  ::    would surface as a kernel CRASH on a `got` against a missing key rather
-  ::    than as a wrong answer, so they are asserted directly.
-  ::
-  ::    Asserted on the state BEFORE deletion as well as after. An oracle that
-  ::    only passes on post-deletion state proves nothing: if one of these does
-  ::    not already hold on a normal chain, the invariant is wrong rather than
-  ::    the code.
+  ::    Complements +apt, which checks only the raw-txs partition and nothing
+  ::    about the block-keyed maps agreeing with each other. Most of these break
+  ::    as a kernel crash on a `got`, not as a wrong answer.
   ++  con-referential-integrity
     |=  c=consensus-state
     ^-  (list @tas)
@@ -1038,17 +1027,11 @@
   ::  +con-block-residue: which block-keyed maps still hold .block-id, in a
   ::  fixed order. `~` means the block is gone from all of them.
   ::
-  ::    Deleting a block has to be all-or-nothing across these, so this names
-  ::    every map rather than probing .blocks alone. The asymmetry that makes
-  ::    that worth spelling out is .balance: +validate-page-with-txs reads
-  ::    balance[parent] with `get`, not `got`. A block left in .blocks whose
-  ::    .balance entry was dropped therefore does NOT crash -- it validates that
-  ::    block's children against an EMPTY utxo set and silently rejects every
-  ::    one of them. A .blocks-only probe would report that state as clean.
+  ::    Names every map rather than probing .blocks alone: deletion is
+  ::    all-or-nothing across them, and a .blocks-only probe reports a dropped
+  ::    .balance as clean.
   ::
-  ::    Note .txs holds an entry only for a block that actually carried txs (see
-  ::    +accept-page: the put is a fold over the block's txs), so an empty block
-  ::    legitimately has no .txs entry and reports without %txs.
+  ::    A block that carried no txs legitimately has no .txs entry.
   ++  con-block-residue
     |=  [c=consensus-state =block-id:t]
     ^-  (list @tas)

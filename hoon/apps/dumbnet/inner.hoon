@@ -37,13 +37,8 @@
     |=  arg=load-kernel-state:dk
     ::  cut
     |^
-    ::  Each stage is announced before it runs. The %bout hints below print a
-    ::  bare "took: <duration>" with no label, so without a slog naming the
-    ::  stage first, a boot yields a column of anonymous durations that cannot
-    ::  be attributed. The stages are also split apart rather than composed in
-    ::  one expression, so each gets its own %bout and a slow boot names the
-    ::  stage responsible. This is a boot-only path: the logging costs nothing
-    ::  an event ever pays for.
+    ::  each stage is named before it runs so that the %bout durations, which
+    ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
     =/  ks=kernel-state:dk
       ~>  %slog.[0 'load: [1/5] state-n-to-9: migrating state to version 9']
@@ -57,15 +52,6 @@
     =.  c.k
       ~>  %slog.[0 'load: [4/5] check-and-repair: validating consensus state']
       ~>  %bout  check-and-repair:con
-    ::  One-time repair of transactions stranded by reorgs that predate
-    ::  +release-orphaned-branch. The old kernel never released an ACCEPTED
-    ::  block's claim on its txs, so a tx carried by a block that later lost a
-    ::  chain race stayed in blocks-needed-by forever: unmineable, never
-    ::  re-gossiped, never dropped, its inputs pinned in spent-by so no
-    ::  replacement tx could spend those notes either. The reorgs that stranded
-    ::  them are long past, so the live release path cannot reach them -- only
-    ::  this can. Walking every block is acceptable here and only here: a boot
-    ::  already pays to load the whole state, an event must not.
     =.  c.k
       ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: releasing txs stranded by past reorgs']
       ~>  %bout  repair-orphaned-claims:con
