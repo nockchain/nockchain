@@ -37,6 +37,7 @@ fn stdio_lifecycle_uses_lsp_framing_and_json_rpc_responses() {
     ]);
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_honk-lsp"))
+        .arg("--stdio")
         .arg("--check-delay-ms=0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

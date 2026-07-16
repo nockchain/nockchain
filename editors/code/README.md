@@ -4,8 +4,12 @@ This extension launches `honk-lsp` directly over stdio. It does not route LSP
 traffic through the gRPC daemon. The current feature set includes unsaved-buffer
 diagnostics, hierarchical symbols for Hoon arms and molds, and structural hover
 augmented with inferred types after the matching compiler check completes.
-Go-to-definition follows compiler-resolved core arms and imported gates; local
-face and binding declarations are not covered yet.
+Go-to-definition follows compiler-resolved core arms and imported gates, with a
+conservative structural fallback for unambiguous arms and molds in the current
+document, its import graph, and the configured prelude. Rune tokens navigate to
+their canonical tagged alternatives in the prelude's `hoon` mold; `++`, `+$`,
+and `+|` navigate to the corresponding hoon-138 parser arms. Local face and
+binding declarations are not covered yet.
 
 ## Development setup
 

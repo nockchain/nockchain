@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
+use honk::pipeline::{self, NativeImportKind, NativeSourceView, ScopeMode};
 use honk::workspace::{
     WorkspaceCheckRequest, WorkspaceCompileError, WorkspaceConfig, WorkspaceDiagnostic,
-    WorkspaceDiagnosticKind,
+    WorkspaceDiagnosticKind, WorkspaceSourceSnapshot,
 };
 use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
-    range_from_one_based_spot, SemanticHover, SemanticNodeId, SemanticSession, SemanticSymbol,
+    hoon_rune_at, hoon_term_at, range_from_one_based_spot, structural_definition,
+    structural_rune_definition, SemanticHover, SemanticNodeId, SemanticSession, SemanticSymbol,
     SemanticSymbolKind, SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
@@ -88,6 +90,18 @@ struct EditorSnapshot {
     documents: HashMap<PathBuf, OpenDocument>,
 }
 
+struct SemanticDefinitionWorkspace {
+    dependencies: PathBuf,
+    prelude: PathBuf,
+    sources: WorkspaceSourceSnapshot,
+}
+
+struct SemanticDefinition {
+    path: PathBuf,
+    source: Arc<str>,
+    range: SemanticTextRange,
+}
+
 impl EditorSnapshot {
     fn target(&self, configured_entry: Option<&Path>) -> Option<PathBuf> {
         configured_entry
@@ -128,12 +142,19 @@ struct SemanticJob {
 
 enum SemanticQuery {
     DocumentSymbols,
-    Hover { byte_offset: u32 },
+    Hover {
+        byte_offset: u32,
+    },
+    Definition {
+        byte_offset: u32,
+        workspace: Arc<SemanticDefinitionWorkspace>,
+    },
 }
 
 enum SemanticQueryResult {
     DocumentSymbols(Vec<SemanticSymbol>),
     Hover(Option<SemanticHover>),
+    Definition(Option<SemanticDefinition>),
     Unavailable(String),
 }
 
@@ -150,6 +171,7 @@ struct PendingSemanticRequest {
     source: Arc<str>,
     cancelled: Arc<AtomicBool>,
     hover_offset: Option<u32>,
+    workspace_generation: Option<u64>,
 }
 
 struct DocumentTypeFacts {
@@ -698,7 +720,7 @@ fn handle_request(
                     .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
                 return Ok(());
             };
-            let definition = match definition_at(
+            let compiler_definition = match definition_at(
                 &semantics.resolution_facts, &path, document.version, &document.text, byte_offset,
             ) {
                 Some((target, location)) => {
@@ -715,9 +737,37 @@ fn handle_request(
                 }
                 None => None,
             };
-            connection
-                .sender
-                .send(Response::new_ok(request.id, serde_json::to_value(definition)?).into())?;
+            if let Some(definition) = compiler_definition {
+                connection.sender.send(
+                    Response::new_ok(request.id, serde_json::to_value(Some(definition))?).into(),
+                )?;
+            } else {
+                let editor = lock_snapshot(state)?.clone();
+                let sources = WorkspaceSourceSnapshot::try_new(
+                    editor.generation,
+                    editor
+                        .documents
+                        .into_iter()
+                        .map(|(path, document)| (path, document.text)),
+                )
+                .context("failed to snapshot open documents for definition lookup")?;
+                enqueue_semantic_query(
+                    connection,
+                    semantic_sender,
+                    &mut semantics.pending,
+                    request.id,
+                    path,
+                    document,
+                    SemanticQuery::Definition {
+                        byte_offset,
+                        workspace: Arc::new(SemanticDefinitionWorkspace {
+                            dependencies: config.workspace.dependencies.clone(),
+                            prelude: config.workspace.prelude.clone(),
+                            sources,
+                        }),
+                    },
+                )?;
+            }
         }
         _ => {
             return send_request_error(
@@ -753,7 +803,11 @@ fn enqueue_semantic_query(
     let cancelled = Arc::new(AtomicBool::new(false));
     let hover_offset = match &query {
         SemanticQuery::Hover { byte_offset } => Some(*byte_offset),
-        SemanticQuery::DocumentSymbols => None,
+        SemanticQuery::DocumentSymbols | SemanticQuery::Definition { .. } => None,
+    };
+    let workspace_generation = match &query {
+        SemanticQuery::Definition { workspace, .. } => Some(workspace.sources.revision()),
+        SemanticQuery::DocumentSymbols | SemanticQuery::Hover { .. } => None,
     };
     let job = SemanticJob {
         id: id.clone(),
@@ -779,6 +833,7 @@ fn enqueue_semantic_query(
             source,
             cancelled,
             hover_offset,
+            workspace_generation,
         },
     );
     Ok(())
@@ -885,16 +940,35 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                 if cancelled.load(Ordering::Acquire) {
                     continue;
                 }
-                let result = match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
-                    Ok(snapshot) => match query {
-                        SemanticQuery::DocumentSymbols => {
-                            SemanticQueryResult::DocumentSymbols(snapshot.symbols.clone())
+                let result = match query {
+                    SemanticQuery::DocumentSymbols => {
+                        match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                            Ok(snapshot) => {
+                                SemanticQueryResult::DocumentSymbols(snapshot.symbols.clone())
+                            }
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
-                        SemanticQuery::Hover { byte_offset } => {
-                            SemanticQueryResult::Hover(snapshot.hover(byte_offset))
+                    }
+                    SemanticQuery::Hover { byte_offset } => {
+                        match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                            Ok(snapshot) => SemanticQueryResult::Hover(snapshot.hover(byte_offset)),
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
+                    }
+                    SemanticQuery::Definition {
+                        byte_offset,
+                        workspace,
+                    } => match structural_workspace_definition(
+                        &mut semantics,
+                        &path,
+                        version,
+                        Arc::clone(&source),
+                        byte_offset,
+                        &workspace,
+                    ) {
+                        Ok(definition) => SemanticQueryResult::Definition(definition),
+                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                     },
-                    Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                 };
                 if cancelled.load(Ordering::Acquire) {
                     continue;
@@ -913,6 +987,114 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
             }
             SemanticCommand::Close(path) => semantics.close(&path),
             SemanticCommand::Stop => break,
+        }
+    }
+}
+
+fn structural_workspace_definition(
+    semantics: &mut SemanticSession,
+    path: &Path,
+    version: i32,
+    source: Arc<str>,
+    byte_offset: u32,
+    workspace: &SemanticDefinitionWorkspace,
+) -> Result<Option<SemanticDefinition>> {
+    let (name, rune, local) = {
+        let snapshot = semantics
+            .snapshot(path, i64::from(version), source.as_ref())
+            .map_err(anyhow::Error::new)?;
+        (
+            hoon_term_at(source.as_ref(), byte_offset).map(str::to_owned),
+            hoon_rune_at(source.as_ref(), byte_offset).map(str::to_owned),
+            snapshot.definition(source.as_ref(), byte_offset),
+        )
+    };
+    if let Some(range) = local {
+        return Ok(Some(SemanticDefinition {
+            path: path.to_path_buf(),
+            source,
+            range,
+        }));
+    }
+    if let Some(rune) = rune {
+        let prelude_source = workspace
+            .sources
+            .read_to_string(&workspace.prelude)
+            .with_context(|| format!("failed to read prelude {}", workspace.prelude.display()))?;
+        return Ok(
+            structural_rune_definition(&prelude_source, &rune).map(|range| SemanticDefinition {
+                path: workspace.prelude.clone(),
+                source: Arc::from(prelude_source),
+                range,
+            }),
+        );
+    }
+    let Some(name) = name else {
+        return Ok(None);
+    };
+
+    let mut visited = HashSet::<PathBuf>::new();
+    if let Ok(canonical) = workspace.sources.canonicalize(path) {
+        visited.insert(canonical);
+    }
+    let mut frontier = hoon_imports(path, workspace);
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        let mut definitions = Vec::new();
+        for dependency in frontier {
+            let identity = workspace
+                .sources
+                .canonicalize(&dependency)
+                .unwrap_or_else(|_| dependency.clone());
+            if !visited.insert(identity) {
+                continue;
+            }
+            let Ok(dependency_source) = workspace.sources.read_to_string(&dependency) else {
+                continue;
+            };
+            if let Some(range) = structural_definition(&dependency_source, &name) {
+                definitions.push(SemanticDefinition {
+                    path: dependency.clone(),
+                    source: Arc::from(dependency_source.as_str()),
+                    range,
+                });
+            }
+            next.extend(hoon_imports(&dependency, workspace));
+        }
+        match definitions.len() {
+            0 => frontier = next,
+            1 => return Ok(definitions.pop()),
+            _ => return Ok(None),
+        }
+    }
+
+    let prelude_source = workspace
+        .sources
+        .read_to_string(&workspace.prelude)
+        .with_context(|| format!("failed to read prelude {}", workspace.prelude.display()))?;
+    Ok(
+        structural_definition(&prelude_source, &name).map(|range| SemanticDefinition {
+            path: workspace.prelude.clone(),
+            source: Arc::from(prelude_source),
+            range,
+        }),
+    )
+}
+
+fn hoon_imports(path: &Path, workspace: &SemanticDefinitionWorkspace) -> Vec<PathBuf> {
+    match pipeline::resolve_native_imports_with_source(
+        path,
+        &workspace.dependencies,
+        ScopeMode::Standard,
+        &workspace.sources,
+    ) {
+        Ok(imports) => imports
+            .into_iter()
+            .filter_map(|import| (import.kind == NativeImportKind::Hoon).then_some(import.path))
+            .collect(),
+        Err(error) => {
+            debug!(path = %path.display(), %error, "definition import scan failed");
+            Vec::new()
         }
     }
 }
@@ -940,13 +1122,13 @@ fn drain_semantic_events(
             )?;
             continue;
         }
-        let is_current = lock_snapshot(state)?
-            .documents
-            .get(&request.path)
-            .is_some_and(|document| {
-                document.version == request.version
-                    && document.text.as_str() == request.source.as_ref()
-            });
+        let editor = lock_snapshot(state)?;
+        let is_current = editor.documents.get(&request.path).is_some_and(|document| {
+            document.version == request.version && document.text.as_str() == request.source.as_ref()
+        }) && request
+            .workspace_generation
+            .is_none_or(|generation| generation == editor.generation);
+        drop(editor);
         if !is_current {
             request.cancelled.store(true, Ordering::Release);
             send_request_error(
@@ -1004,6 +1186,21 @@ fn drain_semantic_events(
                     (None, None) => None,
                 };
                 serde_json::to_value(hover)?
+            }
+            SemanticQueryResult::Definition(definition) => {
+                let definition = definition
+                    .map(|definition| -> Result<Option<GotoDefinitionResponse>> {
+                        let uri = file_path_to_uri(&definition.path)?;
+                        Ok(
+                            semantic_range_to_lsp(definition.source.as_ref(), definition.range)
+                                .map(|range| {
+                                    GotoDefinitionResponse::Scalar(Location::new(uri, range))
+                                }),
+                        )
+                    })
+                    .transpose()?
+                    .flatten();
+                serde_json::to_value(definition)?
             }
             SemanticQueryResult::Unavailable(message) => {
                 debug!(
@@ -2003,6 +2200,7 @@ mod tests {
                 source: Arc::from("42\n"),
                 cancelled: Arc::clone(&cancelled),
                 hover_offset: None,
+                workspace_generation: None,
             },
         )]);
 
@@ -2053,6 +2251,7 @@ mod tests {
                 source: Arc::from("42\n"),
                 cancelled: Arc::new(AtomicBool::new(false)),
                 hover_offset: Some(0),
+                workspace_generation: None,
             },
         )]);
         let (sender, receiver) = crossbeam_channel::unbounded();
