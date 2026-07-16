@@ -911,11 +911,13 @@
   ?~  lp  c
   =/  block-height=page-number:t  ~(height get:local-page:t u.lp)
   =/  canonical=(unit block-id:t)  (~(get z-by heaviest-chain) block-height)
-  ::  we cannot say what the heaviest chain holds here, so we cannot prove this
-  ::  block is orphaned. stop rather than release a tx that is really mined.
-  ?~  canonical  c
   ::  reached the common ancestor: this block is on the new chain too
-  ?:  =(u.canonical cur)  c
+  ?:  &(?=(^ canonical) =(u.canonical cur))  c
+  ::  heaviest-chain's keys are exactly 0..tip (+prune-above), so absence above
+  ::  the tip proves this block is not on the heaviest chain. At or below the
+  ::  tip absence proves nothing: stop rather than release a tx that is really
+  ::  mined.
+  ?:  &(?=(~ canonical) !(gth block-height get-cur-height))  c
   ::  orphaned: release its txs, then continue up the abandoned branch
   =.  c  (release-orphan-claims cur)
   =/  parent=block-id:t  ~(parent get:local-page:t u.lp)

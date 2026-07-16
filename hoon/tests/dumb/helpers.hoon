@@ -926,6 +926,49 @@
     =/  booted  (load:nockchain [%0 desk-hash.outer.nockchain ks])
     ;;(consensus-state c.internal.outer.booted)
   ::
+  ::  the page at the tip of the heaviest chain
+  ++  tip-page
+    ^-  page:t
+    (to-page:local-page:t (~(got h-by blocks:con) (need heaviest-block:con)))
+  ::
+  ::  +with-heaviest-block: .c with its tip moved to .block-id. Pair with
+  ::  +der-update to reach the state a reorg onto a shorter heavier chain
+  ::  leaves: a tip below blocks that are still held.
+  ++  with-heaviest-block
+    |=  [c=consensus-state =block-id:t]
+    ^-  consensus-state
+    =.  heaviest-block.c  `block-id
+    c
+  ::
+  ::  +der-update: the derived-state update, as +accept-block runs it
+  ++  der-update
+    |=  [d=derived-state c=consensus-state pag=page:t]
+    ^-  derived-state
+    (~(update dder d bc) c pag)
+  ::
+  ::  +release-branch: the live reorg release, as +accept-block runs it
+  ++  release-branch
+    |=  [c=consensus-state old-heavy=block-id:t hc=(z-map page-number:t block-id:t)]
+    ^-  consensus-state
+    (~(release-orphaned-branch dcon c bc) old-heavy hc)
+  ::
+  ++  heaviest-chain-at
+    |=  [d=derived-state =page-number:t]
+    ^-  (unit block-id:t)
+    (~(get z-by heaviest-chain.d) page-number)
+  ::
+  ++  put-heaviest-chain-at
+    |=  [d=derived-state =page-number:t =block-id:t]
+    ^-  derived-state
+    =.  heaviest-chain.d  (~(put z-by heaviest-chain.d) page-number block-id)
+    d
+  ::
+  ++  del-heaviest-chain-at
+    |=  [d=derived-state =page-number:t]
+    ^-  derived-state
+    =.  heaviest-chain.d  (~(del z-by heaviest-chain.d) page-number)
+    d
+  ::
   ::  +with-con: this node, running on the given consensus state. Use to poke a
   ::  node with a state +boot-with produced: +load returns the wrapper's outer
   ::  core, which does not nest with the +k-by door's sample.

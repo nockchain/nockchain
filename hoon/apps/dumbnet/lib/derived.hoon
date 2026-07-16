@@ -19,11 +19,11 @@
     (to-page:local-page:t (~(got h-by blocks.c) (need heaviest-block.c)))
   =/  next-parent=block-id:t    ~(digest get:page:t heaviest-page)
   =/  next-height=page-number:t  ~(height get:page:t heaviest-page)
+  ::  must precede the walk, which returns at the first height that agrees
+  =.  heaviest-chain.d  (prune-above next-height)
   |-
   ?:  =((~(get z-by heaviest-chain.d) next-height) `next-parent)
     ::  heaviest chain is accurate
-    ::TODO check there aren't any blocks at page-numbers higher than
-    ::the page-number of the heaviest block?
     d
   ::  heaviest chain is wrong, start revising
   =.  heaviest-chain.d
@@ -35,6 +35,27 @@
     next-height   (dec next-height)
     next-parent  ~(parent get:local-page:t (~(got h-by blocks.c) next-parent))
   ==
+::  +prune-above: drop every heaviest-chain entry above .tip, restoring the
+::  invariant that its keys are exactly 0..tip.
+::
+::    Heaviness is accumulated-work rather than height, so a reorg onto a
+::    shorter heavier chain lowers the tip and leaves entries above it naming
+::    the abandoned chain. +release-orphaned-branch reads absence above the tip
+::    as proof a block is orphaned, and so depends on this.
+::
+::    Walks up from tip+1 until a height is absent: O(height dropped), and O(1)
+::    when the tip only rises.
+++  prune-above
+  ~/  %prune-above
+  |=  tip=page-number:t
+  ^-  (z-map page-number:t block-id:t)
+  =/  h=page-number:t  +(tip)
+  =/  hc  heaviest-chain.d
+  |-
+  ^-  (z-map page-number:t block-id:t)
+  ?~  (~(get z-by hc) h)  hc
+  $(hc (~(del z-by hc) h), h +(h))
+::
 ++  update-highest
   ~/  %update-highest
   |=  height=page-number:t

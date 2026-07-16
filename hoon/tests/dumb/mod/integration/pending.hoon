@@ -839,4 +839,149 @@
           (~(has-raw-tx k-by:h nockchain) id.raw1)
           ~(consensus-invariants k-by:h nockchain)
       ==
+
+::  A reorg onto a shorter, heavier chain releases the whole abandoned branch.
+::
+::    Heaviness is accumulated-work, not height, so the winning chain can end
+::    BELOW the branch it abandons. +prune-above then leaves heaviest-chain's
+::    keys at exactly 0..tip, and +release-orphaned-branch reads absence above
+::    the tip as proof a block is orphaned. Drives the real +update into the
+::    real +release-orphaned-branch: either half alone releases nothing.
+++  test-reorg-lowering-tip-releases-abandoned-branch
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 2 nockchain)
+  =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
+  =/  raw2  (make-raw-tx-from-coinbase:v0:h p:default-keys-3:h (snag 1 pages))
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-tx k-by:h nockchain) raw1)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-tx k-by:h nockchain) raw2)
+  ::  blocks 3 and 4 carry the txs and become the tip
+  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-4  (make-page-with-txs:v0:h block-3 ~[id.raw2])
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
+  ?>  =(~(digest get:page:t block-4) ~(heaviest-block k-by:h nockchain))
+  ::  claimed by their blocks, so out of the mempool
+  ?>  ?&  !(~(has-excluded k-by:h nockchain) id.raw1)
+          !(~(has-excluded k-by:h nockchain) id.raw2)
+      ==
+  ::
+  ::  a heavier chain ending at block 2 wins: the tip drops from 4 to 2 while
+  ::  blocks 3 and 4 are still held
+  =/  block-2  (snag 1 pages)
+  =/  lowered
+    (~(with-heaviest-block k-by:h nockchain) ~(con k-by:h nockchain) ~(digest get:page:t block-2))
+  =/  d  (~(der-update k-by:h nockchain) ~(der k-by:h nockchain) lowered block-2)
+  ::  the index now stops at the tip
+  ?>  ?&  =(~ (~(heaviest-chain-at k-by:h nockchain) d 4))
+          =(~ (~(heaviest-chain-at k-by:h nockchain) d 3))
+          =(`~(digest get:page:t block-2) (~(heaviest-chain-at k-by:h nockchain) d 2))
+      ==
+  ::
+  =/  released
+    %^  ~(release-branch k-by:h nockchain)  lowered
+      ~(digest get:page:t block-4)
+    heaviest-chain.d
+  ::  both blocks' txs are back in the mempool, neither still claimed
+  %+  expect-eq
+    !>([%.y %.y %.n %.n ~])
+  !>  :*  (~(con-excluded k-by:h nockchain) released id.raw1)
+          (~(con-excluded k-by:h nockchain) released id.raw2)
+          (~(con-claimed k-by:h nockchain) released id.raw1)
+          (~(con-claimed k-by:h nockchain) released id.raw2)
+          (~(con-invariants k-by:h nockchain) released)
+      ==
+::
+::  +update drops heaviest-chain entries above the tip and keeps the tip's own.
+++  test-derived-update-prunes-heaviest-chain-above-tip
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 4 nockchain)
+  =/  tip  ~(tip-page k-by:h nockchain)
+  =/  tip-height  ~(height get:page:t tip)
+  =/  stale-id  ~(digest get:page:t (snag 0 pages))
+  =/  stale-d
+    %^  ~(put-heaviest-chain-at k-by:h nockchain)
+        (~(put-heaviest-chain-at k-by:h nockchain) ~(der k-by:h nockchain) +(tip-height) stale-id)
+      +(+(tip-height))
+    stale-id
+  =/  updated
+    %^  ~(der-update k-by:h nockchain)  stale-d  ~(con k-by:h nockchain)  tip
+  %+  expect-eq
+    !>([~ ~ `~(digest get:page:t tip)])
+  !>  :*  (~(heaviest-chain-at k-by:h nockchain) updated +(tip-height))
+          (~(heaviest-chain-at k-by:h nockchain) updated +(+(tip-height)))
+          (~(heaviest-chain-at k-by:h nockchain) updated tip-height)
+      ==
+::
+::  A gap at or below the tip proves nothing, so the release stops rather than
+::  hand back a tx that is really mined.
+++  test-release-orphaned-branch-stops-at-gap-below-tip
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 2 nockchain)
+  =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-tx k-by:h nockchain) raw1)
+  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3-p  (make-empty-page:h (snag 1 pages))
+  =/  block-4-p  (make-empty-page:h block-3-p)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-block k-by:h nockchain) block-3)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
+  ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
+  ::  the live reorg already released raw1, so put it back under block-3's
+  ::  claim: otherwise this asserts that release rather than the walk below
+  =/  stranded
+    %+  ~(strand-tx-on-block k-by:h nockchain)
+      id.raw1
+    ~(digest get:page:t block-3)
+  ?>  (~(con-claimed k-by:h nockchain) stranded id.raw1)
+  ::  block-3 sits at height 3, below the tip at 4. Punch the index out there:
+  ::  its absence is now unexplained rather than proof of an orphan.
+  =/  gapped  (~(del-heaviest-chain-at k-by:h nockchain) ~(der k-by:h nockchain) 3)
+  =/  released
+    %^  ~(release-branch k-by:h nockchain)  stranded
+      ~(digest get:page:t block-3)
+    heaviest-chain.gapped
+  ::  nothing released: the tx stays claimed by block-3
+  %+  expect-eq
+    !>([%.n %.y])
+  !>  :*  (~(con-excluded k-by:h nockchain) released id.raw1)
+          (~(con-claimed k-by:h nockchain) released id.raw1)
+      ==
+::
+::  The %heaviest-chain peek reports the tip, not the highest block ever seen.
+::
+::    highest-block-height is a monotone max over every accepted block and is
+::    never lowered, so after a reorg onto a shorter heavier chain it names a
+::    height the heaviest chain has not reached. Indexing by it returns a block
+::    that is not the tip, or -- once +prune-above drops the entry -- nothing at
+::    all, which reads as "this node has no chain".
+++  test-heaviest-chain-peek-reports-tip
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 2 nockchain)
+  =/  block-3-p  (make-empty-page:h (snag 1 pages))
+  =/  block-4-p  (make-empty-page:h block-3-p)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
+  ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
+  ::  a heavier chain ending at block 2 wins: the tip drops to 2 while
+  ::  highest-block-height stays at 4
+  =/  block-2  (snag 1 pages)
+  =/  lowered
+    %+  ~(with-heaviest-block k-by:h nockchain)
+      ~(con k-by:h nockchain)
+    ~(digest get:page:t block-2)
+  =/  chain  (~(with-con k-by:h nockchain) lowered)
+  =/  peeked=(unit (unit *))  (peek:chain [%heaviest-chain ~])
+  ?~  peeked  !!
+  ?~  u.peeked  !!
+  %+  expect-eq
+    !>  [~(height get:page:t block-2) ~(digest get:page:t block-2)]
+  !>  ;;([page-number:t block-id:t] u.u.peeked)
 --

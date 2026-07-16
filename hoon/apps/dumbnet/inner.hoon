@@ -533,16 +533,18 @@
       `(bind (~(get h-by blocks.c.k) u.id) to-page:local-page:t)
     ::
         [%heaviest-chain ~]
+      ::  the tip, not highest-block-height: that is a monotone max over every
+      ::  accepted block, side chains included, so it names a height the
+      ::  heaviest chain need not have reached.
       ^-  (unit (unit [page-number:t block-id:t]))
-      ?~  highest=highest-block-height.d.k
+      ?~  heaviest-block.c.k
         [~ ~]
-      =/  block-id=(unit block-id:t)
-        (~(get z-by heaviest-chain.d.k) u.highest)
-      ?~  block-id
+      =/  lp=(unit local-page:t)  (~(get h-by blocks.c.k) u.heaviest-block.c.k)
+      ?~  lp
         [~ ~]
       %-  some
       %-  some
-      [u.highest u.block-id]
+      [~(height get:local-page:t u.lp) u.heaviest-block.c.k]
     ::
         [%heaviest-chain-map ~]
       ^-  (unit (unit (z-map page-number:t block-id:t)))
