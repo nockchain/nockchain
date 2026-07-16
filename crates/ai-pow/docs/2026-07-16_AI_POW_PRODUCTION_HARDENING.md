@@ -307,39 +307,60 @@ Post-activation the chain runs BOTH puzzles at once: ZK-PoW (proof version %2,
 each with its OWN ASERT retargeting; fork choice compares one accumulated-work number
 across the mix. This is the highest-risk consensus interaction and needs explicit tests.
 
-- **9.1 Per-puzzle ASERT (design).** Target validation dispatches by puzzle type
-  (consensus.hoon:647-666): a block's expected target is computed by
-  `compute-target-zk-asert` or `compute-target-ai-asert` against its **same-type
-  parent** (`find-same-type-ancestor`, so each puzzle retargets only against its own
-  block series). STATUS: `SOUND` (structure) — _pending §-dual-puzzle audit for
-  oscillation/interaction, bootstrap at activation (first AI block has no AI-parent →
-  `degenerate` fallback to the immediate parent), and epoch/target-store handling_.
-- **9.2 Cross-puzzle heaviness comparability — THE key risk.** Fork choice sums
-  `compute-work(target)=max_target/(target+1)` (tx-engine-0.hoon:736) over all blocks
-  regardless of puzzle. For this to be secure, an AI block and a ZK block of equivalent
-  real cost must contribute comparable work. The concern: the AI jet checks the jackpot
-  against `target × difficulty_adjustment_factor (h·w·dot)` (pearl_compat.rs), so the
-  stored block `target` (which feeds `compute-work`) may not be on the same scale as the
-  effective work — potentially over/under-crediting AI blocks vs ZK, which an attacker
-  could exploit to build a "heavier" chain more cheaply. STATUS: `OPEN` — _pending
-  §-dual-puzzle audit: is `compute-work(ai_target)` a faithful, ZK-comparable work
-  measure given the factor?_ This must be resolved + tested before mainnet.
-- **9.3 Version gating / selection.** `pow-artifact-to-proof-version` discriminates the
-  puzzle from the persisted pow artifact (independent of the block's version field);
-  `proof-version-valid-at-height` accepts %2 or %3 post-activation; `do-pow` admits
-  whichever a miner solves first. STATUS: `SOUND` (validated: emit + accept e2e +
-  roswell) — _confirm no version-field/artifact-version disagreement edge case_.
-- **9.4 Feature completeness — AI-PoW vs ZK-PoW.** AI-PoW must participate in ALL the
-  same consensus paths as ZK-PoW (heaviness, per-puzzle ASERT, epoch/target store,
-  genesis, validation, coinbase/reward, gossip, candidate emission). STATUS: _pending
-  §-dual-puzzle audit for any stubbed/missing `%mine-ai`/`%ai-pow` arms_.
-- **9.5 Test coverage — side-by-side.** STATUS: `OPEN`. Existing tests cover ASERT and
-  accumulated-work in isolation, but there is (to confirm) NO test that runs a MIXED
-  ZK+AI chain and checks per-puzzle retargeting + cross-puzzle heaviness accumulation +
-  heaviest-block selection end to end. **Build one** (consensus-level, constructing
-  mixed-version pages so it need not prove real puzzles): assert each puzzle's target
-  retargets toward its interval from its own block series, that accumulated-work sums
-  correctly across the mix, and that the heavier mixed chain wins fork choice.
+**Verdict (audited): AI-PoW is wired at the type/dispatch level but NOT consensus-
+complete.** Heaviness is a single shared, deterministic sum (nodes agree — no fork from
+this), but the cross-puzzle comparison is not soundly normalized, the AI ASERT is
+degenerate, and the AI candidate is mis-targeted so real AI blocks cannot currently be
+accepted post-ASERT-activation. Six concrete items:
+
+- **9.1 Per-puzzle ASERT structure — SOUND.** Validation dispatches by puzzle type and
+  retargets each against its `find-same-type-ancestor` (consensus.hoon:209-223, 647-669);
+  `update-min-timestamps` computes a per-puzzle median-of-11. Three regimes exist
+  (`zk-asert` 150s, `zk-asert-post-ai` 300s, `ai-asert` 300s, anchor `2^291`,
+  tx-engine-1.hoon:344-411).
+- **9.2 Cross-puzzle heaviness — NOT soundly normalized (design gap).** `compute-work =
+  max_tip5_atom/(target+1)` is identical for both, and same-target→same-work (so no
+  puzzle is artificially heavier for a given target *number*). BUT the AI puzzle applies a
+  hidden `difficulty_adjustment_factor = h·w·dot` (`pearl_compat.rs:1078-1103`): the
+  jackpot must meet `target×factor`, while `compute-work` credits `max/target` (pre-factor).
+  Each ASERT independently pins its target to a *time* cadence, not cost-parity, so the two
+  puzzles' work units (AI matmul-ops vs ZK STARK-trials) are incommensurable — mixing them
+  in one heaviness total over/under-credits one puzzle. **DESIGN DECISION required (the
+  consensus economic model).**
+- **9.3 256-bit AI target saturation — SOUNDNESS BUG.** ZK compares targets in the full
+  ~2^320 space; the AI jet reads the target as 256-bit with saturation to `[0xff;32]`
+  (=2^256-1) for any atom > 32 bytes (`target_atom_to_32_saturating`). The shared anchor
+  `2^291` (~37 bytes) and genesis target `~2^306` both EXCEED 2^256 → the AI difficulty gate
+  `jackpot ≤ 2^256-1` is TRIVIALLY satisfied at/near anchor difficulty → **essentially no
+  PoW for AI blocks near the anchor.** AI targets must stay < 2^256.
+- **9.4 AI ASERT is degenerate (C1) + AI candidate mis-targeted (C2) — FUNCTIONAL gaps.**
+  (C1) Nothing populates `cached-ai-asert-anchor` (no `populate-ai-asert-anchor`; only the
+  ZK-post-AI one exists, derived.hoon:49-63), so `compute-target-ai-asert` falls through to
+  the constant `2^291` — it never retargets. (C2) The miner computes only the ZK candidate
+  target (miner.hoon:299-324) and `%mine-ai` ships that ZK target (inner.hoon:861), but the
+  validator expects `compute-target-ai-asert` (consensus.hoon:664-669) → a mined AI block
+  fails `%page-target-invalid`. **So AI blocks cannot currently be accepted post-ASERT.**
+- **9.5 Cadence mismatch (C5) + emission inconsistency (C3).** ASERT `blocks-since-anchor`
+  uses GLOBAL height while `current-min-timestamp` uses the same-type median (asert.hoon:123,
+  consensus.hoon:441-448) → each puzzle targets the GLOBAL interval, so both-active settles
+  to ~300s global / ~600s per puzzle, not the documented 300s-per-puzzle. Masked while AI
+  ASERT is degenerate. Also `do-mine` (accept-block/do-born path) emits only `%mine-zk` and
+  crashes on %3 (inner.hoon:1848-1853) while the inline path emits `%mine-ai` — inconsistent.
+  Stale docs claim "%ai-pow rejected until verifier wired" (tx-engine-1.hoon:436-454).
+- **9.6 Version gating — SOUND.** Validation always derives the proof-version from the pow
+  artifact (`pow-artifact-to-proof-version`), never a claimed field; page `version` is an
+  orthogonal format namespace. No disagreement risk.
+- **9.7 Test coverage — ABSENT.** No test runs both puzzles on one chain; no valid-AI-block
+  builder exists in the Hoon harness (only `make-ai-pow-garbage-page`). Nothing catches
+  9.2/9.3/9.4/9.5. STATUS: **OPEN — build the exhaustive side-by-side suite.**
+
+**This is the active goal: implement + exhaustively test.** Ordered plan: (1) fix 9.3
+(bound AI targets < 2^256) and decide 9.2 (work normalization) — the soundness core; (2)
+fix 9.4-C2 (AI candidate target + block-target-per-puzzle so AI blocks are acceptable) and
+9.4-C1 (populate the AI anchor); (3) fix 9.5 (same-type height in ASERT; reconcile
+emission); (4) build the mixed-chain test suite covering per-puzzle retargeting + cross-
+puzzle heaviness + fork choice + AI acceptance. Each stage: KAT-first, tests, rebuild
+dumb.jam→binary, commit.
 
 ## 10. Node operator experience
 
