@@ -87,6 +87,7 @@ dependencies = [
  "once_cell",
  "serde",
  "tempfile",
+ "tikv-jemallocator",
  "tracing",
 ]
 

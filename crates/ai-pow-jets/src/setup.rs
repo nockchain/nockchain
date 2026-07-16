@@ -603,18 +603,48 @@ pub fn verifier_context_file_path(
         .join(format!("ctx-2p{log2}-{tag}.bin"))
 }
 
-/// Serialize one built verifier setup (context + digest) to `path` for disk paging.
+/// The sidecar file holding the BLAKE3 checksum of a context file's bytes.
+fn context_checksum_path(context_path: &std::path::Path) -> std::path::PathBuf {
+    let mut p = context_path.as_os_str().to_owned();
+    p.push(".blake3");
+    std::path::PathBuf::from(p)
+}
+
+/// Serialize one built verifier setup to `path` for disk paging, and write a sidecar
+/// BLAKE3 of the file bytes (re-checked on every page-in to catch on-disk bit-rot).
+/// Returns the checksum.
 fn write_verifier_context_file(
     setup: &AiPowVerifierSetup,
     path: &std::path::Path,
-) -> Result<(), SetupError> {
+) -> Result<[u8; 32], SetupError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(err("create verifier-context dir"))?;
     }
     let bytes = bincode::serde::encode_to_vec(setup, bincode::config::standard())
         .map_err(err("serialize verifier context"))?;
+    let checksum = *blake3::hash(&bytes).as_bytes();
     std::fs::write(path, bytes).map_err(err("write verifier context file"))?;
-    Ok(())
+    std::fs::write(context_checksum_path(path), checksum)
+        .map_err(err("write verifier context checksum"))?;
+    Ok(checksum)
+}
+
+/// The expected checksum for an existing context file: read the 32-byte sidecar if
+/// present, else compute it from the file bytes and write the sidecar (self-heal for
+/// files written before checksums, or a lost sidecar). This never trusts the file — it
+/// only records what is on disk; `page_in_bucket` re-reads + re-checks on every use.
+fn context_file_checksum(path: &std::path::Path) -> Result<[u8; 32], SetupError> {
+    let sidecar = context_checksum_path(path);
+    if let Ok(bytes) = std::fs::read(&sidecar) {
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return Ok(arr);
+        }
+    }
+    let file = std::fs::read(path).map_err(err("read verifier context for checksum"))?;
+    let checksum = *blake3::hash(&file).as_bytes();
+    // Best-effort sidecar write (ignore failure: page_in will recompute if absent).
+    let _ = std::fs::write(&sidecar, checksum);
+    Ok(checksum)
 }
 
 /// Ensure every bucket has a valid on-disk context, building + serializing any that
@@ -632,7 +662,10 @@ fn build_or_reuse_disk_contexts(
         let h = seed.trace_height();
         let committed_digest = seed.verifier_key_digest_bytes.clone();
         let ctx_path = verifier_context_file_path(data_dir, h, &committed_digest);
-        if !ctx_path.exists() {
+        let checksum = if ctx_path.exists() {
+            // Reuse: record the existing file's checksum (page_in re-verifies on use).
+            context_file_checksum(&ctx_path)?
+        } else {
             if built == 0 {
                 tracing::info!(
                     "Building the AI-PoW verifier contexts to disk ({total} buckets, one-time; \
@@ -652,10 +685,11 @@ fn build_or_reuse_disk_contexts(
                      digest — refusing to run a divergent verifier"
                 )));
             }
-            write_verifier_context_file(&setup, &ctx_path)?;
+            let ck = write_verifier_context_file(&setup, &ctx_path)?;
             built += 1;
-        }
-        disk_buckets.push(crate::DiskBucket::new(h, committed_digest, ctx_path));
+            ck
+        };
+        disk_buckets.push(crate::DiskBucket::new(h, committed_digest, ctx_path, checksum));
     }
     if built > 0 {
         tracing::info!("Built {built} AI-PoW verifier context(s) to disk.");
@@ -677,8 +711,8 @@ pub fn install_verifier_setup_disk_from_setups(
         let h = setup.trace_height;
         let digest = setup.digest_bytes.clone();
         let ctx_path = verifier_context_file_path(data_dir, h, &digest);
-        write_verifier_context_file(setup, &ctx_path)?;
-        disk_buckets.push(crate::DiskBucket::new(h, digest, ctx_path));
+        let checksum = write_verifier_context_file(setup, &ctx_path)?;
+        disk_buckets.push(crate::DiskBucket::new(h, digest, ctx_path, checksum));
     }
     crate::init_ai_pow_verifier_setup_disk(disk_buckets, cap)
         .map_err(|()| SetupError("disk-paged setup rejected or already initialized".to_string()))
@@ -710,7 +744,10 @@ pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<u
             let h = seed.trace_height();
             let digest = seed.verifier_key_digest_bytes.clone();
             let ctx_path = verifier_context_file_path(data_dir, h, &digest);
-            crate::DiskBucket::new(h, digest, ctx_path)
+            // Register-only (never paged in by a non-consensus tool): read the sidecar
+            // checksum if a node already built the file, else a zero placeholder.
+            let checksum = context_file_checksum(&ctx_path).unwrap_or([0u8; 32]);
+            crate::DiskBucket::new(h, digest, ctx_path, checksum)
         })
         .collect();
     crate::init_ai_pow_verifier_setup_disk(disk_buckets, verifier_cache_cap()).map_err(|()| {

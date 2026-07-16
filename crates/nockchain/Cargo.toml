@@ -7,8 +7,10 @@ edition.workspace = true
 
 [features]
 bazel_build = []
-jemalloc = ["tikv-jemallocator"]
-tracing-heap = ["tikv-jemallocator", "tracy-client"]
+# jemalloc is now REQUIRED (see main.rs) — this feature is a no-op kept for
+# backward compatibility with existing `--features jemalloc` build commands.
+jemalloc = []
+tracing-heap = ["tracy-client"]
 
 [dependencies]
 
@@ -43,7 +45,7 @@ num_cpus = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
 termcolor.workspace = true
-tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracy-client = { workspace = true, optional = true }

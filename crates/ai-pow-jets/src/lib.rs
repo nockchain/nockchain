@@ -26,6 +26,13 @@ use ai_pow_miner::certificate_noun::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+// Tests use jemalloc (the production allocator) so RSS-reclaim probes measure the real
+// behavior — the system allocator retains freed page-outs and would give misleading
+// numbers. Matches the required `#[global_allocator]` in the nockchain binary.
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use ai_pow_zk::recursion::AiPowCompactBatchVerifierContext;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
@@ -68,18 +75,38 @@ pub struct DiskBucket {
     /// consensus parameter). Checked at boot and on every page-in.
     committed_digest: Vec<u8>,
     context_path: std::path::PathBuf,
+    /// BLAKE3 of the serialized context FILE BYTES, computed when the file was
+    /// written. Re-checked on every page-in so on-disk bit-rot (which overwhelmingly
+    /// lands in the multi-GB preprocessed tree, leaving the small stored digest fields
+    /// intact) is caught as a NON-DETERMINISTIC load fault (→ the jet `%fail`s) rather
+    /// than silently corrupting the tree and later rejecting a valid block.
+    context_file_blake3: [u8; 32],
 }
 
 impl DiskBucket {
     /// Assemble a disk bucket from its trace height, committed verifier-key digest,
-    /// and the path of its serialized context file. The boot installer builds these.
+    /// the path of its serialized context file, and the BLAKE3 of that file's bytes.
+    /// The boot installer builds these.
     pub fn new(
         trace_height: usize,
         committed_digest: Vec<u8>,
         context_path: std::path::PathBuf,
+        context_file_blake3: [u8; 32],
     ) -> Self {
-        Self { trace_height, committed_digest, context_path }
+        Self { trace_height, committed_digest, context_path, context_file_blake3 }
     }
+}
+
+/// The outcome of resolving a verifier setup for a trace height. Distinguishes a
+/// DETERMINISTIC "this block is invalid" (no committed bucket for the height ⇒ the
+/// jet returns `NO`, which flows to the normal liar-block handling) from a
+/// NON-DETERMINISTIC local fault (a real bucket whose context could not be loaded ⇒
+/// the jet `%fail`s, so a broken node halts instead of wrongly rejecting valid
+/// blocks that honest nodes accept).
+pub enum VerifierSetupLookup {
+    Found(Arc<AiPowVerifierSetup>),
+    NoSuchBucket,
+    LoadFailed,
 }
 
 /// A bounded LRU keyed by trace height. MRU is the back of `order`. Generic over the
@@ -118,7 +145,10 @@ impl<V: Clone> Lru<V> {
         }
         self.map.insert(h, value.clone());
         self.order.push(h); // MRU
-        while self.map.len() > cap.max(1) {
+        // Evict the least-recently-used beyond `cap`. Guard `remove(0)` on a non-empty
+        // `order` so this can never panic even if a prior panic (recovered via a
+        // poisoned lock) left `order`/`map` momentarily inconsistent.
+        while self.map.len() > cap.max(1) && !self.order.is_empty() {
             let lru = self.order.remove(0); // front = LRU; `h` is at the back, so safe
             self.map.remove(&lru);
         }
@@ -143,35 +173,55 @@ struct DiskPagedSetup {
 static SETUP: OnceCell<DiskPagedSetup> = OnceCell::new();
 
 /// Resolve the setup for a given Layer-0 `trace_height`, paging its context in from
-/// disk if it is not already resident.
+/// disk if it is not already resident. See [`VerifierSetupLookup`] for how the jet
+/// treats each outcome.
 ///
-/// Returns `None` if the table is uninjected, has no bucket for `trace_height` (an
-/// in-band miss is a boot config error, so the jet BAILs), or the on-disk context
-/// fails its committed-digest check (fail-safe — a divergent/corrupt context must not
-/// verify). The returned `Arc` keeps the context alive for the caller's verify even
-/// if the LRU evicts it concurrently.
-pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<Arc<AiPowVerifierSetup>> {
-    let s = SETUP.get()?;
+/// - `NoSuchBucket`: the table is missing a bucket for `trace_height`. Because the
+///   committed table pins exactly the seven real heights, an `trace_height` with no
+///   bucket cannot belong to a valid block on ANY honest node — this is a
+///   DETERMINISTIC invalid-block signal (the jet returns `NO`, and consensus marks the
+///   block a liar so it cannot be re-spammed).
+/// - `LoadFailed`: the table is uninjected, or a bucket EXISTS but its context could
+///   not be loaded (missing / corrupt / bit-rotten file, disk error). That is a
+///   NON-DETERMINISTIC per-node fault — the jet `%fail`s rather than voting.
+///
+/// The returned `Arc` keeps the context alive for the caller's verify even if the LRU
+/// evicts it concurrently.
+pub fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLookup {
+    // Uninjected setup is a per-node boot state (this node cannot verify anything yet),
+    // not a property of the block ⇒ non-deterministic fault.
+    let Some(s) = SETUP.get() else {
+        return VerifierSetupLookup::LoadFailed;
+    };
     // Fast path: already paged into memory.
     {
         let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(arc) = lru.get_touch(trace_height) {
-            return Some(arc);
+            return VerifierSetupLookup::Found(arc);
         }
     }
-    // Miss: page the context in from disk OUTSIDE the lock (~0.6 s worst case) so we
-    // do not block other verifies while reading/deserializing.
-    let bucket = s.disk.get(&trace_height)?;
-    let setup = page_in_bucket(bucket)?;
+    // No committed bucket for this height ⇒ the block is invalid (deterministic).
+    let Some(bucket) = s.disk.get(&trace_height) else {
+        return VerifierSetupLookup::NoSuchBucket;
+    };
+    // A real bucket: page its context in from disk OUTSIDE the lock (~0.6 s worst
+    // case). A load failure here is a non-deterministic local fault, NOT an
+    // invalid-block signal.
+    let setup = match page_in_bucket(bucket) {
+        Some(s) => s,
+        None => return VerifierSetupLookup::LoadFailed,
+    };
     let arc = Arc::new(setup);
     let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
-    Some(lru.insert_capped(trace_height, arc, s.cap))
+    VerifierSetupLookup::Found(lru.insert_capped(trace_height, arc, s.cap))
 }
 
-/// Page one bucket's verifier context IN from its on-disk file and validate that its
-/// verifier-key digest equals the committed value. `None` (fail-safe) on a read /
-/// deserialize error or a digest mismatch — a divergent or corrupt context must not
-/// verify. This reads + deserializes a PREBUILT context (fast); it never rebuilds.
+/// Page one bucket's verifier context IN from its on-disk file, verifying its file
+/// checksum and its committed verifier-key digest. `None` on any read / checksum /
+/// deserialize / digest failure — a missing, corrupt, or divergent context is a
+/// NON-DETERMINISTIC local fault (the caller turns `None` into a jet `%fail`), never a
+/// silent reject. This reads + deserializes a PREBUILT context (fast); it never
+/// rebuilds.
 fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
     let raw = match std::fs::read(&bucket.context_path) {
         Ok(b) => b,
@@ -184,19 +234,43 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
             return None;
         }
     };
-    let (setup, _): (AiPowVerifierSetup, _) =
-        match bincode::serde::decode_from_slice(&raw, bincode::config::standard()) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "ai-pow: deserializing verifier context for trace_height {} failed: {e:?}",
-                    bucket.trace_height,
-                );
-                return None;
-            }
-        };
+    // Integrity: the file bytes must hash to the checksum recorded when it was written.
+    // This catches on-disk bit-rot in the multi-GB preprocessed tree BEFORE it can
+    // reach verification (where it would otherwise cause a valid block to be rejected).
+    let file_blake3 = *blake3::hash(&raw).as_bytes();
+    if file_blake3 != bucket.context_file_blake3 {
+        tracing::error!(
+            "ai-pow: verifier context file for trace_height {} failed its checksum (on-disk \
+             corruption) — refusing to verify against it",
+            bucket.trace_height,
+        );
+        return None;
+    }
+    // Deserialize under catch_unwind: a corrupt-but-checksum-colliding or otherwise
+    // pathological file must not panic the node (this is a local, non-deterministic
+    // fault ⇒ `None` ⇒ the caller `%fail`s).
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bincode::serde::decode_from_slice::<AiPowVerifierSetup, _>(&raw, bincode::config::standard())
+    }));
+    let (setup, _) = match decoded {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::error!(
+                "ai-pow: deserializing verifier context for trace_height {} failed: {e:?}",
+                bucket.trace_height,
+            );
+            return None;
+        }
+        Err(_panic) => {
+            tracing::error!(
+                "ai-pow: deserializing verifier context for trace_height {} panicked (corrupt file)",
+                bucket.trace_height,
+            );
+            return None;
+        }
+    };
     // Consensus + integrity gate: the deserialized context's verifier-key digest must
-    // equal the committed value (catches a corrupt/tampered/wrong context file).
+    // equal the committed value (catches a wrong/swapped/stale context file).
     let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
         setup.context.verifier_key_digest(),
     );
@@ -371,12 +445,15 @@ pub fn ai_pow_verify_core(
 /// `commit_from_noun`), `target` the `merge:bignum` LE atom the Hoon arm passes.
 /// Result: loobean.
 ///
-/// The artifact is decoded BEFORE the boot setup is required: a malformed/garbage
-/// `%ai-pow` artifact is a rejected block (`NO`) that needs no setup — so a garbage
-/// block cannot crash a node whose setup is still building, and the jet is
-/// unit-testable end-to-end without a ~25 s setup prove. A *well-formed* artifact
-/// with no setup injected does bail to the stubbed Hoon arm (`!!`) — the
-/// jet-required design surfaces the boot bug rather than silently accepting.
+/// **It is impossible to panic the node from this jet.** The two attacker-controlled
+/// steps — decoding the artifact and running the (large, vendored) recursion verifier
+/// on the certificate — are wrapped in `catch_unwind`; a panic on crafted input is a
+/// DETERMINISTIC invalid-block signal → `NO` (which consensus turns into a
+/// `%liar-block-id`, so the block cannot be re-spammed). Neither wrapped step mutates
+/// the interpreter stack, so catching is safe. The setup lookup distinguishes a
+/// DETERMINISTIC "no such bucket ⇒ invalid block" (`NO`) from a NON-DETERMINISTIC
+/// local fault (missing/corrupt context file, uninjected table ⇒ `%fail` via
+/// `BAIL_FAIL`, so a broken node halts rather than wrongly rejecting valid blocks).
 pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, JetErr> {
     let space = context.stack.noun_space();
     // sample = [artifact commit target]  ⇒  head=2, commit=6, target=7
@@ -385,38 +462,52 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     let commit_noun = slot(sample, 6, &space)?;
     let target_noun = slot(sample, 7, &space)?;
 
-    // Decode first — garbage is a rejected block, not a jet failure, and needs no
-    // setup. `PearlMergeAiPowArtifactShape` is an owned decode, so it survives the
-    // stack mutation from `commit_from_noun` below.
-    let limits = CertificateNounLimits::default();
-    let artifact = match decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits) {
-        Ok(a) => a,
-        Err(_) => return Ok(NO),
+    // Decode + target-parse + cap-check the ATTACKER-CONTROLLED artifact under
+    // catch_unwind. A decode/shape failure, a bad target, an over-cap height, OR a
+    // panic on crafted input are all the same DETERMINISTIC invalid-block signal → NO.
+    // None of this mutates `context.stack`, so catching a panic here is safe.
+    let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let limits = CertificateNounLimits::default();
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits).ok()?;
+        let target = target_atom_to_32_saturating(target_noun, &space)?;
+        // Consensus cap: a block claiming a Layer-0 trace height above the accept-band
+        // (2^19) is invalid (the top bucket is deliberately not built).
+        if artifact.certificate.trace_height > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
+            return None;
+        }
+        Some((artifact, target))
+    }));
+    let (artifact, target) = match decoded {
+        Ok(Some(v)) => v,
+        Ok(None) | Err(_) => return Ok(NO),
     };
-    let Some(target) = target_atom_to_32_saturating(target_noun, &space) else {
-        return Ok(NO);
+
+    // Resolve the setup for THIS cert's trace-height bucket.
+    let setup = match ai_pow_verifier_setup_for(artifact.certificate.trace_height) {
+        VerifierSetupLookup::Found(s) => s,
+        // Deterministic: no committed bucket ⇒ the block is invalid on every honest
+        // node ⇒ NO (and consensus marks it a liar).
+        VerifierSetupLookup::NoSuchBucket => return Ok(NO),
+        // Non-deterministic per-node fault (missing/corrupt file, uninjected table) ⇒
+        // %fail; this node halts rather than wrongly voting.
+        VerifierSetupLookup::LoadFailed => return Err(BAIL_FAIL),
     };
-    // Consensus cap: the accept-band tops out at AI_POW_MAX_TRACE_HEIGHT (2^19).
-    // A block claiming a larger Layer-0 trace height is INVALID (rejected) — and we
-    // reject it here BEFORE the setup lookup so it is a clean `NO`, not a BAIL_FAIL
-    // on the (deliberately absent) top bucket. The boot table holds exactly the
-    // seven feasible buckets 2^13..2^19. (A false-small trace_height cannot help a
-    // forger: the compact proof only verifies against the setup for its true
-    // height, so an oversized proof fails against every in-band setup.)
-    if artifact.certificate.trace_height > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
-        return Ok(NO);
-    }
-    // Resolve the setup for THIS cert's trace-height bucket from the boot table.
-    // A well-formed IN-BAND artifact whose bucket is absent (or the table
-    // uninjected) falls back to the stubbed Hoon arm (`!!`) — surfaces an
-    // incomplete boot table rather than silently rejecting a valid block.
-    let Some(setup) = ai_pow_verifier_setup_for(artifact.certificate.trace_height) else {
-        return Err(BAIL_FAIL);
-    };
-    // Canonicalize the structured commitment noun (mutates the stack via jam).
+
+    // Canonicalize the structured commitment noun (mutates the stack via jam). Kept
+    // OUTSIDE the catch_unwind below (which must not wrap stack mutation); the noun is
+    // Hoon-constructed (the candidate's commitment), not attacker-shaped.
     let commit = commit_from_noun(&mut context.stack, commit_noun);
-    let verified = ai_pow_verify_core(&artifact, commit, target, &setup)?;
-    Ok(if verified { YES } else { NO })
+
+    // Verify the certificate against the trusted setup, under catch_unwind. A panic in
+    // the recursion verifier on a crafted cert is a deterministic reject → NO, never a
+    // node crash. `ai_pow_verify_core` touches only owned/borrowed data (no stack).
+    let verified = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ai_pow_verify_core(&artifact, commit, target, &setup)
+    }));
+    match verified {
+        Ok(Ok(true)) => Ok(YES),
+        Ok(Ok(false)) | Ok(Err(_)) | Err(_) => Ok(NO),
+    }
 }
 
 /// Hot-state entry set for the AI-PoW verify jet. Appended to the nockchain kernel
@@ -632,6 +723,15 @@ mod jet_tests {
         let root = slab.cue_into(jammed).expect("cue artifact");
         slab.set_root(root);
         slab
+    }
+
+    /// Unwrap a `VerifierSetupLookup::Found`, panicking (in test) otherwise.
+    fn expect_found(l: crate::VerifierSetupLookup) -> std::sync::Arc<crate::AiPowVerifierSetup> {
+        match l {
+            crate::VerifierSetupLookup::Found(a) => a,
+            crate::VerifierSetupLookup::NoSuchBucket => panic!("expected Found, got NoSuchBucket"),
+            crate::VerifierSetupLookup::LoadFailed => panic!("expected Found, got LoadFailed"),
+        }
     }
 
     /// **Soundness KAT (fast, no proving): the commit representation binding.**
@@ -948,8 +1048,7 @@ mod jet_tests {
             .expect("disk-paged init");
 
         // First lookup pages the context in from disk (and validates its digest).
-        let setup = crate::ai_pow_verifier_setup_for(trace_height)
-            .expect("verifier context paged in from disk");
+        let setup = expect_found(crate::ai_pow_verifier_setup_for(trace_height));
 
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
@@ -974,16 +1073,63 @@ mod jet_tests {
         );
 
         // A second lookup returns the SAME resident context (no page-in).
-        let setup2 = crate::ai_pow_verifier_setup_for(trace_height).expect("resident");
+        let setup2 = expect_found(crate::ai_pow_verifier_setup_for(trace_height));
         assert!(
             std::sync::Arc::ptr_eq(&setup, &setup2),
             "the second lookup must return the cached (resident) context, not a fresh page-in",
         );
 
-        // An unknown in-band height has no bucket ⇒ None (the jet then BAILs).
+        // An unknown in-band height has no bucket ⇒ NoSuchBucket (jet returns NO, a
+        // deterministic invalid-block reject — NOT a %fail).
         assert!(
-            crate::ai_pow_verifier_setup_for(trace_height + 1).is_none(),
-            "a height with no disk bucket resolves to None",
+            matches!(
+                crate::ai_pow_verifier_setup_for(trace_height + 1),
+                crate::VerifierSetupLookup::NoSuchBucket
+            ),
+            "a height with no disk bucket resolves to NoSuchBucket",
+        );
+    }
+
+    /// CORRUPT-FILE FAIL-SAFE KAT (real proof, ~25s): a bit-rotten context file is
+    /// caught by its checksum at page-in and resolves to `LoadFailed` (⇒ the jet
+    /// `%fail`s — a non-deterministic local fault), NOT `Found` (which would verify
+    /// against a corrupt tree) and NOT a silent reject of a valid block. Pins the H3
+    /// fix. Sets the process-global setup; run alone.
+    #[test]
+    #[ignore = "real MoE compact proof (~25s); corrupts a context file; run alone"]
+    fn corrupt_context_file_pages_in_as_load_failed() {
+        if crate::ai_pow_verifier_setup_initialized() {
+            eprintln!("skip: verifier setup already initialized in this process");
+            return;
+        }
+        let params = MatmulParams {
+            m: 64, k: 1024, n: 64, noise_rank: 64, tile: 8, spot_checks: 1, difficulty_bits: 0,
+        };
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
+            .expect("prove");
+        let h = block.certificate.trace_height;
+        let setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build");
+        let digest = setup.digest_bytes.clone();
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::setup::install_verifier_setup_disk_from_setups(vec![setup], tmp.path(), 2)
+            .expect("disk-paged init");
+
+        // Corrupt the context file (flip a byte in the middle — lands in the tree),
+        // leaving the sidecar checksum intact.
+        let ctx_path = crate::setup::verifier_context_file_path(tmp.path(), h, &digest);
+        let mut bytes = std::fs::read(&ctx_path).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xff;
+        std::fs::write(&ctx_path, &bytes).unwrap();
+
+        // First page-in reads the corrupt file → checksum mismatch → LoadFailed.
+        assert!(
+            matches!(
+                crate::ai_pow_verifier_setup_for(h),
+                crate::VerifierSetupLookup::LoadFailed
+            ),
+            "a corrupt context file must page in as LoadFailed (→ %fail), never Found or a \
+             silent reject",
         );
     }
 
@@ -1040,7 +1186,7 @@ mod jet_tests {
         // Page every height in, with cap=2 — RSS must stay ~2 contexts, not 7.
         for db in 13u32..=19 {
             let h = 1usize << db;
-            let setup = crate::ai_pow_verifier_setup_for(h).expect("page in bucket");
+            let setup = expect_found(crate::ai_pow_verifier_setup_for(h));
             assert_eq!(setup.trace_height, h);
         }
         let after_paging = rss_mb();
@@ -1052,6 +1198,68 @@ mod jet_tests {
             after_paging < 6000,
             "disk-paged RSS with cap=2 must stay well under the ~8.6 GB all-resident table \
              (got {after_paging} MB)",
+        );
+    }
+
+    /// AUDIT PROBE: does DROPPING a paged-in context actually return RSS to the OS on
+    /// THIS allocator? The "cap bounds RSS" guarantee needs eviction (a `drop`) to
+    /// reclaim memory. Page the largest context in and out several times, printing RSS
+    /// each cycle: flat ⇒ the drop reclaims (guarantee holds even on the system
+    /// allocator); growing ⇒ the allocator retains freed memory and the guarantee
+    /// relies on jemalloc's background decay (production) rather than the drop alone.
+    /// Needs a built 2^19 context file (from a prior boot/RSS run); skips otherwise.
+    #[test]
+    #[ignore = "pages a big context in/out repeatedly to check that eviction reclaims RSS; opt-in"]
+    fn eviction_reclaims_rss_probe() {
+        fn rss_mb() -> u64 {
+            let pid = std::process::id().to_string();
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &pid])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+        }
+        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let cache = crate::setup::verifier_setup_seed_cache_path(&dir);
+        if !cache.exists() {
+            eprintln!("skip: no stable seed cache");
+            return;
+        }
+        let mut seeds = crate::setup::load_verifier_setup_seeds(&cache).expect("load seeds");
+        seeds.sort_by_key(|s| s.trace_height());
+        let big = seeds.pop().expect("a seed");
+        let ctx_path = crate::setup::verifier_context_file_path(
+            &dir,
+            big.trace_height(),
+            &big.verifier_key_digest_bytes,
+        );
+        if !ctx_path.exists() {
+            eprintln!("skip: no built 2^19 context file at {} (run the boot+RSS test first)", ctx_path.display());
+            return;
+        }
+        let base = rss_mb();
+        eprintln!("base RSS {base} MB; paging 2^19 in and out 4x:");
+        let mut peak_held = 0u64;
+        for i in 0..4 {
+            let held = {
+                let raw = std::fs::read(&ctx_path).expect("read ctx");
+                let (setup, _): (AiPowVerifierSetup, _) =
+                    bincode::serde::decode_from_slice(&raw, bincode::config::standard())
+                        .expect("decode ctx");
+                let h = rss_mb();
+                std::hint::black_box(&setup);
+                h
+                // setup + raw dropped here (eviction)
+            };
+            peak_held = peak_held.max(held);
+            let after_drop = rss_mb();
+            eprintln!("  cycle {i}: held {held} MB (+{} over base), after drop {after_drop} MB", held.saturating_sub(base));
+        }
+        let end = rss_mb();
+        eprintln!(
+            "END RSS {end} MB. If ~base ({base}) the drop reclaims; if ~peak_held ({peak_held}) the \
+             allocator retains (needs jemalloc decay). context ~{} MB.",
+            peak_held.saturating_sub(base),
         );
     }
 

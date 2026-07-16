@@ -6,8 +6,11 @@ use nockapp::kernel::boot;
 use nockchain::NockchainAPIConfig;
 use zkvm_jetpack::hot::produce_prover_hot_state;
 
-// When enabled, use jemalloc for more stable memory allocation
-#[cfg(all(feature = "jemalloc", not(feature = "tracing-heap")))]
+// jemalloc is REQUIRED (not optional): the AI-PoW verifier-setup table pages large
+// contexts in/out of memory, and returning that freed memory to the OS relies on
+// jemalloc's decay-based purging (the system allocator retains it, so RSS would grow
+// with every page-in).
+#[cfg(not(feature = "tracing-heap"))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
