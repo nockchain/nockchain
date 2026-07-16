@@ -877,4 +877,45 @@
           (~(has-raw-tx k-by:h nockchain) id.raw1)
           ~(consensus-invariants k-by:h nockchain)
       ==
+::
+::  +update must drop heaviest-chain entries above the tip.
+::
+::    heaviest-chain is contiguous 0..tip, and +update only ever walks DOWN from
+::    a new tip, so nothing has ever removed an entry above it. Heaviness is
+::    accumulated-work, not height (+compare-heaviness), so a reorg onto a chain
+::    with more work but LESS height lowers the tip and strands every entry
+::    above it naming the abandoned chain. derived.hoon carried a TODO asking
+::    for exactly this check.
+::
+::    Those entries are not inert. +release-orphaned-branch classifies with this
+::    index: handed old-heavy after a tip-lowering reorg, it looks up
+::    old-heavy's own height, finds the stale entry still naming old-heavy,
+::    concludes `u.canonical == cur` -- "reached the common ancestor" -- and
+::    releases NOTHING. The whole abandoned branch stays stranded.
+::
+::    Note +update early-stops at the first height that already agrees, which is
+::    immediately in this test. A prune placed after that walk would never run
+::    on exactly the reorgs that strand these entries, so it runs before it.
+++  test-derived-update-prunes-heaviest-chain-above-tip
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 4 nockchain)
+  =/  tip  ~(tip-page k-by:h nockchain)
+  =/  tip-height  ~(height get:page:t tip)
+  =/  stale-id  ~(digest get:page:t (snag 0 pages))
+  =/  stale-d
+    %+  ~(stale-heaviest-chain-above-tip k-by:h nockchain)
+      ~(der k-by:h nockchain)
+    :~  [+(tip-height) stale-id]
+        [+(+(tip-height)) stale-id]
+    ==
+  =/  updated
+    %^  ~(der-update k-by:h nockchain)  stale-d  ~(con k-by:h nockchain)  tip
+  ::  both stale entries gone, and the tip's own entry untouched
+  %+  expect-eq
+    !>([~ ~ `~(digest get:page:t tip)])
+  !>  :*  (~(heaviest-chain-at k-by:h nockchain) updated +(tip-height))
+          (~(heaviest-chain-at k-by:h nockchain) updated +(+(tip-height)))
+          (~(heaviest-chain-at k-by:h nockchain) updated tip-height)
+      ==
 --
