@@ -142,6 +142,183 @@ impl SemanticSnapshot {
                 }
             })
     }
+
+    /// Resolve an unambiguous same-document arm or mold name.
+    ///
+    /// Compiler-owned provenance remains authoritative for scoped and
+    /// cross-file definitions. This structural fallback deliberately declines
+    /// duplicate names rather than guessing across nested cores.
+    pub fn definition(&self, source: &str, byte_offset: u32) -> Option<SemanticTextRange> {
+        let name = hoon_term_at(source, byte_offset)?;
+        let mut matches = self.symbols.iter().filter(|symbol| symbol.name == name);
+        let definition = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(definition.selection_range)
+    }
+}
+
+/// Return the Hoon term under a byte offset using the editor's term boundary
+/// rules. This deliberately excludes uppercase and punctuation-heavy tokens.
+pub fn hoon_term_at(source: &str, byte_offset: u32) -> Option<&str> {
+    let range = hoon_term_range_at(source, byte_offset)?;
+    source.get(range.start as usize..range.end as usize)
+}
+
+/// Return the two-glyph Hoon rune under a byte offset.
+pub fn hoon_rune_at(source: &str, byte_offset: u32) -> Option<&str> {
+    let offset = usize::try_from(byte_offset).ok()?;
+    if offset >= source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    [offset.checked_sub(1), Some(offset)]
+        .into_iter()
+        .flatten()
+        .find_map(|start| {
+            let rune = source.get(start..start.checked_add(2)?)?;
+            rune_tag(rune).is_some().then_some(rune)
+        })
+}
+
+/// Locate a unique arm or mold declaration without parsing the whole file.
+///
+/// This lightweight structural index is used for imported editor sources and
+/// the large standard-library prelude. It declines duplicate declarations so
+/// callers never guess between nested cores with the same arm name.
+pub fn structural_definition(source: &str, name: &str) -> Option<SemanticTextRange> {
+    if source.len() > u32::MAX as usize {
+        return None;
+    }
+    let mut matches = scan_arm_headers(source)
+        .into_iter()
+        .filter(|symbol| symbol.name == name);
+    let definition = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some(definition.selection_range)
+}
+
+/// Locate a rune's canonical tagged alternative in the standard-library
+/// `hoon` mold, such as `^-` at `[%kthp p=spec q=hoon]`.
+pub fn structural_rune_definition(source: &str, rune: &str) -> Option<SemanticTextRange> {
+    if source.len() > u32::MAX as usize {
+        return None;
+    }
+    if let Some(parser_arm) = match rune {
+        "++" => Some("bola"),
+        "+$" => Some("boba"),
+        "+|" => Some("whip"),
+        _ => None,
+    } {
+        return structural_definition(source, parser_arm);
+    }
+    let tag = rune_tag(rune)?;
+    let tagged_alternative = format!("[%{tag}");
+    let mut offset = 0usize;
+    let mut definition = None;
+    for line in source.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let Some(tag_start) = line_without_newline.find(&tagged_alternative) else {
+            offset += line.len();
+            continue;
+        };
+        let Some(comment_start) = line_without_newline[tag_start + tagged_alternative.len()..]
+            .find("::")
+            .map(|relative| tag_start + tagged_alternative.len() + relative)
+        else {
+            offset += line.len();
+            continue;
+        };
+        let comment = line_without_newline[comment_start + 2..].trim_start();
+        let rune_is_documented = comment.strip_prefix(rune).is_some_and(|remainder| {
+            remainder.is_empty()
+                || remainder
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_whitespace)
+        });
+        if !rune_is_documented {
+            offset += line.len();
+            continue;
+        }
+        let start = offset + tag_start + 2;
+        let range = SemanticTextRange {
+            start: u32::try_from(start).ok()?,
+            end: u32::try_from(start + tag.len()).ok()?,
+        };
+        if definition.replace(range).is_some() {
+            return None;
+        }
+        offset += line.len();
+    }
+    definition
+}
+
+fn rune_tag(rune: &str) -> Option<String> {
+    let bytes: [u8; 2] = rune.as_bytes().try_into().ok()?;
+    Some(format!(
+        "{}{}",
+        rune_syllable_tag(bytes[0])?,
+        rune_syllable_tag(bytes[1])?
+    ))
+}
+
+fn rune_syllable_tag(glyph: u8) -> Option<&'static str> {
+    match glyph {
+        b'|' => Some("br"),
+        b'$' => Some("bc"),
+        b'_' => Some("cb"),
+        b'%' => Some("cn"),
+        b':' => Some("cl"),
+        b',' => Some("cm"),
+        b'.' => Some("dt"),
+        b'/' => Some("fs"),
+        b'<' => Some("gl"),
+        b'>' => Some("gr"),
+        b'#' => Some("hx"),
+        b'-' => Some("hp"),
+        b'^' => Some("kt"),
+        b'+' => Some("ls"),
+        b';' => Some("mc"),
+        b'&' => Some("pm"),
+        b'@' => Some("pt"),
+        b'~' => Some("sg"),
+        b'*' => Some("tr"),
+        b'`' => Some("tc"),
+        b'=' => Some("ts"),
+        b'?' => Some("wt"),
+        b'!' => Some("zp"),
+        _ => None,
+    }
+}
+
+fn hoon_term_range_at(source: &str, byte_offset: u32) -> Option<SemanticTextRange> {
+    let offset = usize::try_from(byte_offset).ok()?;
+    if offset >= source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let is_term_byte =
+        |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-';
+    if !is_term_byte(source.as_bytes()[offset]) {
+        return None;
+    }
+    let mut start = offset;
+    while start > 0 && is_term_byte(source.as_bytes()[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset + 1;
+    while end < source.len() && is_term_byte(source.as_bytes()[end]) {
+        end += 1;
+    }
+    if !source.as_bytes()[start].is_ascii_lowercase() {
+        return None;
+    }
+    Some(SemanticTextRange {
+        start: u32::try_from(start).ok()?,
+        end: u32::try_from(end).ok()?,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -695,8 +872,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        range_from_one_based_spot, scan_arm_headers, LineIndex, SemanticSession,
-        SemanticSymbolKind, SemanticTextRange,
+        hoon_rune_at, range_from_one_based_spot, scan_arm_headers, structural_definition,
+        structural_rune_definition, LineIndex, SemanticSession, SemanticSymbolKind,
+        SemanticTextRange,
     };
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
@@ -740,6 +918,81 @@ mod tests {
         let body_hover = snapshot.hover(body_offset).expect("body hover");
         assert!(body_hover.markdown.contains("Hoon syntax"));
         assert!(!body_hover.markdown.contains("answer"));
+    }
+
+    #[test]
+    fn structural_definition_resolves_unique_hyphenated_symbols_only() {
+        let source =
+            "|%\n+$  kernel-state  [%state version=%1]\n++  moat  (keep kernel-state)\n--\n";
+        let mut session = SemanticSession::default();
+        let mut snapshot = session
+            .snapshot(Path::new("/tmp/definition.hoon"), 1, source)
+            .expect("semantic snapshot")
+            .clone();
+        let offset =
+            u32::try_from(source.rfind("kernel-state").expect("use offset")).expect("small source");
+        let definition = snapshot
+            .definition(source, offset)
+            .expect("unique structural definition");
+        let start = usize::try_from(definition.start).expect("small source");
+        let end = usize::try_from(definition.end).expect("small source");
+        assert_eq!(&source[start..end], "kernel-state");
+
+        let duplicate = snapshot
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == "kernel-state")
+            .expect("kernel-state symbol")
+            .clone();
+        snapshot.symbols.push(duplicate);
+        assert!(snapshot.definition(source, offset).is_none());
+
+        let lightweight =
+            structural_definition(source, "kernel-state").expect("lightweight definition");
+        assert_eq!(
+            &source[lightweight.start as usize..lightweight.end as usize],
+            "kernel-state"
+        );
+        let duplicated_source = source.replace("++  moat", "+$  kernel-state  @\n++  moat");
+        assert!(structural_definition(&duplicated_source, "kernel-state").is_none());
+    }
+
+    #[test]
+    fn structural_rune_definition_resolves_both_glyph_positions() {
+        let use_source = "  ^-  [(list effect) state]\n";
+        let rune_start = use_source.find("^-").expect("rune start");
+        assert_eq!(
+            hoon_rune_at(use_source, u32::try_from(rune_start).expect("small source")),
+            Some("^-")
+        );
+        assert_eq!(
+            hoon_rune_at(
+                use_source,
+                u32::try_from(rune_start + 1).expect("small source")
+            ),
+            Some("^-")
+        );
+
+        let prelude = concat!(
+            "++  bola  ::  ++ arms\n  parser\n", "++  boba  ::  +$ arms\n  parser\n",
+            "++  whip  ::  +| chapter declare\n  parser\n",
+            "  [%ktls p=hoon q=hoon] :: ^+ expression cast\n",
+            "  [%kthp p=spec q=hoon] :: ^- structure cast\n",
+        );
+        let definition = structural_rune_definition(prelude, "^-").expect("ket-hep definition");
+        assert_eq!(
+            &prelude[definition.start as usize..definition.end as usize],
+            "kthp"
+        );
+        for (rune, parser_arm) in [("++", "bola"), ("+$", "boba"), ("+|", "whip")] {
+            let definition = structural_rune_definition(prelude, rune)
+                .unwrap_or_else(|| panic!("{rune} parser definition"));
+            assert_eq!(
+                &prelude[definition.start as usize..definition.end as usize],
+                parser_arm
+            );
+        }
+        assert!(structural_rune_definition(prelude, "::").is_none());
     }
 
     #[test]

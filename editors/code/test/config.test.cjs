@@ -2,6 +2,14 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 
 const { expandWorkspacePath, serverArguments } = require('../dist/config.js');
+const languageConfiguration = require('../language-configuration.json');
+
+test('Hoon words preserve hyphenated terms', () => {
+  const words = 'kernel-state noun-digest:tip5'.match(
+    new RegExp(languageConfiguration.wordPattern, 'g'),
+  );
+  assert.deepEqual(words, ['kernel-state', 'noun-digest', 'tip5']);
+});
 
 test('workspace variables and relative paths resolve consistently', () => {
   assert.equal(

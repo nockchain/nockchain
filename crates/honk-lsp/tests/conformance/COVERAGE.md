@@ -20,6 +20,11 @@ clients that implement later, capability-negotiated LSP versions.
 | Hover | Advertised hover responds from the current unsaved document snapshot and adds compiler-owned inferred types when the matching check completes | MUST for advertised capability | `document_symbols_hover_and_definition_use_current_unsaved_snapshot` | Passing |
 | Definition | Advertised go-to-definition follows compiler-resolved core arms in the current unsaved snapshot | MUST for advertised capability | `document_symbols_hover_and_definition_use_current_unsaved_snapshot` | Passing |
 | Definition | Imported gate definitions resolve to another file using compiler-owned provenance | MUST for advertised capability | `definition_navigates_to_an_imported_gate` | Passing |
+| Definition | An unambiguous same-document arm or mold resolves structurally when compiler provenance is unavailable | implementation fallback | `definition_navigates_to_a_hyphenated_mold_arm` | Passing |
+| Definition | Real `miner.hoon` same-file mold uses resolve despite large atom literals in its parsed AST | real-source regression | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` | Passing |
+| Definition | A mold inherited through the real `zeke` → `ztd-eight` → … → `ztd-four` import chain resolves to its source file | implementation fallback | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` (`tip5-hash-atom`) | Passing |
+| Definition | A standard-library mold resolves into the configured prelude | implementation fallback | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` (`list`) | Passing |
+| Definition | F12 on either glyph of a rune resolves to its canonical tagged alternative or core-declaration parser arm in the configured hoon-138 prelude | implementation fallback | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` (`^-`, `=/`, `\|=`, `?:`, `++`, `+$`) | Passing |
 | Positions | Semantic queries translate UTF-16 positions without splitting surrogate pairs | MUST for negotiated positions | `semantic_positions_round_trip_as_utf16` | Passing |
 | Cancellation | `$/cancelRequest` completes the pending request exactly once and suppresses its result | base protocol contract | unit cancellation test + process responsiveness test | Passing |
 | Responsiveness | Semantic indexing does not block unrelated JSON-RPC handling | implementation invariant | `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` | Passing |
@@ -29,5 +34,9 @@ Coverage claim applies only to the rows above, not to the full LSP feature set.
 Completion, references, formatting, semantic tokens, pull diagnostics,
 notebooks, and workspace folders are not advertised. Document symbols remain
 structural. Hover combines structural syntax with an owned type summary at
-compiler debug spots. Definition support currently covers compiler-resolved
-core arms and gates, but not local face or binding declarations.
+compiler debug spots. Definition support covers compiler-resolved core arms and
+gates plus unambiguous arm and mold headers in the same document, its resolved
+Hoon import graph, and the configured prelude. Gene rune tokens resolve to
+their canonical tagged alternatives in the prelude's `hoon` mold; core
+declaration tokens `++`, `+$`, and `+|` resolve to their parser arms. Local
+face and binding declarations are not covered.

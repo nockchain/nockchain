@@ -9,6 +9,9 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(about = "Hoon language server backed directly by honk")]
 struct Args {
+    /// Serve LSP over stdio. This is also the default transport.
+    #[arg(long = "stdio")]
+    _stdio: bool,
     /// Hoon compiler prelude. Defaults to <workspace>/hoon/common/hoon.hoon.
     #[arg(long)]
     prelude: Option<PathBuf>,

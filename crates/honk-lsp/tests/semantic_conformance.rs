@@ -372,6 +372,322 @@ fn definition_navigates_to_an_imported_gate() {
 }
 
 #[test]
+fn definition_navigates_to_a_hyphenated_mold_arm() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("hyphenated-mold.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let source = "|%\n+$  kernel-state  [%state version=%1]\n++  moat  (keep kernel-state)\n--\n";
+    let (client, server_thread) = start_server(&root, 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut request_id = 2;
+    let definition = loop {
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(request_id),
+                    "textDocument/definition".to_string(),
+                    json!({
+                        "textDocument": { "uri": entry_uri },
+                        "position": { "line": 2, "character": 20 }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request hyphenated mold definition");
+        let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(
+            receive_response(&client, request_id),
+        )
+        .expect("definition response");
+        if let Some(definition) = definition {
+            break definition;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "compiler-resolved hyphenated mold definition did not become available"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let GotoDefinitionResponse::Scalar(definition) = definition else {
+        panic!("server must return a single definition location");
+    };
+    assert_eq!(definition.uri, entry_uri);
+    assert_eq!(definition.range.start.line, 1);
+
+    shutdown_server(&client, server_thread, request_id + 1);
+}
+
+#[test]
+fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
+    let root = repository_root();
+    let entry = root.join("hoon/apps/dumbnet/miner.hoon");
+    let source = std::fs::read_to_string(&entry).expect("read real miner source");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let (client, server_thread) = start_server(&root, 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        source.clone(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let declaration_line = source
+        .lines()
+        .position(|line| line.trim_start().starts_with("+$  kernel-state"))
+        .expect("kernel-state declaration");
+    let declaration_character = source
+        .lines()
+        .nth(declaration_line)
+        .expect("kernel-state declaration line")
+        .find("kernel-state")
+        .expect("kernel-state declaration character");
+    let uses = [
+        "++  moat  (keep kernel-state)", "|_  k=kernel-state", "|=  =kernel-state  kernel-state",
+    ];
+    let mut request_id = 2;
+    for use_line in uses {
+        let line = source
+            .lines()
+            .position(|line| line.contains(use_line))
+            .unwrap_or_else(|| panic!("missing real miner use: {use_line}"));
+        let line_source = source.lines().nth(line).expect("located source line");
+        let character = line_source
+            .rfind("kernel-state")
+            .expect("kernel-state use character");
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(request_id),
+                    "textDocument/definition".to_string(),
+                    json!({
+                        "textDocument": { "uri": entry_uri },
+                        "position": { "line": line, "character": character + 2 }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request real miner definition");
+        let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(
+            receive_response(&client, request_id),
+        )
+        .expect("definition response")
+        .unwrap_or_else(|| panic!("no definition for real miner use: {use_line}"));
+        let GotoDefinitionResponse::Scalar(definition) = definition else {
+            panic!("server must return a single definition location");
+        };
+        assert_eq!(definition.uri, entry_uri);
+        assert_eq!(
+            usize::try_from(definition.range.start.line).expect("small line"),
+            declaration_line
+        );
+        assert_eq!(
+            usize::try_from(definition.range.start.character).expect("small character"),
+            declaration_character
+        );
+        request_id += 1;
+    }
+
+    let external_definitions = [
+        (
+            "dig=tip5-hash-atom",
+            "tip5-hash-atom",
+            root.join("hoon/common/ztd/four.hoon"),
+            "+$  tip5-hash-atom",
+        ),
+        (
+            "^-  [(list effect)",
+            "list",
+            root.join("hoon/common/hoon.hoon"),
+            "++  list",
+        ),
+    ];
+    for (use_text, symbol, definition_path, declaration_text) in external_definitions {
+        let line = source
+            .lines()
+            .position(|line| line.contains(use_text))
+            .unwrap_or_else(|| panic!("missing real miner use: {use_text}"));
+        let character = source
+            .lines()
+            .nth(line)
+            .expect("located source line")
+            .find(symbol)
+            .unwrap_or_else(|| panic!("missing {symbol} on real miner use line"));
+        client
+            .sender
+            .send(
+                Request::new(
+                    RequestId::from(request_id),
+                    "textDocument/definition".to_string(),
+                    json!({
+                        "textDocument": { "uri": entry_uri },
+                        "position": { "line": line, "character": character + 1 }
+                    }),
+                )
+                .into(),
+            )
+            .expect("request external real miner definition");
+        let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(
+            receive_response(&client, request_id),
+        )
+        .expect("definition response")
+        .unwrap_or_else(|| panic!("no definition for real miner symbol: {symbol}"));
+        let GotoDefinitionResponse::Scalar(definition) = definition else {
+            panic!("server must return a single definition location");
+        };
+
+        let definition_source =
+            std::fs::read_to_string(&definition_path).expect("read definition source");
+        let declaration_line = definition_source
+            .lines()
+            .position(|line| line.trim_start().starts_with(declaration_text))
+            .unwrap_or_else(|| panic!("missing declaration: {declaration_text}"));
+        let declaration_character = definition_source
+            .lines()
+            .nth(declaration_line)
+            .expect("declaration line")
+            .find(symbol)
+            .expect("declaration character");
+        let definition_uri = Uri::from_str(
+            url::Url::from_file_path(&definition_path)
+                .expect("definition file URI")
+                .as_str(),
+        )
+        .expect("definition LSP URI");
+        assert_eq!(definition.uri, definition_uri);
+        assert_eq!(
+            usize::try_from(definition.range.start.line).expect("small line"),
+            declaration_line
+        );
+        assert_eq!(
+            usize::try_from(definition.range.start.character).expect("small character"),
+            declaration_character
+        );
+        request_id += 1;
+    }
+
+    let prelude_path = root.join("hoon/common/hoon.hoon");
+    let prelude_source = std::fs::read_to_string(&prelude_path).expect("read prelude source");
+    let prelude_uri = Uri::from_str(
+        url::Url::from_file_path(&prelude_path)
+            .expect("prelude file URI")
+            .as_str(),
+    )
+    .expect("prelude LSP URI");
+    let rune_cases = [
+        ("^-  [(list effect)", "^-", "kthp", "[%kthp "),
+        ("=/  cause", "=/", "tsfs", "[%tsfs "),
+        ("|=  =kernel-state", "|=", "brts", "[%brts "),
+        ("?:  (check-target", "?:", "wtcl", "[%wtcl "),
+        ("++  moat", "++", "bola", "++  bola"),
+        ("+$  effect", "+$", "boba", "++  boba"),
+    ];
+    for (use_text, rune, target, declaration_marker) in rune_cases {
+        let rune_line = source
+            .lines()
+            .position(|line| line.contains(use_text))
+            .unwrap_or_else(|| panic!("missing real miner rune use: {use_text}"));
+        let rune_character = source
+            .lines()
+            .nth(rune_line)
+            .expect("rune source line")
+            .find(rune)
+            .expect("rune character");
+        let rune_definition_line = prelude_source
+            .lines()
+            .position(|line| line.contains(declaration_marker))
+            .unwrap_or_else(|| panic!("missing {rune} rune declaration"));
+        let rune_definition_character = prelude_source
+            .lines()
+            .nth(rune_definition_line)
+            .expect("rune declaration line")
+            .find(target)
+            .expect("rune declaration character");
+        for cursor_delta in 0..=1 {
+            client
+                .sender
+                .send(
+                    Request::new(
+                        RequestId::from(request_id),
+                        "textDocument/definition".to_string(),
+                        json!({
+                            "textDocument": { "uri": entry_uri },
+                            "position": {
+                                "line": rune_line,
+                                "character": rune_character + cursor_delta
+                            }
+                        }),
+                    )
+                    .into(),
+                )
+                .unwrap_or_else(|_| panic!("request {rune} rune definition"));
+            let definition = serde_json::from_value::<Option<GotoDefinitionResponse>>(
+                receive_response(&client, request_id),
+            )
+            .expect("rune definition response")
+            .unwrap_or_else(|| panic!("no definition for {rune} rune"));
+            let GotoDefinitionResponse::Scalar(definition) = definition else {
+                panic!("server must return a single rune definition location");
+            };
+            assert_eq!(definition.uri, prelude_uri);
+            assert_eq!(
+                usize::try_from(definition.range.start.line).expect("small line"),
+                rune_definition_line
+            );
+            assert_eq!(
+                usize::try_from(definition.range.start.character).expect("small character"),
+                rune_definition_character
+            );
+            request_id += 1;
+        }
+    }
+
+    shutdown_server(&client, server_thread, request_id);
+}
+
+#[test]
 fn cancellation_and_other_requests_remain_responsive_during_semantic_indexing() {
     let root = repository_root();
     let temp = TempDir::new().expect("temporary workspace");

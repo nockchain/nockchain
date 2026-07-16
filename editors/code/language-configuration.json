@@ -2,6 +2,7 @@
   "comments": {
     "lineComment": "::"
   },
+  "wordPattern": "[a-z][a-z0-9-]*",
   "brackets": [
     ["[", "]"],
     ["(", ")"],

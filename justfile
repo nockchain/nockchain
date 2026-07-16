@@ -14,6 +14,11 @@ test:
 test-honk:
     cargo nextest run --release -p honk
 
+# Install the locked dependencies and build the installable VS Code extension.
+npm-build:
+    npm --prefix editors/code ci
+    npm --prefix editors/code run package
+
 build-honk-assets: honc-cold-138-asset hoonc-octs-type-138-asset
 
 honc-cold-138-asset:
