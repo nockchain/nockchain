@@ -402,26 +402,26 @@ impl PublicNockchainGrpcServer {
                 let new_height_value = height.0 .0;
                 tracing::Span::current()
                     .record("new_height", &tracing::field::display(new_height_value));
-                let should_update = guard
-                    .as_ref()
-                    .map(|current| new_height_value >= current.height.0 .0)
-                    .unwrap_or(true);
-
-                if should_update {
-                    let snapshot = HeaviestChainSnapshot {
-                        height,
-                        block_id,
-                        fetched_at: Instant::now(),
-                    };
-                    *guard = Some(snapshot);
-                    self.metrics.heaviest_chain_age_seconds.swap(0.0);
-                } else if let Some(current) = guard.as_ref() {
-                    warn!(
-                        new_height = new_height_value,
-                        cached_height = current.height.0 .0,
-                        "Heaviest chain peek returned lower height than cache"
-                    );
+                // The peek reports the tip, and a reorg onto a chain with more
+                // accumulated work in fewer blocks lowers it. The snapshot must
+                // follow it down: it keys the balance cache, so pinning it to a
+                // height the chain no longer holds misses on every lookup.
+                if let Some(current) = guard.as_ref() {
+                    if new_height_value < current.height.0 .0 {
+                        warn!(
+                            new_height = new_height_value,
+                            cached_height = current.height.0 .0,
+                            "Heaviest chain tip moved down: reorg onto a shorter heavier chain"
+                        );
+                    }
                 }
+                let snapshot = HeaviestChainSnapshot {
+                    height,
+                    block_id,
+                    fetched_at: Instant::now(),
+                };
+                *guard = Some(snapshot);
+                self.metrics.heaviest_chain_age_seconds.swap(0.0);
             }
             None => {}
         }
