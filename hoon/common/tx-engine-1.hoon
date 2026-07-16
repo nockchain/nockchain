@@ -395,7 +395,12 @@
   $+  ai-asert
   $~  :*  phase=95.000
           anchor-height=95.000
-          anchor-target-atom=^~((bex 291))
+          ::  AI targets live in the 256-bit jackpot space, so the AI anchor is
+          ::  bex 227 (< 2^256, no jet saturation). Paired with the AI work
+          ::  normalizer max-ai = max-target-atom/2^64 (see +compute-work-ai),
+          ::  a block at bex 227 contributes work equal to a ZK block at bex 291
+          ::  — equal-weight cross-puzzle fork choice.
+          anchor-target-atom=^~((bex 227))
           ideal-block-time=300
           half-life=^~((mul 12 ^~((mul 60 60))))
           ::  Placeholder. Pinned to the first AI block's median-of-11

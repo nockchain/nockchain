@@ -150,6 +150,28 @@
   =/  prf=proof:sp  (need ((soft proof:sp) pow))
   version.prf
 ::
+::  +block-compute-work: a block's heaviness contribution, dispatched by
+::  puzzle type. The ZK and AI puzzles use DIFFERENT work normalizers so
+::  cross-puzzle fork choice is EQUAL-WEIGHT (a block at each puzzle's ASERT
+::  anchor contributes identical work; see +compute-work-ai:page). This is the
+::  single source of truth for a block's work — validation heaviness AND the
+::  finalized block's stored accumulated-work MUST both use it. A powless block
+::  defaults to the ZK normalizer (it fails the pow check regardless).
+++  block-compute-work
+  |=  pag=page:t
+  ^-  bignum:bignum:t
+  =/  target  ~(target get:page:t pag)
+  ::  Cross-puzzle equal-weight AI normalization is active only post-asert
+  ::  (it pairs with the per-puzzle ASERT regime). Pre-asert every block uses the
+  ::  ZK normalizer — legacy behavior; AI blocks do not occur pre-asert on mainnet.
+  ?.  (post-asert-activation:t ~(height get:page:t pag))
+    (compute-work:page:t target)
+  =/  pow-unit  ~(pow get:page:t pag)
+  ?~  pow-unit  (compute-work:page:t target)
+  ?:  =(%ai-pow (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit)))
+    (compute-work-ai:page:t target)
+  (compute-work:page:t target)
+::
 ::  +block-id-to-proof-version: returns the proof version of an
 ::  already-accepted block, given its block-id. Reads the
 ::  block-versions map first (post-activation blocks); falls back
@@ -684,7 +706,7 @@
     %-  chunk:bignum:t
     %+  add
       (merge:bignum:t ~(accumulated-work get:page:t par))
-    (merge:bignum:t (compute-work:page:t ~(target get:page:t pag)))
+    (merge:bignum:t (block-compute-work pag))
   ?.  check-heaviness
     [%.n %page-heaviness-invalid]
   ::

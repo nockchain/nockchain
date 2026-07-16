@@ -461,6 +461,11 @@
     ^-  bignum:bn
     (compute-work:page:v0 target-bn)
   ::
+  ++  compute-work-ai
+    |=  target-bn=bignum:bn
+    ^-  bignum:bn
+    (compute-work-ai:page:v0 target-bn)
+  ::
   ++  compute-digest
     |=  pag=form
     ^-  block-id

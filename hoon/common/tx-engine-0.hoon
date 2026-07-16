@@ -739,6 +739,27 @@
     =/  target-atom=@  (merge:bn target-bn)
     =/  raw=@  (div max-target-atom +(target-atom))
     (chunk:bn ?:(=(0 raw) 1 raw))
+  ::  +compute-work-ai: heaviness contribution for an AI-PoW (%ai-pow) block.
+  ::
+  ::    The AI puzzle's jackpot is a 256-bit value, so its target lives in the
+  ::    256-bit space (AI ASERT anchors at bex 227), whereas ZK targets live in the
+  ::    full ~2^320 space (ZK anchor bex 291). To make cross-puzzle fork choice
+  ::    EXACTLY equal-weight, we scale the AI target UP by 2^64 into the ZK target
+  ::    space and then apply the identical GetBlockProof formula (same +compute-work
+  ::    max-target-atom and +1 denominator). Consequences, all exact integer
+  ::    identities (no rounding drift):
+  ::      compute-work-ai(T) == compute-work(T * 2^64)
+  ::      => AI anchor bex 227 gives max-target-atom/(2^291 + 1) == ZK anchor work.
+  ::    ZK (+compute-work) is untouched. At AI-target T and ZK-target T*2^64 the two
+  ::    puzzles have equal solve probability, so summing their work in one heaviness
+  ::    total is meaningful.
+  ++  compute-work-ai
+    |=  target-bn=bignum:bn
+    ^-  bignum:bn
+    =/  target-atom=@  (merge:bn target-bn)
+    =/  scaled-atom=@  (mul target-atom (bex 64))
+    =/  raw=@  (div max-target-atom +(scaled-atom))
+    (chunk:bn ?:(=(0 raw) 1 raw))
   ::
   ++  to-page-summary
     |=  pag=form
