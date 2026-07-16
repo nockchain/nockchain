@@ -19,15 +19,11 @@
     (to-page:local-page:t (~(got h-by blocks.c) (need heaviest-block.c)))
   =/  next-parent=block-id:t    ~(digest get:page:t heaviest-page)
   =/  next-height=page-number:t  ~(height get:page:t heaviest-page)
-  ::  Drop anything above the tip before revising the chain below it. This must
-  ::  come BEFORE the walk: the walk returns as soon as it finds a height that
-  ::  already agrees, which is the common case, so a prune placed after it would
-  ::  never run -- least of all on a reorg, which is the only thing that strands
-  ::  an entry up there in the first place.
-  =.  heaviest-chain.d  (prune-above next-height)
   |-
   ?:  =((~(get z-by heaviest-chain.d) next-height) `next-parent)
     ::  heaviest chain is accurate
+    ::TODO check there aren't any blocks at page-numbers higher than
+    ::the page-number of the heaviest block?
     d
   ::  heaviest chain is wrong, start revising
   =.  heaviest-chain.d
@@ -39,37 +35,6 @@
     next-height   (dec next-height)
     next-parent  ~(parent get:local-page:t (~(got h-by blocks.c) next-parent))
   ==
-::  +prune-above: drop every heaviest-chain entry above .tip.
-::
-::    heaviest-chain is contiguous 0..tip, and +update only ever walks DOWN from
-::    a new tip, so until now nothing ever removed an entry above one. Heaviness
-::    is accumulated-work, not height (+compare-heaviness), so a reorg onto a
-::    chain carrying more work in FEWER blocks lowers the tip and leaves every
-::    entry above it still naming the chain we just abandoned.
-::
-::    Those entries are not inert. +release-orphaned-branch classifies with this
-::    index: handed the old heaviest block after such a reorg, it looks up that
-::    block's own height, finds the stale entry there still naming it, reads
-::    `u.canonical == cur` as "reached the common ancestor" and returns having
-::    released nothing -- so the whole abandoned branch stays stranded. The boot
-::    repair (+repair-orphaned-claims) catches what this misses, but only at the
-::    next boot, and only because it classifies by ancestry instead of by this
-::    index.
-::
-::    Walks up from tip+1 until a height is absent, so it costs O(height
-::    dropped) -- never O(chain), and O(1) in the ordinary case where the tip
-::    only ever rises and there is nothing above it to drop.
-++  prune-above
-  ~/  %prune-above
-  |=  tip=page-number:t
-  ^-  (z-map page-number:t block-id:t)
-  =/  h=page-number:t  +(tip)
-  =/  hc  heaviest-chain.d
-  |-
-  ^-  (z-map page-number:t block-id:t)
-  ?~  (~(get z-by hc) h)  hc
-  $(hc (~(del z-by hc) h), h +(h))
-::
 ++  update-highest
   ~/  %update-highest
   |=  height=page-number:t

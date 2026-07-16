@@ -926,41 +926,6 @@
     =/  booted  (load:nockchain [%0 desk-hash.outer.nockchain ks])
     ;;(consensus-state c.internal.outer.booted)
   ::
-  ::  the page at the tip of the heaviest chain
-  ++  tip-page
-    ^-  page:t
-    (to-page:local-page:t (~(got h-by blocks:con) (need heaviest-block:con)))
-  ::
-  ::  +der-update: the derived-state update, as +accept-block runs it.
-  ++  der-update
-    |=  [d=derived-state c=consensus-state pag=page:t]
-    ^-  derived-state
-    (~(update dder d bc) c pag)
-  ::
-  ::  +stale-heaviest-chain-above-tip: plant heaviest-chain entries ABOVE the
-  ::  tip, which is what a tip-lowering reorg leaves behind.
-  ::
-  ::    +update only ever walks DOWN from the new tip, so nothing has ever
-  ::    removed an entry above it. Heaviness is accumulated-work, not height
-  ::    (+compare-heaviness), so reorging onto a chain with more work but less
-  ::    height lowers the tip and strands the entries above it. Planting them is
-  ::    how that state is reached here: forging a genuinely heavier-but-shorter
-  ::    chain would mean driving accumulated-work through targets, which the
-  ::    page builders do not expose.
-  ++  stale-heaviest-chain-above-tip
-    |=  [d=derived-state above=(list [=page-number:t =block-id:t])]
-    ^-  derived-state
-    =.  heaviest-chain.d
-      %+  roll  above
-      |=  [[=page-number:t =block-id:t] hc=_heaviest-chain.d]
-      (~(put z-by hc) page-number block-id)
-    d
-  ::
-  ++  heaviest-chain-at
-    |=  [d=derived-state =page-number:t]
-    ^-  (unit block-id:t)
-    (~(get z-by heaviest-chain.d) page-number)
-  ::
   ::  +with-con: this node, running on the given consensus state.
   ::
   ::    +load returns the wrapper's outer core, whose shape does not nest with
