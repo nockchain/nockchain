@@ -946,7 +946,6 @@
 ::    The result is closed under parent by construction. Callers deleting its
 ::    complement depend on that.
 ++  canonical-block-ids
-  ~/  %canonical-block-ids
   ^-  (unit (h-set block-id:t))
   ?:  =(~ heaviest-block.c)  `*(h-set block-id:t)
   =/  cur=block-id:t  (need heaviest-block.c)
@@ -1005,7 +1004,6 @@
 ::    scan. Boot-only for that reason -- an event must never pay for the size of
 ::    the chain.
 ++  repair-orphaned-claims
-  ~/  %repair-orphaned-claims
   ^-  consensus-state:dk
   ::  no chain yet, so nothing can be orphaned. Tested with `=(~ ...)` rather
   ::  than `?~`: `?~` would narrow .c's type to one whose heaviest-block is known
