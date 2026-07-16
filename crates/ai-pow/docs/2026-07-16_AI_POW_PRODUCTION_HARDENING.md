@@ -354,13 +354,61 @@ accepted post-ASERT-activation. Six concrete items:
   builder exists in the Hoon harness (only `make-ai-pow-garbage-page`). Nothing catches
   9.2/9.3/9.4/9.5. STATUS: **OPEN — build the exhaustive side-by-side suite.**
 
-**This is the active goal: implement + exhaustively test.** Ordered plan: (1) fix 9.3
-(bound AI targets < 2^256) and decide 9.2 (work normalization) — the soundness core; (2)
-fix 9.4-C2 (AI candidate target + block-target-per-puzzle so AI blocks are acceptable) and
-9.4-C1 (populate the AI anchor); (3) fix 9.5 (same-type height in ASERT; reconcile
-emission); (4) build the mixed-chain test suite covering per-puzzle retargeting + cross-
-puzzle heaviness + fork choice + AI acceptance. Each stage: KAT-first, tests, rebuild
-dumb.jam→binary, commit.
+### Confirmed design (user decisions 2026-07-16): equal-weight normalization + constant combined rate
+
+**Heaviness = equal weight at anchor, ZERO change to ZK.** Keep the shared `compute-work`
+FORMULA but make it PUZZLE-AWARE in the normalizer: ZK uses `max_zk = max_tip5_atom (~2^320)`;
+AI uses `max_ai = max_tip5_atom / 2^64 (< 2^256)`. Set the AI ASERT anchor to `bex 227` and the
+ZK anchor stays `bex 291`. Then `max_ai/anchor_ai = (max_tip5/2^64)/(2^291/2^64) =
+max_tip5/2^291 = max_zk/anchor_zk` EXACTLY → a block at each puzzle's anchor contributes
+identical work; and because `max_ai < 2^256` and `anchor_ai < 2^256`, AI targets are natively
+256-bit so the jet's existing parse handles them with NO saturation (fixes 9.3 with **no
+Rust/jet change**). ZK's `compute-work` is untouched (no hard-fork of existing heaviness). At
+equal *stored target* the two puzzles then have equal solve probability, so summing their
+`compute-work` in one heaviness total is exactly the intended equal-weight fork choice.
+
+**Combined rate constant:** each puzzle's ASERT targets 300s over ITS OWN same-type subchain →
+combined ~150s (unchanged global cadence). Requires fixing 9.5: `blocks-since-anchor` must use
+the SAME-TYPE height/count (via `find-same-type-ancestor` walk), not global height.
+
+### Implementation residual (precise, staged — the atomic unit is coupled; land as a coherent whole then test)
+
+All Hoon (rebuild dumb.jam→binary per stage; NEVER run hoonc in parallel):
+1. **Constants** (tx-engine-1.hoon:394-411): `ai-asert.anchor-target-atom = ^~((bex 227))`
+   (was 291); keep 300s ideal + 12h half-life.
+2. **Puzzle-aware `compute-work`** (tx-engine-0.hoon:736 + the `page:t` dispatcher
+   tx-engine.hoon:459): take a puzzle-type (or the pow artifact) and select `max_zk` vs
+   `max_ai = (div max-target-atom (bex 64))`. Thread the puzzle type at BOTH call sites that
+   must agree: block-VALIDATION heaviness (consensus.hoon:687, has `pag`→pow→type) and block-
+   FINALIZATION accumulated-work. NOTE the coupling: the candidate is created before the puzzle
+   is known, so `do-pow`'s `%ai-pow` branch (inner.hoon:1662) must RE-SET the block's target to
+   the AI ASERT target AND recompute `accumulated-work` with `max_ai` before `heard-block`.
+3. **AI candidate target + emission (9.4-C2/C3):** in `update-candidate-block` (miner.hoon:299-
+   324) compute a parallel AI candidate target via `compute-target-ai-asert` over the AI
+   same-type ancestor; emit `%mine-ai` with THAT target (inner.hoon:861, not `zk-target`); make
+   `do-mine` (inner.hoon:1848-1853) emit `%mine-ai` post-activation instead of crashing on %3.
+4. **Populate AI anchor (9.4-C1):** add `populate-ai-asert-anchor` (mirror
+   `populate-zk-asert-post-ai-anchor`, derived.hoon:49-63) so `cached-ai-asert-anchor` fills
+   from the first AI block; fix the false comment at types.hoon:549.
+5. **Cadence (9.5):** in `compute-target-{zk-post-ai,ai}-asert` compute `blocks-since-anchor`
+   over the same-type subchain, not global height (asert.hoon:123, consensus.hoon:446-448).
+6. **Correct stale docs** (tx-engine-1.hoon:436-454, consensus.hoon:409-414 header TODO).
+
+**Test harness prerequisite (blocks 9.7):** the Hoon test framework has NO valid-AI-block
+builder (only `make-ai-pow-garbage-page`). Add a `make-ai-pow-page` helper that constructs a
+mixed chain WITHOUT real proving (validate-page-without-txs reads the puzzle type from a mock
+`[%ai-pow ...]` artifact head and defers the pow to check-pow, so a mock artifact suffices for
+ASERT/heaviness/target tests). Then build the exhaustive suite: (a) per-puzzle ASERT retargets
+toward 300s from its OWN subchain on a mixed chain; (b) equal-weight — an AI block at the AI
+anchor and a ZK block at the ZK anchor add equal `compute-work`; (c) accumulated-work sums
+correctly across the mix; (d) fork choice picks the heavier mixed chain; (e) an AI block
+carrying the ZK target is REJECTED `%page-target-invalid`, one with the AI target ACCEPTED;
+(f) combined cadence ~150s. Plus a full roswell `test-dumb` regression each stage.
+
+STATUS OF THIS GOAL: audit + design DONE and confirmed; the coupled consensus implementation
+(steps 1-6) + exhaustive test (above) is the next focused work — deliberately NOT partially
+landed, per the soundness-critical-invasive rule (a half-applied difficulty/fork-choice change
+is worse than a clean, implementation-ready plan).
 
 ## 10. Node operator experience
 
