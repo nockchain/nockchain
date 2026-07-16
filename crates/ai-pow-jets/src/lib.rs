@@ -23,6 +23,9 @@ use ai_pow_miner::certificate_noun::{
     decode_ai_pow_pearl_merge_artifact_noun, verify_ai_pow_block_artifact, AiPowBlockVerifyOutcome,
     CertificateNounLimits, PearlMergeAiPowArtifactShape,
 };
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use ai_pow_zk::recursion::AiPowCompactBatchVerifierContext;
 use nockvm::interpreter::Context;
 use nockvm::jets::util::{slot, BAIL_FAIL};
@@ -54,16 +57,150 @@ pub struct AiPowVerifierSetup {
     pub digest_bytes: Vec<u8>,
 }
 
-/// The boot-injected verifier-setup TABLE — one [`AiPowVerifierSetup`] per Pearl
-/// trace-height bucket. Keyed lookup is by the cert's `trace_height`.
-static SETUP: OnceCell<Vec<AiPowVerifierSetup>> = OnceCell::new();
+/// A resident, immutable per-bucket seed: the small (~1–5 MB) serialized
+/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] plus its committed
+/// verifier-key digest. Kept resident so a bucket's heavy verifier context can be
+/// (re)built ON DEMAND (see [`ai_pow_verifier_setup_for`]) without holding it in
+/// memory until it is used. The seed is stored as bytes because it is not `Clone`
+/// (its metadata's `stark_common` isn't); deserializing it is cheap next to the
+/// ~10 s circuit rebuild.
+struct BucketSeed {
+    trace_height: usize,
+    /// The canonical 40-byte verifier-key digest this bucket must rebuild to (the
+    /// consensus parameter). Checked at boot (against the cached seed digest) and on
+    /// every rebuild (against the actually-rebuilt context).
+    committed_digest: Vec<u8>,
+    seed_bytes: Vec<u8>,
+}
 
-/// Resolve the setup for a given Layer-0 `trace_height` from the boot table.
-/// Returns `None` if the table is uninjected or has no bucket for `trace_height`
-/// (a full boot table covers every Pearl-envelope bucket, so a miss is a boot
-/// config error, not a valid block).
-pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<&'static AiPowVerifierSetup> {
-    SETUP.get()?.iter().find(|s| s.trace_height == trace_height)
+/// A bounded LRU keyed by trace height. MRU is the back of `order`. Generic over the
+/// value so its eviction/dedup logic is unit-testable without real contexts.
+struct Lru<V> {
+    map: HashMap<usize, V>,
+    order: Vec<usize>,
+}
+
+impl<V: Clone> Lru<V> {
+    fn empty() -> Self {
+        Self { map: HashMap::new(), order: Vec::new() }
+    }
+
+    fn touch(&mut self, h: usize) {
+        if let Some(pos) = self.order.iter().position(|&x| x == h) {
+            self.order.remove(pos);
+        }
+        self.order.push(h);
+    }
+
+    /// Return the resident value for `h`, bumping it to MRU.
+    fn get_touch(&mut self, h: usize) -> Option<V> {
+        let v = self.map.get(&h)?.clone();
+        self.touch(h);
+        Some(v)
+    }
+
+    /// Insert `h` (deduping if it is already present, e.g. another thread filled it
+    /// while we rebuilt) and evict the least-recently-used entries beyond `cap`.
+    /// Returns the resident value for `h`.
+    fn insert_capped(&mut self, h: usize, value: V, cap: usize) -> V {
+        if let Some(existing) = self.map.get(&h).cloned() {
+            self.touch(h);
+            return existing;
+        }
+        self.map.insert(h, value.clone());
+        self.order.push(h); // MRU
+        while self.map.len() > cap.max(1) {
+            let lru = self.order.remove(0); // front = LRU; `h` is at the back, so safe
+            self.map.remove(&lru);
+        }
+        value
+    }
+}
+
+/// The process-global verifier-setup table. Holds the small resident seeds (so a
+/// bucket's heavy context can be rebuilt on demand) and a bounded LRU of the
+/// contexts actually in use. See `LAZY_VERIFIER_SETUP_RESIDENCY` doc.
+struct LazyVerifierSetup {
+    /// Rebuildable buckets, keyed by trace height. Empty for an eager-injected table
+    /// (tests): those contexts are pinned in `resident` and never rebuilt.
+    seeds: HashMap<usize, BucketSeed>,
+    /// Max resident rebuilt contexts — the working-set bound on RSS. For an eager
+    /// table it is `>= len` so nothing evicts.
+    cap: usize,
+    resident: Mutex<Lru<Arc<AiPowVerifierSetup>>>,
+}
+
+static SETUP: OnceCell<LazyVerifierSetup> = OnceCell::new();
+
+/// Resolve the setup for a given Layer-0 `trace_height`, building it on demand from
+/// the resident seed if it is not already resident (lazy residency).
+///
+/// Returns `None` if the table is uninjected, has no bucket/seed for `trace_height`
+/// (an in-band miss is a boot config error, so the jet BAILs), or a rebuilt context
+/// fails its committed-digest check (fail-safe — a divergent verifier must reject).
+/// The returned `Arc` keeps the context alive for the caller's verify even if the
+/// LRU evicts it concurrently.
+pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<Arc<AiPowVerifierSetup>> {
+    let s = SETUP.get()?;
+    // Fast path: already resident.
+    {
+        let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(arc) = lru.get_touch(trace_height) {
+            return Some(arc);
+        }
+    }
+    // Miss: rebuild from the seed OUTSIDE the lock (~10 s) so we do not block other
+    // verifies while building.
+    let bucket = s.seeds.get(&trace_height)?;
+    let setup = rebuild_and_validate_bucket(bucket)?;
+    let arc = Arc::new(setup);
+    let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
+    Some(lru.insert_capped(trace_height, arc, s.cap))
+}
+
+/// Rebuild one bucket's verifier context from its resident seed and validate that
+/// its verifier-key digest equals the committed value. `None` (fail-safe) on a
+/// deserialize/rebuild error or a digest mismatch — a divergent verifier must not
+/// verify. The rebuild is deterministic, so the result is independent of when/how
+/// often a bucket is (re)built.
+fn rebuild_and_validate_bucket(bucket: &BucketSeed) -> Option<AiPowVerifierSetup> {
+    let (seed, _): (ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed, _) =
+        match bincode::serde::decode_from_slice(&bucket.seed_bytes, bincode::config::standard()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "ai-pow: verifier-setup seed for trace_height {} failed to deserialize: {e:?}",
+                    bucket.trace_height,
+                );
+                return None;
+            }
+        };
+    let setup = match crate::setup::rebuild_verifier_setup_from_seed(seed) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(
+                "ai-pow: verifier-setup rebuild for trace_height {} failed: {e}",
+                bucket.trace_height,
+            );
+            return None;
+        }
+    };
+    // Consensus gate: the ACTUALLY-rebuilt context's verifier-key digest must equal
+    // the committed value (not merely the cached one).
+    let rebuilt_digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+        setup.context.verifier_key_digest(),
+    );
+    if rebuilt_digest.as_slice() != bucket.committed_digest.as_slice()
+        || setup.digest_bytes != bucket.committed_digest
+    {
+        tracing::error!(
+            "ai-pow: rebuilt verifier setup for trace_height {} does not match its committed \
+             digest — refusing to verify against a divergent verifier",
+            bucket.trace_height,
+        );
+        return None;
+    }
+    Some(setup)
 }
 
 /// Whether the boot verifier-setup table has already been injected. Boot uses this
@@ -73,21 +210,31 @@ pub fn ai_pow_verifier_setup_initialized() -> bool {
     SETUP.get().is_some()
 }
 
-/// Inject the compact verifier-setup TABLE once at node boot — one entry per
-/// Pearl trace-height bucket. Each setup is deterministic from its trace height
-/// and proof-independent (prove one canonical block per bucket; see
-/// `ai-pow-miner` / `build_verifier_setup`), so building the table once and
-/// reusing it for every block is sound. Rejects an empty table or duplicate
-/// trace-height buckets.
+/// EAGER injection — inject a fully-built verifier-setup TABLE (one entry per Pearl
+/// trace-height bucket) and PIN it resident. Used by tests / harnesses that already
+/// hold rebuilt contexts. The contexts are never evicted (cap `>= len`) and never
+/// rebuilt (no seeds), so this reproduces the pre-lazy all-resident behavior.
 ///
-/// Returns `Err` if already initialized (boot should call this exactly once) or
-/// if the table is empty / has duplicate buckets.
+/// Returns `Err` if already initialized (boot should call this exactly once) or if
+/// the table is empty / has duplicate buckets.
 pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(), ()> {
     let heights: Vec<usize> = setups.iter().map(|s| s.trace_height).collect();
     if !setup_table_heights_valid(&heights) {
         return Err(());
     }
-    SETUP.set(setups).map_err(|_| ())
+    let cap = setups.len().max(1);
+    let mut lru = Lru::empty();
+    for s in setups {
+        let h = s.trace_height;
+        lru.map.insert(h, Arc::new(s));
+        lru.order.push(h);
+    }
+    let lazy = LazyVerifierSetup {
+        seeds: HashMap::new(),
+        cap,
+        resident: Mutex::new(lru),
+    };
+    SETUP.set(lazy).map_err(|_| ())
 }
 
 /// A verifier-setup table is well-formed iff it is non-empty and has no duplicate
@@ -231,7 +378,7 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     };
     // Canonicalize the structured commitment noun (mutates the stack via jam).
     let commit = commit_from_noun(&mut context.stack, commit_noun);
-    let verified = ai_pow_verify_core(&artifact, commit, target, setup)?;
+    let verified = ai_pow_verify_core(&artifact, commit, target, &setup)?;
     Ok(if verified { YES } else { NO })
 }
 
@@ -271,6 +418,49 @@ pub fn produce_ai_pow_hot_state() -> Vec<nockvm::jets::hot::HotEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bounded LRU underlying lazy residency: MRU touch, cap eviction of the
+    /// least-recently-used entry, and dedup insert. Uses cheap `u64` values so the
+    /// eviction/recency logic is tested without building real contexts.
+    #[test]
+    fn lru_evicts_least_recently_used() {
+        let mut lru: Lru<u64> = Lru::empty();
+        // Fill to cap 2.
+        assert_eq!(lru.insert_capped(13, 130, 2), 130);
+        assert_eq!(lru.insert_capped(14, 140, 2), 140);
+        assert_eq!(lru.map.len(), 2);
+        // Touch 13 so 14 becomes the LRU.
+        assert_eq!(lru.get_touch(13), Some(130));
+        // Insert 15 → evicts 14 (LRU), keeps 13 (just touched) and 15.
+        lru.insert_capped(15, 150, 2);
+        assert_eq!(lru.map.len(), 2);
+        assert_eq!(lru.get_touch(14), None, "14 was evicted as least-recently-used");
+        assert_eq!(lru.get_touch(13), Some(130), "13 survived (was touched)");
+        assert_eq!(lru.get_touch(15), Some(150), "15 is resident");
+    }
+
+    /// Dedup insert: inserting a height already resident returns the EXISTING value
+    /// (a concurrent double-rebuild does not double-store or grow past cap).
+    #[test]
+    fn lru_insert_dedups_existing() {
+        let mut lru: Lru<u64> = Lru::empty();
+        assert_eq!(lru.insert_capped(13, 130, 3), 130);
+        // Second insert of 13 with a DIFFERENT value returns the first (existing).
+        assert_eq!(lru.insert_capped(13, 999, 3), 130, "existing value kept on dedup");
+        assert_eq!(lru.map.len(), 1, "no duplicate entry");
+    }
+
+    /// A cap of 1 keeps only the most-recent bucket (minimum RSS). Monotonic height
+    /// progression (the common case) never thrashes: each new height evicts the old.
+    #[test]
+    fn lru_cap_one_keeps_only_mru() {
+        let mut lru: Lru<u64> = Lru::empty();
+        lru.insert_capped(13, 130, 1);
+        lru.insert_capped(14, 140, 1);
+        assert_eq!(lru.map.len(), 1);
+        assert_eq!(lru.get_touch(13), None);
+        assert_eq!(lru.get_touch(14), Some(140));
+    }
 
     /// The verifier-setup TABLE admission rule (supporting the full Pearl band):
     /// non-empty, one setup per trace-height bucket, no duplicates.
