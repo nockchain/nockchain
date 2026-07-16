@@ -337,6 +337,23 @@ impl<SC: StarkGenericConfig> CircuitProverData<SC> {
     pub const fn common_data(&self) -> &CommonData<SC> {
         &self.prover_data.common
     }
+
+    /// Drop the prove-only raw preprocessed columns, keeping only what VERIFICATION
+    /// reads.
+    ///
+    /// `primitive_columns` and `non_primitive_columns` are dereferenced ONLY by the
+    /// prover (`prove` / `prove_all_tables`); the path-pruned compact verifier never
+    /// reads them — it restores omitted preprocessed openings from `prover_data` (the
+    /// shared `CommonData` plus the preprocessed Merkle tree), which is retained. A
+    /// VERIFY-ONLY holder (e.g. a consensus node's boot verifier-setup table) can free
+    /// the raw columns to cut resident memory. Verification is bit-identical; the
+    /// result must NOT be used for proving.
+    #[must_use]
+    pub fn into_verifier_only(mut self) -> Self {
+        self.primitive_columns = Vec::new();
+        self.non_primitive_columns = NonPrimitivePreprocessedMap::default();
+        self
+    }
 }
 
 /// Convenience macro for deriving all degree-specific helpers from a single base

@@ -1507,10 +1507,21 @@ pub fn rebuild_compact_verifier_context(
                 "rebuild: compact batch verifier-key digest construction failed: {e:?}"
             ))
         })?;
+    // This context only ever VERIFIES (it is the boot verifier setup): drop the
+    // prove-only raw preprocessed columns, which the path-pruned compact verifier
+    // never reads, to cut resident memory. The preprocessed Merkle tree in
+    // `prover_data` — which verification DOES need to restore omitted openings — is
+    // kept, so verification is bit-identical. The Arc is freshly built on this
+    // rebuild path (refcount 1) so `try_unwrap` succeeds; the shared fallback keeps
+    // the full data (still correct, just not slimmed).
+    let circuit_prover_data = match std::sync::Arc::try_unwrap(l2_prep.circuit_prover_data) {
+        Ok(cpd) => std::sync::Arc::new(cpd.into_verifier_only()),
+        Err(shared) => shared,
+    };
     Ok(AiPowCompactBatchVerifierContext {
         verifier_key_digest,
         metadata,
-        circuit_prover_data: l2_prep.circuit_prover_data,
+        circuit_prover_data,
         fri_shape,
     })
 }

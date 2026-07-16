@@ -548,6 +548,129 @@ mod jet_tests {
         );
     }
 
+    /// SLIM-CONTEXT SOUNDNESS KAT (real proof, ~25s): dropping the prove-only raw
+    /// preprocessed columns from a boot verifier setup (via `into_verifier_only` on
+    /// the rebuild path) leaves verification BIT-IDENTICAL. Prove one real block, then
+    /// verify a real artifact and a wrong-commit artifact against BOTH the full proved
+    /// context (retains the raw columns) and the slimmed rebuilt context (raw columns
+    /// dropped), asserting identical accept/reject outcomes and an identical
+    /// verifier-key digest. Pins that the RSS trim does not change consensus results.
+    #[test]
+    #[ignore = "real MoE compact proof (~25s); opt-in"]
+    fn slimmed_verifier_only_context_verifies_identically() {
+        let params = MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
+            .expect("prove canonical MoE block");
+        let commit = block.commit;
+        let loose_target = [0xffu8; 32];
+
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &block.statement,
+            &block.aux_inclusion,
+            &block.moe_art,
+            &block.certificate.zk_params,
+            block.certificate.found_idx,
+            block.certificate.trace_height,
+            &block.certificate.commitments,
+            &block.certificate.public_inputs,
+            &block.certificate.certificate,
+        )
+        .expect("build MoE artifact noun")
+        .jam();
+
+        // FULL context: the freshly-proved context, which retains the raw columns.
+        let full_digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            &block.run.verifier_key_digest(),
+        )
+        .to_vec();
+        let full_setup = AiPowVerifierSetup {
+            trace_height: block.run.trace_height,
+            context: block.run.verifier_context,
+            digest_bytes: full_digest.clone(),
+        };
+        // SLIM context: rebuilt from the seed — `into_verifier_only` drops the raw
+        // columns on this (verify-only) rebuild path.
+        let slim_setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
+            .expect("rebuild slimmed setup from seed");
+
+        assert_eq!(slim_setup.trace_height, full_setup.trace_height, "same bucket");
+        assert_eq!(
+            slim_setup.digest_bytes, full_digest,
+            "verifier-key digest must be UNCHANGED by dropping the raw columns",
+        );
+
+        // Confirm the slimming ACTUALLY happened (the rebuild's `Arc::try_unwrap`
+        // succeeded and dropped the raw columns): the slimmed context serializes
+        // strictly smaller than the full proved one. Deterministic (no RSS noise) and
+        // reports the exact prove-only-column bytes dropped for this bucket.
+        let full_ser = bincode::serde::encode_to_vec(
+            &full_setup.context,
+            bincode::config::standard(),
+        )
+        .expect("serialize full context")
+        .len();
+        let slim_ser = bincode::serde::encode_to_vec(
+            &slim_setup.context,
+            bincode::config::standard(),
+        )
+        .expect("serialize slim context")
+        .len();
+        eprintln!(
+            "context serialized: full {full_ser} B, slim {slim_ser} B (dropped {} B of \
+             prove-only columns at 2^{})",
+            full_ser.saturating_sub(slim_ser),
+            (slim_setup.trace_height as u64).trailing_zeros(),
+        );
+        assert!(
+            slim_ser < full_ser,
+            "the slimmed verify-only context must drop the prove-only columns (got full={full_ser} \
+             slim={slim_ser})",
+        );
+
+        let slab = cue_artifact(jammed);
+        let space = slab.noun_space();
+        let root = unsafe { *slab.root() };
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+            root,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode artifact noun");
+
+        // ACCEPT: the real block verifies against BOTH contexts.
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &full_setup), Ok(true)),
+            "real block verifies against the FULL context",
+        );
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &slim_setup), Ok(true)),
+            "real block verifies IDENTICALLY against the SLIMMED context",
+        );
+        // REJECT: a wrong commitment is rejected by BOTH contexts.
+        assert!(
+            matches!(
+                ai_pow_verify_core(&artifact, [0x99u8; 32], loose_target, &full_setup),
+                Ok(false)
+            ),
+            "wrong commitment rejected by the FULL context",
+        );
+        assert!(
+            matches!(
+                ai_pow_verify_core(&artifact, [0x99u8; 32], loose_target, &slim_setup),
+                Ok(false)
+            ),
+            "wrong commitment rejected IDENTICALLY by the SLIMMED context",
+        );
+    }
+
     /// KAT (real proving, ~25s): the ACCEPTANCE path with the block commitment
     /// derived exactly as the jet derives it in consensus — `commit_from_noun`
     /// (BLAKE3 of the nockvm jam) of a realistic block-commitment noun (a tip5
@@ -992,6 +1115,19 @@ mod jet_tests {
             table.len(),
             total.saturating_sub(base),
         );
+        // CONSENSUS INVARIANCE: dropping the prove-only raw columns must NOT change the
+        // committed v0 table digest (the digest is over the verifier-key, not the
+        // columns). Re-verify against the pinned constant on the slimmed table.
+        if table.len() == 7 && crate::table_digest::v0_digest_is_pinned() {
+            let digest = crate::table_digest::verifier_setup_table_digest(&table)
+                .expect("table digest");
+            assert_eq!(
+                digest,
+                crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
+                "slimmed (verifier-only) table digest must equal the pinned v0 constant",
+            );
+            eprintln!("v0 table digest UNCHANGED by slimming ✓");
+        }
         std::hint::black_box(&table);
     }
 
