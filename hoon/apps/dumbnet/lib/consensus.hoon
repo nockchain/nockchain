@@ -473,6 +473,42 @@
       max-target-atom:t
   ==
 ::
+::  +build-ai-candidate: derive the AI-puzzle variant of a ZK candidate block.
+::
+::    Post-ai-activation the miner builds ONE candidate, targeted for the ZK
+::    puzzle. The AI puzzle needs the SAME block bound to the AI ASERT target
+::    instead: an AI certificate commits to the block commitment + target, so an
+::    AI block must carry +compute-target-ai-asert (validation rejects any other
+::    target as %page-target-invalid). This deterministically re-targets the
+::    candidate — replace the target with the AI ASERT target (over the AI
+::    subchain via +find-same-type-ancestor) and recompute accumulated-work with
+::    the AI normalizer (+compute-work-ai, matching validation's +block-compute-
+::    work). Emission (the %mine-ai effect) and +do-pow (reconstructing the block
+::    from an AI solution) both call this on the same candidate + consensus
+::    state, so the commitments match and the solved certificate validates.
+++  build-ai-candidate
+  |=  zk-cand=page:t
+  ^-  page:t
+  =/  candidate-height=@  ~(height get:page:t zk-cand)
+  =/  parent-bid=block-id:t  ~(parent get:page:t zk-cand)
+  =/  ai-parent=block-id:t
+    =/  found=(unit block-id:t)  (find-same-type-ancestor parent-bid %ai-pow)
+    ?~  found  parent-bid  ::  bootstrap: no AI ancestor yet -> degenerate anchor
+    u.found
+  =/  ai-target=bignum:bignum:t  (compute-target-ai-asert candidate-height ai-parent)
+  =/  parent-work=@
+    =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) parent-bid))
+    (merge:bignum:t ~(accumulated-work get:page:t par))
+  =/  ai-work=bignum:bignum:t
+    (chunk:bignum:t (add parent-work (merge:bignum:t (compute-work-ai:page:t ai-target))))
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(target ai-target)  zk-cand(target ai-target)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(accumulated-work ai-work)  zk-cand(accumulated-work ai-work)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(digest (compute-digest:page:t zk-cand))  zk-cand(digest (compute-digest:page:t zk-cand))
+  zk-cand
+::
 ::  +compute-epoch-duration: computes the duration of an epoch in seconds
 ::
 ::    to mitigate certain types of "time warp" attacks, the timestamp we mark

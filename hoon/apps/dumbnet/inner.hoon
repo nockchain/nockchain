@@ -851,14 +851,18 @@
         %2  [%mine-zk %2 commit zk-target pow-len:t]
         %3  [%mine-zk %2 commit zk-target pow-len:t]
       ==
-    ::  Post-activation, ALSO emit a %mine-ai candidate carrying the SAME block
-    ::  commitment + target, so the ai-pow-miner (which subscribes to %mine-ai)
-    ::  receives work. Both puzzle types are valid at post-activation heights
-    ::  (+proof-version-valid-at-height accepts %2 ZK or %3 AI), and +do-pow admits
-    ::  whichever a miner solves first — the pow-artifact's own version discriminates
-    ::  (+pow-artifact-to-proof-version), independent of the candidate's version field.
+    ::  Post-activation, ALSO emit a %mine-ai candidate for the ai-pow-miner. It
+    ::  carries the AI-puzzle variant of the candidate: the SAME block re-targeted
+    ::  to the AI ASERT target (+build-ai-candidate), with its own commitment. The
+    ::  AI target differs from the ZK target (per-puzzle ASERT), and an AI
+    ::  certificate binds to the AI commitment + AI target, so validation would
+    ::  reject an AI block carrying the ZK target as %page-target-invalid. +do-pow
+    ::  reconstructs the identical variant from the same candidate + state.
     ?:  (gte candidate-height ai-pow-activation-height.constants.k)
-      [[%mine-ai %3 commit zk-target pow-len:t] zk-effect effs]
+      =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k)
+      =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
+      =/  ai-target  ~(target get:page:t ai-cand)
+      [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect effs]
     [zk-effect effs]
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
@@ -1652,6 +1656,13 @@
           ?:  (lth candidate-height ai-pow-activation-height.constants.k)
             ~>  %slog.[0 'do-pow: %ai-pow pre-activation; rejected']
             [~ k]
+          ::  Re-target the candidate to the AI ASERT target in-place (the exact
+          ::  block the miner solved against — the %mine-ai emission bound the AI
+          ::  commitment + AI target via the same +build-ai-candidate). Without
+          ::  this the candidate still carries the ZK target, so the certificate's
+          ::  commitment would not match and +heard-block would reject the block as
+          ::  %page-target-invalid. The next candidate rebuild overwrites this.
+          =.  candidate-block.m.k  (build-ai-candidate:con candidate-block.m.k)
           ::  Set the AI-PoW artifact on the candidate, then verify it with
           ::  +check-pow — which re-derives the block commitment + target from the
           ::  candidate itself and runs the mandatory +ai-pow-verify jet against the
