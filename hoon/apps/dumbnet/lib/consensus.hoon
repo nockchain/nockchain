@@ -905,6 +905,13 @@
   ^-  consensus-state:dk
   ::  loop-invariant: the release mutates .c but not .heaviest-block or .blocks
   =/  tip-height=page-number:t  get-cur-height
+  ::  .heaviest-chain must already describe the tip in .c. Absence above the tip
+  ::  is read below as proof of an orphan, which holds only for an index +update
+  ::  has revised and pruned for this tip; an index still describing the chain we
+  ::  just left names old-heavy at its own height, and the walk stops on the spot
+  ::  having released nothing.
+  ~|  %release-orphaned-branch-stale-heaviest-chain
+  ?>  =(`(need heaviest-block.c) (~(get z-by heaviest-chain) tip-height))
   =/  cur=block-id:t  old-heavy
   |-
   ^-  consensus-state:dk

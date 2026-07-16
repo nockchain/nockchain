@@ -993,4 +993,38 @@
   %+  expect-eq
     !>  [~(height get:page:t block-2) ~(digest get:page:t block-2)]
   !>  ;;([page-number:t block-id:t] u.u.peeked)
+
+::  +release-orphaned-branch rejects an index that does not describe the tip.
+::
+::    Its whole result depends on +update having revised and pruned the index
+::    for the new tip first: handed the index from before the reorg, it reads
+::    old-heavy's own stale entry as the common ancestor and releases nothing.
+::    Nothing in the type enforces that ordering, so the arm checks it.
+++  test-release-orphaned-branch-rejects-stale-heaviest-chain
+  =+  [nockchain genesis]=init-nockchain:h
+  =^  pages  nockchain
+    (add-n-pages-integration:h genesis 2 nockchain)
+  =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-tx k-by:h nockchain) raw1)
+  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-4  (make-empty-page:h block-3)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
+  ?>  =(~(digest get:page:t block-4) ~(heaviest-block k-by:h nockchain))
+  ::  the index as it stood before the reorg: still naming block-4 at height 4,
+  ::  while the tip has moved to block-2-p at height 2
+  =/  stale-chain  heaviest-chain:~(der k-by:h nockchain)
+  =/  block-2-p  (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-block k-by:h nockchain) block-2-p)
+  =/  lowered
+    %+  ~(with-heaviest-block k-by:h nockchain)
+      ~(con k-by:h nockchain)
+    ~(digest get:page:t block-2-p)
+  %+  expect-fail
+    |.  %^  ~(release-branch k-by:h nockchain)  lowered
+          ~(digest get:page:t block-4)
+        stale-chain
+  `"release-orphaned-branch-stale-heaviest-chain"
 --
