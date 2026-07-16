@@ -921,6 +921,80 @@ mod jet_tests {
         }
     }
 
+    /// RSS + rebuild-latency MEASUREMENT for the boot verifier-setup table.
+    ///
+    /// Reports (a) the resident memory each rebuilt bucket context costs and the
+    /// total standing RSS of the 7-bucket table, and (b) the wall-clock to rebuild
+    /// each bucket from its cached seed — i.e. the per-height latency an on-demand
+    /// (rebuild-per-verify) design would pay. Feeds the RSS/latency tradeoff work.
+    /// Uses a STABLE cache dir so re-runs skip the ~17-min generation. Run with:
+    ///   cargo test -p ai-pow-jets --lib measure_verifier_setup_table_rss -- --ignored --nocapture
+    /// Wrap the test binary in `/usr/bin/time -l` to also capture PEAK RSS (the
+    /// rebuild transient, which exceeds the steady resident set).
+    #[test]
+    #[ignore = "first run generates the table (~17 min), then measures RSS + rebuild latency; opt-in"]
+    fn measure_verifier_setup_table_rss() {
+        use std::time::Instant;
+        // Current RSS in MiB via `ps` (macOS/Linux report rss in KiB).
+        fn rss_mb() -> u64 {
+            let pid = std::process::id().to_string();
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &pid])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                / 1024
+        }
+        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        if !path.exists() {
+            let buckets = crate::setup::production_verifier_setup_buckets();
+            eprintln!(
+                "no cache; generating the full table to {} (one-time, ~17 min)…",
+                path.display(),
+            );
+            crate::setup::build_and_cache_verifier_setup_seeds(&path, &buckets)
+                .expect("generate+cache");
+        }
+        let cache_mb =
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
+        let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
+        let base = rss_mb();
+        eprintln!(
+            "cache {cache_mb:.1} MiB on disk; baseline RSS after loading seeds = {base} MB; \
+             rebuilding {} buckets:",
+            seeds.len(),
+        );
+        let mut table = Vec::new();
+        let mut prev = base;
+        let mut total_rebuild_ms = 0u128;
+        for seed in seeds {
+            let h = (seed.trace_height() as u64).trailing_zeros();
+            let t = Instant::now();
+            let setup = crate::setup::rebuild_verifier_setup_from_seed(seed).expect("rebuild");
+            let ms = t.elapsed().as_millis();
+            total_rebuild_ms += ms;
+            table.push(setup);
+            let now = rss_mb();
+            eprintln!(
+                "  2^{h:>2}: +{:>5} MB resident  ({now:>6} MB total)  rebuilt in {ms:>6} ms",
+                now.saturating_sub(prev),
+            );
+            prev = now;
+        }
+        let total = rss_mb();
+        eprintln!(
+            "TOTAL: {} buckets, standing table RSS = {total} MB (delta {} MB over baseline); \
+             full-table rebuild = {total_rebuild_ms} ms",
+            table.len(),
+            total.saturating_sub(base),
+        );
+        std::hint::black_box(&table);
+    }
+
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**
     /// Pearl admits a BAND of puzzle shapes; nockchain must verify all of them.
     /// A single embedded boot setup only suffices if the verifier-key digest is
