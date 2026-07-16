@@ -18,14 +18,17 @@
 //! unmet-difficulty reject, commit-noun binding, and malformed/undecodable-artifact
 //! reject (`malformed_ai_pow_artifact_is_rejected_at_decode`).
 //!
-//! The single expensive step is proving one small MoE block (~30s); the setup is
-//! rebuilt from the same proof's seed (no extra proving). Marked `#[ignore]`.
+//! The single expensive step is proving one small MoE block (~30s); the setup's
+//! context is built from that proof's seed, serialized to disk, and injected
+//! DISK-PAGED — the jet pages it in from disk during the first `check-pow` (read +
+//! deserialize, no rebuild). Marked `#[ignore]`.
 
 use ai_pow::params::MatmulParams;
-use ai_pow_jets::setup::{prove_canonical_moe_block, rebuild_verifier_setup_from_seed, CanonicalBlock};
-use ai_pow_jets::{
-    ai_pow_verifier_setup_initialized, init_ai_pow_verifier_setup, produce_ai_pow_hot_state,
+use ai_pow_jets::setup::{
+    install_verifier_setup_disk_from_setups, prove_canonical_moe_block,
+    rebuild_verifier_setup_from_seed, CanonicalBlock,
 };
+use ai_pow_jets::{ai_pow_verifier_setup_initialized, produce_ai_pow_hot_state};
 use ai_pow_miner::certificate_noun::build_ai_pow_pearl_merge_moe_artifact_noun_from_node;
 use chaff::Chaff;
 use nockapp::kernel::boot::{self, NockStackSize};
@@ -205,8 +208,12 @@ async fn ai_pow_valid_block_is_admitted() {
     // admitted. Its setup (same trace-height bucket) is injected once and reused below.
     let bad_block = prove_canonical_moe_block(&params, 8, 2, 1, [0x99u8; 32]).expect("prove wrong-commit block");
     let bad_artifact = artifact_for_block(&bad_block);
-    let vsetup = rebuild_verifier_setup_from_seed(bad_block.seed).expect("rebuild setup");
-    init_ai_pow_verifier_setup(vec![vsetup]).expect("inject setup");
+    // Inject the setup DISK-PAGED (production path): build the context, serialize it to
+    // disk, and register it — the jet PAGES it in from disk during the first
+    // `check-pow` (read + deserialize, no rebuild) and caches it.
+    let vsetup = rebuild_verifier_setup_from_seed(bad_block.seed).expect("build context");
+    install_verifier_setup_disk_from_setups(vec![vsetup], tmp.path(), 2)
+        .expect("inject disk-paged setup");
     app.poke(SystemWire.to_wire(), pow_poke_from_artifact(&bad_artifact))
         .await
         .expect("poke wrong-commit %pow");

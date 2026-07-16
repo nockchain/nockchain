@@ -57,20 +57,29 @@ pub struct AiPowVerifierSetup {
     pub digest_bytes: Vec<u8>,
 }
 
-/// A resident, immutable per-bucket seed: the small (~1–5 MB) serialized
-/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] plus its committed
-/// verifier-key digest. Kept resident so a bucket's heavy verifier context can be
-/// (re)built ON DEMAND (see [`ai_pow_verifier_setup_for`]) without holding it in
-/// memory until it is used. The seed is stored as bytes because it is not `Clone`
-/// (its metadata's `stark_common` isn't); deserializing it is cheap next to the
-/// ~10 s circuit rebuild.
-struct BucketSeed {
+/// A per-bucket verifier context living ON DISK: the path of its serialized context
+/// file plus its committed verifier-key digest. Only this small metadata is resident;
+/// the heavy (~0.9–2.7 GB) context is read from disk and deserialized on demand (see
+/// [`ai_pow_verifier_setup_for`]) — a fast page-in (~0.6 s worst case), NEVER a
+/// circuit rebuild. Built once at boot (see the disk-paged residency doc).
+pub struct DiskBucket {
     trace_height: usize,
-    /// The canonical 40-byte verifier-key digest this bucket must rebuild to (the
-    /// consensus parameter). Checked at boot (against the cached seed digest) and on
-    /// every rebuild (against the actually-rebuilt context).
+    /// The canonical 40-byte verifier-key digest this context must match (the
+    /// consensus parameter). Checked at boot and on every page-in.
     committed_digest: Vec<u8>,
-    seed_bytes: Vec<u8>,
+    context_path: std::path::PathBuf,
+}
+
+impl DiskBucket {
+    /// Assemble a disk bucket from its trace height, committed verifier-key digest,
+    /// and the path of its serialized context file. The boot installer builds these.
+    pub fn new(
+        trace_height: usize,
+        committed_digest: Vec<u8>,
+        context_path: std::path::PathBuf,
+    ) -> Self {
+        Self { trace_height, committed_digest, context_path }
+    }
 }
 
 /// A bounded LRU keyed by trace height. MRU is the back of `order`. Generic over the
@@ -117,85 +126,87 @@ impl<V: Clone> Lru<V> {
     }
 }
 
-/// The process-global verifier-setup table. Holds the small resident seeds (so a
-/// bucket's heavy context can be rebuilt on demand) and a bounded LRU of the
-/// contexts actually in use. See `LAZY_VERIFIER_SETUP_RESIDENCY` doc.
-struct LazyVerifierSetup {
-    /// Rebuildable buckets, keyed by trace height. Empty for an eager-injected table
-    /// (tests): those contexts are pinned in `resident` and never rebuilt.
-    seeds: HashMap<usize, BucketSeed>,
-    /// Max resident rebuilt contexts — the working-set bound on RSS. For an eager
-    /// table it is `>= len` so nothing evicts.
+/// The process-global verifier-setup table: per-bucket on-disk contexts (built once
+/// at boot) plus a bounded LRU of the contexts currently paged into memory. A verify
+/// pays at most a fast disk read + deserialize (~0.6 s worst case), NEVER a circuit
+/// rebuild. See the disk-paged residency doc.
+struct DiskPagedSetup {
+    /// On-disk buckets, keyed by trace height. Empty for an eager-injected table
+    /// (tests): those contexts are pinned in `resident` and never paged.
+    disk: HashMap<usize, DiskBucket>,
+    /// Max contexts paged into memory at once — the working-set bound on RSS. For an
+    /// eager table it is `>= len` so nothing evicts.
     cap: usize,
     resident: Mutex<Lru<Arc<AiPowVerifierSetup>>>,
 }
 
-static SETUP: OnceCell<LazyVerifierSetup> = OnceCell::new();
+static SETUP: OnceCell<DiskPagedSetup> = OnceCell::new();
 
-/// Resolve the setup for a given Layer-0 `trace_height`, building it on demand from
-/// the resident seed if it is not already resident (lazy residency).
+/// Resolve the setup for a given Layer-0 `trace_height`, paging its context in from
+/// disk if it is not already resident.
 ///
-/// Returns `None` if the table is uninjected, has no bucket/seed for `trace_height`
-/// (an in-band miss is a boot config error, so the jet BAILs), or a rebuilt context
-/// fails its committed-digest check (fail-safe — a divergent verifier must reject).
-/// The returned `Arc` keeps the context alive for the caller's verify even if the
-/// LRU evicts it concurrently.
+/// Returns `None` if the table is uninjected, has no bucket for `trace_height` (an
+/// in-band miss is a boot config error, so the jet BAILs), or the on-disk context
+/// fails its committed-digest check (fail-safe — a divergent/corrupt context must not
+/// verify). The returned `Arc` keeps the context alive for the caller's verify even
+/// if the LRU evicts it concurrently.
 pub fn ai_pow_verifier_setup_for(trace_height: usize) -> Option<Arc<AiPowVerifierSetup>> {
     let s = SETUP.get()?;
-    // Fast path: already resident.
+    // Fast path: already paged into memory.
     {
         let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(arc) = lru.get_touch(trace_height) {
             return Some(arc);
         }
     }
-    // Miss: rebuild from the seed OUTSIDE the lock (~10 s) so we do not block other
-    // verifies while building.
-    let bucket = s.seeds.get(&trace_height)?;
-    let setup = rebuild_and_validate_bucket(bucket)?;
+    // Miss: page the context in from disk OUTSIDE the lock (~0.6 s worst case) so we
+    // do not block other verifies while reading/deserializing.
+    let bucket = s.disk.get(&trace_height)?;
+    let setup = page_in_bucket(bucket)?;
     let arc = Arc::new(setup);
     let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
     Some(lru.insert_capped(trace_height, arc, s.cap))
 }
 
-/// Rebuild one bucket's verifier context from its resident seed and validate that
-/// its verifier-key digest equals the committed value. `None` (fail-safe) on a
-/// deserialize/rebuild error or a digest mismatch — a divergent verifier must not
-/// verify. The rebuild is deterministic, so the result is independent of when/how
-/// often a bucket is (re)built.
-fn rebuild_and_validate_bucket(bucket: &BucketSeed) -> Option<AiPowVerifierSetup> {
-    let (seed, _): (ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed, _) =
-        match bincode::serde::decode_from_slice(&bucket.seed_bytes, bincode::config::standard()) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!(
-                    "ai-pow: verifier-setup seed for trace_height {} failed to deserialize: {e:?}",
-                    bucket.trace_height,
-                );
-                return None;
-            }
-        };
-    let setup = match crate::setup::rebuild_verifier_setup_from_seed(seed) {
-        Ok(s) => s,
+/// Page one bucket's verifier context IN from its on-disk file and validate that its
+/// verifier-key digest equals the committed value. `None` (fail-safe) on a read /
+/// deserialize error or a digest mismatch — a divergent or corrupt context must not
+/// verify. This reads + deserializes a PREBUILT context (fast); it never rebuilds.
+fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
+    let raw = match std::fs::read(&bucket.context_path) {
+        Ok(b) => b,
         Err(e) => {
             tracing::error!(
-                "ai-pow: verifier-setup rebuild for trace_height {} failed: {e}",
+                "ai-pow: reading verifier context {} (trace_height {}) failed: {e}",
+                bucket.context_path.display(),
                 bucket.trace_height,
             );
             return None;
         }
     };
-    // Consensus gate: the ACTUALLY-rebuilt context's verifier-key digest must equal
-    // the committed value (not merely the cached one).
-    let rebuilt_digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+    let (setup, _): (AiPowVerifierSetup, _) =
+        match bincode::serde::decode_from_slice(&raw, bincode::config::standard()) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "ai-pow: deserializing verifier context for trace_height {} failed: {e:?}",
+                    bucket.trace_height,
+                );
+                return None;
+            }
+        };
+    // Consensus + integrity gate: the deserialized context's verifier-key digest must
+    // equal the committed value (catches a corrupt/tampered/wrong context file).
+    let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
         setup.context.verifier_key_digest(),
     );
-    if rebuilt_digest.as_slice() != bucket.committed_digest.as_slice()
+    if setup.trace_height != bucket.trace_height
+        || digest.as_slice() != bucket.committed_digest.as_slice()
         || setup.digest_bytes != bucket.committed_digest
     {
         tracing::error!(
-            "ai-pow: rebuilt verifier setup for trace_height {} does not match its committed \
-             digest — refusing to verify against a divergent verifier",
+            "ai-pow: on-disk verifier context for trace_height {} does not match its committed \
+             digest — refusing to verify against a divergent/corrupt context",
             bucket.trace_height,
         );
         return None;
@@ -213,7 +224,7 @@ pub fn ai_pow_verifier_setup_initialized() -> bool {
 /// EAGER injection — inject a fully-built verifier-setup TABLE (one entry per Pearl
 /// trace-height bucket) and PIN it resident. Used by tests / harnesses that already
 /// hold rebuilt contexts. The contexts are never evicted (cap `>= len`) and never
-/// rebuilt (no seeds), so this reproduces the pre-lazy all-resident behavior.
+/// paged (no disk buckets), so this reproduces the all-resident behavior.
 ///
 /// Returns `Err` if already initialized (boot should call this exactly once) or if
 /// the table is empty / has duplicate buckets.
@@ -229,12 +240,38 @@ pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(),
         lru.map.insert(h, Arc::new(s));
         lru.order.push(h);
     }
-    let lazy = LazyVerifierSetup {
-        seeds: HashMap::new(),
+    let setup = DiskPagedSetup {
+        disk: HashMap::new(),
         cap,
         resident: Mutex::new(lru),
     };
-    SETUP.set(lazy).map_err(|_| ())
+    SETUP.set(setup).map_err(|_| ())
+}
+
+/// DISK-PAGED injection — inject the per-bucket ON-DISK contexts (built at boot),
+/// once. Each bucket's context is paged into memory on demand by
+/// [`ai_pow_verifier_setup_for`] and held in a bounded LRU of `cap` contexts, so
+/// standing RSS is bounded to ~`cap` contexts instead of all buckets at once — and a
+/// verify never rebuilds, only reads a prebuilt context from disk.
+///
+/// The caller (the boot installer) is responsible for having BUILT each context,
+/// validated it against the committed consensus digest, and serialized it to
+/// `context_path`; the recorded `committed_digest` is re-checked on every page-in.
+/// Rejects an empty table or duplicate trace-height buckets; `Err` if already
+/// initialized.
+pub fn init_ai_pow_verifier_setup_disk(buckets: Vec<DiskBucket>, cap: usize) -> Result<(), ()> {
+    let heights: Vec<usize> = buckets.iter().map(|b| b.trace_height).collect();
+    if !setup_table_heights_valid(&heights) {
+        return Err(());
+    }
+    let disk: HashMap<usize, DiskBucket> =
+        buckets.into_iter().map(|b| (b.trace_height, b)).collect();
+    let setup = DiskPagedSetup {
+        disk,
+        cap: cap.max(1),
+        resident: Mutex::new(Lru::empty()),
+    };
+    SETUP.set(setup).map_err(|_| ())
 }
 
 /// A verifier-setup table is well-formed iff it is non-empty and has no duplicate
@@ -861,6 +898,184 @@ mod jet_tests {
         );
     }
 
+    /// DISK-PAGED RESIDENCY KAT (real proof, ~25s): a context built at boot and
+    /// serialized to disk is PAGED IN at the first lookup (read + deserialize, no
+    /// rebuild), verifies a real block identically to the eager path, caches it (a
+    /// second lookup returns the SAME `Arc`), and rejects a wrong commitment.
+    /// Exercises the full disk page-in + per-bucket digest-validation path used in
+    /// production.
+    #[test]
+    #[ignore = "real MoE compact proof (~25s); opt-in; sets the process-global setup"]
+    fn disk_paged_setup_pages_in_and_verifies() {
+        assert!(
+            !crate::ai_pow_verifier_setup_initialized(),
+            "run in a fresh process (installs the process-global setup)",
+        );
+        let params = MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
+            .expect("prove canonical MoE block");
+        let commit = block.commit;
+        let loose_target = [0xffu8; 32];
+        let trace_height = block.certificate.trace_height;
+        let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &block.statement,
+            &block.aux_inclusion,
+            &block.moe_art,
+            &block.certificate.zk_params,
+            block.certificate.found_idx,
+            block.certificate.trace_height,
+            &block.certificate.commitments,
+            &block.certificate.public_inputs,
+            &block.certificate.certificate,
+        )
+        .expect("build MoE artifact noun")
+        .jam();
+
+        // Build the context, serialize it to a temp dir, and inject it DISK-PAGED —
+        // nothing heavy resident yet.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let setup_built = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
+            .expect("build context");
+        crate::setup::install_verifier_setup_disk_from_setups(vec![setup_built], tmp.path(), 2)
+            .expect("disk-paged init");
+
+        // First lookup pages the context in from disk (and validates its digest).
+        let setup = crate::ai_pow_verifier_setup_for(trace_height)
+            .expect("verifier context paged in from disk");
+
+        let slab = cue_artifact(jammed);
+        let space = slab.noun_space();
+        let root = unsafe { *slab.root() };
+        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
+            root,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode artifact noun");
+
+        assert!(
+            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            "a lazily-built setup verifies a real block",
+        );
+        assert!(
+            matches!(
+                ai_pow_verify_core(&artifact, [0x99u8; 32], loose_target, &setup),
+                Ok(false)
+            ),
+            "wrong commitment rejected",
+        );
+
+        // A second lookup returns the SAME resident context (no page-in).
+        let setup2 = crate::ai_pow_verifier_setup_for(trace_height).expect("resident");
+        assert!(
+            std::sync::Arc::ptr_eq(&setup, &setup2),
+            "the second lookup must return the cached (resident) context, not a fresh page-in",
+        );
+
+        // An unknown in-band height has no bucket ⇒ None (the jet then BAILs).
+        assert!(
+            crate::ai_pow_verifier_setup_for(trace_height + 1).is_none(),
+            "a height with no disk bucket resolves to None",
+        );
+    }
+
+    /// PRODUCTION BOOT + RSS KAT (~1–2 min + ~8 GB disk; needs the stable seed cache):
+    /// run the real `install_or_build_verifier_setup` — build ALL 7 contexts to disk at
+    /// boot, inject disk-paged — then page through every height with `cap=2` and confirm
+    /// (a) each pages in + resolves, and (b) standing RSS stays bounded to ~2 contexts,
+    /// NOT the ~8 GB of the all-resident table. Sets the process-global setup; run alone.
+    #[test]
+    #[ignore = "builds all 7 contexts to disk (~1–2 min, ~8 GB) + measures paged RSS; run alone"]
+    fn install_or_build_disk_paged_boot_and_rss() {
+        if crate::ai_pow_verifier_setup_initialized() {
+            eprintln!("skip: verifier setup already initialized in this process");
+            return;
+        }
+        fn rss_mb() -> u64 {
+            let pid = std::process::id().to_string();
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &pid])
+                .output()
+                .expect("ps");
+            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+        }
+        // Use the stable dir (has the seed cache) DIRECTLY so the built context files
+        // persist across runs: the FIRST run builds all 7 (retention shows), a SECOND
+        // run finds the files and reuses them (clean boot — the common case).
+        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let src_cache = crate::setup::verifier_setup_seed_cache_path(&dir);
+        if !src_cache.exists() {
+            eprintln!("skip: no stable seed cache at {}", src_cache.display());
+            return;
+        }
+        // Detect whether this is a build-boot or a reuse-boot (context files present).
+        let seeds = crate::setup::load_verifier_setup_seeds(&src_cache).expect("load seeds");
+        let reuse = seeds.iter().all(|s| {
+            crate::setup::verifier_context_file_path(&dir, s.trace_height(), &s.verifier_key_digest_bytes)
+                .exists()
+        });
+        drop(seeds);
+
+        std::env::set_var(crate::setup::AI_POW_VERIFIER_CACHE_CAP_ENV, "2");
+        let base = rss_mb();
+        // Production boot: build all 7 contexts to disk (first run) or reuse them
+        // (later runs) + inject disk-paged.
+        let n = crate::setup::install_or_build_verifier_setup(&dir, &[])
+            .expect("install_or_build (disk-paged)");
+        assert_eq!(n, 7, "all 7 buckets installed");
+        let after_boot = rss_mb();
+        eprintln!(
+            "boot mode: {}; after boot (contexts on disk, none paged in): RSS {after_boot} MB (base {base})",
+            if reuse { "REUSE (files existed)" } else { "BUILD (first run)" },
+        );
+
+        // Page every height in, with cap=2 — RSS must stay ~2 contexts, not 7.
+        for db in 13u32..=19 {
+            let h = 1usize << db;
+            let setup = crate::ai_pow_verifier_setup_for(h).expect("page in bucket");
+            assert_eq!(setup.trace_height, h);
+        }
+        let after_paging = rss_mb();
+        eprintln!(
+            "after paging all 7 (cap=2): RSS {after_paging} MB — bounded to ~2 resident contexts \
+             (eager all-resident is ~8600 MB)",
+        );
+        assert!(
+            after_paging < 6000,
+            "disk-paged RSS with cap=2 must stay well under the ~8.6 GB all-resident table \
+             (got {after_paging} MB)",
+        );
+    }
+
+    /// LAZY BOOT DIGEST CHECK (fast, no proving; needs the generated seed cache): the
+    /// real 7-bucket seed cache's cached per-bucket digests hash to the committed v0
+    /// constant via the seed-only path — i.e. the lazy boot check ACCEPTS a valid
+    /// cache without rebuilding. This is the "not over-strict" guard for lazy boot,
+    /// mirroring the rebuilt-table digest check. Skips if the cache is absent.
+    #[test]
+    #[ignore = "needs the generated seed cache (a prior run); validates the lazy boot digest check"]
+    fn stable_cache_seeds_pass_lazy_boot_digest_check() {
+        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        if !path.exists() {
+            eprintln!("skip: no stable seed cache at {}", path.display());
+            return;
+        }
+        let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
+        assert_eq!(seeds.len(), 7, "full 7-bucket cache");
+        crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds)
+            .expect("stable-cache seeds must hash to the committed v0 digest (no rebuild)");
+        eprintln!("stable cache seeds pass the lazy boot digest check ✓");
+    }
+
     /// KAT (real proving, ~25s): the ACCEPTANCE path with the block commitment
     /// derived exactly as the jet derives it in consensus — `commit_from_noun`
     /// (BLAKE3 of the nockvm jam) of a realistic block-commitment noun (a tip5
@@ -1319,6 +1534,58 @@ mod jet_tests {
             eprintln!("v0 table digest UNCHANGED by slimming ✓");
         }
         std::hint::black_box(&table);
+    }
+
+    /// DE-RISK for disk-paged residency: how fast is "page in from disk" — a
+    /// read+deserialize of a PREBUILT context — versus the ~10 s circuit rebuild?
+    /// Rebuild the largest bucket (2^19, worst case), serialize it to a file, drop
+    /// it, then time reading + deserializing it back. If this is small, we can build
+    /// all buckets at boot, persist them, and page them from disk (no rebuild on the
+    /// verify path). Needs the stable seed cache; skips otherwise.
+    #[test]
+    #[ignore = "rebuilds the largest bucket, then times serialize/read/deserialize; opt-in"]
+    fn measure_context_page_in_latency() {
+        use std::time::Instant;
+        let dir = std::env::temp_dir().join("aipow-rss-cache");
+        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        if !path.exists() {
+            eprintln!("skip: no stable seed cache at {}", path.display());
+            return;
+        }
+        let mut seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
+        seeds.sort_by_key(|s| s.trace_height());
+        let biggest = seeds.pop().expect("at least one seed");
+        let h = (biggest.trace_height() as u64).trailing_zeros();
+
+        let t = Instant::now();
+        let setup = crate::setup::rebuild_verifier_setup_from_seed(biggest).expect("rebuild");
+        eprintln!("REBUILD 2^{h}: {} ms (the latency we must AVOID on the verify path)", t.elapsed().as_millis());
+
+        let t = Instant::now();
+        let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
+            .expect("serialize context");
+        let mb = bytes.len() as f64 / (1024.0 * 1024.0);
+        eprintln!("serialize 2^{h}: {mb:.0} MB in {} ms", t.elapsed().as_millis());
+        let file = dir.join("ctx-page-in-probe.bin");
+        std::fs::write(&file, &bytes).expect("write context file");
+        drop(setup);
+        drop(bytes);
+
+        // Page-in from disk: read + deserialize the prebuilt context.
+        let t = Instant::now();
+        let raw = std::fs::read(&file).expect("read context file");
+        let read_ms = t.elapsed().as_millis();
+        let t = Instant::now();
+        let (setup2, _): (AiPowVerifierSetup, _) =
+            bincode::serde::decode_from_slice(&raw, bincode::config::standard())
+                .expect("deserialize context");
+        let de_ms = t.elapsed().as_millis();
+        eprintln!(
+            "PAGE-IN 2^{h}: read {read_ms} ms + deserialize {de_ms} ms = {} ms total (vs the ~10 s rebuild)",
+            read_ms + de_ms,
+        );
+        std::hint::black_box(&setup2);
+        let _ = std::fs::remove_file(&file);
     }
 
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**

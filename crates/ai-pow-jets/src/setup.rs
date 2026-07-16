@@ -451,45 +451,65 @@ pub fn load_verifier_setup_table(
         .collect()
 }
 
-/// Load the cached seed table, rebuild it (no proving), and validate it against the
-/// committed **v0** consensus digest. Any failure — a missing/unreadable file, a
-/// corrupt or format-incompatible cache (bincode decode error), a rebuild error, an
-/// internal cached-vs-rebuilt digest disagreement, or a mismatch against the pinned
-/// consensus constant — is returned as `Err`. The boot installer treats a
-/// present-but-invalid cache as corrupt and regenerates from scratch.
-fn load_and_validate_verifier_setup_table(
-    path: &std::path::Path,
-) -> Result<Vec<AiPowVerifierSetup>, SetupError> {
-    let table = load_verifier_setup_table(path)?;
-    crate::table_digest::verify_verifier_setup_table_digest(&table)?;
-    Ok(table)
+/// Env var to override the resident-context LRU cap (max heavy contexts kept in
+/// memory at once). See [`verifier_cache_cap`].
+pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
+
+/// Default resident-context LRU cap. A node verifies at the current difficulty's
+/// trace height (stable — ASERT adjusts slowly) and admits blocks in height order,
+/// so the working set is ~1–2 heights; 2 avoids thrashing on a height shift while
+/// keeping standing RSS to ~2 contexts instead of all 7.
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 2;
+
+/// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
+/// `>= 1`), else the default. Raising it trades RSS for fewer on-demand rebuilds;
+/// `>= 7` keeps every bucket resident once built (≈ the old all-resident behavior,
+/// minus the upfront boot rebuild).
+pub fn verifier_cache_cap() -> usize {
+    std::env::var(AI_POW_VERIFIER_CACHE_CAP_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|c| c.max(1))
+        .unwrap_or(AI_POW_VERIFIER_CACHE_CAP_DEFAULT)
 }
 
-/// BOOT installer: ensure the AI-PoW verifier-setup table is installed, or FAIL.
+/// Load the cached SEEDS and validate them against the committed **v0** consensus
+/// digest WITHOUT rebuilding (lazy boot). Any failure — a missing/unreadable file, a
+/// corrupt or format-incompatible cache (bincode decode error), or a mismatch against
+/// the pinned consensus constant — is returned as `Err`. The boot installer treats a
+/// present-but-invalid cache as corrupt and regenerates from scratch.
+fn load_and_validate_seeds(
+    path: &std::path::Path,
+) -> Result<Vec<AiPowCompactVerifierSetupSeed>, SetupError> {
+    let seeds = load_verifier_setup_seeds(path)?;
+    crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds)?;
+    Ok(seeds)
+}
+
+/// BOOT installer: ensure the AI-PoW verifier-setup table is installed (LAZILY), or
+/// FAIL.
 ///
 /// The verifier-setup table is a CONSENSUS PARAMETER — every node must verify
 /// `%ai-pow` blocks against byte-identical verifier keys. This installer pins that:
-/// whatever table it ends up with (loaded or freshly generated) must match the
-/// committed [`crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST`], or the
-/// node refuses to run.
+/// the SEEDS it ends up with (loaded or freshly generated) must hash to the committed
+/// [`crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST`], or the node refuses
+/// to run. It builds every bucket's context to disk AT THE OUTSET (first boot;
+/// reused after) and injects them disk-paged (see
+/// [`crate::init_ai_pow_verifier_setup_disk`] / [`verifier_cache_cap`]), so a verify
+/// never rebuilds — at most a ~0.6 s page-in from disk — and standing RSS is a bounded
+/// working set.
 ///
-/// - **Cache present and valid:** load + rebuild (no proving) + inject — the fast
-///   path, seconds not minutes.
+/// - **Cache present and valid:** load seeds + validate digest + build/reuse contexts.
 /// - **Cache present but corrupt / format-incompatible / digest-mismatched:** DELETE
-///   it and regenerate from scratch (below), rather than run against an unusable or
-///   divergent cache.
+///   it and regenerate from scratch, rather than run against an unusable/divergent
+///   cache.
 /// - **Cache absent (or just deleted):** GENERATE it (one real compact proof per
-///   `buckets` entry — a one-time ~5-minute boot delay), cache it to the data dir,
-///   then load + rebuild + validate + inject. The node "sits there and generates
-///   one" on first boot, then boots fast forever after.
+///   `buckets` entry — a one-time ~5-minute boot delay), cache it, then load +
+///   validate + inject.
 ///
-/// Returns the number of buckets installed. **Any failure is returned as `Err` and
-/// is FATAL** — the caller must shut the node down: a node with no valid verifier
-/// setup cannot validate `%ai-pow` blocks and must not run. A digest mismatch on a
-/// FRESHLY-GENERATED table is fatal and NOT retried (regenerating cannot fix a
-/// machine that produces a divergent verifier). Idempotent: if the table is already
-/// installed in-process (e.g. a second boot in a test harness), returns `Ok`
-/// without regenerating.
+/// Returns the number of buckets installed. **Any failure is `Err` and is FATAL** —
+/// the caller must shut the node down. A digest mismatch on a FRESHLY-GENERATED cache
+/// is fatal and NOT retried. Idempotent (a second in-process boot returns `Ok(0)`).
 pub fn install_or_build_verifier_setup(
     data_dir: &std::path::Path,
     buckets: &[VerifierSetupBucketShape],
@@ -499,15 +519,12 @@ pub fn install_or_build_verifier_setup(
     }
     let path = verifier_setup_seed_cache_path(data_dir);
 
-    // Fast path: a present, loadable, digest-matching cache.
-    let mut table: Option<Vec<AiPowVerifierSetup>> = None;
+    // Fast path: a present, loadable, digest-matching seed cache (no rebuild).
+    let mut seeds: Option<Vec<AiPowCompactVerifierSetupSeed>> = None;
     if path.exists() {
-        match load_and_validate_verifier_setup_table(&path) {
-            Ok(t) => table = Some(t),
+        match load_and_validate_seeds(&path) {
+            Ok(s) => seeds = Some(s),
             Err(e) => {
-                // Corrupt / format-incompatible / digest-mismatched cache: delete it
-                // and regenerate. If the delete itself fails, that is fatal — we must
-                // not run against an unusable cache we cannot replace.
                 tracing::warn!(
                     "AI-PoW verifier-setup cache at {} is unusable ({e}); deleting and \
                      regenerating from scratch",
@@ -519,10 +536,9 @@ pub fn install_or_build_verifier_setup(
         }
     }
 
-    let table = match table {
-        Some(t) => t,
+    let seeds = match seeds {
+        Some(s) => s,
         None => {
-            // No cache, or one we just deleted: generate the table once.
             if buckets.is_empty() {
                 return Err(SetupError(
                     "no usable verifier-setup cache and no bucket shapes to generate one from"
@@ -536,26 +552,136 @@ pub fn install_or_build_verifier_setup(
                 buckets.len(),
             );
             build_and_cache_verifier_setup_seeds(&path, buckets)?;
-            // A digest mismatch HERE is fatal and NOT retried: regenerating cannot fix
-            // a machine that produces a divergent verifier — it must shut down.
-            load_and_validate_verifier_setup_table(&path)?
+            // A digest mismatch HERE is fatal and NOT retried.
+            load_and_validate_seeds(&path)?
         }
     };
 
-    if table.is_empty() {
+    if seeds.is_empty() {
         return Err(SetupError(
-            "verifier-setup table is empty after build/load".to_string(),
+            "verifier-setup seed table is empty after build/load".to_string(),
         ));
     }
-    let n = table.len();
-    crate::init_ai_pow_verifier_setup(table).map_err(|()| {
+
+    // Build (or reuse) every bucket's on-disk context AT THE OUTSET: first boot builds
+    // all of them (a one-time cost); subsequent boots find the files and skip straight
+    // to disk-paged residency. Because all contexts exist before any block is verified,
+    // a verify NEVER triggers a ~12 s rebuild — at most a ~0.6 s page-in from disk.
+    let disk_buckets = build_or_reuse_disk_contexts(data_dir, seeds)?;
+    let n = disk_buckets.len();
+    let cap = verifier_cache_cap();
+    crate::init_ai_pow_verifier_setup_disk(disk_buckets, cap).map_err(|()| {
         SetupError(
             "verifier-setup table rejected (empty / duplicate buckets) or already initialized"
                 .to_string(),
         )
     })?;
-    tracing::info!("AI-PoW verifier-setup table installed: {n} trace-height bucket(s).");
+    tracing::info!(
+        "AI-PoW verifier-setup installed (disk-paged): {n} bucket(s); contexts paged from disk, up \
+         to {cap} resident at once.",
+    );
     Ok(n)
+}
+
+/// The on-disk file for one bucket's serialized verifier context. The committed
+/// verifier-key digest is baked into the filename so a seed/table change (⇒ new
+/// digest) yields a new filename and a rebuild, and a stale file is never mistaken
+/// for the current one.
+pub fn verifier_context_file_path(
+    data_dir: &std::path::Path,
+    trace_height: usize,
+    committed_digest: &[u8],
+) -> std::path::PathBuf {
+    let log2 = (trace_height as u64).trailing_zeros();
+    let tag: String = committed_digest
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    data_dir
+        .join("ai-pow")
+        .join(format!("ctx-2p{log2}-{tag}.bin"))
+}
+
+/// Serialize one built verifier setup (context + digest) to `path` for disk paging.
+fn write_verifier_context_file(
+    setup: &AiPowVerifierSetup,
+    path: &std::path::Path,
+) -> Result<(), SetupError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(err("create verifier-context dir"))?;
+    }
+    let bytes = bincode::serde::encode_to_vec(setup, bincode::config::standard())
+        .map_err(err("serialize verifier context"))?;
+    std::fs::write(path, bytes).map_err(err("write verifier context file"))?;
+    Ok(())
+}
+
+/// Ensure every bucket has a valid on-disk context, building + serializing any that
+/// are missing (consuming `seeds`), and return the disk buckets for injection. A
+/// freshly-built context is digest-validated against its seed's committed digest
+/// before it is written; a mismatch is fatal (a divergent verifier must not run).
+fn build_or_reuse_disk_contexts(
+    data_dir: &std::path::Path,
+    seeds: Vec<AiPowCompactVerifierSetupSeed>,
+) -> Result<Vec<crate::DiskBucket>, SetupError> {
+    let mut disk_buckets: Vec<crate::DiskBucket> = Vec::with_capacity(seeds.len());
+    let mut built = 0usize;
+    let total = seeds.len();
+    for seed in seeds {
+        let h = seed.trace_height();
+        let committed_digest = seed.verifier_key_digest_bytes.clone();
+        let ctx_path = verifier_context_file_path(data_dir, h, &committed_digest);
+        if !ctx_path.exists() {
+            if built == 0 {
+                tracing::info!(
+                    "Building the AI-PoW verifier contexts to disk ({total} buckets, one-time; \
+                     ~1–2 minutes). They are paged in from disk afterwards, never rebuilt.",
+                );
+            }
+            let setup = rebuild_verifier_setup_from_seed(seed)?;
+            // Digest gate: the built context must match its seed's committed digest.
+            let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                setup.context.verifier_key_digest(),
+            );
+            if digest.as_slice() != committed_digest.as_slice()
+                || setup.digest_bytes != committed_digest
+            {
+                return Err(SetupError(format!(
+                    "built verifier context for trace_height {h} does not match its committed \
+                     digest — refusing to run a divergent verifier"
+                )));
+            }
+            write_verifier_context_file(&setup, &ctx_path)?;
+            built += 1;
+        }
+        disk_buckets.push(crate::DiskBucket::new(h, committed_digest, ctx_path));
+    }
+    if built > 0 {
+        tracing::info!("Built {built} AI-PoW verifier context(s) to disk.");
+    }
+    Ok(disk_buckets)
+}
+
+/// Test / bootstrap helper: serialize already-built `setups` to per-bucket context
+/// files under `data_dir` and inject them disk-paged, mirroring what the boot
+/// installer does after building — without generating or loading a seed cache. Each
+/// setup's own `digest_bytes` is the committed digest (re-checked on page-in).
+pub fn install_verifier_setup_disk_from_setups(
+    setups: Vec<AiPowVerifierSetup>,
+    data_dir: &std::path::Path,
+    cap: usize,
+) -> Result<(), SetupError> {
+    let mut disk_buckets: Vec<crate::DiskBucket> = Vec::with_capacity(setups.len());
+    for setup in &setups {
+        let h = setup.trace_height;
+        let digest = setup.digest_bytes.clone();
+        let ctx_path = verifier_context_file_path(data_dir, h, &digest);
+        write_verifier_context_file(setup, &ctx_path)?;
+        disk_buckets.push(crate::DiskBucket::new(h, digest, ctx_path));
+    }
+    crate::init_ai_pow_verifier_setup_disk(disk_buckets, cap)
+        .map_err(|()| SetupError("disk-paged setup rejected or already initialized".to_string()))
 }
 
 /// Lenient loader for non-consensus tools (e.g. roswell): if the data-dir cache
@@ -572,9 +698,22 @@ pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<u
     if !path.exists() {
         return Ok(0);
     }
-    let table = load_verifier_setup_table(&path)?;
-    let n = table.len();
-    crate::init_ai_pow_verifier_setup(table).map_err(|()| {
+    // Lenient: register the disk-bucket paths WITHOUT building the heavy contexts and
+    // WITHOUT the consensus-digest gate. A non-consensus tool never verifies a real
+    // block, so it never pages a context in; if it did, page-in re-checks the digest
+    // and a missing/wrong file fails safe.
+    let seeds = load_verifier_setup_seeds(&path)?;
+    let n = seeds.len();
+    let disk_buckets: Vec<crate::DiskBucket> = seeds
+        .iter()
+        .map(|seed| {
+            let h = seed.trace_height();
+            let digest = seed.verifier_key_digest_bytes.clone();
+            let ctx_path = verifier_context_file_path(data_dir, h, &digest);
+            crate::DiskBucket::new(h, digest, ctx_path)
+        })
+        .collect();
+    crate::init_ai_pow_verifier_setup_disk(disk_buckets, verifier_cache_cap()).map_err(|()| {
         SetupError(
             "verifier-setup table rejected (empty / duplicate buckets) or already initialized"
                 .to_string(),

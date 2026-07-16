@@ -124,6 +124,64 @@ pub fn verifier_setup_table_digest(table: &[AiPowVerifierSetup]) -> Result<[u8; 
     Ok(hash_table_fingerprints(&fps))
 }
 
+/// Compute the consensus fingerprint of a SEED table WITHOUT rebuilding — using each
+/// seed's cached verifier-key digest. Because a seed's cached digest equals the digest
+/// its context rebuilds to (checked on every rebuild), this equals
+/// [`verifier_setup_table_digest`] of the rebuilt table. This is the boot-time check
+/// for lazy residency: it validates the whole seed set against the pinned constant
+/// with no proving and no rebuild. blake3 collision-resistance means a cache whose
+/// cached digests hash to the committed value cannot carry forged digests.
+pub fn verifier_setup_seed_table_digest(
+    seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
+) -> Result<[u8; 32], SetupError> {
+    if seeds.is_empty() {
+        return Err(SetupError(
+            "cannot fingerprint an empty verifier-setup seed table".to_string(),
+        ));
+    }
+    let mut fps: Vec<(u64, BucketDigest)> = Vec::with_capacity(seeds.len());
+    let mut seen: Vec<usize> = Vec::with_capacity(seeds.len());
+    for s in seeds {
+        let h = s.trace_height();
+        if seen.contains(&h) {
+            return Err(SetupError(format!(
+                "seed table has duplicate trace-height bucket {h}"
+            )));
+        }
+        seen.push(h);
+        let d: BucketDigest = s.verifier_key_digest_bytes.as_slice().try_into().map_err(|_| {
+            SetupError(format!(
+                "seed at trace_height {h}: cached verifier-key digest is not {} bytes",
+                AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
+            ))
+        })?;
+        fps.push((h as u64, d));
+    }
+    Ok(hash_table_fingerprints(&fps))
+}
+
+/// Verify a SEED table matches the committed **v0** consensus digest (boot-time,
+/// no rebuild). Same fatal semantics as [`verify_verifier_setup_table_digest`].
+pub fn verify_verifier_setup_seed_table_digest(
+    seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
+) -> Result<[u8; 32], SetupError> {
+    if !v0_digest_is_pinned() {
+        return Err(SetupError(
+            "AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST is the all-zero placeholder".to_string(),
+        ));
+    }
+    let got = verifier_setup_seed_table_digest(seeds)?;
+    if got != AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST {
+        return Err(SetupError(format!(
+            "verifier-setup SEED table digest mismatch: got {} but consensus v0 pins {} — corrupt \
+             or format-incompatible cache",
+            hex32(&got),
+            hex32(&AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST),
+        )));
+    }
+    Ok(got)
+}
+
 /// Verify a built table matches the committed **v0** consensus digest.
 ///
 /// Returns the (matching) digest on success. On mismatch returns a `SetupError` the
