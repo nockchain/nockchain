@@ -37,8 +37,26 @@
     |=  arg=load-kernel-state:dk
     ::  cut
     |^
-    =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-9 arg)))
-    =.  c.k  ~>  %bout  check-and-repair:con
+    ::  Each stage is announced before it runs. The %bout hints below print a
+    ::  bare "took: <duration>" with no label, so without a slog naming the
+    ::  stage first, a boot yields a column of anonymous durations that cannot
+    ::  be attributed. The stages are also split apart rather than composed in
+    ::  one expression, so each gets its own %bout and a slow boot names the
+    ::  stage responsible. This is a boot-only path: the logging costs nothing
+    ::  an event ever pays for.
+    ~>  %slog.[0 'load: begin']
+    =/  ks=kernel-state:dk
+      ~>  %slog.[0 'load: [1/5] state-n-to-9: migrating state to version 9']
+      ~>  %bout  (state-n-to-9 arg)
+    =.  ks
+      ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
+      ~>  %bout  (check-checkpoints ks)
+    =.  k
+      ~>  %slog.[0 'load: [3/5] update-constants']
+      ~>  %bout  (update-constants ks)
+    =.  c.k
+      ~>  %slog.[0 'load: [4/5] check-and-repair: validating consensus state']
+      ~>  %bout  check-and-repair:con
     ::  One-time repair of transactions stranded by reorgs that predate
     ::  +release-orphaned-branch. The old kernel never released an ACCEPTED
     ::  block's claim on its txs, so a tx carried by a block that later lost a
@@ -48,9 +66,12 @@
     ::  them are long past, so the live release path cannot reach them -- only
     ::  this can. Walking every block is acceptable here and only here: a boot
     ::  already pays to load the whole state, an event must not.
-    =.  c.k  ~>  %bout  (repair-orphaned-claims:con heaviest-chain.d.k)
+    =.  c.k
+      ~>  %slog.[0 'load: [5/5] repair-orphaned-claims: releasing txs stranded by past reorgs']
+      ~>  %bout  repair-orphaned-claims:con
     ~|  %v1-phase-must-be-lte-asert-phase
     ?>  (lte v1-phase.constants.k asert-phase.constants.k)
+    ~>  %slog.[0 'load: complete']
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
     ++  state-n-to-9

@@ -907,7 +907,7 @@
   ++  repair-orphans
     |=  c=consensus-state
     ^-  consensus-state
-    (~(repair-orphaned-claims dcon c bc) heaviest-chain:der)
+    ~(repair-orphaned-claims dcon c bc)
   ::
   ::  +boot-with: run the kernel's REAL +load over a given consensus state, the
   ::  way the runtime does when a new kernel is swapped in over existing state.
@@ -926,6 +926,20 @@
     =/  booted  (load:nockchain [%0 desk-hash.outer.nockchain ks])
     ;;(consensus-state c.internal.outer.booted)
   ::
+  ::  +with-con: this node, running on the given consensus state.
+  ::
+  ::    +load returns the wrapper's outer core, whose shape does not nest with
+  ::    the +k-by door's sample, so a booted kernel cannot be poked directly.
+  ::    Feeding the post-load state back into THIS kernel is the way to poke a
+  ::    node as it stands after a boot -- e.g. to hand it a block whose parent
+  ::    the boot deleted.
+  ++  with-con
+    |=  c=consensus-state
+    ^-  _nockchain
+    =/  n  nockchain
+    =.  c.internal.outer.n  c
+    n
+  ::
   ::  membership probes against a bare consensus-state (rather than the kernel)
   ++  con-excluded
     |=  [c=consensus-state =tx-id:t]
@@ -943,6 +957,113 @@
     |=  c=consensus-state
     ^-  (unit @tas)
     ~(apt dcon c bc)
+  ::
+  ::  +con-referential-integrity: every cross-map reference in .c resolves.
+  ::  `~` means sound; each term names an invariant that broke.
+  ::
+  ::    +apt checks only the raw-txs partition. NOTHING in the kernel checks
+  ::    that the block-keyed maps agree with each other -- and deleting blocks
+  ::    is precisely the operation that can break that agreement. Most of these
+  ::    would surface as a kernel CRASH on a `got` against a missing key rather
+  ::    than as a wrong answer, so they are asserted directly.
+  ::
+  ::    Asserted on the state BEFORE deletion as well as after. An oracle that
+  ::    only passes on post-deletion state proves nothing: if one of these does
+  ::    not already hold on a normal chain, the invariant is wrong rather than
+  ::    the code.
+  ++  con-referential-integrity
+    |=  c=consensus-state
+    ^-  (list @tas)
+    =/  block-ids=(list block-id:t)  ~(tap h-in ~(key h-by blocks.c))
+    =/  has-block  |=(=block-id:t (~(has h-by blocks.c) block-id))
+    %+  murn
+      ^-  (list [m=@tas ok=?])
+      :~  ::  the tip itself must be a block we hold
+          :-  %dangling-heaviest-block
+          ?|  =(~ heaviest-block.c)
+              (has-block (need heaviest-block.c))
+          ==
+          ::  every block we hold carries its own derived entries. Two entries
+          ::  are legitimately absent and are NOT required here: .txs, which
+          ::  only a block that actually carried txs has, and .balance for
+          ::  GENESIS -- genesis has no coinbase, so +accept-page's fold over
+          ::  coinbases puts nothing. +get-cur-balance encodes that same
+          ::  exception: it returns an empty balance for a genesis tip and
+          ::  crashes only for a non-genesis one.
+          :-  %missing-balance
+          %+  levy  block-ids
+          |=  =block-id:t
+          ?:  .=  *page-number:t
+              ~(height get:local-page:t (~(got h-by blocks.c) block-id))
+            %.y
+          (~(has h-by balance.c) block-id)
+          :-  %missing-min-timestamp
+          (levy block-ids |=(=block-id:t (~(has h-by min-timestamps.c) block-id)))
+          :-  %missing-epoch-start
+          (levy block-ids |=(=block-id:t (~(has h-by epoch-start.c) block-id)))
+          :-  %missing-target
+          (levy block-ids |=(=block-id:t (~(has h-by targets.c) block-id)))
+          ::  +update-min-timestamps walks parents 11 deep and +accept-page one
+          ::  deep, both with `got`: a block whose parent was dropped crashes the
+          ::  kernel the moment a child of it arrives.
+          :-  %dangling-parent
+          %+  levy  block-ids
+          |=  =block-id:t
+          =/  lp  (~(got h-by blocks.c) block-id)
+          ?:  =(*page-number:t ~(height get:local-page:t lp))  %.y
+          (has-block ~(parent get:local-page:t lp))
+          ::  .epoch-start's VALUES are block-ids too, reaching up to
+          ::  blocks-per-epoch back
+          :-  %dangling-epoch-start
+          %+  levy  block-ids
+          |=  =block-id:t
+          ?.  (~(has h-by epoch-start.c) block-id)  %.y
+          (has-block (~(got h-by epoch-start.c) block-id))
+          ::  ...and nothing may be keyed by a block we no longer hold
+          :-  %orphaned-balance-key
+          (levy ~(tap h-in ~(key h-by balance.c)) has-block)
+          :-  %orphaned-txs-key
+          (levy ~(tap h-in ~(key h-by txs.c)) has-block)
+          :-  %orphaned-min-timestamps-key
+          (levy ~(tap h-in ~(key h-by min-timestamps.c)) has-block)
+          :-  %orphaned-epoch-start-key
+          (levy ~(tap h-in ~(key h-by epoch-start.c)) has-block)
+          :-  %orphaned-targets-key
+          (levy ~(tap h-in ~(key h-by targets.c)) has-block)
+      ==
+    |=  [m=@tas ok=?]
+    ^-  (unit @tas)
+    ?:(ok ~ `m)
+  ::
+  ::  +con-block-residue: which block-keyed maps still hold .block-id, in a
+  ::  fixed order. `~` means the block is gone from all of them.
+  ::
+  ::    Deleting a block has to be all-or-nothing across these, so this names
+  ::    every map rather than probing .blocks alone. The asymmetry that makes
+  ::    that worth spelling out is .balance: +validate-page-with-txs reads
+  ::    balance[parent] with `get`, not `got`. A block left in .blocks whose
+  ::    .balance entry was dropped therefore does NOT crash -- it validates that
+  ::    block's children against an EMPTY utxo set and silently rejects every
+  ::    one of them. A .blocks-only probe would report that state as clean.
+  ::
+  ::    Note .txs holds an entry only for a block that actually carried txs (see
+  ::    +accept-page: the put is a fold over the block's txs), so an empty block
+  ::    legitimately has no .txs entry and reports without %txs.
+  ++  con-block-residue
+    |=  [c=consensus-state =block-id:t]
+    ^-  (list @tas)
+    %+  murn
+      ^-  (list [m=@tas present=?])
+      :~  [%blocks (~(has h-by blocks.c) block-id)]
+          [%balance (~(has h-by balance.c) block-id)]
+          [%txs (~(has h-by txs.c) block-id)]
+          [%min-timestamps (~(has h-by min-timestamps.c) block-id)]
+          [%epoch-start (~(has h-by epoch-start.c) block-id)]
+          [%targets (~(has h-by targets.c) block-id)]
+      ==
+    |=  [m=@tas present=?]
+    ^-  (unit @tas)
+    ?:(present `m ~)
   ::
   ::  +consensus-invariants: the consensus state's own +apt check, as an oracle.
   ::
