@@ -395,6 +395,46 @@ mod jet_tests {
         }
     }
 
+    /// **Robustness (fast, no proving): a MALFORMED `%ai-pow` artifact is a clean
+    /// reject, never a verifier crash or a false accept.** The jet decodes the
+    /// artifact BEFORE it requires the boot setup and turns any decode `Err` into
+    /// `Ok(NO)` (see `ai_pow_verify_jet` / `ai_pow_verify_core`). This pins the three
+    /// malformed shapes a hostile miner can submit to the live `+do-pow` path — a
+    /// non-tuple, a wrong artifact tag, and a well-tagged artifact with an
+    /// undecodable nonce/certificate tail — each rejecting at the decode boundary.
+    #[test]
+    fn malformed_ai_pow_artifact_is_rejected_at_decode() {
+        use nockvm::noun::{D, T};
+        use nockvm_macros::tas;
+        let limits = CertificateNounLimits::default();
+
+        // Build a root noun in a fresh slab and assert it does NOT decode.
+        let assert_rejected = |build: &dyn Fn(&mut NounSlab) -> nockvm::noun::Noun, why: &str| {
+            let mut slab: NounSlab = NounSlab::new();
+            let root = build(&mut slab);
+            slab.set_root(root);
+            let space = slab.noun_space();
+            let root = unsafe { *slab.root() };
+            assert!(
+                decode_ai_pow_pearl_merge_artifact_noun(root, &space, limits).is_err(),
+                "{why}",
+            );
+        };
+
+        // 1) Not a 3-tuple — a bare atom.
+        assert_rejected(&|_s| D(0), "a bare atom is not an %ai-pow artifact");
+        // 2) A 3-tuple with the WRONG head tag.
+        assert_rejected(
+            &|s| T(s, &[D(0xdead_beef), D(0), D(0)]),
+            "a non-%ai-pow artifact tag must be rejected",
+        );
+        // 3) Correct %ai-pow tag but a garbage (undecodable) nonce + certificate tail.
+        assert_rejected(
+            &|s| T(s, &[D(tas!(b"ai-pow")), D(0), D(0)]),
+            "a well-tagged artifact with an undecodable nonce/cert must be rejected",
+        );
+    }
+
     /// KAT (real proving, ~25s): a real MoE `%ai-pow` block artifact verifies
     /// through the jet CORE; a wrong commitment and an unmet difficulty are
     /// rejected (`Ok(false)`, not a jet error). Validates the artifact decode-from-

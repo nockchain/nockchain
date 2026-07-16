@@ -6,8 +6,17 @@
 //! injects the matching verifier setup, and pokes the `%pow` `%ai-pow` submission.
 //! `do-pow` verifies the certificate against the injected setup (via the mandatory
 //! `++ai-pow-verify` jet) and, on success, admits the block through `+heard-block`.
-//! The test asserts the height-1 block is admitted, plus the adversarial rejections
-//! (wrong commitment, over-cap trace height, malformed cert).
+//!
+//! This test exercises the LIVE consensus kernel end to end and asserts:
+//!   * the post-activation node emits a `%mine-ai` candidate (the AI work effect);
+//!   * NEGATIVE — a real certificate bound to the WRONG block commitment is rejected
+//!     by `do-pow` (the structurally-valid-but-invalid submission path); and
+//!   * POSITIVE — a valid `%ai-pow` block is admitted through `do-pow -> heard-block`.
+//!
+//! The other adversarial cases are covered at the jet level (`ai-pow-jets::jet_tests`),
+//! where they can be tested without a full kernel boot: over-cap trace-height reject,
+//! unmet-difficulty reject, commit-noun binding, and malformed/undecodable-artifact
+//! reject (`malformed_ai_pow_artifact_is_rejected_at_decode`).
 //!
 //! The single expensive step is proving one small MoE block (~30s); the setup is
 //! rebuilt from the same proof's seed (no extra proving). Marked `#[ignore]`.
