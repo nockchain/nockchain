@@ -22,6 +22,7 @@
 ++  t  ~(. txe bc-ai-pow-provable:helpers)
 ++  hd  ~(. helpers bc-dual-puzzle:helpers)
 ++  hc  ~(. helpers bc-ai-anchor-test:helpers)
+++  hp  ~(. helpers bc-dual-post:helpers)
 ::
 ::  A block at the AI anchor (bex 227) contributes work EQUAL to a block at the
 ::  ZK anchor (bex 291): the core equal-weight cross-puzzle invariant.
@@ -157,4 +158,24 @@
   %+  expect-eq  !>([%.n %.y])
   !>  :-  ?=(^ cached-ai-asert-anchor.der.below)
       ?=(^ cached-ai-asert-anchor.der.above)
+::
+::  END-TO-END ACCEPTANCE (post-asert) — a correctly-built AI block travels the
+::  full +validate-page-without-txs path and is ACCEPTED (target dispatch,
+::  AI-normalized heaviness, version, coinbase, timestamp all pass; the AI cert
+::  check is deferred to the prover-gated +check-pow). A mis-built AI block
+::  (parent/ZK target + ZK-normalized work) is REJECTED. Together: consensus
+::  accepts correctly-targeted AI blocks and rejects mis-targeted ones on a live
+::  post-asert chain, without the prover.
+++  test-ai-block-accepted-post-asert
+  ^-  tang
+  =/  built  (build-typed-chain:hp ~[%zk %ai %zk])
+  =/  ai-page  (make-ai-pow-page:hp tip.built con.built)
+  =/  good
+    %.  [ai-page ~(timestamp get:page:t ai-page)]
+    ~(validate-page-without-txs dcon con.built der.built bc-dual-post:helpers)
+  =/  bad-page  (make-ai-pow-garbage-page:hp tip.built)
+  =/  bad
+    %.  [bad-page ~(timestamp get:page:t bad-page)]
+    ~(validate-page-without-txs dcon con.built der.built bc-dual-post:helpers)
+  %+  expect-eq  !>([%.y %.n])  !>([-.good -.bad])
 --

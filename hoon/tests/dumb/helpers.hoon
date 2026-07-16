@@ -146,7 +146,10 @@
     v1-phase                       1
     ai-pow-activation-height       1
     anchor-height.ai-asert         0
-    anchor-min-timestamp.ai-asert  1
+    ::  anchor timestamp at the genesis second (chain builds from
+    ::  time-in-secs(*@da)); a tiny value here would make the ASERT exponent huge
+    ::  and saturate the target to max, hiding the subchain-count behaviour.
+    anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
   ==
 ::  Like bc-dual-puzzle but with the AI anchor at height 2 and NO hardcoded
 ::  anchor timestamp, so +compute-target-ai-asert must read the anchor from the
@@ -157,6 +160,24 @@
     v1-phase                  1
     ai-pow-activation-height  1
     anchor-height.ai-asert    2
+  ==
+::  Post-ASERT dual-puzzle config: low zk-asert phase (2) with a hardcoded ZK
+::  anchor (so accept-page/validation can compute the ZK ASERT without a cache),
+::  AI active from height 1 with a hardcoded AI anchor. Lets a low-height AI block
+::  travel the full +validate-page-without-txs path in the post-asert regime.
+++  bc-dual-post
+  %*  .  bc-pending-provable
+    v1-phase                       1
+    blocks-per-epoch               1.000.000
+    phase.zk-asert                 2
+    anchor-height.zk-asert         1
+    anchor-target-atom.zk-asert    ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.zk-asert      150
+    half-life.zk-asert             43.200
+    anchor-min-timestamp.zk-asert  (add (time-in-secs:page:txe *@da) 1.200)
+    ai-pow-activation-height       1
+    anchor-height.ai-asert         0
+    anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
   ==
 ::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
 ::  limit, but poke-able through the kernel. The oversize-tx mempool test
@@ -755,6 +776,25 @@
       new-page(digest (compute-digest:page:t new-page))
     new-page(digest (compute-digest:page:t new-page))
   new-page
+::  +make-ai-pow-page: a VALID post-asert AI block — the ZK candidate re-targeted
+::  to the AI ASERT target/work (+build-ai-candidate) and stamped with a %ai-pow
+::  artifact + fresh digest. Passes +validate-page-without-txs (the AI cert check
+::  is deferred to +check-pow); unlike +make-ai-pow-garbage-page it carries the
+::  correct AI target and AI-normalized work, so it is accepted rather than
+::  rejected at the target/heaviness gates.
+++  make-ai-pow-page
+  |=  [parent=page:t con=consensus-state]
+  ^-  page:t
+  =/  zk-cand=page:t  (make-empty-page parent)
+  =/  ai-cand=page:t  (~(build-ai-candidate dcon con der bc) zk-cand)
+  ::  v1 page (atom head) runs the FALSE branch and takes the %ai-pow artifact;
+  ::  the v0 branch is dead but must type-check, and v0's narrower pow type cannot
+  ::  hold [%ai-pow ..], so it keeps mock-pow (see +make-ai-pow-garbage-page).
+  =.  ai-cand
+    ?^  -.ai-cand  ai-cand(pow mock-pow)  ai-cand(pow `[%ai-pow 0 0])
+  =.  ai-cand
+    ?^  -.ai-cand  ai-cand(digest (compute-digest:page:t ai-cand))  ai-cand(digest (compute-digest:page:t ai-cand))
+  ai-cand
 ::
 ++  make-default-coinbase
   ^-  coinbase:t
