@@ -868,23 +868,32 @@
           !(~(has-excluded k-by:h nockchain) id.raw2)
       ==
   ::
-  ::  a heavier chain ending at block 2 wins: the tip drops from 4 to 2 while
-  ::  blocks 3 and 4 are still held
-  =/  block-2  (snag 1 pages)
+  ::  A heavier chain forks at block 1 and ends at block-2-p, height 2: the tip
+  ::  drops from 4 to 2 while blocks 2, 3 and 4 are still held. It must fork
+  ::  rather than end at block-2 itself -- a prefix of the abandoned chain can
+  ::  never out-weigh it, and the walk would stop at the fork point without ever
+  ::  taking the "index names a different block at this height" branch.
+  ::  a different miner key gives a distinct block at the same height
+  =/  block-2-p  (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-block k-by:h nockchain) block-2-p)
   =/  lowered
-    (~(with-heaviest-block k-by:h nockchain) ~(con k-by:h nockchain) ~(digest get:page:t block-2))
-  =/  d  (~(der-update k-by:h nockchain) ~(der k-by:h nockchain) lowered block-2)
-  ::  the index now stops at the tip
+    %+  ~(with-heaviest-block k-by:h nockchain)
+      ~(con k-by:h nockchain)
+    ~(digest get:page:t block-2-p)
+  =/  d  (~(der-update k-by:h nockchain) ~(der k-by:h nockchain) lowered block-2-p)
+  ::  the index stops at the tip and names the fork at height 2
   ?>  ?&  =(~ (~(heaviest-chain-at k-by:h nockchain) d 4))
           =(~ (~(heaviest-chain-at k-by:h nockchain) d 3))
-          =(`~(digest get:page:t block-2) (~(heaviest-chain-at k-by:h nockchain) d 2))
+          =(`~(digest get:page:t block-2-p) (~(heaviest-chain-at k-by:h nockchain) d 2))
       ==
   ::
   =/  released
     %^  ~(release-branch k-by:h nockchain)  lowered
       ~(digest get:page:t block-4)
     heaviest-chain.d
-  ::  both blocks' txs are back in the mempool, neither still claimed
+  ::  blocks 4 and 3 release via absence above the tip, block-2 via the index
+  ::  naming block-2-p at its height, and the walk stops at block 1
   %+  expect-eq
     !>([%.y %.y %.n %.n ~])
   !>  :*  (~(con-excluded k-by:h nockchain) released id.raw1)

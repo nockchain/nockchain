@@ -614,15 +614,13 @@
       =/  first-name=hash:t  (from-b58:hash:t first-name.pole)
       ?~  heaviest-block.c.k
         [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
+      ?~  lp=(~(get h-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
       ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  highest=highest-block-height.d.k
-        [~ ~]
       %-  some
       %-  some
-      :+  u.highest
+      :+  ~(height get:local-page:t u.lp)
         u.heaviest-block.c.k
       %-  ~(rep h-by u.bal)
       |=  [[k=nname:t v=nnote:t] bal=(z-map nname:t nnote:t)]
@@ -635,15 +633,13 @@
       =/  pubkey=schnorr-pubkey:t  (from-b58:schnorr-pubkey:t key-b58.pole)
       ?~  heaviest-block.c.k
         [~ ~]
-      ?.  (~(has h-by blocks.c.k) u.heaviest-block.c.k)
+      ?~  lp=(~(get h-by blocks.c.k) u.heaviest-block.c.k)
         [~ ~]
       ?~  bal=(~(get h-by balance.c.k) u.heaviest-block.c.k)
         [~ ~]
-      ?~  highest=highest-block-height.d.k
-        [~ ~]
       %-  some
       %-  some
-      :+  u.highest
+      :+  ~(height get:local-page:t u.lp)
         u.heaviest-block.c.k
       %-  ~(rep h-by u.bal)
       |=  [[k=nname:t v=nnote:t] pub-bal=(z-map nname:t nnote:t)]

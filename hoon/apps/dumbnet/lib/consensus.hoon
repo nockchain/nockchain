@@ -903,6 +903,8 @@
   ~/  %release-orphaned-branch
   |=  [old-heavy=block-id:t heaviest-chain=(z-map page-number:t block-id:t)]
   ^-  consensus-state:dk
+  ::  loop-invariant: the release mutates .c but not .heaviest-block or .blocks
+  =/  tip-height=page-number:t  get-cur-height
   =/  cur=block-id:t  old-heavy
   |-
   ^-  consensus-state:dk
@@ -917,7 +919,7 @@
   ::  the tip proves this block is not on the heaviest chain. At or below the
   ::  tip absence proves nothing: stop rather than release a tx that is really
   ::  mined.
-  ?:  &(?=(~ canonical) !(gth block-height get-cur-height))  c
+  ?:  &(?=(~ canonical) !(gth block-height tip-height))  c
   ::  orphaned: release its txs, then continue up the abandoned branch
   =.  c  (release-orphan-claims cur)
   =/  parent=block-id:t  ~(parent get:local-page:t u.lp)
