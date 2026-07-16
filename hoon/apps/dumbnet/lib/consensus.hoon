@@ -923,27 +923,6 @@
   ?:  =(*page-number:t block-height)  c
   $(cur parent)
 ::
-::  +repair-orphaned-claims: BOOT-ONLY. Release every orphaned block's claim on
-::  its transactions.
-::
-::    A node that ran the old kernel is carrying transactions stranded by reorgs
-::    that happened before +release-orphaned-branch existed: still held in
-::    raw-txs, still claimed by a block that is no longer on the heaviest chain,
-::    and therefore unmineable, un-re-gossiped, un-droppable, with their inputs
-::    pinned in spent-by so not even a replacement tx can spend those notes.
-::    +release-orphaned-branch cannot reach them -- it only walks the branch a
-::    LIVE reorg abandons, and those reorgs are long past. This is the one-time
-::    repair that frees them, and it is why the fix is not merely prospective.
-::
-::    Restored txs land in excluded-txs, so the first +garbage-collect after boot
-::    applies the usual spent-input check to them: any whose notes the canonical
-::    chain has since spent (most of them -- they were re-mined on the winning
-::    chain) are dropped outright, which also frees their inputs from spent-by.
-::    Only the genuinely unmined ones stay, to be re-gossiped and mined.
-::
-::    This walks all of .blocks. That is exactly why it lives in +load and
-::    nowhere else: a boot already pays to load the whole state, whereas a
-::    steady-state event must never pay for the size of the chain.
 ::  +canonical-block-ids: the heaviest block and every one of its ancestors,
 ::  walked from the tip through .blocks itself.
 ::
@@ -1036,6 +1015,31 @@
   =.  targets.c         (~(del h-by targets.c) block-id)
   c
 ::
+::  +repair-orphaned-claims: BOOT-ONLY. Release every orphaned block's claim on
+::  its transactions, then delete the block.
+::
+::    A node that ran the old kernel is carrying transactions stranded by reorgs
+::    that happened before +release-orphaned-branch existed: still held in
+::    raw-txs, still claimed by a block that is no longer on the heaviest chain,
+::    and therefore unmineable, un-re-gossiped, un-droppable, with their inputs
+::    pinned in spent-by so not even a replacement tx can spend those notes.
+::    +release-orphaned-branch cannot reach them -- it only walks the branch a
+::    LIVE reorg abandons, and those reorgs are long past. This is the one-time
+::    repair that frees them, and it is why the fix is not merely prospective.
+::    It also catches what the live path silently misses: before +prune-above,
+::    a tip-lowering reorg released nothing at all (see derived.hoon).
+::
+::    Restored txs land in excluded-txs, so the first +garbage-collect after boot
+::    applies the usual spent-input check to them: any whose notes the canonical
+::    chain has since spent (most of them -- they were re-mined on the winning
+::    chain) are dropped outright, which also frees their inputs from spent-by.
+::    Only the genuinely unmined ones stay, to be re-gossiped and mined.
+::
+::    This makes TWO passes over the size of the chain: +canonical-block-ids
+::    walks the tip's ancestry, then the scan below walks all of .blocks. That
+::    is exactly why this lives in +load and nowhere else: a boot already pays
+::    to load the whole state, whereas a steady-state event must never pay for
+::    the size of the chain.
 ++  repair-orphaned-claims
   ~/  %repair-orphaned-claims
   ^-  consensus-state:dk
