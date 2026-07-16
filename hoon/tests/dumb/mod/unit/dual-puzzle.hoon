@@ -119,4 +119,29 @@
   =/  target-a  (~(compute-target-ai-asert dcon con.a der:hd bc-dual-puzzle:helpers) 2 ai-parent-a)
   =/  target-b  (~(compute-target-ai-asert dcon con.b der:hd bc-dual-puzzle:helpers) 3 ai-parent-b)
   %+  expect-eq  !>((merge:bignum target-a))  !>((merge:bignum target-b))
+::
+::  PRODUCTION — +build-ai-candidate re-targets the ZK candidate to exactly the
+::  AI ASERT target and the AI-normalized accumulated-work that validation
+::  recomputes (+block-compute-work). This is the block the miner solves against;
+::  if either field were off, +heard-block would reject the mined block as
+::  %page-target-invalid / %page-heaviness-invalid.
+++  test-build-ai-candidate-retargets
+  ^-  tang
+  =/  built  (build-typed-chain:hd ~[%ai %zk])
+  =/  con  con.built
+  =/  zk-cand=page:t  (make-empty-page:hd tip.built)
+  =/  ai-cand=page:t
+    (~(build-ai-candidate dcon con der:hd bc-dual-puzzle:helpers) zk-cand)
+  =/  ai-parent
+    %-  need
+    %.  [~(parent get:page:t zk-cand) %ai-pow]
+    ~(find-same-type-ancestor dcon con der:hd bc-dual-puzzle:helpers)
+  =/  expected-target
+    (~(compute-target-ai-asert dcon con der:hd bc-dual-puzzle:helpers) ~(height get:page:t zk-cand) ai-parent)
+  =/  parent-work  (merge:bignum ~(accumulated-work get:page:t tip.built))
+  =/  expected-work  (add parent-work (merge:bignum (compute-work-ai:page:t expected-target)))
+  %+  expect-eq
+    !>([(merge:bignum expected-target) expected-work])
+  !>  :-  (merge:bignum ~(target get:page:t ai-cand))
+      (merge:bignum ~(accumulated-work get:page:t ai-cand))
 --
