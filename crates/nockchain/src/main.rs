@@ -48,20 +48,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .await?;
 
     // Install the AI-PoW compact verifier-setup table from the data dir BEFORE
-    // processing any block. If the cache is present this is fast (load seeds +
-    // rebuild; no proving); if it is absent the node GENERATES the table once
-    // (a one-time boot delay), caches it, and injects it. A node with no valid
-    // verifier setup cannot validate %ai-pow blocks, so a generation failure is
-    // FATAL — we propagate the error and shut down rather than run blind.
+    // processing any block. If the cache is present + valid this is fast (load seeds
+    // + rebuild; no proving); if it is absent (or corrupt) the node GENERATES the
+    // table once (a one-time ~5-minute boot delay; it logs this), caches it, and
+    // injects it — validating it against the committed v0 consensus digest either
+    // way. A node with no valid verifier setup cannot validate %ai-pow blocks, so any
+    // failure is FATAL: we propagate the error and shut down rather than run blind.
     let buckets = ai_pow_jets::setup::production_verifier_setup_buckets();
-    if !ai_pow_jets::setup::verifier_setup_seed_cache_path(&data_dir).exists() {
-        tracing::info!(
-            "no AI-PoW verifier-setup cache at {}; generating it now (one-time; cached afterwards)…",
-            ai_pow_jets::setup::verifier_setup_seed_cache_path(&data_dir).display(),
-        );
-    }
-    let n = ai_pow_jets::setup::install_or_build_verifier_setup(&data_dir, &buckets)?;
-    tracing::info!("AI-PoW verifier-setup table installed: {n} trace-height bucket(s)");
+    ai_pow_jets::setup::install_or_build_verifier_setup(&data_dir, &buckets)?;
 
     nockchain.run().await?;
     Ok(())

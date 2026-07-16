@@ -31,6 +31,7 @@ use nockvm::noun::{Noun, NounSpace, D};
 use once_cell::sync::OnceCell;
 
 pub mod setup;
+pub mod table_digest;
 
 /// Pattern-length bound the verifier enforces (protocol constant; matches the
 /// production admission envelope).
@@ -309,6 +310,45 @@ mod tests {
             !crate::ai_pow_verifier_setup_initialized(),
             "failed install must not have injected a table",
         );
+    }
+
+    /// Corrupt-cache recovery (cheap, no proving): a present-but-unreadable cache is
+    /// DELETED and — because this test provides no buckets to regenerate from — the
+    /// installer then returns `Err` (fatal). Asserts BOTH that the corrupt file was
+    /// removed (the "delete and regenerate" behavior) and that no table was injected.
+    /// Exercises the delete-on-corrupt branch without the ~5-minute generation. A
+    /// bincode-undecodable cache stands in for both a truncated/corrupt file and a
+    /// format-incompatible cache from an older version.
+    #[test]
+    fn corrupt_cache_is_deleted_then_fatal_without_buckets() {
+        assert!(
+            !crate::ai_pow_verifier_setup_initialized(),
+            "precondition: no setup installed in this test process",
+        );
+        let dir =
+            std::env::temp_dir().join(format!("ai-pow-jets-corrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = crate::setup::verifier_setup_seed_cache_path(&dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"this is not a valid bincode seed table").unwrap();
+        assert!(path.exists(), "precondition: corrupt cache present");
+
+        // No buckets ⇒ after deleting the corrupt cache there is nothing to
+        // regenerate from ⇒ fatal. The corrupt file must still have been removed.
+        let result = crate::setup::install_or_build_verifier_setup(&dir, &[]);
+        assert!(
+            result.is_err(),
+            "corrupt cache + no buckets to regenerate must be fatal",
+        );
+        assert!(
+            !path.exists(),
+            "the corrupt/incompatible cache file must be deleted during recovery",
+        );
+        assert!(
+            !crate::ai_pow_verifier_setup_initialized(),
+            "failed install must not have injected a table",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The production bucket set (what boot generates) must cover EXACTLY the
@@ -851,6 +891,34 @@ mod jet_tests {
         assert_eq!(table.len(), 7, "rebuilt table has 7 buckets");
         let tl2: BTreeSet<u32> = table.iter().map(|s| s.trace_height.trailing_zeros()).collect();
         assert_eq!(tl2, log2s, "rebuilt table covers the same 7 buckets");
+
+        // CONSENSUS FINGERPRINT (v0): compute the table digest over the rebuilt table
+        // — the exact generate -> cache -> load path a fresh node runs at boot. Print
+        // it so the constant can be pinned; once pinned, re-running this test (which
+        // re-generates from scratch) also RE-VALIDATES run-to-run determinism, since
+        // an independent generation must reproduce the pinned digest.
+        let table_digest =
+            crate::table_digest::verifier_setup_table_digest(&table).expect("v0 table digest");
+        eprintln!(
+            "V0 VERIFIER-SETUP TABLE DIGEST = {}",
+            crate::table_digest::hex32(&table_digest),
+        );
+        eprintln!(
+            "  pin: AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST = [{}];",
+            table_digest
+                .iter()
+                .map(|b| format!("0x{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        if crate::table_digest::v0_digest_is_pinned() {
+            assert_eq!(
+                table_digest,
+                crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
+                "independently-generated table digest must match the pinned v0 consensus constant \
+                 (determinism / consensus-parameter check)",
+            );
+        }
     }
 
     /// **DE-RISK — is the compact verifier setup shape-DEPENDENT?**

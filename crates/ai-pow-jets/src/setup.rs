@@ -451,20 +451,45 @@ pub fn load_verifier_setup_table(
         .collect()
 }
 
+/// Load the cached seed table, rebuild it (no proving), and validate it against the
+/// committed **v0** consensus digest. Any failure — a missing/unreadable file, a
+/// corrupt or format-incompatible cache (bincode decode error), a rebuild error, an
+/// internal cached-vs-rebuilt digest disagreement, or a mismatch against the pinned
+/// consensus constant — is returned as `Err`. The boot installer treats a
+/// present-but-invalid cache as corrupt and regenerates from scratch.
+fn load_and_validate_verifier_setup_table(
+    path: &std::path::Path,
+) -> Result<Vec<AiPowVerifierSetup>, SetupError> {
+    let table = load_verifier_setup_table(path)?;
+    crate::table_digest::verify_verifier_setup_table_digest(&table)?;
+    Ok(table)
+}
+
 /// BOOT installer: ensure the AI-PoW verifier-setup table is installed, or FAIL.
 ///
-/// - If the data-dir cache exists: load + rebuild (no proving) + inject — the
-///   fast path, seconds not minutes.
-/// - If it does NOT exist: GENERATE it (prove one canonical block per `buckets`
-///   entry — a one-time boot delay), cache it to the data dir, then load + rebuild
-///   + inject. The node "sits there and generates one" on first boot, then boots
-///   fast forever after.
+/// The verifier-setup table is a CONSENSUS PARAMETER — every node must verify
+/// `%ai-pow` blocks against byte-identical verifier keys. This installer pins that:
+/// whatever table it ends up with (loaded or freshly generated) must match the
+/// committed [`crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST`], or the
+/// node refuses to run.
+///
+/// - **Cache present and valid:** load + rebuild (no proving) + inject — the fast
+///   path, seconds not minutes.
+/// - **Cache present but corrupt / format-incompatible / digest-mismatched:** DELETE
+///   it and regenerate from scratch (below), rather than run against an unusable or
+///   divergent cache.
+/// - **Cache absent (or just deleted):** GENERATE it (one real compact proof per
+///   `buckets` entry — a one-time ~5-minute boot delay), cache it to the data dir,
+///   then load + rebuild + validate + inject. The node "sits there and generates
+///   one" on first boot, then boots fast forever after.
 ///
 /// Returns the number of buckets installed. **Any failure is returned as `Err` and
 /// is FATAL** — the caller must shut the node down: a node with no valid verifier
-/// setup cannot validate `%ai-pow` blocks and must not run. Idempotent: if the
-/// table is already installed in-process (e.g. a second boot in a test harness),
-/// returns `Ok` without regenerating.
+/// setup cannot validate `%ai-pow` blocks and must not run. A digest mismatch on a
+/// FRESHLY-GENERATED table is fatal and NOT retried (regenerating cannot fix a
+/// machine that produces a divergent verifier). Idempotent: if the table is already
+/// installed in-process (e.g. a second boot in a test harness), returns `Ok`
+/// without regenerating.
 pub fn install_or_build_verifier_setup(
     data_dir: &std::path::Path,
     buckets: &[VerifierSetupBucketShape],
@@ -473,16 +498,50 @@ pub fn install_or_build_verifier_setup(
         return Ok(0);
     }
     let path = verifier_setup_seed_cache_path(data_dir);
-    if !path.exists() {
-        if buckets.is_empty() {
-            return Err(SetupError(
-                "no verifier-setup cache and no bucket shapes to generate one from".to_string(),
-            ));
+
+    // Fast path: a present, loadable, digest-matching cache.
+    let mut table: Option<Vec<AiPowVerifierSetup>> = None;
+    if path.exists() {
+        match load_and_validate_verifier_setup_table(&path) {
+            Ok(t) => table = Some(t),
+            Err(e) => {
+                // Corrupt / format-incompatible / digest-mismatched cache: delete it
+                // and regenerate. If the delete itself fails, that is fatal — we must
+                // not run against an unusable cache we cannot replace.
+                tracing::warn!(
+                    "AI-PoW verifier-setup cache at {} is unusable ({e}); deleting and \
+                     regenerating from scratch",
+                    path.display(),
+                );
+                std::fs::remove_file(&path)
+                    .map_err(err("delete corrupt/incompatible verifier-setup cache"))?;
+            }
         }
-        // One-time generation: one real compact proof per bucket, then cache.
-        build_and_cache_verifier_setup_seeds(&path, buckets)?;
     }
-    let table = load_verifier_setup_table(&path)?;
+
+    let table = match table {
+        Some(t) => t,
+        None => {
+            // No cache, or one we just deleted: generate the table once.
+            if buckets.is_empty() {
+                return Err(SetupError(
+                    "no usable verifier-setup cache and no bucket shapes to generate one from"
+                        .to_string(),
+                ));
+            }
+            tracing::info!(
+                "Generating the AI-PoW verifier-setup table ({} buckets). This is a one-time \
+                 step and takes about 5 minutes; the result is cached, so subsequent boots are \
+                 fast.",
+                buckets.len(),
+            );
+            build_and_cache_verifier_setup_seeds(&path, buckets)?;
+            // A digest mismatch HERE is fatal and NOT retried: regenerating cannot fix
+            // a machine that produces a divergent verifier — it must shut down.
+            load_and_validate_verifier_setup_table(&path)?
+        }
+    };
+
     if table.is_empty() {
         return Err(SetupError(
             "verifier-setup table is empty after build/load".to_string(),
@@ -495,6 +554,7 @@ pub fn install_or_build_verifier_setup(
                 .to_string(),
         )
     })?;
+    tracing::info!("AI-PoW verifier-setup table installed: {n} trace-height bucket(s).");
     Ok(n)
 }
 
