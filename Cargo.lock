@@ -6470,7 +6470,9 @@ dependencies = [
 name = "nockchain"
 version = "0.1.0"
 dependencies = [
+ "ai-pow",
  "ai-pow-jets",
+ "ai-pow-miner",
  "blake3",
  "bs58",
  "chaff",

@@ -108,12 +108,26 @@ fn setup_table_heights_valid(heights: &[usize]) -> bool {
 const YES: Noun = D(0);
 const NO: Noun = D(1);
 
-fn atom_to_32(noun: Noun, space: &NounSpace) -> Option<[u8; 32]> {
+/// Convert a PoW **target** atom to a 32-byte little-endian value, SATURATING to
+/// `[0xff; 32]` (2^256 − 1) when the atom exceeds 32 bytes.
+///
+/// The Nockchain block target is a tip5-atom-sized value (`merge:bignum` of
+/// `max_tip5_atom / 2^bex`, up to ~2^320 — see `blockchain_constants::DEFAULT_MAX_TIP5_ATOM`),
+/// so a real target routinely needs ~40 bytes and would fail the strict 32-byte
+/// [`atom_to_32`]. The AI-PoW jackpot digest is a 256-bit value (`< 2^256`), so any
+/// target `>= 2^256` is trivially satisfied by every valid jackpot. Clamping such a
+/// target to `2^256 − 1` is EXACTLY equivalent for a 256-bit jackpot (`jackpot <=
+/// 2^256 − 1 <= real_target`), and the downstream difficulty adjustment
+/// (`u256_le_mul_u128_saturating`) already saturates in the same 256-bit domain.
+/// Targets `< 2^256` still parse exactly. This never widens acceptance beyond the
+/// real target, so it is sound; it only stops the jet from rejecting every real
+/// block on the target-parse step.
+fn target_atom_to_32_saturating(noun: Noun, space: &NounSpace) -> Option<[u8; 32]> {
     let atom = noun.in_space(space).as_atom().ok()?.atom();
     let handle = atom.in_space(space);
     let bytes = handle.as_ne_bytes();
     if bytes.len() > 32 {
-        return None;
+        return Some([0xffu8; 32]);
     }
     let mut out = [0u8; 32];
     out[..bytes.len()].copy_from_slice(bytes);
@@ -194,7 +208,7 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
         Ok(a) => a,
         Err(_) => return Ok(NO),
     };
-    let Some(target) = atom_to_32(target_noun, &space) else {
+    let Some(target) = target_atom_to_32_saturating(target_noun, &space) else {
         return Ok(NO);
     };
     // Consensus cap: the accept-band tops out at AI_POW_MAX_TRACE_HEIGHT (2^19).
