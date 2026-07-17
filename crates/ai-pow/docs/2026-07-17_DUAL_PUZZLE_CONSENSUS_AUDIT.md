@@ -96,6 +96,40 @@ difficulty difference comes only from the deterministic subchain block-count.
   soundness-maintenance hazard — it read as though no MoE block could ever be accepted —
   and is now corrected. MoE's *deep* circuit soundness remains conditional on §1.1.
 
+## Adversarial verification pass (of the fixes above)
+
+Each landed fix was re-reviewed adversarially — trying to break it — after implementation:
+
+- **N5 is consensus-load-bearing, not latent.** The N5-fixed `verify_pearl_aux_inclusion`
+  is called on BOTH consensus accept branches of `verify_ai_pow_block_artifact`: the
+  dense precheck (`precheck_ai_pow_pearl_merge_artifact_statement_committed`,
+  `certificate_noun.rs:2047`) and the MoE verifier (`…compact_moe…`,
+  `certificate_noun.rs:2488`). The binding chain is tight: the coinbase embeds exactly
+  one `expected_aux_commitment`; `expected_aux_commitment == commitment(aux)` (a hash
+  over `aux.nock_block_commitment`); and `aux.nock_block_commitment ==
+  candidate_nock_block_commitment` (the consensus commit the jet passes). So one Pearl
+  PoW (one coinbase, one merkle root) binds EXACTLY ONE consensus block commitment.
+  The tag string is non-self-periodic, so a spurious extra occurrence is a ~2^-160
+  event and rejecting on >1 is fail-closed. No bypass.
+- **§9.3** — the only AI-anchor constructor `ai_default()` is `2^227`; the two `2^291`
+  values are the ZK anchors (`zk_default`, `zk_post_ai_default`), correctly untouched.
+  `227 = 291 − 64` matches the equal-weight normalizer. No missed AI default.
+- **§4.6** — `#[cfg(panic="abort")] compile_error!` is unconditional and lives in the
+  jet's own crate; Cargo's panic strategy is whole-program, so the consensus binary
+  cannot link a build where the verify jet's `catch_unwind` is a no-op.
+- **§4.4** — `verifier_cache_cap()` clamps `.max(1)`, so an attacker/operator value of
+  `0` yields one resident bucket, never a "no cache ⇒ every access page-faults" worse
+  DoS. The only unbounded direction is operator-chosen RSS (documented tradeoff).
+- **§1.3** — the MoE compact verifier wires the bindings in the correct order (aux ⇒
+  routing-consistency via `verify_pearl_moe_compatible_work` ⇒ proven-jackpot
+  `pis.hash_jackpot == public_params.hash_jackpot` ⇒ dims ⇒ verifier-key digest ⇒
+  recursive cert with the P0 program-commitment fold). The glue is sound; the deep
+  AIR/recursion soundness that makes these bindings *mean* "the miner did the inference"
+  is exactly §1.1.
+
+Regression gate: `ai-pow`, `ai-pow-jets`, `nockchain-types` suites all green
+(0 failed; heavy real-MoE-proof tests remain `#[ignore]` opt-in).
+
 ## OPEN — the production residual (prioritized)
 
 1. **§1.1 external ZK/circuit audit (HIGHEST).** The recursion + composite-AIR
