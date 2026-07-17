@@ -527,10 +527,19 @@
 ::    work). Emission (the %mine-ai effect) and +do-pow (reconstructing the block
 ::    from an AI solution) both call this on the same candidate + consensus
 ::    state, so the commitments match and the solved certificate validates.
+::
+::    PRE-asert the AI candidate IS the ZK candidate: validation's target check
+::    and +block-compute-work are both epoch/ZK pre-asert, so re-targeting to the
+::    AI ASERT target here would make validation reject the block as
+::    %page-target-invalid. AI blocks only diverge from ZK post-asert. (On mainnet
+::    AI activates well after asert, so this only matters on fakenets that
+::    activate AI early.)
 ++  build-ai-candidate
   |=  zk-cand=page:t
   ^-  page:t
   =/  candidate-height=@  ~(height get:page:t zk-cand)
+  ?.  (post-asert-activation:t candidate-height)
+    zk-cand
   =/  parent-bid=block-id:t  ~(parent get:page:t zk-cand)
   =/  ai-parent=block-id:t
     =/  found=(unit block-id:t)  (find-same-type-ancestor parent-bid %ai-pow)

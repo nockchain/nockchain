@@ -129,17 +129,19 @@
 ::  %page-target-invalid / %page-heaviness-invalid.
 ++  test-build-ai-candidate-retargets
   ^-  tang
-  =/  built  (build-typed-chain:hd ~[%ai %zk])
+  ::  bc-dual-post: post-asert at the candidate height, so +build-ai-candidate
+  ::  actually re-targets (pre-asert it returns the ZK candidate unchanged).
+  =/  built  (build-typed-chain:hp ~[%ai %zk])
   =/  con  con.built
-  =/  zk-cand=page:t  (make-empty-page:hd tip.built)
+  =/  zk-cand=page:t  (make-empty-page:hp tip.built)
   =/  ai-cand=page:t
-    (~(build-ai-candidate dcon con der:hd bc-dual-puzzle:helpers) zk-cand)
+    (~(build-ai-candidate dcon con der:hp bc-dual-post:helpers) zk-cand)
   =/  ai-parent
     %-  need
     %.  [~(parent get:page:t zk-cand) %ai-pow]
-    ~(find-same-type-ancestor dcon con der:hd bc-dual-puzzle:helpers)
+    ~(find-same-type-ancestor dcon con der:hp bc-dual-post:helpers)
   =/  expected-target
-    (~(compute-target-ai-asert dcon con der:hd bc-dual-puzzle:helpers) ~(height get:page:t zk-cand) ai-parent)
+    (~(compute-target-ai-asert dcon con der:hp bc-dual-post:helpers) ~(height get:page:t zk-cand) ai-parent)
   =/  parent-work  (merge:bignum ~(accumulated-work get:page:t tip.built))
   =/  expected-work  (add parent-work (merge:bignum (compute-work-ai:page:t expected-target)))
   %+  expect-eq
