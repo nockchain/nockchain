@@ -29,11 +29,12 @@ attached advanced a single chain to height 9 with BOTH puzzles winning heights
 | Arbitrary miner matrices | SOUND (per-nonce noise forces fresh matmul; difficulty binds work) |
 | 256-bit AI-target saturation (§9.3) | FIXED (kernel already bex 227; Rust default corrected this audit) |
 | verify-jet crash DoS under panic=abort (§4.6) | FIXED this audit (build guard) |
-| Cache-thrash DoS via `trace_height` (§4.4) | OPEN — mitigation documented below |
-| One-PoW-binds-two-commitments (N5) | OPEN — needs a consensus decision; mitigation ready |
+| One-PoW-binds-two-commitments (N5) | FIXED this audit (exactly-one aux-tag enforced + tests) |
+| MoE live-vs-gated (§1.3/§1.6) | RESOLVED this audit (live via compact path, routing-bound; stale comments reconciled) |
+| Cache-thrash DoS via `trace_height` (§4.4) | MITIGATED this audit (operator CLI knob); code page-in-off-thread residual |
+| Liar `%failed-pow-check` ban is peer-id/Weak, not IP/Strong (§4.3) | DEFERRED — current ban deemed sufficient; high-risk networking surgery |
 | Checkpoint (non-compact) verify skips program bind (§1.4) | LATENT — production uses compact (bound); not consensus-wired |
 | External ZK/circuit soundness audit (§1.1) | OPEN — external; everything above is conditional on it |
-| MoE live-vs-gated (§1.3) | OPEN — decision + routing-binding audit |
 
 ## SOUND — analyzed this audit
 
@@ -73,6 +74,27 @@ difficulty difference comes only from the deterministic subchain block-count.
   jet's no-crash guarantee relies on `catch_unwind`; `panic=abort` makes it a no-op,
   so one crafted `%ai-pow` block would abort the node. A `compile_error!` now refuses
   to build the consensus verifier under `panic=abort`.
+- **N5 — one PoW must not bind two commitments** (`ai-pow/src/pearl_compat.rs`,
+  commit 29ef1eb9). `verify_pearl_aux_inclusion` now requires the
+  `NOCKCHAIN-AI-POW-AUX` tag to occur **exactly once** in the verified coinbase (was a
+  substring `contains` check), so a merge-miner cannot embed two aux commitments under
+  one Pearl PoW and mint two same-height forks from one unit of work. Covered by
+  `pearl_aux_inclusion_rejects_double_tag_n5` and
+  `pearl_aux_inclusion_rejects_tag_without_room_for_commitment`.
+- **§4.4 — verifier cache-thrash DoS knob** (`nockchain` CLI, commits 29ef1eb9 +
+  9c495d88). `--ai-pow-verifier-cache-cap` (env `AI_POW_VERIFIER_CACHE_CAP`) lets an
+  operator pin all trace-height buckets resident (cap ≥ 7) to neutralize the
+  attacker-controlled page-in thrash. Default kept low (2) to bound RSS; raise it if
+  the vector is exercised. Moving the page-in off the consensus thread remains a
+  code-level residual (below).
+- **§1.3 / §1.6 — MoE is live via the compact path; stale "fail-closed" comments
+  reconciled** (`ai-pow/src/pearl_compat.rs` + test, commit 652c2b58). MoE ai-pow
+  blocks ARE accepted, through `verify_pearl_moe_compact_recursive_certificate` +
+  `verify_pearl_moe_compatible_work`, which bind the routing commitment (demonstrated
+  by the live dual chain). The stale docstring/error-string on the *dense*-prover
+  config guard (which correctly refuses MoE as a caller-routing error) was a
+  soundness-maintenance hazard — it read as though no MoE block could ever be accepted —
+  and is now corrected. MoE's *deep* circuit soundness remains conditional on §1.1.
 
 ## OPEN — the production residual (prioritized)
 
@@ -81,28 +103,33 @@ difficulty difference comes only from the deterministic subchain block-count.
    Every "SOUND" verdict on the crypto is conditional on this. Requires a dedicated
    external circuit + recursion audit before an adversarial mainnet.
 
-2. **§4.4 cache-thrash DoS.** `trace_height` is attacker-controlled (cert field, ≤2^19)
-   and a cache miss triggers a ~0.6 s synchronous disk page-in on the serf thread; an
-   attacker cycling ≥3 heights stalls consensus. **Mitigation (operator):** set the
-   verifier cache cap ≥ 7 (all production buckets 2^13..2^19 resident) —
-   `AI_POW_VERIFIER_CACHE_CAP`. **Code fix (next):** move page-in off the consensus
-   thread or pin all buckets resident for validators.
+2. **§4.4 cache-thrash — code residual (LOW).** The operator knob above closes the
+   practical DoS. The remaining code-level improvement is to move the ~0.6 s
+   `trace_height` page-in off the serf/consensus thread (or pin all buckets resident
+   for validators by default), so an under-provisioned operator who leaves the cap low
+   is not exposed. Not consensus-soundness; a latency/liveness hardening.
 
-3. **N5 one-PoW-binds-two-commitments.** A merge-miner who knows two
-   `nock_block_commitment`s can embed both aux tags in one coinbase, so one Pearl PoW
-   satisfies aux-inclusion for both → two same-height forks from one unit of work.
-   **Mitigation (ready):** enforce exactly one `NOCKCHAIN-AI-POW-AUX` tag occurrence
-   in the verified coinbase. Needs a consensus decision + Hoon/verify change + test.
+3. **§1.4 checkpoint program-bind (LATENT, defense-in-depth).** The non-compact
+   checkpoint `verify_recursive_certificate` does not assert the canonical-program
+   equality. Production AI-PoW uses the *compact* path, which DOES bind the program via
+   the D6/P0 opened-schedule fold, and the checkpoint path is not consensus-wired — so
+   this is not currently reachable on the accept path. Add the equality check (or a
+   `debug_assert` + doc that it is test-only) before ever wiring the checkpoint path
+   into consensus.
 
-4. **§1.3 MoE live-vs-gated.** The verify jet accepts MoE if the proof verifies, but
-   its routing binding is not deep-audited and code comments still say "fail-closed."
-   Decide: gate MoE off until audited, or confirm `verify_pearl_moe_routing_binding`
-   and mark it live. Reconcile the stale comments (§1.6).
-
-5. **§4.3 / §1.4 hardening.** Make `%failed-pow-check` an IP-level (Strong) ban, not a
-   rotatable weak one (§4.3). Add the canonical-program equality check to the
-   checkpoint `verify_recursive_certificate` or keep it off the consensus path (§1.4;
-   the production *compact* path already binds it via the D6/P0 fold).
+4. **§4.3 liar-ban strength — DEFERRED (accepted risk).** A `%failed-pow-check` liar
+   currently earns a peer-id-scoped (Weak) ban: a session-lived libp2p `allow_block_list`
+   block on the peer-id + fail2ban logging, with the IP-exclusion ceiling at
+   `IP_EXTENDED_EXCLUSION`/`MAX_AUTO_EXCLUSION` = 6 h. Escalating *specifically*
+   `%failed-pow-check` to an IP-level (Strong) exclusion would require reason-parsing
+   the liar effect and resolving each tracked peer's address inside the driver's ban
+   path — invasive surgery on load-bearing networking code with real false-positive
+   risk (NAT-shared IPs). **Decision (operator):** the current ~6 h ban is deemed
+   sufficient; defer the IP-level escalation to a dedicated, separately-validated
+   networking effort. A prototype of the targeted change (Strong only for
+   `%failed-pow-check`, Weak preserved for all other liar reasons that can arise from
+   honest soft-fork ruleset skew) was written and reverted this session; see the commit
+   history if revisited.
 
 ## Not re-audited (verify the fixes, per the prior corpus)
 
