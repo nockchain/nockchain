@@ -32,12 +32,13 @@ compile_error!(
      rejections; under panic=abort a crafted %ai-pow block would crash the node."
 );
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use ai_pow_miner::certificate_noun::{
     decode_ai_pow_pearl_merge_artifact_noun, verify_ai_pow_block_artifact, AiPowBlockVerifyOutcome,
     CertificateNounLimits, PearlMergeAiPowArtifactShape,
 };
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 // Tests use jemalloc (the production allocator) so RSS-reclaim probes measure the real
 // behavior — the system allocator retains freed page-outs and would give misleading
@@ -106,7 +107,12 @@ impl DiskBucket {
         context_path: std::path::PathBuf,
         context_file_blake3: [u8; 32],
     ) -> Self {
-        Self { trace_height, committed_digest, context_path, context_file_blake3 }
+        Self {
+            trace_height,
+            committed_digest,
+            context_path,
+            context_file_blake3,
+        }
     }
 }
 
@@ -131,7 +137,10 @@ struct Lru<V> {
 
 impl<V: Clone> Lru<V> {
     fn empty() -> Self {
-        Self { map: HashMap::new(), order: Vec::new() }
+        Self {
+            map: HashMap::new(),
+            order: Vec::new(),
+        }
     }
 
     fn touch(&mut self, h: usize) {
@@ -158,9 +167,9 @@ impl<V: Clone> Lru<V> {
         }
         self.map.insert(h, value.clone());
         self.order.push(h); // MRU
-        // Evict the least-recently-used beyond `cap`. Guard `remove(0)` on a non-empty
-        // `order` so this can never panic even if a prior panic (recovered via a
-        // poisoned lock) left `order`/`map` momentarily inconsistent.
+                            // Evict the least-recently-used beyond `cap`. Guard `remove(0)` on a non-empty
+                            // `order` so this can never panic even if a prior panic (recovered via a
+                            // poisoned lock) left `order`/`map` momentarily inconsistent.
         while self.map.len() > cap.max(1) && !self.order.is_empty() {
             let lru = self.order.remove(0); // front = LRU; `h` is at the back, so safe
             self.map.remove(&lru);
@@ -263,7 +272,10 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
     // pathological file must not panic the node (this is a local, non-deterministic
     // fault ⇒ `None` ⇒ the caller `%fail`s).
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        bincode::serde::decode_from_slice::<AiPowVerifierSetup, _>(&raw, bincode::config::standard())
+        bincode::serde::decode_from_slice::<AiPowVerifierSetup, _>(
+            &raw,
+            bincode::config::standard(),
+        )
     }));
     let (setup, _) = match decoded {
         Ok(Ok(v)) => v,
@@ -439,12 +451,7 @@ pub fn ai_pow_verify_core(
 ) -> Result<bool, JetErr> {
     let limits = CertificateNounLimits::default();
     match verify_ai_pow_block_artifact(
-        artifact,
-        limits,
-        &commit,
-        &target,
-        AI_POW_VERIFY_MAX_PATTERN_LEN,
-        &setup.context,
+        artifact, limits, &commit, &target, AI_POW_VERIFY_MAX_PATTERN_LEN, &setup.context,
         &setup.digest_bytes,
     ) {
         Ok(AiPowBlockVerifyOutcome::Dense(_)) | Ok(AiPowBlockVerifyOutcome::Moe(_)) => Ok(true),
@@ -481,7 +488,8 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
     // None of this mutates `context.stack`, so catching a panic here is safe.
     let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let limits = CertificateNounLimits::default();
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits).ok()?;
+        let artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits).ok()?;
         let target = target_atom_to_32_saturating(target_noun, &space)?;
         // Consensus cap: a block claiming a Layer-0 trace height above the accept-band
         // (2^19) is invalid (the top bucket is deliberately not built).
@@ -575,7 +583,11 @@ mod tests {
         // Insert 15 → evicts 14 (LRU), keeps 13 (just touched) and 15.
         lru.insert_capped(15, 150, 2);
         assert_eq!(lru.map.len(), 2);
-        assert_eq!(lru.get_touch(14), None, "14 was evicted as least-recently-used");
+        assert_eq!(
+            lru.get_touch(14),
+            None,
+            "14 was evicted as least-recently-used"
+        );
         assert_eq!(lru.get_touch(13), Some(130), "13 survived (was touched)");
         assert_eq!(lru.get_touch(15), Some(150), "15 is resident");
     }
@@ -587,7 +599,11 @@ mod tests {
         let mut lru: Lru<u64> = Lru::empty();
         assert_eq!(lru.insert_capped(13, 130, 3), 130);
         // Second insert of 13 with a DIFFERENT value returns the first (existing).
-        assert_eq!(lru.insert_capped(13, 999, 3), 130, "existing value kept on dedup");
+        assert_eq!(
+            lru.insert_capped(13, 999, 3),
+            130,
+            "existing value kept on dedup"
+        );
         assert_eq!(lru.map.len(), 1, "no duplicate entry");
     }
 
@@ -656,8 +672,7 @@ mod tests {
             !crate::ai_pow_verifier_setup_initialized(),
             "precondition: no setup installed in this test process",
         );
-        let dir =
-            std::env::temp_dir().join(format!("ai-pow-jets-corrupt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ai-pow-jets-corrupt-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -696,8 +711,14 @@ mod tests {
         for b in &buckets {
             let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
                 .expect("cheap trace height");
-            assert!(th.is_power_of_two(), "bucket height {th} must be a power of two");
-            assert!(th >= 1 << 13, "bucket height {th} must be >= MIN_STARK_LEN (2^13)");
+            assert!(
+                th.is_power_of_two(),
+                "bucket height {th} must be a power of two"
+            );
+            assert!(
+                th >= 1 << 13,
+                "bucket height {th} must be >= MIN_STARK_LEN (2^13)"
+            );
             assert!(
                 th <= ai_pow::params::AI_POW_MAX_TRACE_HEIGHT,
                 "bucket height {th} must be <= the consensus cap 2^{cap_db}",
@@ -723,12 +744,13 @@ mod tests {
 
 #[cfg(test)]
 mod jet_tests {
-    use super::*;
-    use crate::setup::{prove_canonical_moe_block, CANONICAL_SETUP_COMMIT};
     use ai_pow::params::MatmulParams;
     use ai_pow_miner::certificate_noun::build_ai_pow_pearl_merge_moe_artifact_noun_from_node;
     use nockapp::noun::slab::NounSlab;
     use nockvm::noun::NounAllocator;
+
+    use super::*;
+    use crate::setup::{prove_canonical_moe_block, CANONICAL_SETUP_COMMIT};
 
     /// Cue a jammed artifact into a fresh slab and return `(slab, root)`.
     fn cue_artifact(jammed: nockapp::Bytes) -> NounSlab {
@@ -835,14 +857,9 @@ mod jet_tests {
             .expect("prove canonical MoE block");
 
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &block.statement,
-            &block.aux_inclusion,
-            &block.moe_art,
-            &block.certificate.zk_params,
-            block.certificate.found_idx,
-            block.certificate.trace_height,
-            &block.certificate.commitments,
-            &block.certificate.public_inputs,
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
         .expect("build MoE artifact noun")
@@ -864,15 +881,15 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
-            root,
-            &space,
-            CertificateNounLimits::default(),
-        )
-        .expect("decode artifact noun");
+        let artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(root, &space, CertificateNounLimits::default())
+                .expect("decode artifact noun");
 
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &setup),
+                Ok(true)
+            ),
             "real MoE block must verify through the jet core",
         );
         assert!(
@@ -883,7 +900,10 @@ mod jet_tests {
             "wrong block commitment must be rejected",
         );
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, [0u8; 32], &setup), Ok(false)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, [0u8; 32], &setup),
+                Ok(false)
+            ),
             "unmet difficulty must be rejected",
         );
     }
@@ -913,14 +933,9 @@ mod jet_tests {
         let loose_target = [0xffu8; 32];
 
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &block.statement,
-            &block.aux_inclusion,
-            &block.moe_art,
-            &block.certificate.zk_params,
-            block.certificate.found_idx,
-            block.certificate.trace_height,
-            &block.certificate.commitments,
-            &block.certificate.public_inputs,
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
         .expect("build MoE artifact noun")
@@ -941,7 +956,10 @@ mod jet_tests {
         let slim_setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
             .expect("rebuild slimmed setup from seed");
 
-        assert_eq!(slim_setup.trace_height, full_setup.trace_height, "same bucket");
+        assert_eq!(
+            slim_setup.trace_height, full_setup.trace_height,
+            "same bucket"
+        );
         assert_eq!(
             slim_setup.digest_bytes, full_digest,
             "verifier-key digest must be UNCHANGED by dropping the raw columns",
@@ -951,18 +969,14 @@ mod jet_tests {
         // succeeded and dropped the raw columns): the slimmed context serializes
         // strictly smaller than the full proved one. Deterministic (no RSS noise) and
         // reports the exact prove-only-column bytes dropped for this bucket.
-        let full_ser = bincode::serde::encode_to_vec(
-            &full_setup.context,
-            bincode::config::standard(),
-        )
-        .expect("serialize full context")
-        .len();
-        let slim_ser = bincode::serde::encode_to_vec(
-            &slim_setup.context,
-            bincode::config::standard(),
-        )
-        .expect("serialize slim context")
-        .len();
+        let full_ser =
+            bincode::serde::encode_to_vec(&full_setup.context, bincode::config::standard())
+                .expect("serialize full context")
+                .len();
+        let slim_ser =
+            bincode::serde::encode_to_vec(&slim_setup.context, bincode::config::standard())
+                .expect("serialize slim context")
+                .len();
         eprintln!(
             "context serialized: full {full_ser} B, slim {slim_ser} B (dropped {} B of \
              prove-only columns at 2^{})",
@@ -978,20 +992,23 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
-            root,
-            &space,
-            CertificateNounLimits::default(),
-        )
-        .expect("decode artifact noun");
+        let artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(root, &space, CertificateNounLimits::default())
+                .expect("decode artifact noun");
 
         // ACCEPT: the real block verifies against BOTH contexts.
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &full_setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &full_setup),
+                Ok(true)
+            ),
             "real block verifies against the FULL context",
         );
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &slim_setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &slim_setup),
+                Ok(true)
+            ),
             "real block verifies IDENTICALLY against the SLIMMED context",
         );
         // REJECT: a wrong commitment is rejected by BOTH contexts.
@@ -1039,14 +1056,9 @@ mod jet_tests {
         let loose_target = [0xffu8; 32];
         let trace_height = block.certificate.trace_height;
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &block.statement,
-            &block.aux_inclusion,
-            &block.moe_art,
-            &block.certificate.zk_params,
-            block.certificate.found_idx,
-            block.certificate.trace_height,
-            &block.certificate.commitments,
-            &block.certificate.public_inputs,
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
         .expect("build MoE artifact noun")
@@ -1055,8 +1067,8 @@ mod jet_tests {
         // Build the context, serialize it to a temp dir, and inject it DISK-PAGED —
         // nothing heavy resident yet.
         let tmp = tempfile::TempDir::new().unwrap();
-        let setup_built = crate::setup::rebuild_verifier_setup_from_seed(block.seed)
-            .expect("build context");
+        let setup_built =
+            crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build context");
         crate::setup::install_verifier_setup_disk_from_setups(vec![setup_built], tmp.path(), 2)
             .expect("disk-paged init");
 
@@ -1066,15 +1078,15 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
-            root,
-            &space,
-            CertificateNounLimits::default(),
-        )
-        .expect("decode artifact noun");
+        let artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(root, &space, CertificateNounLimits::default())
+                .expect("decode artifact noun");
 
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &setup),
+                Ok(true)
+            ),
             "a lazily-built setup verifies a real block",
         );
         assert!(
@@ -1116,10 +1128,16 @@ mod jet_tests {
             return;
         }
         let params = MatmulParams {
-            m: 64, k: 1024, n: 64, noise_rank: 64, tile: 8, spot_checks: 1, difficulty_bits: 0,
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
         };
-        let block = prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT)
-            .expect("prove");
+        let block =
+            prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT).expect("prove");
         let h = block.certificate.trace_height;
         let setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build");
         let digest = setup.digest_bytes.clone();
@@ -1164,7 +1182,11 @@ mod jet_tests {
                 .args(["-o", "rss=", "-p", &pid])
                 .output()
                 .expect("ps");
-            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                / 1024
         }
         // Use the stable dir (has the seed cache) DIRECTLY so the built context files
         // persist across runs: the FIRST run builds all 7 (retention shows), a SECOND
@@ -1178,8 +1200,12 @@ mod jet_tests {
         // Detect whether this is a build-boot or a reuse-boot (context files present).
         let seeds = crate::setup::load_verifier_setup_seeds(&src_cache).expect("load seeds");
         let reuse = seeds.iter().all(|s| {
-            crate::setup::verifier_context_file_path(&dir, s.trace_height(), &s.verifier_key_digest_bytes)
-                .exists()
+            crate::setup::verifier_context_file_path(
+                &dir,
+                s.trace_height(),
+                &s.verifier_key_digest_bytes,
+            )
+            .exists()
         });
         drop(seeds);
 
@@ -1230,7 +1256,11 @@ mod jet_tests {
                 .args(["-o", "rss=", "-p", &pid])
                 .output()
                 .expect("ps");
-            String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(0)
+                / 1024
         }
         let dir = std::env::temp_dir().join("aipow-rss-cache");
         let cache = crate::setup::verifier_setup_seed_cache_path(&dir);
@@ -1247,7 +1277,10 @@ mod jet_tests {
             &big.verifier_key_digest_bytes,
         );
         if !ctx_path.exists() {
-            eprintln!("skip: no built 2^19 context file at {} (run the boot+RSS test first)", ctx_path.display());
+            eprintln!(
+                "skip: no built 2^19 context file at {} (run the boot+RSS test first)",
+                ctx_path.display()
+            );
             return;
         }
         let base = rss_mb();
@@ -1266,7 +1299,10 @@ mod jet_tests {
             };
             peak_held = peak_held.max(held);
             let after_drop = rss_mb();
-            eprintln!("  cycle {i}: held {held} MB (+{} over base), after drop {after_drop} MB", held.saturating_sub(base));
+            eprintln!(
+                "  cycle {i}: held {held} MB (+{} over base), after drop {after_drop} MB",
+                held.saturating_sub(base)
+            );
         }
         let end = rss_mb();
         eprintln!(
@@ -1348,14 +1384,9 @@ mod jet_tests {
         );
 
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &block.statement,
-            &block.aux_inclusion,
-            &block.moe_art,
-            &block.certificate.zk_params,
-            block.certificate.found_idx,
-            block.certificate.trace_height,
-            &block.certificate.commitments,
-            &block.certificate.public_inputs,
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
         .expect("build MoE artifact noun")
@@ -1374,17 +1405,17 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let artifact = decode_ai_pow_pearl_merge_artifact_noun(
-            root,
-            &space,
-            CertificateNounLimits::default(),
-        )
-        .expect("decode artifact noun");
+        let artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(root, &space, CertificateNounLimits::default())
+                .expect("decode artifact noun");
 
         let loose_target = [0xffu8; 32];
         // ACCEPT: the jet-derived commit matches the cert's commitment.
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &setup),
+                Ok(true)
+            ),
             "real block must verify when the commit is derived from its commitment noun",
         );
         // REJECT: a different commitment noun yields a different commit.
@@ -1393,7 +1424,10 @@ mod jet_tests {
         let other_commit = commit_from_noun(&mut stack2, other_noun);
         assert_ne!(other_commit, commit, "distinct nouns ⇒ distinct commits");
         assert!(
-            matches!(ai_pow_verify_core(&artifact, other_commit, loose_target, &setup), Ok(false)),
+            matches!(
+                ai_pow_verify_core(&artifact, other_commit, loose_target, &setup),
+                Ok(false)
+            ),
             "a block committed to a different noun must be rejected",
         );
     }
@@ -1436,14 +1470,9 @@ mod jet_tests {
 
         // Build the block artifact noun (uses the freshly-proved cert; unchanged).
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-            &block.statement,
-            &block.aux_inclusion,
-            &block.moe_art,
-            &block.certificate.zk_params,
-            block.certificate.found_idx,
-            block.certificate.trace_height,
-            &block.certificate.commitments,
-            &block.certificate.public_inputs,
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
             &block.certificate.certificate,
         )
         .expect("build MoE artifact noun")
@@ -1470,16 +1499,16 @@ mod jet_tests {
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
         let root = unsafe { *slab.root() };
-        let mut artifact = decode_ai_pow_pearl_merge_artifact_noun(
-            root,
-            &space,
-            CertificateNounLimits::default(),
-        )
-        .expect("decode artifact noun");
+        let mut artifact =
+            decode_ai_pow_pearl_merge_artifact_noun(root, &space, CertificateNounLimits::default())
+                .expect("decode artifact noun");
 
         let loose_target = [0xffu8; 32];
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &setup),
+                Ok(true)
+            ),
             "real MoE block must verify against the REBUILT (cached-seed) setup",
         );
         assert!(
@@ -1499,8 +1528,8 @@ mod jet_tests {
         let cache_path = crate::setup::verifier_setup_seed_cache_path(&tmp_data_dir);
         crate::setup::save_verifier_setup_seeds(&cache_path, std::slice::from_ref(&block.seed))
             .expect("save seed cache to data-dir file");
-        let table =
-            crate::setup::load_verifier_setup_table(&cache_path).expect("load + rebuild seed table");
+        let table = crate::setup::load_verifier_setup_table(&cache_path)
+            .expect("load + rebuild seed table");
         let _ = std::fs::remove_dir_all(&tmp_data_dir);
         assert_eq!(table.len(), 1, "one-bucket table loaded from disk");
         assert_eq!(
@@ -1508,7 +1537,10 @@ mod jet_tests {
             "disk-loaded setup trace height matches the proved cert",
         );
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &table[0]), Ok(true)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &table[0]),
+                Ok(true)
+            ),
             "real MoE block must verify against the DISK-loaded rebuilt setup",
         );
 
@@ -1517,7 +1549,10 @@ mod jet_tests {
         // reject — the accept-band is capped and the top (2^20) setup is not built.
         artifact.certificate.trace_height = ai_pow::params::AI_POW_MAX_TRACE_HEIGHT + 1;
         assert!(
-            matches!(ai_pow_verify_core(&artifact, commit, loose_target, &setup), Ok(false)),
+            matches!(
+                ai_pow_verify_core(&artifact, commit, loose_target, &setup),
+                Ok(false)
+            ),
             "a block claiming trace_height above the consensus cap must be rejected",
         );
     }
@@ -1545,7 +1580,10 @@ mod jet_tests {
         // Generate (prove) + cache the one-bucket table to the data-dir file.
         crate::setup::build_and_cache_verifier_setup_seeds(&path, &[shape])
             .expect("generate + cache one bucket");
-        assert!(path.exists(), "cache file must be written under the data dir");
+        assert!(
+            path.exists(),
+            "cache file must be written under the data dir"
+        );
 
         // Load + rebuild (no proving) — the fast subsequent-boot path.
         let table = crate::setup::load_verifier_setup_table(&path).expect("load + rebuild table");
@@ -1561,7 +1599,8 @@ mod jet_tests {
     #[test]
     fn print_production_bucket_shapes() {
         for b in crate::setup::production_verifier_setup_buckets() {
-            let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap();
+            let th =
+                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap();
             eprintln!(
                 "2^{}: m={} k={} n={} r={} tile={} | hw={} e={} top_k={} ns={}",
                 th.trailing_zeros(),
@@ -1597,10 +1636,7 @@ mod jet_tests {
         let mut total_bytes = 0usize;
         for (i, shape) in buckets.iter().enumerate() {
             let seed = crate::setup::build_verifier_setup_seed(
-                &shape.params,
-                shape.hw,
-                shape.e,
-                shape.top_k,
+                &shape.params, shape.hw, shape.e, shape.top_k,
             )
             .unwrap_or_else(|e| panic!("bucket {i} generation failed: {e}"));
             let sz = bincode::serde::encode_to_vec(&seed, bincode::config::standard())
@@ -1621,8 +1657,10 @@ mod jet_tests {
             total_bytes as f64 / (1024.0 * 1024.0),
         );
 
-        let log2s: BTreeSet<u32> =
-            seeds.iter().map(|s| s.trace_height().trailing_zeros()).collect();
+        let log2s: BTreeSet<u32> = seeds
+            .iter()
+            .map(|s| s.trace_height().trailing_zeros())
+            .collect();
         assert_eq!(log2s.len(), 7, "7 distinct-height buckets (2^13..2^19)");
         for db in 13u32..=cap_db {
             assert!(log2s.contains(&db), "table must cover 2^{db}");
@@ -1634,11 +1672,17 @@ mod jet_tests {
         let path = crate::setup::verifier_setup_seed_cache_path(&tmp);
         crate::setup::save_verifier_setup_seeds(&path, &seeds).expect("save table");
         let cache_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        eprintln!("cache file on disk = {:.1} MiB", cache_bytes as f64 / (1024.0 * 1024.0));
+        eprintln!(
+            "cache file on disk = {:.1} MiB",
+            cache_bytes as f64 / (1024.0 * 1024.0)
+        );
         let table = crate::setup::load_verifier_setup_table(&path).expect("load+rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
         assert_eq!(table.len(), 7, "rebuilt table has 7 buckets");
-        let tl2: BTreeSet<u32> = table.iter().map(|s| s.trace_height.trailing_zeros()).collect();
+        let tl2: BTreeSet<u32> = table
+            .iter()
+            .map(|s| s.trace_height.trailing_zeros())
+            .collect();
         assert_eq!(tl2, log2s, "rebuilt table covers the same 7 buckets");
 
         // CONSENSUS FINGERPRINT (v0): compute the table digest over the rebuilt table
@@ -1745,8 +1789,8 @@ mod jet_tests {
         // committed v0 table digest (the digest is over the verifier-key, not the
         // columns). Re-verify against the pinned constant on the slimmed table.
         if table.len() == 7 && crate::table_digest::v0_digest_is_pinned() {
-            let digest = crate::table_digest::verifier_setup_table_digest(&table)
-                .expect("table digest");
+            let digest =
+                crate::table_digest::verifier_setup_table_digest(&table).expect("table digest");
             assert_eq!(
                 digest,
                 crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST,
@@ -1780,13 +1824,19 @@ mod jet_tests {
 
         let t = Instant::now();
         let setup = crate::setup::rebuild_verifier_setup_from_seed(biggest).expect("rebuild");
-        eprintln!("REBUILD 2^{h}: {} ms (the latency we must AVOID on the verify path)", t.elapsed().as_millis());
+        eprintln!(
+            "REBUILD 2^{h}: {} ms (the latency we must AVOID on the verify path)",
+            t.elapsed().as_millis()
+        );
 
         let t = Instant::now();
         let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
             .expect("serialize context");
         let mb = bytes.len() as f64 / (1024.0 * 1024.0);
-        eprintln!("serialize 2^{h}: {mb:.0} MB in {} ms", t.elapsed().as_millis());
+        eprintln!(
+            "serialize 2^{h}: {mb:.0} MB in {} ms",
+            t.elapsed().as_millis()
+        );
         let file = dir.join("ctx-page-in-probe.bin");
         std::fs::write(&file, &bytes).expect("write context file");
         drop(setup);
@@ -1824,7 +1874,13 @@ mod jet_tests {
         // MoE routing needs m/e >= hw and n/e >= hw (each expert must have >= hw
         // rows/cols to fill the opened tile), so base at m=n=16, e=2, hw=8.
         let base = MatmulParams {
-            m: 16, k: 1024, n: 16, noise_rank: 64, tile: 8, spot_checks: 1, difficulty_bits: 0,
+            m: 16,
+            k: 1024,
+            n: 16,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
         };
         // (label, params, hw, e, top_k). num_stripes = k/noise_rank; the pinned AIR
         // caps it at STRIPE_MAX=64. Span the band from num_stripes=8 to the max 64,
@@ -1832,19 +1888,70 @@ mod jet_tests {
         // accept-band.
         let shapes: [(&str, MatmulParams, u32, usize, usize); 7] = [
             ("stripes16 base m16 k1024 r64 hw8", base, 8, 2, 1),
-            ("stripes8 k512 r64", MatmulParams { k: 512, ..base }, 8, 2, 1),
-            ("stripes16 k512 r32", MatmulParams { k: 512, noise_rank: 32, ..base }, 8, 2, 1),
-            ("stripes32 k2048 r64", MatmulParams { k: 2048, ..base }, 8, 2, 1),
-            ("stripes64 k2048 r32 (MAX)", MatmulParams { k: 2048, noise_rank: 32, ..base }, 8, 2, 1),
-            ("stripes64 k4096 r64 (MAX)", MatmulParams { k: 4096, ..base }, 8, 2, 1),
-            ("hw16 m32 n32", MatmulParams { m: 32, n: 32, ..base }, 16, 2, 1),
+            (
+                "stripes8 k512 r64",
+                MatmulParams { k: 512, ..base },
+                8,
+                2,
+                1,
+            ),
+            (
+                "stripes16 k512 r32",
+                MatmulParams {
+                    k: 512,
+                    noise_rank: 32,
+                    ..base
+                },
+                8,
+                2,
+                1,
+            ),
+            (
+                "stripes32 k2048 r64",
+                MatmulParams { k: 2048, ..base },
+                8,
+                2,
+                1,
+            ),
+            (
+                "stripes64 k2048 r32 (MAX)",
+                MatmulParams {
+                    k: 2048,
+                    noise_rank: 32,
+                    ..base
+                },
+                8,
+                2,
+                1,
+            ),
+            (
+                "stripes64 k4096 r64 (MAX)",
+                MatmulParams { k: 4096, ..base },
+                8,
+                2,
+                1,
+            ),
+            (
+                "hw16 m32 n32",
+                MatmulParams {
+                    m: 32,
+                    n: 32,
+                    ..base
+                },
+                16,
+                2,
+                1,
+            ),
         ];
         let mut digests = Vec::new();
         for (label, params, hw, e, top_k) in shapes {
             match build_verifier_setup(&params, hw, e, top_k) {
                 Ok(setup) => {
-                    let hex: String =
-                        setup.digest_bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let hex: String = setup
+                        .digest_bytes
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
                     eprintln!("SHAPE-DIGEST [{label}] = {hex}");
                     digests.push((label, Some(hex)));
                 }

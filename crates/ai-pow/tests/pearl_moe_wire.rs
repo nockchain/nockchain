@@ -98,7 +98,10 @@ fn exact_byte_layout() {
     let wire = core.to_wire_bytes_moe(&moe).unwrap();
 
     // Core (164) is exactly the dense public-data serialization (with MoE trailer).
-    assert_eq!(&wire[..PEARL_PUBLIC_PROOF_PARAMS_SIZE], &core.to_public_data().unwrap());
+    assert_eq!(
+        &wire[..PEARL_PUBLIC_PROOF_PARAMS_SIZE],
+        &core.to_public_data().unwrap()
+    );
     // Trailer discriminant e in the core.
     assert_eq!(&wire[20..22], &3u16.to_le_bytes());
 

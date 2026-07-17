@@ -703,8 +703,16 @@ mod tests {
             legacy.len() + 1,
             "V2 adds exactly one option-tag byte over legacy"
         );
-        assert_eq!(&v2[..legacy.len()], &legacy[..], "V2 core == legacy encoding");
-        assert_eq!(*v2.last().unwrap(), 0x00, "trailing bincode Option::None tag");
+        assert_eq!(
+            &v2[..legacy.len()],
+            &legacy[..],
+            "V2 core == legacy encoding"
+        );
+        assert_eq!(
+            *v2.last().unwrap(),
+            0x00,
+            "trailing bincode Option::None tag"
+        );
 
         // Default encoder / base64 helper both emit native V2.
         let mut default = Vec::new();
@@ -780,7 +788,9 @@ mod tests {
         proof.moe = Some(synthetic_moe_proof());
 
         let mut manual = Vec::new();
-        proof.encode_bincode1(&mut manual).expect("encode MoE share");
+        proof
+            .encode_bincode1(&mut manual)
+            .expect("encode MoE share");
         // Trailing tail begins with the Option::Some tag.
         let dense_len = {
             let mut d = build_dense_proof();

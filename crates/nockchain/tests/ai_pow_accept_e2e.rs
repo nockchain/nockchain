@@ -37,12 +37,11 @@ use nockapp::utils::make_tas;
 use nockapp::wire::{SystemWire, Wire};
 use nockapp::{AtomExt, NockApp};
 use nockchain::setup::{self, heard_fake_genesis_block, SetupCommand, FAKENET_GENESIS_MESSAGE};
-use nockchain_types::Seconds;
 use nockchain_math::belt::Belt;
 use nockchain_math::crypto::cheetah::A_GEN;
 use nockchain_mining_common::{MiningCandidate, MiningCandidateKind};
 use nockchain_types::tx_engine::common::{Hash, SchnorrPubkey};
-use nockchain_types::fakenet_blockchain_constants;
+use nockchain_types::{fakenet_blockchain_constants, Seconds};
 use nockvm::noun::{Atom, NounAllocator, D, T};
 use nockvm_macros::tas;
 
@@ -81,8 +80,12 @@ fn set_mining_key_poke() -> NounSlab {
     let pk = SchnorrPubkey(A_GEN).to_base58().expect("pubkey base58");
     let pkh = Hash([Belt(1), Belt(2), Belt(3), Belt(4), Belt(5)]).to_base58();
     let cmd = make_tas(&mut slab, "set-mining-key").as_noun();
-    let v0 = Atom::from_value(&mut slab, pk.as_bytes()).unwrap().as_noun();
-    let v1 = Atom::from_value(&mut slab, pkh.as_bytes()).unwrap().as_noun();
+    let v0 = Atom::from_value(&mut slab, pk.as_bytes())
+        .unwrap()
+        .as_noun();
+    let v1 = Atom::from_value(&mut slab, pkh.as_bytes())
+        .unwrap()
+        .as_noun();
     let poke = T(&mut slab, &[D(tas!(b"command")), cmd, v0, v1]);
     slab.set_root(poke);
     slab
@@ -132,14 +135,9 @@ fn pow_poke_from_artifact(artifact: &NounSlab) -> NounSlab {
 /// Build the `[%ai-pow nonce cert]` artifact noun for a proved canonical block.
 fn artifact_for_block(block: &CanonicalBlock) -> NounSlab {
     build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-        &block.statement,
-        &block.aux_inclusion,
-        &block.moe_art,
-        &block.certificate.zk_params,
-        block.certificate.found_idx,
-        block.certificate.trace_height,
-        &block.certificate.commitments,
-        &block.certificate.public_inputs,
+        &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+        block.certificate.found_idx, block.certificate.trace_height,
+        &block.certificate.commitments, &block.certificate.public_inputs,
         &block.certificate.certificate,
     )
     .expect("build MoE artifact noun")
@@ -155,18 +153,24 @@ async fn drive_genesis(app: &mut NockApp<Chaff>) {
     setup::poke(app, SetupCommand::PokeFakenetConstants(Box::new(constants)))
         .await
         .expect("set-constants");
-    setup::poke(app, SetupCommand::PokeSetGenesisSeal(FAKENET_GENESIS_MESSAGE.to_string()))
-        .await
-        .expect("set-genesis-seal");
+    setup::poke(
+        app,
+        SetupCommand::PokeSetGenesisSeal(FAKENET_GENESIS_MESSAGE.to_string()),
+    )
+    .await
+    .expect("set-genesis-seal");
     setup::poke(app, SetupCommand::PokeSetBtcData)
         .await
         .expect("btc-data");
     app.poke(SystemWire.to_wire(), born_poke())
         .await
         .expect("born");
-    app.poke(SystemWire.to_wire(), heard_fake_genesis_block(None).unwrap())
-        .await
-        .expect("heard genesis");
+    app.poke(
+        SystemWire.to_wire(),
+        heard_fake_genesis_block(None).unwrap(),
+    )
+    .await
+    .expect("heard genesis");
 }
 
 #[tokio::test]
@@ -178,22 +182,35 @@ async fn ai_pow_valid_block_is_admitted() {
     cli.stack_size = NockStackSize::Large;
     let mut hot = zkvm_jetpack::hot::produce_prover_hot_state();
     hot.extend(produce_ai_pow_hot_state());
-    let mut app = boot::setup::<Chaff>(kernels_open_dumb::KERNEL, cli, hot.as_slice(), "nockchain", None)
-        .await
-        .expect("boot dumb kernel");
+    let mut app = boot::setup::<Chaff>(
+        kernels_open_dumb::KERNEL,
+        cli,
+        hot.as_slice(),
+        "nockchain",
+        None,
+    )
+    .await
+    .expect("boot dumb kernel");
 
     drive_genesis(&mut app).await;
     // Genesis (height 0) must be admitted.
     assert!(
-        app.peek_handle(heaviest_block_path()).await.unwrap().is_some(),
+        app.peek_handle(heaviest_block_path())
+            .await
+            .unwrap()
+            .is_some(),
         "genesis must be admitted",
     );
 
     // Set a mining key + enable mining so the kernel builds the height-1 candidate
     // (do-enable-mining -> heard-new-block). The candidate's commitment is read below
     // from the %mine effect it re-emits after the update interval.
-    app.poke(SystemWire.to_wire(), set_mining_key_poke()).await.expect("set-mining-key");
-    app.poke(SystemWire.to_wire(), enable_mining_poke()).await.expect("enable-mining");
+    app.poke(SystemWire.to_wire(), set_mining_key_poke())
+        .await
+        .expect("set-mining-key");
+    app.poke(SystemWire.to_wire(), enable_mining_poke())
+        .await
+        .expect("enable-mining");
     assert!(
         !ai_pow_verifier_setup_initialized(),
         "run this test in a fresh process (it installs the process-global setup)",
@@ -206,7 +223,8 @@ async fn ai_pow_valid_block_is_admitted() {
     // REJECTED by do-pow. `check-pow` re-derives the candidate's real commitment and
     // the `0x99..`-bound cert fails the in-circuit binding, so the block is not
     // admitted. Its setup (same trace-height bucket) is injected once and reused below.
-    let bad_block = prove_canonical_moe_block(&params, 8, 2, 1, [0x99u8; 32]).expect("prove wrong-commit block");
+    let bad_block = prove_canonical_moe_block(&params, 8, 2, 1, [0x99u8; 32])
+        .expect("prove wrong-commit block");
     let bad_artifact = artifact_for_block(&bad_block);
     // Inject the setup DISK-PAGED (production path): build the context, serialize it to
     // disk, and register it — the jet PAGES it in from disk during the first
@@ -229,7 +247,10 @@ async fn ai_pow_valid_block_is_admitted() {
     // commitment — is unchanged. do-pow verifies the cert against the injected setup
     // (via the ai-pow-verify jet) and admits the block through heard-block.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    let effs = app.poke(SystemWire.to_wire(), timer_poke()).await.expect("timer");
+    let effs = app
+        .poke(SystemWire.to_wire(), timer_poke())
+        .await
+        .expect("timer");
     let candidate = effs
         .into_iter()
         .find_map(|s| MiningCandidate::from_effect_slab(s).ok().flatten())
@@ -253,5 +274,8 @@ async fn ai_pow_valid_block_is_admitted() {
         app.peek_handle(heavy_n_path(1)).await.unwrap().is_some(),
         "a valid %ai-pow block must be admitted through do-pow -> heard-block",
     );
-    eprintln!("[positive] valid %ai-pow block ADMITTED at height 1 (commit {})", hex(&commit32));
+    eprintln!(
+        "[positive] valid %ai-pow block ADMITTED at height 1 (commit {})",
+        hex(&commit32)
+    );
 }

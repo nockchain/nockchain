@@ -1125,9 +1125,17 @@ impl CompositeTrace {
             "sel must be sorted + distinct"
         );
         assert!(*sel.last().unwrap() < num_chunks, "sel chunk out of range");
-        assert_eq!(strip_bytes.len(), sel.len() * 1024, "strip_bytes must be |sel|*1024");
+        assert_eq!(
+            strip_bytes.len(),
+            sel.len() * 1024,
+            "strip_bytes must be |sel|*1024"
+        );
         if let Some(n) = noise_strip {
-            assert_eq!(n.len(), strip_bytes.len(), "noise_strip must be parallel to strip_bytes");
+            assert_eq!(
+                n.len(),
+                strip_bytes.len(),
+                "noise_strip must be parallel to strip_bytes"
+            );
         }
         let key_words: [u32; 8] = core::array::from_fn(|i| {
             u32::from_le_bytes([kappa[i * 4], kappa[i * 4 + 1], kappa[i * 4 + 2], kappa[i * 4 + 3]])
@@ -1135,7 +1143,10 @@ impl CompositeTrace {
         let strip_c0 = sel[0];
         let mut row = row_start;
         if num_chunks == 1 {
-            assert!(sel == [0] && auth_siblings.is_empty(), "lone chunk: sel=[0], no siblings");
+            assert!(
+                sel == [0] && auth_siblings.is_empty(),
+                "lone chunk: sel=[0], no siblings"
+            );
             let cv = self.place_leaf_chunk(
                 &mut row,
                 &strip_bytes[0..1024],
@@ -1154,7 +1165,11 @@ impl CompositeTrace {
             &mut row, 0, num_chunks, sel, strip_bytes, auth_siblings, &mut si, &key_words, true,
             selector_idx, noise_strip, mat_id_base, strip_c0,
         );
-        assert_eq!(si, auth_siblings.len(), "unconsumed authentication siblings");
+        assert_eq!(
+            si,
+            auth_siblings.len(),
+            "unconsumed authentication siblings"
+        );
         (row, root)
     }
 
@@ -1773,14 +1788,7 @@ impl CompositeTrace {
         let a_lanes: Vec<usize> = (0..h_tile).collect();
         let b_lanes: Vec<usize> = (0..w_tile).collect();
         self.place_useful_work_chain_hw_indexed(
-            row_start,
-            a_prime_rows,
-            b_prime_cols,
-            h_tile,
-            w_tile,
-            r,
-            num_stripes,
-            &a_lanes,
+            row_start, a_prime_rows, b_prime_cols, h_tile, w_tile, r, num_stripes, &a_lanes,
             &b_lanes,
         )
     }
@@ -2028,17 +2036,22 @@ impl CompositeTrace {
         a_lanes: &[usize],
         b_lanes: &[usize],
     ) -> (usize, [u32; 16]) {
-        use crate::composite_layout::{
-            CONTROL_PREP, FOLD_IS_FOLD, FOLD_MCUR_BITS_START, FOLD_SLOT_SEL_START,
-            FOLD_STATE_START, FOLD_STRIPE_SEL_START, FOLD_XOR_OUT, FOLD_XSTEP, FOLD_XSTEP_BITS_START,
-            TA_ACC_START, TA_DOT_START, TA_IS_ACTIVE, TA_IS_RESET, TA_SB_SEL_START, TR_IN_BITS_START,
-            TR_IN_START, TR_IS_ACTIVE, TR_NEW, TR_NEW_BITS_START, TR_Q_START, TR_STRIPE_RESET,
-            TR_XSTEP, TR_XSTEP_BITS_START,
-        };
         use p3_field::integers::QuotientMap;
 
+        use crate::composite_layout::{
+            CONTROL_PREP, FOLD_IS_FOLD, FOLD_MCUR_BITS_START, FOLD_SLOT_SEL_START,
+            FOLD_STATE_START, FOLD_STRIPE_SEL_START, FOLD_XOR_OUT, FOLD_XSTEP,
+            FOLD_XSTEP_BITS_START, TA_ACC_START, TA_DOT_START, TA_IS_ACTIVE, TA_IS_RESET,
+            TA_SB_SEL_START, TR_IN_BITS_START, TR_IN_START, TR_IS_ACTIVE, TR_NEW,
+            TR_NEW_BITS_START, TR_Q_START, TR_STRIPE_RESET, TR_XSTEP, TR_XSTEP_BITS_START,
+        };
+
         let chunks = r.div_ceil(TILE_D).max(1);
-        let k = if h_tile == 0 { 0 } else { a_prime_rows.len() / h_tile };
+        let k = if h_tile == 0 {
+            0
+        } else {
+            a_prime_rows.len() / h_tile
+        };
         assert_eq!(a_prime_rows.len(), h_tile * k, "a_prime_rows must be h*k");
         assert_eq!(b_prime_cols.len(), w_tile * k, "b_prime_cols must be w*k");
         assert_eq!(a_lanes.len(), h_tile, "a_lanes must have h_tile entries");
@@ -2061,10 +2074,10 @@ impl CompositeTrace {
         let mut c_blk = vec![0i32; n_sb * 4]; // held h·w accumulator
         let mut m = [0u32; 16]; // fold state
         let mut carry = [0i32; CUMSUM_LEN]; // matmul CUMSUM byproduct
-        // The TileReduce lane THREADS through every row (passthrough on
-        // non-reduce rows; = NEW after a reduce). It is forced to 0 only
-        // ENTERING a stripe's first reduce row (STRIPE_RESET disables the
-        // passthrough into it), so each stripe's x_step starts fresh.
+                                            // The TileReduce lane THREADS through every row (passthrough on
+                                            // non-reduce rows; = NEW after a reduce). It is forced to 0 only
+                                            // ENTERING a stripe's first reduce row (STRIPE_RESET disables the
+                                            // passthrough into it), so each stripe's x_step starts fresh.
         let mut v = 0u32;
         let mut row = row_start;
 
@@ -2131,7 +2144,9 @@ impl CompositeTrace {
                             for dj in 0..TILE_H {
                                 let mut acc = 0i32;
                                 for d in 0..TILE_D {
-                                    acc = acc.wrapping_add((a_blk[di][d] as i32) * (b_blk[dj][d] as i32));
+                                    acc = acc.wrapping_add(
+                                        (a_blk[di][d] as i32) * (b_blk[dj][d] as i32),
+                                    );
                                 }
                                 dot[di * TILE_H + dj] = acc;
                             }
@@ -2148,20 +2163,27 @@ impl CompositeTrace {
                         }
                         rs[TA_SB_SEL_START + sb] = <Val as QuotientMap<u64>>::from_int(1);
                         for p in 0..4 {
-                            rs[TA_DOT_START + p] = <Val as QuotientMap<i64>>::from_int(dot[p] as i64);
+                            rs[TA_DOT_START + p] =
+                                <Val as QuotientMap<i64>>::from_int(dot[p] as i64);
                         }
                         for c in 0..n_sb * 4 {
-                            rs[TA_ACC_START + c] = <Val as QuotientMap<i64>>::from_int(c_blk[c] as i64);
+                            rs[TA_ACC_START + c] =
+                                <Val as QuotientMap<i64>>::from_int(c_blk[c] as i64);
                         }
                         // FoldChip M passthrough: FOLD_STATE threads through
                         // every row (M changes only on fold rows), so sweep
                         // rows carry the current state.
                         for s in 0..16 {
-                            rs[FOLD_STATE_START + s] = <Val as QuotientMap<u64>>::from_int(m[s] as u64);
+                            rs[FOLD_STATE_START + s] =
+                                <Val as QuotientMap<u64>>::from_int(m[s] as u64);
                         }
                         for p in 0..4 {
                             let cell = sb * 4 + p;
-                            c_blk[cell] = if ta_reset { dot[p] } else { c_blk[cell].wrapping_add(dot[p]) };
+                            c_blk[cell] = if ta_reset {
+                                dot[p]
+                            } else {
+                                c_blk[cell].wrapping_add(dot[p])
+                            };
                         }
 
                         // TR lane threads on EVERY row. `entering` is the lane
@@ -2181,7 +2203,8 @@ impl CompositeTrace {
                             let mut xin = 0u32;
                             for p in 0..4 {
                                 let cv = c_blk[sb * 4 + p];
-                                rs[TR_IN_START + p] = <Val as QuotientMap<i64>>::from_int(cv as i64);
+                                rs[TR_IN_START + p] =
+                                    <Val as QuotientMap<i64>>::from_int(cv as i64);
                                 set_bits(rs, TR_IN_BITS_START + p * 32, cv as u32);
                                 xin ^= cv as u32;
                             }
@@ -2211,7 +2234,11 @@ impl CompositeTrace {
             assert!(row < trace_h - 1, "R-b fold overflows trace");
             let slot = step % 16;
             let base = row * TOTAL_TRACE_WIDTH;
-            ControlChip.fill_row(&[false; crate::chips::control::NUM_SELECTORS], 0, &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH]);
+            ControlChip.fill_row(
+                &[false; crate::chips::control::NUM_SELECTORS],
+                0,
+                &mut self.matrix.values[base..base + TOTAL_TRACE_WIDTH],
+            );
             let cp = ControlChip::pack_control_prep_full(
                 &[false; crate::chips::control::NUM_SELECTORS],
                 0,
@@ -4190,7 +4217,10 @@ mod tests {
                 let (_n, root) = t.place_matrix_strip_opening_set(
                     0, &strip_bytes, sel, nc, &sibs, &key, 4, None, None,
                 );
-                assert_eq!(root, full_root, "selective open {sel:?} of {nc} != committed root");
+                assert_eq!(
+                    root, full_root,
+                    "selective open {sel:?} of {nc} != committed root"
+                );
             }
             // Contiguous set ⇒ identical to the range opening (root + placed rows).
             for c0 in 0..nc {
@@ -4200,14 +4230,22 @@ mod tests {
                     let strip_bytes = &raw[c0 * 1024..c1 * 1024];
                     let (n_set, r_set) = {
                         let mut t = CompositeTrace::baseline_min();
-                        t.place_matrix_strip_opening_set(0, strip_bytes, &sel, nc, &sibs, &key, 4, None, None)
+                        t.place_matrix_strip_opening_set(
+                            0, strip_bytes, &sel, nc, &sibs, &key, 4, None, None,
+                        )
                     };
                     let (n_rng, r_rng) = {
                         let (_o, sibs_r) = crate::blake3_tree::open_strip(&raw, &key, c0, c1);
                         let mut t = CompositeTrace::baseline_min();
-                        t.place_matrix_strip_opening(0, strip_bytes, c0, c1, nc, &sibs_r, &key, 4, None, None)
+                        t.place_matrix_strip_opening(
+                            0, strip_bytes, c0, c1, nc, &sibs_r, &key, 4, None, None,
+                        )
                     };
-                    assert_eq!((n_set, r_set), (n_rng, r_rng), "selective != range for [{c0},{c1}) of {nc}");
+                    assert_eq!(
+                        (n_set, r_set),
+                        (n_rng, r_rng),
+                        "selective != range for [{c0},{c1}) of {nc}"
+                    );
                 }
             }
         }

@@ -264,12 +264,9 @@ impl TileReduceChip {
             };
             let mut tb = builder.when_transition();
             // Not into a reset row: active ⇒ next = NEW; inactive ⇒ next = XSTEP.
-            let not_reset: AB::Expr =
-                <AB::Expr as PrimeCharacteristicRing>::ONE - nxt_reset.into();
+            let not_reset: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ONE - nxt_reset.into();
             // active: (1-reset_next)·is_active·(nxt - NEW) = 0
-            tb.assert_zero(
-                not_reset.clone() * is_active.into() * (nxt_xstep.into() - new.into()),
-            );
+            tb.assert_zero(not_reset.clone() * is_active.into() * (nxt_xstep.into() - new.into()));
             // inactive: (1-reset_next)·(1-is_active)·(nxt - XSTEP) = 0
             let one_minus_active: AB::Expr =
                 <AB::Expr as PrimeCharacteristicRing>::ONE - is_active.into();
@@ -393,7 +390,14 @@ mod tests {
 
     fn cfg() -> AiPowStarkConfig {
         build_stark_config(
-            &ZkParams { m: 8, k: 16, n: 8, noise_rank: 2, tile: 2, difficulty_bits: 0 },
+            &ZkParams {
+                m: 8,
+                k: 16,
+                n: 8,
+                noise_rank: 2,
+                tile: 2,
+                difficulty_bits: 0,
+            },
             &CircuitConfig::TEST_PEARL,
         )
     }
@@ -402,7 +406,9 @@ mod tests {
         let mut s = seed;
         (0..n)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 (s >> 32) as i32
             })
             .collect()
@@ -437,8 +443,9 @@ mod tests {
                 );
             }
             let proof = prove::<AiPowStarkConfig, _>(&c, &TileReduceChip, trace, &[]);
-            verify::<AiPowStarkConfig, _>(&c, &TileReduceChip, &proof, &[])
-                .unwrap_or_else(|e| panic!("honest stripe-reduce (n_stripes={n_stripes}) must verify: {e:?}"));
+            verify::<AiPowStarkConfig, _>(&c, &TileReduceChip, &proof, &[]).unwrap_or_else(|e| {
+                panic!("honest stripe-reduce (n_stripes={n_stripes}) must verify: {e:?}")
+            });
         }
     }
 

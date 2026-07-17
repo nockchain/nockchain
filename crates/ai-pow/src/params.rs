@@ -736,8 +736,7 @@ mod tests {
         };
         assert_eq!(p512.num_stripes(), 512);
         assert_eq!(p512.num_stripes() as usize, PEARL_STRIPE_MAX);
-        p512
-            .validate_prod_envelope()
+        p512.validate_prod_envelope()
             .expect("num_stripes=512 (Pearl's ceiling) must be admissible");
 
         // The envelope (`k ≤ 4r²` ∧ `k ≤ PEARL_K_MAX`) already caps

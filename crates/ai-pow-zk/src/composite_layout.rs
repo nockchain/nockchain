@@ -735,7 +735,7 @@ mod tests {
             + 1 /* SX_SEG_RESET (§6(b)-G3) */;
         let fold_stripe_sel = FOLD_STRIPE_SEL_LEN; // 64
         let msg_pair_sel = MSG_PAIR_SEL_LEN; // 8
-        // §6(b)-R-b stripe-major block (TA_* + TR_*, contiguous).
+                                             // §6(b)-R-b stripe-major block (TA_* + TR_*, contiguous).
         let r_b = TR_END - TA_IS_ACTIVE; // 558
 
         let groups: [(&str, usize); 16] = [

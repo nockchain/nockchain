@@ -265,16 +265,28 @@ pub fn indexed_strips_chunk_range(
 /// only the O(|indices|·⌈k/1024⌉) chunks actually touched — not the O(max−min)
 /// covering range — which keeps the Layer-0 trace inside `PEARL_TRACE_BOUND` at
 /// production scale. `chunks[0]` equals the range `c0` (the producer-key base).
-pub fn indexed_strips_chunk_set(indices: &[u32], k: usize, total_bytes: usize) -> (Vec<usize>, usize) {
-    assert!(!indices.is_empty(), "indexed strip opening requires >= 1 index");
+pub fn indexed_strips_chunk_set(
+    indices: &[u32],
+    k: usize,
+    total_bytes: usize,
+) -> (Vec<usize>, usize) {
+    assert!(
+        !indices.is_empty(),
+        "indexed strip opening requires >= 1 index"
+    );
     assert!(k > 0, "strip length k must be nonzero");
     let padded = (total_bytes.div_ceil(CHUNK_LEN) * CHUNK_LEN).max(CHUNK_LEN);
     let num_chunks = padded / CHUNK_LEN;
     let mut chunks: Vec<usize> = Vec::new();
     for &idx in indices {
-        let lo = (idx as usize).checked_mul(k).expect("indexed strip lo overflow");
+        let lo = (idx as usize)
+            .checked_mul(k)
+            .expect("indexed strip lo overflow");
         let hi = lo + k;
-        assert!(hi <= total_bytes, "indexed strip [{lo},{hi}) exceeds {total_bytes}B");
+        assert!(
+            hi <= total_bytes,
+            "indexed strip [{lo},{hi}) exceeds {total_bytes}B"
+        );
         let c_lo = lo / CHUNK_LEN;
         let c_hi = hi.div_ceil(CHUNK_LEN).min(num_chunks).max(c_lo + 1);
         for c in c_lo..c_hi {
@@ -774,7 +786,11 @@ mod tests {
                     let key = |s: &[AuthSibling]| {
                         s.iter().map(|x| (x.lo, x.hi, x.cv)).collect::<Vec<_>>()
                     };
-                    assert_eq!(key(&s_set), key(&s_rng), "siblings differ for [{c0},{c1}) of {nc}");
+                    assert_eq!(
+                        key(&s_set),
+                        key(&s_rng),
+                        "siblings differ for [{c0},{c1}) of {nc}"
+                    );
                 }
             }
         }
@@ -827,7 +843,10 @@ mod tests {
         assert_ne!(verify_strip_opening_set(&opened, &sibs, &sel, nc, &k), root);
         let (opened2, mut sibs2) = open_strip_set(&raw, &k, &sel);
         sibs2[0].cv[0] ^= 1;
-        assert_ne!(verify_strip_opening_set(&opened2, &sibs2, &sel, nc, &k), root);
+        assert_ne!(
+            verify_strip_opening_set(&opened2, &sibs2, &sel, nc, &k),
+            root
+        );
     }
 
     /// **§C adversarial audit (k > 1024).** At Llama scale a single strip (row)

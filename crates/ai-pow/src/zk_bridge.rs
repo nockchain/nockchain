@@ -201,10 +201,14 @@ pub fn expected_layer0_rows_for_strip_schedule(
     // place_matrix_strip_opening_set's placement. Contiguous ⇒ == the range count.
     let kk = params.k as usize;
     let (a_chunks, _) = ai_pow_zk::blake3_tree::indexed_strips_chunk_set(
-        &strip_schedule.a_indices, kk, a_nc * 1024,
+        &strip_schedule.a_indices,
+        kk,
+        a_nc * 1024,
     );
     let (b_chunks, _) = ai_pow_zk::blake3_tree::indexed_strips_chunk_set(
-        &strip_schedule.b_indices, kk, b_nc * 1024,
+        &strip_schedule.b_indices,
+        kk,
+        b_nc * 1024,
     );
     Ok(Layer0RowBudget {
         mhash_a: ai_pow_zk::canonical::strip_opening_rows_set(&a_chunks, a_nc) as u64,
@@ -1595,9 +1599,7 @@ pub struct PearlMoeCompactProveRun {
 }
 
 impl PearlMoeCompactProveRun {
-    pub fn verifier_key_digest(
-        &self,
-    ) -> ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest {
+    pub fn verifier_key_digest(&self) -> ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest {
         *self.compact_cert.verifier_key_digest()
     }
 }
@@ -1718,8 +1720,15 @@ fn prove_pearl_moe_l0_and_ticket(
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
 
-    let (artifact, prover_program, _) =
-        prove_ai_pow_scheduled_full_with_context(&zctx, params, 0, 0, &strip_schedule, |_| {}, None)?;
+    let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
+        &zctx,
+        params,
+        0,
+        0,
+        &strip_schedule,
+        |_| {},
+        None,
+    )?;
     let ZkProofArtifact {
         proof,
         pis,
@@ -1753,9 +1762,8 @@ pub fn pearl_moe_canonical_trace_height(
         .map(|&c| c + (expert_idx * n_e) as u32)
         .collect();
     let zk_params = zk_params_from(params);
-    let strip_schedule =
-        StripIndexSchedule::from_indices(&zk_params, outer_indices, b_cols_global)
-            .map_err(BridgeError::ZkParamsInvalid)?;
+    let strip_schedule = StripIndexSchedule::from_indices(&zk_params, outer_indices, b_cols_global)
+        .map_err(BridgeError::ZkParamsInvalid)?;
     Ok(expected_layer0_rows_for_strip_schedule(params, &strip_schedule)?.required_trace_len())
 }
 
@@ -1816,11 +1824,7 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
     )
     .to_vec();
     let seed = ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed::from_run(
-        &zk_params,
-        verified_l0,
-        run.l1_outer_proof,
-        metadata,
-        digest_bytes,
+        &zk_params, verified_l0, run.l1_outer_proof, metadata, digest_bytes,
     );
 
     let prove_run = PearlMoeCompactProveRun {
@@ -1864,35 +1868,22 @@ pub fn verify_pearl_moe_recursive_certificate(
 
     // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
     crate::pearl_compat::verify_pearl_moe_routing_binding(
-        kappa,
-        mining_config,
-        moe,
-        m,
-        t_rows,
-        routing_data,
-        max_pattern_len,
+        kappa, mining_config, moe, m, t_rows, routing_data, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
     // (2) Recompute the opened B-columns from the PUBLIC column pattern offset by
     // the expert — never trust prover-supplied columns.
-    let cfg = mining_config
-        .moe()
-        .ok_or(BridgeError::PearlMergeStatement(
-            crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
-        ))?;
+    let cfg = mining_config.moe().ok_or(BridgeError::PearlMergeStatement(
+        crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
+    ))?;
     // Recompute the opened B-columns AND enforce the per-expert clamp (audit N1):
     // local columns must stay within this expert's n_e block, or they bleed into a
     // neighbouring expert's weights (a fork from Pearl + a column-grinding lever).
     // `moe_expert_b_cols_global` performs the divisibility check + the `local < n_e`
     // clamp that the downstream `validate_strip_indices` (global `< n`) misses.
     let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
-        mining_config,
-        cfg.e,
-        params.n,
-        moe.expert_idx,
-        t_cols,
-        max_pattern_len,
+        mining_config, cfg.e, params.n, moe.expert_idx, t_cols, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
@@ -1907,7 +1898,11 @@ pub fn verify_pearl_moe_recursive_certificate(
     let hash_activations = moe_hash_activations(h_a, &hash_routing);
     let s_b = noise_seed_b(kappa, h_b);
     let s_a = noise_seed_a(&s_b, &hash_activations);
-    expect_pi_eq(&pis.commitment_hash, &bytes_to_words_le(&s_a), "COMMITMENT_HASH")?;
+    expect_pi_eq(
+        &pis.commitment_hash,
+        &bytes_to_words_le(&s_a),
+        "COMMITMENT_HASH",
+    )?;
     expect_pi_eq(&pis.hash_a, &bytes_to_words_le(h_a), "HASH_A")?;
     expect_pi_eq(&pis.hash_b, &bytes_to_words_le(h_b), "HASH_B")?;
     expect_pi_eq(&pis.job_key, &bytes_to_words_le(kappa), "JOB_KEY")?;
@@ -1921,8 +1916,8 @@ pub fn verify_pearl_moe_recursive_certificate(
         b_cols_global,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
-    let trace_height = expected_layer0_rows_for_strip_schedule(params, &schedule)?
-        .required_trace_len();
+    let trace_height =
+        expected_layer0_rows_for_strip_schedule(params, &schedule)?.required_trace_len();
     let bp = ai_pow_zk::canonical::BlockPublic {
         tile_i: 0,
         tile_j: 0,
@@ -1931,10 +1926,7 @@ pub fn verify_pearl_moe_recursive_certificate(
         s_b,
     };
     let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-        &zk_params,
-        &schedule,
-        &bp,
-        trace_height,
+        &zk_params, &schedule, &bp, trace_height,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
     if !certificate.l0_program_matches(&expected_program) {
@@ -1982,30 +1974,17 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
 
     // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
     crate::pearl_compat::verify_pearl_moe_routing_binding(
-        kappa,
-        mining_config,
-        moe,
-        m,
-        t_rows,
-        routing_data,
-        max_pattern_len,
+        kappa, mining_config, moe, m, t_rows, routing_data, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
     // (2) Recompute the opened B-columns from the PUBLIC column pattern offset by
     // the expert (per-expert `local < n_e` clamp; audit N1).
-    let cfg = mining_config
-        .moe()
-        .ok_or(BridgeError::PearlMergeStatement(
-            crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
-        ))?;
+    let cfg = mining_config.moe().ok_or(BridgeError::PearlMergeStatement(
+        crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
+    ))?;
     let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
-        mining_config,
-        cfg.e,
-        params.n,
-        moe.expert_idx,
-        t_cols,
-        max_pattern_len,
+        mining_config, cfg.e, params.n, moe.expert_idx, t_cols, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
@@ -2020,7 +1999,11 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
     let hash_activations = moe_hash_activations(h_a, &hash_routing);
     let s_b = noise_seed_b(kappa, h_b);
     let s_a = noise_seed_a(&s_b, &hash_activations);
-    expect_pi_eq(&pis.commitment_hash, &bytes_to_words_le(&s_a), "COMMITMENT_HASH")?;
+    expect_pi_eq(
+        &pis.commitment_hash,
+        &bytes_to_words_le(&s_a),
+        "COMMITMENT_HASH",
+    )?;
     expect_pi_eq(&pis.hash_a, &bytes_to_words_le(h_a), "HASH_A")?;
     expect_pi_eq(&pis.hash_b, &bytes_to_words_le(h_b), "HASH_B")?;
     expect_pi_eq(&pis.job_key, &bytes_to_words_le(kappa), "JOB_KEY")?;
@@ -2044,10 +2027,7 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
         s_b,
     };
     let expected_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-        &zk_params,
-        &schedule,
-        &bp,
-        trace_height,
+        &zk_params, &schedule, &bp, trace_height,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
     let profile = CircuitConfig::for_layer0_trace(trace_height);
@@ -2931,20 +2911,21 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // sweep's SX/CUMSUM passthrough). Shared by both paths — the
     // consumed chunk positions are identical, only the sweep ORDER
     // differs, and the LogUp bus is a multiset (order-independent).
-    let place_store = |trace: &mut CompositeTrace, store_start: usize| -> Result<usize, BridgeError> {
-        if coloc {
-            return Ok(0); // producers are the co-located leaf round-0 rows
-        }
-        for (i, s) in store_srcs.iter().enumerate() {
-            let (plain, noise) = plain_noise(s);
-            let id_base = if s.side_a { a_id_base } else { b_id_base };
-            let mat_id = ai_pow_zk::composite_trace::noised_chunk_id(id_base, kk2, &s.src)
-                .try_into()
-                .map_err(|_| BridgeError::CommitmentMismatch("NOISED_PACKED id overflow"))?;
-            trace.place_noised_store_row_split(store_start + i, &plain, &noise, mat_id);
-        }
-        Ok(n_store)
-    };
+    let place_store =
+        |trace: &mut CompositeTrace, store_start: usize| -> Result<usize, BridgeError> {
+            if coloc {
+                return Ok(0); // producers are the co-located leaf round-0 rows
+            }
+            for (i, s) in store_srcs.iter().enumerate() {
+                let (plain, noise) = plain_noise(s);
+                let id_base = if s.side_a { a_id_base } else { b_id_base };
+                let mat_id = ai_pow_zk::composite_trace::noised_chunk_id(id_base, kk2, &s.src)
+                    .try_into()
+                    .map_err(|_| BridgeError::CommitmentMismatch("NOISED_PACKED id overflow"))?;
+                trace.place_noised_store_row_split(store_start + i, &plain, &noise, mat_id);
+            }
+            Ok(n_store)
+        };
     let real_m = if sx_bound {
         let sweep_start = mh_end + 3;
         // B5b: opened row/col lanes = covering-range positions (index − chunk
@@ -3365,9 +3346,15 @@ mod tests {
             "Pearl-envelope trace-height buckets ({} shapes checked): {:?} (log2: {:?})",
             checked,
             buckets,
-            buckets.iter().map(|b| b.trailing_zeros()).collect::<Vec<_>>()
+            buckets
+                .iter()
+                .map(|b| b.trailing_zeros())
+                .collect::<Vec<_>>()
         );
-        assert!(checked > 0, "the sweep must cover some consensus-valid shapes");
+        assert!(
+            checked > 0,
+            "the sweep must cover some consensus-valid shapes"
+        );
         // The boot table has one setup per bucket — must stay small & tractable.
         assert!(
             buckets.len() <= 12,
@@ -4205,15 +4192,15 @@ mod tests {
             difficulty_bits: 0,
         };
         let (attempt, params, a, b) = pearl_merge_ticket_fixture_with_params(
-            b"pearl-recursive-noncontiguous-real",
-            params,
-            noncontig,
-            noncontig,
+            b"pearl-recursive-noncontiguous-real", params, noncontig, noncontig,
         );
         let run = prove_pearl_merge_recursive_certificate(&attempt, &params, &a, &b, 16)
             .expect("prove non-contiguous recursive certificate");
         // The certificate binds the NON-CONTIGUOUS ticket, not a contiguous tile.
-        assert_eq!(run.pis.jackpot, tile_state_words(&attempt.ticket.tile_state));
+        assert_eq!(
+            run.pis.jackpot,
+            tile_state_words(&attempt.ticket.tile_state)
+        );
         assert_eq!(
             run.pis.hash_jackpot,
             bytes_to_words_le(&attempt.ticket.jackpot_hash)
@@ -4297,7 +4284,13 @@ mod tests {
         )
         .expect("MoE strip schedule");
         let (artifact, _prog, _) = prove_ai_pow_scheduled_full_with_context(
-            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+            &zctx,
+            &params,
+            0,
+            0,
+            &strip_schedule,
+            |_| {},
+            None,
         )
         .expect("prove MoE grouped tile Layer-0");
 
@@ -4340,15 +4333,12 @@ mod tests {
             hash_routing: ticket.commitment.routing_root,
             outer_indices: ticket.outer_indices.clone(),
         };
-        assert_eq!(strip_schedule.a_indices, moe_params.outer_indices, "a_indices == outer_indices");
+        assert_eq!(
+            strip_schedule.a_indices, moe_params.outer_indices,
+            "a_indices == outer_indices"
+        );
         crate::pearl_compat::verify_pearl_moe_routing_binding(
-            &kappa,
-            &mining_config,
-            &moe_params,
-            m as u32,
-            0,
-            &routing.routing_data,
-            4096,
+            &kappa, &mining_config, &moe_params, m as u32, 0, &routing.routing_data, 4096,
         )
         .expect("opened rows are expert 0's routed tokens (routing binding)");
     }
@@ -4423,7 +4413,13 @@ mod tests {
         )
         .expect("MoE strip schedule");
         let (artifact, _prog, _) = prove_ai_pow_scheduled_full_with_context(
-            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+            &zctx,
+            &params,
+            0,
+            0,
+            &strip_schedule,
+            |_| {},
+            None,
         )
         .expect("prove wide-k MoE grouped tile Layer-0 (R-b indexed path)");
 
@@ -4471,8 +4467,11 @@ mod tests {
         let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
         let h_a = matrix_commitment(&a_bytes, &kappa);
         let h_b = matrix_commitment(&b_bytes, &kappa);
-        let (expert_idx, inner, local_b) =
-            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let (expert_idx, inner, local_b) = (
+            0usize,
+            (0..8).collect::<Vec<u32>>(),
+            (0..8).collect::<Vec<u32>>(),
+        );
         let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
             &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
         )
@@ -4499,7 +4498,13 @@ mod tests {
 
         // Layer-0: prove the MoE grouped tile.
         let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
-            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+            &zctx,
+            &params,
+            0,
+            0,
+            &strip_schedule,
+            |_| {},
+            None,
         )
         .expect("prove MoE Layer-0");
         let ZkProofArtifact { proof, pis, .. } = artifact;
@@ -4512,12 +4517,13 @@ mod tests {
                 &pis,
             )
         };
-        let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
-            &zk_params,
-            &CircuitConfig::PROD,
-            verified_l0,
-        )
-        .expect("prove MoE recursive certificate");
+        let l1 =
+            ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
+                &zk_params,
+                &CircuitConfig::PROD,
+                verified_l0,
+            )
+            .expect("prove MoE recursive certificate");
 
         // MoE routing + public-input binding component (NOT the complete node
         // verify — the opened-rows/schedule binding is the remaining node-precheck
@@ -4545,19 +4551,8 @@ mod tests {
         };
         let verify = |h_a_in: &[u8; 32], routing_in: &[u32], t_cols: u32| {
             verify_pearl_moe_recursive_certificate(
-                &l1.l1_cert,
-                &pis,
-                &params,
-                &kappa,
-                h_a_in,
-                &h_b,
-                &mining_config,
-                &moe_params,
-                m as u32,
-                0,
-                t_cols,
-                routing_in,
-                4096,
+                &l1.l1_cert, &pis, &params, &kappa, h_a_in, &h_b, &mining_config, &moe_params,
+                m as u32, 0, t_cols, routing_in, 4096,
             )
         };
         verify(&h_a, &routing.routing_data, 0).expect("node verifies the MoE certificate");
@@ -4566,11 +4561,17 @@ mod tests {
         // rejected by the routing binding.
         let mut bad_routing = routing.routing_data.clone();
         bad_routing[0] ^= 1;
-        assert!(verify(&h_a, &bad_routing, 0).is_err(), "forged routing must be rejected");
+        assert!(
+            verify(&h_a, &bad_routing, 0).is_err(),
+            "forged routing must be rejected"
+        );
         // Adversarial: a forged matrix commitment breaks the PI binding.
         let mut bad_h_a = h_a;
         bad_h_a[0] ^= 1;
-        assert!(verify(&bad_h_a, &routing.routing_data, 0).is_err(), "forged h_a must be rejected");
+        assert!(
+            verify(&bad_h_a, &routing.routing_data, 0).is_err(),
+            "forged h_a must be rejected"
+        );
         // Adversarial (opened-schedule binding, the soundness crux): the honest
         // certificate opened expert-0 columns [0,8) at t_cols=0. Verifying with a
         // shifted column offset recomputes a different opened schedule, so the
@@ -4618,8 +4619,11 @@ mod tests {
         let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
         let h_a = matrix_commitment(&a_bytes, &kappa);
         let h_b = matrix_commitment(&b_bytes, &kappa);
-        let (expert_idx, inner, local_b) =
-            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let (expert_idx, inner, local_b) = (
+            0usize,
+            (0..8).collect::<Vec<u32>>(),
+            (0..8).collect::<Vec<u32>>(),
+        );
         let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
             &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
         )
@@ -4644,7 +4648,10 @@ mod tests {
             &mining_config, e as u16, params.n, expert_idx as u16, 0, 4096,
         )
         .expect("expert b cols");
-        assert_eq!(verify_b_cols, ticket.b_cols_global, "verify recomputes the ticket's columns");
+        assert_eq!(
+            verify_b_cols, ticket.b_cols_global,
+            "verify recomputes the ticket's columns"
+        );
 
         let zk_params = zk_params_from(&params);
         let schedule = ai_pow_zk::canonical::StripIndexSchedule::from_indices(
@@ -4707,8 +4714,11 @@ mod tests {
         let b_bytes: Vec<u8> = b.iter().map(|&v| v as u8).collect();
         let h_a = matrix_commitment(&a_bytes, &kappa);
         let h_b = matrix_commitment(&b_bytes, &kappa);
-        let (expert_idx, inner, local_b) =
-            (0usize, (0..8).collect::<Vec<u32>>(), (0..8).collect::<Vec<u32>>());
+        let (expert_idx, inner, local_b) = (
+            0usize,
+            (0..8).collect::<Vec<u32>>(),
+            (0..8).collect::<Vec<u32>>(),
+        );
         let ticket = crate::pearl_compat::compute_pearl_moe_ticket(
             &kappa, &h_a, &h_b, &a, &b, &routing, expert_idx, &inner, &local_b, n_e, k, r, k,
         )
@@ -4734,7 +4744,13 @@ mod tests {
 
         // Layer-0: prove the MoE grouped tile.
         let (artifact, prover_program, _) = prove_ai_pow_scheduled_full_with_context(
-            &zctx, &params, 0, 0, &strip_schedule, |_| {}, None,
+            &zctx,
+            &params,
+            0,
+            0,
+            &strip_schedule,
+            |_| {},
+            None,
         )
         .expect("prove MoE Layer-0");
         let ZkProofArtifact { proof, pis, .. } = artifact;
@@ -4761,10 +4777,7 @@ mod tests {
             s_b: ticket.s_b,
         };
         let node_program = ai_pow_zk::canonical::canonical_program_for_strip_schedule(
-            &zk_params,
-            &strip_schedule,
-            &block_public,
-            trace_height,
+            &zk_params, &strip_schedule, &block_public, trace_height,
         )
         .expect("node-side MoE canonical program");
         let node_commit = ai_pow_zk::recursion::canonical_l0_program_commitment_vals(
@@ -4798,8 +4811,9 @@ mod tests {
         .expect("MoE compact certificate verifies with the NODE-derived commitment (M3)");
 
         // M7 adversarial: a wrong program commitment must reject (D6 for MoE).
-        let decoded_wrong = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
-            .expect("decode for wrong-commitment test");
+        let decoded_wrong =
+            ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
+                .expect("decode for wrong-commitment test");
         // A different program commitment ⇒ different statement-digest preimage ⇒
         // reject. (Same-length value-sensitivity is covered by the dense recursion
         // round-trip's `wrong[0] += Val::ONE` adversarial.)
@@ -4837,20 +4851,8 @@ mod tests {
         let node_cert = ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode for node MoE verify");
         verify_pearl_moe_compact_recursive_certificate(
-            &run.verifier_context,
-            node_cert,
-            &pis,
-            &params,
-            &kappa,
-            &h_a,
-            &h_b,
-            &mining_config,
-            &moe_params,
-            m as u32,
-            0,
-            0,
-            &routing.routing_data,
-            4096,
+            &run.verifier_context, node_cert, &pis, &params, &kappa, &h_a, &h_b, &mining_config,
+            &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
         )
         .expect("full node MoE compact verify (routing + PI + schedule binding)");
 
@@ -4862,20 +4864,8 @@ mod tests {
         bad_routing[0] ^= 1;
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
-                &run.verifier_context,
-                node_cert_bad,
-                &pis,
-                &params,
-                &kappa,
-                &h_a,
-                &h_b,
-                &mining_config,
-                &moe_params,
-                m as u32,
-                0,
-                0,
-                &bad_routing,
-                4096,
+                &run.verifier_context, node_cert_bad, &pis, &params, &kappa, &h_a, &h_b,
+                &mining_config, &moe_params, m as u32, 0, 0, &bad_routing, 4096,
             )
             .is_err(),
             "forged routing must be rejected on the compact node path (M7)"
@@ -4893,20 +4883,8 @@ mod tests {
         forged_pis.hash_jackpot[0] ^= 1;
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
-                &run.verifier_context,
-                node_cert_jp,
-                &forged_pis,
-                &params,
-                &kappa,
-                &h_a,
-                &h_b,
-                &mining_config,
-                &moe_params,
-                m as u32,
-                0,
-                0,
-                &routing.routing_data,
-                4096,
+                &run.verifier_context, node_cert_jp, &forged_pis, &params, &kappa, &h_a, &h_b,
+                &mining_config, &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
             )
             .is_err(),
             "a forged hash_jackpot PI must be rejected by the proof (the (a) soundness \
@@ -4922,20 +4900,8 @@ mod tests {
         forged_tile.jackpot[0] ^= 1;
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
-                &run.verifier_context,
-                node_cert_j,
-                &forged_tile,
-                &params,
-                &kappa,
-                &h_a,
-                &h_b,
-                &mining_config,
-                &moe_params,
-                m as u32,
-                0,
-                0,
-                &routing.routing_data,
-                4096,
+                &run.verifier_context, node_cert_j, &forged_tile, &params, &kappa, &h_a, &h_b,
+                &mining_config, &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
             )
             .is_err(),
             "a forged raw-tile `jackpot` PI must be rejected by the proof (the dense (a) \
@@ -7126,7 +7092,11 @@ mod tests {
             .unwrap_or_else(|e| {
                 panic!("R-b wide-stripe compact recursive certificate must prove+verify: {e:?}")
             });
-        assert_eq!(run.zk_params.k / run.zk_params.noise_rank, 65, "num_stripes bound");
+        assert_eq!(
+            run.zk_params.k / run.zk_params.noise_rank,
+            65,
+            "num_stripes bound"
+        );
     }
 
     /// **§4.C.2 c-exact cx.2 — the position-exact adversarial.**

@@ -164,9 +164,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // PoW verification is unconditional in this codebase — the legacy
                 // `check_pow_flag` constant was removed (the noun slot is retained
                 // but always %.y). `--skip-pow` therefore cannot disable it here.
-                info!(
-                    "bench: --skip-pow set but PoW verification is unconditional; ignoring flag"
-                );
+                info!("bench: --skip-pow set but PoW verification is unconditional; ignoring flag");
             }
             let genesis = extract_block(&mut source, 0)
                 .await?

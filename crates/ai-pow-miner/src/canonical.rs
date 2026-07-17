@@ -269,19 +269,8 @@ pub fn evaluate_canonical_moe_ticket(
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
     // Mirror the prover's ticket call exactly (expert 0, dot_product_len == k).
     compute_pearl_moe_ticket(
-        &commitments.kappa,
-        &commitments.h_a,
-        &commitments.h_b,
-        &a,
-        &b,
-        &routing,
-        0,
-        &inner,
-        &local_b,
-        n_e,
-        params.k as usize,
-        params.noise_rank as usize,
-        params.k as usize,
+        &commitments.kappa, &commitments.h_a, &commitments.h_b, &a, &b, &routing, 0, &inner,
+        &local_b, n_e, params.k as usize, params.noise_rank as usize, params.k as usize,
     )
     .map_err(err("moe ticket"))
 }
@@ -343,17 +332,8 @@ pub fn prove_canonical_moe_block_at(
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
     let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
-        params,
-        &a,
-        &b,
-        &commitments.kappa,
-        &commitments.h_a,
-        &commitments.h_b,
-        &routing,
-        0,
-        &inner,
-        &local_b,
-        n_e,
+        params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+        &inner, &local_b, n_e,
     )
     .map_err(err("prove"))?;
 

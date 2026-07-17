@@ -259,7 +259,10 @@ impl StripeXorChip {
             let (reset, xr): (AB::Var, [AB::Var; cols::XR_LEN]) = {
                 let main = builder.main();
                 let cur = main.current_slice();
-                (cur[off.seg_reset], core::array::from_fn(|s| cur[off.xr + s]))
+                (
+                    cur[off.seg_reset],
+                    core::array::from_fn(|s| cur[off.xr + s]),
+                )
             };
             builder.assert_bool(reset);
             for s in 0..cols::XR_LEN {
@@ -596,7 +599,9 @@ pub fn build_trace_segmented(
     assert!(!segments.is_empty(), "segments must be non-empty");
     let total_events: usize = segments.iter().map(|s| s.len()).sum();
     assert!(total_events > 0, "segments must contain events");
-    let n = (total_events + segments.len() + 1).next_power_of_two().max(4);
+    let n = (total_events + segments.len() + 1)
+        .next_power_of_two()
+        .max(4);
     let mut flat = vec![Val::default(); n * cols::ROW_W];
 
     let set_bits = |row: &mut [Val], at: usize, v: u32| {
@@ -792,8 +797,9 @@ mod tests {
                 );
             }
             let proof = prove::<AiPowStarkConfig, _>(&c, &StripeXorChip, trace, &[]);
-            verify::<AiPowStarkConfig, _>(&c, &StripeXorChip, &proof, &[])
-                .unwrap_or_else(|e| panic!("honest segmented trace (n_seg={n_seg}) must verify: {e:?}"));
+            verify::<AiPowStarkConfig, _>(&c, &StripeXorChip, &proof, &[]).unwrap_or_else(|e| {
+                panic!("honest segmented trace (n_seg={n_seg}) must verify: {e:?}")
+            });
         }
     }
 

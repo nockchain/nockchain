@@ -153,7 +153,12 @@ impl TileAccumChip {
         //   ACC_next[c] = ACC[c]·(1 − SB_SEL[c/4]·IS_RESET) + SB_SEL[c/4]·DOT[c%4]
         {
             let n = off.n_sb * SB_CELLS;
-            let (is_reset, sb_sel, dot, acc): (AB::Var, Vec<AB::Var>, [AB::Var; SB_CELLS], Vec<AB::Var>) = {
+            let (is_reset, sb_sel, dot, acc): (
+                AB::Var,
+                Vec<AB::Var>,
+                [AB::Var; SB_CELLS],
+                Vec<AB::Var>,
+            ) = {
                 let main = builder.main();
                 let cur = main.current_slice();
                 (
@@ -255,7 +260,11 @@ pub fn build_trace(n_sb: usize, dots: &[Vec<[i32; SB_CELLS]>]) -> RowMajorMatrix
             // Apply the update to `acc` for the next row.
             for p in 0..SB_CELLS {
                 let cell = sb * SB_CELLS + p;
-                acc[cell] = if s == 0 { dot[p] } else { acc[cell].wrapping_add(dot[p]) };
+                acc[cell] = if s == 0 {
+                    dot[p]
+                } else {
+                    acc[cell].wrapping_add(dot[p])
+                };
             }
             row_idx += 1;
         }
@@ -297,7 +306,14 @@ mod tests {
 
     fn cfg() -> AiPowStarkConfig {
         build_stark_config(
-            &ZkParams { m: 8, k: 16, n: 8, noise_rank: 2, tile: 2, difficulty_bits: 0 },
+            &ZkParams {
+                m: 8,
+                k: 16,
+                n: 8,
+                noise_rank: 2,
+                tile: 2,
+                difficulty_bits: 0,
+            },
             &CircuitConfig::TEST_PEARL,
         )
     }
@@ -306,7 +322,9 @@ mod tests {
         let mut s = seed;
         (0..n)
             .map(|_| {
-                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 // small magnitudes so wrapping sums stay well within i32/field.
                 ((s >> 40) as i32) % 4096
             })
@@ -340,8 +358,9 @@ mod tests {
                 "n_stripes={n_stripes} n_sb={n_sb}: final accumulator vs reference c_blk",
             );
             let proof = prove::<AiPowStarkConfig, _>(&c, &TileAccumChip, trace, &[]);
-            verify::<AiPowStarkConfig, _>(&c, &TileAccumChip, &proof, &[])
-                .unwrap_or_else(|e| panic!("honest accumulator (n_stripes={n_stripes}) must verify: {e:?}"));
+            verify::<AiPowStarkConfig, _>(&c, &TileAccumChip, &proof, &[]).unwrap_or_else(|e| {
+                panic!("honest accumulator (n_stripes={n_stripes}) must verify: {e:?}")
+            });
         }
     }
 

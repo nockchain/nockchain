@@ -486,16 +486,12 @@ fn compact_batch_l1_public_values_for_statement(
 /// (`MerkleCapTargets::get_values`), base-extracted (each element is a base value
 /// lifted to the extension field, so coefficient 0 is lossless). Empty if the
 /// program has no preprocessed data.
-fn l0_program_commitment_vals(
-    common_data: &CommonData<AiPowStarkConfig>,
-) -> Vec<Val> {
+fn l0_program_commitment_vals(common_data: &CommonData<AiPowStarkConfig>) -> Vec<Val> {
     match common_data.preprocessed.as_ref() {
         Some(prep) => {
             <CompositeComm as p3_recursion::Recursive<Challenge>>::get_values(&prep.commitment)
                 .into_iter()
-                .map(|c| {
-                    <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&c)[0]
-                })
+                .map(|c| <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&c)[0])
                 .collect()
         }
         None => Vec::new(),
@@ -1519,8 +1515,8 @@ pub fn rebuild_compact_verifier_context(
     // (3) Rebuild the L2 preprocessed commitment + assemble the context.
     let l2_prep = build_compact_batch_l2_over_l1_prep(&l1)?;
     let fri_shape = compact_batch_l2_fri_shape();
-    let verifier_key_digest =
-        compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape).map_err(|e| {
+    let verifier_key_digest = compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape)
+        .map_err(|e| {
             VerificationError::InvalidProofShape(format!(
                 "rebuild: compact batch verifier-key digest construction failed: {e:?}"
             ))
@@ -1611,14 +1607,8 @@ impl AiPowCompactVerifierSetupSeed {
         let sx_bound = (self.zk_params.k / self.zk_params.noise_rank) as usize
             <= crate::composite_layout::STRIPE_MAX;
         rebuild_compact_verifier_context(
-            &self.zk_params,
-            &profile,
-            &self.l0_program,
-            &self.l0_proof,
-            &self.l0_public_inputs,
-            sx_bound,
-            self.l1_outer_proof,
-            self.metadata,
+            &self.zk_params, &profile, &self.l0_program, &self.l0_proof, &self.l0_public_inputs,
+            sx_bound, self.l1_outer_proof, self.metadata,
         )
     }
 }
@@ -2320,8 +2310,10 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
         )));
     }
 
-    let l1_statement_public_values =
-        compact_batch_l1_public_values_for_statement(&public_inputs.to_vec(), l0_program_commitment);
+    let l1_statement_public_values = compact_batch_l1_public_values_for_statement(
+        &public_inputs.to_vec(),
+        l0_program_commitment,
+    );
     let l2_statement_public_values =
         compact_batch_l2_statement_public_values_for_l1(&l1_statement_public_values);
     let compact_context = p3_circuit_prover::GoldilocksBlake3PathPrunedCompactVerifierContext::new(
@@ -2434,7 +2426,8 @@ mod tests {
 
     use super::*;
     use crate::composite_proof::{
-        build_config, composite_prove_pinned_logup, composite_prove_pinned_logup_sx, logup_common_for,
+        build_config, composite_prove_pinned_logup, composite_prove_pinned_logup_sx,
+        logup_common_for,
     };
     use crate::composite_public::CompositePublicInputs;
     use crate::composite_trace::CompositeTrace;
@@ -2479,8 +2472,9 @@ mod tests {
         let h = trace.height();
         let (rows_used, m) =
             trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
-        let store_chunks =
-            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        let store_chunks = CompositeTrace::enumerate_noised_chunks_positioned(
+            &a_prime, &b_prime, t, r, num_stripes,
+        );
         let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
         let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
         for (i, chunk) in store_chunks.iter().enumerate() {
@@ -2511,12 +2505,12 @@ mod tests {
         let decoded =
             decode_compact_batch_recursive_certificate(&bytes).expect("decode R-b compact cert");
         let commit = canonical_l0_program_commitment_vals(&zk, &profile, &verified.program);
-        assert!(!commit.is_empty(), "L0 program must have a preprocessed commitment");
+        assert!(
+            !commit.is_empty(),
+            "L0 program must have a preprocessed commitment"
+        );
         verify_compact_batch_recursive_certificate_with_context(
-            &run.verifier_context,
-            decoded,
-            &pis,
-            &commit,
+            &run.verifier_context, decoded, &pis, &commit,
         )
         .expect("decoded R-b compact cert (num_stripes 96) must verify");
 
@@ -2555,23 +2549,13 @@ mod tests {
                 .expect("deserialize (l1_outer_proof, metadata)")
                 .0;
         let rebuilt_ctx = rebuild_compact_verifier_context(
-            &zk,
-            &profile,
-            &verified.program,
-            &verified.proof,
-            &pis,
-            false,
-            l1_rt,
-            meta_rt,
+            &zk, &profile, &verified.program, &verified.proof, &pis, false, l1_rt, meta_rt,
         )
         .expect("rebuild compact verifier context from SMALL cache (no proving)");
         let decoded_again =
             decode_compact_batch_recursive_certificate(&bytes).expect("re-decode R-b compact cert");
         verify_compact_batch_recursive_certificate_with_context(
-            &rebuilt_ctx,
-            decoded_again,
-            &pis,
-            &commit,
+            &rebuilt_ctx, decoded_again, &pis, &commit,
         )
         .expect("R-b compact cert must verify against the REBUILT (cached-setup) context");
     }
@@ -2761,7 +2745,10 @@ mod tests {
         // P0/D6: the canonical L0 program commitment the node folds into the
         // statement digest (here == the prover's, honest program).
         let commit = canonical_l0_program_commitment_vals(&zk, &profile, &verified.program);
-        assert!(!commit.is_empty(), "L0 program must have a preprocessed commitment");
+        assert!(
+            !commit.is_empty(),
+            "L0 program must have a preprocessed commitment"
+        );
         verify_compact_batch_recursive_certificate_with_context(
             &run.verifier_context, decoded, &pis, &commit,
         )

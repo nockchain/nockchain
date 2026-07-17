@@ -714,9 +714,10 @@ mod tests {
     /// per-stripe contribution other than the held accumulator's.
     #[test]
     fn rb_tampered_reduce_input_rejects() {
-        use crate::composite_layout::{TOTAL_TRACE_WIDTH, TR_IN_START, TR_IS_ACTIVE};
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
+
+        use crate::composite_layout::{TOTAL_TRACE_WIDTH, TR_IN_START, TR_IS_ACTIVE};
 
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let (t, r, num_stripes) = (8usize, 4usize, 16usize);
@@ -760,9 +761,10 @@ mod tests {
     /// adversarially bound with the SX 64-lane keystone OFF.
     #[test]
     fn rb_tampered_dot_rejects() {
-        use crate::composite_layout::{TA_DOT_START, TA_IS_ACTIVE, TOTAL_TRACE_WIDTH};
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
+
+        use crate::composite_layout::{TA_DOT_START, TA_IS_ACTIVE, TOTAL_TRACE_WIDTH};
 
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let (t, r, num_stripes) = (8usize, 4usize, 16usize);
@@ -818,7 +820,8 @@ mod tests {
             .collect();
         let mut trace = CompositeTrace::baseline_min();
         let h = trace.height();
-        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let (_rows, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
         // §4.D: the jackpot-hash block sets last-row JACKPOT_MSG == M.
         let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
 
@@ -844,9 +847,10 @@ mod tests {
     /// live under `sx_bound=false` (the R-b soundness linchpin).
     #[test]
     fn rb_pinned_tampered_fold_xstep_rejects() {
-        use crate::composite_layout::{FOLD_IS_FOLD, FOLD_XSTEP, TOTAL_TRACE_WIDTH};
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
+
+        use crate::composite_layout::{FOLD_IS_FOLD, FOLD_XSTEP, TOTAL_TRACE_WIDTH};
 
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
@@ -860,7 +864,8 @@ mod tests {
             .collect();
         let mut trace = CompositeTrace::baseline_min();
         let h = trace.height();
-        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let (_rows, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
         let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
 
         // Tamper FOLD_XSTEP on the FIRST fold row (FOLD_IS_FOLD==1) to a
@@ -914,7 +919,8 @@ mod tests {
             .collect();
         let mut trace = CompositeTrace::baseline_min();
         let h = trace.height();
-        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let (_rows, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
         let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
         let pis = CompositePublicInputs::derive_from_trace(&trace);
         let pis_v = pis.to_vec();
@@ -960,8 +966,9 @@ mod tests {
         // MAT_IDs (place_matmul_step_with_ids), so the bus balances against the
         // same positioned chunk keys. place_noised_store_row sets only the
         // store cols, preserving the sweep's FOLD_STATE/TR/TA passthrough.
-        let store_chunks =
-            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        let store_chunks = CompositeTrace::enumerate_noised_chunks_positioned(
+            &a_prime, &b_prime, t, r, num_stripes,
+        );
         let store_start = 8 + rows_used;
         let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
         let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
@@ -1006,8 +1013,9 @@ mod tests {
         let h = trace.height();
         let (rows_used, m) =
             trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
-        let mut store_chunks =
-            CompositeTrace::enumerate_noised_chunks_positioned(&a_prime, &b_prime, t, r, num_stripes);
+        let mut store_chunks = CompositeTrace::enumerate_noised_chunks_positioned(
+            &a_prime, &b_prime, t, r, num_stripes,
+        );
         // FORGE: corrupt EVERY producer's PUBLISHED value (keep the mat_id
         // position keys). Each store row now produces (id, wrong) while
         // the R-b sweep still consumes (id, real). The noised_packed bus
@@ -1060,7 +1068,8 @@ mod tests {
             .collect();
         let mut trace = CompositeTrace::baseline_min();
         let h = trace.height();
-        let (_rows, m) = trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let (_rows, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
         // FORGE: hash a jackpot message from a DIFFERENT fold state than
         // the trace's real M (flip one lane). The §4.D keystone
         // JACKPOT_MSG == FOLD_STATE must catch the mismatch.

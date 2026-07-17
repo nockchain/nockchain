@@ -1385,7 +1385,11 @@ mod tests {
             .iter()
             .filter(|b| matches!(b, StripBlock::Leaf { .. }))
             .count();
-        assert_eq!(leaves, sel.len() * 16, "one 16-block leaf per selected chunk");
+        assert_eq!(
+            leaves,
+            sel.len() * 16,
+            "one 16-block leaf per selected chunk"
+        );
         let covering = strip_blocks(*sel.first().unwrap(), sel.last().unwrap() + 1, nc);
         assert!(
             blocks.len() < covering.len() / 4,
@@ -1502,13 +1506,7 @@ mod tests {
             let b_prime = vec![0i8; w_tile * kk];
             let mut trace = CompositeTrace::baseline(trace_len);
             trace.place_useful_work_chain_rb(
-                l.sweep_start,
-                &a_prime,
-                &b_prime,
-                h_tile,
-                w_tile,
-                r as usize,
-                num_stripes,
+                l.sweep_start, &a_prime, &b_prime, h_tile, w_tile, r as usize, num_stripes,
             );
             let extracted = extract_program(&trace.matrix);
 
@@ -1587,14 +1585,18 @@ mod tests {
             let ((ca0, _, _), (cb0, _, _)) = sched.chunk_ranges(&params).expect("chunk ranges");
             let a_lanes: Vec<usize> = sched.a_indices.iter().map(|&i| i as usize - ca0).collect();
             let b_lanes: Vec<usize> = sched.b_indices.iter().map(|&i| i as usize - cb0).collect();
-            assert_ne!(a_lanes, (0..h_tile).collect::<Vec<_>>(), "lanes must be non-tile-local");
+            assert_ne!(
+                a_lanes,
+                (0..h_tile).collect::<Vec<_>>(),
+                "lanes must be non-tile-local"
+            );
 
             let a_prime = vec![0i8; h_tile * kk];
             let b_prime = vec![0i8; w_tile * kk];
             let mut trace = CompositeTrace::baseline(trace_len);
             trace.place_useful_work_chain_rb_indexed(
-                l.sweep_start, &a_prime, &b_prime, h_tile, w_tile, r as usize, num_stripes, &a_lanes,
-                &b_lanes,
+                l.sweep_start, &a_prime, &b_prime, h_tile, w_tile, r as usize, num_stripes,
+                &a_lanes, &b_lanes,
             );
             let extracted = extract_program(&trace.matrix);
 
@@ -1750,12 +1752,18 @@ mod tests {
         // Interleaved + contiguous: seg0.fold_end == seg1.sweep_start.
         assert_eq!(l.segments[0].fold_end, l.segments[1].sweep_start);
         // sweep-per-stripe = (h/2)(w/2)·⌈r/16⌉ = 4·4·1 = 16 (square tile=8).
-        assert_eq!(l.segments[0].store_start - l.segments[0].sweep_start, 16 * sm);
+        assert_eq!(
+            l.segments[0].store_start - l.segments[0].sweep_start,
+            16 * sm
+        );
         // class_of + local-index helpers resolve segment 1.
         let r1 = l.segments[1].fold_start + 5;
         assert!(matches!(l.class_of(r1), RowClass::Fold));
         assert_eq!(l.fold_segment_and_local(r1), Some((1, 5)));
-        assert!(matches!(l.class_of(l.segments[1].sweep_start), RowClass::Sweep));
+        assert!(matches!(
+            l.class_of(l.segments[1].sweep_start),
+            RowClass::Sweep
+        ));
         assert_eq!(
             l.sweep_segment_and_offset(l.segments[1].sweep_start + 3),
             Some((1, 3))

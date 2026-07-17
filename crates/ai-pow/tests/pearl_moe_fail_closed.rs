@@ -162,7 +162,9 @@ fn to_bytes_round_trips_moe_and_rejects_bad_pad() {
 #[test]
 fn dense_public_data_round_trips() {
     let params = dense_public_params();
-    let bytes = params.to_public_data().expect("serialize dense public data");
+    let bytes = params
+        .to_public_data()
+        .expect("serialize dense public data");
     assert_eq!(bytes.len(), PEARL_PUBLIC_PROOF_PARAMS_SIZE);
     let restored = PearlPublicProofParams::from_public_data(dense_header(), &bytes)
         .expect("decode dense public data");

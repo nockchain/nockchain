@@ -316,8 +316,14 @@ mod tests {
         let rd: Vec<u8> = (0u32..16).flat_map(|v| v.to_le_bytes()).collect();
         let ro: Vec<u8> = [16u32].iter().flat_map(|v| v.to_le_bytes()).collect();
         let c = moe_routing_commitment(&kappa, &h_a, &rd, &ro);
-        assert_eq!(c.routing_root, crate::commit::matrix_commitment(&rd, &kappa));
-        assert_eq!(c.hash_offsets, crate::commit::matrix_commitment(&ro, &kappa));
+        assert_eq!(
+            c.routing_root,
+            crate::commit::matrix_commitment(&rd, &kappa)
+        );
+        assert_eq!(
+            c.hash_offsets,
+            crate::commit::matrix_commitment(&ro, &kappa)
+        );
     }
 
     /// **Real Pearl KAT** — our `hash_offsets` (keyed matrix commitment of the
@@ -374,10 +380,16 @@ mod tests {
         // to the same expert (slots 0,1 → expert 3), exercising the grouping.
         let topk = [3u32, 3, 0, 1, 3, 0, 2, 2, 1, 0];
         let rd = crate::pearl_moe_routing::build_routing_data(&topk, 5, 2, 4).unwrap();
-        let routing_data_le: Vec<u8> =
-            rd.routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
-        let routing_offsets_le: Vec<u8> =
-            rd.routing_offsets.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let routing_data_le: Vec<u8> = rd
+            .routing_data
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let routing_offsets_le: Vec<u8> = rd
+            .routing_offsets
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
 
         // ---- Pearl reference, re-implemented from mine.rs + proof_utils.rs ----
         let unkeyed = |parts: &[&[u8]]| -> [u8; 32] {
@@ -400,11 +412,7 @@ mod tests {
 
         // ---- Our implementation ----
         let (s_a, s_b, c) = canonical_noise_seeds_moe(
-            &kappa,
-            &hash_a,
-            &hash_b,
-            &routing_data_le,
-            &routing_offsets_le,
+            &kappa, &hash_a, &hash_b, &routing_data_le, &routing_offsets_le,
         );
         assert_eq!(c.routing_root, routing_root, "routing_root");
         assert_eq!(c.hash_offsets, hash_offsets, "hash_offsets");
@@ -445,14 +453,20 @@ mod tests {
         let h_a = [2u8; 32];
         let h_b = [3u8; 32];
         let rd: Vec<u8> = (0u32..32).flat_map(|v| v.to_le_bytes()).collect();
-        let ro: Vec<u8> = [8u32, 16, 24, 32].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let ro: Vec<u8> = [8u32, 16, 24, 32]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
 
         let (dense_s_a, dense_s_b) =
             canonical_noise_seeds_from_matrix_commitments(&kappa, &h_a, &h_b);
         let (moe_s_a, moe_s_b, c) = canonical_noise_seeds_moe(&kappa, &h_a, &h_b, &rd, &ro);
 
         assert_eq!(moe_s_b, dense_s_b, "s_B must be unchanged by MoE");
-        assert_ne!(moe_s_a, dense_s_a, "s_A must fold in the routing commitment");
+        assert_ne!(
+            moe_s_a, dense_s_a,
+            "s_A must fold in the routing commitment"
+        );
         // s_A is exactly noise_seed_a(s_B, hash_activations).
         assert_eq!(moe_s_a, noise_seed_a(&moe_s_b, &c.hash_activations));
     }

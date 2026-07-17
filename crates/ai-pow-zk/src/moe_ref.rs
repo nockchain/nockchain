@@ -92,7 +92,10 @@ mod tests {
         let job_key = [0x11u8; 32];
         let h_a = [0x22u8; 32];
         let rd: Vec<u8> = (0u32..40).flat_map(|v| v.to_le_bytes()).collect();
-        let ro: Vec<u8> = [10u32, 20, 30, 40].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let ro: Vec<u8> = [10u32, 20, 30, 40]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         let c = moe_commitment(&job_key, &h_a, &rd, &ro);
 
         let rr = keyed_matrix_commitment(&rd, &job_key);
@@ -100,21 +103,33 @@ mod tests {
         assert_eq!(c.routing_root, rr);
         assert_eq!(c.hash_offsets, ho);
         assert_eq!(c.hash_routing, combine_routing(&rr, &ho));
-        assert_eq!(c.hash_activations, combine_activations(&h_a, &c.hash_routing));
+        assert_eq!(
+            c.hash_activations,
+            combine_activations(&h_a, &c.hash_routing)
+        );
 
         // Each input binds hash_activations.
         let base = c.hash_activations;
         let mut rd2 = rd.clone();
         rd2[0] ^= 1;
-        assert_ne!(base, moe_commitment(&job_key, &h_a, &rd2, &ro).hash_activations);
+        assert_ne!(
+            base,
+            moe_commitment(&job_key, &h_a, &rd2, &ro).hash_activations
+        );
         let mut ro2 = ro.clone();
         ro2[0] ^= 1;
-        assert_ne!(base, moe_commitment(&job_key, &h_a, &rd, &ro2).hash_activations);
+        assert_ne!(
+            base,
+            moe_commitment(&job_key, &h_a, &rd, &ro2).hash_activations
+        );
         let mut jk2 = job_key;
         jk2[0] ^= 1;
         assert_ne!(base, moe_commitment(&jk2, &h_a, &rd, &ro).hash_activations);
         let mut ha2 = h_a;
         ha2[0] ^= 1;
-        assert_ne!(base, moe_commitment(&job_key, &ha2, &rd, &ro).hash_activations);
+        assert_ne!(
+            base,
+            moe_commitment(&job_key, &ha2, &rd, &ro).hash_activations
+        );
     }
 }

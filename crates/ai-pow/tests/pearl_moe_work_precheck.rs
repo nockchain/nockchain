@@ -113,19 +113,8 @@ fn build_fixture() -> Fixture {
         .unwrap();
 
     let ticket = compute_pearl_moe_ticket(
-        &commitments.kappa,
-        &commitments.h_a,
-        &commitments.h_b,
-        &a,
-        &b,
-        &routing,
-        EXPERT_IDX,
-        &inner,
-        &local_b,
-        N_E,
-        K,
-        R,
-        K, // dot_product_length == common_dim here (rank | k)
+        &commitments.kappa, &commitments.h_a, &commitments.h_b, &a, &b, &routing, EXPERT_IDX,
+        &inner, &local_b, N_E, K, R, K, // dot_product_length == common_dim here (rank | k)
     )
     .expect("compute MoE ticket");
 
@@ -168,11 +157,7 @@ const LOOSE_TARGET: [u8; 32] = [0xffu8; 32];
 fn moe_work_precheck_binds_committed_commitments_and_splice() {
     let f = build_fixture();
     let pre = verify_pearl_moe_compatible_work(
-        &f.public_params,
-        &f.moe,
-        &f.routing_data,
-        &LOOSE_TARGET,
-        MAX_PATTERN_LEN,
+        &f.public_params, &f.moe, &f.routing_data, &LOOSE_TARGET, MAX_PATTERN_LEN,
     )
     .expect("valid MoE work must verify");
 
@@ -210,11 +195,7 @@ fn moe_work_precheck_rejects_unmet_difficulty() {
     let zero_target = [0u8; 32];
     assert_eq!(
         verify_pearl_moe_compatible_work(
-            &f.public_params,
-            &f.moe,
-            &f.routing_data,
-            &zero_target,
-            MAX_PATTERN_LEN,
+            &f.public_params, &f.moe, &f.routing_data, &zero_target, MAX_PATTERN_LEN,
         ),
         Err(PearlCompatError::NockchainTargetNotMet),
     );
@@ -229,11 +210,7 @@ fn moe_work_precheck_rejects_forged_routing() {
     bad[0] ^= 1;
     assert!(
         verify_pearl_moe_compatible_work(
-            &f.public_params,
-            &f.moe,
-            &bad,
-            &LOOSE_TARGET,
-            MAX_PATTERN_LEN,
+            &f.public_params, &f.moe, &bad, &LOOSE_TARGET, MAX_PATTERN_LEN,
         )
         .is_err(),
         "forged routing must be rejected by the routing-consistency binding",
@@ -248,11 +225,7 @@ fn moe_work_precheck_rejects_dense_config() {
     f.public_params.mining_config.reserved = [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE];
     assert!(
         verify_pearl_moe_compatible_work(
-            &f.public_params,
-            &f.moe,
-            &f.routing_data,
-            &LOOSE_TARGET,
-            MAX_PATTERN_LEN,
+            &f.public_params, &f.moe, &f.routing_data, &LOOSE_TARGET, MAX_PATTERN_LEN,
         )
         .is_err(),
         "a dense config must not verify through the MoE work path",

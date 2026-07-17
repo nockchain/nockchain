@@ -41,6 +41,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,6 +53,7 @@ use ai_pow::pearl_compat::{
     PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
     PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
+use ai_pow::tile_hash::hash_le_target;
 use ai_pow::zk_bridge::{
     AiPowCompactRecursiveCertificateRun, AiPowCompactRecursiveProverCache,
     AiPowRecursiveCertificateRun, ZkPublicCommitments,
@@ -70,10 +72,6 @@ use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use ai_pow::tile_hash::hash_le_target;
 
 use crate::canonical::{
     evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at, CanonicalBlock,
@@ -743,14 +741,9 @@ const CANONICAL_TOP_K: usize = 1;
 /// metadata self-check — that would reject the MoE nonce magic).
 fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> {
     let artifact = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
-        &block.statement,
-        &block.aux_inclusion,
-        &block.moe_art,
-        &block.certificate.zk_params,
-        block.certificate.found_idx,
-        block.certificate.trace_height,
-        &block.certificate.commitments,
-        &block.certificate.public_inputs,
+        &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+        block.certificate.found_idx, block.certificate.trace_height,
+        &block.certificate.commitments, &block.certificate.public_inputs,
         &block.certificate.certificate,
     )
     .map_err(|e| MinerError::CertificateBuild(format!("canonical moe artifact: {e}")))?;
@@ -772,9 +765,7 @@ enum CanonicalOutcome {
     Joined(Result<GrindResult, tokio::task::JoinError>),
 }
 
-async fn await_canonical_worker(
-    worker: &mut Option<JoinHandle<GrindResult>>,
-) -> CanonicalOutcome {
+async fn await_canonical_worker(worker: &mut Option<JoinHandle<GrindResult>>) -> CanonicalOutcome {
     match worker.take() {
         Some(h) => CanonicalOutcome::Joined(h.await),
         None => CanonicalOutcome::None,
@@ -801,11 +792,7 @@ fn grind_canonical_block(
             return Ok(None);
         }
         let jackpot = evaluate_canonical_moe_jackpot(
-            &CANONICAL_MATMUL_PARAMS,
-            CANONICAL_HW,
-            CANONICAL_E,
-            CANONICAL_TOP_K,
-            commit,
+            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
             extranonce,
         )
         .map_err(|e| CanonicalProveError(format!("grind attempt {extranonce}: {}", e.0)))?;
@@ -816,11 +803,7 @@ fn grind_canonical_block(
                 "canonical AI-PoW jackpot hit; proving certificate (~25-30s)"
             );
             let block = prove_canonical_moe_block_at(
-                &CANONICAL_MATMUL_PARAMS,
-                CANONICAL_HW,
-                CANONICAL_E,
-                CANONICAL_TOP_K,
-                commit,
+                &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
                 extranonce,
             )?;
             return Ok(Some(block));
@@ -894,7 +877,9 @@ pub async fn run_canonical(
         {
             return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
         }
-        info!("ai-pow-miner: subscribed + mining enabled (canonical); awaiting %mine-ai candidates");
+        info!(
+            "ai-pow-miner: subscribed + mining enabled (canonical); awaiting %mine-ai candidates"
+        );
 
         let mut worker: Option<JoinHandle<GrindResult>> = None;
         // Shared stop flag so a grind on the blocking pool bails promptly at

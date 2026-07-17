@@ -509,20 +509,10 @@ mod tests {
     fn zk_and_ai_asert_flags_parse_independently() {
         let cli = NockchainCli::parse_from_with_default_stack_size(
             [
-                "nockchain",
-                "--fakenet",
-                "--fakenet-asert-phase",
-                "10",
-                "--fakenet-asert-anchor-height",
-                "9",
-                "--fakenet-asert-anchor-target-bex",
-                "40",
-                "--fakenet-ai-asert-phase",
-                "20",
-                "--fakenet-ai-asert-anchor-height",
-                "20",
-                "--fakenet-ai-asert-anchor-target-bex",
-                "50",
+                "nockchain", "--fakenet", "--fakenet-asert-phase", "10",
+                "--fakenet-asert-anchor-height", "9", "--fakenet-asert-anchor-target-bex", "40",
+                "--fakenet-ai-asert-phase", "20", "--fakenet-ai-asert-anchor-height", "20",
+                "--fakenet-ai-asert-anchor-target-bex", "50",
             ],
             NockStackSize::Large,
         );
@@ -678,7 +668,9 @@ mod tests {
         let mut cli = base_cli();
         cli.fakenet = true;
         cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(4));
-        let err = cli.validate().expect_err("expected AI anchor invariant error");
+        let err = cli
+            .validate()
+            .expect_err("expected AI anchor invariant error");
         assert!(err.contains("ai-asert"));
         assert!(err.contains("must equal"));
     }
@@ -726,7 +718,9 @@ mod tests {
         let mut zk = FakenetAsertArgs::default();
         zk.ideal_block_time = Some(30);
         cli.fakenet_asert = zk;
-        let err = cli.validate().expect_err("expected ideal-without-trio error");
+        let err = cli
+            .validate()
+            .expect_err("expected ideal-without-trio error");
         assert!(err.contains("require the"));
     }
 }

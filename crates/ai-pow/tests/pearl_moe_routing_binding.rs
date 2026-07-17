@@ -5,8 +5,8 @@
 
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
-    moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError, PearlMiningConfig,
-    PearlMoeParams, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
+    moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError,
+    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
     PEARL_MMA_INT7XINT7_TO_INT32, PEARL_MOE_MAX_ROUTING_ENTRIES,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
@@ -44,7 +44,11 @@ fn valid() -> (PearlMiningConfig, RoutingData, PearlMoeParams) {
     (config, routing, moe)
 }
 
-fn check(config: &PearlMiningConfig, routing: &RoutingData, moe: &PearlMoeParams) -> Result<(), PearlCompatError> {
+fn check(
+    config: &PearlMiningConfig,
+    routing: &RoutingData,
+    moe: &PearlMoeParams,
+) -> Result<(), PearlCompatError> {
     verify_pearl_moe_routing_binding(&KAPPA, config, moe, M, 0, &routing.routing_data, 4096)
 }
 
@@ -64,11 +68,17 @@ fn forged_outer_indices_rejected() {
     let (config, routing, mut moe) = valid();
     // Prover opens A-rows [4,6] (real A rows, but NOT expert 0's first two tokens).
     moe.outer_indices = vec![4, 6];
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOuterIndicesMismatch));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOuterIndicesMismatch)
+    );
     // Even one wrong entry is caught.
     let (config, routing, mut moe) = valid();
     moe.outer_indices = vec![0, 4];
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOuterIndicesMismatch));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOuterIndicesMismatch)
+    );
 }
 
 #[test]
@@ -76,7 +86,10 @@ fn cross_expert_forgery_rejected() {
     // expert_idx=0 but claiming expert 1's tokens [1,3] must fail.
     let (config, routing, mut moe) = valid();
     moe.outer_indices = vec![1, 3];
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOuterIndicesMismatch));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOuterIndicesMismatch)
+    );
 }
 
 /// §D audit — Pearl acceptance-set parity. `top_k >= e` (each token routed to at
@@ -85,7 +98,7 @@ fn cross_expert_forgery_rejected() {
 #[test]
 fn top_k_not_less_than_experts_rejected() {
     let (e, top_k, m) = (2usize, 2usize, 4u32); // top_k == e (invalid)
-    // Each token → both experts; grouped: expert 0 = [0,1,2,3], expert 1 = [0,1,2,3].
+                                                // Each token → both experts; grouped: expert 0 = [0,1,2,3], expert 1 = [0,1,2,3].
     let routing_data: Vec<u32> = vec![0, 1, 2, 3, 0, 1, 2, 3];
     let routing_data_le: Vec<u8> = routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let config = PearlMiningConfig {
@@ -114,7 +127,7 @@ fn top_k_not_less_than_experts_rejected() {
 #[test]
 fn expert_span_exceeding_m_rejected() {
     let (e, top_k, m) = (3usize, 2usize, 2u32); // top_k < e, so the span check is reached
-    // expert 0 = [0,0,1] (token 0 twice → span 3 > m), expert 1 = [1], expert 2 = [].
+                                                // expert 0 = [0,0,1] (token 0 twice → span 3 > m), expert 1 = [1], expert 2 = [].
     let routing_data: Vec<u32> = vec![0, 0, 1, 1];
     let routing_data_le: Vec<u8> = routing_data.iter().flat_map(|v| v.to_le_bytes()).collect();
     let config = PearlMiningConfig {
@@ -133,7 +146,11 @@ fn expert_span_exceeding_m_rejected() {
     };
     assert_eq!(
         verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, 0, &routing_data, 4096),
-        Err(PearlCompatError::MoeExpertSpanExceedsTokens { expert: 0, span: 3, m: 2 })
+        Err(PearlCompatError::MoeExpertSpanExceedsTokens {
+            expert: 0,
+            span: 3,
+            m: 2
+        })
     );
 }
 
@@ -221,18 +238,25 @@ fn tampered_routing_data_root_mismatch() {
     // Change routing_data so outer_indices' claimed source differs; hash_routing
     // (committed) no longer matches.
     routing.routing_data[1] = 0; // was 2
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeRoutingRootMismatch));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeRoutingRootMismatch)
+    );
 }
 
 #[test]
 fn out_of_range_token_rejected() {
     let (config, mut routing, mut moe) = valid();
     routing.routing_data[0] = 100; // >= m
-    // Recommit so the root check would pass; the token-range check fires first.
+                                   // Recommit so the root check would pass; the token-range check fires first.
     moe.hash_routing = matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA);
     assert!(matches!(
         check(&config, &routing, &moe),
-        Err(PearlCompatError::MoeRoutingTokenOutOfRange { slot: 0, token: 100, m: 8 })
+        Err(PearlCompatError::MoeRoutingTokenOutOfRange {
+            slot: 0,
+            token: 100,
+            m: 8
+        })
     ));
 }
 
@@ -243,7 +267,10 @@ fn wrong_routing_data_length_rejected() {
     moe.hash_routing = matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA);
     assert!(matches!(
         check(&config, &routing, &moe),
-        Err(PearlCompatError::MoeRoutingDataLenMismatch { expected: 8, actual: 7 })
+        Err(PearlCompatError::MoeRoutingDataLenMismatch {
+            expected: 8,
+            actual: 7
+        })
     ));
 }
 
@@ -252,11 +279,17 @@ fn inconsistent_offsets_rejected() {
     // Non-monotone offsets.
     let (config, routing, mut moe) = valid();
     moe.routing_offsets = vec![8, 4];
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOffsetsInconsistent));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOffsetsInconsistent)
+    );
     // Last offset != m*top_k.
     let (config, routing, mut moe) = valid();
     moe.routing_offsets = vec![4, 7];
-    assert_eq!(check(&config, &routing, &moe), Err(PearlCompatError::MoeOffsetsInconsistent));
+    assert_eq!(
+        check(&config, &routing, &moe),
+        Err(PearlCompatError::MoeOffsetsInconsistent)
+    );
 }
 
 #[test]
@@ -265,13 +298,19 @@ fn wrong_expert_count_or_idx_rejected() {
     moe.routing_offsets = vec![8]; // len 1 != e=2
     assert!(matches!(
         check(&config, &routing, &moe),
-        Err(PearlCompatError::MoeExpertCountMismatch { expected: 2, actual: 1 })
+        Err(PearlCompatError::MoeExpertCountMismatch {
+            expected: 2,
+            actual: 1
+        })
     ));
     let (config, routing, mut moe) = valid();
     moe.expert_idx = 5; // >= e
     assert!(matches!(
         check(&config, &routing, &moe),
-        Err(PearlCompatError::MoeExpertIdxOutOfRange { expert_idx: 5, e: 2 })
+        Err(PearlCompatError::MoeExpertIdxOutOfRange {
+            expert_idx: 5,
+            e: 2
+        })
     ));
 }
 
@@ -281,7 +320,10 @@ fn outer_indices_length_must_match_pattern() {
     moe.outer_indices = vec![0, 2, 4]; // pattern size is 2
     assert!(matches!(
         check(&config, &routing, &moe),
-        Err(PearlCompatError::MoeOuterIndicesLenMismatch { expected: 2, actual: 3 })
+        Err(PearlCompatError::MoeOuterIndicesLenMismatch {
+            expected: 2,
+            actual: 3
+        })
     ));
 }
 
@@ -310,7 +352,10 @@ fn pattern_position_beyond_expert_tokens_rejected() {
     };
     assert!(matches!(
         verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, M, 0, &routing.routing_data, 4096),
-        Err(PearlCompatError::MoeOuterIndexOutsideExpert { expert_idx: 0, pos: 5 })
+        Err(PearlCompatError::MoeOuterIndexOutsideExpert {
+            expert_idx: 0,
+            pos: 5
+        })
     ));
 }
 

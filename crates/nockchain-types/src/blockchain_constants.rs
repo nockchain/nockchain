@@ -160,7 +160,11 @@ impl NounEncode for AsertParams {
 }
 
 /// Decode a `UBig` from a noun atom (little-endian bytes).
-fn decode_ubig(noun: &Noun, space: &NounSpace, field: &'static str) -> Result<UBig, NounDecodeError> {
+fn decode_ubig(
+    noun: &Noun,
+    space: &NounSpace,
+    field: &'static str,
+) -> Result<UBig, NounDecodeError> {
     let atom = noun
         .in_space(space)
         .as_atom()
@@ -195,13 +199,25 @@ impl NounDecode for AsertParams {
             .as_cell()
             .map_err(|_| NounDecodeError::ExpectedCell)?;
         let phase = u64::from_noun(&c.head().noun(), space)?;
-        c = c.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        c = c
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let anchor_height = u64::from_noun(&c.head().noun(), space)?;
-        c = c.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        c = c
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let anchor_target_atom = decode_ubig(&c.head().noun(), space, "asert-anchor-target-atom")?;
-        c = c.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        c = c
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let ideal_block_time = u64::from_noun(&c.head().noun(), space)?;
-        c = c.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        c = c
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let half_life = u64::from_noun(&c.head().noun(), space)?;
         let anchor_min_timestamp = u64::from_noun(&c.tail().noun(), space)?;
         Ok(Self {
@@ -463,15 +479,30 @@ impl NounDecode for BlockchainConstants {
             .as_cell()
             .map_err(|_| NounDecodeError::ExpectedCell)?;
         let v1_phase = u64::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let bythos_phase = u64::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let note_data = NoteDataConstraints::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let base_fee = u64::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let input_fee_divisor = u64::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
 
         // slot 6: v0 (blockchain-constants:v0) sub-cell; slots 7-10 in the tail.
         let mut v0 = outer
@@ -480,43 +511,85 @@ impl NounDecode for BlockchainConstants {
             .in_space(space)
             .as_cell()
             .map_err(|_| NounDecodeError::ExpectedCell)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
 
         let max_block_size = u64::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let blocks_per_epoch = u64::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let target_epoch_duration = Seconds::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let update_candidate_timestamp_interval = decode_shifted_seconds(
             &v0.head().noun(),
             space,
             "update-candidate-timestamp-interval",
         )?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let max_future_timestamp = Seconds::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let min_past_blocks = u64::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let genesis_target_atom = decode_ubig(&v0.head().noun(), space, "genesis-target-atom")?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let max_target_atom = decode_ubig(&v0.head().noun(), space, "max-target-atom")?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         // legacy check-pow slot (always %.y); PoW is unconditionally verified.
         let _check_pow_flag = bool::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let coinbase_timelock_min = u64::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let pow_len = u64::from_noun(&v0.head().noun(), space)?;
-        v0 = v0.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        v0 = v0
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let max_coinbase_split = u64::from_noun(&v0.head().noun(), space)?;
         let first_month_coinbase_min = u64::from_noun(&v0.tail().noun(), space)?;
 
         // slots 7-10: the three AsertParams regimes + the AI activation height.
         let zk_asert = AsertParams::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let zk_asert_post_ai = AsertParams::from_noun(&outer.head().noun(), space)?;
-        outer = outer.tail().as_cell().map_err(|_| NounDecodeError::ExpectedCell)?;
+        outer = outer
+            .tail()
+            .as_cell()
+            .map_err(|_| NounDecodeError::ExpectedCell)?;
         let ai_pow_activation_height = u64::from_noun(&outer.head().noun(), space)?;
         let ai_asert = AsertParams::from_noun(&outer.tail().noun(), space)?;
 

@@ -21,10 +21,10 @@ use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow::zk_bridge::{
     prove_pearl_moe_compact_recursive_certificate_with_seed, PearlMoeCompactProveRun,
 };
-use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 use ai_pow_miner::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
 };
+use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 
 use crate::AiPowVerifierSetup;
 
@@ -246,12 +246,7 @@ pub fn canonical_moe_trace_height(
 ) -> Result<usize, SetupError> {
     let s = canonical_moe_schedule(params, hw, e, top_k)?;
     ai_pow::zk_bridge::pearl_moe_canonical_trace_height(
-        params,
-        &s.routing,
-        0,
-        &s.inner,
-        &s.local_b,
-        s.n_e,
+        params, &s.routing, 0, &s.inner, &s.local_b, s.n_e,
     )
     .map_err(err("moe canonical trace height"))
 }
@@ -283,17 +278,8 @@ pub fn prove_canonical_moe_block(
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit)?;
 
     let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
-        params,
-        &a,
-        &b,
-        &commitments.kappa,
-        &commitments.h_a,
-        &commitments.h_b,
-        &routing,
-        0,
-        &inner,
-        &local_b,
-        n_e,
+        params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+        &inner, &local_b, n_e,
     )
     .map_err(err("prove"))?;
 
@@ -357,11 +343,10 @@ pub fn build_verifier_setup(
 ) -> Result<AiPowVerifierSetup, SetupError> {
     let block = prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?;
     let trace_height = block.run.trace_height;
-    let digest_bytes =
-        ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-            &block.run.verifier_key_digest(),
-        )
-        .to_vec();
+    let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+        &block.run.verifier_key_digest(),
+    )
+    .to_vec();
     Ok(AiPowVerifierSetup {
         trace_height,
         context: block.run.verifier_context,
@@ -698,7 +683,9 @@ fn build_or_reuse_disk_contexts(
             built += 1;
             ck
         };
-        disk_buckets.push(crate::DiskBucket::new(h, committed_digest, ctx_path, checksum));
+        disk_buckets.push(crate::DiskBucket::new(
+            h, committed_digest, ctx_path, checksum,
+        ));
     }
     if built > 0 {
         tracing::info!("Built {built} AI-PoW verifier context(s) to disk.");

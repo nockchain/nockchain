@@ -98,7 +98,9 @@ pub enum PearlCompatError {
     MoeRoutingRootMismatch,
     #[error("Pearl MoE routing token index {token} at slot {slot} is out of range (m={m})")]
     MoeRoutingTokenOutOfRange { slot: usize, token: u32, m: u32 },
-    #[error("Pearl MoE routing_offsets are not a valid non-decreasing partition ending at m*top_k")]
+    #[error(
+        "Pearl MoE routing_offsets are not a valid non-decreasing partition ending at m*top_k"
+    )]
     MoeOffsetsInconsistent,
     #[error("Pearl MoE top_k={top_k} must be < number of experts e={e}")]
     MoeTopKNotLessThanExperts { top_k: usize, e: usize },
@@ -107,10 +109,16 @@ pub enum PearlCompatError {
     #[error("Pearl MoE column dimension n={n} is not divisible by the number of experts e={e}")]
     MoeColumnDimIndivisible { n: u32, e: u16 },
     #[error("Pearl MoE local column {local} reaches outside expert {expert_idx}'s block (n_e={n_e}); would bleed into a neighbouring expert's weights")]
-    MoeColumnOutsideExpert { local: u32, n_e: u32, expert_idx: u16 },
+    MoeColumnOutsideExpert {
+        local: u32,
+        n_e: u32,
+        expert_idx: u16,
+    },
     #[error("Pearl MoE outer_indices length {actual} must equal the row-pattern size {expected}")]
     MoeOuterIndicesLenMismatch { expected: usize, actual: usize },
-    #[error("Pearl MoE opened row position {pos} falls outside expert {expert_idx}'s routed tokens")]
+    #[error(
+        "Pearl MoE opened row position {pos} falls outside expert {expert_idx}'s routed tokens"
+    )]
     MoeOuterIndexOutsideExpert { expert_idx: u16, pos: u32 },
     #[error("Pearl MoE outer_indices do not match the expert's routed tokens (gather mismatch)")]
     MoeOuterIndicesMismatch,
@@ -801,9 +809,8 @@ impl PearlPublicProofParams {
         if num_outer > PEARL_MOE_MAX_OUTER_INDICES {
             return Err(PearlCompatError::MoeOuterIndicesExceedMax(num_outer));
         }
-        let expected_len = PEARL_MOE_MIN_WIRE_SIZE
-            + num_outer * 4
-            + e * PEARL_MOE_ROUTING_OFFSET_BYTES;
+        let expected_len =
+            PEARL_MOE_MIN_WIRE_SIZE + num_outer * 4 + e * PEARL_MOE_ROUTING_OFFSET_BYTES;
         if bytes.len() != expected_len {
             return Err(PearlCompatError::MoeWireLengthMismatch {
                 expected: expected_len,
@@ -1519,15 +1526,7 @@ pub fn compute_pearl_moe_ticket(
         .map(|&c| c + (expert_idx * n_e) as u32)
         .collect();
     let (tile_state, jackpot_hash) = compute_moe_tile(
-        a_row_major,
-        b_col_major,
-        &outer_indices,
-        &b_cols_global,
-        &s_a,
-        &s_b,
-        k,
-        r,
-        dot_product_len,
+        a_row_major, b_col_major, &outer_indices, &b_cols_global, &s_a, &s_b, k, r, dot_product_len,
     );
     Ok(PearlMoeTicket {
         s_a,
@@ -1812,13 +1811,8 @@ pub fn verify_pearl_moe_compatible_work(
     // routed tokens. MUST precede the splice — it is what makes moe.hash_routing
     // trustworthy as the routing root.
     verify_pearl_moe_routing_binding(
-        &commitments.kappa,
-        &public_params.mining_config,
-        moe,
-        public_params.m,
-        public_params.t_rows,
-        routing_data,
-        max_pattern_len,
+        &commitments.kappa, &public_params.mining_config, moe, public_params.m,
+        public_params.t_rows, routing_data, max_pattern_len,
     )?;
 
     // (5) Recompute the routing-spliced seeds (same formula as the PI-validated
@@ -1835,11 +1829,7 @@ pub fn verify_pearl_moe_compatible_work(
     let s_b = noise_seed_b(&commitments.kappa, &commitments.h_b);
     let s_a = noise_seed_a(&s_b, &hash_activations);
     let b_cols_global = moe_expert_b_cols_global(
-        &public_params.mining_config,
-        cfg.e,
-        public_params.n,
-        moe.expert_idx,
-        public_params.t_cols,
+        &public_params.mining_config, cfg.e, public_params.n, moe.expert_idx, public_params.t_cols,
         max_pattern_len,
     )?;
 

@@ -205,7 +205,10 @@ fn pearl_aux_inclusion_rejects_double_tag_n5() {
     let coinbase = coinbase_tx_with_script(&script, None);
     let mut header = header();
     header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&coinbase));
-    let proof = PearlAuxInclusionProof { coinbase_tx: coinbase, merkle_branch: vec![] };
+    let proof = PearlAuxInclusionProof {
+        coinbase_tx: coinbase,
+        merkle_branch: vec![],
+    };
 
     for commit in [commit_a, commit_b] {
         assert!(
@@ -230,7 +233,10 @@ fn pearl_aux_inclusion_rejects_tag_without_room_for_commitment() {
     let coinbase = coinbase_tx_with_script(&script, None);
     let mut header = header();
     header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&coinbase));
-    let proof = PearlAuxInclusionProof { coinbase_tx: coinbase, merkle_branch: vec![] };
+    let proof = PearlAuxInclusionProof {
+        coinbase_tx: coinbase,
+        merkle_branch: vec![],
+    };
     assert!(matches!(
         verify_pearl_aux_inclusion(&header, &aux_commitment, &proof),
         Err(PearlCompatError::PearlAuxCommitmentTagMissing)

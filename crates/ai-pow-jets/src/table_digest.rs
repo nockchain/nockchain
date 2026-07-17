@@ -149,12 +149,16 @@ pub fn verifier_setup_seed_table_digest(
             )));
         }
         seen.push(h);
-        let d: BucketDigest = s.verifier_key_digest_bytes.as_slice().try_into().map_err(|_| {
-            SetupError(format!(
-                "seed at trace_height {h}: cached verifier-key digest is not {} bytes",
-                AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
-            ))
-        })?;
+        let d: BucketDigest = s
+            .verifier_key_digest_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                SetupError(format!(
+                    "seed at trace_height {h}: cached verifier-key digest is not {} bytes",
+                    AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
+                ))
+            })?;
         fps.push((h as u64, d));
     }
     Ok(hash_table_fingerprints(&fps))
