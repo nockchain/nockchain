@@ -131,7 +131,7 @@ impl FoldChip {
         for s in 0..crate::composite_layout::FOLD_STRIPE_SEL_LEN {
             let sel = cur[crate::composite_layout::FOLD_STRIPE_SEL_START + s];
             builder.assert_bool(sel);
-            sum = sum + sel.into();
+            sum += sel.into();
         }
         builder.assert_eq(sum, is_fold.into());
     }
@@ -154,7 +154,7 @@ impl FoldChip {
             for s in 0..cols::SLOT_SEL_LEN {
                 let sel = cur[off.slot_sel + s];
                 builder.assert_bool(sel);
-                sel_sum = sel_sum + sel.into();
+                sel_sum += sel.into();
             }
             builder.assert_eq(sel_sum, cur[off.is_fold].into());
 
@@ -164,8 +164,8 @@ impl FoldChip {
             for i in 0..cols::XSTEP_BITS_LEN {
                 let bit = cur[off.xstep_bits + i];
                 builder.assert_bool(bit);
-                x_acc = x_acc + bit.into() * pow.clone();
-                pow = pow * two.clone();
+                x_acc += bit.into() * pow.clone();
+                pow *= two.clone();
             }
             builder.assert_eq(cur[off.xstep].into(), x_acc);
 
@@ -180,12 +180,12 @@ impl FoldChip {
             for i in 0..cols::MCUR_BITS_LEN {
                 let bit = cur[off.mcur_bits + i];
                 builder.assert_bool(bit);
-                m_acc = m_acc + bit.into() * pow_m.clone();
-                pow_m = pow_m * two.clone();
+                m_acc += bit.into() * pow_m.clone();
+                pow_m *= two.clone();
             }
             let mut sel_val: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..cols::SLOT_SEL_LEN {
-                sel_val = sel_val + cur[off.slot_sel + s].into() * cur[off.fold_state + s].into();
+                sel_val += cur[off.slot_sel + s].into() * cur[off.fold_state + s].into();
             }
             builder.assert_eq(m_acc, sel_val);
 
@@ -207,8 +207,8 @@ impl FoldChip {
                 let two_ab: AB::Expr =
                     a.into() * b.into() * <AB::F as PrimeCharacteristicRing>::TWO;
                 let xor_bit: AB::Expr = a.into() + b.into() - two_ab;
-                xacc = xacc + xor_bit * powx2.clone();
-                powx2 = powx2 * two.clone();
+                xacc += xor_bit * powx2.clone();
+                powx2 *= two.clone();
             }
             builder.assert_eq(cur[off.xor_out].into(), xacc);
         }
@@ -261,7 +261,7 @@ impl FoldChip {
             // `is_fold·(res_sel − acc)` form is gone (§4.A fix).
             let mut res_sel: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..cols::FOLD_STATE_LEN {
-                res_sel = res_sel + sel[s].into() * nxt_state[s].into();
+                res_sel += sel[s].into() * nxt_state[s].into();
             }
             tb.assert_eq(res_sel, is_fold * xor_out);
 

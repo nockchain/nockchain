@@ -24,7 +24,7 @@
 
 use p3_matrix::dense::RowMajorMatrix;
 
-use crate::blake3_tree::{indexed_strips_chunk_range, left_len, strip_opening_rows};
+use crate::blake3_tree::{indexed_strips_chunk_range, left_len};
 use crate::chips::blake3::chip::pack_tweak;
 use crate::chips::blake3::compress::Blake3Tweak;
 use crate::chips::control::NUM_SELECTORS;
@@ -305,11 +305,11 @@ pub(crate) fn schedule_layout_for_strip_schedule(
     let h_tile = strip_schedule.a_indices.len();
     let w_tile = strip_schedule.b_indices.len();
     assert!(
-        h_tile % TILE_H == 0,
+        h_tile.is_multiple_of(TILE_H),
         "schedule_layout requires h_tile divisible by TILE_H"
     );
     assert!(
-        w_tile % TILE_H == 0,
+        w_tile.is_multiple_of(TILE_H),
         "schedule_layout requires w_tile divisible by TILE_H"
     );
     let k = params.k as usize;
@@ -421,7 +421,7 @@ pub(crate) fn schedule_layout_rb(
     let h_tile = strip_schedule.a_indices.len();
     let w_tile = strip_schedule.b_indices.len();
     assert!(
-        h_tile % TILE_H == 0 && w_tile % TILE_H == 0,
+        h_tile.is_multiple_of(TILE_H) && w_tile.is_multiple_of(TILE_H),
         "schedule_layout_rb requires h_tile,w_tile divisible by TILE_H"
     );
     let k = params.k as usize;
@@ -740,7 +740,7 @@ pub fn canonical_program(
     // an attacker-controlled-params bypass (broken CRIT-1 trust pin)
     // into a typed `Err` rather than a deep cryptic panic.
     params.validate()?;
-    if params.noise_rank % 16 != 0 {
+    if !params.noise_rank.is_multiple_of(16) {
         return Err(format!(
             "canonical_program requires 16 | noise_rank (Pearl §4.8 \
              always-16|r co-location path); got noise_rank={}",
@@ -777,7 +777,7 @@ pub fn canonical_program_for_strip_schedule(
     trace_len: usize,
 ) -> Result<RowMajorMatrix<Val>, String> {
     params.validate_base()?;
-    if params.noise_rank % 16 != 0 {
+    if !params.noise_rank.is_multiple_of(16) {
         return Err(format!(
             "canonical_program requires 16 | noise_rank (Pearl §4.8 \
              always-16|r co-location path); got noise_rank={}",
@@ -1465,10 +1465,10 @@ mod tests {
     /// The node commits to THIS canonical program, so it MUST match what
     /// the R-b prover builds — a divergence would reject a legitimate
     /// >64 certificate (or, if the divergence were in the prover's favour,
-    /// admit a forged schedule). Origin tile (0,0), 16|r ⇒ `ca0=0` ⇒ the
-    /// canonical `ids_for` (`indices[j]-ca0`) equals the trace's
-    /// tile-local lane. PROGRAM_COLS are position-derived (not
-    /// value-derived), so an all-zero matrix suffices to fix the schedule.
+    /// > admit a forged schedule). Origin tile (0,0), 16|r ⇒ `ca0=0` ⇒ the
+    /// > canonical `ids_for` (`indices[j]-ca0`) equals the trace's
+    /// > tile-local lane. PROGRAM_COLS are position-derived (not
+    /// > value-derived), so an all-zero matrix suffices to fix the schedule.
     #[test]
     fn cr_rb_canonical_program_eq_extract_on_sweep_fold() {
         use crate::composite_full_air::{extract_program, PROGRAM_COLS};
@@ -1813,7 +1813,7 @@ mod tests {
         )
         .expect("rectangular Pearl schedule");
         let layout = schedule_layout_for_strip_schedule(&p, &sched, len);
-        let ((ca0, ca1, a_nc), (cb0, cb1, b_nc)) = sched.chunk_ranges(&p).expect("chunk ranges");
+        let ((ca0, ca1, a_nc), (_cb0, _cb1, b_nc)) = sched.chunk_ranges(&p).expect("chunk ranges");
         // B5b: schedule_layout now uses the SELECTIVE (disjoint-chunk) opening —
         // only the chunks the scattered rows/cols touch, not the covering range.
         let kk = p.k as usize;

@@ -196,8 +196,8 @@ impl TileReduceChip {
                 for i in 0..32 {
                     let bit = cur[off.in_bits + c * 32 + i];
                     b.assert_bool(bit);
-                    recon = recon + bit.into() * pow.clone();
-                    pow = pow * two.clone();
+                    recon += bit.into() * pow.clone();
+                    pow *= two.clone();
                 }
                 let sign: AB::Expr = cur[off.in_bits + c * 32 + 31].into() * two_pow_32.clone();
                 b.assert_eq(cur[off.in_cells + c].into(), recon - sign);
@@ -209,8 +209,8 @@ impl TileReduceChip {
             for i in 0..32 {
                 let bit = cur[off.xstep_bits + i];
                 b.assert_bool(bit);
-                x_recon = x_recon + bit.into() * powx.clone();
-                powx = powx * two.clone();
+                x_recon += bit.into() * powx.clone();
+                powx *= two.clone();
             }
             b.assert_eq(x_recon, cur[off.xstep].into());
 
@@ -220,8 +220,8 @@ impl TileReduceChip {
             for i in 0..32 {
                 let bit = cur[off.new_bits + i];
                 b.assert_bool(bit);
-                new_recon = new_recon + bit.into() * pown.clone();
-                pown = pown * two.clone();
+                new_recon += bit.into() * pown.clone();
+                pown *= two.clone();
             }
             b.assert_eq(cur[off.new].into(), new_recon);
 
@@ -230,7 +230,7 @@ impl TileReduceChip {
             for i in 0..32 {
                 let mut col_sum: AB::Expr = cur[off.xstep_bits + i].into();
                 for c in 0..IN_LEN {
-                    col_sum = col_sum + cur[off.in_bits + c * 32 + i].into();
+                    col_sum += cur[off.in_bits + c * 32 + i].into();
                 }
                 let nbit = cur[off.new_bits + i];
                 let q: AB::Expr = cur[off.q + i].into();

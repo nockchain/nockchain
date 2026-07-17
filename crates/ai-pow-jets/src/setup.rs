@@ -159,7 +159,7 @@ fn canonical_moe_schedule(
 ) -> Result<CanonicalMoeSchedule, SetupError> {
     let m = params.m as usize;
     let n = params.n as usize;
-    if e == 0 || n % e != 0 {
+    if e == 0 || !n.is_multiple_of(e) {
         return Err(SetupError(format!("n={n} not divisible by e={e}")));
     }
     let n_e = n / e;

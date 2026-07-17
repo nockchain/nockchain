@@ -37,6 +37,7 @@ use crate::tile_hash::{difficulty_target, hash_le_target};
 const INPUT_RANGE_MAX: i8 = 64;
 
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct ProverOptions {
     /// Deprecated no-op retained for API compatibility. Production mining uses
     /// one verifier-derived jackpot tile per nonce-bound attempt, so there is
@@ -44,11 +45,6 @@ pub struct ProverOptions {
     pub seek_best: bool,
 }
 
-impl Default for ProverOptions {
-    fn default() -> Self {
-        Self { seek_best: false }
-    }
-}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MineError {
@@ -236,7 +232,7 @@ impl<'a> BlockContext<'a> {
             });
         }
         for (idx, &v) in a.iter().enumerate() {
-            if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+            if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
                 return Err(MineError::InputOutOfRange {
                     matrix: "A",
                     index: idx,
@@ -245,7 +241,7 @@ impl<'a> BlockContext<'a> {
             }
         }
         for (idx, &v) in b.iter().enumerate() {
-            if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+            if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
                 return Err(MineError::InputOutOfRange {
                     matrix: "B",
                     index: idx,

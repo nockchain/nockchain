@@ -367,7 +367,7 @@ impl<AB: AirBuilder<F = crate::Val>> Air<AB> for CompositeFullAirPinned {
                 core::array::from_fn(|s| c3[crate::composite_layout::SX_XR_START + s]);
             let mut bind: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..STRIPE_MAX {
-                bind = bind + sel[s].into() * (fx.into() - xr[s].into());
+                bind += sel[s].into() * (fx.into() - xr[s].into());
             }
             builder.assert_zero(bind);
         }
@@ -527,7 +527,7 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
                 for j in 0..TILE_H {
                     let mut dot: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
                     for d in 0..TILE_D {
-                        dot = dot + a_u[i * TILE_D + d].into() * b_u[j * TILE_D + d].into();
+                        dot += a_u[i * TILE_D + d].into() * b_u[j * TILE_D + d].into();
                     }
                     builder.assert_zero(ta_active.into() * (ta_dot[i * TILE_H + j].into() - dot));
                 }
@@ -564,7 +564,7 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
             for p in 0..4 {
                 let mut sel_acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
                 for s in 0..TA_SB_SEL_LEN {
-                    sel_acc = sel_acc + sb_sel[s].into() * nxt_acc[s][p].into();
+                    sel_acc += sb_sel[s].into() * nxt_acc[s][p].into();
                 }
                 tb.assert_zero(tr_active.into() * (tr_in[p].into() - sel_acc));
             }
@@ -611,8 +611,8 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
                     let mut recon: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
                     let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
                     for d in 0..4 {
-                        recon = recon + unpack[c * 4 + d] * pow.clone();
-                        pow = pow * b256.clone();
+                        recon += unpack[c * 4 + d] * pow.clone();
+                        pow *= b256.clone();
                     }
                     let diff: AB::Expr = packed[c].into() - recon;
                     builder.assert_zero(matmul_active.clone() * diff);
@@ -755,7 +755,7 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
         for p in 0..MSG_PAIR_SEL_LEN {
             let sel: AB::Var = cur[MSG_PAIR_SEL_START + p];
             builder.assert_bool(sel);
-            pair_sum = pair_sum + sel.into();
+            pair_sum += sel.into();
         }
         builder.assert_zero(pair_sum - c3_gate.clone());
         // (iii) §4.C.2 c-exact cx.2/X1 — **whole-block** C3.
@@ -785,8 +785,8 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
             let mut recomposed: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
             for b in 0..4 {
-                recomposed = recomposed + cur[UINT8_DATA_START + 4 * w + b] * pow.clone();
-                pow = pow * base256.clone();
+                recomposed += cur[UINT8_DATA_START + 4 * w + b] * pow.clone();
+                pow *= base256.clone();
             }
             let msg_word: AB::Var = cur[BLAKE3_MSG_START + w];
             builder.assert_zero(c3_gate.clone() * (msg_word.into() - recomposed));

@@ -410,7 +410,7 @@ pub(crate) fn logup_common_for(
     use p3_batch_stark::ProverData;
     let log_ext_db = checked_program_degree_bits(program)
         .expect("canonical program shape already validated")
-        + config.is_zk() as usize;
+        + config.is_zk();
     let air =
         crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned::try_new_with(
             program.clone(),

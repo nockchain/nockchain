@@ -1295,7 +1295,7 @@ fn fetch_pearl_gateway_mining_job(
     let response_line = exchange_pearl_gateway_request(config, &request)?;
 
     let response: PearlGatewayMiningInfoRpcResponse = serde_json::from_str(&response_line)?;
-    if response.id != serde_json::Value::from(request_id) {
+    if response.id != request_id {
         return Err(PearlGatewayError::ResponseIdMismatch {
             expected: request_id,
             actual: response.id.to_string(),
@@ -1389,7 +1389,7 @@ fn submit_pearl_gateway_plain_proof(
     .to_string();
     let response_line = exchange_pearl_gateway_request(config, &request)?;
     let response: PearlGatewaySubmitRpcResponse = serde_json::from_str(&response_line)?;
-    if response.id != serde_json::Value::from(request_id) {
+    if response.id != request_id {
         return Err(PearlGatewayError::ResponseIdMismatch {
             expected: request_id,
             actual: response.id.to_string(),

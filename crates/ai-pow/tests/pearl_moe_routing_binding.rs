@@ -7,7 +7,7 @@
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
     moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError,
-    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
+    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern,
     PEARL_MMA_INT7XINT7_TO_INT32, PEARL_MOE_MAX_ROUTING_ENTRIES,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
@@ -20,7 +20,7 @@ const E: usize = 2;
 /// Valid setup: 8 tokens, top_k=1, 2 experts (token t → expert t%2).
 /// expert 0 tokens = [0,2,4,6]; the row pattern [0,1] opens the first two.
 fn valid() -> (PearlMiningConfig, RoutingData, PearlMoeParams) {
-    let topk: Vec<u32> = (0..M).map(|t| (t % E as u32)).collect();
+    let topk: Vec<u32> = (0..M).map(|t| t % E as u32).collect();
     let routing = build_routing_data(&topk, M as usize, TOP_K, E).unwrap();
     // routing_data = [0,2,4,6, 1,3,5,7]; routing_offsets = [4,8].
     assert_eq!(routing.routing_data, vec![0, 2, 4, 6, 1, 3, 5, 7]);
@@ -332,7 +332,7 @@ fn outer_indices_length_must_match_pattern() {
 fn pattern_position_beyond_expert_tokens_rejected() {
     // A pattern selecting position 5, but expert 0 only has 4 tokens (positions
     // 0..4) — position 5 would read into expert 1 / padding.
-    let topk: Vec<u32> = (0..M).map(|t| (t % E as u32)).collect();
+    let topk: Vec<u32> = (0..M).map(|t| t % E as u32).collect();
     let routing = build_routing_data(&topk, M as usize, TOP_K, E).unwrap();
     let hash_routing = matrix_commitment(&routing.routing_data_le_bytes(), &KAPPA);
     let config = PearlMiningConfig {

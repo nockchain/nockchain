@@ -472,10 +472,7 @@ fn compact_batch_l1_public_values_for_statement(
         .into_iter()
         .flat_map(|value| {
             let lifted = Challenge::from(value);
-            <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&lifted)
-                .iter()
-                .copied()
-                .collect::<Vec<_>>()
+            <Challenge as BasedVectorSpace<Val>>::as_basis_coefficients_slice(&lifted).to_vec()
         })
         .collect()
 }
@@ -2179,7 +2176,7 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
 
     let t = Instant::now();
     let l2_proof = prove_compact_batch_l2_with_prep(
-        &l2_prep, &l1_outer_proof, &statement_digest_public_values,
+        l2_prep, &l1_outer_proof, &statement_digest_public_values,
     )?;
     let l2_prove_ms = t.elapsed().as_millis();
 
@@ -2777,15 +2774,14 @@ mod tests {
 
         let mut wrong_digest_cert = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate for digest test");
-        wrong_digest_cert.verifier_key_digest[0] =
-            wrong_digest_cert.verifier_key_digest[0] + Val::ONE;
+        wrong_digest_cert.verifier_key_digest[0] += Val::ONE;
         verify_compact_batch_recursive_certificate_with_context(
             &run.verifier_context, wrong_digest_cert, &pis, &commit,
         )
         .expect_err("compact batch recursive certificate must reject wrong verifier-key digest");
 
         let mut wrong_context = run.verifier_context;
-        wrong_context.verifier_key_digest[0] = wrong_context.verifier_key_digest[0] + Val::ONE;
+        wrong_context.verifier_key_digest[0] += Val::ONE;
         let decoded_for_wrong_context = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate for context digest test");
         verify_compact_batch_recursive_certificate_with_context(

@@ -262,7 +262,7 @@ impl MatmulParams {
         if self.tile == 0 {
             return Err(ParamError::ZeroTile);
         }
-        if self.m % self.tile != 0 || self.n % self.tile != 0 {
+        if !self.m.is_multiple_of(self.tile) || !self.n.is_multiple_of(self.tile) {
             return Err(ParamError::TileDoesNotDivide);
         }
         let row_tiles = self.m / self.tile;
@@ -300,7 +300,7 @@ impl MatmulParams {
         if self.noise_rank == 0 || self.noise_rank > self.k {
             return Err(ParamError::NoiseRankOutOfRange);
         }
-        if self.k % self.noise_rank != 0 {
+        if !self.k.is_multiple_of(self.noise_rank) {
             return Err(ParamError::NoiseRankDoesNotDivideK);
         }
         // Pearl §4.4: each column of E_R has one +1 and one -1 at two
@@ -376,7 +376,7 @@ impl MatmulParams {
         if k < 16 * r || k > 4 * r * r {
             return Err(ParamError::KOutOfSecurityBand);
         }
-        if self.k % 64 != 0 {
+        if !self.k.is_multiple_of(64) {
             return Err(ParamError::KNotAlignedTo64);
         }
         // h·w ≥ 32 with square tiles (h = w = tile).
@@ -918,7 +918,7 @@ mod tests {
                     continue;
                 }
                 let k = k64 as u32;
-                if k % 64 != 0 || k % r != 0 {
+                if !k.is_multiple_of(64) || !k.is_multiple_of(r) {
                     continue;
                 }
                 // Largest tile that still respects the trace bound,

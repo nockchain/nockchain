@@ -116,8 +116,8 @@ impl XStepChip {
             for i in 0..32 {
                 let bit = cur[off.acc_bits + c * 32 + i];
                 builder.assert_bool(bit);
-                acc_recon = acc_recon + bit.into() * pow;
-                pow = pow * two;
+                acc_recon += bit.into() * pow;
+                pow *= two;
             }
             builder.assert_eq(cur[off.acc + c].into(), acc_recon);
         }
@@ -128,8 +128,8 @@ impl XStepChip {
         for i in 0..32 {
             let bit = cur[off.xstep_bits + i];
             builder.assert_bool(bit);
-            x_recon = x_recon + bit.into() * powx;
-            powx = powx * two;
+            x_recon += bit.into() * powx;
+            powx *= two;
         }
         builder.assert_eq(cur[off.xstep].into(), x_recon);
 
@@ -141,15 +141,15 @@ impl XStepChip {
         for i in 0..32 {
             let mut col_sum: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for c in 0..ACC_LEN {
-                col_sum = col_sum + cur[off.acc_bits + c * 32 + i].into();
+                col_sum += cur[off.acc_bits + c * 32 + i].into();
             }
             let mut q: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             let mut powq: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
             for b in 0..QBITS {
                 let qbit = cur[off.q_bits + i * QBITS + b];
                 builder.assert_bool(qbit);
-                q = q + qbit.into() * powq;
-                powq = powq * two;
+                q += qbit.into() * powq;
+                powq *= two;
             }
             let xbit = cur[off.xstep_bits + i];
             builder.assert_eq(col_sum, xbit.into() + q * two);

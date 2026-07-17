@@ -156,7 +156,7 @@ pub fn merkle_path(leaves: &[[u8; 32]], idx: usize) -> Result<Vec<[u8; 32]>, Mer
     let mut path = Vec::new();
     let mut pos = idx;
     while layer.len() > 1 {
-        let sibling = if pos % 2 == 0 {
+        let sibling = if pos.is_multiple_of(2) {
             layer[pos + 1]
         } else {
             layer[pos - 1]
@@ -194,7 +194,7 @@ pub fn merkle_recover_root(
     let mut node = leaf_hash(leaf);
     let mut pos = idx;
     for sibling in path {
-        node = if pos % 2 == 0 {
+        node = if pos.is_multiple_of(2) {
             node_hash(&node, sibling)
         } else {
             node_hash(sibling, &node)

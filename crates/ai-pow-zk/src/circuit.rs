@@ -706,14 +706,8 @@ mod tests {
         use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
         let perm = Tip5Perm;
         let sponge: PaddingFreeSponge<Tip5Perm, 16, 10, 5> = PaddingFreeSponge::new(perm);
-        let a = from_u64s(&[1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])[..5]
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
-        let b = from_u64s(&[1, 2, 3, 4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])[..5]
-            .iter()
-            .copied()
-            .collect::<Vec<_>>();
+        let a = from_u64s(&[1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])[..5].to_vec();
+        let b = from_u64s(&[1, 2, 3, 4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])[..5].to_vec();
         let da: [Goldilocks; 5] = sponge.hash_iter(a);
         let db: [Goldilocks; 5] = sponge.hash_iter(b);
         let to = |d: [Goldilocks; 5]| {

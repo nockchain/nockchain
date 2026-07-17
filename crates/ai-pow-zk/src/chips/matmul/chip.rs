@@ -152,7 +152,7 @@ impl MatmulCumsumChip {
                 for d in 0..TILE_D {
                     let a_cell: AB::Expr = cur[off.a_unpack_start + i * TILE_D + d].into();
                     let b_cell: AB::Expr = cur[off.b_unpack_start + j * TILE_D + d].into();
-                    acc = acc + a_cell * b_cell;
+                    acc += a_cell * b_cell;
                 }
                 dot[i * TILE_H + j] = acc;
             }

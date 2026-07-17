@@ -651,7 +651,7 @@ impl CompositeTrace {
         // (BLAKE3 spec for non-power-of-2 chunk counts).
         while chunk_cvs.len() > 1 {
             let is_top_layer = chunk_cvs.len() == 2;
-            let mut next: Vec<[u32; 8]> = Vec::with_capacity((chunk_cvs.len() + 1) / 2);
+            let mut next: Vec<[u32; 8]> = Vec::with_capacity(chunk_cvs.len().div_ceil(2));
             let mut i = 0;
             while i + 1 < chunk_cvs.len() {
                 let left = chunk_cvs[i];
@@ -1819,11 +1819,11 @@ impl CompositeTrace {
         assert_eq!(a_lanes.len(), h_tile, "a_lanes must have h_tile entries");
         assert_eq!(b_lanes.len(), w_tile, "b_lanes must have w_tile entries");
         assert!(
-            h_tile % TILE_H == 0,
+            h_tile.is_multiple_of(TILE_H),
             "tile height must split into TILE_H sub-blocks"
         );
         assert!(
-            w_tile % TILE_H == 0,
+            w_tile.is_multiple_of(TILE_H),
             "tile width must split into TILE_H sub-blocks"
         );
         assert!(

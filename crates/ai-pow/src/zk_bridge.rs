@@ -229,7 +229,7 @@ fn validate_scheduled_params(params: &MatmulParams) -> Result<(), BridgeError> {
     if params.noise_rank < 2
         || params.noise_rank > params.k
         || !params.noise_rank.is_power_of_two()
-        || params.k % params.noise_rank != 0
+        || !params.k.is_multiple_of(params.noise_rank)
     {
         return Err(BridgeError::ZkParamsInvalid(
             "noise_rank must be a power of two in 2..=k and divide k".into(),
@@ -2648,8 +2648,8 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     strip_schedule
         .chunk_ranges(&zk_params)
         .map_err(BridgeError::ZkParamsInvalid)?;
-    if strip_schedule.a_indices.len() % ai_pow_zk::composite_layout::TILE_H != 0
-        || strip_schedule.b_indices.len() % ai_pow_zk::composite_layout::TILE_H != 0
+    if !strip_schedule.a_indices.len().is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
+        || !strip_schedule.b_indices.len().is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
     {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -2708,7 +2708,7 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // not zero-gap) — co-location there would unbalance
     // `noised_packed` (the cmset.1a finding). `coloc` gates BOTH
     // the leaf-row noise strips AND retiring the separate store.
-    let coloc = params.noise_rank % 16 == 0;
+    let coloc = params.noise_rank.is_multiple_of(16);
     let rr = params.noise_rank;
     let a_id_base = ai_pow_zk::composite_trace::NOISED_CHUNK_ID_BASE;
     let b_id_base = a_id_base + ((strip_schedule.a_indices.len() * kk).div_ceil(8)) as u64;
@@ -3209,7 +3209,7 @@ fn pearl_merge_legacy_ticket(
     if h != params.tile || w != params.tile {
         return None;
     }
-    if public_params.t_rows % params.tile != 0 || public_params.t_cols % params.tile != 0 {
+    if !public_params.t_rows.is_multiple_of(params.tile) || !public_params.t_cols.is_multiple_of(params.tile) {
         return None;
     }
     let col_tiles = public_params.n / params.tile;
@@ -3301,7 +3301,7 @@ mod tests {
             let k_hi = (4u64 * r as u64 * r as u64).min(crate::params::PEARL_K_MAX as u64) as u32;
             // Sample k across the band (multiples of 64, num_stripes ≤ 512).
             let mut ks: Vec<u32> = Vec::new();
-            let mut k = (k_lo + 63) / 64 * 64;
+            let mut k = k_lo.div_ceil(64) * 64;
             while k <= k_hi {
                 if (k / r) as usize <= crate::params::PEARL_STRIPE_MAX {
                     ks.push(k);
@@ -5473,7 +5473,7 @@ mod tests {
         let t = params.tile as usize;
         let r = params.noise_rank as usize;
         let steps = params.num_stripes() as usize;
-        assert!(t % TILE_H == 0, "tile must tile into TILE_H sub-blocks");
+        assert!(t.is_multiple_of(TILE_H), "tile must tile into TILE_H sub-blocks");
         assert!(
             r <= TILE_D,
             "stripe width must fit one micro-step (zero-pad)"
@@ -6166,14 +6166,14 @@ mod tests {
                                     &ctx.s_a,
                                     lane_g,
                                     l0 + m as u32,
-                                    r as u32,
+                                    r,
                                 )
                             } else {
                                 ai_pow_zk::noise_ref::f_value(
                                     &ctx.s_b,
                                     l0 + m as u32,
                                     lane_g,
-                                    r as u32,
+                                    r,
                                 )
                             }
                         ),

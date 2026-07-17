@@ -296,7 +296,7 @@ impl StripeXorChip {
             for s in 0..cols::LANE_SEL_LEN {
                 let sel = cur[off.lane_sel + s];
                 builder.assert_bool(sel);
-                sel_sum = sel_sum + sel.into();
+                sel_sum += sel.into();
             }
             builder.assert_eq(sel_sum, cur[off.is_active].into());
         }
@@ -356,8 +356,8 @@ impl StripeXorChip {
                 for i in 0..32 {
                     let bit = cur[off.in_bits + c * 32 + i];
                     b.assert_bool(bit);
-                    recon = recon + bit.into() * pow.clone();
-                    pow = pow * two.clone();
+                    recon += bit.into() * pow.clone();
+                    pow *= two.clone();
                 }
                 let sign: AB::Expr = cur[off.in_bits + c * 32 + 31].into() * two_pow_32.clone();
                 b.assert_eq(cur[off.in_cells + c].into(), recon - sign);
@@ -371,12 +371,12 @@ impl StripeXorChip {
             for i in 0..32 {
                 let bit = cur[off.xr_sel_bits + i];
                 b.assert_bool(bit);
-                sel_recon = sel_recon + bit.into() * powx.clone();
-                powx = powx * two.clone();
+                sel_recon += bit.into() * powx.clone();
+                powx *= two.clone();
             }
             let mut sel_val: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..cols::XR_LEN {
-                sel_val = sel_val + cur[off.lane_sel + s].into() * cur[off.xr + s].into();
+                sel_val += cur[off.lane_sel + s].into() * cur[off.xr + s].into();
             }
             b.assert_eq(sel_recon, sel_val);
 
@@ -386,8 +386,8 @@ impl StripeXorChip {
             for i in 0..32 {
                 let bit = cur[off.new_sel_bits + i];
                 b.assert_bool(bit);
-                new_recon = new_recon + bit.into() * pown.clone();
-                pown = pown * two.clone();
+                new_recon += bit.into() * pown.clone();
+                pown *= two.clone();
             }
             b.assert_eq(cur[off.new_sel].into(), new_recon);
 
@@ -399,7 +399,7 @@ impl StripeXorChip {
             for i in 0..32 {
                 let mut col_sum: AB::Expr = cur[off.xr_sel_bits + i].into();
                 for c in 0..IN_LEN {
-                    col_sum = col_sum + cur[off.in_bits + c * 32 + i].into();
+                    col_sum += cur[off.in_bits + c * 32 + i].into();
                 }
                 let nbit = cur[off.new_sel_bits + i];
                 let q: AB::Expr = cur[off.q + i].into();
@@ -456,7 +456,7 @@ impl StripeXorChip {
             // transition, from XR = 0 (pinned by the reset constraint).
             let mut res_sel: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             for s in 0..cols::XR_LEN {
-                res_sel = res_sel + sel[s].into() * nxt_xr[s].into();
+                res_sel += sel[s].into() * nxt_xr[s].into();
             }
             tb.assert_eq(res_sel, new_sel);
 

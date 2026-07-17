@@ -371,7 +371,7 @@ impl PearlPeriodicPattern {
         while pattern.len() > 1 {
             let mut found = false;
             for period in 1..pattern.len() {
-                if pattern.len() % period != 0 {
+                if !pattern.len().is_multiple_of(period) {
                     continue;
                 }
                 let stride = pattern[period];
@@ -1062,7 +1062,7 @@ impl PearlPublicProofParams {
             // STARK (`params::PEARL_HW_MAX`). Omitting it here would admit
             // Pearl-out-of-envelope tickets that Pearl's own verifier rejects.
             || u64::from(h) * u64::from(w) > PEARL_HW_MAX
-            || dot_product_len % u64::from(PEARL_DWORD_SIZE) != 0
+            || !dot_product_len.is_multiple_of(u64::from(PEARL_DWORD_SIZE))
             || self.m > PearlPeriodicPattern::MAX_PERIOD
             || self.n > PearlPeriodicPattern::MAX_PERIOD
             || worker_input_size > PEARL_WORKER_INPUT_MAX
@@ -1256,7 +1256,7 @@ fn validate_recursive_params_for_pearl_schedule(
     if params.noise_rank < 2
         || params.noise_rank > params.k
         || !params.noise_rank.is_power_of_two()
-        || params.k % params.noise_rank != 0
+        || !params.k.is_multiple_of(params.noise_rank)
     {
         return Err(PearlCompatError::PublicParamEnvelope);
     }
@@ -1324,7 +1324,7 @@ pub fn pattern_partitions_bounded(
     max_partitions: usize,
 ) -> Result<Vec<Vec<u32>>, PearlCompatError> {
     let period = pattern.period()?;
-    if period == 0 || total_dimension % period != 0 {
+    if period == 0 || !total_dimension.is_multiple_of(period) {
         return Err(PearlCompatError::PatternPeriodDoesNotDivideDimension);
     }
     let base_indices = pattern.to_list_bounded(max_indices_per_partition)?;
@@ -1885,7 +1885,7 @@ pub fn moe_expert_b_cols_global(
     if expert_idx >= e {
         return Err(PearlCompatError::MoeExpertIdxOutOfRange { expert_idx, e });
     }
-    if n % u32::from(e) != 0 {
+    if !n.is_multiple_of(u32::from(e)) {
         return Err(PearlCompatError::MoeColumnDimIndivisible { n, e });
     }
     let n_e = n / u32::from(e);

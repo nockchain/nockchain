@@ -150,11 +150,7 @@ fn build_pkh_configs(args: &Args) -> Option<Vec<MiningPkhConfig>> {
             share: 1,
             pkh: pkh.clone(),
         }])
-    } else if let Some(adv) = &args.mining_pkh_adv {
-        Some(adv.clone())
-    } else {
-        None
-    }
+    } else { args.mining_pkh_adv.clone() }
 }
 
 #[cfg(test)]

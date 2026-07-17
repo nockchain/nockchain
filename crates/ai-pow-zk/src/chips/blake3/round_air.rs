@@ -131,8 +131,8 @@ fn polyval_bits<AB: AirBuilder>(bits: &[AB::Var]) -> AB::Expr {
     let mut acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
     let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
     for &b in bits {
-        acc = acc + b * pow.clone();
-        pow = pow * two.clone();
+        acc += b * pow.clone();
+        pow *= two.clone();
     }
     acc
 }
@@ -431,8 +431,8 @@ pub fn verify_init_state<AB: AirBuilder>(
     let mut acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
     let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
     for bit in active_bits.iter() {
-        acc = acc + bit.clone() * pow.clone();
-        pow = pow * two.clone();
+        acc += bit.clone() * pow.clone();
+        pow *= two.clone();
     }
     builder.assert_zero(is_new_blake.clone() * (acc - blake3_tweak));
 

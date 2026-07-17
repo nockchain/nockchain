@@ -43,7 +43,7 @@ use ai_pow::pearl_compat::{
 #[cfg(test)]
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
 use ai_pow::zk_bridge::{
-    expected_layer0_rows_for_strip_schedule, verify_ai_pow_full_matmul_production_statement,
+    expected_layer0_rows_for_strip_schedule,
     verify_pearl_moe_compact_recursive_certificate, zk_params_from_matmul,
     AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun, BridgeError,
     ZkPublicCommitments,
@@ -2450,10 +2450,10 @@ fn precheck_pearl_merge_certificate_public_inputs(
 ) -> Result<(), CertificateNounError> {
     let metadata = AiPowCertificateMetadata {
         version: certificate.version,
-        zk_params: certificate.zk_params.clone(),
+        zk_params: certificate.zk_params,
         found_idx: certificate.found_idx,
         trace_height: certificate.trace_height,
-        commitments: certificate.commitments.clone(),
+        commitments: certificate.commitments,
         public_inputs: certificate.public_inputs.clone(),
     };
     precheck_pearl_merge_certificate_metadata(&metadata, statement, precheck, check_jackpot)
@@ -2618,7 +2618,7 @@ fn pearl_merge_legacy_found_idx(
     if h != params.tile || w != params.tile {
         return None;
     }
-    if public_params.t_rows % params.tile != 0 || public_params.t_cols % params.tile != 0 {
+    if !public_params.t_rows.is_multiple_of(params.tile) || !public_params.t_cols.is_multiple_of(params.tile) {
         return None;
     }
     let col_tiles = public_params.n / params.tile;
@@ -2642,7 +2642,7 @@ fn validate_pearl_merge_recursive_params(
     if params.noise_rank < 2
         || params.noise_rank > params.k
         || !params.noise_rank.is_power_of_two()
-        || params.k % params.noise_rank != 0
+        || !params.k.is_multiple_of(params.noise_rank)
     {
         return Err(CertificateNounError::PearlMergeUnsupportedTileShape);
     }

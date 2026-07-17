@@ -137,7 +137,7 @@ pub fn extract(qg: &QuantizedGemm) -> Result<PearlOperands, QuantError> {
     }
     let check = |v: i8, what: &'static str| -> Result<i8, QuantError> {
         let x = v as i32;
-        if x < PEARL_INT_LO || x > PEARL_INT_HI {
+        if !(PEARL_INT_LO..=PEARL_INT_HI).contains(&x) {
             Err(QuantError::OutOfDomain { what, value: x })
         } else {
             Ok(v)

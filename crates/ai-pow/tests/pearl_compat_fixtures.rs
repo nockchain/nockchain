@@ -178,8 +178,8 @@ fn s4_noise_reconstruction_matches_pearl() {
         spot_checks: 1,
         difficulty_bits: 0,
     };
-    let e_r_pos: Vec<(u32, u32)> = fix::FIX4_E_R_T_POS.iter().copied().collect();
-    let f_l_pos: Vec<(u32, u32)> = fix::FIX4_F_L_POS.iter().copied().collect();
+    let e_r_pos: Vec<(u32, u32)> = fix::FIX4_E_R_T_POS.to_vec();
+    let f_l_pos: Vec<(u32, u32)> = fix::FIX4_F_L_POS.to_vec();
     let noise = BlockNoise {
         m: params.m,
         k: params.k,

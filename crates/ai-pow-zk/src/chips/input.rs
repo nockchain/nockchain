@@ -78,8 +78,8 @@ impl InputChip {
         let mut acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
         let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
         for &c in coeffs {
-            acc = acc + c * pow.clone();
-            pow = pow * base_f.clone();
+            acc += c * pow.clone();
+            pow *= base_f.clone();
         }
         acc
     }
@@ -128,7 +128,7 @@ impl InputChip {
                 &noise_unpack[i * BYTES_PER_GOLDILOCKS..(i + 1) * BYTES_PER_GOLDILOCKS];
             let mat_packed = Self::polyval::<AB>(mat_chunk, MATRIX_PACKING_BASE);
             let noise_packed = Self::polyval::<AB>(noise_chunk, MATRIX_PACKING_BASE);
-            builder.assert_eq(noised_packed[i].clone(), mat_packed + noise_packed);
+            builder.assert_eq(noised_packed[i], mat_packed + noise_packed);
         }
     }
 

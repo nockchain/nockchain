@@ -123,7 +123,7 @@ impl TileAccumChip {
             for s in 0..off.n_sb {
                 let sel = cur[off.sb_sel + s];
                 builder.assert_bool(sel);
-                sum = sum + sel.into();
+                sum += sel.into();
             }
             builder.assert_eq(sum, cur[off.is_active].into());
         }

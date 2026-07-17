@@ -162,7 +162,7 @@ fn decode_does_not_amplify_attacker_declared_counts() {
     // allocation (the policy-cap check).
     let oversize = malicious_spot_blob(u32::MAX);
     let (res, peak) = measure_alloc_peak(|| MatmulProof::decode(&oversize));
-    assert!(matches!(res, Err(_)));
+    assert!(res.is_err());
     assert!(
         peak < AMPLIFICATION_LIMIT,
         "u32::MAX-count blob allocated {peak} bytes",

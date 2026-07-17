@@ -273,12 +273,12 @@ fn precheck_opening(
         });
     }
     for &v in &opening.a_rows {
-        if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+        if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
             return Err(VerifyError::AStripOutOfRange);
         }
     }
     for &v in &opening.b_cols {
-        if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+        if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
             return Err(VerifyError::BStripOutOfRange);
         }
     }
@@ -339,12 +339,12 @@ fn verify_opening(
 
     // Strip value range checks (Pearl §4.1).
     for &v in &opening.a_rows {
-        if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+        if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
             return Err(VerifyError::AStripOutOfRange);
         }
     }
     for &v in &opening.b_cols {
-        if v < -INPUT_RANGE_MAX || v > INPUT_RANGE_MAX {
+        if !(-INPUT_RANGE_MAX..=INPUT_RANGE_MAX).contains(&v) {
             return Err(VerifyError::BStripOutOfRange);
         }
     }

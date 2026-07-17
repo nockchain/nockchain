@@ -141,7 +141,7 @@ impl JackpotChip {
         // ---- 2. Sum of SLOT_SEL == IS_ACTIVE ----
         let mut sel_sum: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
         for k in 0..16 {
-            sel_sum = sel_sum + cur[off.slot_sel_start + k];
+            sel_sum += cur[off.slot_sel_start + k];
         }
         builder.assert_eq(sel_sum, is_active.clone());
 
@@ -150,7 +150,7 @@ impl JackpotChip {
         for i in 0..JACKPOT_SIZE {
             let sel: AB::Expr = cur[off.slot_sel_start + i].into();
             let msg: AB::Expr = cur[off.jackpot_msg_start + i].into();
-            selected_msg = selected_msg + sel * msg;
+            selected_msg += sel * msg;
         }
         let v_packed = polyval_bits::<AB>(&cur[off.v_bits_start..off.v_bits_start + 32]);
         builder.assert_zero(is_active.clone() * (selected_msg - v_packed.clone()));
@@ -164,8 +164,8 @@ impl JackpotChip {
             let v_bit: AB::Expr = cur[off.v_bits_start + src_bit_idx].into();
             let x_bit: AB::Expr = cur[off.x_bits_start + i].into();
             let xor_bit: AB::Expr = v_bit.clone() + x_bit.clone() - x_bit * v_bit * two.clone();
-            rotated_xor_packed = rotated_xor_packed + xor_bit * pow.clone();
-            pow = pow * two.clone();
+            rotated_xor_packed += xor_bit * pow.clone();
+            pow *= two.clone();
         }
 
         {
@@ -225,8 +225,8 @@ fn polyval_bits<AB: AirBuilder>(bits: &[AB::Var]) -> AB::Expr {
     let mut acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
     let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
     for &b in bits {
-        acc = acc + b * pow.clone();
-        pow = pow * two.clone();
+        acc += b * pow.clone();
+        pow *= two.clone();
     }
     acc
 }

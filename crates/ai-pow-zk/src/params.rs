@@ -49,7 +49,7 @@ impl ZkParams {
         if self.noise_rank < 2 || !self.noise_rank.is_power_of_two() {
             return Err("noise_rank must be a power of two >= 2".into());
         }
-        if self.k % self.noise_rank != 0 {
+        if !self.k.is_multiple_of(self.noise_rank) {
             return Err("noise_rank must divide k".into());
         }
         Ok(())
@@ -60,7 +60,7 @@ impl ZkParams {
     /// defensively because the cross-crate boundary could be misused.
     pub fn validate(&self) -> Result<(), String> {
         self.validate_base()?;
-        if self.tile == 0 || self.m % self.tile != 0 || self.n % self.tile != 0 {
+        if self.tile == 0 || !self.m.is_multiple_of(self.tile) || !self.n.is_multiple_of(self.tile) {
             return Err("tile must divide m and n".into());
         }
         Ok(())

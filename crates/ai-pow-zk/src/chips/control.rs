@@ -163,13 +163,13 @@ impl ControlChip {
         let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
         let two: AB::F = <AB::F as PrimeCharacteristicRing>::from_u32(2);
         for &col in SELECTOR_COLS.iter() {
-            acc = acc + cur[col] * pow.clone();
-            pow = pow * two.clone();
+            acc += cur[col] * pow.clone();
+            pow *= two.clone();
         }
         // After 21 selectors, mat_id contributes at coefficient 2^21.
         // Pearl uses `eval.polyval(&[selectors, mat_id], 2)` so mat_id
         // sits at the position after the last selector.
-        acc = acc + mat_id_expr * pow.clone();
+        acc += mat_id_expr * pow.clone();
 
         // HIGH-2.2 §6 — pin the FoldChip *schedule* into CONTROL_PREP.
         //
@@ -190,19 +190,19 @@ impl ControlChip {
         // always wires alongside this chip; here we only need
         // `FOLD_IS_FOLD` boolean for the pack term to be well-formed.
         let two_pow_mat_id = <AB::F as PrimeCharacteristicRing>::from_u32(1u32 << MAT_ID_BITS);
-        pow = pow * two_pow_mat_id; // pow = 2^(21+26) = 2^47
+        pow *= two_pow_mat_id; // pow = 2^(21+26) = 2^47
 
         let is_fold: AB::Var = cur[FOLD_IS_FOLD];
         builder.assert_bool(is_fold);
-        acc = acc + is_fold * pow.clone(); // 2^47
-        pow = pow * two.clone(); // 2^48
+        acc += is_fold * pow.clone(); // 2^47
+        pow *= two.clone(); // 2^48
 
         let mut slot_idx: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
         for s in 0..FOLD_SLOT_SEL_LEN {
             let w = <AB::F as PrimeCharacteristicRing>::from_u32(s as u32);
-            slot_idx = slot_idx + cur[FOLD_SLOT_SEL_START + s] * w;
+            slot_idx += cur[FOLD_SLOT_SEL_START + s] * w;
         }
-        acc = acc + slot_idx * pow.clone(); // 2^48 (4-bit slot ⇒ 48..52)
+        acc += slot_idx * pow.clone(); // 2^48 (4-bit slot ⇒ 48..52)
 
         // HIGH-2.2 §6(b)-G2 — pin the 6-bit fold-**stripe** index
         // (the keystone's `SX_XR[stripe]` lane selector, needed for
@@ -211,13 +211,13 @@ impl ControlChip {
         // is enforced by `FoldChip`; zero on non-fold rows ⇒ zero
         // blast radius (CONTROL_PREP byte-identical there).
         let two_pow_slot = <AB::F as PrimeCharacteristicRing>::from_u32(1u32 << FOLD_SLOT_BITS);
-        pow = pow * two_pow_slot; // pow = 2^52
+        pow *= two_pow_slot; // pow = 2^52
         let mut stripe_idx: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
         for s in 0..FOLD_STRIPE_SEL_LEN {
             let w = <AB::F as PrimeCharacteristicRing>::from_u32(s as u32);
-            stripe_idx = stripe_idx + cur[FOLD_STRIPE_SEL_START + s] * w;
+            stripe_idx += cur[FOLD_STRIPE_SEL_START + s] * w;
         }
-        acc = acc + stripe_idx * pow.clone(); // 2^52 (6-bit stripe ⇒ 52..58)
+        acc += stripe_idx * pow.clone(); // 2^52 (6-bit stripe ⇒ 52..58)
 
         // §4.C.2 c-exact (cx.1c) — pin the 3-bit C3 message
         // word-pair index `p` at bit 2^58. The generalized C3
@@ -230,13 +230,13 @@ impl ControlChip {
         // `CONTROL_PREP` byte-identical) — the §6(a)/G2
         // zero-blast property.
         let two_pow_stripe = <AB::F as PrimeCharacteristicRing>::from_u32(1u32 << FOLD_STRIPE_BITS);
-        pow = pow * two_pow_stripe; // pow = 2^58
+        pow *= two_pow_stripe; // pow = 2^58
         let mut pair_idx: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
         for p in 0..MSG_PAIR_SEL_LEN {
             let w = <AB::F as PrimeCharacteristicRing>::from_u32(p as u32);
-            pair_idx = pair_idx + cur[MSG_PAIR_SEL_START + p] * w;
+            pair_idx += cur[MSG_PAIR_SEL_START + p] * w;
         }
-        acc = acc + pair_idx * pow.clone(); // 2^58 (3-bit pair ⇒ 58..61)
+        acc += pair_idx * pow.clone(); // 2^58 (3-bit pair ⇒ 58..61)
 
         // §6(b)-G3 — pin the 1-bit `SX_SEG_RESET` at bit 2^61. This makes
         // the StripeXor per-segment reset verifier-fixed (via the CRIT-1
@@ -245,10 +245,10 @@ impl ControlChip {
         // `x_steps`. Zero on every single-segment trace (`SX_SEG_RESET`
         // pinned to 0 there) ⇒ +0 ⇒ `CONTROL_PREP` byte-identical.
         let two_pow_pair = <AB::F as PrimeCharacteristicRing>::from_u32(1u32 << MSG_PAIR_BITS);
-        pow = pow * two_pow_pair; // pow = 2^61
+        pow *= two_pow_pair; // pow = 2^61
         let seg_reset: AB::Var = cur[crate::composite_layout::SX_SEG_RESET];
         builder.assert_bool(seg_reset);
-        acc = acc + seg_reset * pow; // 2^61
+        acc += seg_reset * pow; // 2^61
 
         builder.assert_eq(control_prep, acc);
     }

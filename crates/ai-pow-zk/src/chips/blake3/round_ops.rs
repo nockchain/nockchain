@@ -126,8 +126,8 @@ pub fn xor_32_shift_if<AB: AirBuilder>(
         // x XOR y = x + y - 2xy, valid when x, y are boolean.
         let two_ab = AB::Expr::from(b_src) * a_bit.clone() * two.clone();
         let xor_bit: AB::Expr = a_bit + AB::Expr::from(b_src) - two_ab;
-        acc = acc + xor_bit * pow.clone();
-        pow = pow * two.clone();
+        acc += xor_bit * pow.clone();
+        pow *= two.clone();
     }
     // `is_activated * (res - acc) = 0` ⇒ when activated, res equals
     // the recomposed XOR.
@@ -153,8 +153,8 @@ pub fn xor_32_packed<AB: AirBuilder>(builder: &mut AB, a: &[AB::Var], b: &[AB::V
     for i in 0..32 {
         let two_ab: AB::Expr = AB::Expr::from(a[i]) * b[i] * two.clone();
         let xor_bit: AB::Expr = AB::Expr::from(a[i]) + AB::Expr::from(b[i]) - two_ab;
-        acc = acc + xor_bit * pow.clone();
-        pow = pow * two.clone();
+        acc += xor_bit * pow.clone();
+        pow *= two.clone();
     }
     acc
 }
@@ -407,8 +407,8 @@ mod tests {
             let mut acc: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
             let mut pow: AB::F = <AB::F as PrimeCharacteristicRing>::ONE;
             for i in 0..32 {
-                acc = acc + cur[34 + i] * pow.clone();
-                pow = pow * two.clone();
+                acc += cur[34 + i] * pow.clone();
+                pow *= two.clone();
             }
             builder.assert_eq(AB::Expr::from(cur[32]), acc);
 
