@@ -493,8 +493,6 @@ pub fn composite_verify_pow_pinned_logup_sx(
 }
 
 #[allow(dead_code)]
-fn _suppress_unused_val_import(_v: Val<AiPowStarkConfig>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

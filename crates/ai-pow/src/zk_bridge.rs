@@ -144,10 +144,9 @@ impl Layer0RowBudget {
     }
 
     /// Does the whole construction fit one Pearl-§4.8-bounded STARK
-    /// (`≤ PEARL_TRACE_BOUND = 2²²`)? After P-B.2.4 (strip-opening)
-    /// this is **true for every in-§4.8-envelope params set**
-    /// (incl. the real Llama-3.1-8B INT GEMMs) — the matrix-hash is
-    /// no longer the blocker.
+    /// (`≤ PEARL_TRACE_BOUND = 2²²`)? True for every in-§4.8-envelope params
+    /// set (incl. the real Llama-3.1-8B INT GEMMs): the trace is bounded by
+    /// the strip-opening schedule, not the full matrix hash.
     pub fn fits_one_stark(&self) -> bool {
         (self.required_trace_len() as u64) <= crate::params::PEARL_TRACE_BOUND
     }

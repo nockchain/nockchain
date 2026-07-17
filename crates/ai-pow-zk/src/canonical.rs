@@ -901,7 +901,6 @@ fn strip_blocks(c0: usize, c1: usize, num_chunks: usize) -> Vec<StripBlock> {
 /// O(|sel|·log n) rather than the O(max−min) covering range — this is what keeps
 /// the Layer-0 trace inside `PEARL_TRACE_BOUND` for scattered MoE routed tokens.
 /// For a contiguous `sel == c0..c1` it is byte-identical to `strip_blocks`.
-#[allow(dead_code)]
 fn strip_blocks_set(sel: &[usize], num_chunks: usize) -> Vec<StripBlock> {
     let mut out = Vec::new();
     if num_chunks == 1 {
@@ -1819,8 +1818,8 @@ mod tests {
         .expect("rectangular Pearl schedule");
         let layout = schedule_layout_for_strip_schedule(&p, &sched, len);
         let ((ca0, ca1, a_nc), (_cb0, _cb1, b_nc)) = sched.chunk_ranges(&p).expect("chunk ranges");
-        // B5b: schedule_layout now uses the SELECTIVE (disjoint-chunk) opening —
-        // only the chunks the scattered rows/cols touch, not the covering range.
+        // schedule_layout uses the SELECTIVE (disjoint-chunk) opening — only the
+        // chunks the scattered rows/cols touch, not the covering range.
         let kk = p.k as usize;
         let (a_chunks, _) =
             crate::blake3_tree::indexed_strips_chunk_set(&sched.a_indices, kk, a_nc * 1024);

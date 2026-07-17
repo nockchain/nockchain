@@ -287,9 +287,9 @@ mod bus_emit {
         // Pearl parity (audit N2): the PLAIN matrix operand `MAT_UNPACK` is
         // int7 `[-64,64]`, range-checked here alongside `NOISE_UNPACK` — exactly
         // Pearl `pearl_stark.rs` (`MAT_UNPACK_RANGE.chain(NOISE_UNPACK_RANGE)` →
-        // IRANGE7P1, "// Signal is in [-64, 64]"). Previously `MAT_UNPACK` went to
-        // IRANGE8 `[-128,127]`, admitting plain bytes Pearl rejects (accept-set
-        // divergence). `i8u8` still bridges these i8 cells to `UINT8_DATA`.
+        // IRANGE7P1, "// Signal is in [-64, 64]"). The tighter int7 bound (vs a
+        // plain i8 `[-128,127]`) is what keeps the accept-set identical to Pearl.
+        // `i8u8` bridges these i8 cells to `UINT8_DATA`.
         for i in 0..MAT_UNPACK_WIN {
             builder.push_interaction(
                 BUS_IRANGE7P1,
