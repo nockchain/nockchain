@@ -511,17 +511,33 @@ mod tests {
     /// the jackpot from the ticket's own `tile_state` + `s_a` must reproduce it
     /// exactly — proving there is no hidden degree of freedom that could change the
     /// jackpot without changing the matmul.
+    ///
+    /// PEARL MERGE-COMPAT LOCK: Pearl keys the jackpot with `s_A` DIRECTLY
+    /// (`compute_jackpot_hash(jackpot, key=a_noise_seed)`, Pearl zk-pow
+    /// proof_utils.rs:1411-1415). The native path's `pow_key_for_nonce(s_a, nonce)`
+    /// folds an EXTRA nonce and must NOT appear on this path — it would both break
+    /// Pearl merge-compat and reintroduce a skip-inference degree of freedom. We
+    /// assert the canonical jackpot equals the s_A-keyed hash and does NOT equal the
+    /// nonce-folded-key hash.
     #[test]
-    fn canonical_jackpot_is_pure_function_of_tile_and_seed() {
+    fn canonical_jackpot_keyed_by_s_a_direct_not_nonce_folded() {
         let params = canonical_params();
         let commit = [0x77u8; 32];
         for xn in [0u32, 1, 5, 100] {
             let t = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
-            let recomputed =
-                ai_pow::pearl_compat::pearl_jackpot_hash(&t.tile_state, &t.s_a);
+            // Pearl form: BLAKE3(M, key = s_A).
+            let pearl_keyed = ai_pow::pearl_compat::pearl_jackpot_hash(&t.tile_state, &t.s_a);
             assert_eq!(
-                recomputed, t.jackpot_hash,
-                "extranonce {xn}: jackpot must equal keyed_hash(tile_state, s_a)"
+                pearl_keyed, t.jackpot_hash,
+                "extranonce {xn}: jackpot must equal keyed_hash(tile_state, s_a) [Pearl s_A-direct]"
+            );
+            // Native form (forbidden here): BLAKE3(M, key = pow_key_for_nonce(s_a, nonce)).
+            let nonce_folded_key =
+                ai_pow::fiat_shamir::pow_key_for_nonce(&t.s_a, &xn.to_le_bytes());
+            let nonce_folded_jackpot = t.tile_state.keyed_hash(&nonce_folded_key);
+            assert_ne!(
+                nonce_folded_jackpot, t.jackpot_hash,
+                "extranonce {xn}: canonical jackpot must NOT use the nonce-folded native key"
             );
         }
     }

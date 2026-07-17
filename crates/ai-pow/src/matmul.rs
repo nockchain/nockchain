@@ -203,9 +203,11 @@ impl TileState {
     /// hardness check value (Pearl §4.5 line 16).
     ///
     /// Byte-equivalent to Pearl's `compute_jackpot_hash(jackpot, key)`
-    /// (Pearl zk-pow api/proof_utils.rs:1077-1081): hashes exactly
+    /// (Pearl zk-pow api/proof_utils.rs:1411-1415): hashes exactly
     /// 64 bytes (16 × `u32` little-endian) under the keyed BLAKE3 mode
-    /// with `pow_key` as the key. No context prefix.
+    /// with `pow_key` as the key. No context prefix. For a Pearl-compatible
+    /// (merge-mineable) jackpot the key MUST be `s_A` directly — not a
+    /// nonce-folded `pow_key_for_nonce(s_a, nonce)`, which is native-only.
     pub fn keyed_hash(&self, pow_key: &[u8; 32]) -> [u8; 32] {
         let mut hasher = Hasher::new_keyed(pow_key);
         for v in &self.0 {
