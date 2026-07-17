@@ -115,13 +115,23 @@ impl AsertParams {
     }
 
     /// Defaults for the AI puzzle ASERT, matching `+$ ai-asert`'s `$~`
-    /// clause. By default phase = anchor-height = ai-pow-activation-height
-    /// so the first AI block becomes the AI puzzle's anchor.
+    /// clause in tx-engine-1.hoon. By default phase = anchor-height =
+    /// ai-pow-activation-height so the first AI block becomes the AI puzzle's
+    /// anchor.
+    ///
+    /// The anchor target is `2^227`, NOT `2^291`: the AI jackpot is a 256-bit
+    /// BLAKE3 value, so an anchor `>= 2^256` would be trivially cleared by every
+    /// jackpot (no proof-of-work at the anchor). Paired with the AI work
+    /// normalizer `max-ai = max-target-atom / 2^64` (see `+compute-work-ai`), a
+    /// block at bex 227 contributes work equal to a ZK block at bex 291 —
+    /// equal-weight cross-puzzle fork choice. This mirrors the Hoon consensus
+    /// default; keeping them in sync matters because a fakenet with no
+    /// `--fakenet-ai-asert-*` override poked `2^291` here, which disabled AI PoW.
     pub fn ai_default() -> Self {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
-            anchor_target_atom: UBig::from(1u64) << 291,
+            anchor_target_atom: UBig::from(1u64) << 227,
             ideal_block_time: 300,
             half_life: 12 * 60 * 60,
             // Placeholder — first AI block's median-of-11 timestamp; pinned

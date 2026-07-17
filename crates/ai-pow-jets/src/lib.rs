@@ -19,6 +19,19 @@
 //! `ai-pow-miner`), so it is built once at boot and injected via
 //! [`init_ai_pow_verifier_setup`].
 
+// SOUNDNESS (consensus DoS): the verify jet's guarantee that a crafted `%ai-pow`
+// block can never crash the node relies on `std::panic::catch_unwind` converting an
+// attacker-induced panic (in decode or the vendored recursion verifier) into a
+// deterministic invalid-block `NO`. Under `panic = "abort"` catch_unwind is a no-op
+// and a panic aborts the whole process — turning one crafted block into a
+// network-wide crash. Refuse to build the consensus verifier that way.
+#[cfg(panic = "abort")]
+compile_error!(
+    "ai-pow-jets requires panic=unwind: the consensus verify jet relies on \
+     catch_unwind to turn crafted-block panics into deterministic invalid-block \
+     rejections; under panic=abort a crafted %ai-pow block would crash the node."
+);
+
 use ai_pow_miner::certificate_noun::{
     decode_ai_pow_pearl_merge_artifact_noun, verify_ai_pow_block_artifact, AiPowBlockVerifyOutcome,
     CertificateNounLimits, PearlMergeAiPowArtifactShape,
