@@ -62,9 +62,6 @@ const DEFAULT_PEARL_GATEWAY_REFRESH_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_BACKOFF_INITIAL_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_BACKOFF_MAX_MS: u64 = 30_000;
 const DEFAULT_RECONNECT_MAX_ATTEMPTS: u32 = 5;
-// The canonical production synth seed now lives in `ai_pow::synth` so a consensus
-// verifier re-derives the same matrices. This CLI default is a `str` view of it.
-const DEFAULT_SYNTH_SEED: &str = "ai-pow-prod-v1";
 const DEFAULT_MATMUL_PARAMS: MatmulParams = MatmulParams {
     m: 8,
     k: 1024,
@@ -216,7 +213,9 @@ fn build_pkh_configs(args: &Args) -> Option<Vec<MiningPkhConfig>> {
             share: 1,
             pkh: pkh.clone(),
         }])
-    } else { args.mining_pkh_adv.clone() }
+    } else {
+        args.mining_pkh_adv.clone()
+    }
 }
 
 fn build_puzzle_inputs(args: &Args) -> Result<AiPuzzleInputs> {

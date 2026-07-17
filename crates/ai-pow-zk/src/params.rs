@@ -60,7 +60,8 @@ impl ZkParams {
     /// defensively because the cross-crate boundary could be misused.
     pub fn validate(&self) -> Result<(), String> {
         self.validate_base()?;
-        if self.tile == 0 || !self.m.is_multiple_of(self.tile) || !self.n.is_multiple_of(self.tile) {
+        if self.tile == 0 || !self.m.is_multiple_of(self.tile) || !self.n.is_multiple_of(self.tile)
+        {
             return Err("tile must divide m and n".into());
         }
         Ok(())

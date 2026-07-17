@@ -328,6 +328,10 @@ pub fn ai_pow_verifier_setup_initialized() -> bool {
 ///
 /// Returns `Err` if already initialized (boot should call this exactly once) or if
 /// the table is empty / has duplicate buckets.
+// `Err(())` is a deliberate succeeded/failed marker: every caller adds its own
+// boot-context error via `.map_err(|()| ..)`, so a richer error type would be
+// discarded at the call site.
+#[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(), ()> {
     let heights: Vec<usize> = setups.iter().map(|s| s.trace_height).collect();
     if !setup_table_heights_valid(&heights) {
@@ -359,6 +363,8 @@ pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(),
 /// `context_path`; the recorded `committed_digest` is re-checked on every page-in.
 /// Rejects an empty table or duplicate trace-height buckets; `Err` if already
 /// initialized.
+// `Err(())` marker: callers add boot context via `.map_err(|()| ..)`.
+#[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup_disk(buckets: Vec<DiskBucket>, cap: usize) -> Result<(), ()> {
     let heights: Vec<usize> = buckets.iter().map(|b| b.trace_height).collect();
     if !setup_table_heights_valid(&heights) {

@@ -178,7 +178,7 @@ mod tests {
         assert!(rows.is_power_of_two() && rows >= span);
         let mut flat: Vec<Val> = vec![Val::default(); rows * TOTAL_TRACE_WIDTH];
         for r in 0..rows {
-            let mut row = &mut flat[r * TOTAL_TRACE_WIDTH..(r + 1) * TOTAL_TRACE_WIDTH];
+            let row = &mut flat[r * TOTAL_TRACE_WIDTH..(r + 1) * TOTAL_TRACE_WIDTH];
             chip.fill_row(r, row);
         }
         RowMajorMatrix::new(flat, TOTAL_TRACE_WIDTH)

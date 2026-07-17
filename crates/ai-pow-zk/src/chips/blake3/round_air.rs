@@ -596,12 +596,8 @@ mod tests {
     /// counter / block_len / flags pattern.
     fn canonical_initial_state() -> [u32; 16] {
         let mut s = [0u32; 16];
-        for i in 0..8 {
-            s[i] = BLAKE3_IV[i];
-        }
-        for i in 0..4 {
-            s[8 + i] = BLAKE3_IV[i];
-        }
+        s[..8].copy_from_slice(&BLAKE3_IV[..8]);
+        s[8..12].copy_from_slice(&BLAKE3_IV[..4]);
         // counter_low, counter_high, block_len, flags:
         s[12] = 0;
         s[13] = 0;

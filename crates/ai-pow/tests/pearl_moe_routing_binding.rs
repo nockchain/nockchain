@@ -7,8 +7,8 @@
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
     moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError,
-    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern,
-    PEARL_MMA_INT7XINT7_TO_INT32, PEARL_MOE_MAX_ROUTING_ENTRIES,
+    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern, PEARL_MMA_INT7XINT7_TO_INT32,
+    PEARL_MOE_MAX_ROUTING_ENTRIES,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
 

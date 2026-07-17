@@ -40,3 +40,6 @@ gnort = { workspace = true }
 ibig = { workspace = true }
 once_cell = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

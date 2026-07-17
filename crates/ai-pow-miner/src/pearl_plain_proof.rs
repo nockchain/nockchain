@@ -57,6 +57,7 @@ pub enum PlainProofWireFormat {
     /// Legacy pre-fork V1: no trailing `moe` field. A V2 gateway still accepts
     /// this via `PlainProof::deserialize_compat` (which retries with a `0x00`
     /// appended); retained only for talking to a pre-fork gateway.
+    #[allow(dead_code)] // used under some feature/target configs only
     LegacyV1,
 }
 

@@ -43,10 +43,9 @@ use ai_pow::pearl_compat::{
 #[cfg(test)]
 use ai_pow::pearl_compat::{PEARL_NOCKCHAIN_AUX_CHAIN_ID_MAX, PEARL_NOCKCHAIN_AUX_EXTRA_MAX};
 use ai_pow::zk_bridge::{
-    expected_layer0_rows_for_strip_schedule,
-    verify_pearl_moe_compact_recursive_certificate, zk_params_from_matmul,
-    AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun, BridgeError,
-    ZkPublicCommitments,
+    expected_layer0_rows_for_strip_schedule, verify_pearl_moe_compact_recursive_certificate,
+    zk_params_from_matmul, AiPowCompactRecursiveCertificateRun, AiPowRecursiveCertificateRun,
+    BridgeError, ZkPublicCommitments,
 };
 use ai_pow_zk::canonical::StripIndexSchedule;
 use ai_pow_zk::{CompositePublicInputs, ZkParams};
@@ -296,7 +295,11 @@ pub fn decode_pearl_merge_ai_pow_nonce(
     }
 
     let mut offset = 4usize;
-    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+    let statement_len = u16::from_le_bytes(
+        nonce[offset..offset + 2]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    ) as usize;
     offset += 2;
     let statement_end =
         offset
@@ -313,7 +316,11 @@ pub fn decode_pearl_merge_ai_pow_nonce(
     if nonce.len().saturating_sub(offset) < 4 + 1 {
         return Err(CertificateNounError::Shape("ai-pow nonce coinbase length"));
     }
-    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+    let coinbase_len = u32::from_le_bytes(
+        nonce[offset..offset + 4]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    ) as usize;
     offset += 4;
     if coinbase_len > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
         return Err(CertificateNounError::LimitExceeded(
@@ -501,7 +508,11 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
 
     // --- dense framing: statement ---
     let mut offset = 4usize;
-    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+    let statement_len = u16::from_le_bytes(
+        nonce[offset..offset + 2]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    ) as usize;
     offset += 2;
     let statement_end =
         offset
@@ -523,7 +534,11 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
             "ai-pow MoE nonce coinbase length",
         ));
     }
-    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+    let coinbase_len = u32::from_le_bytes(
+        nonce[offset..offset + 4]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    ) as usize;
     offset += 4;
     if coinbase_len > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
         return Err(CertificateNounError::LimitExceeded(
@@ -597,7 +612,11 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     if nonce.len().saturating_sub(offset) < tail_fixed {
         return Err(CertificateNounError::Shape("ai-pow MoE nonce tail"));
     }
-    let expert_idx = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above"));
+    let expert_idx = u16::from_le_bytes(
+        nonce[offset..offset + 2]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    );
     offset += 2;
     if (expert_idx as usize) >= e {
         return Err(CertificateNounError::Shape(
@@ -607,11 +626,15 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     let mut routing_offsets = Vec::with_capacity(e);
     for _ in 0..e {
         routing_offsets.push(u32::from_le_bytes(
-            nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above"),
+            nonce[offset..offset + 4]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
         ));
         offset += 4;
     }
-    let hash_routing: [u8; 32] = nonce[offset..offset + 32].try_into().expect("fixed-width field; buffer length checked above");
+    let hash_routing: [u8; 32] = nonce[offset..offset + 32]
+        .try_into()
+        .expect("fixed-width field; buffer length checked above");
     offset += 32;
     let outer_count = nonce[offset] as usize;
     offset += 1;
@@ -636,11 +659,17 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     let mut outer_indices = Vec::with_capacity(outer_count);
     for _ in 0..outer_count {
         outer_indices.push(u32::from_le_bytes(
-            nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above"),
+            nonce[offset..offset + 4]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
         ));
         offset += 4;
     }
-    let routing_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+    let routing_len = u32::from_le_bytes(
+        nonce[offset..offset + 4]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above"),
+    ) as usize;
     offset += 4;
     if routing_len > PEARL_MOE_MAX_ROUTING_ENTRIES {
         return Err(CertificateNounError::LimitExceeded(
@@ -822,6 +851,7 @@ pub(crate) fn compact_recursive_certificate_to_node(
 /// This is the inverse of [`recursive_certificate_to_node`]. It exists so the
 /// production Rust/Hoon boundary can verify the structured noun artifact
 /// directly instead of requiring an adjacent compact byte blob.
+#[allow(dead_code)] // used under some feature/target configs only
 fn recursive_certificate_from_node<C: DeserializeOwned>(
     node: &AiProofNode,
 ) -> Result<C, CertificateNounError> {
@@ -2618,7 +2648,9 @@ fn pearl_merge_legacy_found_idx(
     if h != params.tile || w != params.tile {
         return None;
     }
-    if !public_params.t_rows.is_multiple_of(params.tile) || !public_params.t_cols.is_multiple_of(params.tile) {
+    if !public_params.t_rows.is_multiple_of(params.tile)
+        || !public_params.t_cols.is_multiple_of(params.tile)
+    {
         return None;
     }
     let col_tiles = public_params.n / params.tile;
@@ -4127,6 +4159,7 @@ impl SerializeMap for NodeMap {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // used under some feature/target configs only
 struct DeError(String);
 
 impl std::fmt::Display for DeError {
@@ -4143,8 +4176,10 @@ impl de::Error for DeError {
     }
 }
 
+#[allow(dead_code)] // used under some feature/target configs only
 type DeResult<T> = Result<T, DeError>;
 
+#[allow(dead_code)] // used under some feature/target configs only
 struct NodeDeserializer {
     node: AiProofNode,
 }
@@ -4497,6 +4532,7 @@ impl<'de> de::Deserializer<'de> for NodeDeserializer {
     }
 }
 
+#[allow(dead_code)] // used under some feature/target configs only
 struct NodeSeqAccess {
     items: Vec<AiProofNode>,
     index: usize,
@@ -4561,6 +4597,7 @@ impl<'de> SeqAccess<'de> for NodeSeqAccess {
     }
 }
 
+#[allow(dead_code)] // used under some feature/target configs only
 struct NodeMapAccess {
     items: Vec<(AiProofNode, AiProofNode)>,
     index: usize,
@@ -4568,6 +4605,7 @@ struct NodeMapAccess {
 }
 
 impl NodeMapAccess {
+    #[allow(dead_code)] // used under some feature/target configs only
     fn new(items: &[(AiProofNode, AiProofNode)]) -> Self {
         Self {
             items: items.to_vec(),
@@ -4613,12 +4651,14 @@ impl<'de> MapAccess<'de> for NodeMapAccess {
     }
 }
 
+#[allow(dead_code)] // used under some feature/target configs only
 struct NodeEnumAccess {
     variant: u32,
     payload: Option<AiProofNode>,
 }
 
 impl NodeEnumAccess {
+    #[allow(dead_code)] // used under some feature/target configs only
     fn new(node: &AiProofNode) -> DeResult<Self> {
         match node {
             AiProofNode::U64(variant) => Ok(Self {
@@ -4781,12 +4821,14 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // used under some feature/target configs only
     fn words_le(b: &[u8; 32]) -> [u32; 8] {
         core::array::from_fn(|i| {
             u32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]])
         })
     }
 
+    #[allow(dead_code)] // used under some feature/target configs only
     fn single_tile_prod_params() -> MatmulParams {
         MatmulParams {
             m: 8,
@@ -4799,6 +4841,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // used under some feature/target configs only
     fn production_statement_fixture_for_params(
         params: MatmulParams,
         block_commitment: &[u8],
@@ -4841,6 +4884,7 @@ mod tests {
         (params, commitments, pis, trace_height, found_idx)
     }
 
+    #[allow(dead_code)] // used under some feature/target configs only
     fn production_statement_fixture(
         block_commitment: &[u8],
         nonce: &[u8],
@@ -4879,6 +4923,7 @@ mod tests {
         slab
     }
 
+    #[allow(dead_code)] // used under some feature/target configs only
     fn build_ai_pow_artifact_slab(nonce: &[u8], certificate: &NounSlab) -> NounSlab {
         let cert_space = certificate.noun_space();
         let mut slab: NounSlab = NounSlab::new();

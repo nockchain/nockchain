@@ -933,18 +933,15 @@ mod tests {
                         spot_checks: 1,
                         difficulty_bits: 0,
                     };
-                    match p.validate_prod_envelope() {
-                        Ok(()) => {
-                            assert!(
-                                p.pearl_trace_bound() <= PEARL_TRACE_BOUND,
-                                "{p:?} in envelope but trace {} > 2^22",
-                                p.pearl_trace_bound()
-                            );
-                            checked += 1;
-                        }
-                        // Out-of-envelope combos are fine to skip; the
-                        // theorem is only about the Ok arm.
-                        Err(_) => {}
+                    // Out-of-envelope combos are fine to skip; the theorem is
+                    // only about the Ok arm.
+                    if p.validate_prod_envelope().is_ok() {
+                        assert!(
+                            p.pearl_trace_bound() <= PEARL_TRACE_BOUND,
+                            "{p:?} in envelope but trace {} > 2^22",
+                            p.pearl_trace_bound()
+                        );
+                        checked += 1;
                     }
                 }
             }

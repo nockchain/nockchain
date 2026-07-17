@@ -104,7 +104,10 @@
     allow(
         clippy::unwrap_used,
         clippy::erasing_op,
-        clippy::identity_op
+        clippy::identity_op,
+        // Layout/offset tests deliberately assert relationships between const
+        // column offsets to document + guard the trace schedule.
+        clippy::assertions_on_constants
     )
 )]
 

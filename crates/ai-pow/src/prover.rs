@@ -36,15 +36,13 @@ use crate::tile_hash::{difficulty_target, hash_le_target};
 /// Pearl §4.1 input range: `|A|, |B| <= 64`.
 const INPUT_RANGE_MAX: i8 = 64;
 
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ProverOptions {
     /// Deprecated no-op retained for API compatibility. Production mining uses
     /// one verifier-derived jackpot tile per nonce-bound attempt, so there is
     /// no miner-selected tile set to scan for a "best" hash.
     pub seek_best: bool,
 }
-
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MineError {

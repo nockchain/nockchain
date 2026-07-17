@@ -24,6 +24,8 @@
 
 use p3_matrix::dense::RowMajorMatrix;
 
+#[cfg(test)]
+use crate::blake3_tree::strip_opening_rows;
 use crate::blake3_tree::{indexed_strips_chunk_range, left_len};
 use crate::chips::blake3::chip::pack_tweak;
 use crate::chips::blake3::compress::Blake3Tweak;
@@ -120,10 +122,12 @@ pub(crate) struct ScheduleLayout {
     /// First §6(b) sweep row (`mh_end + 3`) — `== segments[0].sweep_start`.
     pub sweep_start: usize,
     /// One past segment 0's last sweep row (`== segments[0].store_start`).
+    #[allow(dead_code)] // read by layout tests; kept as the pre-G3 single-segment view
     pub store_start: usize,
     /// First FoldChip row of segment 0 (`== segments[0].fold_start`).
     pub fold_start: usize,
     /// One past segment 0's last fold row (`== segments[0].fold_end`).
+    #[allow(dead_code)] // read by layout tests; kept as the pre-G3 single-segment view
     pub fold_end: usize,
     /// First jackpot-hash row (`trace_len - 8`).
     pub jpot_start: usize,
@@ -837,6 +841,7 @@ enum StripBlock {
 /// — mirrors `fold_strip` / `subtree_inside` / `place_leaf_chunk`
 /// **exactly** (sibling subtrees consume 0 rows; each block = 8
 /// rows). `8 * strip_blocks(..).len()` == `strip_opening_rows`.
+#[cfg(test)]
 fn strip_blocks(c0: usize, c1: usize, num_chunks: usize) -> Vec<StripBlock> {
     let mut out = Vec::new();
     if num_chunks == 1 {

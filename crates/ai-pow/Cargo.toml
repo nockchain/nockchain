@@ -33,3 +33,6 @@ zk = ["dep:ai-pow-zk", "dep:bincode", "ai-pow-zk/recursion"]
 [[bench]]
 name = "bench"
 harness = false
+
+[lints]
+workspace = true

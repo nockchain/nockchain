@@ -23,6 +23,7 @@
 //! DISK-PAGED — the jet pages it in from disk during the first `check-pow` (read +
 //! deserialize, no rebuild). Marked `#[ignore]`.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::params::MatmulParams;
 use ai_pow_jets::setup::{
     install_verifier_setup_disk_from_setups, prove_canonical_moe_block,

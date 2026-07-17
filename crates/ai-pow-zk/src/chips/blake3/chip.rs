@@ -446,12 +446,8 @@ impl Blake3Chip {
 
         // Build the initial state: cv[0..8] ++ IV[0..4] ++ tweak[0..4].
         let mut state = [0u32; 16];
-        for i in 0..8 {
-            state[i] = cv_in[i];
-        }
-        for i in 0..4 {
-            state[8 + i] = BLAKE3_IV[i];
-        }
+        state[..8].copy_from_slice(&cv_in[..8]);
+        state[8..12].copy_from_slice(&BLAKE3_IV[..4]);
         state[12] = tweak.counter_low;
         state[13] = tweak.counter_high as u32;
         state[14] = tweak.block_len;

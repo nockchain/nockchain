@@ -2648,8 +2648,14 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     strip_schedule
         .chunk_ranges(&zk_params)
         .map_err(BridgeError::ZkParamsInvalid)?;
-    if !strip_schedule.a_indices.len().is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
-        || !strip_schedule.b_indices.len().is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
+    if !strip_schedule
+        .a_indices
+        .len()
+        .is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
+        || !strip_schedule
+            .b_indices
+            .len()
+            .is_multiple_of(ai_pow_zk::composite_layout::TILE_H)
     {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -3209,7 +3215,9 @@ fn pearl_merge_legacy_ticket(
     if h != params.tile || w != params.tile {
         return None;
     }
-    if !public_params.t_rows.is_multiple_of(params.tile) || !public_params.t_cols.is_multiple_of(params.tile) {
+    if !public_params.t_rows.is_multiple_of(params.tile)
+        || !public_params.t_cols.is_multiple_of(params.tile)
+    {
         return None;
     }
     let col_tiles = public_params.n / params.tile;
@@ -5473,7 +5481,10 @@ mod tests {
         let t = params.tile as usize;
         let r = params.noise_rank as usize;
         let steps = params.num_stripes() as usize;
-        assert!(t.is_multiple_of(TILE_H), "tile must tile into TILE_H sub-blocks");
+        assert!(
+            t.is_multiple_of(TILE_H),
+            "tile must tile into TILE_H sub-blocks"
+        );
         assert!(
             r <= TILE_D,
             "stripe width must fit one micro-step (zero-pad)"
@@ -6162,19 +6173,9 @@ mod tests {
                             // plain = a′ − noise; recover via the
                             // A3.1-proven decomposition.
                             if s.side_a {
-                                ai_pow_zk::noise_ref::e_value(
-                                    &ctx.s_a,
-                                    lane_g,
-                                    l0 + m as u32,
-                                    r,
-                                )
+                                ai_pow_zk::noise_ref::e_value(&ctx.s_a, lane_g, l0 + m as u32, r)
                             } else {
-                                ai_pow_zk::noise_ref::f_value(
-                                    &ctx.s_b,
-                                    l0 + m as u32,
-                                    lane_g,
-                                    r,
-                                )
+                                ai_pow_zk::noise_ref::f_value(&ctx.s_b, l0 + m as u32, lane_g, r)
                             }
                         ),
                         "store plain byte != committed (strip-opening) byte"

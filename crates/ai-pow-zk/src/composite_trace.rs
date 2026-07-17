@@ -396,12 +396,8 @@ impl CompositeTrace {
 
         // Initial state at the start of hash: cv ++ IV[0..4] ++ tweak words.
         let mut state = [0u32; 16];
-        for i in 0..8 {
-            state[i] = cv_in[i];
-        }
-        for i in 0..4 {
-            state[8 + i] = BLAKE3_IV[i];
-        }
+        state[..8].copy_from_slice(&cv_in[..8]);
+        state[8..12].copy_from_slice(&BLAKE3_IV[..4]);
         state[12] = tweak.counter_low;
         state[13] = tweak.counter_high as u32;
         state[14] = tweak.block_len;
@@ -657,10 +653,8 @@ impl CompositeTrace {
                 let left = chunk_cvs[i];
                 let right = chunk_cvs[i + 1];
                 let mut message = [0u32; 16];
-                for j in 0..8 {
-                    message[j] = left[j];
-                    message[8 + j] = right[j];
-                }
+                message[..8].copy_from_slice(&left[..8]);
+                message[8..16].copy_from_slice(&right[..8]);
 
                 let is_root_parent = is_top_layer && i + 2 == chunk_cvs.len();
                 let mut flags = F_KEYED_HASH | F_PARENT;
@@ -973,10 +967,8 @@ impl CompositeTrace {
         const F_ROOT: u32 = 1 << 3;
         const F_KEYED_HASH: u32 = 1 << 4;
         let mut message = [0u32; 16];
-        for j in 0..8 {
-            message[j] = left[j];
-            message[8 + j] = right[j];
-        }
+        message[..8].copy_from_slice(&left[..8]);
+        message[8..16].copy_from_slice(&right[..8]);
         let mut flags = F_KEYED_HASH | F_PARENT;
         if is_root {
             flags |= F_ROOT;

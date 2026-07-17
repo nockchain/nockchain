@@ -36,6 +36,24 @@ unnecessary_sort_by = "allow"
 collapsible_match = "allow"
 manual_checked_ops = "allow"
 while_let_loop = "allow"
+# Style/complexity lints that are pervasive and idiomatic in the numeric / AIR /
+# STARK-prover code (explicit trace-index loops, prover functions with many
+# statement parameters, complex circuit-prover data types). Fixing them would hurt
+# clarity or force churny struct-wrapping without changing behaviour.
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Pedantic style lints where the existing form is deliberate: mnemonic hex
+# constants (`0xC0FFEE_42`) and nested indented doc-list structure in the AIR
+# constraint documentation.
+unusual_byte_groupings = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+# Noun decoders dispatch on tag cords via `x if x == tas!(b"..")` guards (the
+# `tas!` macro cannot appear in pattern position), and some driver enums carry
+# one intentionally-large proof/artifact variant.
+redundant_guards = "allow"
+large_enum_variant = "allow"
 
 [workspace.dependencies]
 aes = { version = "0.8.3", default-features = false }

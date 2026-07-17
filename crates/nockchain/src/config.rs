@@ -715,9 +715,10 @@ mod tests {
     fn validate_rejects_ideal_or_half_life_without_trio() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        let mut zk = FakenetAsertArgs::default();
-        zk.ideal_block_time = Some(30);
-        cli.fakenet_asert = zk;
+        cli.fakenet_asert = FakenetAsertArgs {
+            ideal_block_time: Some(30),
+            ..Default::default()
+        };
         let err = cli
             .validate()
             .expect_err("expected ideal-without-trio error");

@@ -261,13 +261,29 @@ impl PearlIncompleteBlockHeader {
         if bytes.len() != PEARL_INCOMPLETE_BLOCK_HEADER_SIZE {
             return Err(PearlCompatError::BadHeaderLen(bytes.len()));
         }
-        let version = u32::from_le_bytes(bytes[0..4].try_into().expect("fixed-width field; buffer length checked above"));
-        let mut prev_block: [u8; 32] = bytes[4..36].try_into().expect("fixed-width field; buffer length checked above");
+        let version = u32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let mut prev_block: [u8; 32] = bytes[4..36]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         prev_block.reverse();
-        let mut merkle_root: [u8; 32] = bytes[36..68].try_into().expect("fixed-width field; buffer length checked above");
+        let mut merkle_root: [u8; 32] = bytes[36..68]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         merkle_root.reverse();
-        let timestamp = u32::from_le_bytes(bytes[68..72].try_into().expect("fixed-width field; buffer length checked above"));
-        let nbits = u32::from_le_bytes(bytes[72..76].try_into().expect("fixed-width field; buffer length checked above"));
+        let timestamp = u32::from_le_bytes(
+            bytes[68..72]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let nbits = u32::from_le_bytes(
+            bytes[72..76]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
         Ok(Self {
             version,
             prev_block,
@@ -590,15 +606,29 @@ impl PearlMiningConfig {
         if bytes.len() != PEARL_MINING_CONFIG_SIZE {
             return Err(PearlCompatError::BadMiningConfigLen(bytes.len()));
         }
-        let common_dim = u32::from_le_bytes(bytes[0..4].try_into().expect("fixed-width field; buffer length checked above"));
-        let rank = u16::from_le_bytes(bytes[4..6].try_into().expect("fixed-width field; buffer length checked above"));
-        let mma_type = u16::from_le_bytes(bytes[6..8].try_into().expect("fixed-width field; buffer length checked above"));
+        let common_dim = u32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let rank = u16::from_le_bytes(
+            bytes[4..6]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let mma_type = u16::from_le_bytes(
+            bytes[6..8]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
         if mma_type != PEARL_MMA_INT7XINT7_TO_INT32 {
             return Err(PearlCompatError::UnsupportedMmaType(mma_type));
         }
         let rows_pattern = PearlPeriodicPattern::from_bytes(&bytes[8..14])?;
         let cols_pattern = PearlPeriodicPattern::from_bytes(&bytes[14..20])?;
-        let reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE] = bytes[20..52].try_into().expect("fixed-width field; buffer length checked above");
+        let reserved: [u8; PEARL_MINING_CONFIG_RESERVED_SIZE] = bytes[20..52]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         parse_mining_config_trailer(&reserved)?;
         Ok(Self {
             common_dim,
@@ -770,13 +800,35 @@ impl PearlPublicProofParams {
         if e > PEARL_MOE_MAX_NUM_EXPERTS {
             return Err(PearlCompatError::MoeExpertsExceedMax(e));
         }
-        let hash_a = bytes[52..84].try_into().expect("fixed-width field; buffer length checked above");
-        let hash_b = bytes[84..116].try_into().expect("fixed-width field; buffer length checked above");
-        let hash_jackpot = bytes[116..148].try_into().expect("fixed-width field; buffer length checked above");
-        let m = u32::from_le_bytes(bytes[148..152].try_into().expect("fixed-width field; buffer length checked above"));
-        let n = u32::from_le_bytes(bytes[152..156].try_into().expect("fixed-width field; buffer length checked above"));
-        let t_rows = u32::from_le_bytes(bytes[156..160].try_into().expect("fixed-width field; buffer length checked above"));
-        let t_cols = u32::from_le_bytes(bytes[160..164].try_into().expect("fixed-width field; buffer length checked above"));
+        let hash_a = bytes[52..84]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let hash_b = bytes[84..116]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let hash_jackpot = bytes[116..148]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let m = u32::from_le_bytes(
+            bytes[148..152]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let n = u32::from_le_bytes(
+            bytes[152..156]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let t_rows = u32::from_le_bytes(
+            bytes[156..160]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let t_cols = u32::from_le_bytes(
+            bytes[160..164]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
 
         // MoE tail. Need at least the routing offsets before the fixed remainder.
         let min_with_offsets = PEARL_MOE_MIN_WIRE_SIZE + e * PEARL_MOE_ROUTING_OFFSET_BYTES;
@@ -787,7 +839,11 @@ impl PearlPublicProofParams {
             });
         }
         let tail = &bytes[PEARL_PUBLIC_PROOF_PARAMS_SIZE..];
-        let expert_idx = u16::from_le_bytes(tail[0..2].try_into().expect("fixed-width field; buffer length checked above"));
+        let expert_idx = u16::from_le_bytes(
+            tail[0..2]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
         if expert_idx >= cfg.e {
             return Err(PearlCompatError::MoeExpertIdxOutOfRange {
                 expert_idx,
@@ -798,11 +854,15 @@ impl PearlPublicProofParams {
         let mut routing_offsets = Vec::with_capacity(e);
         for _ in 0..e {
             routing_offsets.push(u32::from_le_bytes(
-                tail[cursor..cursor + 4].try_into().expect("fixed-width field; buffer length checked above"),
+                tail[cursor..cursor + 4]
+                    .try_into()
+                    .expect("fixed-width field; buffer length checked above"),
             ));
             cursor += 4;
         }
-        let hash_routing: [u8; 32] = tail[cursor..cursor + 32].try_into().expect("fixed-width field; buffer length checked above");
+        let hash_routing: [u8; 32] = tail[cursor..cursor + 32]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         cursor += 32;
         let num_outer = tail[cursor] as usize;
         cursor += 1;
@@ -820,7 +880,9 @@ impl PearlPublicProofParams {
         let mut outer_indices = Vec::with_capacity(num_outer);
         for _ in 0..num_outer {
             outer_indices.push(u32::from_le_bytes(
-                tail[cursor..cursor + 4].try_into().expect("fixed-width field; buffer length checked above"),
+                tail[cursor..cursor + 4]
+                    .try_into()
+                    .expect("fixed-width field; buffer length checked above"),
             ));
             cursor += 4;
         }
@@ -915,13 +977,35 @@ impl PearlPublicProofParams {
             return Err(PearlCompatError::BadPublicParamsLen(bytes.len()));
         }
         let mining_config = PearlMiningConfig::from_bytes(&bytes[0..52])?;
-        let hash_a = bytes[52..84].try_into().expect("fixed-width field; buffer length checked above");
-        let hash_b = bytes[84..116].try_into().expect("fixed-width field; buffer length checked above");
-        let hash_jackpot = bytes[116..148].try_into().expect("fixed-width field; buffer length checked above");
-        let m = u32::from_le_bytes(bytes[148..152].try_into().expect("fixed-width field; buffer length checked above"));
-        let n = u32::from_le_bytes(bytes[152..156].try_into().expect("fixed-width field; buffer length checked above"));
-        let t_rows = u32::from_le_bytes(bytes[156..160].try_into().expect("fixed-width field; buffer length checked above"));
-        let t_cols = u32::from_le_bytes(bytes[160..164].try_into().expect("fixed-width field; buffer length checked above"));
+        let hash_a = bytes[52..84]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let hash_b = bytes[84..116]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let hash_jackpot = bytes[116..148]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
+        let m = u32::from_le_bytes(
+            bytes[148..152]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let n = u32::from_le_bytes(
+            bytes[152..156]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let t_rows = u32::from_le_bytes(
+            bytes[156..160]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
+        let t_cols = u32::from_le_bytes(
+            bytes[160..164]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
 
         if !mining_config.rows_pattern.offset_is_valid(t_rows)
             || !mining_config.cols_pattern.offset_is_valid(t_cols)
@@ -1044,7 +1128,8 @@ impl PearlPublicProofParams {
         let dot_product_len = self.mining_config.dot_product_length()? as u64;
         let worker_input_size = u64::from(h.saturating_add(w)).saturating_mul(dot_product_len);
 
-        if !(r.is_power_of_two() && (32..=1024).contains(&r))
+        if !r.is_power_of_two()
+            || !(32..=1024).contains(&r)
             || !r.is_multiple_of(PEARL_TILE_D)
             || k > (1 << 16)
             || !k.is_multiple_of(64)
@@ -1973,7 +2058,9 @@ impl PearlNockchainAux {
         if !(PEARL_NOCKCHAIN_AUX_MIN_SIZE..=PEARL_NOCKCHAIN_AUX_MAX_SIZE).contains(&bytes.len()) {
             return Err(PearlCompatError::BadNockchainAuxLen(bytes.len()));
         }
-        let magic: [u8; 4] = bytes[0..4].try_into().expect("fixed-width field; buffer length checked above");
+        let magic: [u8; 4] = bytes[0..4]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         if magic != PEARL_NOCKCHAIN_AUX_MAGIC {
             return Err(PearlCompatError::BadNockchainAuxMagic(magic));
         }
@@ -1994,12 +2081,21 @@ impl PearlNockchainAux {
 
         let nockchain_chain_id = bytes[offset..after_chain].to_vec();
         offset = after_chain;
-        let nock_block_commitment: [u8; 32] = bytes[offset..offset + 32].try_into().expect("fixed-width field; buffer length checked above");
+        let nock_block_commitment: [u8; 32] = bytes[offset..offset + 32]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         offset += 32;
-        let nockchain_target_epoch_or_height =
-            u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("fixed-width field; buffer length checked above"));
+        let nockchain_target_epoch_or_height = u64::from_le_bytes(
+            bytes[offset..offset + 8]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        );
         offset += 8;
-        let extra_len = u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+        let extra_len = u16::from_le_bytes(
+            bytes[offset..offset + 2]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        ) as usize;
         offset += 2;
         validate_nockchain_aux_extra_len(extra_len)?;
         let expected = offset
@@ -2154,21 +2250,31 @@ impl PearlMergePublicStatement {
         {
             return Err(PearlCompatError::BadMergePublicStatementLen(bytes.len()));
         }
-        let magic: [u8; 4] = bytes[0..4].try_into().expect("fixed-width field; buffer length checked above");
+        let magic: [u8; 4] = bytes[0..4]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         if magic != PEARL_MERGE_PUBLIC_STATEMENT_MAGIC {
             return Err(PearlCompatError::BadMergePublicStatementMagic(magic));
         }
 
         let mut offset = 4usize;
         let block_header = bytes[offset..offset + PEARL_INCOMPLETE_BLOCK_HEADER_SIZE]
-            .try_into().expect("fixed-width field; buffer length checked above");
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         offset += PEARL_INCOMPLETE_BLOCK_HEADER_SIZE;
         let public_data = bytes[offset..offset + PEARL_PUBLIC_PROOF_PARAMS_SIZE]
-            .try_into().expect("fixed-width field; buffer length checked above");
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         offset += PEARL_PUBLIC_PROOF_PARAMS_SIZE;
-        let expected_aux_commitment = bytes[offset..offset + 32].try_into().expect("fixed-width field; buffer length checked above");
+        let expected_aux_commitment = bytes[offset..offset + 32]
+            .try_into()
+            .expect("fixed-width field; buffer length checked above");
         offset += 32;
-        let aux_len = u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
+        let aux_len = u16::from_le_bytes(
+            bytes[offset..offset + 2]
+                .try_into()
+                .expect("fixed-width field; buffer length checked above"),
+        ) as usize;
         offset += 2;
         let expected = offset
             .checked_add(aux_len)
@@ -2961,7 +3067,11 @@ fn read_canonical_varint(tx: &[u8], offset: &mut usize) -> Result<u64, PearlComp
         0x00..=0xfc => Ok(u64::from(tag)),
         0xfd => {
             let bytes = take(tx, offset, 2)?;
-            let value = u16::from_le_bytes(bytes.try_into().expect("fixed-width field; buffer length checked above")) as u64;
+            let value = u16::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("fixed-width field; buffer length checked above"),
+            ) as u64;
             if value < 0xfd {
                 return Err(PearlCompatError::PearlAuxMalformedCoinbaseTx);
             }
@@ -2969,7 +3079,11 @@ fn read_canonical_varint(tx: &[u8], offset: &mut usize) -> Result<u64, PearlComp
         }
         0xfe => {
             let bytes = take(tx, offset, 4)?;
-            let value = u32::from_le_bytes(bytes.try_into().expect("fixed-width field; buffer length checked above")) as u64;
+            let value = u32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("fixed-width field; buffer length checked above"),
+            ) as u64;
             if value <= u64::from(u16::MAX) {
                 return Err(PearlCompatError::PearlAuxMalformedCoinbaseTx);
             }
@@ -2977,7 +3091,11 @@ fn read_canonical_varint(tx: &[u8], offset: &mut usize) -> Result<u64, PearlComp
         }
         0xff => {
             let bytes = take(tx, offset, 8)?;
-            let value = u64::from_le_bytes(bytes.try_into().expect("fixed-width field; buffer length checked above"));
+            let value = u64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .expect("fixed-width field; buffer length checked above"),
+            );
             if value <= u64::from(u32::MAX) {
                 return Err(PearlCompatError::PearlAuxMalformedCoinbaseTx);
             }
