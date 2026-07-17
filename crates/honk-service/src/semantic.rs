@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,18 @@ pub struct SemanticSymbol {
     signature: String,
 }
 
+/// An editor-only lexical face and the exact source region in which it is
+/// visible. These records are derived from the traced parser AST without
+/// changing the AST or any compiler-owned type-checking path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticBinding {
+    pub id: SemanticNodeId,
+    pub name: String,
+    pub declaration_range: SemanticTextRange,
+    pub scope_range: SemanticTextRange,
+    signature: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticHover {
     pub id: SemanticNodeId,
@@ -87,6 +100,7 @@ pub struct SemanticSnapshot {
     pub version: i64,
     pub nodes: Vec<SemanticNode>,
     pub symbols: Vec<SemanticSymbol>,
+    pub bindings: Vec<SemanticBinding>,
 }
 
 impl SemanticSnapshot {
@@ -143,13 +157,27 @@ impl SemanticSnapshot {
             })
     }
 
-    /// Resolve an unambiguous same-document arm or mold name.
+    /// Resolve the innermost lexical face or an unambiguous same-document arm
+    /// or mold name.
     ///
     /// Compiler-owned provenance remains authoritative for scoped and
     /// cross-file definitions. This structural fallback deliberately declines
     /// duplicate names rather than guessing across nested cores.
     pub fn definition(&self, source: &str, byte_offset: u32) -> Option<SemanticTextRange> {
         let name = hoon_term_at(source, byte_offset)?;
+        if let Some(binding) = self
+            .bindings
+            .iter()
+            .filter(|binding| binding.name == name && binding.scope_range.contains(byte_offset))
+            .min_by_key(|binding| {
+                (
+                    binding.scope_range.len(),
+                    Reverse(binding.declaration_range.start),
+                )
+            })
+        {
+            return Some(binding.declaration_range);
+        }
         let mut matches = self.symbols.iter().filter(|symbol| symbol.name == name);
         let definition = matches.next()?;
         if matches.next().is_some() {
@@ -299,17 +327,15 @@ fn hoon_term_range_at(source: &str, byte_offset: u32) -> Option<SemanticTextRang
     if offset >= source.len() || !source.is_char_boundary(offset) {
         return None;
     }
-    let is_term_byte =
-        |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-';
-    if !is_term_byte(source.as_bytes()[offset]) {
+    if !is_hoon_term_byte(source.as_bytes()[offset]) {
         return None;
     }
     let mut start = offset;
-    while start > 0 && is_term_byte(source.as_bytes()[start - 1]) {
+    while start > 0 && is_hoon_term_byte(source.as_bytes()[start - 1]) {
         start -= 1;
     }
     let mut end = offset + 1;
-    while end < source.len() && is_term_byte(source.as_bytes()[end]) {
+    while end < source.len() && is_hoon_term_byte(source.as_bytes()[end]) {
         end += 1;
     }
     if !source.as_bytes()[start].is_ascii_lowercase() {
@@ -319,6 +345,10 @@ fn hoon_term_range_at(source: &str, byte_offset: u32) -> Option<SemanticTextRang
         start: u32::try_from(start).ok()?,
         end: u32::try_from(end).ok()?,
     })
+}
+
+fn is_hoon_term_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -429,6 +459,14 @@ struct RawSymbol {
     signature: String,
 }
 
+#[derive(Clone, Debug)]
+struct RawBinding {
+    name: String,
+    declaration_range: SemanticTextRange,
+    scope_range: SemanticTextRange,
+    signature: String,
+}
+
 fn build_snapshot(
     path: &Path,
     version: i64,
@@ -513,11 +551,54 @@ fn build_snapshot(
         hierarchy.push((indent, symbol.id));
     }
 
+    let mut raw_bindings = Vec::new();
+    collect_bindings(&value, source, &lines, None, &mut raw_bindings);
+    raw_bindings.sort_by_key(|binding| {
+        (
+            binding.declaration_range.start,
+            binding.declaration_range.end,
+            binding.scope_range.end,
+            binding.name.clone(),
+        )
+    });
+    raw_bindings.dedup_by(|right, left| {
+        right.name == left.name
+            && right.declaration_range == left.declaration_range
+            && right.scope_range == left.scope_range
+    });
+    let mut occurrences = HashMap::<String, usize>::new();
+    for binding in &mut raw_bindings {
+        let occurrence = occurrences.entry(binding.name.clone()).or_default();
+        binding.signature = format!("binding:{}:{}", binding.name, *occurrence);
+        *occurrence += 1;
+    }
+    let mut old_binding_ids = previous
+        .map(|snapshot| {
+            signature_ids(
+                snapshot
+                    .bindings
+                    .iter()
+                    .map(|binding| (&binding.signature, binding.id)),
+            )
+        })
+        .unwrap_or_default();
+    let bindings = raw_bindings
+        .into_iter()
+        .map(|binding| SemanticBinding {
+            id: reused_or_new_id(&binding.signature, &mut old_binding_ids, next_id),
+            name: binding.name,
+            declaration_range: binding.declaration_range,
+            scope_range: binding.scope_range,
+            signature: binding.signature,
+        })
+        .collect();
+
     Ok(SemanticSnapshot {
         path: path.to_path_buf(),
         version,
         nodes,
         symbols,
+        bindings,
     })
 }
 
@@ -576,6 +657,449 @@ fn collect_traced_nodes(value: &Value, source: &str, lines: &LineIndex, nodes: &
         }
         Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
+}
+
+/// Walk the serialized traced AST as an editor side table. Keeping this walk
+/// separate from Hatch's AST types is intentional: the compiler consumes the
+/// exact same tree as before, while editor analyses can grow their own
+/// annotations and lifetimes around its stable serialized skeleton.
+fn collect_bindings(
+    value: &Value,
+    source: &str,
+    lines: &LineIndex,
+    enclosing_range: Option<SemanticTextRange>,
+    bindings: &mut Vec<RawBinding>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_bindings(value, source, lines, enclosing_range, bindings);
+            }
+        }
+        Value::Object(values) => {
+            if let Some(Value::Array(parts)) = values.get("Dbug") {
+                if let [spot, inner] = parts.as_slice() {
+                    collect_bindings(
+                        inner,
+                        source,
+                        lines,
+                        spot_range(spot, lines).or(enclosing_range),
+                        bindings,
+                    );
+                }
+                return;
+            }
+            if values.len() == 1 {
+                let (kind, payload) = values.iter().next().expect("single AST variant");
+                if matches!(kind.as_str(), "Note" | "Gist" | "Help") {
+                    if let Some(inner) = payload.as_array().and_then(|parts| parts.last()) {
+                        collect_bindings(inner, source, lines, enclosing_range, bindings);
+                    }
+                    return;
+                }
+
+                match kind.as_str() {
+                    "TisFas" => record_skin_body_binding(
+                        payload, 0, 2, enclosing_range, source, lines, bindings,
+                    ),
+                    "TisMic" => record_skin_body_binding(
+                        payload, 0, 1, enclosing_range, source, lines, bindings,
+                    ),
+                    "TisKet" => record_skin_body_binding(
+                        payload, 0, 3, enclosing_range, source, lines, bindings,
+                    ),
+                    "TisTar" => record_named_body_binding(
+                        payload, 0, 2, enclosing_range, source, lines, bindings,
+                    ),
+                    "BarSig" | "BarTar" | "BarTis" | "TisBar" => record_spec_body_binding(
+                        payload, 0, 1, enclosing_range, source, lines, bindings,
+                    ),
+                    "BarCab" => record_core_sample_bindings(
+                        payload, enclosing_range, source, lines, bindings,
+                    ),
+                    "WutHep" => record_clause_bindings(payload, 1, source, lines, bindings),
+                    "WutLus" => record_clause_bindings(payload, 2, source, lines, bindings),
+                    _ => {}
+                }
+            }
+
+            for value in values.values() {
+                collect_bindings(value, source, lines, enclosing_range, bindings);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
+}
+
+fn record_skin_body_binding(
+    payload: &Value,
+    skin_index: usize,
+    body_index: usize,
+    enclosing_range: Option<SemanticTextRange>,
+    source: &str,
+    lines: &LineIndex,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let Some(parts) = payload.as_array() else {
+        return;
+    };
+    let (Some(skin), Some(body), Some(node_range)) = (
+        parts.get(skin_index),
+        parts.get(body_index),
+        enclosing_range,
+    ) else {
+        return;
+    };
+    let Some(scope_range) = traced_range(body, lines) else {
+        return;
+    };
+    let mut names = Vec::new();
+    collect_skin_names(skin, &mut names);
+    record_names(names, node_range, scope_range, source, bindings);
+}
+
+fn record_spec_body_binding(
+    payload: &Value,
+    spec_index: usize,
+    body_index: usize,
+    enclosing_range: Option<SemanticTextRange>,
+    source: &str,
+    lines: &LineIndex,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let Some(parts) = payload.as_array() else {
+        return;
+    };
+    let (Some(spec), Some(body), Some(node_range)) = (
+        parts.get(spec_index),
+        parts.get(body_index),
+        enclosing_range,
+    ) else {
+        return;
+    };
+    let Some(scope_range) = traced_range(body, lines) else {
+        return;
+    };
+    let mut names = Vec::new();
+    collect_spec_names(spec, &mut names);
+    record_names(names, node_range, scope_range, source, bindings);
+}
+
+fn record_named_body_binding(
+    payload: &Value,
+    name_index: usize,
+    body_index: usize,
+    enclosing_range: Option<SemanticTextRange>,
+    source: &str,
+    lines: &LineIndex,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let Some(parts) = payload.as_array() else {
+        return;
+    };
+    let (Some(name_payload), Some(body), Some(node_range)) = (
+        parts.get(name_index),
+        parts.get(body_index),
+        enclosing_range,
+    ) else {
+        return;
+    };
+    let Some(scope_range) = traced_range(body, lines) else {
+        return;
+    };
+    let Some(name) = name_payload
+        .as_array()
+        .and_then(|parts| parts.first())
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    record_names(
+        vec![name.to_string()],
+        node_range,
+        scope_range,
+        source,
+        bindings,
+    );
+}
+
+fn record_core_sample_bindings(
+    payload: &Value,
+    enclosing_range: Option<SemanticTextRange>,
+    source: &str,
+    lines: &LineIndex,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let (Some(parts), Some(node_range)) = (payload.as_array(), enclosing_range) else {
+        return;
+    };
+    let Some(spec) = parts.first() else {
+        return;
+    };
+    let Some(scope_start) = parts
+        .iter()
+        .skip(1)
+        .filter_map(|value| earliest_traced_range(value, lines))
+        .map(|range| range.start)
+        .min()
+    else {
+        return;
+    };
+    let scope_range = SemanticTextRange {
+        start: scope_start,
+        end: node_range.end,
+    };
+    let mut names = Vec::new();
+    collect_spec_names(spec, &mut names);
+    record_names(names, node_range, scope_range, source, bindings);
+}
+
+fn record_clause_bindings(
+    payload: &Value,
+    clauses_index: usize,
+    source: &str,
+    lines: &LineIndex,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let Some(clauses) = payload
+        .as_array()
+        .and_then(|parts| parts.get(clauses_index))
+        .and_then(Value::as_array)
+    else {
+        return;
+    };
+    for clause in clauses {
+        let Some(pair) = clause.as_array() else {
+            continue;
+        };
+        let (Some(spec), Some(body)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let (Some(declaration_area), Some(scope_range)) =
+            (traced_range(spec, lines), traced_range(body, lines))
+        else {
+            continue;
+        };
+        let mut names = Vec::new();
+        collect_spec_names(spec, &mut names);
+        record_names(names, declaration_area, scope_range, source, bindings);
+    }
+}
+
+fn record_names(
+    names: Vec<String>,
+    node_range: SemanticTextRange,
+    scope_range: SemanticTextRange,
+    source: &str,
+    bindings: &mut Vec<RawBinding>,
+) {
+    let declaration_area = SemanticTextRange {
+        start: node_range.start,
+        end: scope_range.start.min(node_range.end),
+    };
+    for name in names {
+        let Some(declaration_range) = find_term_in_range(source, &name, declaration_area) else {
+            continue;
+        };
+        bindings.push(RawBinding {
+            name,
+            declaration_range,
+            scope_range,
+            signature: String::new(),
+        });
+    }
+}
+
+fn traced_range(value: &Value, lines: &LineIndex) -> Option<SemanticTextRange> {
+    let values = value.as_object()?;
+    if let Some(parts) = values.get("Dbug").and_then(Value::as_array) {
+        return parts.first().and_then(|spot| spot_range(spot, lines));
+    }
+    if values.len() == 1 {
+        let (kind, payload) = values.iter().next()?;
+        if matches!(kind.as_str(), "Note" | "Gist" | "Help") {
+            return payload
+                .as_array()
+                .and_then(|parts| parts.last())
+                .and_then(|inner| traced_range(inner, lines));
+        }
+    }
+    None
+}
+
+fn earliest_traced_range(value: &Value, lines: &LineIndex) -> Option<SemanticTextRange> {
+    if let Some(range) = traced_range(value, lines) {
+        return Some(range);
+    }
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| earliest_traced_range(value, lines))
+            .min_by_key(|range| range.start),
+        Value::Object(values) => values
+            .values()
+            .filter_map(|value| earliest_traced_range(value, lines))
+            .min_by_key(|range| range.start),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
+    }
+}
+
+fn collect_skin_names(value: &Value, names: &mut Vec<String>) {
+    let Some(values) = value.as_object() else {
+        return;
+    };
+    let Some((kind, payload)) = values.iter().next() else {
+        return;
+    };
+    match kind.as_str() {
+        "Term" => push_binding_name(payload, names),
+        "Cell" => for_each_array(payload, |value| collect_skin_names(value, names)),
+        "Dbug" | "Help" | "Over" => {
+            if let Some(inner) = payload.as_array().and_then(|parts| parts.last()) {
+                collect_skin_names(inner, names);
+            }
+        }
+        "Name" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(name) = parts.first() {
+                    push_binding_name(name, names);
+                }
+                if let Some(inner) = parts.get(1) {
+                    collect_skin_names(inner, names);
+                }
+            }
+        }
+        "Spec" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(spec) = parts.first() {
+                    collect_spec_names(spec, names);
+                }
+                if let Some(inner) = parts.get(1) {
+                    collect_skin_names(inner, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_spec_names(value: &Value, names: &mut Vec<String>) {
+    let Some(values) = value.as_object() else {
+        return;
+    };
+    let Some((kind, payload)) = values.iter().next() else {
+        return;
+    };
+    match kind.as_str() {
+        "Dbug" | "Gist" | "Made" | "Over" => {
+            if let Some(inner) = payload.as_array().and_then(|parts| parts.last()) {
+                collect_spec_names(inner, names);
+            }
+        }
+        "Make" => {
+            if let Some(specs) = payload.as_array().and_then(|parts| parts.get(1)) {
+                for_each_array(specs, |spec| collect_spec_names(spec, names));
+            }
+        }
+        "Name" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(name) = parts.first() {
+                    push_binding_name(name, names);
+                }
+                if let Some(inner) = parts.get(1) {
+                    collect_spec_names(inner, names);
+                }
+            }
+        }
+        "BucGar" | "BucGal" | "BucHep" | "BucKet" | "BucPat" => {
+            for_each_array(payload, |spec| collect_spec_names(spec, names));
+        }
+        "BucBuc" | "BucDot" | "BucFas" | "BucTic" | "BucZap" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(spec) = parts.first() {
+                    collect_spec_names(spec, names);
+                }
+                if let Some(specs) = parts.get(1).and_then(Value::as_object) {
+                    for spec in specs.values() {
+                        collect_spec_names(spec, names);
+                    }
+                }
+            }
+        }
+        "BucBar" | "BucPam" => {
+            if let Some(spec) = payload.as_array().and_then(|parts| parts.first()) {
+                collect_spec_names(spec, names);
+            }
+        }
+        "BucCol" | "BucCen" | "BucWut" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(spec) = parts.first() {
+                    collect_spec_names(spec, names);
+                }
+                if let Some(specs) = parts.get(1) {
+                    for_each_array(specs, |spec| collect_spec_names(spec, names));
+                }
+            }
+        }
+        "BucLus" | "BucSig" => {
+            if let Some(spec) = payload.as_array().and_then(|parts| parts.get(1)) {
+                collect_spec_names(spec, names);
+            }
+        }
+        "BucTis" => {
+            if let Some(parts) = payload.as_array() {
+                if let Some(skin) = parts.first() {
+                    collect_skin_names(skin, names);
+                }
+                if let Some(spec) = parts.get(1) {
+                    collect_spec_names(spec, names);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn for_each_array(value: &Value, mut visit: impl FnMut(&Value)) {
+    if let Some(values) = value.as_array() {
+        for value in values {
+            visit(value);
+        }
+    }
+}
+
+fn push_binding_name(value: &Value, names: &mut Vec<String>) {
+    let Some(name) = value.as_str() else {
+        return;
+    };
+    if name.as_bytes().first().is_some_and(u8::is_ascii_lowercase) {
+        names.push(name.to_string());
+    }
+}
+
+fn find_term_in_range(
+    source: &str,
+    name: &str,
+    range: SemanticTextRange,
+) -> Option<SemanticTextRange> {
+    let start = usize::try_from(range.start).ok()?;
+    let end = usize::try_from(range.end).ok()?;
+    let haystack = source.get(start..end)?;
+    for (relative, _) in haystack.match_indices(name) {
+        let match_start = start + relative;
+        let match_end = match_start + name.len();
+        let left_boundary =
+            match_start == 0 || !is_hoon_term_byte(*source.as_bytes().get(match_start - 1)?);
+        let right_boundary =
+            match_end == source.len() || !is_hoon_term_byte(*source.as_bytes().get(match_end)?);
+        if left_boundary && right_boundary {
+            return Some(SemanticTextRange {
+                start: u32::try_from(match_start).ok()?,
+                end: u32::try_from(match_end).ok()?,
+            });
+        }
+    }
+    None
 }
 
 fn syntax_kind(value: &Value) -> Option<&str> {
@@ -1022,6 +1546,77 @@ mod tests {
         assert!(session.snapshot(path, 1, "|=  [a=@\n").is_err());
         assert!(session.snapshot(path, 1, "|=  [a=@\n").is_err());
         assert!(session.snapshot(path, 2, "|=  a=@\n  a\n").is_ok());
+    }
+
+    #[test]
+    fn lexical_bindings_resolve_innermost_scope_and_keep_stable_ids() {
+        let source = concat!(
+            "=/  value  1\n", "=/  before  value\n", "=/  result\n", "  =/  value  2\n",
+            "  value\n", "[before result value]\n",
+        );
+        let path = Path::new("/tmp/bindings.hoon");
+        let mut session = SemanticSession::default();
+        let first = session
+            .snapshot(path, 1, source)
+            .expect("binding snapshot")
+            .clone();
+        assert_eq!(first.bindings.len(), 4);
+
+        let outer_declaration = source.find("value").expect("outer declaration");
+        let inner_declaration =
+            source.find("  =/  value").expect("inner declaration") + "  =/  ".len();
+        let inner_use = source.rfind("  value\n").expect("inner use") + 2;
+        let final_use = source.rfind("value]").expect("final use");
+        assert_eq!(
+            first
+                .definition(source, u32::try_from(inner_use).expect("small source"))
+                .expect("inner definition")
+                .start,
+            u32::try_from(inner_declaration).expect("small source")
+        );
+        assert_eq!(
+            first
+                .definition(source, u32::try_from(final_use).expect("small source"))
+                .expect("outer definition")
+                .start,
+            u32::try_from(outer_declaration).expect("small source")
+        );
+        assert!(first
+            .definition(
+                source,
+                u32::try_from(outer_declaration).expect("small source")
+            )
+            .is_none());
+
+        let edited = format!("\n{}", source.replace("  1\n", "  42\n"));
+        let second = session
+            .snapshot(path, 2, &edited)
+            .expect("edited binding snapshot");
+        assert_eq!(first.bindings[0].id, second.bindings[0].id);
+        assert_ne!(
+            first.bindings[0].declaration_range,
+            second.bindings[0].declaration_range
+        );
+
+        let core_source = "|_  value=value\n++  read\n  value\n--\n";
+        let core = session
+            .snapshot(Path::new("/tmp/core-bindings.hoon"), 1, core_source)
+            .expect("core binding snapshot");
+        let declaration = core_source.find("value").expect("sample declaration");
+        let mold = core_source
+            .find("=value")
+            .expect("sample mold")
+            .saturating_add(1);
+        let body = core_source.rfind("value").expect("sample body");
+        assert!(core
+            .definition(core_source, u32::try_from(mold).expect("small source"))
+            .is_none());
+        assert_eq!(
+            core.definition(core_source, u32::try_from(body).expect("small source"))
+                .expect("core sample definition")
+                .start,
+            u32::try_from(declaration).expect("small source")
+        );
     }
 
     #[test]

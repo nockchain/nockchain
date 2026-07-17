@@ -11,7 +11,7 @@ use lsp_server::{
 };
 use lsp_types::notification::{DidOpenTextDocument, Notification as LspNotification};
 use lsp_types::{
-    DidOpenTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, Hover,
+    DidOpenTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location,
     TextDocumentItem, Uri,
 };
 use serde_json::{json, Value};
@@ -49,6 +49,37 @@ fn receive_response(client: &Connection, expected: i32) -> Value {
         );
     };
     result
+}
+
+fn request_definition(
+    client: &Connection,
+    request_id: i32,
+    uri: &Uri,
+    line: usize,
+    character: usize,
+) -> Option<Location> {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/definition".to_string(),
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character }
+                }),
+            )
+            .into(),
+        )
+        .expect("request definition");
+    let response = serde_json::from_value::<Option<GotoDefinitionResponse>>(receive_response(
+        client, request_id,
+    ))
+    .expect("definition response")?;
+    let GotoDefinitionResponse::Scalar(location) = response else {
+        panic!("server must return a single definition location");
+    };
+    Some(location)
 }
 
 fn start_server(
@@ -444,6 +475,69 @@ fn definition_navigates_to_a_hyphenated_mold_arm() {
 }
 
 #[test]
+fn local_binding_definition_respects_value_scope_and_shadowing() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("local-bindings.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let source = concat!(
+        "=/  value  1\n", "=/  before  value\n", "=/  result\n", "  =/  value  2\n", "  value\n",
+        "[before result value]\n",
+    );
+    let (client, server_thread) = start_server(&root, 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let cases = [
+        // A =/ face is not in scope in its value, so this resolves outward.
+        (1, 13, 0, 4),
+        // The nested face shadows the outer face only inside its body.
+        (4, 3, 3, 6),
+        // Leaving that value expression restores the outer binding.
+        (5, 15, 0, 4),
+    ];
+    let mut request_id = 2;
+    for (use_line, use_character, definition_line, definition_character) in cases {
+        let definition =
+            request_definition(&client, request_id, &entry_uri, use_line, use_character)
+                .unwrap_or_else(|| panic!("no definition at {use_line}:{use_character}"));
+        assert_eq!(definition.uri, entry_uri);
+        assert_eq!(
+            usize::try_from(definition.range.start.line).expect("small line"),
+            definition_line
+        );
+        assert_eq!(
+            usize::try_from(definition.range.start.character).expect("small character"),
+            definition_character
+        );
+        request_id += 1;
+    }
+
+    shutdown_server(&client, server_thread, request_id);
+}
+
+#[test]
 fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
     let root = repository_root();
     let entry = root.join("hoon/apps/dumbnet/miner.hoon");
@@ -484,18 +578,25 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
         .find("kernel-state")
         .expect("kernel-state declaration character");
     let uses = [
-        "++  moat  (keep kernel-state)", "|_  k=kernel-state", "|=  =kernel-state  kernel-state",
+        ("++  moat  (keep kernel-state)", true),
+        ("|_  k=kernel-state", true),
+        // The declaration-side occurrence remains a mold reference; the
+        // same token in the gate body is covered by the lexical cases below.
+        ("|=  =kernel-state  kernel-state", false),
     ];
     let mut request_id = 2;
-    for use_line in uses {
+    for (use_line, use_last) in uses {
         let line = source
             .lines()
             .position(|line| line.contains(use_line))
             .unwrap_or_else(|| panic!("missing real miner use: {use_line}"));
         let line_source = source.lines().nth(line).expect("located source line");
-        let character = line_source
-            .rfind("kernel-state")
-            .expect("kernel-state use character");
+        let character = if use_last {
+            line_source.rfind("kernel-state")
+        } else {
+            line_source.find("kernel-state")
+        }
+        .expect("kernel-state use character");
         client
             .sender
             .send(
@@ -526,6 +627,69 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
         assert_eq!(
             usize::try_from(definition.range.start.character).expect("small character"),
             declaration_character
+        );
+        request_id += 1;
+    }
+
+    let local_bindings = [
+        // Gate sample shorthand: the body use resolves to the sample face, not
+        // the same-named mold used to declare it.
+        (
+            "|=  =kernel-state  kernel-state", "kernel-state", true,
+            "|=  =kernel-state  kernel-state", "kernel-state",
+        ),
+        ("?~  pax", "pax", false, "=/  pax", "pax"),
+        (
+            "?~  cause", "cause", false, "=/  cause  ((soft cause)", "cause",
+        ),
+        (
+            "=/  cause  u.cause", "cause", true, "=/  cause  ((soft cause)", "cause",
+        ),
+        ("?-  -.cause", "cause", false, "=/  cause  u.cause", "cause"),
+        (
+            "(prove-block-inner:mine input)", "input", false, "=/  input=prover-input:sp", "input",
+        ),
+        (
+            "?:  (check-target:mine dig", "dig", false, "dig=tip5-hash-atom]", "dig",
+        ),
+        (":_  k", "k", false, "|_  k=kernel-state", "k"),
+        ("((soft path) arg)", "arg", false, "|=  arg=*", "arg"),
+    ];
+    for (use_text, symbol, use_last, declaration_text, declaration_symbol) in local_bindings {
+        let use_line = source
+            .lines()
+            .position(|line| line.contains(use_text))
+            .unwrap_or_else(|| panic!("missing real miner local use: {use_text}"));
+        let use_source = source.lines().nth(use_line).expect("located use line");
+        let use_character = if use_last {
+            use_source.rfind(symbol)
+        } else {
+            use_source.find(symbol)
+        }
+        .unwrap_or_else(|| panic!("missing {symbol} on local use line"));
+        let declaration_line = source
+            .lines()
+            .position(|line| line.contains(declaration_text))
+            .unwrap_or_else(|| panic!("missing local declaration: {declaration_text}"));
+        let declaration_character = source
+            .lines()
+            .nth(declaration_line)
+            .expect("local declaration line")
+            .find(declaration_symbol)
+            .expect("local declaration character");
+        let definition =
+            request_definition(&client, request_id, &entry_uri, use_line, use_character)
+                .unwrap_or_else(|| panic!("no definition for real miner local: {symbol}"));
+        assert_eq!(definition.uri, entry_uri);
+        assert_eq!(
+            usize::try_from(definition.range.start.line).expect("small line"),
+            declaration_line,
+            "wrong declaration line for {symbol} at {use_text}"
+        );
+        assert_eq!(
+            usize::try_from(definition.range.start.character).expect("small character"),
+            declaration_character,
+            "wrong declaration character for {symbol} at {use_text}"
         );
         request_id += 1;
     }
