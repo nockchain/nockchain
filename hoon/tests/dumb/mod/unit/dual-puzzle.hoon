@@ -23,6 +23,7 @@
 ++  hd  ~(. helpers bc-dual-puzzle:helpers)
 ++  hc  ~(. helpers bc-ai-anchor-test:helpers)
 ++  hp  ~(. helpers bc-dual-post:helpers)
+++  ht  ~(. helpers bc-tandem:helpers)
 ::
 ::  A block at the AI anchor (bex 227) contributes work EQUAL to a block at the
 ::  ZK anchor (bex 291): the core equal-weight cross-puzzle invariant.
@@ -180,4 +181,50 @@
     %.  [bad-page ~(timestamp get:page:t bad-page)]
     ~(validate-page-without-txs dcon con.built der.built bc-dual-post:helpers)
   %+  expect-eq  !>([%.y %.n])  !>([-.good -.bad])
+::
+::  TANDEM RETARGETING — both puzzles' ASERT run in their SUBCHAIN regime at once
+::  and each retargets over its OWN block count, independently. bc-tandem gives the
+::  two puzzles the SAME anchor target (and 300s ideal / 600s half-life), so the
+::  targets are directly comparable. The ASERT time input is the median-of-11 of
+::  the parent (a GLOBAL quantity, ~equal for both puzzles at the tip), so the
+::  difference between the two targets is driven by the per-puzzle SUBCHAIN COUNT.
+::
+::  ZK-heavy chain (3 ZK + 1 AI over the same span): the ZK subchain has more
+::  blocks per unit time, so the ZK ASERT hardens MORE -> zk-target < ai-target.
+++  test-tandem-asert-zk-heavy
+  ^-  tang
+  =/  t0  (time-in-secs:page:t *@da)
+  =/  built
+    %-  build-typed-chain-timed:ht
+    :~  [%zk (add t0 10)]  [%zk (add t0 20)]  [%zk (add t0 30)]  [%ai (add t0 40)]
+    ==
+  =/  con  con.built
+  =/  tip-bid  ~(digest get:page:t tip.built)
+  =/  zk-parent
+    (need (~(find-same-type-ancestor dcon con der:ht bc-tandem:helpers) tip-bid %dumb-zkpow))
+  =/  ai-parent
+    (need (~(find-same-type-ancestor dcon con der:ht bc-tandem:helpers) tip-bid %ai-pow))
+  =/  zk-target  (merge:bignum (~(compute-target-zk-asert dcon con der:ht bc-tandem:helpers) 5 zk-parent))
+  =/  ai-target  (merge:bignum (~(compute-target-ai-asert dcon con der:ht bc-tandem:helpers) 5 ai-parent))
+  %+  expect-eq  !>(%.y)  !>((lth zk-target ai-target))
+::
+::  AI-heavy chain (3 AI + 1 ZK): the reverse — the AI ASERT hardens MORE, so
+::  ai-target < zk-target. Confirms each retarget is keyed to its own subchain, not
+::  a fixed bias or the global cadence.
+++  test-tandem-asert-ai-heavy
+  ^-  tang
+  =/  t0  (time-in-secs:page:t *@da)
+  =/  built
+    %-  build-typed-chain-timed:ht
+    :~  [%ai (add t0 10)]  [%ai (add t0 20)]  [%ai (add t0 30)]  [%zk (add t0 40)]
+    ==
+  =/  con  con.built
+  =/  tip-bid  ~(digest get:page:t tip.built)
+  =/  zk-parent
+    (need (~(find-same-type-ancestor dcon con der:ht bc-tandem:helpers) tip-bid %dumb-zkpow))
+  =/  ai-parent
+    (need (~(find-same-type-ancestor dcon con der:ht bc-tandem:helpers) tip-bid %ai-pow))
+  =/  zk-target  (merge:bignum (~(compute-target-zk-asert dcon con der:ht bc-tandem:helpers) 5 zk-parent))
+  =/  ai-target  (merge:bignum (~(compute-target-ai-asert dcon con der:ht bc-tandem:helpers) 5 ai-parent))
+  %+  expect-eq  !>(%.y)  !>((lth ai-target zk-target))
 --

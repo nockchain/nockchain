@@ -161,6 +161,36 @@
     ai-pow-activation-height  1
     anchor-height.ai-asert    2
   ==
+::  Tandem-retargeting config: BOTH puzzles' ASERT active + in their SUBCHAIN
+::  regime at low heights, with hardcoded anchors so neither degenerates. Unlike
+::  bc-dual-post (whose zk-asert-post-ai.phase stays at the 95000 default, so the
+::  ZK ASERT runs in regime 1 / global-height), here zk-asert-post-ai.phase is low
+::  so the ZK ASERT runs in regime 2 (ZK-subchain count), matching the AI ASERT.
+::  Short half-life (600s) + 300s ideal amplify the retarget so a short test chain
+::  shows a clear direction. anchor-min-timestamp = genesis second so the ASERT
+::  block-distance times are just the controlled per-block deltas.
+++  bc-tandem
+  %*  .  bc-pending-provable
+    v1-phase                               1
+    blocks-per-epoch                       1.000.000
+    phase.zk-asert                         2
+    anchor-height.zk-asert                 1
+    ideal-block-time.zk-asert              300
+    half-life.zk-asert                     600
+    anchor-min-timestamp.zk-asert          (time-in-secs:page:txe *@da)
+    phase.zk-asert-post-ai                 2
+    anchor-height.zk-asert-post-ai         1
+    anchor-target-atom.zk-asert-post-ai    ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.zk-asert-post-ai      300
+    half-life.zk-asert-post-ai             600
+    anchor-min-timestamp.zk-asert-post-ai  (time-in-secs:page:txe *@da)
+    ai-pow-activation-height               1
+    anchor-height.ai-asert                 1
+    anchor-target-atom.ai-asert            ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.ai-asert              300
+    half-life.ai-asert                     600
+    anchor-min-timestamp.ai-asert          (time-in-secs:page:txe *@da)
+  ==
 ::  Post-ASERT dual-puzzle config: low zk-asert phase (2) with a hardcoded ZK
 ::  anchor (so accept-page/validation can compute the ZK ASERT without a cache),
 ::  AI active from height 1 with a hardcoded AI anchor. Lets a low-height AI block
@@ -293,6 +323,31 @@
   =.  con  (~(update-heaviest dcon con d bc) new-page)
   =.  d  (~(update dder d bc) con new-page)
   $(types t.types, parent new-page, con con, d d)
+::  +build-typed-chain-timed: like +build-typed-chain but each entry carries an
+::  absolute block timestamp (seconds), so a test can drive a controlled per-puzzle
+::  cadence. Timestamps must be strictly increasing and above the genesis second.
+++  build-typed-chain-timed
+  |=  entries=(list [type=?(%zk %ai) ts=@])
+  ^-  [con=consensus-state der=derived-state tip=page:t]
+  =/  con=consensus-state  initial-consensus-state
+  =/  d=derived-state  der
+  =/  parent=page:t  default-genesis-page
+  |-
+  ?~  entries  [con d parent]
+  =/  base=page:t
+    ?:  =(%ai type.i.entries)
+      (make-ai-pow-garbage-page parent)
+    (make-empty-page parent)
+  =/  new-page=page:t
+    =.  base
+      ?^  -.base  base(timestamp ts.i.entries)  base(timestamp ts.i.entries)
+    ?^  -.base  base(digest (compute-digest:page:t base))  base(digest (compute-digest:page:t base))
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
+  ?>  ?=(%.y -.r)
+  =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
+  =.  con  (~(update-heaviest dcon con d bc) new-page)
+  =.  d  (~(update dder d bc) con new-page)
+  $(entries t.entries, parent new-page, con con, d d)
 ::
 ++  default-genesis-page
   ^-  page:t
