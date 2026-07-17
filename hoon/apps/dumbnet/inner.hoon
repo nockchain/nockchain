@@ -1849,7 +1849,6 @@
           (block-commitment:page:t candidate-block.m.k)
         =/  zk-target  ~(target get:page:t candidate-block.m.k)
         =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
-        =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
         =/  proof-version  (height-to-proof-version:con candidate-height)
         =/  zk-mine-start
           ?-  proof-version
@@ -1858,12 +1857,18 @@
             %2  [%2 commit zk-target pow-len:t]
             %3  ~|(%unexpected-v3-in-zk-mine-start !!)
           ==
+        =/  zk-effect  [%mine-zk zk-mine-start]
         :_  k
-        ::  do-mine (new-heaviest-block / born) re-emits only the ZK candidate.
-        ::  The AI candidate (%mine-ai) is delivered by the candidate-update poke
-        ::  path (+build-ai-candidate), so post-activation AI miners re-target on
-        ::  the poke/timer cadence rather than immediately here.
-        [%mine-zk zk-mine-start]~
+        ::  do-mine (new-heaviest-block / born) re-emits the ZK candidate, and
+        ::  post-activation ALSO the %mine-ai candidate — the same block re-targeted
+        ::  to the AI ASERT target (+build-ai-candidate) — matching the
+        ::  candidate-update poke path, so AI miners re-target immediately here too.
+        ?:  (gte candidate-height ai-pow-activation-height.constants.k)
+          =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k)
+          =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
+          =/  ai-target  ~(target get:page:t ai-cand)
+          [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect ~]
+        [zk-effect ~]
       ::
       ::  only send a %elders request for reasonable heights
       ++  missing-parent-effects
