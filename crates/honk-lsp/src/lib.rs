@@ -15,8 +15,8 @@ use honk::workspace::{
 use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
     hoon_rune_at, hoon_term_at, range_from_one_based_spot, structural_definition,
-    structural_rune_definition, SemanticHover, SemanticNodeId, SemanticSession, SemanticSymbol,
-    SemanticSymbolKind, SemanticTextRange,
+    structural_rune_definition, SemanticHover, SemanticNodeId, SemanticRename,
+    SemanticRenameTarget, SemanticSession, SemanticSymbol, SemanticSymbolKind, SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -26,18 +26,21 @@ use lsp_types::notification::{
     Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
-    DocumentSymbolRequest, GotoDefinition, HoverRequest, Request as LspRequest,
+    DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
+    Request as LspRequest,
 };
 use lsp_types::{
     CancelParams, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, Location, LogMessageParams, MarkupContent, MarkupKind,
-    MessageType, NumberOrString, OneOf, Position, PositionEncodingKind, PublishDiagnosticsParams,
-    Range, ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind,
-    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Uri,
+    DocumentChanges, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    HoverProviderCapability, InitializeParams, InitializeResult, Location, LogMessageParams,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf,
+    OptionalVersionedTextDocumentIdentifier, Position, PositionEncodingKind, PrepareRenameResponse,
+    PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
+    ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind, TextDocumentEdit,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
@@ -149,12 +152,27 @@ enum SemanticQuery {
         byte_offset: u32,
         workspace: Arc<SemanticDefinitionWorkspace>,
     },
+    References {
+        byte_offset: u32,
+        include_declaration: bool,
+    },
+    PrepareRename {
+        byte_offset: u32,
+    },
+    Rename {
+        byte_offset: u32,
+        new_name: String,
+    },
 }
 
 enum SemanticQueryResult {
     DocumentSymbols(Vec<SemanticSymbol>),
     Hover(Option<SemanticHover>),
     Definition(Option<SemanticDefinition>),
+    References(Option<Vec<SemanticTextRange>>),
+    PrepareRename(Option<SemanticRenameTarget>),
+    Rename(Option<SemanticRename>),
+    RequestError { code: ErrorCode, message: String },
     Unavailable(String),
 }
 
@@ -246,6 +264,11 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         document_symbol_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Right(RenameOptions {
+            prepare_provider: Some(true),
+            work_done_progress_options: Default::default(),
+        })),
         experimental: Some(serde_json::json!({
             "honk": {
                 "lspBaseline": LSP_BASELINE_VERSION,
@@ -769,6 +792,151 @@ fn handle_request(
                 )?;
             }
         }
+        References::METHOD => {
+            let params: ReferenceParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid references parameters: {error}"),
+                    );
+                }
+            };
+            let text_document = &params.text_document_position.text_document;
+            let position = params.text_document_position.position;
+            let document = match open_document(state, &text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid references URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::References {
+                    byte_offset,
+                    include_declaration: params.context.include_declaration,
+                },
+            )?;
+        }
+        PrepareRenameRequest::METHOD => {
+            let params: TextDocumentPositionParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid prepare rename parameters: {error}"),
+                    );
+                }
+            };
+            let document = match open_document(state, &params.text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid prepare rename URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, params.position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::PrepareRename { byte_offset },
+            )?;
+        }
+        Rename::METHOD => {
+            let params: RenameParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid rename parameters: {error}"),
+                    );
+                }
+            };
+            let text_document = &params.text_document_position.text_document;
+            let position = params.text_document_position.position;
+            let document = match open_document(state, &text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid rename URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::Rename {
+                    byte_offset,
+                    new_name: params.new_name,
+                },
+            )?;
+        }
         _ => {
             return send_request_error(
                 connection,
@@ -803,11 +971,19 @@ fn enqueue_semantic_query(
     let cancelled = Arc::new(AtomicBool::new(false));
     let hover_offset = match &query {
         SemanticQuery::Hover { byte_offset } => Some(*byte_offset),
-        SemanticQuery::DocumentSymbols | SemanticQuery::Definition { .. } => None,
+        SemanticQuery::DocumentSymbols
+        | SemanticQuery::Definition { .. }
+        | SemanticQuery::References { .. }
+        | SemanticQuery::PrepareRename { .. }
+        | SemanticQuery::Rename { .. } => None,
     };
     let workspace_generation = match &query {
         SemanticQuery::Definition { workspace, .. } => Some(workspace.sources.revision()),
-        SemanticQuery::DocumentSymbols | SemanticQuery::Hover { .. } => None,
+        SemanticQuery::DocumentSymbols
+        | SemanticQuery::Hover { .. }
+        | SemanticQuery::References { .. }
+        | SemanticQuery::PrepareRename { .. }
+        | SemanticQuery::Rename { .. } => None,
     };
     let job = SemanticJob {
         id: id.clone(),
@@ -967,6 +1143,40 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                         &workspace,
                     ) {
                         Ok(definition) => SemanticQueryResult::Definition(definition),
+                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                    },
+                    SemanticQuery::References {
+                        byte_offset,
+                        include_declaration,
+                    } => match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                        Ok(snapshot) => SemanticQueryResult::References(snapshot.references(
+                            source.as_ref(),
+                            byte_offset,
+                            include_declaration,
+                        )),
+                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                    },
+                    SemanticQuery::PrepareRename { byte_offset } => {
+                        match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                            Ok(snapshot) => SemanticQueryResult::PrepareRename(
+                                snapshot.prepare_rename(source.as_ref(), byte_offset),
+                            ),
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                        }
+                    }
+                    SemanticQuery::Rename {
+                        byte_offset,
+                        new_name,
+                    } => match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
+                        Ok(snapshot) => {
+                            match snapshot.rename(source.as_ref(), byte_offset, &new_name) {
+                                Ok(rename) => SemanticQueryResult::Rename(rename),
+                                Err(error) => SemanticQueryResult::RequestError {
+                                    code: ErrorCode::InvalidParams,
+                                    message: error.to_string(),
+                                },
+                            }
+                        }
                         Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                     },
                 };
@@ -1201,6 +1411,59 @@ fn drain_semantic_events(
                     .transpose()?
                     .flatten();
                 serde_json::to_value(definition)?
+            }
+            SemanticQueryResult::References(references) => {
+                let uri = file_path_to_uri(&request.path)?;
+                let references = references.map(|ranges| {
+                    ranges
+                        .into_iter()
+                        .filter_map(|range| {
+                            semantic_range_to_lsp(request.source.as_ref(), range)
+                                .map(|range| Location::new(uri.clone(), range))
+                        })
+                        .collect::<Vec<_>>()
+                });
+                serde_json::to_value(references)?
+            }
+            SemanticQueryResult::PrepareRename(target) => {
+                let target = target.and_then(|target| {
+                    semantic_range_to_lsp(request.source.as_ref(), target.range).map(|range| {
+                        PrepareRenameResponse::RangeWithPlaceholder {
+                            range,
+                            placeholder: target.name,
+                        }
+                    })
+                });
+                serde_json::to_value(target)?
+            }
+            SemanticQueryResult::Rename(rename) => {
+                let rename = rename.map(|rename| {
+                    let uri = file_path_to_uri(&request.path)?;
+                    let edits = rename
+                        .edits
+                        .into_iter()
+                        .filter_map(|edit| {
+                            semantic_range_to_lsp(request.source.as_ref(), edit.range)
+                                .map(|range| OneOf::Left(TextEdit::new(range, edit.new_text)))
+                        })
+                        .collect::<Vec<_>>();
+                    Ok::<_, anyhow::Error>(WorkspaceEdit {
+                        changes: None,
+                        document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
+                            text_document: OptionalVersionedTextDocumentIdentifier {
+                                uri,
+                                version: Some(request.version),
+                            },
+                            edits,
+                        }])),
+                        change_annotations: None,
+                    })
+                });
+                serde_json::to_value(rename.transpose()?)?
+            }
+            SemanticQueryResult::RequestError { code, message } => {
+                send_request_error(connection, event.id, code, message)?;
+                continue;
             }
             SemanticQueryResult::Unavailable(message) => {
                 debug!(

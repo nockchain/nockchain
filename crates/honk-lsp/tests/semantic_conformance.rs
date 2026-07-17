@@ -12,7 +12,7 @@ use lsp_server::{
 use lsp_types::notification::{DidOpenTextDocument, Notification as LspNotification};
 use lsp_types::{
     DidOpenTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location,
-    TextDocumentItem, Uri,
+    PrepareRenameResponse, TextDocumentItem, Uri, WorkspaceEdit,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -82,6 +82,34 @@ fn request_definition(
     Some(location)
 }
 
+fn request_references(
+    client: &Connection,
+    request_id: i32,
+    uri: &Uri,
+    line: usize,
+    character: usize,
+    include_declaration: bool,
+) -> Vec<Location> {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/references".to_string(),
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character },
+                    "context": { "includeDeclaration": include_declaration }
+                }),
+            )
+            .into(),
+        )
+        .expect("request references");
+    serde_json::from_value::<Option<Vec<Location>>>(receive_response(client, request_id))
+        .expect("references response")
+        .unwrap_or_default()
+}
+
 fn start_server(
     root: &Path,
     check_delay_ms: u64,
@@ -136,6 +164,11 @@ fn start_server_with_dependencies(
     assert_eq!(initialize["capabilities"]["documentSymbolProvider"], true);
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
     assert_eq!(initialize["capabilities"]["definitionProvider"], true);
+    assert_eq!(initialize["capabilities"]["referencesProvider"], true);
+    assert_eq!(
+        initialize["capabilities"]["renameProvider"]["prepareProvider"],
+        true
+    );
     assert_eq!(
         initialize["capabilities"]["experimental"]["honk"]["semanticWorker"],
         true
@@ -538,6 +571,148 @@ fn local_binding_definition_respects_value_scope_and_shadowing() {
 }
 
 #[test]
+fn local_references_and_rename_preserve_binding_identity() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("local-rename.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let source = concat!(
+        "=/  value  1\n", "=/  before  value\n", "=/  result\n", "  =/  value  2\n", "  value\n",
+        "[before result value]\n",
+    );
+    let (client, server_thread) = start_server(&root, 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        7,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let references = request_references(&client, 2, &entry_uri, 1, 13, true);
+    assert_eq!(
+        references
+            .iter()
+            .map(|location| (location.range.start.line, location.range.start.character))
+            .collect::<Vec<_>>(),
+        vec![(0, 4), (1, 12), (5, 15)]
+    );
+    let uses = request_references(&client, 3, &entry_uri, 1, 13, false);
+    assert_eq!(uses.len(), 2);
+    assert!(uses.iter().all(|location| location.range.start.line != 0));
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(4),
+                "textDocument/prepareRename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": { "line": 1, "character": 13 }
+                }),
+            )
+            .into(),
+        )
+        .expect("prepare rename");
+    let prepared =
+        serde_json::from_value::<Option<PrepareRenameResponse>>(receive_response(&client, 4))
+            .expect("prepare rename response")
+            .expect("local face can be renamed");
+    assert_eq!(
+        prepared,
+        PrepareRenameResponse::RangeWithPlaceholder {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(1, 12),
+                lsp_types::Position::new(1, 17),
+            ),
+            placeholder: "value".to_string(),
+        }
+    );
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(5),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": { "line": 1, "character": 13 },
+                    "newName": "renamed"
+                }),
+            )
+            .into(),
+        )
+        .expect("request rename");
+    let edit = serde_json::from_value::<Option<WorkspaceEdit>>(receive_response(&client, 5))
+        .expect("rename response")
+        .expect("rename edit");
+    let edit_json = serde_json::to_value(edit).expect("workspace edit JSON");
+    assert_eq!(
+        edit_json["documentChanges"][0]["textDocument"]["uri"],
+        entry_uri.as_str()
+    );
+    assert_eq!(
+        edit_json["documentChanges"][0]["textDocument"]["version"],
+        7
+    );
+    let edits = edit_json["documentChanges"][0]["edits"]
+        .as_array()
+        .expect("rename text edits");
+    assert_eq!(edits.len(), 3);
+    assert!(edits.iter().all(|edit| edit["newText"] == "renamed"));
+    assert_eq!(
+        edits
+            .iter()
+            .map(|edit| edit["range"]["start"]["line"].as_u64().expect("line"))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 5]
+    );
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(6),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": { "line": 1, "character": 13 },
+                    "newName": "result"
+                }),
+            )
+            .into(),
+        )
+        .expect("request colliding rename");
+    let collision = receive_response_message(&client, 6);
+    let ResponseKind::Err { error } = collision.response_kind else {
+        panic!("colliding rename must be rejected");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+    assert!(error.message.contains("result"));
+    assert!(error.message.contains("capture"));
+
+    shutdown_server(&client, server_thread, 7);
+}
+
+#[test]
 fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
     let root = repository_root();
     let entry = root.join("hoon/apps/dumbnet/miner.hoon");
@@ -847,6 +1022,161 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
             request_id += 1;
         }
     }
+
+    let outer_cause_declaration_line = source
+        .lines()
+        .position(|line| line.contains("=/  cause  ((soft cause)"))
+        .expect("outer cause declaration");
+    let outer_cause_declaration_character = source
+        .lines()
+        .nth(outer_cause_declaration_line)
+        .expect("outer cause declaration line")
+        .find("cause")
+        .expect("outer cause declaration character");
+    let outer_cause_use_line = source
+        .lines()
+        .position(|line| line.contains("?~  cause"))
+        .expect("outer cause use");
+    let outer_cause_use_character = source
+        .lines()
+        .nth(outer_cause_use_line)
+        .expect("outer cause use line")
+        .find("cause")
+        .expect("outer cause use character");
+    let outer_cause_initializer_line = source
+        .lines()
+        .position(|line| line.contains("=/  cause  u.cause"))
+        .expect("shadowing cause initializer");
+    let outer_cause_initializer_character = source
+        .lines()
+        .nth(outer_cause_initializer_line)
+        .expect("shadowing cause initializer line")
+        .rfind("cause")
+        .expect("shadowing cause initializer character");
+    let cause_references = request_references(
+        &client, request_id, &entry_uri, outer_cause_use_line, outer_cause_use_character, true,
+    );
+    assert_eq!(
+        cause_references
+            .iter()
+            .map(|location| (location.range.start.line, location.range.start.character))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                u32::try_from(outer_cause_declaration_line).expect("small line"),
+                u32::try_from(outer_cause_declaration_character).expect("small character"),
+            ),
+            (
+                u32::try_from(outer_cause_use_line).expect("small line"),
+                u32::try_from(outer_cause_use_character).expect("small character"),
+            ),
+            (
+                u32::try_from(outer_cause_initializer_line).expect("small line"),
+                u32::try_from(outer_cause_initializer_character).expect("small character"),
+            ),
+        ]
+    );
+    request_id += 1;
+
+    let dig_use_line = source
+        .lines()
+        .position(|line| line.contains("check-target:mine dig"))
+        .expect("dig use");
+    let dig_use_character = source
+        .lines()
+        .nth(dig_use_line)
+        .expect("dig use line")
+        .find("dig")
+        .expect("dig use character");
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": { "line": dig_use_line, "character": dig_use_character },
+                    "newName": "mining-digest"
+                }),
+            )
+            .into(),
+        )
+        .expect("rename real miner dig");
+    let dig_rename =
+        serde_json::from_value::<Option<WorkspaceEdit>>(receive_response(&client, request_id))
+            .expect("real miner rename response")
+            .expect("real miner rename edit");
+    let dig_rename = serde_json::to_value(dig_rename).expect("real miner rename JSON");
+    assert_eq!(
+        dig_rename["documentChanges"][0]["textDocument"]["version"],
+        1
+    );
+    let dig_edits = dig_rename["documentChanges"][0]["edits"]
+        .as_array()
+        .expect("real miner rename edits");
+    assert_eq!(dig_edits.len(), 5);
+    assert!(dig_edits
+        .iter()
+        .all(|edit| edit["newText"] == "mining-digest"));
+    assert_eq!(
+        dig_edits
+            .iter()
+            .map(|edit| edit["range"]["start"]["line"].as_u64().expect("line"))
+            .collect::<Vec<_>>(),
+        vec![53, 56, 57, 57, 58]
+    );
+    request_id += 1;
+
+    let shorthand_line = source
+        .lines()
+        .position(|line| line.contains("|=  =kernel-state  kernel-state"))
+        .expect("kernel-state shorthand binding");
+    let shorthand_use_character = source
+        .lines()
+        .nth(shorthand_line)
+        .expect("shorthand binding line")
+        .rfind("kernel-state")
+        .expect("shorthand body use");
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": {
+                        "line": shorthand_line,
+                        "character": shorthand_use_character
+                    },
+                    "newName": "state-value"
+                }),
+            )
+            .into(),
+        )
+        .expect("rename real miner shorthand binding");
+    let shorthand_rename =
+        serde_json::from_value::<Option<WorkspaceEdit>>(receive_response(&client, request_id))
+            .expect("real miner shorthand rename response")
+            .expect("real miner shorthand rename edit");
+    let shorthand_rename =
+        serde_json::to_value(shorthand_rename).expect("real miner shorthand rename JSON");
+    let shorthand_edits = shorthand_rename["documentChanges"][0]["edits"]
+        .as_array()
+        .expect("real miner shorthand rename edits");
+    assert_eq!(shorthand_edits.len(), 2);
+    assert_eq!(
+        shorthand_edits
+            .iter()
+            .map(|edit| edit["newText"].as_str().expect("replacement text"))
+            .collect::<Vec<_>>(),
+        vec!["state-value=kernel-state", "state-value"]
+    );
+    assert!(shorthand_edits.iter().all(|edit| {
+        edit["range"]["start"]["line"] == u64::try_from(shorthand_line).expect("small line")
+    }));
+    request_id += 1;
 
     shutdown_server(&client, server_thread, request_id);
 }
