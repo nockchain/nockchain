@@ -498,7 +498,7 @@ fn load_and_validate_seeds(
 ///   it and regenerate from scratch, rather than run against an unusable/divergent
 ///   cache.
 /// - **Cache absent (or just deleted):** GENERATE it (one real compact proof per
-///   `buckets` entry — a one-time ~5-minute boot delay), cache it, then load +
+///   `buckets` entry — a one-time ~15-minute boot delay), cache it, then load +
 ///   validate + inject.
 ///
 /// Returns the number of buckets installed. **Any failure is `Err` and is FATAL** —
@@ -541,7 +541,7 @@ pub fn install_or_build_verifier_setup(
             }
             tracing::info!(
                 "Generating the AI-PoW verifier-setup table ({} buckets). This is a one-time \
-                 step and takes about 5 minutes; the result is cached, so subsequent boots are \
+                 step and takes about 15 minutes; the result is cached, so subsequent boots are \
                  fast.",
                 buckets.len(),
             );
@@ -800,8 +800,8 @@ pub fn build_and_cache_verifier_setup_seeds(
 /// The height climbs with the opened tile side `hw`, `k`, and `num_stripes = k/r`;
 /// `m = n = e·hw` is the minimal MoE-valid width (each of `e` experts gets exactly
 /// `hw` rows/cols) and `m,n` do not affect the trace height. Coverage of the full
-/// 2^13..2^20 band is asserted cheaply (no proving) in
-/// `production_verifier_setup_buckets_cover_the_envelope`.
+/// capped 2^13..2^19 band is asserted cheaply (no proving) in
+/// `production_verifier_setup_buckets_cover_the_capped_band`.
 pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
     use std::collections::BTreeMap;
     const E: usize = 2;

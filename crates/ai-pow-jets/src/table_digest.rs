@@ -48,8 +48,8 @@ const TABLE_DIGEST_DOMAIN_V0: &[u8] = b"ai-pow-v0-verifier-setup-table-digest\0"
 ///
 /// This is a CONSENSUS CONSTANT. It is measured once on a reference build by
 /// generating the full table and hashing it with [`verifier_setup_table_digest`]
-/// (see the ignored test `measure_v0_verifier_setup_table_digest` in
-/// `crate::setup`'s test module), then pinned here. Boot recomputes the digest of
+/// (see the ignored test `boot_generate_full_production_table` in
+/// `crate`'s test module), then pinned here. Boot recomputes the digest of
 /// the table it built and refuses to run on a mismatch.
 pub const AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST: [u8; 32] = [
     // Measured by `boot_generate_full_production_table` on the reference build

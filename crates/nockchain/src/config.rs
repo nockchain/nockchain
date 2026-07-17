@@ -445,6 +445,12 @@ impl NockchainCli {
         self.fakenet_asert.clone().into_config().map(|_| ())?;
         self.fakenet_ai_asert.clone().into_config().map(|_| ())?;
 
+        // The post-AI ZK re-anchor sits at `activation_height - 1`, so activation
+        // at genesis has no valid ZK anchor.
+        if self.fakenet_ai_pow_activation_height == Some(0) {
+            return Err("--fakenet-ai-pow-activation-height must be >= 1".to_string());
+        }
+
         Ok(())
     }
 }
@@ -639,6 +645,17 @@ mod tests {
         cli.fakenet_asert = zk_asert(Some(0), Some(0), Some(4));
         let err = cli.validate().expect_err("expected phase=0 error");
         assert!(err.contains("must equal"));
+    }
+
+    #[test]
+    fn validate_rejects_ai_pow_activation_height_zero() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_pow_activation_height = Some(0);
+        let err = cli
+            .validate()
+            .expect_err("expected activation-height=0 error");
+        assert!(err.contains(">= 1"));
     }
 
     #[test]

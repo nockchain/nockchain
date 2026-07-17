@@ -548,8 +548,8 @@
 ::      consensus-state's min-timestamps + targets maps).
 ::    cached-ai-asert-anchor: populated by accept-block when the
 ::      first verified %ai-pow block lands; captures the block itself as
-::      the AI puzzle's anchor. Consensus remains fail-closed for %ai-pow
-::      until recursive certificate verification is wired.
+::      the AI puzzle's anchor. %ai-pow blocks are verified via the
+::      recursive-certificate jet (%ai-pow-verify).
 +$  derived-state-10
   $+  derived-state-10
   $:  highest-block-height=(unit page-number:dt)
@@ -637,8 +637,8 @@
   $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]  ::  the existing puzzle-nock STARK PoW
       ::  AI matmul PoW wire shape. Carries a Rust-owned nonce plus the
       ::  recursive certificate only; raw Layer-0 proofs and the plain
-      ::  MatmulProof are not persisted in blocks. Consensus rejects this arm
-      ::  until the recursive verifier is wired.
+      ::  MatmulProof are not persisted in blocks. This arm is verified via
+      ::  the recursive-certificate jet (%ai-pow-verify).
       [%ai-pow nonce=ai-pow-nonce cert=ai-pow-certificate]
   ==
 ::
@@ -696,9 +696,8 @@
       [%track p=track]  :: runtime tracking of blocks for %liar-block-id effect
       [%seen p=seen]    ::  seen so don't reprocess
       ::  Mining candidate emissions. `%mine-zk` is emitted when the
-      ::  candidate block changes. `%mine-ai` is reserved for the AI
-      ::  puzzle but is not emitted while consensus is fail-closed
-      ::  awaiting recursive certificate verification.
+      ::  candidate block changes. `%mine-ai` is emitted for the AI puzzle
+      ::  once at/after the AI-PoW activation height.
       [%mine-zk mine-start]
       [%mine-ai mine-start]
       lie

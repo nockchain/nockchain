@@ -7,7 +7,7 @@
 //!   after the Nockchain target is hit. The selected noun encoder packages the
 //!   compact final-layer batch-STARK certificate as canonical bytes inside the
 //!   `%ai-pow` artifact. The large checkpoint certificate remains a regression
-//!   path; native terminal compression has been removed from this API.
+//!   path.
 //! * Pearl Gateway proof-submission plumbing for Pearl-side hits. This remains
 //!   Rust-only miner metadata; it is not part of the Hoon `%ai-pow` artifact.
 //! * A Rust-owned opaque nonce envelope for `%ai-pow` artifacts. Hoon sees the

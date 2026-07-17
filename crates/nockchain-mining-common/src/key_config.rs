@@ -1,5 +1,6 @@
 //! Mining-reward configuration types, parsed from CLI flags on the
-//! miner binary and pushed to the node via `MiningWire::SetPubKey`.
+//! miner binary and pushed to the node via each miner's `SetPubKey` wire
+//! (`ZkPowMinerWire`/`AiPowMinerWire`).
 //!
 //! Lifted verbatim from `crates/nockchain/src/mining.rs`. The
 //! `FromStr` impls are used by `clap`'s `value_parser!`.

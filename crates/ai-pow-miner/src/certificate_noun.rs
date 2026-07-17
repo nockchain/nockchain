@@ -7,9 +7,9 @@
 //! full-matmul statement precheck before recursive proof reconstruction or
 //! verification. The selected compact final-layer batch-STARK path is encoded
 //! as canonical postcard bytes inside a bounded proof-node atom so the noun
-//! boundary does not re-inflate the compact certificate. Recursive verifier
-//! helpers are still Rust boundaries only; Hoon consensus remains fail-closed
-//! and does not call them in the current milestone.
+//! boundary does not re-inflate the compact certificate. The compact verify
+//! boundary here IS the consensus verify path: `check-pow`'s `%ai-pow` branch
+//! calls it through the `%ai-pow-verify` jet.
 //!
 //! ## Production API guide
 //!
@@ -2852,28 +2852,27 @@ pub enum AiPowBlockVerifyOutcome {
 /// **Self-contained consensus verifier** for a jammed `%ai-pow` compact block
 /// artifact — the single entrypoint the Hoon `check-pow`/`do-pow` jet calls (D4).
 ///
-/// Unlike the lower-level `verify_..._jam_with_context` entries, this does NOT
-/// require the caller to supply the matrices: it **derives the canonical `(A, B)`
-/// from the protocol seed** (`ai_pow::synth::AI_POW_PROD_SYNTH_SEED`) and the
-/// block's own `params` (`m`/`k`/`n` from the authenticated statement). That is
-/// what makes `A`/`B` non-grindable and needs no external model distribution — a
-/// consensus node holds only the block, the seed constant, and the compact
-/// verifier setup. It then dispatches on the nonce tag (`AIM1` → MoE, `AIP1` →
-/// dense) to the corresponding node verify branch.
+/// Unlike the lower-level `verify_..._jam_with_context` entries, the matrices are
+/// never supplied or reconstructed: the model is miner-chosen (Pearl parity — no
+/// synthetic-matrix pin). The verifier holds only the block, the compact verifier
+/// setup, and the consensus-derived commitment/target. It dispatches on the nonce
+/// tag (`AIM1` → MoE, `AIP1` → dense) to the corresponding compact node verify
+/// branch.
 ///
-/// The caller still supplies the trusted compact verifier setup
-/// (`compact_context` + `expected_verifier_key_digest_bytes`) — deterministic
-/// from the production params and built/cached once at node startup (shared with
-/// dense; see the parity doc §4 D4/S1) — and the consensus-derived
+/// The caller supplies the trusted compact verifier setup (`compact_context` +
+/// `expected_verifier_key_digest_bytes`) — deterministic from the production
+/// params and built/cached once at node startup (shared with dense; see the
+/// parity doc §4 D4/S1) — and the consensus-derived
 /// `candidate_nock_block_commitment` + `nockchain_target`.
 ///
 /// # Soundness
 ///
-/// The matrices are re-derived here, NOT taken from the prover, so a miner cannot
-/// grind a favorable `(A, B)`: any proof built over different matrices fails the
-/// `HASH_A`/`HASH_B` public-input binding (dense) or the routing/jackpot binding
-/// (MoE). This is the canonical-matrix rule the AI-PoW soundness argument
-/// requires (see `ai_pow::synth`).
+/// The miner's `(A, B)` are bound, not re-derived: the compact certificate proves
+/// the opened tile over the block-committed `HASH_A`/`HASH_B` (dense) or the
+/// routing/jackpot commitment (MoE), and the anti-grind is the commitment-keyed
+/// noise — a proof over any other matrices fails that public-input binding. So no
+/// external model distribution is needed and a miner cannot grind a favorable
+/// `(A, B)` without redoing the bound work.
 pub fn verify_ai_pow_block_artifact_jam(
     jammed: &[u8],
     limits: CertificateNounLimits,

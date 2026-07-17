@@ -3,7 +3,7 @@
 //! Connects to a `nockchain` node's private NockAppService gRPC,
 //! subscribes to `%mine` candidate effects, runs the STARK in a
 //! worker pool, and pokes solutions back as `%pow` commands on the
-//! `MiningWire::Mined` wire.
+//! `ZkPowMinerWire::Mined` wire.
 //!
 //! Quick start (assuming a fakenet node on `127.0.0.1:5555`):
 //!

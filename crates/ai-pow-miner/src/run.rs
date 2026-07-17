@@ -34,8 +34,8 @@
 //! constructs the Rust-owned `AIP1` nonce and, when a Pearl Gateway work item
 //! hits Pearl's target, submits Pearl's `PlainProof` wire payload to Gateway.
 //! If the same attempt hits Nockchain's target, the miner separately submits
-//! the Nockchain `%ai-pow` command. The kernel remains fail-closed until
-//! recursive certificate verification is wired.
+//! the Nockchain `%ai-pow` command, which consensus verifies via the
+//! `%ai-pow-verify` jet before admitting the block.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};

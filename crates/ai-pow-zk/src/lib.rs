@@ -26,12 +26,13 @@
 //! directly. Lower-level callers that already performed chain statement
 //! verification should use:
 //!
-//! - [`recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof`]
-//!   — selected compact final-layer batch-STARK route. It proves the
+//! - [`recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_sx`]
+//!   — selected compact final-layer batch-STARK route (the `_sx` stripe-major
+//!   variant is the one the production bridge calls). It proves the
 //!   statement-bound L1 proof inside a compact L2 proof, carries only the final
 //!   compact body plus an explicit verifier-key digest, and verifies against
 //!   verifier-owned metadata/setup and public values.
-//! - [`recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache`]
+//! - [`recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache_sx`]
 //!   — same proof path with reusable prover-side setup.
 //! - [`recursion::verify_compact_batch_recursive_certificate_with_context`]
 //!   — verifier entrypoint for compact certificates. The context and expected

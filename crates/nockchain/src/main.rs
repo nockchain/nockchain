@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Install the AI-PoW compact verifier-setup table from the data dir BEFORE
     // processing any block. If the cache is present + valid this is fast (load seeds
     // + rebuild; no proving); if it is absent (or corrupt) the node GENERATES the
-    // table once (a one-time ~5-minute boot delay; it logs this), caches it, and
+    // table once (a one-time ~15-minute boot delay; it logs this), caches it, and
     // injects it — validating it against the committed v0 consensus digest either
     // way. A node with no valid verifier setup cannot validate %ai-pow blocks, so any
     // failure is FATAL: we propagate the error and shut down rather than run blind.
