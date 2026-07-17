@@ -3010,13 +3010,6 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8],
     Ok(out)
 }
 
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    !needle.is_empty()
-        && haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
-}
-
 fn i8_slice_as_u8(input: &[i8]) -> &[u8] {
     // SAFETY: i8 and u8 have identical layout and alignment. The commitment
     // hashes raw two's-complement bytes, which is exactly what Pearl hashes.
