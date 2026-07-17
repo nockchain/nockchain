@@ -35,7 +35,9 @@
   m(shares s)
 ::
 ::  true if no keys are set for v0 or no key hashes are set for v1
-++  no-keys-set  ?|(=(*shares:v0:t v0-shares.m) =(*shares:t shares.m))
+::  no keys set iff BOTH the v0 sig-shares AND the v1 hash-shares are empty; a
+::  v1-only (or v0-only) miner still counts as having keys.
+++  no-keys-set  ?&(=(*shares:v0:t v0-shares.m) =(*shares:t shares.m))
 ::
 +|  %candidate-block
 ++  set-pow

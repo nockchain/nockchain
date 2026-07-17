@@ -1709,12 +1709,12 @@
         ?:  (gth (lent v1.command) 2)
         ~>  %slog.[1 'do-set-mining-key-advanced: Coinbase split for more than two public-key hashes not yet supported, exiting']
           [[%exit 1]~ k]
-        ?~  v0.command
-        ~>  %slog.[1 'do-set-mining-key-advanced: Empty list of sigs, exiting.']
-          [[%exit 1]~ k]
-        ::
-        ?~  v1.command
-        ~>  %slog.[1 'do-set-mining-key-advanced: Empty list of public key hashes, exiting.']
+        ::  Accept a v0-only, v1-only, OR both key set. A standalone v1 miner
+        ::  (e.g. ai-pow-mine / zk-pow-mine with only --mining-pkh) sends an empty
+        ::  v0 sig list + a v1 pkh; require at least one, and set only the
+        ::  non-empty side (an empty share map fails +validate:shares).
+        ?:  ?&(?=(~ v0.command) ?=(~ v1.command))
+        ~>  %slog.[1 'do-set-mining-key-advanced: No keys provided, exiting.']
           [[%exit 1]~ k]
         ::
         =/  [v0-shares=(list [sig:t @]) crash=?]
@@ -1743,8 +1743,8 @@
         ?:  crash
           ~>  %slog.[1 'do-set-mining-key-advanced: Invalid public keys provided, exiting']
           [[%exit 1]~ k]
-        =.  m.k  (set-v0-shares:min v0-shares)
-        =.  m.k  (set-shares:min shares)
+        =?  m.k  ?=(^ v0-shares)  (set-v0-shares:min v0-shares)
+        =?  m.k  ?=(^ shares)     (set-shares:min shares)
         `k
       ::
       ++  do-enable-mining
