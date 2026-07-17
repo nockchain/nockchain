@@ -1179,13 +1179,17 @@ pub fn validate_pearl_merge_config_for_recursive_prover(
     params: &MatmulParams,
     max_pattern_len: usize,
 ) -> Result<(), PearlCompatError> {
-    // Block-acceptance fail-closed: the recursive certificate does not yet bind
-    // the MoE routing commitment / grouped matmul (Track B5). Refuse MoE mining
-    // configs so no MoE proof can be accepted as a Nockchain block until the
-    // circuit lands, even though the config now parses (B3a).
+    // This validates config for the DENSE recursive prover only, which cannot prove
+    // a MoE (GROUPED_GEMM) work instance. MoE is NOT globally rejected: MoE blocks are
+    // proven and verified through the separate COMPACT MoE path
+    // (`prove_pearl_moe_compact_recursive_certificate` /
+    // `verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_...`), which binds the
+    // routing commitment (`verify_pearl_moe_compatible_work` +
+    // `verify_pearl_moe_compact_recursive_certificate`). So refuse MoE here — a MoE
+    // config on the dense prover is a caller error, not the acceptance gate.
     if config.moe().is_some() {
         return Err(PearlCompatError::UnsupportedRecursivePearlParams(
-            "MoE (GROUPED_GEMM) recursive proving is not implemented",
+            "MoE (GROUPED_GEMM) uses the compact recursive path, not the dense prover",
         ));
     }
     if params.difficulty_bits != 0 {

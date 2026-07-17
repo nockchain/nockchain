@@ -93,7 +93,9 @@ fn moe_config_parses_and_acceptance_fails_closed() {
         // Round-trips byte-for-byte.
         assert_eq!(config.to_bytes().unwrap(), bytes);
 
-        // Block-acceptance (recursive prover) refuses MoE.
+        // The DENSE recursive prover refuses MoE (MoE is proven+verified via the
+        // separate compact MoE path, which binds the routing commitment). This is a
+        // caller-routing guard, not a global MoE acceptance gate.
         assert_eq!(
             validate_pearl_merge_config_for_recursive_prover(
                 &config,
@@ -101,9 +103,9 @@ fn moe_config_parses_and_acceptance_fails_closed() {
                 4096
             ),
             Err(PearlCompatError::UnsupportedRecursivePearlParams(
-                "MoE (GROUPED_GEMM) recursive proving is not implemented"
+                "MoE (GROUPED_GEMM) uses the compact recursive path, not the dense prover"
             )),
-            "e={e} top_k={top_k} recursive acceptance must fail closed"
+            "e={e} top_k={top_k} dense recursive prover must refuse MoE"
         );
     }
 
