@@ -1124,7 +1124,10 @@ impl CompositeTrace {
             sel.windows(2).all(|w| w[0] < w[1]),
             "sel must be sorted + distinct"
         );
-        assert!(*sel.last().unwrap() < num_chunks, "sel chunk out of range");
+        assert!(
+            *sel.last().expect("sel non-empty (asserted above)") < num_chunks,
+            "sel chunk out of range"
+        );
         assert_eq!(
             strip_bytes.len(),
             sel.len() * 1024,

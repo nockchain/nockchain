@@ -1,6 +1,7 @@
 //! Adversarial tests: every check the verifier performs must reject the
 //! corresponding tampering.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::params::{MatmulParams, ParamError, SPOT_CHECKS_MAX};
 use ai_pow::proof::{MatmulProof, TileOpening};
 use ai_pow::prover::{mine, ProverOptions};

@@ -18,6 +18,7 @@
 //! benchmarks and fuzz harnesses. The connected node driver lives behind
 //! `feature = "node"`.
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

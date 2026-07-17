@@ -13,6 +13,7 @@
 //!   * **MoE fail-closed** — every non-dense trailer / MoE public-data shape is
 //!     rejected with a precise error, before any proving.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
     validate_pearl_merge_config_for_recursive_prover, verify_pearl_compatible_work,

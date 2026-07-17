@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::commit::matrix_commitment;
 use ai_pow::fiat_shamir::{noise_seed_a, noise_seed_b};
 use ai_pow::params::MatmulParams;

@@ -4,6 +4,7 @@
 //! CI; pass `BENCH_PROFILE=mid` or `BENCH_PROFILE=prod` in the environment
 //! to bench larger profiles.
 
+#![allow(clippy::unwrap_used)] // benchmark: unwrap is acceptable
 use std::env;
 use std::time::Duration;
 

@@ -9,6 +9,7 @@
 //! encodes MoE public data byte-compatibly; it does **not** accept an MoE proof
 //! (recursive acceptance stays fail-closed until Track B5).
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::pearl_compat::{
     PearlCompatError, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams,
     PearlPeriodicPattern, PearlPublicProofParams, PEARL_MINING_CONFIG_RESERVED_SIZE,

@@ -41,6 +41,7 @@
 //!                             +------------------+
 //! ```
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 pub mod pool;
 pub mod run;
 pub mod wire;

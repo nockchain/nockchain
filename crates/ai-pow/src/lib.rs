@@ -27,6 +27,10 @@
 //! the verifier can replicate one tile without seeing the full matrices.
 //! No SNARK / STARK is used (Pearl §4.7 — separate work).
 
+// `unwrap()` is acceptable in unit tests (repo convention; production code uses
+// explicit error handling / `expect` with a stated invariant).
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
 pub mod commit;
 pub mod fiat_shamir;
 pub mod matmul;

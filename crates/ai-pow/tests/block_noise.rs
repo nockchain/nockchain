@@ -2,6 +2,7 @@
 //! bytes as `mine` at the same nonce, and each nonce must rebuild the
 //! commitment/noise/matmul-derived state rather than reusing work.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::params::MatmulParams;
 use ai_pow::prover::{mine, mine_block, ProverOptions};
 use ai_pow::synth::synth_matrices;

@@ -19,6 +19,7 @@
 //! `ai-pow-miner`), so it is built once at boot and injected via
 //! [`init_ai_pow_verifier_setup`].
 
+#![cfg_attr(test, allow(clippy::unwrap_used))]
 // SOUNDNESS (consensus DoS): the verify jet's guarantee that a crafted `%ai-pow`
 // block can never crash the node relies on `std::panic::catch_unwind` converting an
 // attacker-induced panic (in decode or the vendored recursion verifier) into a

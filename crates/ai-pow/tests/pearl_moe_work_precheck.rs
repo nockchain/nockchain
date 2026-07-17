@@ -18,6 +18,7 @@
 //! proof-half + the forged-`hash_jackpot` rejection are covered by
 //! `zk_bridge::real_moe_compact_recursive_certificate_proves_and_verifies`.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::pearl_compat::{
     compute_pearl_moe_ticket, derive_pearl_work_commitments, verify_pearl_moe_compatible_work,
     PearlCompatError, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams,

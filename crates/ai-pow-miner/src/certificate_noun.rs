@@ -296,7 +296,7 @@ pub fn decode_pearl_merge_ai_pow_nonce(
     }
 
     let mut offset = 4usize;
-    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().unwrap()) as usize;
+    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
     offset += 2;
     let statement_end =
         offset
@@ -313,7 +313,7 @@ pub fn decode_pearl_merge_ai_pow_nonce(
     if nonce.len().saturating_sub(offset) < 4 + 1 {
         return Err(CertificateNounError::Shape("ai-pow nonce coinbase length"));
     }
-    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().unwrap()) as usize;
+    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
     offset += 4;
     if coinbase_len > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
         return Err(CertificateNounError::LimitExceeded(
@@ -501,7 +501,7 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
 
     // --- dense framing: statement ---
     let mut offset = 4usize;
-    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().unwrap()) as usize;
+    let statement_len = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above")) as usize;
     offset += 2;
     let statement_end =
         offset
@@ -523,7 +523,7 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
             "ai-pow MoE nonce coinbase length",
         ));
     }
-    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().unwrap()) as usize;
+    let coinbase_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
     offset += 4;
     if coinbase_len > PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES {
         return Err(CertificateNounError::LimitExceeded(
@@ -597,7 +597,7 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     if nonce.len().saturating_sub(offset) < tail_fixed {
         return Err(CertificateNounError::Shape("ai-pow MoE nonce tail"));
     }
-    let expert_idx = u16::from_le_bytes(nonce[offset..offset + 2].try_into().unwrap());
+    let expert_idx = u16::from_le_bytes(nonce[offset..offset + 2].try_into().expect("fixed-width field; buffer length checked above"));
     offset += 2;
     if (expert_idx as usize) >= e {
         return Err(CertificateNounError::Shape(
@@ -607,11 +607,11 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     let mut routing_offsets = Vec::with_capacity(e);
     for _ in 0..e {
         routing_offsets.push(u32::from_le_bytes(
-            nonce[offset..offset + 4].try_into().unwrap(),
+            nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above"),
         ));
         offset += 4;
     }
-    let hash_routing: [u8; 32] = nonce[offset..offset + 32].try_into().unwrap();
+    let hash_routing: [u8; 32] = nonce[offset..offset + 32].try_into().expect("fixed-width field; buffer length checked above");
     offset += 32;
     let outer_count = nonce[offset] as usize;
     offset += 1;
@@ -636,11 +636,11 @@ pub fn decode_pearl_merge_ai_pow_nonce_moe(
     let mut outer_indices = Vec::with_capacity(outer_count);
     for _ in 0..outer_count {
         outer_indices.push(u32::from_le_bytes(
-            nonce[offset..offset + 4].try_into().unwrap(),
+            nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above"),
         ));
         offset += 4;
     }
-    let routing_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().unwrap()) as usize;
+    let routing_len = u32::from_le_bytes(nonce[offset..offset + 4].try_into().expect("fixed-width field; buffer length checked above")) as usize;
     offset += 4;
     if routing_len > PEARL_MOE_MAX_ROUTING_ENTRIES {
         return Err(CertificateNounError::LimitExceeded(

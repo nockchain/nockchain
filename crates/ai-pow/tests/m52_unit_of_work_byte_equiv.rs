@@ -9,6 +9,7 @@
 //!
 //! Gated by the `zk` feature.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 #![cfg(feature = "zk")]
 
 use ai_pow::params::MatmulParams;

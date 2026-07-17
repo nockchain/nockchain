@@ -24,6 +24,7 @@
 //!
 //! Authoritative plan: `crates/ai-pow-zk/docs/2026-05-18_PHASE_B_DESIGN.md`.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::commit::{padded_chunk_len, CHUNK_LEN};
 use ai_pow::matmul::{compute_tile_from_slices, BlockNoise};
 use ai_pow::params::{LlamaFfnLayer, MatmulParams};

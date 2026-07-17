@@ -9,6 +9,7 @@
 //!     the MoE routing-commitment splice (`s_a`) actually changes the tile, and
 //!     every opened-index / seed perturbation binds.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::commit::matrix_commitment;
 use ai_pow::fiat_shamir::{
     canonical_noise_seeds_moe, moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b,

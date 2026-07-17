@@ -1,5 +1,6 @@
 //! End-to-end prover -> verifier tests at small dimensions.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::fiat_shamir::attempt_tile_index;
 use ai_pow::params::MatmulParams;
 use ai_pow::prover::{mine, mine_with_context_at_target, BlockContext, MineError, ProverOptions};

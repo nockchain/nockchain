@@ -516,7 +516,10 @@ pub fn open_strip_set(
         sel.windows(2).all(|w| w[0] < w[1]),
         "selective opening chunks must be sorted + distinct"
     );
-    assert!(*sel.last().unwrap() < n, "selective chunk out of 0..{n}");
+    assert!(
+        *sel.last().expect("sel non-empty (asserted above)") < n,
+        "selective chunk out of 0..{n}"
+    );
     let cvs = leaf_cvs(&padded, kappa);
     let opened: Vec<[u8; 32]> = sel.iter().map(|&c| cvs[c]).collect();
     let mut sibs = Vec::new();

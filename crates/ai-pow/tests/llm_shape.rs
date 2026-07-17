@@ -5,6 +5,7 @@
 //! 21) so we exercise small rectangular shapes that share the
 //! relevant structural properties.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::params::MatmulParams;
 use ai_pow::prover::{mine, ProverOptions};
 use ai_pow::synth::synth_matrices;

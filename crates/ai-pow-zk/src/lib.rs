@@ -96,6 +96,18 @@
 //!   verifier-derived statement from block data, and calls the Rust verifier.
 //!   Until that hook is wired, the Hoon/kernel path remains fail-closed.
 
+// Test-only lint relaxations: `unwrap()` is fine in tests (repo convention), and the
+// AIR/trace negative tests address cells by the explicit `row * WIDTH + col` index
+// idiom (`0 * WIDTH + col` for row 0), which trips erasing_op/identity_op.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::erasing_op,
+        clippy::identity_op
+    )
+)]
+
 pub mod blake3_tree;
 pub mod canonical;
 pub mod chips;

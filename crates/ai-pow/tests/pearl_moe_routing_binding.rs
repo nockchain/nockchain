@@ -3,6 +3,7 @@
 //! prover from opening arbitrary A-rows and claiming they are an expert's routed
 //! tokens. Every forgery path must be rejected.
 
+#![allow(clippy::unwrap_used)] // integration test: unwrap is acceptable
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
     moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError,
