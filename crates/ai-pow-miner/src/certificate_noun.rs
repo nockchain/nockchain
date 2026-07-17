@@ -243,7 +243,7 @@ impl PearlMergePublicStatementShape {
     }
 }
 
-pub fn encode_pearl_merge_ai_pow_nonce(
+pub(crate) fn encode_pearl_merge_ai_pow_nonce(
     statement: &PearlMergePublicStatementShape,
     aux_inclusion: &PearlAuxInclusionProof,
 ) -> Result<Vec<u8>, CertificateNounError> {
@@ -281,7 +281,7 @@ pub fn encode_pearl_merge_ai_pow_nonce(
     Ok(out)
 }
 
-pub fn decode_pearl_merge_ai_pow_nonce(
+pub(crate) fn decode_pearl_merge_ai_pow_nonce(
     nonce: &[u8],
 ) -> Result<PearlMergeAiPowNonceShape, CertificateNounError> {
     if nonce.len() > AI_POW_NONCE_MAX_SIZE {
@@ -427,7 +427,7 @@ fn moe_expert_count_from_core(
 /// `statement.public_data` must be a GROUPED_GEMM core (`e > 0`) with
 /// `e == moe.moe.routing_offsets.len()`. All Pearl caps (`e ≤ 1024`,
 /// `outer ≤ 128`) and the [`PEARL_MOE_MAX_ROUTING_ENTRIES`] DoS cap are enforced.
-pub fn encode_pearl_merge_ai_pow_nonce_moe(
+pub(crate) fn encode_pearl_merge_ai_pow_nonce_moe(
     statement: &PearlMergePublicStatementShape,
     aux_inclusion: &PearlAuxInclusionProof,
     moe: &PearlMergeMoeArtifact,
@@ -491,7 +491,7 @@ pub fn encode_pearl_merge_ai_pow_nonce_moe(
 /// Every read is length-checked before indexing and every count is capped before
 /// allocation, so a crafted nonce cannot over-allocate or index out of bounds.
 /// The final length must match exactly (no trailing bytes).
-pub fn decode_pearl_merge_ai_pow_nonce_moe(
+pub(crate) fn decode_pearl_merge_ai_pow_nonce_moe(
     nonce: &[u8],
 ) -> Result<PearlMergeAiPowNonceMoeShape, CertificateNounError> {
     if nonce.len() > AI_POW_NONCE_MOE_MAX_SIZE {
@@ -977,7 +977,7 @@ pub fn ai_pow_compact_recursive_certificate_from_node(
 
 /// Reconstruct a compact recursive certificate after enforcing explicit
 /// proof-node resource limits and canonical postcard encoding.
-pub fn ai_pow_compact_recursive_certificate_from_node_with_limits(
+pub(crate) fn ai_pow_compact_recursive_certificate_from_node_with_limits(
     node: &AiProofNode,
     limits: CertificateNounLimits,
 ) -> Result<ai_pow_zk::recursion::AiPowCompactBatchRecursiveCertificate, CertificateNounError> {
@@ -1065,7 +1065,7 @@ pub fn build_ai_pow_certificate_noun_from_compact_recursive_run(
 
 /// Build the same top-level certificate noun from an already-serialized proof
 /// node. This is mainly useful for focused shape tests.
-pub(crate) fn build_ai_pow_certificate_noun_from_node(
+pub fn build_ai_pow_certificate_noun_from_node(
     zk_params: &ZkParams,
     found_idx: u32,
     trace_height: usize,
@@ -1214,7 +1214,7 @@ pub fn build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
 /// verifier-selected full-matmul attempt. This helper does not build a block
 /// artifact and does not accept proof material; the public production artifact
 /// builder requires a real [`AiPowCompactRecursiveCertificateRun`].
-pub fn pearl_merge_recursive_certificate_parts_from_ticket(
+pub(crate) fn pearl_merge_recursive_certificate_parts_from_ticket(
     attempt: &PearlMergeTicketAttempt,
     a_row_major: &[i8],
     b_col_major: &[i8],
@@ -1351,7 +1351,7 @@ pub fn pearl_merge_recursive_certificate_parts_from_ticket(
 /// because that is a Layer-0 trace detail rather than part of Pearl's public
 /// work statement. This is still a metadata helper, not a public artifact
 /// constructor; block submission uses the compact recursive-run builder.
-pub fn pearl_merge_recursive_certificate_parts_from_ticket_public_inputs(
+pub(crate) fn pearl_merge_recursive_certificate_parts_from_ticket_public_inputs(
     attempt: &PearlMergeTicketAttempt,
     a_row_major: &[i8],
     b_col_major: &[i8],
@@ -1424,7 +1424,7 @@ pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_n
 /// Build the canonical `%ai-pow` artifact from a successful Pearl-compatible
 /// ticket and a real recursive prover run.
 #[doc(hidden)]
-pub fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_recursive_run(
+pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_recursive_run(
     attempt: &PearlMergeTicketAttempt,
     aux_inclusion: &PearlAuxInclusionProof,
     a_row_major: &[i8],
@@ -1474,7 +1474,7 @@ pub fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_recursive_run(
 
 /// Build the canonical `%ai-pow` artifact from a successful Pearl-compatible
 /// ticket and a real compact recursive prover run.
-pub fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+pub(crate) fn build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
     attempt: &PearlMergeTicketAttempt,
     aux_inclusion: &PearlAuxInclusionProof,
     a_row_major: &[i8],
@@ -1536,7 +1536,7 @@ pub fn decode_ai_pow_certificate_slab<J>(
 ///
 /// This parser enforces the production shape and bounded proof-node recursion.
 /// It does not verify the recursive ZKP itself.
-pub fn decode_ai_pow_certificate_noun(
+pub(crate) fn decode_ai_pow_certificate_noun(
     root: Noun,
     space: &NounSpace,
     limits: CertificateNounLimits,
@@ -1840,7 +1840,7 @@ pub fn decode_ai_pow_pearl_merge_artifact_noun(
 /// This is the cheap-rejection boundary for Nockchain submission and
 /// consensus prechecks: it parses the Rust-owned `AIP1` nonce and certificate
 /// statement metadata without reconstructing the recursive proof-node tail.
-pub fn decode_ai_pow_pearl_merge_artifact_metadata_noun(
+pub(crate) fn decode_ai_pow_pearl_merge_artifact_metadata_noun(
     root: Noun,
     space: &NounSpace,
     limits: CertificateNounLimits,
@@ -1856,7 +1856,7 @@ pub fn decode_ai_pow_pearl_merge_artifact_metadata_noun(
 
 /// Decode and validate the Pearl-format-compatible `%ai-pow` nonce and
 /// certificate metadata only in a slab.
-pub fn decode_ai_pow_pearl_merge_artifact_metadata_slab<J>(
+pub(crate) fn decode_ai_pow_pearl_merge_artifact_metadata_slab<J>(
     slab: &NounSlab<J>,
     limits: CertificateNounLimits,
 ) -> Result<PearlMergeAiPowArtifactMetadataShape, CertificateNounError> {
@@ -2010,7 +2010,7 @@ pub fn precheck_ai_pow_pearl_merge_artifact_statement_with_context(
 /// matrices; the `hash_jackpot` PI comparison here (from the authenticated
 /// statement) ties the difficulty gate to the proven tile. The commitment-keyed
 /// noise is the anti-grind, so arbitrary/degenerate matrices are safe.
-pub fn precheck_ai_pow_pearl_merge_artifact_statement_committed(
+pub(crate) fn precheck_ai_pow_pearl_merge_artifact_statement_committed(
     artifact: &PearlMergeAiPowArtifactShape,
     context: &PearlMergeAiPowVerifierContext<'_>,
 ) -> Result<PearlMergeMiningPrecheck, CertificateNounError> {
@@ -2272,7 +2272,7 @@ fn canonical_l0_commitment_for_compact(
 /// that makes this safe is **not yet implemented** (residual M2/M3); until it
 /// exists this function must not be reached by block acceptance. See
 /// `crates/ai-pow/docs/2026-07-13_ZK_POW_PRODUCTION_PUZZLE_VS_PEARL_AUDIT.md` §G.
-pub fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
+pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
     artifact: &PearlMergeAiPowArtifactShape,
     context: PearlMergeAiPowVerifierContext<'_>,
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
@@ -2337,7 +2337,7 @@ pub struct PearlMergeMoeMiningPrecheck {
 /// the recursive-prover acceptance guard + the Hoon↔Rust consensus wiring (M4
 /// admission half + D4/S1); this function is the soundness-complete verify the
 /// eventual dispatcher calls for `artifact.moe.is_some()`.
-pub fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
+pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_context_and_limits(
     artifact: &PearlMergeAiPowArtifactShape,
     context: PearlMergeAiPowVerifierContext<'_>,
     compact_context: &ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
@@ -2696,7 +2696,7 @@ fn validate_pearl_merge_recursive_params(
 /// not derive them; the recursive proof verifier still checks the full public
 /// input vector supplied by the certificate. This helper is not a production
 /// artifact constructor.
-pub fn pearl_merge_recursive_public_inputs_from_work(
+pub(crate) fn pearl_merge_recursive_public_inputs_from_work(
     commitments: &PearlWorkCommitments,
     ticket: &PearlPatternTicket,
 ) -> CompositePublicInputs {
