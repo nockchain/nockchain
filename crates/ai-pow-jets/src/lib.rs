@@ -123,7 +123,7 @@ impl DiskBucket {
 /// NON-DETERMINISTIC local fault (a real bucket whose context could not be loaded ⇒
 /// the jet `%fail`s, so a broken node halts instead of wrongly rejecting valid
 /// blocks that honest nodes accept).
-pub enum VerifierSetupLookup {
+pub(crate) enum VerifierSetupLookup {
     Found(Arc<AiPowVerifierSetup>),
     NoSuchBucket,
     LoadFailed,
@@ -210,7 +210,7 @@ static SETUP: OnceCell<DiskPagedSetup> = OnceCell::new();
 ///
 /// The returned `Arc` keeps the context alive for the caller's verify even if the LRU
 /// evicts it concurrently.
-pub fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLookup {
+pub(crate) fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLookup {
     // Uninjected setup is a per-node boot state (this node cannot verify anything yet),
     // not a property of the block ⇒ non-deterministic fault.
     let Some(s) = SETUP.get() else {
@@ -434,7 +434,7 @@ fn target_atom_to_32_saturating(noun: Noun, space: &NounSpace) -> Option<[u8; 32
 /// canonicalizes it the same way the prover did. `nockvm::serialization::jam`
 /// (here) and `NounSlab::jam` (the miner) are the same canonical jam, so the
 /// BLAKE3 inputs — and thus the commitments — match.
-pub fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -> [u8; 32] {
+pub(crate) fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -> [u8; 32] {
     let jammed = nockvm::serialization::jam(stack, noun);
     let space = stack.noun_space();
     let handle = jammed.in_space(&space);
@@ -450,7 +450,7 @@ pub fn commit_from_noun(stack: &mut nockvm::mem::NockStack, noun: Noun) -> [u8; 
 /// block commitment + target and an explicit setup. Factored out so it is
 /// unit-testable without the boot cache. Returns `Ok(true)` iff the block verifies,
 /// `Ok(false)` if it is well-formed but invalid.
-pub fn ai_pow_verify_core(
+pub(crate) fn ai_pow_verify_core(
     artifact: &PearlMergeAiPowArtifactShape,
     commit: [u8; 32],
     target: [u8; 32],

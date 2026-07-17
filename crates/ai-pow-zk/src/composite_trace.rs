@@ -244,7 +244,7 @@ impl CompositeTrace {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn place_matmul_step_with_ids(
+    pub(crate) fn place_matmul_step_with_ids(
         &mut self,
         row_idx: usize,
         a: &[[i8; TILE_D]; TILE_H],
@@ -325,7 +325,7 @@ impl CompositeTrace {
     /// matmul step (so the AIR's cross-row equation
     /// `nxt.CUMSUM = cur.CUMSUM` is satisfied when the next row is
     /// not itself an active matmul step).
-    pub fn set_cumsum_row(&mut self, row_idx: usize, cumsum: &[i32; CUMSUM_LEN]) {
+    pub(crate) fn set_cumsum_row(&mut self, row_idx: usize, cumsum: &[i32; CUMSUM_LEN]) {
         use p3_field::integers::QuotientMap;
         assert!(row_idx < self.height());
         let base = row_idx * TOTAL_TRACE_WIDTH;
@@ -359,7 +359,7 @@ impl CompositeTrace {
     /// `IS_HASH_A` / `IS_HASH_B` on the chunk-Merkle root row.
     /// `extra_selectors_on_finalize` indexes into `SELECTOR_COLS`
     /// (so `IS_HASH_A` = 4, `IS_HASH_B` = 5).
-    pub fn place_blake3_hash_with_selectors(
+    pub(crate) fn place_blake3_hash_with_selectors(
         &mut self,
         row_start: usize,
         message: &[u32; 16],
@@ -566,7 +566,7 @@ impl CompositeTrace {
     /// the last placed BLAKE3 block, and the 8-u32 commitment that
     /// matches `matrix_commitment(matrix_bytes, key)`. The caller
     /// must ensure `self.height() >= next_row`.
-    pub fn place_matrix_hash(
+    pub(crate) fn place_matrix_hash(
         &mut self,
         row_start: usize,
         matrix_bytes: &[u8],
@@ -1769,7 +1769,7 @@ impl CompositeTrace {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn place_useful_work_chain_hw(
+    pub(crate) fn place_useful_work_chain_hw(
         &mut self,
         row_start: usize,
         a_prime_rows: &[i8],
@@ -2408,7 +2408,7 @@ impl CompositeTrace {
         Self::enumerate_noised_chunks_with_src_hw(a_prime_rows, b_prime_cols, t, t, r, num_stripes)
     }
 
-    pub fn enumerate_noised_chunks_with_src_hw(
+    pub(crate) fn enumerate_noised_chunks_with_src_hw(
         a_prime_rows: &[i8],
         b_prime_cols: &[i8],
         h_tile: usize,
@@ -2595,7 +2595,7 @@ impl CompositeTrace {
         Self::noised_store_layout_hw(t, t, r, num_stripes, k)
     }
 
-    pub fn noised_store_layout_hw(
+    pub(crate) fn noised_store_layout_hw(
         h_tile: usize,
         w_tile: usize,
         r: usize,
@@ -2671,7 +2671,7 @@ impl CompositeTrace {
     /// `prove_batch`. The LogUp constraints will reject any trace
     /// where a query cell holds an out-of-range value, regardless
     /// of how `*_FREQ` is set.
-    pub fn populate_lookup_freq(&mut self) {
+    pub(crate) fn populate_lookup_freq(&mut self) {
         use p3_field::integers::QuotientMap;
         use p3_field::PrimeField64;
 

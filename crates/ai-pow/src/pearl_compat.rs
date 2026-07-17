@@ -2495,7 +2495,7 @@ pub fn verify_pearl_merge_mining_public_data_with_aux_bytes(
 /// proves that `expected_aux_commitment` is present in txid-committed coinbase
 /// bytes under the Pearl header merkle root, then runs the normal
 /// Nockchain/Pearl shared-work precheck.
-pub fn verify_pearl_merge_mining_public_data_with_aux_inclusion(
+pub(crate) fn verify_pearl_merge_mining_public_data_with_aux_inclusion(
     candidate_nock_block_commitment: &[u8; 32],
     block_header_bytes: &[u8],
     public_data: &[u8],

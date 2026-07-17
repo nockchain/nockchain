@@ -745,7 +745,7 @@ pub struct BuiltCompositeL1 {
 /// challenger desynchronizes. (`num_queries` is intrinsic to the
 /// proof shape and need not be threaded.)
 #[doc(hidden)]
-pub fn build_composite_l1_verifier_circuit(
+pub(crate) fn build_composite_l1_verifier_circuit(
     config: &AiPowStarkConfig,
     composite_air: &CompositeFullAirWithLookupsPinned,
     proof: &BatchProof<AiPowStarkConfig>,
