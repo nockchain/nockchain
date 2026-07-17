@@ -463,6 +463,30 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
                 zk_asert.half_life = half_life;
             }
             fakenet_constants = fakenet_constants.with_zk_asert(zk_asert);
+
+            // Fakenet ergonomics: the ZK flags also drive the post-AI-activation
+            // regime (zk_asert_post_ai), which is the regime actually in force once
+            // AI is active from a low height. Copy the same anchor target / ideal /
+            // half-life so there is ONE ZK difficulty knob across the regime switch,
+            // and pin anchor_min_timestamp to a non-zero sentinel so the regime-2
+            // target reads its hardcoded anchor instead of the (empty) cache — which
+            // otherwise crashes the first ZK candidate a dual-miner run builds. With
+            // a large half-life the sentinel timestamp is absorbed, giving a stable
+            // (~constant) normalized fakenet difficulty; the phase/anchor-height stay
+            // as --fakenet-ai-pow-activation-height set them.
+            let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
+            zk_post.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                zk_post.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                zk_post.half_life = half_life;
+            }
+            if zk_post.anchor_min_timestamp == 0 {
+                zk_post.anchor_min_timestamp = 1;
+            }
+            fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
         }
         if let Some(asert) = cli.fakenet_ai_asert.into_config()? {
             // AI-puzzle ASERT overrides (--fakenet-ai-asert-*). Symmetric with the
