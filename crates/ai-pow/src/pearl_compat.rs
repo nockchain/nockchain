@@ -219,6 +219,8 @@ pub enum PearlCompatError {
     PearlAuxNotCoinbase,
     #[error("Pearl aux commitment tag is not present in the txid-committed coinbase script")]
     PearlAuxCommitmentTagMissing,
+    #[error("Pearl aux commitment tag occurs {0} times in the coinbase script; exactly one is required so one Pearl PoW binds at most one Nockchain commitment")]
+    PearlAuxCommitmentTagNotUnique(usize),
     #[error("Pearl aux inclusion merkle branch does not match the Pearl header merkle root")]
     PearlAuxMerkleRootMismatch,
 }
@@ -2075,10 +2077,32 @@ pub fn verify_pearl_aux_inclusion(
     }
 
     let parsed_tx = pearl_txid_committed_bytes(&proof.coinbase_tx)?;
-    let mut tagged = Vec::with_capacity(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG.len() + 32);
-    tagged.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
-    tagged.extend_from_slice(aux_commitment);
-    if !contains_subslice(&parsed_tx.coinbase_script, &tagged) {
+    // N5: bind EXACTLY ONE Nockchain commitment per Pearl PoW. A plain "tag is
+    // present somewhere" check lets a merge-miner embed two `TAG || commit` pairs in
+    // one coinbase, so a single Pearl PoW (one coinbase, one merkle root) satisfies
+    // aux-inclusion for two distinct commitments — two competing same-height forks
+    // from one unit of work. Require the tag to occur exactly once, and the 32 bytes
+    // that follow it to be this commitment. (The tag is a fixed 20-byte,
+    // non-self-periodic string, so a spurious extra occurrence in an honest coinbase
+    // is a ~2^-160 event; rejecting on >1 is fail-closed and safe.)
+    let tag = PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG;
+    let tag_positions: Vec<usize> = parsed_tx
+        .coinbase_script
+        .windows(tag.len())
+        .enumerate()
+        .filter_map(|(i, w)| (w == tag).then_some(i))
+        .collect();
+    match tag_positions.as_slice() {
+        [] => return Err(PearlCompatError::PearlAuxCommitmentTagMissing),
+        [_] => {}
+        many => return Err(PearlCompatError::PearlAuxCommitmentTagNotUnique(many.len())),
+    }
+    let commit_start = tag_positions[0] + tag.len();
+    let commit_end = commit_start
+        .checked_add(32)
+        .filter(|&e| e <= parsed_tx.coinbase_script.len())
+        .ok_or(PearlCompatError::PearlAuxCommitmentTagMissing)?;
+    if &parsed_tx.coinbase_script[commit_start..commit_end] != aux_commitment {
         return Err(PearlCompatError::PearlAuxCommitmentTagMissing);
     }
 

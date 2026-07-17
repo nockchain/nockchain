@@ -186,6 +186,57 @@ fn pearl_aux_inclusion_verifies_tagged_coinbase_commitment_against_merkle_root()
         .expect("tagged aux commitment is included in Pearl merkle root");
 }
 
+// N5: a coinbase carrying TWO aux tags (one Pearl PoW trying to bind two distinct
+// Nockchain commitments -> two competing same-height forks) must be rejected for
+// BOTH commitments. Before the fix the plain subslice check accepted each.
+#[test]
+fn pearl_aux_inclusion_rejects_double_tag_n5() {
+    let commit_a =
+        pearl_nockchain_aux_commitment(b"nockchain-mainnet", &[0xAA; 32], 1, b"a").unwrap();
+    let commit_b =
+        pearl_nockchain_aux_commitment(b"nockchain-mainnet", &[0xBB; 32], 2, b"b").unwrap();
+    assert_ne!(commit_a, commit_b);
+    // script = 0x01 0x00 || TAG||commit_a || TAG||commit_b
+    let mut script = vec![0x01u8, 0x00];
+    script.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
+    script.extend_from_slice(&commit_a);
+    script.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
+    script.extend_from_slice(&commit_b);
+    let coinbase = coinbase_tx_with_script(&script, None);
+    let mut header = header();
+    header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&coinbase));
+    let proof = PearlAuxInclusionProof { coinbase_tx: coinbase, merkle_branch: vec![] };
+
+    for commit in [commit_a, commit_b] {
+        assert!(
+            matches!(
+                verify_pearl_aux_inclusion(&header, &commit, &proof),
+                Err(PearlCompatError::PearlAuxCommitmentTagNotUnique(2))
+            ),
+            "double-tag coinbase must reject (one PoW must not bind two commitments)"
+        );
+    }
+}
+
+// A tag with fewer than 32 trailing bytes cannot carry a commitment -> reject
+// (no panic / no out-of-bounds).
+#[test]
+fn pearl_aux_inclusion_rejects_tag_without_room_for_commitment() {
+    let aux_commitment =
+        pearl_nockchain_aux_commitment(b"nockchain-mainnet", &[0x42; 32], 1, b"w").unwrap();
+    let mut script = vec![0x01u8, 0x00];
+    script.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
+    script.extend_from_slice(&aux_commitment[..20]); // only 20 of 32 bytes follow the tag
+    let coinbase = coinbase_tx_with_script(&script, None);
+    let mut header = header();
+    header.merkle_root = display_root_from_raw(pearl_bitcoin_double_sha256_raw(&coinbase));
+    let proof = PearlAuxInclusionProof { coinbase_tx: coinbase, merkle_branch: vec![] };
+    assert!(matches!(
+        verify_pearl_aux_inclusion(&header, &aux_commitment, &proof),
+        Err(PearlCompatError::PearlAuxCommitmentTagMissing)
+    ));
+}
+
 #[test]
 fn pearl_aux_inclusion_rejects_witness_only_commitment() {
     let aux_commitment =
