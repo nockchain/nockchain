@@ -798,6 +798,25 @@ mod tests {
     }
 
     #[test]
+    fn blockchain_constants_roundtrip_from_noun_for_mainnet_and_fakenet() {
+        // `from_noun(to_noun(c)) == c` guards the hand-written v1 10-slot encode/
+        // decode (incl. the `AsertParams` trios) against any encode↔decode asymmetry.
+        for constants in [BlockchainConstants::new(), default_fakenet_blockchain_constants()] {
+            let mut slab: NounSlab = NounSlab::new();
+            let noun = constants.to_noun(&mut slab);
+            slab.set_root(noun);
+            let space = slab.noun_space();
+            let root = unsafe { *slab.root() };
+            let decoded = BlockchainConstants::from_noun(&root, &space)
+                .expect("from_noun(to_noun(c)) must decode");
+            assert_eq!(
+                decoded, constants,
+                "blockchain-constants noun round-trip must be identity"
+            );
+        }
+    }
+
+    #[test]
     fn blockchain_constants_new_defaults_are_valid() {
         let constants = BlockchainConstants::new();
 

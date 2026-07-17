@@ -1179,6 +1179,7 @@ fn prove_ai_pow_block(
 /// [`prove_pearl_merge_recursive_certificate`] because Pearl's unit is an
 /// explicit tile ticket from a committed work instance.
 #[doc(hidden)]
+#[cfg(test)] // checkpoint prover: exercised only by regression tests
 pub fn prove_ai_pow_recursive_certificate(
     ctx: &BlockContext<'_>,
     params: &MatmulParams,
@@ -1366,6 +1367,7 @@ fn prove_ai_pow_compact_recursive_certificate_inner(
 /// regression, but the active production recursive proof candidate is the
 /// compact final-layer batch-STARK certificate.
 #[doc(hidden)]
+#[cfg(test)] // checkpoint prover: exercised only by regression tests
 pub fn prove_pearl_merge_recursive_certificate(
     attempt: &PearlMergeTicketAttempt,
     params: &MatmulParams,
