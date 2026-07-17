@@ -71,7 +71,14 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::canonical::{prove_canonical_moe_block, CanonicalBlock, CanonicalProveError};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use ai_pow::tile_hash::hash_le_target;
+
+use crate::canonical::{
+    evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at, CanonicalBlock,
+    CanonicalProveError,
+};
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node,
@@ -755,13 +762,18 @@ fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> 
     Ok(slab)
 }
 
+/// A grind worker returns `Ok(Some(block))` when a nonce cleared the target and
+/// its certificate was proved, `Ok(None)` when the grind was cancelled (a new
+/// candidate arrived) or exhausted the nonce space, and `Err` on a prove failure.
+type GrindResult = Result<Option<CanonicalBlock>, CanonicalProveError>;
+
 enum CanonicalOutcome {
     None,
-    Joined(Result<Result<CanonicalBlock, CanonicalProveError>, tokio::task::JoinError>),
+    Joined(Result<GrindResult, tokio::task::JoinError>),
 }
 
 async fn await_canonical_worker(
-    worker: &mut Option<JoinHandle<Result<CanonicalBlock, CanonicalProveError>>>,
+    worker: &mut Option<JoinHandle<GrindResult>>,
 ) -> CanonicalOutcome {
     match worker.take() {
         Some(h) => CanonicalOutcome::Joined(h.await),
@@ -769,15 +781,70 @@ async fn await_canonical_worker(
     }
 }
 
+/// Proof-of-work grind for the gateway-free canonical miner. Iterates the
+/// extranonce (header timestamp), and for each attempt computes the cheap MoE
+/// tile jackpot ([`evaluate_canonical_moe_jackpot`]) and tests it against the
+/// node's difficulty `target`. On the first nonce whose jackpot clears the target
+/// it pays the one-time recursive-certificate cost ([`prove_canonical_moe_block_at`])
+/// and returns the block. Checks `cancel` every [`GRIND_CANCEL_CHECK_STRIDE`]
+/// attempts so a superseding candidate abandons the grind promptly. Runs on a
+/// blocking thread.
+const GRIND_CANCEL_CHECK_STRIDE: u32 = 64;
+
+fn grind_canonical_block(
+    commit: [u8; 32],
+    target: DifficultyTarget,
+    cancel: Arc<AtomicBool>,
+) -> GrindResult {
+    for extranonce in 0u32..=u32::MAX {
+        if extranonce % GRIND_CANCEL_CHECK_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let jackpot = evaluate_canonical_moe_jackpot(
+            &CANONICAL_MATMUL_PARAMS,
+            CANONICAL_HW,
+            CANONICAL_E,
+            CANONICAL_TOP_K,
+            commit,
+            extranonce,
+        )
+        .map_err(|e| CanonicalProveError(format!("grind attempt {extranonce}: {}", e.0)))?;
+        if hash_le_target(&jackpot, &target) {
+            info!(
+                extranonce,
+                commit = %hex::encode(commit),
+                "canonical AI-PoW jackpot hit; proving certificate (~25-30s)"
+            );
+            let block = prove_canonical_moe_block_at(
+                &CANONICAL_MATMUL_PARAMS,
+                CANONICAL_HW,
+                CANONICAL_E,
+                CANONICAL_TOP_K,
+                commit,
+                extranonce,
+            )?;
+            return Ok(Some(block));
+        }
+    }
+    warn!(
+        commit = %hex::encode(commit),
+        "canonical AI-PoW grind exhausted the u32 extranonce space with no jackpot; \
+         the target is too hard for the canonical shape (raise --fakenet-ai-asert-anchor-target-bex)"
+    );
+    Ok(None)
+}
+
 /// Gateway-free CPU miner loop: connect to the node, subscribe to `%mine-ai`
-/// candidates, and for each candidate prove a CANONICAL AI-PoW block bound to the
-/// candidate's block commitment (CPU, ~25-30s) and poke it as `%pow`. No Pearl
-/// Gateway. One prove runs at a time; a new candidate that arrives mid-prove is
-/// ignored until the current prove finishes, so the CPU never piles up. Because
-/// the prove is much slower than the default fakenet candidate refresh, run the
-/// node with `--fakenet-update-candidate-interval-secs` LARGER than the prove
-/// time (e.g. 120) so the candidate commitment is stable long enough for the
-/// proved certificate to still bind when it lands.
+/// candidates, and for each candidate GRIND a CANONICAL AI-PoW block bound to the
+/// candidate's block commitment — sweeping the extranonce, computing each attempt's
+/// MoE tile jackpot, until one clears the candidate's difficulty target; then pay
+/// the one-time recursive-certificate cost (~25-30s) and poke it as `%pow`. This is
+/// real proof-of-work: expected attempts ~= 2^256 / target. No Pearl Gateway. One
+/// grind runs at a time; candidates that arrive mid-grind are ignored until it
+/// finishes. Because a block takes grind + prove time, run the node with
+/// `--fakenet-update-candidate-interval-secs` LARGER than that (and tune the AI
+/// ASERT target so the grind fits inside the window) so the winning certificate
+/// still binds the current candidate when it lands.
 pub async fn run_canonical(
     node_addr: String,
     mining_pkh_configs: Vec<MiningPkhConfig>,
@@ -829,11 +896,17 @@ pub async fn run_canonical(
         }
         info!("ai-pow-miner: subscribed + mining enabled (canonical); awaiting %mine-ai candidates");
 
-        let mut worker: Option<JoinHandle<Result<CanonicalBlock, CanonicalProveError>>> = None;
+        let mut worker: Option<JoinHandle<GrindResult>> = None;
+        // Shared stop flag so a grind on the blocking pool bails promptly at
+        // shutdown (its u32 nonce sweep could otherwise run for minutes).
+        let grind_cancel = Arc::new(AtomicBool::new(false));
         let reconnect = loop {
             tokio::select! {
                 biased;
-                _ = shutdown.cancelled() => return Ok(()),
+                _ = shutdown.cancelled() => {
+                    grind_cancel.store(true, Ordering::Relaxed);
+                    return Ok(());
+                }
                 maybe_c = candidates.next() => {
                     let Some(c_res) = maybe_c else {
                         warn!("watch_candidates stream ended; reconnecting");
@@ -850,8 +923,12 @@ pub async fn run_canonical(
                         continue;
                     }
                     if worker.is_some() {
-                        // A prove is already in flight; ignore intervening candidates
-                        // to keep exactly one CPU prove running.
+                        // A grind is already in flight; ignore intervening candidates
+                        // to keep exactly one CPU grind running. A grind that finishes
+                        // against a since-superseded commit produces a block the node
+                        // rejects as stale, and the next candidate starts a fresh grind
+                        // — so difficulty must be tuned (via the AI ASERT target) so the
+                        // grind completes inside the candidate refresh window.
                         continue;
                     }
                     let inputs = match derive_nockchain_candidate_inputs(&candidate) {
@@ -862,19 +939,16 @@ pub async fn run_canonical(
                         }
                     };
                     let commit = inputs.nock_block_commitment;
+                    let target = inputs.target;
                     info!(
                         commit = %hex::encode(commit),
                         pow_len = inputs.pow_len,
-                        "new %mine-ai candidate; proving canonical AI-PoW block (~30s CPU)"
+                        target = %hex::encode(target),
+                        "new %mine-ai candidate; grinding canonical AI-PoW block against target"
                     );
+                    let cancel = grind_cancel.clone();
                     worker = Some(tokio::task::spawn_blocking(move || {
-                        prove_canonical_moe_block(
-                            &CANONICAL_MATMUL_PARAMS,
-                            CANONICAL_HW,
-                            CANONICAL_E,
-                            CANONICAL_TOP_K,
-                            commit,
-                        )
+                        grind_canonical_block(commit, target, cancel)
                     }));
                 }
                 joined = await_canonical_worker(&mut worker) => {
@@ -882,7 +956,7 @@ pub async fn run_canonical(
                         CanonicalOutcome::None => {
                             tokio::time::sleep(Duration::from_millis(50)).await;
                         }
-                        CanonicalOutcome::Joined(Ok(Ok(block))) => {
+                        CanonicalOutcome::Joined(Ok(Ok(Some(block)))) => {
                             info!(
                                 commit = %hex::encode(block.commit),
                                 trace_height = block.certificate.trace_height,
@@ -898,8 +972,11 @@ pub async fn run_canonical(
                                 Err(e) => warn!(error = %e, "build canonical poke failed"),
                             }
                         }
+                        CanonicalOutcome::Joined(Ok(Ok(None))) => {
+                            // Grind cancelled (shutdown) or exhausted the nonce space.
+                        }
                         CanonicalOutcome::Joined(Ok(Err(e))) => {
-                            warn!(error = %e, "canonical AI-PoW prove failed");
+                            warn!(error = %e, "canonical AI-PoW grind/prove failed");
                         }
                         CanonicalOutcome::Joined(Err(e)) => {
                             return Err(MinerError::WorkerJoin(format!("{e}")));
@@ -1834,6 +1911,47 @@ mod tests {
         self, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
     };
     use crate::wire::AiPowMinerWire;
+
+    /// Measure the two cost components of AI-PoW mining on THIS machine, using the
+    /// exact canonical shape the run loop mines (`CANONICAL_MATMUL_PARAMS`,
+    /// hw/e/top-k). AI block time = (expected grind attempts x t_attempt) + t_prove,
+    /// where expected attempts ~= 2^256 / target. These two numbers are what the
+    /// fakenet AI difficulty is tuned to (via the AI ASERT anchor target) so the AI
+    /// and ZK puzzles take comparable wall-clock per block. Ignored (slow); run:
+    ///   cargo test --release -p ai-pow-miner --features node canonical_mining_costs -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn canonical_mining_costs() {
+        let commit = [0x5au8; 32];
+
+        // (a) Per-attempt grind cost: evaluate_canonical_moe_jackpot (matmul +
+        // jackpot, no cert). This is the tunable proof-of-work unit.
+        let warm =
+            evaluate_canonical_moe_jackpot(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, 0).unwrap();
+        assert_ne!(warm, [0u8; 32]);
+        let attempts = 200u32;
+        let t = std::time::Instant::now();
+        for xn in 0..attempts {
+            let _ = evaluate_canonical_moe_jackpot(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, xn)
+                .expect("grind attempt");
+        }
+        let per_attempt = t.elapsed().as_secs_f64() / attempts as f64;
+        println!(
+            "grind attempt mean over {attempts}: {:.4}ms  ({:.0} attempts/sec)  <-- t_attempt",
+            per_attempt * 1e3,
+            1.0 / per_attempt
+        );
+
+        // (b) One-time certificate cost (paid once per block, on the winning nonce).
+        let t = std::time::Instant::now();
+        let block = prove_canonical_moe_block_at(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, 0)
+            .expect("prove");
+        println!(
+            "canonical prove: {:.3}s (trace_height={})  <-- t_prove",
+            t.elapsed().as_secs_f64(),
+            block.certificate.trace_height
+        );
+    }
 
     // Shared NockAppMetrics — gnort rejects double-registration.
     static METRICS: Lazy<Arc<nockapp::nockapp::metrics::NockAppMetrics>> = Lazy::new(|| {

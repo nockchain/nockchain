@@ -16,9 +16,9 @@
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    derive_pearl_work_commitments, pearl_bitcoin_double_sha256_raw, PearlAuxInclusionProof,
-    PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams, PearlNockchainAux,
-    PearlPeriodicPattern, PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32,
+    compute_pearl_moe_ticket, derive_pearl_work_commitments, pearl_bitcoin_double_sha256_raw,
+    PearlAuxInclusionProof, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams,
+    PearlNockchainAux, PearlPeriodicPattern, PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32,
     PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
@@ -74,8 +74,22 @@ fn setup_aux(commit: [u8; 32]) -> PearlNockchainAux {
     }
 }
 
+/// Base header timestamp; `extranonce == 0` reproduces the exact block the boot
+/// verifier-setup builder and `ai_pow_accept_e2e` prove (byte-stable).
+const CANONICAL_BASE_TIMESTAMP: u32 = 0x6677_8899;
+
+/// Build the synthetic Pearl header + aux-inclusion proof for one grind attempt.
+///
+/// `extranonce` varies ONLY the header `timestamp`, which feeds `sigma =
+/// header.to_bytes()` and therefore `kappa` → the noised matmul → the jackpot —
+/// so each extranonce is a fresh proof-of-work attempt. It does NOT touch the
+/// coinbase (hence the `merkle_root`), so the aux inclusion that binds
+/// `nock_commit` stays valid across the whole grind. The node's verifier
+/// re-derives everything from the SUBMITTED header, so it accepts any winning
+/// extranonce (it only re-checks aux inclusion + `jackpot <= target`).
 fn setup_aux_inclusion(
     aux_commitment: &[u8; 32],
+    extranonce: u32,
 ) -> (PearlIncompleteBlockHeader, PearlAuxInclusionProof) {
     let mut script = Vec::from([0x01u8, 0x00]);
     script.extend_from_slice(PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG);
@@ -99,7 +113,7 @@ fn setup_aux_inclusion(
         version: 0x0102_0304,
         prev_block: [0x11; 32],
         merkle_root,
-        timestamp: 0x6677_8899,
+        timestamp: CANONICAL_BASE_TIMESTAMP.wrapping_add(extranonce),
         nbits: 0x207f_ffff,
     };
     (
@@ -185,6 +199,7 @@ fn canonical_moe_inputs(
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
+    extranonce: u32,
 ) -> Result<CanonicalMoeInputs, CanonicalProveError> {
     let CanonicalMoeSchedule {
         config,
@@ -199,7 +214,7 @@ fn canonical_moe_inputs(
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
     let aux = setup_aux(nock_commit);
     let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
-    let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment);
+    let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment, extranonce);
     let mu = config.to_bytes().map_err(err("config bytes"))?;
     let commitments = derive_pearl_work_commitments(&header.to_bytes(), &mu, &a, &b);
 
@@ -221,16 +236,94 @@ fn canonical_moe_inputs(
     })
 }
 
-/// Prove a single canonical MoE block at the given shape, bound to `nock_commit`
-/// (the node's block commitment). `hw` is the opened-tile side; `e`/`top_k` the
-/// MoE config. Deterministic given `nock_commit`; ~25-30s on CPU for the small
-/// shape. Returns errors (panics-free).
+/// Cheap proof-of-work grind step: compute the full work ticket for one attempt
+/// (`nock_commit`, `extranonce`) — the noised MoE tile matmul + BLAKE3 jackpot, and
+/// NOT the ~25-30s recursive certificate. The returned ticket is byte-identical to
+/// the one the matching [`prove_canonical_moe_block_at`] certifies (both route
+/// through `compute_pearl_moe_ticket` with the same inputs), so a jackpot found
+/// here is guaranteed to survive the certificate's `jackpot <= target` gate.
+///
+/// This is the per-attempt proof-of-work UNIT. The jackpot is
+/// `keyed_hash(tile_state, s_a)` — a function of ONLY the tile matmul output and
+/// the noise seed, both of which derive from `kappa = BLAKE3(sigma || mu)`. There
+/// is no separate nonce: changing `extranonce` (the header timestamp inside
+/// `sigma`) changes `kappa` → `s_a`/`s_b` → the noise → the tile matmul → the
+/// jackpot. So a fresh jackpot trial is impossible without a fresh tile inference.
+pub fn evaluate_canonical_moe_ticket(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
+) -> Result<ai_pow::pearl_compat::PearlMoeTicket, CanonicalProveError> {
+    let CanonicalMoeInputs {
+        a,
+        b,
+        commitments,
+        routing,
+        inner,
+        local_b,
+        n_e,
+        ..
+    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
+    // Mirror the prover's ticket call exactly (expert 0, dot_product_len == k).
+    compute_pearl_moe_ticket(
+        &commitments.kappa,
+        &commitments.h_a,
+        &commitments.h_b,
+        &a,
+        &b,
+        &routing,
+        0,
+        &inner,
+        &local_b,
+        n_e,
+        params.k as usize,
+        params.noise_rank as usize,
+        params.k as usize,
+    )
+    .map_err(err("moe ticket"))
+}
+
+/// Cheap grind step returning only the jackpot hash (see
+/// [`evaluate_canonical_moe_ticket`]).
+pub fn evaluate_canonical_moe_jackpot(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
+) -> Result<[u8; 32], CanonicalProveError> {
+    Ok(evaluate_canonical_moe_ticket(params, hw, e, top_k, nock_commit, extranonce)?.jackpot_hash)
+}
+
+/// Prove a single canonical MoE block bound to `nock_commit` at `extranonce == 0`.
+/// Byte-stable back-compat wrapper (the boot setup builder / e2e prove this exact
+/// block).
 pub fn prove_canonical_moe_block(
     params: &MatmulParams,
     hw: u32,
     e: usize,
     top_k: usize,
     nock_commit: [u8; 32],
+) -> Result<CanonicalBlock, CanonicalProveError> {
+    prove_canonical_moe_block_at(params, hw, e, top_k, nock_commit, 0)
+}
+
+/// Prove a single canonical MoE block at the given shape, bound to `nock_commit`
+/// (the node's block commitment) and `extranonce` (the winning grind attempt — it
+/// selects the header timestamp that made `jackpot <= target`). `hw` is the
+/// opened-tile side; `e`/`top_k` the MoE config. ~25-30s on CPU for the small
+/// shape. Returns errors (panics-free).
+pub fn prove_canonical_moe_block_at(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
 ) -> Result<CanonicalBlock, CanonicalProveError> {
     let CanonicalMoeInputs {
         a,
@@ -247,7 +340,7 @@ pub fn prove_canonical_moe_block(
         aux,
         aux_commitment,
         aux_inclusion,
-    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit)?;
+    } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
     let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
         params,
@@ -312,4 +405,124 @@ pub fn prove_canonical_moe_block(
         commit: nock_commit,
         seed,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use ai_pow::tile_hash::hash_le_target;
+
+    use super::*;
+
+    fn canonical_params() -> MatmulParams {
+        MatmulParams {
+            m: 64,
+            k: 1024,
+            n: 64,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        }
+    }
+
+    /// The cheap grind evaluator must be byte-identical to the jackpot the full
+    /// certificate proves, for the SAME `(commit, extranonce)` — otherwise a hit
+    /// found while grinding would not survive the node's `jackpot <= target` check
+    /// after proving. Also: distinct extranonces are distinct PoW attempts (fresh
+    /// jackpots), and `extranonce == 0` is the byte-stable back-compat block.
+    /// Ignored (one prove ~25-30s); run with:
+    ///   cargo test --release -p ai-pow-miner canonical_grind_jackpot_matches_prove -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn canonical_grind_jackpot_matches_prove() {
+        let params = canonical_params();
+        let commit = [0x5au8; 32];
+
+        // Grind jackpots vary per extranonce (fresh attempts).
+        let j0 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 0).expect("eval 0");
+        let j1 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1");
+        let j2 = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 2).expect("eval 2");
+        assert_ne!(j0, j1, "extranonce 0 vs 1 must be distinct attempts");
+        assert_ne!(j1, j2, "extranonce 1 vs 2 must be distinct attempts");
+        // Deterministic per (commit, extranonce).
+        let j1b = evaluate_canonical_moe_jackpot(&params, 8, 2, 1, commit, 1).expect("eval 1b");
+        assert_eq!(j1, j1b, "grind eval must be deterministic");
+
+        // Grind eval == certified jackpot, for a nonzero extranonce.
+        let block = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 1).expect("prove 1");
+        assert_eq!(
+            block.run.ticket.jackpot_hash, j1,
+            "certified jackpot must equal the cheap grind jackpot for the same extranonce"
+        );
+
+        // extranonce 0 back-compat: same wrapper result as prove_canonical_moe_block.
+        let b0a = prove_canonical_moe_block(&params, 8, 2, 1, commit).expect("prove wrapper");
+        let b0b = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 0).expect("prove at 0");
+        assert_eq!(b0a.run.ticket.jackpot_hash, b0b.run.ticket.jackpot_hash);
+        assert_eq!(b0a.run.ticket.jackpot_hash, j0);
+
+        // Sanity: a trivial (all-ones) target is cleared; a zero target is not.
+        assert!(hash_le_target(&j1, &[0xFFu8; 32]));
+        assert!(!hash_le_target(&j1, &[0u8; 32]));
+    }
+
+    /// ANTI-REUSE INVARIANT (no skip-inference nonce): every extranonce that
+    /// changes the jackpot must force a FRESH tile inference. We assert that
+    /// distinct extranonces yield distinct noise seeds (`s_a`, `s_b`) AND distinct
+    /// tile matmul outputs (`tile_state`) — not merely distinct final hashes. If
+    /// the tile matmul output were reused across extranonces, a miner could grind
+    /// cheap jackpot trials without redoing inference; that is exactly the
+    /// forbidden shortcut. Cheap (no certificate), so not ignored.
+    #[test]
+    fn canonical_extranonce_forces_fresh_tile_inference() {
+        let params = canonical_params();
+        let commit = [0x33u8; 32];
+        let n = 24u32;
+        let mut seen_tiles = std::collections::HashSet::new();
+        let mut seen_sa = std::collections::HashSet::new();
+        let mut prev: Option<ai_pow::pearl_compat::PearlMoeTicket> = None;
+        for xn in 0..n {
+            let t = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
+            // Serialize the tile matmul output to compare/collect.
+            let tile_bytes = format!("{:?}", t.tile_state);
+            assert!(
+                seen_tiles.insert(tile_bytes),
+                "extranonce {xn}: tile matmul output repeated — inference was NOT forced fresh"
+            );
+            assert!(
+                seen_sa.insert(t.s_a),
+                "extranonce {xn}: noise seed s_a repeated — kappa did not vary"
+            );
+            if let Some(p) = &prev {
+                assert_ne!(p.s_b, t.s_b, "s_b must vary per extranonce");
+                assert_ne!(
+                    p.jackpot_hash, t.jackpot_hash,
+                    "jackpot must vary per extranonce"
+                );
+            }
+            prev = Some(t);
+        }
+        assert_eq!(seen_tiles.len(), n as usize);
+        assert_eq!(seen_sa.len(), n as usize);
+    }
+
+    /// The jackpot is a pure function of the tile matmul output and the noise seed
+    /// (`keyed_hash(tile_state, s_a)`), with NO separate nonce input. Recomputing
+    /// the jackpot from the ticket's own `tile_state` + `s_a` must reproduce it
+    /// exactly — proving there is no hidden degree of freedom that could change the
+    /// jackpot without changing the matmul.
+    #[test]
+    fn canonical_jackpot_is_pure_function_of_tile_and_seed() {
+        let params = canonical_params();
+        let commit = [0x77u8; 32];
+        for xn in [0u32, 1, 5, 100] {
+            let t = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, xn).expect("ticket");
+            let recomputed =
+                ai_pow::pearl_compat::pearl_jackpot_hash(&t.tile_state, &t.s_a);
+            assert_eq!(
+                recomputed, t.jackpot_hash,
+                "extranonce {xn}: jackpot must equal keyed_hash(tile_state, s_a)"
+            );
+        }
+    }
 }
