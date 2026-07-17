@@ -1859,8 +1859,10 @@
             %3  ~|(%unexpected-v3-in-zk-mine-start !!)
           ==
         :_  k
-        ::  AI mining remains fail-closed until the recursive-certificate
-        ::  verifier is wired into consensus.
+        ::  do-mine (new-heaviest-block / born) re-emits only the ZK candidate.
+        ::  The AI candidate (%mine-ai) is delivered by the candidate-update poke
+        ::  path (+build-ai-candidate), so post-activation AI miners re-target on
+        ::  the poke/timer cadence rather than immediately here.
         [%mine-zk zk-mine-start]~
       ::
       ::  only send a %elders request for reasonable heights

@@ -709,8 +709,8 @@
   $%  [%0 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%1 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%2 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
-      ::  %3: AI PoW mining. Reserved for [%mine-ai ...] once the
-      ::  recursive verifier is wired.
+      ::  %3: AI PoW mining. Emitted post-activation as the [%mine-ai ...]
+      ::  candidate for the ai-pow-miner.
       [%3 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
   ==
 ::
