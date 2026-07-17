@@ -95,6 +95,45 @@ pub struct SemanticHover {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticRenameTarget {
+    pub name: String,
+    pub range: SemanticTextRange,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticRename {
+    pub target: SemanticRenameTarget,
+    pub new_name: String,
+    pub edits: Vec<SemanticRenameEdit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticRenameEdit {
+    pub range: SemanticTextRange,
+    pub new_text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SemanticRenameError {
+    InvalidName(String),
+    WouldCapture(String),
+}
+
+impl fmt::Display for SemanticRenameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidName(name) => write!(formatter, "`{name}` is not a valid Hoon term"),
+            Self::WouldCapture(name) => write!(
+                formatter,
+                "renaming to `{name}` would capture or collide with an existing face"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SemanticRenameError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticSnapshot {
     pub path: PathBuf,
     pub version: i64,
@@ -185,6 +224,219 @@ impl SemanticSnapshot {
         }
         Some(definition.selection_range)
     }
+
+    /// Return same-document references that resolve to the exact lexical face
+    /// or unique structural symbol under the cursor.
+    pub fn references(
+        &self,
+        source: &str,
+        byte_offset: u32,
+        include_declaration: bool,
+    ) -> Option<Vec<SemanticTextRange>> {
+        match self.identity_at(source, byte_offset)? {
+            SemanticIdentity::Binding(binding) => {
+                let mut references = self
+                    .reference_term_ranges(source, &binding.name, binding.scope_range)
+                    .into_iter()
+                    .filter(|range| {
+                        self.binding_identity_at(source, range.start)
+                            .is_some_and(|candidate| candidate.id == binding.id)
+                    })
+                    .collect::<Vec<_>>();
+                if include_declaration {
+                    references.push(binding.declaration_range);
+                }
+                references.sort_by_key(|range| (range.start, range.end));
+                Some(references)
+            }
+            SemanticIdentity::Symbol(symbol) => {
+                let whole_document = SemanticTextRange {
+                    start: 0,
+                    end: u32::try_from(source.len()).ok()?,
+                };
+                let mut references = self
+                    .reference_term_ranges(source, &symbol.name, whole_document)
+                    .into_iter()
+                    .filter(|range| {
+                        if range == &symbol.selection_range {
+                            return include_declaration;
+                        }
+                        self.visible_binding_at(source, range.start).is_none()
+                            && self.definition(source, range.start) == Some(symbol.selection_range)
+                    })
+                    .collect::<Vec<_>>();
+                references.sort_by_key(|range| (range.start, range.end));
+                Some(references)
+            }
+        }
+    }
+
+    /// Only lexical faces are renameable for now. Arms, molds, and imported
+    /// symbols need workspace-wide provenance before they can be changed
+    /// without risking partial edits.
+    pub fn prepare_rename(&self, source: &str, byte_offset: u32) -> Option<SemanticRenameTarget> {
+        let binding = self.binding_identity_at(source, byte_offset)?;
+        Some(SemanticRenameTarget {
+            name: binding.name.clone(),
+            range: hoon_term_range_at(source, byte_offset)?,
+        })
+    }
+
+    pub fn rename(
+        &self,
+        source: &str,
+        byte_offset: u32,
+        new_name: &str,
+    ) -> Result<Option<SemanticRename>, SemanticRenameError> {
+        if !is_valid_hoon_term(new_name) {
+            return Err(SemanticRenameError::InvalidName(new_name.to_string()));
+        }
+        let Some(binding) = self.binding_identity_at(source, byte_offset) else {
+            return Ok(None);
+        };
+        if new_name != binding.name
+            && (self
+                .reference_term_ranges(source, new_name, binding.scope_range)
+                .into_iter()
+                .next()
+                .is_some()
+                || self.bindings.iter().any(|other| {
+                    other.id != binding.id
+                        && other.name == new_name
+                        && ranges_overlap(other.scope_range, binding.scope_range)
+                }))
+        {
+            return Err(SemanticRenameError::WouldCapture(new_name.to_string()));
+        }
+        let references = self
+            .references(source, byte_offset, true)
+            .expect("binding identity has local references");
+        let edits = references
+            .into_iter()
+            .map(|range| {
+                if new_name != binding.name
+                    && range == binding.declaration_range
+                    && range.start > 0
+                    && source.as_bytes().get(range.start as usize - 1) == Some(&b'=')
+                {
+                    SemanticRenameEdit {
+                        range: SemanticTextRange {
+                            start: range.start - 1,
+                            end: range.end,
+                        },
+                        new_text: format!("{new_name}={}", binding.name),
+                    }
+                } else {
+                    SemanticRenameEdit {
+                        range,
+                        new_text: new_name.to_string(),
+                    }
+                }
+            })
+            .collect();
+        Ok(Some(SemanticRename {
+            target: SemanticRenameTarget {
+                name: binding.name.clone(),
+                range: hoon_term_range_at(source, byte_offset)
+                    .expect("binding identity is under a Hoon term"),
+            },
+            new_name: new_name.to_string(),
+            edits,
+        }))
+    }
+
+    fn identity_at<'a>(&'a self, source: &str, byte_offset: u32) -> Option<SemanticIdentity<'a>> {
+        if let Some(binding) = self.binding_identity_at(source, byte_offset) {
+            return Some(SemanticIdentity::Binding(binding));
+        }
+        let name = hoon_term_at(source, byte_offset)?;
+        if let Some(symbol) = self
+            .symbols
+            .iter()
+            .find(|symbol| symbol.name == name && symbol.selection_range.contains(byte_offset))
+        {
+            return Some(SemanticIdentity::Symbol(symbol));
+        }
+        let definition = self.definition(source, byte_offset)?;
+        self.symbols
+            .iter()
+            .find(|symbol| symbol.selection_range == definition)
+            .map(SemanticIdentity::Symbol)
+    }
+
+    fn binding_identity_at(&self, source: &str, byte_offset: u32) -> Option<&SemanticBinding> {
+        let name = hoon_term_at(source, byte_offset)?;
+        self.bindings
+            .iter()
+            .filter(|binding| {
+                binding.name == name && binding.declaration_range.contains(byte_offset)
+            })
+            .min_by_key(|binding| binding.scope_range.len())
+            .or_else(|| self.visible_binding_at(source, byte_offset))
+    }
+
+    fn visible_binding_at(&self, source: &str, byte_offset: u32) -> Option<&SemanticBinding> {
+        let name = hoon_term_at(source, byte_offset)?;
+        self.bindings
+            .iter()
+            .filter(|binding| binding.name == name && binding.scope_range.contains(byte_offset))
+            .min_by_key(|binding| {
+                (
+                    binding.scope_range.len(),
+                    Reverse(binding.declaration_range.start),
+                )
+            })
+    }
+
+    fn reference_term_ranges(
+        &self,
+        source: &str,
+        name: &str,
+        range: SemanticTextRange,
+    ) -> Vec<SemanticTextRange> {
+        term_ranges_in_range(source, name, range)
+            .into_iter()
+            .filter(|candidate| {
+                self.nodes
+                    .iter()
+                    .filter(|node| node.range.contains(candidate.start))
+                    .min_by_key(|node| node.range.len())
+                    .is_some_and(|node| syntax_kind_contains_reference(node.syntax_kind.as_str()))
+            })
+            .collect()
+    }
+}
+
+enum SemanticIdentity<'a> {
+    Binding(&'a SemanticBinding),
+    Symbol(&'a SemanticSymbol),
+}
+
+fn syntax_kind_contains_reference(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Limb"
+            | "Wing"
+            | "Fits"
+            | "Like"
+            | "Over"
+            | "CenCab"
+            | "CenTar"
+            | "CenSig"
+            | "CenTis"
+            | "TisCol"
+            | "TisDot"
+            | "TisWut"
+            | "TisKet"
+            | "WutHep"
+            | "WutKet"
+            | "WutLus"
+            | "WutPat"
+            | "WutSig"
+            | "WutHax"
+            | "WutTis"
+            | "ZapPat"
+    )
 }
 
 /// Return the Hoon term under a byte offset using the editor's term boundary
@@ -349,6 +601,15 @@ fn hoon_term_range_at(source: &str, byte_offset: u32) -> Option<SemanticTextRang
 
 fn is_hoon_term_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+}
+
+fn is_valid_hoon_term(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_lowercase()) && bytes.all(is_hoon_term_byte)
+}
+
+fn ranges_overlap(left: SemanticTextRange, right: SemanticTextRange) -> bool {
+    left.start < right.end && right.start < left.end
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1082,24 +1343,43 @@ fn find_term_in_range(
     name: &str,
     range: SemanticTextRange,
 ) -> Option<SemanticTextRange> {
-    let start = usize::try_from(range.start).ok()?;
-    let end = usize::try_from(range.end).ok()?;
-    let haystack = source.get(start..end)?;
+    term_ranges_in_range(source, name, range).into_iter().next()
+}
+
+fn term_ranges_in_range(
+    source: &str,
+    name: &str,
+    range: SemanticTextRange,
+) -> Vec<SemanticTextRange> {
+    let (Ok(start), Ok(end)) = (usize::try_from(range.start), usize::try_from(range.end)) else {
+        return Vec::new();
+    };
+    let Some(haystack) = source.get(start..end) else {
+        return Vec::new();
+    };
+    let mut ranges = Vec::new();
     for (relative, _) in haystack.match_indices(name) {
         let match_start = start + relative;
         let match_end = match_start + name.len();
-        let left_boundary =
-            match_start == 0 || !is_hoon_term_byte(*source.as_bytes().get(match_start - 1)?);
-        let right_boundary =
-            match_end == source.len() || !is_hoon_term_byte(*source.as_bytes().get(match_end)?);
+        let left_boundary = match_start == 0
+            || source
+                .as_bytes()
+                .get(match_start - 1)
+                .is_some_and(|byte| !is_hoon_term_byte(*byte));
+        let right_boundary = match_end == source.len()
+            || source
+                .as_bytes()
+                .get(match_end)
+                .is_some_and(|byte| !is_hoon_term_byte(*byte));
         if left_boundary && right_boundary {
-            return Some(SemanticTextRange {
-                start: u32::try_from(match_start).ok()?,
-                end: u32::try_from(match_end).ok()?,
-            });
+            let (Ok(start), Ok(end)) = (u32::try_from(match_start), u32::try_from(match_end))
+            else {
+                return Vec::new();
+            };
+            ranges.push(SemanticTextRange { start, end });
         }
     }
-    None
+    ranges
 }
 
 fn syntax_kind(value: &Value) -> Option<&str> {
@@ -1397,8 +1677,8 @@ mod tests {
 
     use super::{
         hoon_rune_at, range_from_one_based_spot, scan_arm_headers, structural_definition,
-        structural_rune_definition, LineIndex, SemanticSession, SemanticSymbolKind,
-        SemanticTextRange,
+        structural_rune_definition, LineIndex, SemanticRenameError, SemanticSession,
+        SemanticSymbolKind, SemanticTextRange,
     };
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
@@ -1588,6 +1868,59 @@ mod tests {
             )
             .is_none());
 
+        let outer_references = first
+            .references(
+                source,
+                u32::try_from(final_use).expect("small source"),
+                true,
+            )
+            .expect("outer references");
+        assert_eq!(outer_references.len(), 3);
+        assert_eq!(outer_references[0].start as usize, outer_declaration);
+        let inner_references = first
+            .references(
+                source,
+                u32::try_from(inner_use).expect("small source"),
+                true,
+            )
+            .expect("inner references");
+        assert_eq!(inner_references.len(), 2);
+        assert_eq!(inner_references[0].start as usize, inner_declaration);
+        let rename = first
+            .rename(
+                source,
+                u32::try_from(final_use).expect("small source"),
+                "renamed",
+            )
+            .expect("valid rename")
+            .expect("rename target");
+        assert_eq!(
+            rename
+                .edits
+                .iter()
+                .map(|edit| edit.range)
+                .collect::<Vec<_>>(),
+            outer_references
+        );
+        assert!(rename.edits.iter().all(|edit| edit.new_text == "renamed"));
+        assert_eq!(rename.new_name, "renamed");
+        assert_eq!(
+            first.rename(
+                source,
+                u32::try_from(final_use).expect("small source"),
+                "result",
+            ),
+            Err(SemanticRenameError::WouldCapture("result".to_string()))
+        );
+        assert_eq!(
+            first.rename(
+                source,
+                u32::try_from(final_use).expect("small source"),
+                "Not-A-Term",
+            ),
+            Err(SemanticRenameError::InvalidName("Not-A-Term".to_string()))
+        );
+
         let edited = format!("\n{}", source.replace("  1\n", "  42\n"));
         let second = session
             .snapshot(path, 2, &edited)
@@ -1616,6 +1949,58 @@ mod tests {
                 .expect("core sample definition")
                 .start,
             u32::try_from(declaration).expect("small source")
+        );
+
+        let shorthand_source = "|=  =kernel-state  kernel-state\n";
+        let shorthand = session
+            .snapshot(
+                Path::new("/tmp/shorthand-bindings.hoon"),
+                1,
+                shorthand_source,
+            )
+            .expect("shorthand binding snapshot");
+        let shorthand_use = shorthand_source.rfind("kernel-state").expect("body use");
+        let shorthand_rename = shorthand
+            .rename(
+                shorthand_source,
+                u32::try_from(shorthand_use).expect("small source"),
+                "state-value",
+            )
+            .expect("valid shorthand rename")
+            .expect("shorthand rename target");
+        assert_eq!(shorthand_rename.edits.len(), 2);
+        assert_eq!(
+            &shorthand_source[shorthand_rename.edits[0].range.start as usize
+                ..shorthand_rename.edits[0].range.end as usize],
+            "=kernel-state"
+        );
+        assert_eq!(
+            shorthand_rename.edits[0].new_text,
+            "state-value=kernel-state"
+        );
+        assert_eq!(
+            &shorthand_source[shorthand_rename.edits[1].range.start as usize
+                ..shorthand_rename.edits[1].range.end as usize],
+            "kernel-state"
+        );
+        assert_eq!(shorthand_rename.edits[1].new_text, "state-value");
+
+        let literal_source = "=/  cause  1\n=/  text  'cause'\ncause\n";
+        let literal = session
+            .snapshot(Path::new("/tmp/literal-bindings.hoon"), 1, literal_source)
+            .expect("literal binding snapshot");
+        let cause_use = literal_source.rfind("cause").expect("cause use");
+        assert_eq!(
+            literal
+                .references(
+                    literal_source,
+                    u32::try_from(cause_use).expect("small source"),
+                    true,
+                )
+                .expect("cause references")
+                .len(),
+            2,
+            "cord contents are not references"
         );
     }
 
