@@ -52,6 +52,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(|| nockapp::default_data_dir("nockchain"));
 
+    // Apply the AI-PoW verifier cache cap (CLI takes precedence over the env var)
+    // BEFORE `install_or_build_verifier_setup`, which reads it via `verifier_cache_cap`.
+    // Raise toward 7 (all trace-height buckets resident) to neutralize the
+    // attacker-controlled trace-height page-in thrash DoS.
+    if let Some(cap) = cli.ai_pow_verifier_cache_cap {
+        std::env::set_var(
+            ai_pow_jets::setup::AI_POW_VERIFIER_CACHE_CAP_ENV,
+            cap.to_string(),
+        );
+    }
+
     let mut nockchain =
         nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
             .await?;

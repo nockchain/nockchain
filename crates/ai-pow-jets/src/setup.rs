@@ -455,20 +455,20 @@ pub fn load_verifier_setup_table(
 /// memory at once). See [`verifier_cache_cap`].
 pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 
-/// Default resident-context LRU cap. Set to the full production bucket count so a
-/// consensus validator keeps ALL 7 trace-height contexts (2^13..2^19) resident and
-/// never page-faults during verify.
+/// Default resident-context LRU cap. A node verifies at the current difficulty's
+/// trace height (stable — ASERT adjusts slowly) and admits blocks in height order,
+/// so the honest working set is ~1–2 heights; 2 avoids thrashing on a height shift
+/// while keeping standing RSS to ~2 contexts instead of all 7.
 ///
-/// This is a DoS defense, not just a perf choice: `trace_height` is an
-/// attacker-controlled certificate field, and a cache miss triggers a ~0.6 s
-/// synchronous context page-in on the single serf/consensus thread. With a small
-/// cap an attacker cycling ≥ cap+1 of the 7 valid buckets (even via INVALID blocks —
-/// the page-in is paid before the cert is rejected) forces an evict+reload each
-/// block, stalling ALL consensus progress. Keeping every bucket resident (there are
-/// only 7, so RSS is bounded) removes the page-in entirely. RSS-constrained,
-/// NON-validating nodes may lower `AI_POW_VERIFIER_CACHE_CAP`, accepting the
-/// thrash-DoS exposure that entails.
-pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 7;
+/// DoS knob: `trace_height` is an attacker-controlled certificate field, and a cache
+/// miss triggers a ~0.6 s synchronous context page-in on the single serf/consensus
+/// thread — paid even for INVALID blocks (the page-in precedes the cert reject). An
+/// attacker cycling ≥ cap+1 of the 7 valid buckets (2^13..2^19) forces an
+/// evict+reload each block, stalling consensus. If that thrash is observed, raise the
+/// cap to 7 (all buckets resident, bounded RSS, no page-in) via
+/// `--ai-pow-verifier-cache-cap` or the `AI_POW_VERIFIER_CACHE_CAP` env var. Kept low
+/// by default so the disk-paging RSS optimization holds for the common case.
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 2;
 
 /// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
 /// `>= 1`), else the default. Raising it trades RSS for fewer on-demand rebuilds;
