@@ -87,6 +87,13 @@ pub mod wire;
 #[cfg(feature = "node")]
 pub mod certificate_noun;
 
+/// Gateway-free canonical AI-PoW block proving for a self-contained CPU miner
+/// (see [`run::run_canonical`]). Copies the jets-free canonical prover so the
+/// standalone miner can prove a valid `%ai-pow` block bound to the node's block
+/// commitment without an external Pearl Gateway.
+#[cfg(feature = "node")]
+pub mod canonical;
+
 /// Out-of-process node-connecting run loop ([`run::run`]) - the production
 /// entry point used by the `ai-pow-mine` binary. Behind the `node` feature
 /// because it pulls in the gRPC + nockapp dep tree.

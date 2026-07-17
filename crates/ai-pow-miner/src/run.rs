@@ -71,10 +71,12 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+use crate::canonical::{prove_canonical_moe_block, CanonicalBlock, CanonicalProveError};
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_recursive_run,
+    build_ai_pow_pearl_merge_moe_artifact_noun_from_node,
     decode_ai_pow_pearl_merge_artifact_metadata_slab, AiProofNode, CertificateNounError,
     CertificateNounLimits,
 };
@@ -708,6 +710,215 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         }
     }
 
+    Ok(())
+}
+
+/// Canonical block shape for the gateway-free CPU miner. Matches the
+/// `ai_pow_accept_e2e` integration test and a member of the node's production
+/// verifier-setup bucket set (heights 2^13..2^19), so a node's boot-installed
+/// setup verifies it. See [`run_canonical`].
+const CANONICAL_MATMUL_PARAMS: MatmulParams = MatmulParams {
+    m: 64,
+    k: 1024,
+    n: 64,
+    noise_rank: 64,
+    tile: 8,
+    spot_checks: 1,
+    difficulty_bits: 0,
+};
+const CANONICAL_HW: u32 = 8;
+const CANONICAL_E: usize = 2;
+const CANONICAL_TOP_K: usize = 1;
+
+/// Build the `[%command %pow [%ai-pow nonce cert]]` poke from a proved canonical
+/// (MoE / `AIM1`) block, mirroring `ai_pow_accept_e2e::artifact_for_block` +
+/// `pow_poke_from_artifact`. The artifact is wrapped directly (no dense-`AIP1`
+/// metadata self-check — that would reject the MoE nonce magic).
+fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> {
+    let artifact = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+        &block.statement,
+        &block.aux_inclusion,
+        &block.moe_art,
+        &block.certificate.zk_params,
+        block.certificate.found_idx,
+        block.certificate.trace_height,
+        &block.certificate.commitments,
+        &block.certificate.public_inputs,
+        &block.certificate.certificate,
+    )
+    .map_err(|e| MinerError::CertificateBuild(format!("canonical moe artifact: {e}")))?;
+    let artifact_space = artifact.noun_space();
+    let mut slab = NounSlab::new();
+    let art = slab.copy_into(unsafe { *artifact.root() }, &artifact_space);
+    let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
+    slab.set_root(payload);
+    Ok(slab)
+}
+
+enum CanonicalOutcome {
+    None,
+    Joined(Result<Result<CanonicalBlock, CanonicalProveError>, tokio::task::JoinError>),
+}
+
+async fn await_canonical_worker(
+    worker: &mut Option<JoinHandle<Result<CanonicalBlock, CanonicalProveError>>>,
+) -> CanonicalOutcome {
+    match worker.take() {
+        Some(h) => CanonicalOutcome::Joined(h.await),
+        None => CanonicalOutcome::None,
+    }
+}
+
+/// Gateway-free CPU miner loop: connect to the node, subscribe to `%mine-ai`
+/// candidates, and for each candidate prove a CANONICAL AI-PoW block bound to the
+/// candidate's block commitment (CPU, ~25-30s) and poke it as `%pow`. No Pearl
+/// Gateway. One prove runs at a time; a new candidate that arrives mid-prove is
+/// ignored until the current prove finishes, so the CPU never piles up. Because
+/// the prove is much slower than the default fakenet candidate refresh, run the
+/// node with `--fakenet-update-candidate-interval-secs` LARGER than the prove
+/// time (e.g. 120) so the candidate commitment is stable long enough for the
+/// proved certificate to still bind when it lands.
+pub async fn run_canonical(
+    node_addr: String,
+    mining_pkh_configs: Vec<MiningPkhConfig>,
+    shutdown: CancellationToken,
+) -> Result<(), MinerError> {
+    validate_mining_pkh_configs(&mining_pkh_configs)?;
+    info!(
+        node = %node_addr,
+        params = ?CANONICAL_MATMUL_PARAMS,
+        "ai-pow-miner: entering CANONICAL (gateway-free CPU) loop"
+    );
+    loop {
+        if shutdown.is_cancelled() {
+            break;
+        }
+        let mut client = match NodeClient::connect(&node_addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "connect failed; retrying in 2s");
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
+                continue;
+            }
+        };
+        if let Err(e) = client
+            .set_mining_key(
+                AiPowMinerWire::SetPubKey.to_wire(),
+                Vec::new(),
+                mining_pkh_configs.clone(),
+            )
+            .await
+        {
+            return Err(MinerError::Configure(format!("set_mining_key: {e}")));
+        }
+        let mut candidates = match client.watch_candidates(vec![b"mine-ai".to_vec()]).await {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "watch_candidates failed; reconnecting");
+                continue;
+            }
+        };
+        if let Err(e) = client
+            .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
+            .await
+        {
+            return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
+        }
+        info!("ai-pow-miner: subscribed + mining enabled (canonical); awaiting %mine-ai candidates");
+
+        let mut worker: Option<JoinHandle<Result<CanonicalBlock, CanonicalProveError>>> = None;
+        let reconnect = loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => return Ok(()),
+                maybe_c = candidates.next() => {
+                    let Some(c_res) = maybe_c else {
+                        warn!("watch_candidates stream ended; reconnecting");
+                        break true;
+                    };
+                    let candidate = match c_res {
+                        Ok(c) => c,
+                        Err(e) => {
+                            warn!(error = %e, "candidate decode error; skipping");
+                            continue;
+                        }
+                    };
+                    if candidate.kind != MiningCandidateKind::Ai {
+                        continue;
+                    }
+                    if worker.is_some() {
+                        // A prove is already in flight; ignore intervening candidates
+                        // to keep exactly one CPU prove running.
+                        continue;
+                    }
+                    let inputs = match derive_nockchain_candidate_inputs(&candidate) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            warn!(error = %e, "could not derive candidate inputs; skipping");
+                            continue;
+                        }
+                    };
+                    let commit = inputs.nock_block_commitment;
+                    info!(
+                        commit = %hex::encode(commit),
+                        pow_len = inputs.pow_len,
+                        "new %mine-ai candidate; proving canonical AI-PoW block (~30s CPU)"
+                    );
+                    worker = Some(tokio::task::spawn_blocking(move || {
+                        prove_canonical_moe_block(
+                            &CANONICAL_MATMUL_PARAMS,
+                            CANONICAL_HW,
+                            CANONICAL_E,
+                            CANONICAL_TOP_K,
+                            commit,
+                        )
+                    }));
+                }
+                joined = await_canonical_worker(&mut worker) => {
+                    match joined {
+                        CanonicalOutcome::None => {
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                        CanonicalOutcome::Joined(Ok(Ok(block))) => {
+                            info!(
+                                commit = %hex::encode(block.commit),
+                                trace_height = block.certificate.trace_height,
+                                "canonical AI-PoW block proved; submitting %pow to node"
+                            );
+                            match build_canonical_poke(&block) {
+                                Ok(poke) => {
+                                    match client.poke_wire(AiPowMinerWire::Mined.to_wire(), poke).await {
+                                        Ok(()) => info!("canonical %ai-pow submission acked by node"),
+                                        Err(e) => warn!(error = %e, "submit canonical %pow failed (likely stale candidate)"),
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "build canonical poke failed"),
+                            }
+                        }
+                        CanonicalOutcome::Joined(Ok(Err(e))) => {
+                            warn!(error = %e, "canonical AI-PoW prove failed");
+                        }
+                        CanonicalOutcome::Joined(Err(e)) => {
+                            return Err(MinerError::WorkerJoin(format!("{e}")));
+                        }
+                    }
+                }
+            }
+        };
+
+        let _ = client
+            .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
+            .await;
+        if reconnect {
+            tokio::select! {
+                _ = shutdown.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+        }
+    }
     Ok(())
 }
 

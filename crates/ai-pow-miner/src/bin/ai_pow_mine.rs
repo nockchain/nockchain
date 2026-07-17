@@ -45,7 +45,7 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow_miner::pearl_mining::PearlMergeMineOptions;
 use ai_pow_miner::run::{
-    run, AiPuzzleInputs, MinerConfig, MinerError, PearlGatewayMinerRpcConfig,
+    run, run_canonical, AiPuzzleInputs, MinerConfig, MinerError, PearlGatewayMinerRpcConfig,
     PearlGatewayTransport, PearlMergeSubmissionConfig,
 };
 use anyhow::{anyhow, bail, Context, Result};
@@ -96,9 +96,16 @@ struct Args {
     mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
 
     /// Pearl Gateway miner RPC endpoint. Accepts `unix:/path/to.sock`, `/path/to.sock`,
-    /// `tcp:host:port`, `tcp://host:port`, or `host:port`.
+    /// `tcp:host:port`, `tcp://host:port`, or `host:port`. Ignored in --canonical mode.
     #[arg(long, value_name = "ENDPOINT", default_value = DEFAULT_PEARL_GATEWAY_ENDPOINT)]
     pearl_gateway: String,
+
+    /// Gateway-free CPU mode: prove a CANONICAL AI-PoW block bound to each
+    /// %mine-ai candidate directly on the CPU (~30s) and submit it, with no Pearl
+    /// Gateway. Self-contained; intended for fakenet. Run the node with
+    /// `--fakenet-update-candidate-interval-secs` larger than the prove time.
+    #[arg(long)]
+    canonical: bool,
 
     /// Log filter (env-filter syntax). Override with the `RUST_LOG` env var.
     #[arg(
@@ -117,23 +124,6 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     };
 
-    let puzzle = match build_puzzle_inputs(&args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("ai-pow-mine: invalid puzzle config: {e:#}");
-            return ExitCode::from(1);
-        }
-    };
-
-    let cfg = MinerConfig {
-        node_addr: args.node_addr,
-        mining_pkh_configs: pkh_configs,
-        puzzle,
-        reconnect_backoff_initial: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_INITIAL_MS),
-        reconnect_backoff_max: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_MAX_MS),
-        reconnect_max_attempts: DEFAULT_RECONNECT_MAX_ATTEMPTS,
-    };
-
     let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -145,24 +135,55 @@ fn main() -> ExitCode {
         }
     };
 
-    let r: Result<(), MinerError> = rt.block_on(async {
-        info!(
-            node = %cfg.node_addr,
-            puzzle_m = cfg.puzzle.params.m,
-            puzzle_k = cfg.puzzle.params.k,
-            puzzle_n = cfg.puzzle.params.n,
-            "ai-pow-mine: starting"
-        );
-        let shutdown = CancellationToken::new();
-        let shutdown_clone = shutdown.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                info!("ai-pow-mine: SIGINT received; shutting down");
-                shutdown_clone.cancel();
+    let r: Result<(), MinerError> = if args.canonical {
+        let node_addr = args.node_addr.clone();
+        rt.block_on(async move {
+            info!(node = %node_addr, "ai-pow-mine: starting (canonical, gateway-free CPU miner)");
+            let shutdown = CancellationToken::new();
+            let shutdown_clone = shutdown.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    info!("ai-pow-mine: SIGINT received; shutting down");
+                    shutdown_clone.cancel();
+                }
+            });
+            run_canonical(node_addr, pkh_configs, shutdown).await
+        })
+    } else {
+        let puzzle = match build_puzzle_inputs(&args) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("ai-pow-mine: invalid puzzle config: {e:#}");
+                return ExitCode::from(1);
             }
-        });
-        run(cfg, shutdown).await
-    });
+        };
+        let cfg = MinerConfig {
+            node_addr: args.node_addr,
+            mining_pkh_configs: pkh_configs,
+            puzzle,
+            reconnect_backoff_initial: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_INITIAL_MS),
+            reconnect_backoff_max: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_MAX_MS),
+            reconnect_max_attempts: DEFAULT_RECONNECT_MAX_ATTEMPTS,
+        };
+        rt.block_on(async {
+            info!(
+                node = %cfg.node_addr,
+                puzzle_m = cfg.puzzle.params.m,
+                puzzle_k = cfg.puzzle.params.k,
+                puzzle_n = cfg.puzzle.params.n,
+                "ai-pow-mine: starting"
+            );
+            let shutdown = CancellationToken::new();
+            let shutdown_clone = shutdown.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    info!("ai-pow-mine: SIGINT received; shutting down");
+                    shutdown_clone.cancel();
+                }
+            });
+            run(cfg, shutdown).await
+        })
+    };
 
     match r {
         Ok(()) => {
