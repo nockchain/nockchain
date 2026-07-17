@@ -105,6 +105,11 @@ default = ["parallel"]
 # consumers; the canonical production proof is the recursive certificate plus
 # verifier-derived statement precheck.
 dev-unsafe = []
+# Compiles the standalone checkpoint recursive-certificate VERIFIER
+# (`recursion::verify_recursive_certificate`) for cross-crate regression/benchmark
+# tests. It is NOT a production path — consensus uses the compact verifier — so it
+# is excluded from release builds. Enable only in `[dev-dependencies]`.
+test-support = []
 parallel = [
     "p3-dft/parallel",
     "p3-uni-stark/parallel",

@@ -20,7 +20,7 @@ bincode = { workspace = true, features = ["serde"], optional = true }
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
-ai-pow-zk = { path = "../ai-pow-zk", features = ["dev-unsafe"] }
+ai-pow-zk = { path = "../ai-pow-zk", features = ["dev-unsafe", "test-support"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-tracy = { workspace = true }

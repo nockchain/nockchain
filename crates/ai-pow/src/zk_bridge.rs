@@ -1839,6 +1839,11 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
 }
 
 /// 5. **Recursive certificate verification** (`verify_recursive_certificate`).
+///
+/// Regression-only: exercised solely by the MoE recursive-stack test. Consensus
+/// verifies MoE blocks through the compact path, so this is `cfg(test)` and never
+/// compiled into a release binary.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn verify_pearl_moe_recursive_certificate(
     certificate: &ai_pow_zk::recursion::AiPowRecursiveCertificate,

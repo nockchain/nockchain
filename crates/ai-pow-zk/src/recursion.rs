@@ -934,6 +934,9 @@ fn run_composite_l1_verifier_traces(
     runner.run().map_err(VerificationError::Circuit)
 }
 
+// Exclusive to `verify_recursive_certificate_inner`; gated with it so a release
+// build (no `test`/`test-support`) does not carry an unused checkpoint helper.
+#[cfg(any(test, feature = "test-support"))]
 fn production_l1_circuit_prover_data(
     built: &BuiltCompositeL1,
 ) -> Result<
@@ -946,6 +949,7 @@ fn production_l1_circuit_prover_data(
     production_l1_circuit_prover_data_with_public_binding_lanes(built, 0)
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn production_l1_circuit_prover_data_with_public_binding_lanes(
     built: &BuiltCompositeL1,
     public_binding_lanes: usize,
@@ -963,6 +967,7 @@ fn production_l1_circuit_prover_data_with_public_binding_lanes(
     )
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn l1_circuit_prover_data_with_config_and_public_binding_lanes(
     built: &BuiltCompositeL1,
     outer_config: &p3_circuit_prover::config::GoldilocksTipsConfig,
@@ -1251,7 +1256,19 @@ fn prove_composite_l1_outer_cert_with_config_and_table_packing(
 /// proof/program, running that circuit against the verifier-derived public
 /// inputs, comparing stable rebuilt outer metadata to the submitted outer
 /// proof, and verifying the submitted outer proof with the production
-/// batch-STARK verifier. It is not the selected compact production wire path.
+/// batch-STARK verifier.
+///
+/// **Not a production path, and not compiled into production builds.** The
+/// consensus accept path is the COMPACT verifier (`verify_ai_pow_block_artifact`
+/// -> the `_compact_` verifiers), which binds the canonical Layer-0 program via
+/// the P0/D6 opened-schedule commitment fold. This standalone checkpoint verifier
+/// is retained only as a regression/benchmark intermediate, so it is gated behind
+/// `test`/`test-support` and does not exist in a release binary. A caller MUST
+/// bind the certificate's `l0_program` to the canonical program from the public
+/// opened schedule (see `AiPowRecursiveCertificate::l0_program_matches`) before
+/// trusting the result — this verifier proves the statement for the certificate's
+/// own embedded program.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn verify_recursive_certificate(
     cert: &AiPowRecursiveCertificate,
@@ -1262,6 +1279,7 @@ pub fn verify_recursive_certificate(
     verify_recursive_certificate_inner(cert, zk_params, profile, &public_inputs.to_vec())
 }
 
+#[cfg(any(test, feature = "test-support"))]
 fn verify_recursive_certificate_inner(
     cert: &AiPowRecursiveCertificate,
     zk_params: &crate::params::ZkParams,
