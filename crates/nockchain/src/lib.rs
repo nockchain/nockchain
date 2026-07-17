@@ -450,15 +450,36 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
         }
         if let Some(asert) = cli.fakenet_asert.into_config()? {
-            // CLI overrides apply to the ZK puzzle's ASERT. AI puzzle's
-            // ASERT stays at defaults until/unless we add dedicated
-            // `--fakenet-ai-asert-*` flags.
+            // ZK-puzzle ASERT overrides (--fakenet-asert-* / --fakenet-zk-asert-*).
             let mut zk_asert = fakenet_constants.zk_asert.clone();
             zk_asert.phase = asert.phase;
             zk_asert.anchor_height = asert.anchor_height;
             zk_asert.anchor_target_atom =
                 ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                zk_asert.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                zk_asert.half_life = half_life;
+            }
             fakenet_constants = fakenet_constants.with_zk_asert(zk_asert);
+        }
+        if let Some(asert) = cli.fakenet_ai_asert.into_config()? {
+            // AI-puzzle ASERT overrides (--fakenet-ai-asert-*). Symmetric with the
+            // ZK flags. Applied after the --fakenet-ai-pow-activation-height block
+            // above, so these take precedence over the phase/anchor-height it sets.
+            let mut ai_asert = fakenet_constants.ai_asert.clone();
+            ai_asert.phase = asert.phase;
+            ai_asert.anchor_height = asert.anchor_height;
+            ai_asert.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                ai_asert.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                ai_asert.half_life = half_life;
+            }
+            fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
         }
         if let Some(interval_secs) = cli.fakenet_update_candidate_interval_secs {
             fakenet_constants =

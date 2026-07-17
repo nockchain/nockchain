@@ -25,6 +25,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let cli = nockchain::NockchainCli::parse_with_default_stack_size(boot::NockStackSize::Large);
     boot::init_default_tracing(&cli.nockapp_cli);
 
+    // Fail fast on invalid CLI config (e.g. a malformed --fakenet-*-asert-* combo)
+    // before the multi-minute AI-PoW verifier-setup generation below.
+    if let Err(e) = cli.validate() {
+        return Err(e.into());
+    }
+
     // Shared jet registry: the STARK prover jets + the AI-PoW consensus verify
     // jet. roswell must extend the identical set (crates/roswell) so `check-pow`'s
     // `~/ %ai-pow-verify` matches in both binaries.
