@@ -7,14 +7,9 @@
 # HONK_NATIVE_PARITY=1 disables that substitution so honk mints the prelude
 # itself — the build this test exercises.
 #
-# STATUS (reproduced 2026-06-14): honk's native mint of the full hoon-138
-# prelude does not complete — memory grows ~linearly (~4 GB/min) with no
-# plateau and exhausts RAM before producing an artifact (the original 49-min
-# OOM is current, not a transient bug). So this test currently reports the
-# memory blowup rather than a parity result. It is wired to become a real
-# byte-parity gate once honk's native-mint memory use is bounded. The honk
-# side is run under an RSS guard so it aborts safely instead of OOM-killing
-# the machine.
+# STATUS (verified 2026-07-18): honk's native self-mint is bounded, completes,
+# and byte-matches hoonc. The honk side remains under an RSS guard so a future
+# memory regression aborts with headroom instead of OOM-killing the machine.
 #
 # hoon/common/hoon.hoon is a symlink to crates/hoonc/hoon/hoon-138.hoon, so
 # both compilers see identical source; any artifact diff is compiler behavior,

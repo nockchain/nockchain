@@ -145,22 +145,27 @@ separate workspace mode:
   the cached structural graph never survives a disk-layout change. Open buffers
   remain authoritative overlays and carry document versions in workspace edits.
 - An unchanged request can reuse path caches.
+- A successful editor check also caches its noun-free semantic and resolution
+  facts by canonical entry. Repeated checks and same-content version updates
+  return those detached facts without re-minting the root.
 - The editor-only source-overlay path records direct and reverse dependency
   edges. A content-only edit to an existing file invalidates that path and its
   transitive dependents while preserving unrelated cached dependency vases.
-- Cache statistics report path hits, misses, and invalidated paths per
-  successful operation; the differential editor test requires all three.
+- Cache statistics report dependency-path and root-check hits, misses, and
+  invalidations per successful operation; the differential editor test requires
+  both levels.
 - Prelude, subject-type, compiler-option, create/delete/rename, and import-layout
   changes still build a fresh compiler context before checking again.
 - Content-only cache reuse across different paths is disabled in workspace mode
   because path-derived spots and import context can differ.
 
-Fine-grained reuse is constrained to cached dependency products. Entry files
-are still rebuilt for every operation, cross-call `miss` memo persistence stays
-disabled, and per-mint transient `Ut` state is cleared through the existing
-compiler boundary. The ordinary CLI and batch paths never enable mutable source
-snapshots or dependency-graph invalidation and retain their prior cache
-behavior.
+Fine-grained noun-bearing reuse is constrained to cached dependency products.
+Successful editor root checks reuse only detached facts; a changed root is
+still rebuilt as one type-checking unit. Cross-call `miss` memo persistence
+stays disabled, and per-mint transient `Ut` state is cleared through the
+existing compiler boundary. The ordinary CLI and batch paths never enable
+mutable source snapshots, root-check caching, or dependency-graph invalidation
+and retain their prior cache behavior.
 
 `WorkspaceArena` owns the noun slab for an epoch and lends it to the compiler
 through a closure, so dropping an invalidated epoch reclaims all of its nouns
