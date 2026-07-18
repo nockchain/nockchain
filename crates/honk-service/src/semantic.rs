@@ -108,6 +108,16 @@ pub struct SemanticCompletion {
     pub detail: String,
 }
 
+/// An editor-only arm or mold declaration found by the lightweight source
+/// scanner. Unlike [`SemanticSymbol`], this does not require a parsed AST and
+/// is suitable for indexing unopened workspace files and the prelude.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticStructuralSymbol {
+    pub name: String,
+    pub kind: SemanticSymbolKind,
+    pub range: SemanticTextRange,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticRenameTarget {
     pub name: String,
@@ -602,6 +612,22 @@ pub fn structural_declaration_ranges(source: &str, name: &str) -> Vec<SemanticTe
         .into_iter()
         .filter(|symbol| symbol.name == name)
         .map(|symbol| symbol.selection_range)
+        .collect()
+}
+
+/// Enumerate every arm and mold declaration using the lightweight source
+/// scanner shared by structural definition, completion, and rename support.
+pub fn structural_symbols(source: &str) -> Vec<SemanticStructuralSymbol> {
+    if source.len() > u32::MAX as usize {
+        return Vec::new();
+    }
+    scan_arm_headers(source)
+        .into_iter()
+        .map(|symbol| SemanticStructuralSymbol {
+            name: symbol.name,
+            kind: symbol.kind,
+            range: symbol.selection_range,
+        })
         .collect()
 }
 
@@ -1853,9 +1879,9 @@ mod tests {
 
     use super::{
         completion_term_range, hoon_rune_at, range_from_one_based_spot, scan_arm_headers,
-        structural_completions, structural_definition, structural_rune_definition, LineIndex,
-        SemanticCompletionKind, SemanticRenameError, SemanticSession, SemanticSymbolKind,
-        SemanticTextRange,
+        structural_completions, structural_definition, structural_rune_definition,
+        structural_symbols, LineIndex, SemanticCompletionKind, SemanticRenameError,
+        SemanticSession, SemanticSymbolKind, SemanticTextRange,
     };
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
@@ -1970,6 +1996,14 @@ mod tests {
             .iter()
             .any(|item| { item.name == "state" && item.kind == SemanticCompletionKind::Mold }));
         assert!(structural.iter().all(|item| item.name != "duplicate"));
+        let symbols = structural_symbols(structural_source);
+        assert_eq!(
+            symbols
+                .iter()
+                .filter(|symbol| symbol.name == "duplicate")
+                .count(),
+            2
+        );
 
         let term_source = "  tip5-hash-atom";
         let cursor = term_source.find("tip5").expect("term") + 4;
