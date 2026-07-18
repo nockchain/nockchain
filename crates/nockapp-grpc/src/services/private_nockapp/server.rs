@@ -148,8 +148,8 @@ impl PrivateNockApp for PrivateNockAppGrpcServer {
         );
 
         // One fresh broadcast subscriber per client. The bus drops effects
-        // for slow consumers; the client gets a `Lagged` warning in the log
-        // and the stream continues with the next live effect.
+        // for slow consumers; a lagging subscriber gets a terminal stream error
+        // so stateful miners reconnect and invalidate stale work.
         let mut receiver = self.handle.effect_sender.subscribe();
         let head_filter = req.head_filter;
         let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<EffectMessage, Status>>(64);
@@ -188,8 +188,13 @@ impl PrivateNockApp for PrivateNockAppGrpcServer {
                         }
                     }
                     Err(RecvError::Lagged(n)) => {
-                        warn!("WatchEffects client lagged by {n} effects; some dropped");
-                        continue;
+                        warn!("WatchEffects client lagged by {n} effects; ending stream");
+                        let _ = tx
+                            .send(Err(Status::data_loss(format!(
+                                "WatchEffects client lagged by {n} effects; reconnect required"
+                            ))))
+                            .await;
+                        break;
                     }
                     Err(RecvError::Closed) => {
                         debug!("WatchEffects: effect broadcast closed; ending stream");

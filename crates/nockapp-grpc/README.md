@@ -23,7 +23,7 @@ The regular node uses the private service for trusted local control. `nockchain-
 - RPC noun payloads are canonical JAM on success and fail explicitly on decode errors.
 - Private and public service implementations remain distinct. Private `Poke` exposes kernel command authority and is not safe as an unauthenticated public API.
 - `WatchEffects` creates one fresh subscriber per client and preserves the order observed by that subscriber.
-- The effect bus and per-client forwarding channel are bounded. A lagging subscriber may lose effects; lag is logged and streaming resumes with the next live effect.
+- The effect bus and per-client forwarding channel are bounded. A lagging subscriber receives a terminal stream error and must reconnect before acting on stateful work.
 - Effect filtering compares only the raw head atom and does not parse or validate the effect tail.
 - A successful `PokeResponse` reports delivery/acknowledgement, not consensus acceptance of any block or transaction produced by the command.
 - Public query caches follow reported chain state but are not protocol authority. Callers must tolerate warm-up, reorganization, and stale-read windows documented by the API binary.
@@ -32,7 +32,7 @@ The regular node uses the private service for trusted local control. `nockchain-
 
 Transport decoding, service dispatch, and backpressure must be bounded because requests and public clients are untrusted. gRPC and protobuf do not provide consensus validity. Every block, transaction, proof, and noun still passes the kernel's normal validation path.
 
-`WatchEffects` is a low-latency notification channel, not durable storage. Consumers recover by accepting replacement candidates or querying current state; they must not require exactly-once delivery.
+`WatchEffects` is a low-latency notification channel, not durable storage. Consumers recover by accepting replacement candidates, reconnecting after stream loss, or querying current state; they must not require exactly-once delivery.
 
 Authentication, authorization, TLS termination, request quotas, and Internet exposure are deployment concerns unless a specific service implements them. The private endpoint should normally bind only to a trusted local interface.
 

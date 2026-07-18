@@ -1,20 +1,19 @@
 //! Worker pool — fans candidate attempts out across N [`Worker`]s and
-//! collects results.
+//! collects generation-tagged results.
 //!
 //! The pool owns its workers (as `Arc<dyn Worker>`). The run loop
 //! drives the pool by:
-//! 1. On a new candidate, `dispatch_to_idle(...)` to spawn one attempt
-//!    per currently-idle worker.
-//! 2. On `next_result()` returning, decide what to do based on the
-//!    `MineResult` (success → submit + respawn the worker;
-//!    retry → respawn with the returned nonce; error → respawn fresh).
+//! 1. On a new candidate, increment its candidate generation and call
+//!    `dispatch_to_idle(...)` to spawn one attempt per currently-idle worker.
+//! 2. On `next_result()` returning, compare the result generation with the
+//!    current candidate generation before submitting or reusing a retry nonce.
 //! 3. On a superseding candidate, `cancel_all()` to signal each
-//!    in-flight attempt to abort; the resulting (error-tagged) results
-//!    surface through `next_result()` like any other.
+//!    in-flight attempt to abort; cancelled or racing results surface through
+//!    `next_result()` like any other.
 //!
 //! The pool does not own the *current* candidate — that's the run loop's
 //! concern. The pool just dispatches pre-built poke slabs and gives
-//! results back.
+//! generation-tagged results back.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -26,7 +25,7 @@ use crate::worker::{MineResult, Worker, WorkerError, WorkerId};
 
 pub struct Pool {
     workers: Vec<Arc<dyn Worker>>,
-    attempts: JoinSet<(WorkerId, Result<MineResult, WorkerError>)>,
+    attempts: JoinSet<(WorkerId, u64, Result<MineResult, WorkerError>)>,
     busy: HashSet<WorkerId>,
 }
 
@@ -61,10 +60,12 @@ impl Pool {
         self.workers.len() - self.busy.len()
     }
 
-    /// Dispatch one attempt to each idle worker. The caller supplies a
-    /// `build_poke` closure that produces a fresh poke per dispatch
-    /// (each invocation typically generates a new random nonce).
-    pub fn dispatch_to_idle<F>(&mut self, mut build_poke: F)
+    /// Dispatch one attempt to each idle worker. `generation` is returned with
+    /// every result so the run loop can reject stale work after a candidate
+    /// supersede. The caller supplies a `build_poke` closure that produces a
+    /// fresh poke per dispatch (each invocation typically generates a new
+    /// random nonce).
+    pub fn dispatch_to_idle<F>(&mut self, generation: u64, mut build_poke: F)
     where
         F: FnMut() -> NounSlab,
     {
@@ -78,28 +79,33 @@ impl Pool {
             .collect();
         for id in idle_ids {
             let poke = build_poke();
-            self.spawn_attempt(id, poke);
+            self.spawn_attempt(id, generation, poke);
         }
     }
 
     /// Dispatch one attempt onto the specified worker. No-op if the
     /// worker is already busy or the id is unknown.
-    pub fn dispatch_one(&mut self, id: WorkerId, poke: NounSlab) {
+    pub fn dispatch_one(&mut self, id: WorkerId, generation: u64, poke: NounSlab) {
         if self.busy.contains(&id) {
             tracing::warn!(
                 worker_id = id,
+                generation,
                 "dispatch_one: worker already busy; skipping"
             );
             return;
         }
         if !self.workers.iter().any(|w| w.id() == id) {
-            tracing::warn!(worker_id = id, "dispatch_one: unknown worker id; skipping");
+            tracing::warn!(
+                worker_id = id,
+                generation,
+                "dispatch_one: unknown worker id; skipping"
+            );
             return;
         }
-        self.spawn_attempt(id, poke);
+        self.spawn_attempt(id, generation, poke);
     }
 
-    fn spawn_attempt(&mut self, id: WorkerId, poke: NounSlab) {
+    fn spawn_attempt(&mut self, id: WorkerId, generation: u64, poke: NounSlab) {
         let worker = self
             .workers
             .iter()
@@ -109,7 +115,7 @@ impl Pool {
         self.busy.insert(id);
         self.attempts.spawn(async move {
             let result = worker.mine_attempt(poke).await;
-            (id, result)
+            (id, generation, result)
         });
     }
 
@@ -125,13 +131,15 @@ impl Pool {
 
     /// Wait for the next attempt result. Returns `None` when no
     /// attempts are in flight (the pool is fully idle). The
-    /// corresponding worker is marked idle before the result is
-    /// returned, so the caller can immediately re-dispatch on that id.
-    pub async fn next_result(&mut self) -> Option<(WorkerId, Result<MineResult, WorkerError>)> {
+    /// corresponding worker is marked idle before the generation-tagged result
+    /// is returned, so the caller can immediately re-dispatch on that id.
+    pub async fn next_result(
+        &mut self,
+    ) -> Option<(WorkerId, u64, Result<MineResult, WorkerError>)> {
         let joined = self.attempts.join_next().await?;
-        let (id, result) = joined.expect("worker task panicked");
+        let (id, generation, result) = joined.expect("worker task panicked");
         self.busy.remove(&id);
-        Some((id, result))
+        Some((id, generation, result))
     }
 }
 
@@ -275,10 +283,12 @@ mod tests {
         let w2 = StubWorker::new(2, vec![StubResponse::SuccessImmediate]);
         let workers: Vec<Arc<dyn Worker>> = vec![w1.clone(), w2.clone()];
         let mut pool = Pool::new(workers);
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(7, dummy_poke);
         assert_eq!(pool.busy_count(), 2);
-        let _r1 = pool.next_result().await.expect("result 1");
-        let _r2 = pool.next_result().await.expect("result 2");
+        let (_id1, gen1, _r1) = pool.next_result().await.expect("result 1");
+        let (_id2, gen2, _r2) = pool.next_result().await.expect("result 2");
+        assert_eq!(gen1, 7);
+        assert_eq!(gen2, 7);
         assert_eq!(pool.busy_count(), 0);
         assert_eq!(w1.attempt_count(), 1);
         assert_eq!(w2.attempt_count(), 1);
@@ -292,10 +302,10 @@ mod tests {
         );
         let workers: Vec<Arc<dyn Worker>> = vec![w1.clone()];
         let mut pool = Pool::new(workers);
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(1, dummy_poke);
         assert_eq!(pool.busy_count(), 1);
         // Second dispatch should NOT spawn a duplicate (worker is busy).
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(2, dummy_poke);
         assert_eq!(pool.busy_count(), 1, "duplicate dispatch was suppressed");
         // Cancel + drain.
         pool.cancel_all();
@@ -310,7 +320,7 @@ mod tests {
         let w2 = StubWorker::new(2, vec![StubResponse::WaitForCancel]);
         let workers: Vec<Arc<dyn Worker>> = vec![w1.clone(), w2.clone()];
         let mut pool = Pool::new(workers);
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(3, dummy_poke);
         assert_eq!(pool.busy_count(), 2);
         pool.cancel_all();
         // Drain both results.
@@ -329,18 +339,20 @@ mod tests {
         );
         let workers: Vec<Arc<dyn Worker>> = vec![w1.clone()];
         let mut pool = Pool::new(workers);
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(1, dummy_poke);
         // First result is the Retry.
-        let (id, r) = pool.next_result().await.expect("first result");
+        let (id, generation, r) = pool.next_result().await.expect("first result");
         assert_eq!(id, 1);
+        assert_eq!(generation, 1);
         assert!(matches!(r, Ok(MineResult::Retry { .. })));
         assert_eq!(pool.busy_count(), 0);
         // Respawn the same worker.
-        pool.dispatch_one(1, dummy_poke());
+        pool.dispatch_one(1, 2, dummy_poke());
         assert_eq!(pool.busy_count(), 1);
         // Second result is the Success.
-        let (id, r) = pool.next_result().await.expect("second result");
+        let (id, generation, r) = pool.next_result().await.expect("second result");
         assert_eq!(id, 1);
+        assert_eq!(generation, 2);
         assert!(matches!(r, Ok(MineResult::Success { .. })));
         assert_eq!(w1.attempt_count(), 2);
     }
@@ -367,18 +379,20 @@ mod tests {
         let workers: Vec<Arc<dyn Worker>> = vec![w1.clone()];
         let mut pool = Pool::new(workers);
         // Dispatch the first attempt; it will hang on WaitForCancel.
-        pool.dispatch_to_idle(dummy_poke);
+        pool.dispatch_to_idle(10, dummy_poke);
         assert_eq!(pool.busy_count(), 1);
         // Simulate supersede: cancel + drain the resulting (error) result.
         pool.cancel_all();
-        let (id, r) = pool.next_result().await.expect("cancelled result");
+        let (id, generation, r) = pool.next_result().await.expect("cancelled result");
         assert_eq!(id, 1);
+        assert_eq!(generation, 10);
         assert!(r.is_err(), "cancelled attempt should surface as Err");
         assert_eq!(pool.busy_count(), 0);
         // Dispatch on the supersede candidate.
-        pool.dispatch_to_idle(dummy_poke);
-        let (id, r) = pool.next_result().await.expect("second result");
+        pool.dispatch_to_idle(11, dummy_poke);
+        let (id, generation, r) = pool.next_result().await.expect("second result");
         assert_eq!(id, 1);
+        assert_eq!(generation, 11);
         assert!(matches!(r, Ok(MineResult::Success { .. })));
         assert_eq!(w1.attempt_count(), 2);
         assert_eq!(w1.cancel_count(), 1);

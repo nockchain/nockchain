@@ -62,7 +62,9 @@ use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
 use nockapp::noun::slab::NounSlab;
-use nockchain_mining_common::{MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient};
+use nockchain_mining_common::{
+    MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient, NodeClientError,
+};
 use nockvm::noun::{NounAllocator, D, T};
 use nockvm_macros::tas;
 use serde::Deserialize;
@@ -501,6 +503,10 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                     };
                     let candidate = match c_res {
                         Ok(c) => c,
+                        Err(NodeClientError::Grpc(e)) => {
+                            warn!(error = %e, "watch_candidates stream failed; will reconnect");
+                            break InnerOutcome::StreamLost;
+                        }
                         Err(e) => break InnerOutcome::Fatal(MinerError::CandidateDecode(format!("{e}"))),
                     };
                     let candidate_inputs = match derive_nockchain_candidate_inputs(&candidate) {
@@ -899,6 +905,10 @@ pub async fn run_canonical(
                     };
                     let candidate = match c_res {
                         Ok(c) => c,
+                        Err(NodeClientError::Grpc(e)) => {
+                            warn!(error = %e, "watch_candidates stream failed; reconnecting");
+                            break true;
+                        }
                         Err(e) => {
                             warn!(error = %e, "candidate decode error; skipping");
                             continue;
@@ -970,6 +980,8 @@ pub async fn run_canonical(
                 }
             }
         };
+
+        grind_cancel.store(true, Ordering::Relaxed);
 
         let _ = client
             .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
@@ -1941,6 +1953,14 @@ mod tests {
             cert_bytes.len(),
             block.certificate.trace_height
         );
+    }
+
+    #[test]
+    fn canonical_grind_exits_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(true));
+        assert!(grind_canonical_block([0u8; 32], [0xff; 32], cancel)
+            .expect("cancelled grind should exit cleanly")
+            .is_none());
     }
 
     // Shared NockAppMetrics — gnort rejects double-registration.

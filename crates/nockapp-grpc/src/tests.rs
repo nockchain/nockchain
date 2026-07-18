@@ -193,4 +193,100 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
     }
+
+    #[tokio::test]
+    async fn watch_effects_lag_ends_stream_with_error() {
+        use std::net::{SocketAddr, TcpListener};
+        use std::sync::{Arc, LazyLock};
+        use std::time::Duration;
+
+        use futures::StreamExt;
+        use nockapp::driver::{IOAction, NockAppHandle};
+        use nockapp::noun::slab::NounSlab;
+        use nockapp::NockAppExit;
+        use nockvm::noun::{D, T};
+        use nockvm_macros::tas;
+        use tokio::sync::{broadcast, mpsc, Mutex};
+
+        use crate::services::private_nockapp::client::PrivateNockAppGrpcClient;
+        use crate::services::private_nockapp::server::PrivateNockAppGrpcServer;
+
+        static METRICS: LazyLock<Arc<nockapp::nockapp::metrics::NockAppMetrics>> =
+            LazyLock::new(|| {
+                Arc::new(
+                    nockapp::nockapp::metrics::NockAppMetrics::register(
+                        gnort::global_metrics_registry(),
+                    )
+                    .expect("register NockAppMetrics"),
+                )
+            });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr: SocketAddr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let server_url = format!("http://{addr}");
+
+        let (action_tx, mut action_rx) = mpsc::channel::<IOAction>(64);
+        let (effect_tx, _effect_seed_rx) = broadcast::channel::<NounSlab>(8);
+        let effect_tx = Arc::new(effect_tx);
+        let effect_rx_for_handle = effect_tx.subscribe();
+        let (exit, _exit_rx) = NockAppExit::new();
+        let handle = NockAppHandle {
+            io_sender: action_tx,
+            effect_sender: effect_tx.clone(),
+            effect_receiver: Mutex::new(effect_rx_for_handle),
+            metrics: METRICS.clone(),
+            exit,
+        };
+        let _action_drainer =
+            tokio::spawn(async move { while action_rx.recv().await.is_some() {} });
+
+        let server = PrivateNockAppGrpcServer::new(handle);
+        let server_handle = tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut client = PrivateNockAppGrpcClient::connect(server_url)
+            .await
+            .expect("client connect");
+        let mut stream = client
+            .watch_effects(1, vec![b"mine".to_vec()])
+            .await
+            .expect("watch_effects subscribe");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        for i in 0..256u64 {
+            let mut slab = NounSlab::new();
+            let root = T(&mut slab, &[D(tas!(b"mine")), D(i)]);
+            slab.set_root(root);
+            effect_tx.send(slab).expect("publish mine effect");
+        }
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lagged WatchEffects stream did not report an error"
+            );
+            match tokio::time::timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("stream.next within timeout")
+            {
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => {
+                    let msg = e.to_string();
+                    assert!(
+                        msg.contains("WatchEffects stream error") && msg.contains("lagged"),
+                        "unexpected stream error: {msg}"
+                    );
+                    break;
+                }
+                None => panic!("lagged WatchEffects stream closed without an error"),
+            }
+        }
+
+        drop(stream);
+        drop(client);
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
 }
