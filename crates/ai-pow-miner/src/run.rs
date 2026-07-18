@@ -2027,8 +2027,8 @@ mod tests {
             format!("http://{}", self.addr)
         }
 
-        // Publish a synthetic %mine-ai effect (the AI miner subscribes
-        // to mine-ai post Stage 4; the mock fixture publishes accordingly).
+        // Publish a synthetic %mine-ai effect matching the production
+        // subscription and noun shape.
         fn publish_synth_mine_effect_with_target_limbs(
             &self,
             commitment_seed: u64,

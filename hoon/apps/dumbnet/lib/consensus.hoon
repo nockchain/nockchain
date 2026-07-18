@@ -99,15 +99,10 @@
       [%0 (from-b58:hash:t '7pR2bvzoMvfFcxXaHv4ERm8AgEnExcZLuEsjNgLkJziBkqBLidLg39Y')]
   ==
 ::
-::  map a block heigh to a corresponding ZK proof version
-::
-::  Pre-Stage-6 behavior: this was the authoritative "what proof
-::  version is legal at this height" oracle. After Stage 6, post-
-::  activation heights accept either %2 (ZK) or %3 (AI); use
-::  +proof-version-valid-at-height for the activation-aware
-::  predicate. This arm retains the pre-activation deterministic
-::  mapping and is used as the fallback for pre-activation
-::  block-ids in +block-id-to-proof-version.
+::  Deterministic ZK proof version for a block height. This is authoritative
+::  before AI activation and remains the ZK branch of the post-activation
+::  version predicate. Persisted post-activation block IDs use
+::  +block-id-to-proof-version because they may be ZK or AI.
 ++  height-to-proof-version-legacy
   |=  height=page-number:t
   ^-  proof-version:sp
@@ -121,8 +116,7 @@
 ::  What block to start using proof version 1
 ++  proof-version-1-start  6.750
 ::
-::  Stage 6 helpers: version <-> puzzle-type, per-block version lookup,
-::  activation-aware predicate, same-type-ancestor walker.
+::  Puzzle/version mapping, persisted version lookup, and activation predicate.
 ::
 ::  +version-to-puzzle-type: maps a proof-version (the discriminator
 ::  shared by all proof shapes) to a puzzle-type tag.
@@ -190,17 +184,12 @@
   ^-  ?(%dumb-zkpow %ai-pow)
   (version-to-puzzle-type (block-id-to-proof-version bid))
 ::
-::  +proof-version-valid-at-height: Stage 6 replacement for the
-::  height-equality check in +check-pow.
-::    pre-activation: must equal the height-derived legacy ZK version
-::    post-activation: legacy ZK version at this height OR %3 (AI)
+::  +proof-version-valid-at-height:
+::    pre-activation: must equal the height-derived ZK version
+::    post-activation: height-derived ZK version or %3 (AI)
 ::
-::  The post-activation legacy branch lets fakenets (with their
-::  low-height activation overrides) continue to use the height-
-::  derived ZK version (%0/%1/%2) for ZK blocks instead of forcing
-::  the latest %2. On mainnet (activation = 95000 > 12000), legacy
-::  at post-activation height = %2 by definition; on fakenet
-::  (activation = 2), legacy at height 2 = %0.
+::  Keeping the height-derived ZK branch permits low-height fakenet activation
+::  without forcing proof version %2 before its normal proof-version height.
 ++  proof-version-valid-at-height
   |=  [version=proof-version:sp height=page-number:t]
   ^-  ?
@@ -912,19 +901,11 @@
     ~
   $(height prev-height, ids [u.prev-id ids], count +(count))
 ::
-::  +update-min-timestamps: sets the median-of-11 timestamp of a new
-::    block, keyed by its digest. Stage 6 semantics: median of the
-::    most recent min-past-blocks timestamps whose blocks are the
-::    SAME puzzle-type as the new block, walked back from pag's
-::    parent edge, skipping wrong-type hops. The new block's own
-::    timestamp is always included as the first entry (matches
-::    pre-Stage-6 convention).
-::
-::    Pre-activation invariant: every walk hop's puzzle-type is
-::    %dumb-zkpow (height-derived legacy fallback in
-::    +block-id-to-proof-version), pag-type is also %dumb-zkpow.
-::  The walk is bounded by `min-past-blocks`: the candidate is included first,
-::  then at most ten parents. Genesis terminates shorter chains.
+::  +update-min-timestamps: store the global median-time-past for a new block,
+::  keyed by its digest. The candidate's timestamp is included first, followed
+::  by up to `min-past-blocks - 1` immediate ancestors regardless of puzzle.
+::  Both puzzles share this clock; their independent ASERT behavior comes from
+::  branch-local puzzle counts and heads. Genesis terminates the ancestry walk.
 ::
 ++  update-min-timestamps
   ~/  %update-min-timestamps
@@ -964,9 +945,8 @@
   ?<  (~(has h-by blocks.c) ~(digest get:page:t pag))
   ?<  (~(has h-by pending-blocks.c) ~(digest get:page:t pag))
   =.  blocks.c  (~(put h-by blocks.c) ~(digest get:page:t pag) (to-local-page:page:t pag))
-  ::  Stage 6: populate block-versions for post-activation blocks.
-  ::  Pre-activation block-ids are NOT inserted; their version is
-  ::  derived deterministically from height by +block-id-to-proof-version.
+  ::  Persist proof versions for post-activation blocks, where height alone no
+  ::  longer identifies the puzzle. Pre-activation versions remain derivable.
   =?  block-versions.c
       (gte ~(height get:page:t pag) ai-pow-activation-height.blockchain-constants)
     %+  ~(put h-by block-versions.c)

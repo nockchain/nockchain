@@ -440,10 +440,8 @@
           ::  Defaults (including phase-2 hardcoded anchor-min-timestamp)
           ::  come from `+$ zk-asert`'s own $~ clause.
           *zk-asert
-          ::  ZK ASERT regime 2 (post-AI-activation, 300s ideal).
-          ::  Active at and after ai-pow-activation-height. Per-puzzle
-          ::  compute-target picks between regimes based on candidate
-          ::  height vs zk-asert-post-ai.phase.
+          ::  ZK ASERT regime 2 (post-AI-activation, 375s ideal).
+          ::  Active at and after ai-pow-activation-height.
           *zk-asert-post-ai
           ::  AI PoW activation threshold. At/after this height, %ai-pow
           ::  blocks are verified via the recursive-certificate jet

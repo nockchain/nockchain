@@ -95,10 +95,9 @@ impl AsertParams {
     }
 
     /// Defaults for the ZK puzzle ASERT post-AI-activation regime,
-    /// matching `+$ zk-asert-post-ai`'s `$~` clause. 300s ideal — ZK
-    /// re-anchors at ai-pow-activation-height-1 with this regime so
-    /// each puzzle targets 5 min and the chain averages 2.5 min
-    /// globally once both puzzles produce blocks.
+    /// matching `+$ zk-asert-post-ai`'s `$~` clause. A 375s ideal gives
+    /// ZK roughly 40% of blocks when paired with AI's 250s ideal; their
+    /// rates sum to the chain's 150s global cadence.
     pub fn zk_post_ai_default() -> Self {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
@@ -107,10 +106,8 @@ impl AsertParams {
             // 375s ideal => ZK wins ~40% of blocks (paired with AI's 250s).
             ideal_block_time: 375,
             half_life: 12 * 60 * 60,
-            // Placeholder — set to the canonical anchor block's median-of-11
-            // at the deferred-task AI verifier integration (the value is the
-            // ZK block at height 114299's stored min-timestamp at chain time
-            // of activation).
+            // Derived from the activation parent's median timestamp in each
+            // branch-local puzzle ASERT state.
             anchor_min_timestamp: 0,
         }
     }
@@ -122,12 +119,10 @@ impl AsertParams {
     ///
     /// The anchor target is `2^227`, NOT `2^291`: the AI jackpot is a 256-bit
     /// BLAKE3 value, so an anchor `>= 2^256` would be trivially cleared by every
-    /// jackpot (no proof-of-work at the anchor). Paired with the AI work
-    /// normalizer `max-ai = max-target-atom / 2^64` (see `+compute-work-ai`), a
-    /// block at bex 227 contributes work equal to a ZK block at bex 291 —
-    /// equal-weight cross-puzzle fork choice. This mirrors the Hoon consensus
-    /// default; keeping them in sync matters because a fakenet with no
-    /// `--fakenet-ai-asert-*` override poked `2^291` here, which disabled AI PoW.
+    /// jackpot (no proof-of-work at the anchor). `+compute-work-ai` evaluates
+    /// the shared work formula at `target * 2^64`, so a block at bex 227
+    /// contributes exactly the work of a ZK block at bex 291. The Rust and Hoon
+    /// defaults must match because fakenet constants cross the noun boundary.
     pub fn ai_default() -> Self {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
@@ -137,8 +132,8 @@ impl AsertParams {
             // bootstrapping the AI Compute Network.
             ideal_block_time: 250,
             half_life: 12 * 60 * 60,
-            // Placeholder — first AI block's median-of-11 timestamp; pinned
-            // at deferred-task AI verifier integration.
+            // Derived from the first accepted AI block's median timestamp in
+            // each branch-local puzzle ASERT state.
             anchor_min_timestamp: 0,
         }
     }
@@ -261,13 +256,11 @@ pub struct BlockchainConstants {
     pub input_fee_divisor: u64,
     pub zk_asert: AsertParams,
     /// ZK ASERT regime 2 — active at and after `ai_pow_activation_height`.
-    /// 300s ideal; the per-puzzle compute-target picks this regime over
-    /// `zk_asert` when candidate-height >= `zk_asert_post_ai.phase`.
+    /// Its 375s ideal gives ZK roughly 40% of blocks beside AI's 250s regime.
     pub zk_asert_post_ai: AsertParams,
-    /// At and after this height, the kernel's `do-pow` accepts `%ai-pow`
-    /// variants. Pre-activation, `%ai-pow` is rejected outright.
-    /// Post-activation the verifier is a hardcoded stub-reject in the
-    /// kernel until the deferred-task real verifier lands.
+    /// At and after this height, the kernel's mandatory recursive-certificate
+    /// verify jet admits valid `%ai-pow` blocks. Pre-activation `%ai-pow` is
+    /// rejected.
     pub ai_pow_activation_height: u64,
     pub ai_asert: AsertParams,
 }
@@ -445,7 +438,7 @@ impl NounEncode for BlockchainConstants {
         //   slot 5 : input-fee-divisor
         //   slot 6 : blockchain-constants:v0 (13-atom sub-cell)
         //   slot 7 : zk-asert sub-cell (regime 1, pre-AI: 150s ideal)
-        //   slot 8 : zk-asert-post-ai sub-cell (regime 2, post-AI: 300s ideal)
+        //   slot 8 : zk-asert-post-ai sub-cell (regime 2, post-AI: 375s ideal)
         //   slot 9 : ai-pow-activation-height
         //   slot 10: ai-asert sub-cell
         let v1_phase = Atom::new(allocator, self.v1_phase).as_noun();
@@ -887,8 +880,8 @@ mod tests {
         );
         assert_eq!(constants.base_fee, 16_384, "base-fee mismatch");
         assert_eq!(constants.input_fee_divisor, 4, "input-fee-divisor mismatch");
-        // zk-asert defaults: 150s pre-AI (current mainnet);
-        // zk-asert-post-ai defaults: 300s post-AI activation.
+        // zk-asert defaults: 150s pre-AI;
+        // zk-asert-post-ai defaults: 375s post-AI activation.
         assert_eq!(
             constants.zk_asert,
             AsertParams::zk_default(),

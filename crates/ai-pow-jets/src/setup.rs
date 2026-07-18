@@ -1,4 +1,4 @@
-//! Boot-time compact verifier-setup builder (Branch b, Stage 2).
+//! Boot-time compact verifier-setup builder.
 //!
 //! The compact verifier `context` + `verifier_key_digest` are deterministic from
 //! the puzzle SHAPE (params / trace-height) and **proof-independent** (validated in

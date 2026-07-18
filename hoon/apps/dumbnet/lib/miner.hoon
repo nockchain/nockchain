@@ -298,18 +298,13 @@
   ::    parent's stored median-of-11. pre-activation: read the next target
   ::    stored at parent.digest by the epoch rule.
   =/  candidate-height=@  +(~(height get:page:t parent))
-  ::  Candidate target (currently ZK-puzzle-only — Stage 4 adds the
-  ::  parallel AI candidate target for emission of the second %mine-ai
-  ::  effect post-AI-activation). Pre-asert-activation falls through
-  ::  to the legacy epoch-stored target.
+  ::  The shared candidate is ZK-targeted. The kernel derives and emits the
+  ::  corresponding AI-targeted variant after AI activation. Before ASERT,
+  ::  target selection falls through to the epoch-stored target.
   =/  candidate-target=bignum:bignum:t
     ?:  (post-asert-activation:t candidate-height)
-      ::  Per-puzzle compute-target lives in lib/consensus.hoon. ZK
-      ::  variant picks between regime 1 (pre-AI-activation, 150s ideal)
-      ::  and regime 2 (post-AI-activation, 300s ideal) based on
-      ::  candidate-height. Each regime uses its own hardcoded anchor
-      ::  median-of-11 (phase-2 of 014-aletheia + the AI activation
-      ::  fork).
+      ::  ZK target selection uses the 150s pre-AI regime or the branch-local
+      ::  375s post-AI regime according to candidate height.
       ::
       ::  The immediate parent's branch-local state carries the latest ZK head
       ::  and count, so long AI-only gaps remain O(1) and cannot influence ZK.
