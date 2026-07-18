@@ -116,9 +116,6 @@
   ?:  (gte height proof-version-1-start)
     %1
   %0
-::  Alias kept temporarily for call-site compatibility while Stage 6
-::  call-site updates land. Identical behavior to the legacy arm.
-++  height-to-proof-version  height-to-proof-version-legacy
 :: What block to start using proof version 2
 ++  proof-version-2-start  12.000
 ::  What block to start using proof version 1
@@ -397,6 +394,7 @@
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
   =/  params  ai-asert.blockchain-constants
+  ?<  =(0 anchor-target-atom.params)
   =/  state  (post-ai-parent-state parent-digest)
   =/  hardcoded-anchor=?  !=(0 anchor-min-timestamp.params)
   =/  anchor=(unit cached-asert-anchor:dk)
@@ -404,7 +402,7 @@
       `[min-ts=anchor-min-timestamp.params target-atom=anchor-target-atom.params]
     ai-anchor.state
   ?~  anchor
-    (chunk:bignum:t anchor-target-atom.params)
+    (chunk:bignum:t (min anchor-target-atom.params max-ai-target-atom:t))
   =/  current-min-ts=@
     ?~  ai-head.state  min-ts.u.anchor
     (~(got h-by min-timestamps.c) u.ai-head.state)
@@ -420,7 +418,7 @@
       blocks-since-anchor
       ideal-block-time.params
       half-life.params
-      max-target-atom:t
+      max-ai-target-atom:t
   ==
 ::
 ::  +build-ai-candidate: build the AI-puzzle variant of a ZK candidate block.
@@ -940,14 +938,18 @@
     =/  prev-timestamps=(list @)  [~(timestamp get:page:t pag) ~]
     =/  collected=@  1
     =/  cur-bid=block-id:t  ~(parent get:page:t pag)
+    =/  cur-height=@  ~(height get:page:t pag)
     |-
     ?:  =(collected min-past-blocks:t)
+      (median:t prev-timestamps)
+    ?:  =(*page-number:t cur-height)
       (median:t prev-timestamps)
     =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
     =/  cur-page=page:t  (to-page:local-page:t cur)
     =/  next-timestamps  [~(timestamp get:page:t cur-page) prev-timestamps]
     ?:  =(*page-number:t ~(height get:local-page:t cur))
       (median:t next-timestamps)
+    =.  cur-height  ~(height get:local-page:t cur)
     $(collected +(collected), cur-bid ~(parent get:local-page:t cur), prev-timestamps next-timestamps)
   (~(put h-by min-timestamps.c) ~(digest get:page:t pag) min-timestamp)
 ::

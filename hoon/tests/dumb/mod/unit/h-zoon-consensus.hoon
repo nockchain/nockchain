@@ -102,20 +102,20 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  c9=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  upgraded=consensus-state  c.current
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =/  upgraded-block=local-page:t  (~(got h-by blocks.c9) bid)
+  =/  upgraded-block=local-page:t  (~(got h-by blocks.upgraded) bid)
   =/  original-block=local-page:t  (~(got h-by blocks.con8) bid)
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%11 -.k9)
-          (consensus-h-apt c9)
-          =((hz-molt blocks.c9) (hz-molt blocks.con8))
-          =((hz-milt balance.c9) (hz-milt balance.con8))
-          =((hz-milt txs.c9) (hz-milt txs.con8))
-          =((hz-molt min-timestamps.c9) (hz-molt min-timestamps.con8))
-          =((hz-molt targets.c9) (hz-molt targets.con8))
+  !>  :*  =(%12 -.current)
+          (consensus-h-apt upgraded)
+          =((hz-molt blocks.upgraded) (hz-molt blocks.con8))
+          =((hz-milt balance.upgraded) (hz-milt balance.con8))
+          =((hz-milt txs.upgraded) (hz-milt txs.con8))
+          =((hz-molt min-timestamps.upgraded) (hz-molt min-timestamps.con8))
+          =((hz-molt targets.upgraded) (hz-molt targets.con8))
           =(upgraded-block original-block)
       ==
 ::
@@ -153,11 +153,11 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  up=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  up=consensus-state  c.current
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%11 -.k9)
+  !>  :*  =(%12 -.current)
           =(~[needed-id] missing)
           =(~[pending-id] ready)
           =(~ extra-ready)
@@ -209,8 +209,8 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  up=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  up=consensus-state  c.current
   =/  upgraded-ok=?
     ?&  =(~[needed-id] missing-a)
         =(~[needed-id] missing-b)
@@ -236,7 +236,7 @@
     ==
   %+  expect-eq
     !>([%.y %.y %.y])
-  !>  [=(%11 -.k9) upgraded-ok after-one-reject-ok]
+  !>  [=(%12 -.current) upgraded-ok after-one-reject-ok]
 ::
 ++  test-consensus-add-raw-tx-h-index-flow
   =/  con=consensus-state  initial-consensus-state:h

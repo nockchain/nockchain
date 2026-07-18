@@ -447,13 +447,15 @@
 ::    +protocol-fund-address). Proves the miner builds the AI fund recipient that
 ::    validation requires.
 ++  test-build-ai-candidate-pays-ai-fund
-  =/  con  (initial-consensus-state-custom:h-ai bc-ai-fund)
-  =^  pag=page:t  con  (add-n-pages:h-ai 5 con default-retain:h-ai)
+  =/  built  (build-typed-chain:h-ai ~[%zk %zk %zk %zk %zk])
+  =/  pag=page:t  tip.built
+  =/  con=consensus-state  con.built
+  =/  d=derived-state  der.built
   =/  emi     height-five-emission
   =/  shares  (~(put z-by *(z-map hash:t @)) first-miner-pkh 1)
-  =/  ai-cand=page:t  (~(build-ai-candidate dcon con der bc-ai-fund) pag shares)
+  =/  ai-cand=page:t  (~(build-ai-candidate dcon con d bc-ai-fund) pag shares)
   =/  ai-cb=coinbase-split:t  ~(coinbase get:page:t ai-cand)
   %+  weld
-    (expect-eq !>(%.y) !>((~(check-fund-split dcon con der bc-ai-fund) ai-cb emi %.y)))
-  (expect-eq !>(%.n) !>((~(check-fund-split dcon con der bc-ai-fund) ai-cb emi %.n)))
+    (expect-eq !>(%.y) !>((~(check-fund-split dcon con d bc-ai-fund) ai-cb emi %.y)))
+  (expect-eq !>(%.n) !>((~(check-fund-split dcon con d bc-ai-fund) ai-cb emi %.n)))
 --

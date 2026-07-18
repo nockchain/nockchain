@@ -136,12 +136,10 @@
       ==
     ::
     ::  upgrade kernel state 9 to kernel state 10
-    ::    derived-state gained two per-puzzle ASERT anchor caches
-    ::    (cached-zk-asert-post-ai-anchor + cached-ai-asert-anchor),
-    ::    both initialized to ~ (None). The ZK cache populates lazily
-    ::    when the first block at height >= ai-pow-activation-height
-    ::    is accepted; the AI cache is reserved for the deferred-task
-    ::    AI verifier integration (stays None until then).
+    ::    derived-state gained branch-local per-puzzle ASERT lineage.
+    ::    Each post-activation block records its parent-derived ZK/AI counts
+    ::    and heads. The ZK anchor is initialized from the activation parent;
+    ::    the AI anchor is initialized by the first accepted AI block.
     ::
     ::    Existing fields (highest-block-height, heaviest-chain) carry
     ::    over unchanged. The cache values themselves are deterministic
@@ -866,14 +864,14 @@
     :_  k
     ?.  candidate-changed  effs
     =/  version=proof-version:sp
-      (height-to-proof-version:con ~(height get:page:t candidate-block.m.k))
+      (height-to-proof-version-legacy:con ~(height get:page:t candidate-block.m.k))
     =/  zk-target  ~(target get:page:t candidate-block.m.k)
     =/  commit  (block-commitment:page:t candidate-block.m.k)
     =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
     =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
     ::  Always emit the ZK candidate (%mine-zk) for the zk-pow-miner.
-    ::  `height-to-proof-version` is the legacy oracle (caps at %2), so `version`
-    ::  is never %3 here; the %3 arm is unreachable but keeps the fork total.
+    ::  The height-derived ZK proof-version oracle caps at %2, so `version` is
+    ::  never %3 here; the %3 arm remains only to make the version fork total.
     =/  zk-effect
       ?-  version
         %0  [%mine-zk %0 commit zk-target pow-len:t]
@@ -1879,7 +1877,7 @@
           (block-commitment:page:t candidate-block.m.k)
         =/  zk-target  ~(target get:page:t candidate-block.m.k)
         =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
-        =/  proof-version  (height-to-proof-version:con candidate-height)
+        =/  proof-version  (height-to-proof-version-legacy:con candidate-height)
         =/  zk-mine-start
           ?-  proof-version
             %0  [%0 commit zk-target pow-len:t]

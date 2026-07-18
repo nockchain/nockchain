@@ -13,6 +13,7 @@
 ::
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
+/=  asert    /apps/dumbnet/lib/asert
 /=  txe      /common/tx-engine
 /=  *        /apps/dumbnet/lib/types
 /=  *        /common/zeke
@@ -67,6 +68,24 @@
   !>  ?&  (lth ^~((bex 227)) ^~((bex 256)))
           (lth (mul ^~((bex 227)) ^~((bex 64))) (merge:bignum max-target:t))
       ==
+::
+::  AI ASERT can never emit a target outside its 256-bit jackpot domain, even
+::  when a configured anchor or a long delay would otherwise saturate at the
+::  320-bit ZK ceiling.
+++  test-ai-asert-target-capped-to-jackpot-domain
+  ^-  tang
+  =/  target
+    %-  compute-target:asert
+    :*  (bex 300)
+        0
+        0
+        0
+        1
+        300
+        600
+        max-ai-target-atom:t
+    ==
+  %+  expect-eq  !>(max-ai-target-atom:t)  !>(target)
 ::
 ::  Cross-puzzle accumulated-work SUM: a mixed chain — parent-work + a ZK block
 ::  at its anchor + an AI block at its anchor — accumulates the SAME as parent +
@@ -195,7 +214,7 @@
 ++  test-ai-block-accepted-post-asert
   ^-  tang
   =/  built  (build-typed-chain:hp ~[%zk %ai %zk])
-  =/  ai-page  (make-ai-pow-page:hp tip.built con.built)
+  =/  ai-page  (make-ai-pow-page:hp tip.built con.built der.built)
   =/  good
     %.  [ai-page ~(timestamp get:page:t ai-page)]
     ~(validate-page-without-txs dcon con.built der.built bc-dual-post:helpers)
@@ -206,11 +225,11 @@
   %+  expect-eq  !>([%.y %.n])  !>([-.good -.bad])
 ::
 ::  TANDEM RETARGETING — both puzzles' ASERT run in their SUBCHAIN regime at once
-::  and each retargets over its OWN block count, independently. bc-tandem gives the
-::  two puzzles the SAME anchor target (and 300s ideal / 600s half-life), so the
-::  targets are directly comparable. The ASERT time input is the median-of-11 of
-::  the parent (a GLOBAL quantity, ~equal for both puzzles at the tip), so the
-::  difference between the two targets is driven by the per-puzzle SUBCHAIN COUNT.
+::  and each retargets over its OWN block count, independently. The test anchors
+::  represent equal work: `ai-target * 2^64 == zk-target`. Comparisons therefore
+::  normalize AI targets into the ZK target space. The ASERT time input is the
+::  parent median-of-11 (a GLOBAL quantity, equal for both puzzles at the tip), so
+::  differences are driven by each puzzle's independent SUBCHAIN COUNT.
 ::
 ::  ZK-heavy chain (3 ZK + 1 AI over the same span): the ZK subchain has more
 ::  blocks per unit time, so the ZK ASERT hardens MORE -> zk-target < ai-target.
@@ -225,7 +244,7 @@
   =/  tip-bid  ~(digest get:page:t tip.built)
   =/  zk-target  (merge:bignum (~(compute-target-zk-asert dcon con der.built bc-tandem:helpers) 5 tip-bid))
   =/  ai-target  (merge:bignum (~(compute-target-ai-asert dcon con der.built bc-tandem:helpers) 5 tip-bid))
-  %+  expect-eq  !>(%.y)  !>((lth zk-target ai-target))
+  %+  expect-eq  !>(%.y)  !>((lth zk-target (mul ai-target (bex 64))))
 ::
 ::  AI-heavy chain (3 AI + 1 ZK): the reverse — the AI ASERT hardens MORE, so
 ::  ai-target < zk-target. Confirms each retarget is keyed to its own subchain, not
@@ -241,5 +260,5 @@
   =/  tip-bid  ~(digest get:page:t tip.built)
   =/  zk-target  (merge:bignum (~(compute-target-zk-asert dcon con der.built bc-tandem:helpers) 5 tip-bid))
   =/  ai-target  (merge:bignum (~(compute-target-ai-asert dcon con der.built bc-tandem:helpers) 5 tip-bid))
-  %+  expect-eq  !>(%.y)  !>((lth ai-target zk-target))
+  %+  expect-eq  !>(%.y)  !>((lth (mul ai-target (bex 64)) zk-target))
 --

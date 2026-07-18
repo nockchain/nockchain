@@ -62,7 +62,7 @@
           min-past-blocks=11
           ::TODO determine appropriate genesis target
           genesis-target-atom=^~((div max-tip5-atom:tip5 (bex 14)))
-          ::TODO determine a real max-target-atom. BTC uses 32 leading zeroes
+          ::  Full five-belt TIP5 target domain used by the ZK puzzle.
           max-target-atom=max-tip5-atom:tip5
           ::  whether or not to check the pow of blocks
           check-pow-flag=&
@@ -103,8 +103,12 @@
 ++  quarter-ted  ^~((div target-epoch-duration 4))
 ::  4x epoch duration - used in target adjustment calculation
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
-++  genesis-target  ^~((chunk:bignum genesis-target-atom))  ::TODO set this
+++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bn max-target-atom))
+::  Largest target representable by AI-PoW's 256-bit jackpot. The independent
+::  AI ASERT must never emit a wider target: every 256-bit digest already clears
+::  this ceiling, and wider values have no additional probability meaning.
+++  max-ai-target-atom  ^~((dec (bex 256)))
 +|  %simple-tx-engine-types
 +$  block-commitment  hash
 +$  tx-id  hash

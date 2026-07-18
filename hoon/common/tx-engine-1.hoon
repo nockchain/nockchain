@@ -369,12 +369,10 @@
       anchor-min-timestamp=@
   ==
 ::
-::  ZK puzzle ASERT, post-AI-activation regime. 300s ideal ⇒ 5 min
-::  average per ZK block. Active for blocks at and after
-::  ai-pow-activation-height — at the boundary, the ZK ASERT
-::  computation re-anchors at height (ai-pow-activation-height - 1)
-::  with anchor-target = 2^291. Combined with ai-asert (also 300s
-::  ideal), the chain averages 2.5 min globally.
+::  ZK puzzle ASERT, post-AI-activation regime. A 375s target interval gives
+::  ZK roughly 40% of blocks when paired with AI's 250s target interval. The
+::  computation re-anchors at height (ai-pow-activation-height - 1) with
+::  anchor-target = 2^291.
 +$  zk-asert-post-ai
   $+  zk-asert-post-ai
   $~  :*  phase=114.300
@@ -383,8 +381,8 @@
           ::  375s ideal ⇒ ZK wins ~40% of blocks (paired with AI's 250s)
           ideal-block-time=375
           half-life=^~((mul 12 ^~((mul 60 60))))
-          ::  Placeholder. Pinned to the mainnet block at height 114,299
-          ::  by the deferred-task AI-PoW activation hard fork.
+          ::  Derived from the activation parent's median timestamp and stored
+          ::  in each branch-local puzzle ASERT state.
           anchor-min-timestamp=0
       ==
   $:  phase=@
@@ -404,18 +402,16 @@
   $+  ai-asert
   $~  :*  phase=114.300
           anchor-height=114.300
-          ::  AI targets live in the 256-bit jackpot space, so the AI anchor is
-          ::  bex 227 (< 2^256, no jet saturation). Paired with the AI work
-          ::  normalizer max-ai = max-target-atom/2^64 (see +compute-work-ai),
-          ::  a block at bex 227 contributes work equal to a ZK block at bex 291
-          ::  — equal-weight cross-puzzle fork choice.
+          ::  AI targets live in the 256-bit jackpot space. At bex 227,
+          ::  +compute-work-ai equals ZK +compute-work at bex 291, giving equal
+          ::  fork-choice weight at their respective anchor difficulties.
           anchor-target-atom=^~((bex 227))
           ::  250s ideal ⇒ AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40)
           ::  to bootstrap the AI Compute Network; paired ZK ideal is 375s.
           ideal-block-time=250
           half-life=^~((mul 12 ^~((mul 60 60))))
-          ::  Placeholder. Pinned to the first AI block's median-of-11
-          ::  by the deferred-task AI-PoW verifier integration.
+          ::  Derived from the first accepted AI block's median timestamp and
+          ::  stored in each branch-local puzzle ASERT state.
           anchor-min-timestamp=0
       ==
   $:  phase=@

@@ -167,8 +167,9 @@
 ::  ZK ASERT runs in regime 1 / global-height), here zk-asert-post-ai.phase is low
 ::  so the ZK ASERT runs in regime 2 (ZK-subchain count), matching the AI ASERT.
 ::  Short half-life (600s) + 300s ideal amplify the retarget so a short test chain
-::  shows a clear direction. anchor-min-timestamp = genesis second so the ASERT
-::  block-distance times are just the controlled per-block deltas.
+::  shows a clear direction. The AI anchor is the ZK anchor shifted down by 64
+::  bits, so normalized targets are directly comparable. Anchor timestamps equal
+::  the genesis second, making block-distance times the controlled deltas.
 ++  bc-tandem
   %*  .  bc-pending-provable
     v1-phase                               1
@@ -186,7 +187,7 @@
     anchor-min-timestamp.zk-asert-post-ai  (time-in-secs:page:txe *@da)
     ai-pow-activation-height               1
     anchor-height.ai-asert                 1
-    anchor-target-atom.ai-asert            ^~((div max-tip5-atom:tip5 (bex 14)))
+    anchor-target-atom.ai-asert            ^~((rsh [0 64] (div max-tip5-atom:tip5 (bex 14))))
     ideal-block-time.ai-asert              300
     half-life.ai-asert                     600
     anchor-min-timestamp.ai-asert          (time-in-secs:page:txe *@da)
@@ -312,9 +313,10 @@
   ?~  types  [con d parent]
   =/  new-page=page:t
     ?:  =(%ai i.types)
-      (make-ai-pow-garbage-page parent)
+      (make-ai-pow-page parent con d)
     (make-empty-page parent)
   =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
+  ~|  [%build-typed-chain-validation-failed r]
   ?>  ?=(%.y -.r)
   =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
   =.  con  (~(update-heaviest dcon con d bc) new-page)
@@ -333,13 +335,14 @@
   ?~  entries  [con d parent]
   =/  base=page:t
     ?:  =(%ai type.i.entries)
-      (make-ai-pow-garbage-page parent)
+      (make-ai-pow-page parent con d)
     (make-empty-page parent)
   =/  new-page=page:t
     =.  base
       ?^  -.base  base(timestamp ts.i.entries)  base(timestamp ts.i.entries)
     ?^  -.base  base(digest (compute-digest:page:t base))  base(digest (compute-digest:page:t base))
   =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
+  ~|  [%build-typed-chain-timed-validation-failed r]
   ?>  ?=(%.y -.r)
   =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
   =.  con  (~(update-heaviest dcon con d bc) new-page)
@@ -835,13 +838,13 @@
 ::  correct AI target and AI-normalized work, so it is accepted rather than
 ::  rejected at the target/heaviness gates.
 ++  make-ai-pow-page
-  |=  [parent=page:t con=consensus-state]
+  |=  [parent=page:t con=consensus-state d=derived-state]
   ^-  page:t
   =/  zk-cand=page:t  (make-empty-page parent)
-  ::  the AI candidate's coinbase is rebuilt from these shares — the same
+  ::  The AI candidate's coinbase is rebuilt from these shares — the same
   ::  single-miner split +make-empty-page seeds its ZK candidate with.
   =/  ai-cand=page:t
-    (~(build-ai-candidate dcon con der bc) zk-cand (sig-to-shares:v1 p:default-keys-1 1))
+    (~(build-ai-candidate dcon con d bc) zk-cand (sig-to-shares:v1 p:default-keys-1 1))
   ::  v1 page (atom head) runs the FALSE branch and takes the %ai-pow artifact;
   ::  the v0 branch is dead but must type-check, and v0's narrower pow type cannot
   ::  hold [%ai-pow ..], so it keeps mock-pow (see +make-ai-pow-garbage-page).

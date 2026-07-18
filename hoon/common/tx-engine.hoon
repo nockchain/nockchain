@@ -13,6 +13,8 @@
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
 ++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bignum max-target-atom))
+::  AI-PoW jackpots are 256-bit digests; wider targets are meaningless.
+++  max-ai-target-atom  max-ai-target-atom:v0
 ++  nicks-per-nock  ^~((bex 16))
 ::
 ::  +post-asert-activation / +pre-asert-activation: 1-arg activation
