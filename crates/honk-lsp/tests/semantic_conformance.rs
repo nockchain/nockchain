@@ -147,6 +147,23 @@ fn request_completion(
     }
 }
 
+fn request_workspace_symbols(client: &Connection, request_id: i32, query: &str) -> Vec<Value> {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "workspace/symbol".to_string(),
+                json!({ "query": query }),
+            )
+            .into(),
+        )
+        .expect("request workspace symbols");
+    serde_json::from_value::<Option<Vec<Value>>>(receive_response(client, request_id))
+        .expect("workspace symbol response")
+        .expect("workspace symbols")
+}
+
 fn start_server(
     root: &Path,
     check_delay_ms: u64,
@@ -202,6 +219,10 @@ fn start_server_with_dependencies(
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
     assert_eq!(initialize["capabilities"]["definitionProvider"], true);
     assert_eq!(initialize["capabilities"]["referencesProvider"], true);
+    assert_eq!(
+        initialize["capabilities"]["workspaceSymbolProvider"]["resolveProvider"],
+        false
+    );
     assert!(initialize["capabilities"]["completionProvider"].is_object());
     assert_eq!(
         initialize["capabilities"]["renameProvider"]["prepareProvider"],
@@ -798,6 +819,41 @@ fn workspace_references_index_unopened_sources_and_follow_watcher_changes() {
 }
 
 #[test]
+fn workspace_symbols_index_unopened_sources_and_refresh_changed_files() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let types = temp.path().join("types.hoon");
+    let use_path = temp.path().join("use.hoon");
+    std::fs::write(&types, "|%\n+$  widget  @\n--\n").expect("initial mold declaration");
+    std::fs::write(&use_path, "/+  types\n^-  widget\n42\n").expect("workspace use");
+    let types_uri = file_uri(&types);
+    let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
+
+    let initial = request_workspace_symbols(&client, 2, "widget");
+    assert_eq!(initial.len(), 1);
+    assert_eq!(initial[0]["name"], "widget");
+    assert_eq!(initial[0]["location"]["uri"], types_uri.as_str());
+
+    std::fs::write(&types, "|%\n+$  gadget  @\n--\n").expect("changed mold declaration");
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidChangeWatchedFiles::METHOD.to_string(),
+                json!({ "changes": [{ "uri": types_uri, "type": 2 }] }),
+            )
+            .into(),
+        )
+        .expect("notify changed declaration");
+    assert!(request_workspace_symbols(&client, 3, "widget").is_empty());
+    let changed = request_workspace_symbols(&client, 4, "gadget");
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0]["name"], "gadget");
+
+    shutdown_server(&client, server_thread, 5);
+}
+
+#[test]
 fn workspace_rename_edits_unopened_sources_and_rejects_import_collisions() {
     let root = repository_root();
     let temp = TempDir::new().expect("temporary workspace");
@@ -1351,6 +1407,14 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
             .into(),
         )
         .expect("send didOpen");
+
+    let expected_tip5_path = root.join("hoon/common/ztd/four.hoon");
+    let expected_tip5_uri = file_uri(&expected_tip5_path);
+    let tip5_symbols = request_workspace_symbols(&client, 10_000, "tip5-hash-atom");
+    assert!(tip5_symbols.iter().any(|symbol| {
+        symbol["name"] == "tip5-hash-atom"
+            && symbol["location"]["uri"] == expected_tip5_uri.as_str()
+    }));
 
     let declaration_line = source
         .lines()

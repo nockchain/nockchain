@@ -17,6 +17,7 @@ clients that implement later, capability-negotiated LSP versions.
 | Diagnostics | Closed documents have their diagnostics cleared | SHOULD | unsaved parse-error integration test | Passing |
 | Freshness | Results from an older document generation are not published | implementation invariant | `stale_worker_generation_does_not_publish_diagnostics` | Passing |
 | Document symbols | Advertised symbols use hierarchical `DocumentSymbol` responses and valid enclosing/selection ranges | MUST for advertised capability | `document_symbols_hover_and_definition_use_current_unsaved_snapshot` | Passing |
+| Workspace symbols | Advertised workspace search returns exact arm and mold locations from unopened files and refreshes changed files | MUST for advertised capability | `workspace_symbols_index_unopened_sources_and_refresh_changed_files` + real `tip5-hash-atom` lookup | Passing |
 | Hover | Advertised hover responds from the current unsaved document snapshot and adds compiler-owned inferred types when the matching check completes | MUST for advertised capability | `document_symbols_hover_and_definition_use_current_unsaved_snapshot` | Passing |
 | Definition | Advertised go-to-definition follows compiler-resolved core arms in the current unsaved snapshot | MUST for advertised capability | `document_symbols_hover_and_definition_use_current_unsaved_snapshot` | Passing |
 | Definition | Imported gate definitions resolve to another file using compiler-owned provenance | MUST for advertised capability | `definition_navigates_to_an_imported_gate` | Passing |
@@ -37,6 +38,8 @@ clients that implement later, capability-negotiated LSP versions.
 | Rename | Advertised prepare-rename and rename return versioned edits for the exact lexical binding identity | MUST for advertised capability | `local_references_and_rename_preserve_binding_identity` | Passing |
 | Rename | Rename rejects invalid terms and changes that would capture or collide with another visible face | implementation safety invariant | service unit coverage + protocol collision case | Passing |
 | Rename | Renaming a shorthand sample preserves its mold by expanding `=old` to `new=old` | real-source regression | real `miner.hoon` `kernel-state` case | Passing |
+| Rename | Structural rename returns versioned multi-file edits for unopened configured sources and rejects import collisions and lexical capture | implementation safety invariant | `workspace_rename_edits_unopened_sources_and_rejects_import_collisions` + real `tip5-hash-atom` case | Passing |
+| Incremental index | An editor generation reloads only changed source records; unchanged source and declaration indexes retain identity, while create/delete events refresh import layout | implementation latency invariant | `structural_graph_refresh_reuses_unchanged_source_indexes` + watcher protocol tests | Passing |
 | Positions | Semantic queries translate UTF-16 positions without splitting surrogate pairs | MUST for negotiated positions | `semantic_positions_round_trip_as_utf16` | Passing |
 | Cancellation | `$/cancelRequest` completes the pending request exactly once and suppresses its result | base protocol contract | unit cancellation test + process responsiveness test | Passing |
 | Responsiveness | Semantic indexing does not block unrelated JSON-RPC handling | implementation invariant | `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` | Passing |
@@ -54,6 +57,7 @@ and `+|` resolve to their parser arms. References preserve same-document lexical
 binding identity and use compiler-owned declaration identity across the latest
 successfully checked import graph for resolved arms and gates. Structural molds
 and standard-library symbols use the same nearest-unique import resolver as
-definition across every open or configured root. Rename is intentionally
-limited to lexical faces until workspace-wide provenance can guarantee complete
-edits.
+definition across every open or configured root. Workspace symbol search uses
+the shared lightweight declaration index. Structural rename uses that complete
+configured-source graph and declines incomplete, ambiguous, colliding, or
+capturing edits.
