@@ -1,14 +1,7 @@
-# ai-pow-zk documentation
+# `ai-pow-zk` documentation
 
-The authoritative production summary is:
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) describes the production Layer-0, Layer-1, and compact Layer-2 route, statement ownership, and verifier setup boundary.
+- [`SECURITY.md`](SECURITY.md) states the maintained proof invariants, cryptographic assumptions, non-goals, and independent-review gate.
+- The crate [`README`](../README.md) is the entry point for integration and supported APIs.
 
-- [`2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md`](2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md)
-
-That document describes the selected compact recursive certificate path, the
-exact commitment and transcript bindings, the verifier-key digest, the wire
-shape, and the remaining integration work.
-
-Older roadmap, terminal-compression, proof-size investigation, WHIR prototype,
-and route-comparison documents were removed from this branch. They remain
-available in git history, but they are not part of the current production API or
-trust surface.
+Historical route comparisons, size experiments, open-test lists, and production roadmaps are retained in git history rather than the active documentation set. The implemented proof path and its tests are the source of truth; dated audit evidence lives under [`../../ai-pow/docs/`](../../ai-pow/docs/).

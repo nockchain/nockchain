@@ -1,13 +1,11 @@
-# ai-pow documentation
+# `ai-pow` documentation
 
-The Pearl-compatible mining implementation is documented by the crate README
-and by the retained fixture tests under `tests/`.
+The stable documentation set is:
 
-The current production certificate pipeline is owned by `ai-pow-zk`:
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — ownership boundaries and end-to-end attempt/certificate flow.
+- [`SECURITY.md`](SECURITY.md) — maintained invariants, attacker model, cryptographic assumptions, and consensus dependencies.
+- [`2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md`](2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md) — dated findings, remediation record, and remaining independent-review gate.
 
-- [`../../ai-pow-zk/docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md`](../../ai-pow-zk/docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md)
+The crate-level [`README`](../README.md) is the entry point for APIs and system integration. Cross-implementation behavior is pinned by fixtures and tests, especially `tests/fixtures/pearl.rs`; historical roadmaps, progress logs, and superseded residual lists belong in git history rather than the active documentation set.
 
-Older Pearl audit and divergence-tracking documents were removed from this
-branch. They remain available in git history, while the current source of truth
-for Pearl byte-equivalence is the fixture set in `tests/fixtures/pearl.rs` and
-the tests that exercise it.
+Proof-stack details live in [`../../ai-pow-zk/docs/`](../../ai-pow-zk/docs/). Verifier setup lifecycle details live in [`../../ai-pow-jets/docs/VERIFIER_SETUP.md`](../../ai-pow-jets/docs/VERIFIER_SETUP.md).

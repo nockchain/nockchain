@@ -46,10 +46,10 @@ as independently audited or unconditionally production-ready.
 
 | ID | Severity | Exploit or failure | Resolution |
 |---|---:|---|---|
-| F01 | Critical | The pre-fix attempt context cached nonce-independent noised matmul state, allowing a miner to grind a nonce/hash loop without one fresh inference per attempt. | The extranonce is upstream of `κ`, `H_A/H_B`, `s_A/s_B`, noise, matmul, and jackpot. The miner rebuilds that state per attempt; verifier and circuit bind the same transcript. See `2026-05-31_AI_POW_ONE_MATMUL_ONE_ATTEMPT_AUDIT.md`. |
-| F02 | High | MoE routing validation omitted Pearl's `top_k < experts` and per-expert span bounds, admitting over-routings Pearl rejects and shapes the difficulty model did not price. | Enforce the Pearl bounds before proof verification; adversarial over-routing KATs reject. See `2026-07-08_MOE_AUDIT_VERDICTS.md` §D. |
-| F03 | Critical | MoE local columns could bleed across expert boundaries, producing fork/grinding divergence from Pearl. | Clamp every expert-local column to `n_e`; malformed and boundary KATs cover the rejection. See `2026-07-08_MOE_AUDIT_VERDICTS_2.md` N1. |
-| F04 | Critical | `MAT_UNPACK` accepted a wider value range than Pearl, creating an acceptance-set split. | Route the plain operand through Pearl's int7 `[-64, 64]` range constraint and LogUp frequency checks. See the N2 audit and recursion KATs. |
+| F01 | Critical | The pre-fix attempt context cached nonce-independent noised matmul state, allowing a miner to grind a nonce/hash loop without one fresh inference per attempt. | The extranonce is upstream of `κ`, `H_A/H_B`, `s_A/s_B`, noise, matmul, and jackpot. The miner rebuilds that state per attempt; verifier and circuit bind the same transcript. The maintained invariant and its adversarial coverage are documented in [`SECURITY.md`](SECURITY.md#per-attempt-work). |
+| F02 | High | MoE routing validation omitted Pearl's `top_k < experts` and per-expert span bounds, admitting over-routings Pearl rejects and shapes the difficulty model did not price. | Enforce the Pearl bounds before proof verification; adversarial over-routing KATs reject. The maintained invariant is documented in [`SECURITY.md`](SECURITY.md#moe-binding). |
+| F03 | Critical | MoE local columns could bleed across expert boundaries, producing fork/grinding divergence from Pearl. | Clamp every expert-local column to `n_e`; malformed and boundary KATs cover the rejection. The maintained invariant is documented in [`SECURITY.md`](SECURITY.md#moe-binding). |
+| F04 | Critical | `MAT_UNPACK` accepted a wider value range than Pearl, creating an acceptance-set split. | Route the plain operand through Pearl's int7 `[-64, 64]` range constraint and LogUp frequency checks; range-boundary and recursive-verification KATs reject divergent values. |
 | F05 | High | Certificate decoding bounded each atom and node count but not cumulative atom bytes, permitting heap amplification. | `CertificateNounLimits` charges a 64 MiB total atom-byte budget before allocation. Oversize, depth, count, list, nonce, and routing cases reject. |
 | F06 | Critical | Aux inclusion used substring containment, so one Pearl coinbase could carry two Nockchain aux tags and reuse one PoW across two commitments. | `verify_pearl_aux_inclusion` requires exactly one tag and exact commitment equality on dense and MoE accept paths (`29ef1eb9`). |
 | F07 | High | Pearl serializes MoE `n` as per-expert columns while the circuit uses total columns; the mixed convention rejected valid expert counts and emitted non-Pearl statements. | Preserve `n_e` on the wire and derive total columns with checked multiplication only at the circuit boundary (`6e4cb9cf`). |
@@ -62,7 +62,7 @@ as independently audited or unconditionally production-ready.
 | F14 | High | Fakenet could configure AI admission and AI ASERT at different heights, splitting admission, anchor, and post-AI ZK cutovers. | Derive one effective boundary and reject conflicting explicit values (`a23ec55b`). |
 | F15 | High | Invalid-proof senders were blocked only by peer ID, so peer-ID rotation from one endpoint could repeatedly buy a full cryptographic verification. | `%failed-pow-check` now records Strong abuse against the authenticated connection address and escalates repeated IP behavior; other upgrade-skew liar reasons remain Weak (`852c899e`). |
 | F16 | High | Candidate emission and validation used different puzzle targets, and new-heaviest handling did not consistently emit the AI variant. | Build one candidate, derive its AI-targeted variant, emit `%mine-zk` and `%mine-ai`, and reconstruct the identical variant in `do-pow` (`270fb1ad`, `fe713761`). |
-| F17 | High | AI and ZK coinbase construction/validation could disagree about the 20% fund recipient. | Dispatch the recipient from the proven puzzle type in both candidate construction and `check-fund-split`; reject wrong recipient/amount/count (`fff135c3`). |
+| F17 | High | AI and ZK coinbase construction/validation could disagree about the recipient of 20% of a block's new issuance. | Dispatch the recipient from the proven puzzle type in both candidate construction and `check-fund-split`; reject wrong recipient/amount/count (`fff135c3`). |
 | F18 | Medium | Stale “MoE fail-closed,” staged verifier, fixed-anchor, 300-second, and deprecated proof-version narratives contradicted live code and could guide a later unsafe change. | Remove obsolete aliases and rollout branches; document the live compact MoE path, mandatory verifier, dynamic anchors, global clock, and 250s/375s regime (`652c2b58`, `3b78b8ee`, `5faf48a7`). |
 
 ## Adversarial vectors with no defect found
@@ -82,8 +82,8 @@ as independently audited or unconditionally production-ready.
   zero `difficulty_bits` policy.
 - **MoE proof binding:** routing root, offsets, expert-local schedule, jackpot,
   cumsum, public inputs, verifier-key digest, and canonical program fold are
-  bound. The N3/N4/N6/N10/N11/N13/N14/N15 vectors in the MoE audits found no
-  bypass.
+  bound. Adversarial routing, column-boundary, schedule, transcript, and
+  difficulty vectors found no bypass.
 - **Pearl byte compatibility:** dense and MoE commitment, noise, ticket, tile,
   jackpot, aux, plain-proof, and routing encodings are checked against Pearl
   formulas, reference fixtures, and merge-mining KATs.

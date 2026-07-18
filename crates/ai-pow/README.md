@@ -1,145 +1,78 @@
 # `ai-pow`
 
-A Pearl-style proof-of-useful-work matrix-multiplication puzzle for
-Nockchain. The crate implements the `(A + E)(B + F)` tiled matmul puzzle
-from the Pearl Whitepaper (cited by name; PDF not in repo)
-end-to-end: low-rank noise generation, tile-by-tile mining with an
-iterative 512-bit accumulator state, shape-aware difficulty thresholds,
-and a replication-style verifier for diagnostic/plain-proof checks.
+`ai-pow` defines Nockchain's Pearl-compatible AI proof-of-useful-work statement. It implements the dense and grouped-GEMM INT8 matrix-multiplication ticket, commitment-keyed low-rank noise, tile-state evolution, jackpot calculation, Pearl transcript compatibility, and the bridge into Nockchain's compact recursive certificate.
 
-This is **Phase 1** of the AI-PoW track. The production block artifact is
-not the plain `MatmulProof`; it is the structured recursive certificate noun
-built through the `ai-pow-zk` integration and consumed at the Rust/Hoon
-boundary. Plain proofs are mining internals and diagnostics.
-An earlier experimental verifiable-inference crate (`ai-pow-vi`) was
-removed — it was offline tooling, not on the production path.
+This crate owns the mineable work unit. It does not own chain activation, ASERT, fork choice, coinbase rules, peer handling, or the mandatory consensus jet.
 
-## Production certificate path
+## Place in the system
 
-`ai-pow` owns the Pearl-compatible mineable work unit and plain-proof
-diagnostics. The production recursive certificate is built and verified through
-`ai-pow-zk` and the miner integration. The current production pipeline,
-including every cryptographic binding and the verifier-key digest, is documented
-in
-[`../ai-pow-zk/docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md`](../ai-pow-zk/docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md).
+```text
+Pearl-compatible model/ticket + Nockchain candidate commitment
+                              |
+                           ai-pow
+                  statement, attempt, precheck
+                         /             \
+                 plain diagnostics    ai-pow-zk proof
+                                             |
+                                     ai-pow-miner noun
+                                             |
+                              Hoon + ai-pow-jets verification
+```
 
-The [`docs/`](docs/) directory intentionally keeps only a small current index.
-Historical Pearl-audit and route-comparison notes remain available in git
-history, but they are not part of the current production API guidance.
+- `ai-pow-miner` drives attempts and packages the block artifact.
+- `ai-pow-zk` proves the selected statement.
+- `ai-pow-jets` performs mandatory native verification.
+- The Hoon kernel independently enforces activation, target, fork choice, and block validity.
 
-## Scope
+## Production and diagnostic paths
 
-What `ai-pow` provides:
+The production block artifact is a versioned `%ai-pow` noun containing an opaque nonce/statement envelope and a compact recursive certificate. Production callers normally enter through `zk_bridge` and the miner's certificate-noun layer.
 
-- **Inputs**: caller-supplied INT8 matrices `A` (m × k row-major) and `B`
-  (n × k column-major), each entry in `[-64, 64]` (Pearl §4.1).
-- **Mining**: `mine(block_commitment, nonce, a, b, params, opts)` searches
-  for a tile whose keyed-hash of the tile state falls below a shape-aware
-  difficulty target `2^(256-b) · r · t²` (Pearl §4.5).
-- **Nonce-bound attempt diagnostics**: `ai_pow::prover::BlockContext` exists
-  for explicit diagnostics, tests, and miner internals. It is intentionally not
-  re-exported from the crate root because it contains cached matmul state for
-  exactly one nonce-bound attempt; normal callers should use `mine` or
-  `mine_block`, which rebuild attempt state per nonce.
-- **Plain-proof verification**: diagnostic and pre-ZKP callers use
-  `ai_pow::verifier::verify_prod_at_target(block_commitment, nonce, params, target, proof)`
-  to confirm that a mined `MatmulProof` hit the exact chain target under the
-  production parameter envelope before recursive certificate generation.
-  Lower-level test/tooling callers can use
-  `ai_pow::verifier::verify_at_target(block_commitment, nonce, params, target, proof)`.
-  These plain verifiers are intentionally not re-exported from the crate root
-  and are not canonical block-acceptance APIs. The old `verifier::verify`
-  helper derives its target from `params.difficulty_bits` and is not a
-  consensus API.
-- **Production certificate verification**: Nockchain block/persistence/wire
-  boundaries must verify the structured recursive certificate noun and run the
-  Pearl-compatible statement precheck. Recursive certificate statements derive
-  canonical seeds from proof-bound chunk commitments. The Pearl-compatible
-  protocol requirement set is Pearl's full periodic-pattern ticket model:
-  canonical `MiningConfiguration`, row/column `PeriodicPattern` values,
-  valid `t_rows`/`t_cols` offsets, shifted opened row/column sets, and
-  Pearl's pattern-size target pricing. The current recursive prover supports
-  square-contiguous Pearl tile tickets across multi-tile matrices and remains
-  fail-closed for other Pearl-valid pattern shapes until proof support catches
-  up to the spec.
-- **Proof format**: 32-byte tile-state commitment `comm_m`, BLAKE3-keyed
-  matrix commitments `H_A` and `H_B`, and per-tile openings (raw strips,
-  m-path to `comm_m`, per-row/col paths to `H_A` / `H_B`).
-- **Synth helper**: `synth_matrices(seed, params)` deterministically
-  generates Pearl-valid `(A, B)` pairs for tests; real miners supply
-  their own.
+`MatmulProof` and the plain verifier are diagnostics and Pearl Gateway plumbing. They are useful for target-hit prechecks and compatibility tests, but they are not canonical Nockchain block-acceptance APIs.
 
-What `ai-pow` deliberately does **not** include:
+## Maintained invariants
 
-- Plonky2 / STARKy zkSNARK block-opening proof (Pearl §4.7). This crate
-  is the pre-SNARK reference; proof sizes scale with σ × t × k.
-- Chain integration, mempool, RPC, block-header format.
-- Hoon-side jets or consensus glue. Those live downstream.
+- **One useful-work instance per attempt.** The extranonce is upstream of `kappa`, `H_A`, `H_B`, `s_A`, `s_B`, noise, noised matrices, tile state, and jackpot. Changing it requires fresh matrix work; cached nonce-only jackpot grinding is invalid.
+- **Commitment binding.** The Nockchain block commitment is included in the Pearl-compatible attempt through exactly one auxiliary tag. A proof cannot authorize two Nockchain commitments.
+- **Matrix binding.** Miner-supplied dense or MoE matrices are authenticated by their commitments and bound to the in-circuit opened schedule. The verifier does not substitute prover-selected public parameters or setup.
+- **MoE binding.** Routing commitments, expert-local dimensions, selected experts, routed rows, and grouped-matmul columns are mutually constrained. Expert-local columns cannot bleed into another expert.
+- **Difficulty binding.** The jackpot is a 256-bit little-endian value checked against the exact chain target after Pearl's shape adjustment. Shape parameters that price work are statement-bound and range-checked.
+- **Canonical wire behavior.** Pearl-compatible hashes, PRNG output, matrix layouts, ticket patterns, and proof metadata use their specified byte order and domain labels.
+- **Fail-closed parsing.** Parameter, proof, routing, opening, and certificate limits reject malformed or oversized inputs before unbounded work or allocation.
 
-## Pearl alignment
+## Pearl compatibility
 
-Cross-implementation byte-equivalence against the Pearl upstream is captured by
-the fixture table in `tests/fixtures/pearl.rs` and exercised by
-`tests/pearl_compat_fixtures.rs`:
+Compatibility is at the mineable-work layer: the same `sigma`, `mu`, matrix commitments, noise seeds, ticket state, and jackpot can serve Pearl and Nockchain submission. The chains retain independent targets, commitments, acceptance rules, and proof formats. Nockchain does not accept Pearl's proof object as its consensus certificate, and Hoon does not interpret Pearl Gateway concepts.
 
-| Section | Topic | Status |
-|---|---|---|
-| S0 | Protocol constants (`JACKPOT_SIZE`, `LROT_PER_TILE`, label seeds, chunk size) | byte-equivalent |
-| S1 | `get_random_hash` PRNG byte stream (`prng::pearl_random_hash`) | byte-equivalent |
-| S2 | Permutation pairs via XOR trick (`prng::pearl_permutation_pair`) | byte-equivalent |
-| S3 | `generate_uniform_random_matrix` (`prng::fill_uniform_row`) | byte-equivalent |
-| S4 | `matvec_sparse_perm` reconstruction | byte-equivalent |
-| S5 | Tile loop `jackpot[16]` evolution | byte-equivalent |
-| S6 | `compute_jackpot_hash` keyed BLAKE3 | byte-equivalent |
-| S7 | Commitment-hash chain `kappa → s_b → s_a` | byte-equivalent |
-| S8 | Matrix-commitment chunk-Merkle root (`commit::matrix_commitment`) | root byte-equivalent; per-strip proof format is a per-row Merkle (follow-on) |
-| S9 | Shape-aware difficulty target in little-endian | byte-equivalent |
+Known-answer fixtures under `tests/fixtures/pearl.rs` pin cross-implementation byte behavior. Merge-mining tests cover dense and MoE success, wrong commitments, malformed aux data, invalid schedules, routing tampering, and independent target outcomes.
 
-The Pearl ISC license is reproduced verbatim at
-[`LICENSE-PEARL`](LICENSE-PEARL); see that file for the precise
-list of `ai-pow`-side derived portions.
+## Module map
 
-## Layout
-
-| Path | Purpose |
+| Module | Responsibility |
 |---|---|
-| `src/lib.rs` | Public re-exports; intentionally omits verifier helpers and `BlockContext` |
-| `src/params.rs` | `MatmulParams` and validation (Pearl §4.8 constraints) |
-| `src/prng.rs` | Pearl-compatible PRNG building blocks (`pearl_random_hash`, uniform-noise, permutation, A/B synth) |
-| `src/matmul.rs` | `BlockNoise`, `Matrices` (`A' = A + E`, `B' = B + F`), `TileState`, `compute_tile`, `compute_tile_from_slices` |
-| `src/tile_hash.rs` | `difficulty_target`, `hash_le_target` (little-endian U256 semantics) |
-| `src/commit.rs` | Tile-state Merkle (sentinel-padded) and Pearl `matrix_commitment` chunk-Merkle |
-| `src/fiat_shamir.rs` | Pearl §4.3 commitment-hash chain helpers; Pearl-compatible mode derives from `sigma || mu`, while native diagnostics can derive from nonce-bound attempt state |
-| `src/prover.rs` | native diagnostic `BlockContext`, `mine`, `mine_block` |
-| `src/verifier.rs` | `verify` |
-| `src/proof.rs` | `MatmulProof`, `TileOpening`, encode / decode |
-| `src/synth.rs` | Deterministic `(A, B)` test synthesis |
-| `tests/` | End-to-end, adversarial, soundness simulation, LLM-shape, Pearl-compat fixtures |
-| `docs/README.md` | Current documentation index |
+| `params` | Dense matrix and ticket parameter validation |
+| `prng` | Pearl-compatible random-hash, noise, permutation, and synthesis helpers |
+| `matmul` | Noised dense/grouped matmul and tile-state transitions |
+| `tile_hash` | Shape-adjusted target and little-endian jackpot comparison |
+| `commit` / `blake3_tree` | Matrix, tile-state, and selective-opening commitments |
+| `pearl_compat` | Pearl parameter, ticket, aux-inclusion, and wire compatibility |
+| `pearl_moe_routing` | MoE routing and expert-local binding |
+| `prover` / `verifier` | Plain diagnostic mining and verification |
+| `zk_bridge` | Canonical statement construction and compact-certificate integration |
 
-## Tests
+## Soundness dependencies
 
-`cargo test -p ai-pow` runs the crate's unit, integration, and fixture tests:
+The work claim depends on BLAKE3's keyed-hash and collision resistance, deterministic transcript derivation, the inability to shortcut the committed noised matmul, and the `ai-pow-zk` AIR/FRI/recursion soundness described in [`docs/SECURITY.md`](docs/SECURITY.md). Consensus additionally depends on exact Hoon/Rust statement agreement and puzzle-specific target enforcement.
 
-- 53 unit (params, prng, matmul, tile_hash, commit, fiat_shamir, proof, synth)
-- 19 adversarial (every verifier rejection path exercised by tampering)
-- nonce-grinding regressions: different nonces re-key commitments, change
-  noise/tile states before final hashing, and stale attempt contexts are
-  rejected
-- 13 end-to-end (round-trip prove → verify)
-- 5 LLM-shape (rectangular, non-pow-2 tile counts, Gemma 4 / Qwen 3.6 FFN profiles)
-- 11 Pearl-compat fixtures (sections S0 – S9 above)
-- 3 soundness Monte-Carlo (rejection rate vs `1 − (1 − f)^σ`)
+The composite AIR and recursion stack still require independent cryptographic review before an unconditional soundness claim. See the [dual-puzzle audit](docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md).
 
-Plus 1 `#[ignore]`-d `gen_fixtures` test that regenerates `tests/fixtures/pearl.rs`
-from vendored Pearl reference code.
+## Documentation and validation
 
-## Difficulty-bound parameters
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — data flow and crate boundaries.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — invariants, assumptions, and attack classes.
+- [`docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md`](docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md) — dated audit record and remaining assurance gate.
 
-Pearl §4.8 constraints (enforced by `MatmulParams::validate`):
-
-- `noise_rank` must be a power of two with `r ≥ 2`
-- `k` must be a multiple of `noise_rank`
-- `k ≤ 2^16`
-- `tile` must divide both `m` and `n`
-- `spot_checks` must be > 0 and ≤ the total tile count
+```sh
+cargo test -p ai-pow
+cargo test -p ai-pow --all-features
+```

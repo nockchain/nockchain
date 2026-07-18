@@ -1,101 +1,53 @@
 # `ai-pow-zk`
 
-`ai-pow-zk` is the Plonky3 proof stack for Nockchain AI proof-of-work.
-The selected production direction is the compact final-layer batch-STARK
-certificate:
+`ai-pow-zk` is the Plonky3 proof stack for Nockchain AI-PoW. It proves the Pearl-compatible useful-work statement supplied by `ai-pow` and produces the compact recursive certificate embedded in `%ai-pow` blocks.
 
-- Layer 0 proves the useful-work AI-PoW statement.
-- Layer 1 recursively verifies Layer 0 with a Tip5-friendly verifier circuit.
-- Layer 2 is a native BLAKE3 final STARK over the Layer-1 proof.
-- The wire artifact is a compact recursive certificate plus an explicit
-  verifier-key/setup digest.
+The crate is internal and unpublished. Its AIR layout and certificate format are consensus-sensitive, and its cryptographic soundness still requires independent review.
 
-> **Important:** the current source of truth is
-> [`2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md`](docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md).
-> Read it before changing recursive proof shape, FRI parameters, certificate
-> serialization, verifier-key digest binding, or miner artifact wiring.
->
-> Open proof-path test work is tracked in
-> [`2026-06-07_OPEN_TEST_ISSUES.md`](docs/2026-06-07_OPEN_TEST_ISSUES.md).
+## Place in the system
 
-## Current Status
+`ai-pow` constructs the canonical statement and witness. `ai-pow-zk` proves and verifies that statement. `ai-pow-miner` serializes the compact certificate, while `ai-pow-jets` selects verifier-owned setup and invokes verification from Hoon consensus.
 
-The compact route meets the relaxed production target:
+The dependency direction is intentional: `ai-pow` depends on `ai-pow-zk`; this crate does not depend back on `ai-pow`. Bridge callers translate protocol types into `ZkParams`, trace rows, public inputs, and the canonical program.
 
-| Gate | Current measurement |
-|---|---:|
-| Full jammed `%ai-pow` artifact | `125,382` bytes |
-| Compact recursive certificate inside that artifact | `124,570` bytes |
-| Cold artifact build wall time | `31.837s` |
-| Crate-level compact certificate | `122,597` bytes |
-| Crate-level recursive proof wall time after chain-verified Layer 0 | `22.006s` |
+## Production proof route
 
-Soundness is 60 FRI query bits without proof-system PoW grinding:
+1. **Layer 0:** a pinned composite batch STARK proves the useful-work trace over Goldilocks. Selector constraints and seven LogUp buses bind BLAKE3 operations, committed/noised operands, matmul, routing where present, tile-state fold, and jackpot public inputs.
+2. **Layer 1:** a recursive Tip5-friendly verifier circuit verifies Layer 0 and exposes a statement digest bound to the canonical Layer-0 program and public values.
+3. **Layer 2:** a native BLAKE3 batch STARK proves the Layer-1 verifier execution and is path-pruned into the compact body carried on wire.
+4. **Verifier context:** the node supplies the expected setup, metadata, public-value layout, FRI shape, and verifier-key digest. The proof supplies none of these as trusted data.
 
-| Layer | Hash / commitment | FRI shape |
-|---|---|---|
-| Layer 0 useful-work STARK | Tip5 MMCS / transcript | `lb=4,nq=15,pow=0` |
-| Layer 1 recursive proof | Tip5 MMCS / transcript | `lb=3,nq=20,cap=4,pow=0` |
-| Layer 2 final compact proof | BLAKE3 MMCS / transcript | `lb=5,nq=12,lfp=2,mla=3,cap=4,pow=0` |
+The older non-compact checkpoint is retained only behind regression/test surfaces. Raw Layer-0 proofs, plain `MatmulProof`, and prover-returned verifier contexts are not block artifacts.
 
-Tip5 remains the recursive/circuit-friendly hash. BLAKE3 is used only for the
-native final Layer-2 STARK commitments/transcript and for the AI-PoW data path
-proved by the BLAKE3 AIR.
+## Maintained invariants
 
-## Production API
+- The verifier rebuilds the canonical Layer-0 program from the trusted statement; it never accepts the program encoded by the prover as authority.
+- The compact certificate binds all public values needed to reconstruct the useful-work claim, including matrix commitments, nonce/job keys, fold state, jackpot key, and jackpot hash.
+- Trace height and proof profile are recomputed from the statement and must match the certificate route.
+- Dense and MoE schedules use the same canonical-program discipline. Routing, routed rows, expert-local columns, and grouped matmul are constrained as part of the proof.
+- LogUp multiplicities close every cross-chip producer/consumer bus used by the production route.
+- Setup and verifier-key digests are proof-independent and verifier-owned. Prover-side caches may improve proving time but cannot alter the verifier's accepted relation.
+- Changing an AI-PoW extranonce changes attempt-dependent witness data. Reusing cached noised matrices or tile states across attempts is forbidden.
+- Certificate decode has a single canonical encoding and explicit resource limits at the node boundary.
 
-Production callers should use the compact recursive path through `ai-pow`:
+## Soundness dependencies
 
-- `ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate`
-- `ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate_with_prover_cache`
-- `ai_pow::zk_bridge::prove_ai_pow_compact_recursive_certificate`
-- `ai_pow::zk_bridge::prove_ai_pow_compact_recursive_certificate_with_prover_cache`
+The proof claim relies on completeness of the composite AIR and canonical program, correct LogUp multiplicities, Goldilocks arithmetic, FRI query soundness, Fiat-Shamir transcript ordering/domain separation, Tip5 and BLAKE3 security in their respective layers, and sound recursive verification. See [`docs/SECURITY.md`](docs/SECURITY.md) for the exact trust model and remaining audit boundary.
 
-The lower-level `ai-pow-zk` entrypoints are for the bridge after it has already
-verified the Layer-0 statement against chain-owned data:
+No proof-system property establishes chain activation, ASERT, fork choice, coinbase routing, or transaction validity. Those remain Hoon consensus responsibilities.
 
-- `recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof`
-- `recursion::prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof_with_prover_cache`
-- `recursion::verify_compact_batch_recursive_certificate_with_context`
-- `recursion::encode_compact_batch_recursive_certificate`
-- `recursion::decode_compact_batch_recursive_certificate`
+## Public surface
 
-Verification must use verifier-owned context and the expected verifier-key/setup
-digest. A miner must not supply trusted metadata, setup, FRI shape, or verifier
-context. The compact certificate carries only the digest and compact final proof
-body.
+Production callers should normally use `ai_pow::zk_bridge`. Lower-level bridge code uses the `_sx` compact certificate builders and `recursion::verify_compact_batch_recursive_certificate_with_context`. Dev-only unpinned or non-compact routes must not be wired into block acceptance.
 
-## Not Production APIs
+## Documentation and validation
 
-- Raw Layer-0 proofs are intermediate prover inputs, not block artifacts.
-- Plain `MatmulProof` remains a diagnostic/pre-ZKP target-hit check.
-- The full batch-STARK recursive checkpoint is retained only for regression and
-  soundness debugging; it is too large for production wire use.
-- Native terminal compression experiments have been removed from the AI-PoW API.
-  The vendored native-terminal backend and its dedicated tests were also
-  removed. Measurements remain in git history and older documents.
-
-## Historical Docs
-
-Historical roadmap, terminal-compression, proof-size, and route-investigation
-documents were removed from this branch and remain available in git history.
-The active implementation guide is the current compact pipeline document linked
-above.
-
-## Validation
-
-For proof-path changes, prefer release/native measurements:
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layers, statements, setup, and wire boundary.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — proof assumptions and adversarial invariants.
 
 ```sh
-RUSTFLAGS="-C target-cpu=native" cargo check -p ai-pow-zk --features recursion
-RUSTFLAGS="-C target-cpu=native" cargo check -p ai-pow --features zk
-RUSTFLAGS="-C target-cpu=native" cargo check -p ai-pow-miner --features node
-RUSTFLAGS="-C target-cpu=native" cargo test -p ai-pow-miner --release --features node \
-  real_compact_pearl_merge_artifact_jam_size_for_selected_route -- --ignored --nocapture
+cargo test -p ai-pow-zk --all-features
+cargo check -p ai-pow-zk --all-features
 ```
 
-Always run `cargo fmt --check` and `git diff --check` before committing.
-
-See also
-[`docs/2026-06-07_OPEN_TEST_ISSUES.md`](docs/2026-06-07_OPEN_TEST_ISSUES.md)
-for release/prover regressions that are not yet automated.
+Expensive production-scale proof and setup tests are opt-in; run them in release mode with the repository's normal shared caches.
