@@ -514,19 +514,28 @@
       max-target-atom:t
   ==
 ::
-::  +build-ai-candidate: derive the AI-puzzle variant of a ZK candidate block.
+::  +build-ai-candidate: build the AI-puzzle variant of a ZK candidate block.
 ::
 ::    Post-ai-activation the miner builds ONE candidate, targeted for the ZK
-::    puzzle. The AI puzzle needs the SAME block bound to the AI ASERT target
-::    instead: an AI certificate commits to the block commitment + target, so an
-::    AI block must carry +compute-target-ai-asert (validation rejects any other
-::    target as %page-target-invalid). This deterministically re-targets the
-::    candidate — replace the target with the AI ASERT target (over the AI
-::    subchain via +find-same-type-ancestor) and recompute accumulated-work with
-::    the AI normalizer (+compute-work-ai, matching validation's +block-compute-
-::    work). Emission (the %mine-ai effect) and +do-pow (reconstructing the block
-::    from an AI solution) both call this on the same candidate + consensus
-::    state, so the commitments match and the solved certificate validates.
+::    puzzle. The AI puzzle needs the SAME transactions bound to the AI ASERT
+::    target and paying the AI fund instead: an AI certificate commits to the
+::    block commitment + target, so an AI block must carry
+::    +compute-target-ai-asert (validation rejects any other target as
+::    %page-target-invalid) and its coinbase must pay +ai-fund-address (validation
+::    rejects a %pow-fund coinbase via +check-fund-split). This deterministically:
+::      - re-targets to the AI ASERT target (over the AI subchain via
+::        +find-same-type-ancestor) and recomputes accumulated-work with the AI
+::        normalizer (+compute-work-ai, matching validation's +block-compute-work);
+::      - rebuilds the coinbase from the start with +ai-fund-address via the same
+::        +new-with-fund-share the ZK candidate uses (only the fund recipient
+::        differs). `shares` is the miner's coinbase split; fees are recovered
+::        from the ZK candidate's coinbase total so the miner-side split matches
+::        the ZK candidate's, keeping this a pure function of (zk-cand, shares).
+::    Emission (the %mine-ai effect) and +do-pow (reconstructing the block from an
+::    AI solution) both call this on the same candidate + shares, so the
+::    commitments match and the solved certificate validates. Validation never
+::    calls this — it reads the submitted block's own coinbase — so `shares` is a
+::    miner-only input.
 ::
 ::    PRE-asert the AI candidate IS the ZK candidate: validation's target check
 ::    and +block-compute-work are both epoch/ZK pre-asert, so re-targeting to the
@@ -535,7 +544,7 @@
 ::    AI activates well after asert, so this only matters on fakenets that
 ::    activate AI early.)
 ++  build-ai-candidate
-  |=  zk-cand=page:t
+  |=  [zk-cand=page:t shares=shares:t]
   ^-  page:t
   =/  candidate-height=@  ~(height get:page:t zk-cand)
   ?.  (post-asert-activation:t candidate-height)
@@ -551,10 +560,27 @@
     (merge:bignum:t ~(accumulated-work get:page:t par))
   =/  ai-work=bignum:bignum:t
     (chunk:bignum:t (add parent-work (merge:bignum:t (compute-work-ai:page:t ai-target))))
+  ::  The %ai-pow coinbase, built from the start with +ai-fund-address (the AI
+  ::  Compute Network fund) via the same +new-with-fund-share the ZK candidate
+  ::  uses. emission is fixed by height; fees are the ZK candidate's coinbase
+  ::  total minus the subsidy, so the miner-side split reproduces the ZK
+  ::  candidate's exactly and only the fund recipient differs.
+  =/  ai-coinbase
+    =/  zk-cb=coinbase-split:t  ~(coinbase get:page:t zk-cand)
+    =/  zk-total=coins:t
+      ?-  -.zk-cb
+        %0  (roll ~(val z-by +.zk-cb) |=([c=coins:t sum=coins:t] (add c sum)))
+        %1  (roll ~(val z-by +.zk-cb) |=([c=coins:t sum=coins:t] (add c sum)))
+      ==
+    =/  emission=coins:t  (emission-calc:coinbase:t candidate-height)
+    =/  fees=coins:t      (sub zk-total emission)
+    (new-with-fund-share:v1:coinbase-split:t ai-fund-address:t emission fees shares)
   =.  zk-cand
     ?^  -.zk-cand  zk-cand(target ai-target)  zk-cand(target ai-target)
   =.  zk-cand
     ?^  -.zk-cand  zk-cand(accumulated-work ai-work)  zk-cand(accumulated-work ai-work)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand  zk-cand(coinbase ai-coinbase)
   =.  zk-cand
     ?^  -.zk-cand  zk-cand(digest (compute-digest:page:t zk-cand))  zk-cand(digest (compute-digest:page:t zk-cand))
   zk-cand
@@ -897,7 +923,12 @@
   ::  Post-activation (014-aletheia): coinbase must split 80/20 between
   ::  the miner and the consensus-known fund address.
   ?:  (post-asert-activation:t height)
-    ?.  (check-fund-split cb emission)
+    ::  015-logos: dispatch the 20% fund recipient on the block's puzzle type.
+    =/  is-ai=?
+      =/  pow-unit  ~(pow get:page:t pag)
+      ?~  pow-unit  %.n
+      =(%ai-pow (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit)))
+    ?.  (check-fund-split cb emission is-ai)
       [%.n %improper-fund-split]
     ~>  %slog.[0 (cat 3 'validate-page-with-txs: Block validated: ' digest-b58)]
     [%.y u.balance-transfer]
@@ -929,7 +960,7 @@
 ::    the v1 coinbase-split caps total entries at max-coinbase-split+1.
 ::    So we only need to verify that:
 ::      (a) the split is v1 (post-asert-activation = post-v1-phase),
-::      (b) the fund-address slot exists,
+::      (b) the protocol-fund-address slot exists,
 ::      (c) that slot's coins equal exactly floor(emission/5).
 ::    The miner side is then `emission - fund-coins + fees`,
 ::    distributed across however many miner outputs the miner chose
@@ -942,12 +973,16 @@
 ::    docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #2.
 ++  check-fund-split
   ~/  %check-fund-split
-  |=  [cb=coinbase-split:t emission=coins:t]
+  |=  [cb=coinbase-split:t emission=coins:t is-ai=?]
   ^-  ?
   ?.  ?=([%1 *] cb)  %.n
   =/  expected-fund-coins=coins:t  (div emission 5)
+  ::  015-logos: the 20% fund share is puzzle-specific. %ai-pow blocks pay the AI
+  ::  Compute Network fund (+ai-fund-address); %pow blocks pay the protocol fund
+  ::  (+protocol-fund-address). The caller reads the puzzle type from the block's page.
+  =/  fund-addr=hash:t  ?:(is-ai ai-fund-address:t protocol-fund-address:t)
   =/  fund-coins=(unit coins:t)
-    (~(get z-by +.cb) fund-address:t)
+    (~(get z-by +.cb) fund-addr)
   ?:  =(0 expected-fund-coins)
     =(~ fund-coins)
   ?~  fund-coins  %.n

@@ -3862,7 +3862,7 @@
 ::    its m-of-n primitive. We cannot hold the four production fund seckeys, so
 ::    these exercise the generic arm with non-production keys (a 2-of-3 standing
 ::    in for the 3-of-4); the real constants are pinned by +test-fund-note-
-::    firstname and +test-fund-address-is-3-of-4-multisig in coinbase-split.
+::    firstname and +test-protocol-fund-address-is-3-of-4-multisig in coinbase-split.
 ::
 ::  +test-fund-multisig-spend-valid: a correctly-revealed multisig with enough
 ::    valid signatures over the spend's sig-hash is accepted.

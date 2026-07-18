@@ -859,7 +859,7 @@
     ::  reject an AI block carrying the ZK target as %page-target-invalid. +do-pow
     ::  reconstructs the identical variant from the same candidate + state.
     ?:  (gte candidate-height ai-pow-activation-height.constants.k)
-      =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k)
+      =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
       =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
       =/  ai-target  ~(target get:page:t ai-cand)
       [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect effs]
@@ -1662,7 +1662,7 @@
           ::  this the candidate still carries the ZK target, so the certificate's
           ::  commitment would not match and +heard-block would reject the block as
           ::  %page-target-invalid. The next candidate rebuild overwrites this.
-          =.  candidate-block.m.k  (build-ai-candidate:con candidate-block.m.k)
+          =.  candidate-block.m.k  (build-ai-candidate:con candidate-block.m.k shares.m.k)
           ::  Set the AI-PoW artifact on the candidate, then verify it with
           ::  +check-pow — which re-derives the block commitment + target from the
           ::  candidate itself and runs the mandatory +ai-pow-verify jet against the
@@ -1864,7 +1864,7 @@
         ::  to the AI ASERT target (+build-ai-candidate) — matching the
         ::  candidate-update poke path, so AI miners re-target immediately here too.
         ?:  (gte candidate-height ai-pow-activation-height.constants.k)
-          =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k)
+          =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
           =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
           =/  ai-target  ~(target get:page:t ai-cand)
           [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect ~]

@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "ai-pow-jets"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "ai-pow",
  "ai-pow-miner",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "ai-pow-miner"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "ai-pow",
  "ai-pow-zk",
@@ -2161,7 +2161,7 @@ dependencies = [
 
 [[package]]
 name = "bridge"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2224,7 +2224,7 @@ dependencies = [
 
 [[package]]
 name = "bridge-dev"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "alloy",
  "anyhow",
@@ -2472,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "chaff"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bincode 2.0.1",
  "blake3",
@@ -3835,7 +3835,7 @@ dependencies = [
 
 [[package]]
 name = "equix-latency"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "equix",
 ]
@@ -4414,7 +4414,7 @@ dependencies = [
 
 [[package]]
 name = "habit"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bytes",
  "quickcheck",
@@ -4665,7 +4665,7 @@ dependencies = [
 
 [[package]]
 name = "hoon"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "clap",
  "hoonc",
@@ -5423,31 +5423,31 @@ dependencies = [
 
 [[package]]
 name = "kernels"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-open-bridge"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-open-dumb"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-open-miner"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-open-nockchain-peek"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-open-wallet"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "kernels-roswell"
-version = "0.1.0"
+version = "0.1.15"
 
 [[package]]
 name = "konst"
@@ -6347,7 +6347,7 @@ checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
 
 [[package]]
 name = "nockapp"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6408,7 +6408,7 @@ dependencies = [
 
 [[package]]
 name = "nockapp-grpc"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6450,7 +6450,7 @@ dependencies = [
 
 [[package]]
 name = "nockapp-grpc-proto"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "glob",
@@ -6470,7 +6470,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "ai-pow",
  "ai-pow-jets",
@@ -6510,7 +6510,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-api"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "chaff",
  "clap",
@@ -6531,7 +6531,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-bridge-sequencer"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bridge",
  "clap",
@@ -6547,7 +6547,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-e2e"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6595,7 +6595,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-libp2p-io"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "async-trait",
  "bs58",
@@ -6639,7 +6639,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-math"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "argon2",
  "arrayref",
@@ -6662,7 +6662,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-mining-common"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bytes",
  "futures",
@@ -6678,7 +6678,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-peek"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "clap",
  "kernels-open-nockchain-peek",
@@ -6694,7 +6694,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-testkit"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "serde",
  "serde_yaml",
@@ -6703,7 +6703,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-types"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "alloy",
  "anyhow",
@@ -6726,7 +6726,7 @@ dependencies = [
 
 [[package]]
 name = "nockchain-wallet"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bs58",
  "clap",
@@ -9231,7 +9231,7 @@ dependencies = [
 
 [[package]]
 name = "roswell"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "ai-pow-jets",
  "clap",
@@ -11432,7 +11432,7 @@ dependencies = [
 
 [[package]]
 name = "wallet-tx-builder"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "bytes",
  "nockapp",
@@ -12574,7 +12574,7 @@ dependencies = [
 
 [[package]]
 name = "zk-pow-miner"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12604,7 +12604,7 @@ dependencies = [
 
 [[package]]
 name = "zkvm-jetpack"
-version = "0.1.0"
+version = "0.1.15"
 dependencies = [
  "argon2",
  "bitvec",

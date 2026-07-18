@@ -73,7 +73,7 @@
   |$  object
   (each object term)
 ::
-::  $fund-address: lock-script hash that receives the 20% protocol-fund
+::  $protocol-fund-address: lock-script hash that receives the 20% protocol-fund
 ::  share of every post-activation coinbase (014-aletheia, zk-asert-phase
 ::  onward). The lock-root of a 3-of-4 multisig over the four pkhs in
 ::  /asert-protocol-lock-fund.txt at the repo root; spending the fund
@@ -83,18 +83,26 @@
 ::  here as a base58 literal. Re-run that script after any change to
 ::  the participant set, the threshold, or the lock-script structure
 ::  to regenerate the value below. The pin is enforced by
-::  test-fund-address-is-3-of-4-multisig in
+::  test-protocol-fund-address-is-3-of-4-multisig in
 ::  /tests/dumb/mod/unit/coinbase-split.
-++  fund-address
+++  protocol-fund-address
   ^-  hash
   (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
+::  $ai-fund-address: lock-script hash that receives the 20% fund share of every
+::  post-activation %ai-pow (AI-PoW) coinbase, in place of +protocol-fund-address. This is
+::  the AI Compute Network fund — the v1 pubkey-hash of National Compute Co, the
+::  AI Compute Network's registrant (015-logos). %pow (ZK) coinbases keep paying
+::  +protocol-fund-address; +check-fund-split dispatches on the block's puzzle type.
+++  ai-fund-address
+  ^-  hash
+  (from-b58:hash '2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j')
 ::
 ::  $fund-note-firstname: the on-chain first-name (-.name) shared by every
 ::  protocol-fund coinbase note. +make-name:coinbase wraps the coinbase-split
-::  key (here +fund-address, itself a 3-of-4 multisig lock-root) as a single
+::  key (here +protocol-fund-address, itself a 3-of-4 multisig lock-root) as a single
 ::  %pkh primitive plus the coinbase timelock, then takes the nname:
 ::
-::    note-lock      = ~[[%pkh m=1 {fund-address}] coinbase-tim-lp]
+::    note-lock      = ~[[%pkh m=1 {protocol-fund-address}] coinbase-tim-lp]
 ::    note-lock-root = (hash:lock note-lock)
 ::    first-name     = (first:nname note-lock-root)
 ::
@@ -109,13 +117,13 @@
   (from-b58:hash '8TvVfU7sbFoY8qV53ffUdBag7Kcqw8LXjsnYgY71nQ1biWE6giRYzkn')
 ::
 ::  $fund-multisig-lock: the real 3-of-4 multisig spend-condition that
-::  +fund-address is the lock-root of -- i.e. the preimage a fund spend must
-::  reveal so +check-multisig-lock's bind ((hash:lock sc) == fund-address)
+::  +protocol-fund-address is the lock-root of -- i.e. the preimage a fund spend must
+::  reveal so +check-multisig-lock's bind ((hash:lock sc) == protocol-fund-address)
 ::  passes. Listed here as the single source of truth for the four
 ::  participant pkhs so the wallet can construct the spend (it cannot recover
-::  the participant set from the +fund-address hash alone). Invariant:
-::  (hash:lock fund-multisig-lock) == fund-address, pinned by
-::  test-fund-multisig-lock-binds-fund-address in coinbase-split.
+::  the participant set from the +protocol-fund-address hash alone). Invariant:
+::  (hash:lock fund-multisig-lock) == protocol-fund-address, pinned by
+::  test-fund-multisig-lock-binds-protocol-fund-address in coinbase-split.
 ++  fund-multisig-lock
   ^-  spend-condition
   =/  pkhs=(list hash)
@@ -191,7 +199,7 @@
     =/  cb=coinbase-split
       ?:  (pre-asert-activation height asert-phase)
         (new:coinbase-split emission shares)
-      (new-with-fund-share:coinbase-split emission 0 shares)
+      (new-with-fund-share:coinbase-split protocol-fund-address emission 0 shares)
     %*  .  *form
       height            height
       parent            par-digest
@@ -369,12 +377,13 @@
 ::  ideal), the chain averages 2.5 min globally.
 +$  zk-asert-post-ai
   $+  zk-asert-post-ai
-  $~  :*  phase=95.000
-          anchor-height=94.999
+  $~  :*  phase=114.300
+          anchor-height=114.299
           anchor-target-atom=^~((bex 291))
-          ideal-block-time=300
+          ::  375s ideal ⇒ ZK wins ~40% of blocks (paired with AI's 250s)
+          ideal-block-time=375
           half-life=^~((mul 12 ^~((mul 60 60))))
-          ::  Placeholder. Pinned to the mainnet block at height 94,999
+          ::  Placeholder. Pinned to the mainnet block at height 114,299
           ::  by the deferred-task AI-PoW activation hard fork.
           anchor-min-timestamp=0
       ==
@@ -393,15 +402,17 @@
 ::  second AI block onward.
 +$  ai-asert
   $+  ai-asert
-  $~  :*  phase=95.000
-          anchor-height=95.000
+  $~  :*  phase=114.300
+          anchor-height=114.300
           ::  AI targets live in the 256-bit jackpot space, so the AI anchor is
           ::  bex 227 (< 2^256, no jet saturation). Paired with the AI work
           ::  normalizer max-ai = max-target-atom/2^64 (see +compute-work-ai),
           ::  a block at bex 227 contributes work equal to a ZK block at bex 291
           ::  — equal-weight cross-puzzle fork choice.
           anchor-target-atom=^~((bex 227))
-          ideal-block-time=300
+          ::  250s ideal ⇒ AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40)
+          ::  to bootstrap the AI Compute Network; paired ZK ideal is 375s.
+          ideal-block-time=250
           half-life=^~((mul 12 ^~((mul 60 60))))
           ::  Placeholder. Pinned to the first AI block's median-of-11
           ::  by the deferred-task AI-PoW verifier integration.
@@ -441,7 +452,7 @@
           ::  AI PoW activation threshold. At/after this height, %ai-pow
           ::  blocks are verified via the recursive-certificate jet
           ::  (%ai-pow-verify) and admitted like %pow blocks.
-          ai-pow-activation-height=95.000
+          ai-pow-activation-height=114.300
           ::  AI ASERT defaults come from `+$ ai-asert`'s own $~ clause.
           *ai-asert
       ==
@@ -841,26 +852,31 @@
     ==
   ::
   ::  +new-with-fund-share: post-asert-activation 80/20 coinbase-split builder.
-  ::    Splits a block's coinbase between the protocol fund and the
-  ::    miner-side recipients:
+  ::    Splits a block's coinbase between a protocol fund and the miner-side
+  ::    recipients:
   ::      fund        = floor(emission / 5)               :: 20% of subsidy
   ::      miner-pool  = (emission - fund) + fees          :: 80% + all fees
   ::    The miner-pool is distributed across `shares` via the same
   ::    proportional-allocation arm as ++new (per-block atom remainders
   ::    accrue to the first share key in z-map order, preserving the
   ::    legacy single-miner behaviour and supporting up-to-2 partner
-  ::    splits). The fund is added as one additional output.
-  ::    `shares` must NOT include `fund-address`.
+  ::    splits). The fund is added as one additional output keyed by
+  ::    `fund-addr`: callers pass +protocol-fund-address for a %pow (ZK) block and
+  ::    +ai-fund-address for an %ai-pow block. The fund recipient is the ONLY
+  ::    difference between the two puzzle types' coinbases and is exactly what
+  ::    +check-fund-split dispatches on, so both are built here from the start
+  ::    with their proper recipient rather than one being rewritten into the
+  ::    other.
+  ::    `shares` must NOT include `fund-addr`.
   ::    Fees are computed from the subsidy alone — folding fees into the
   ::    fund slot would be rejected by +check-fund-split.
   ++  new-with-fund-share
-    |=  [emission=coins fees=coins =shares]
+    |=  [fund-addr=^hash emission=coins fees=coins =shares]
     ^-  form
-    ?<  (~(has z-by shares) fund-address)
+    ?<  (~(has z-by shares) fund-addr)
     =/  fund-coins=coins   (div emission 5)
     =/  miner-pool=coins   (add fees (sub emission fund-coins))
-    =/  miner-split=form   (new miner-pool shares)
-    (~(put z-by miner-split) fund-address fund-coins)
+    (~(put z-by (new miner-pool shares)) fund-addr fund-coins)
   ::
   ++  hashable
     |=  =form
@@ -2152,14 +2168,14 @@
     |=  [=form lock=hash]
     ^-  ?
     ::  Protocol-fund notes (014-aletheia) committed an unsatisfiable lock:
-    ::  +make-name:coinbase wrapped +fund-address (itself the lock-root of a
+    ::  +make-name:coinbase wrapped +protocol-fund-address (itself the lock-root of a
     ::  3-of-4 multisig) as a single %pkh value, so the literal on-chain lock
     ::  demands a signature from a key whose hash equals a *lock-root* -- which
     ::  no one holds. Every such note shares one first-name (+fund-note-
     ::  firstname); recover spendability by routing it to the true multisig
     ::  check. See /scripts/generate-fund-note-name.hoon.
     ?:  =(lock fund-note-firstname)
-      (check-multisig-lock fund-address form)
+      (check-multisig-lock protocol-fund-address form)
     =/  bythos-ok=?
       ?:  ?=([%full * * *] lmp.witness.form)
         (gte now.form bythos-phase.form)
@@ -2197,7 +2213,7 @@
   ::  (the m-of-n %pkh) to be satisfied by the witness over the spend's
   ::  sig-hash. The merkle proof is deliberately bypassed. Generic over
   ::  `target` so the spend mechanism is testable with non-production keys;
-  ::  production passes +fund-address.
+  ::  production passes +protocol-fund-address.
   ++  check-multisig-lock
     |=  [target=hash =form]
     ^-  ?

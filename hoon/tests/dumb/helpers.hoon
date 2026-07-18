@@ -731,7 +731,7 @@
       pag(coinbase new-coinbase)
     =/  new-coinbase
       %-  new-with-fund-share:v1:coinbase-split:t
-      [pag-emission pag-fees default-keys-1-share-v1]
+      [protocol-fund-address:t pag-emission pag-fees default-keys-1-share-v1]
     pag(coinbase new-coinbase)
   =/  new-digest  (compute-digest:page:t pag)
   =.  pag
@@ -841,7 +841,10 @@
   |=  [parent=page:t con=consensus-state]
   ^-  page:t
   =/  zk-cand=page:t  (make-empty-page parent)
-  =/  ai-cand=page:t  (~(build-ai-candidate dcon con der bc) zk-cand)
+  ::  the AI candidate's coinbase is rebuilt from these shares — the same
+  ::  single-miner split +make-empty-page seeds its ZK candidate with.
+  =/  ai-cand=page:t
+    (~(build-ai-candidate dcon con der bc) zk-cand (sig-to-shares:v1 p:default-keys-1 1))
   ::  v1 page (atom head) runs the FALSE branch and takes the %ai-pow artifact;
   ::  the v0 branch is dead but must type-check, and v0's narrower pow type cannot
   ::  hold [%ai-pow ..], so it keeps mock-pow (see +make-ai-pow-garbage-page).

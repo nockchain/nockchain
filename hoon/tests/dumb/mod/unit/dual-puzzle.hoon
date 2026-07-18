@@ -135,8 +135,13 @@
   =/  built  (build-typed-chain:hp ~[%ai %zk])
   =/  con  con.built
   =/  zk-cand=page:t  (make-empty-page:hp tip.built)
+  ::  shares only need to be a valid single-miner split — this test pins the AI
+  ::  candidate's target and accumulated-work, which are independent of the
+  ::  coinbase +build-ai-candidate rebuilds from them.
+  =/  shares=shares:t
+    (~(put z-by *(z-map hash:t @)) (hash:schnorr-pubkey:t default-a-pt-1:helpers) 1)
   =/  ai-cand=page:t
-    (~(build-ai-candidate dcon con der:hp bc-dual-post:helpers) zk-cand)
+    (~(build-ai-candidate dcon con der:hp bc-dual-post:helpers) zk-cand shares)
   =/  ai-parent
     %-  need
     %.  [~(parent get:page:t zk-cand) %ai-pow]

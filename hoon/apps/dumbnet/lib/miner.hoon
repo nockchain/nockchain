@@ -236,7 +236,7 @@
       candidate-block.m(coinbase (new:v1:coinbase-split:t new-assets shares.m))
     =/  emission=coins:t
       (emission-calc:coinbase:t height.candidate-block.m)
-    candidate-block.m(coinbase (new-with-fund-share:v1:coinbase-split:t emission new-fees shares.m))
+    candidate-block.m(coinbase (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t emission new-fees shares.m))
   ::  check size of candidate block
   ?.  candidate-block-below-max-size
     ~>  %slog.[3 log-message-exceeds-max-size]

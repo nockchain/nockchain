@@ -104,11 +104,12 @@ impl AsertParams {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT - 1,
             anchor_target_atom: UBig::from(1u64) << 291,
-            ideal_block_time: 300,
+            // 375s ideal => ZK wins ~40% of blocks (paired with AI's 250s).
+            ideal_block_time: 375,
             half_life: 12 * 60 * 60,
             // Placeholder — set to the canonical anchor block's median-of-11
             // at the deferred-task AI verifier integration (the value is the
-            // ZK block at height 94999's stored min-timestamp at chain time
+            // ZK block at height 114299's stored min-timestamp at chain time
             // of activation).
             anchor_min_timestamp: 0,
         }
@@ -132,7 +133,9 @@ impl AsertParams {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_target_atom: UBig::from(1u64) << 227,
-            ideal_block_time: 300,
+            // 250s ideal => AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40),
+            // bootstrapping the AI Compute Network.
+            ideal_block_time: 250,
             half_life: 12 * 60 * 60,
             // Placeholder — first AI block's median-of-11 timestamp; pinned
             // at deferred-task AI verifier integration.
@@ -294,7 +297,7 @@ impl BlockchainConstants {
     pub const DEFAULT_NOTE_DATA_MIN_FEE: u64 = 256;
     pub const DEFAULT_BASE_FEE: u64 = 16_384;
     pub const DEFAULT_INPUT_FEE_DIVISOR: u64 = 4;
-    pub const DEFAULT_AI_POW_ACTIVATION_HEIGHT: u64 = 95_000;
+    pub const DEFAULT_AI_POW_ACTIVATION_HEIGHT: u64 = 114_300;
 
     pub fn new() -> Self {
         let max_target_atom = UBig::from_str_with_radix_prefix(Self::DEFAULT_MAX_TIP5_ATOM)

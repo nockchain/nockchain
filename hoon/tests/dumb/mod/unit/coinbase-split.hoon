@@ -10,8 +10,8 @@
 ::      - multi-miner partner mode keeps working (1-or-2 miner PKHs +
 ::        fund),
 ::      - the fund's lock-script hash equals the consensus-known
-::        fund-address constant,
-::      - the builder rejects shares that alias fund-address.
+::        protocol-fund-address constant,
+::      - the builder rejects shares that alias protocol-fund-address.
 /=  tx-engine  /common/tx-engine
 /=  emission  /common/schedule
 /=  helpers   /tests/dumb/helpers
@@ -46,11 +46,11 @@
   =/  miner-shares  default-keys-1-share-v1:h
   =/  emission-atoms=coins:t  (mul 2.048 atoms-per-nock:emission)
   =/  cb=coinbase-split:v1:t
-    (new-with-fund-share:v1:coinbase-split:t emission-atoms 0 miner-shares)
+    (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t emission-atoms 0 miner-shares)
   =/  expected-fund=coins:t  (div emission-atoms 5)
   =/  expected-miner=coins:t  (sub emission-atoms expected-fund)
   =/  fund-entry=(unit coins:t)
-    (~(get z-by cb) fund-address:t)
+    (~(get z-by cb) protocol-fund-address:t)
   =/  miner-pkh=hash:t
     (snag 0 ~(tap z-in ~(key z-by miner-shares)))
   =/  miner-entry=(unit coins:t)  (~(get z-by cb) miner-pkh)
@@ -72,9 +72,9 @@
   =/  miner-shares  default-keys-1-share-v1:h
   =/  emission-atoms=coins:t  134.217.728  :: 2,048 * 2^16
   =/  cb=coinbase-split:v1:t
-    (new-with-fund-share:v1:coinbase-split:t emission-atoms 0 miner-shares)
+    (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t emission-atoms 0 miner-shares)
   =/  fund-entry=(unit coins:t)
-    (~(get z-by cb) fund-address:t)
+    (~(get z-by cb) protocol-fund-address:t)
   =/  miner-pkh=hash:t
     (snag 0 ~(tap z-in ~(key z-by miner-shares)))
   =/  miner-entry=(unit coins:t)  (~(get z-by cb) miner-pkh)
@@ -94,9 +94,9 @@
   =/  fee-atoms=coins:t       12.345
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [emission-atoms fee-atoms miner-shares]
+    [protocol-fund-address:t emission-atoms fee-atoms miner-shares]
   =/  fund-entry=(unit coins:t)
-    (~(get z-by cb) fund-address:t)
+    (~(get z-by cb) protocol-fund-address:t)
   =/  miner-pkh=hash:t
     (snag 0 ~(tap z-in ~(key z-by miner-shares)))
   =/  miner-entry=(unit coins:t)  (~(get z-by cb) miner-pkh)
@@ -125,8 +125,8 @@
   =/  emission-atoms=coins:t  125.000.000
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [emission-atoms 0 miner-shares]
-  =/  fund-entry   (~(get z-by cb) fund-address:t)
+    [protocol-fund-address:t emission-atoms 0 miner-shares]
+  =/  fund-entry   (~(get z-by cb) protocol-fund-address:t)
   =/  miner-a-entry  (~(get z-by cb) miner-a-pkh)
   =/  miner-b-entry  (~(get z-by cb) miner-b-pkh)
   =/  total=coins:t
@@ -156,8 +156,8 @@
   =/  fee-atoms=coins:t        1.000.000
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [emission-atoms fee-atoms miner-shares]
-  =/  fund-entry     (~(get z-by cb) fund-address:t)
+    [protocol-fund-address:t emission-atoms fee-atoms miner-shares]
+  =/  fund-entry     (~(get z-by cb) protocol-fund-address:t)
   =/  miner-a-entry  (~(get z-by cb) miner-a-pkh)
   =/  miner-b-entry  (~(get z-by cb) miner-b-pkh)
   =/  total=coins:t
@@ -172,13 +172,13 @@
   ==
 ::
 ::  +test-split-rejects-fund-in-shares: the builder must crash when
-::    `shares` includes the fund-address as a miner key — that would
+::    `shares` includes the protocol-fund-address as a miner key — that would
 ::    let an honest miner accidentally pay the fund slot twice.
 ++  test-split-rejects-fund-in-shares  ^-  tang
   =/  bad-shares=shares:t
-    (~(put z-by *shares:t) fund-address:t 1)
+    (~(put z-by *shares:t) protocol-fund-address:t 1)
   %+  expect-fail
-    |.  (new-with-fund-share:v1:coinbase-split:t 134.217.728 0 bad-shares)
+    |.  (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t 134.217.728 0 bad-shares)
   ~
 ::
 ::  +test-split-post-activation-residual-to-first-key: pin the
@@ -202,13 +202,13 @@
   =/  emission-atoms=coins:t  11
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [emission-atoms 0 miner-shares]
+    [protocol-fund-address:t emission-atoms 0 miner-shares]
   ::  z-by sorts keys by hash atom; first-pkh receives the residual.
   =/  ordered-keys=(list hash:t)
     ~(tap z-in ~(key z-by miner-shares))
   =/  first-pkh   (snag 0 ordered-keys)
   =/  second-pkh  (snag 1 ordered-keys)
-  =/  fund-entry    (~(get z-by cb) fund-address:t)
+  =/  fund-entry    (~(get z-by cb) protocol-fund-address:t)
   =/  first-entry   (~(get z-by cb) first-pkh)
   =/  second-entry  (~(get z-by cb) second-pkh)
   =/  total=coins:t
@@ -222,20 +222,20 @@
     (expect-eq !>(11) !>(total))
   ==
 ::
-::  +test-fund-address-is-3-of-4-multisig: pin fund-address:t to the
+::  +test-protocol-fund-address-is-3-of-4-multisig: pin protocol-fund-address:t to the
 ::    lock-root of a 3-of-4 multisig over the four pkhs listed in
 ::    /asert-protocol-lock-fund.txt. Reconstructs the multisig lock
 ::    independently here (mirroring /scripts/generate-fund-address.hoon)
 ::    and asserts the recomputed lock-root matches the literal in
-::    +fund-address. Catches drift in any of:
+::    +protocol-fund-address. Catches drift in any of:
 ::      - any of the four participant pkhs,
 ::      - the m=3 threshold,
 ::      - the lock-script structure (single ++pkh primitive in a single
 ::        spend-condition),
 ::      - the +hash:lock formula.
-::    Also asserts fund-address is non-zero so we never ship the
+::    Also asserts protocol-fund-address is non-zero so we never ship the
 ::    legacy zero-hash placeholder by accident.
-++  test-fund-address-is-3-of-4-multisig  ^-  tang
+++  test-protocol-fund-address-is-3-of-4-multisig  ^-  tang
   =/  pkhs=(list hash:t)
     :~  (from-b58:hash:t '7pGXggKU1AWk3d3wqX2kpKUatTqT68Cv8SQfGzGRQvJvYnQBvagSSjT')
         (from-b58:hash:t '8Mc1U7kdujhPoEwog1BfNsFDtRp8St8UQCHk84iaLdhP4cX9a2CT1MU')
@@ -246,14 +246,14 @@
   =/  multi-lock=lock:t  [%pkh [m=3 participants]]~
   =/  expected=hash:t  (hash:lock:t multi-lock)
   ;:  weld
-    (expect-eq !>(expected) !>(fund-address:t))
-    (expect-eq !>(%.y) !>(!=(*hash:t fund-address:t)))
+    (expect-eq !>(expected) !>(protocol-fund-address:t))
+    (expect-eq !>(%.y) !>(!=(*hash:t protocol-fund-address:t)))
   ==
 ::
 ::  +test-fund-note-firstname: pin fund-note-firstname:t to the on-chain
 ::    first-name (-.name) shared by every protocol-fund coinbase note.
 ::    Reconstructs the wrapped coinbase note lock exactly as
-::    +make-name:coinbase does -- the single %pkh primitive over {fund-address}
+::    +make-name:coinbase does -- the single %pkh primitive over {protocol-fund-address}
 ::    plus the coinbase timelock -- takes (first:nname (hash:lock ...)), and
 ::    asserts it matches the pinned literal in +fund-note-firstname. This is
 ::    the value +check:check-context special-cases to recover spendability;
@@ -281,13 +281,13 @@
     (expect-eq !>(%.y) !>(!=(*hash:t fund-note-firstname:t)))
   ==
 ::
-::  +test-fund-multisig-lock-binds-fund-address: the 3-of-4 multisig
+::  +test-fund-multisig-lock-binds-protocol-fund-address: the 3-of-4 multisig
 ::    spend-condition exposed for the wallet (+fund-multisig-lock) must hash to
-::    +fund-address. This is the bind +check-multisig-lock enforces, so a fund
+::    +protocol-fund-address. This is the bind +check-multisig-lock enforces, so a fund
 ::    spend that reveals +fund-multisig-lock is accepted by consensus. Catches
 ::    drift between the participant pkhs / threshold listed in
-::    +fund-multisig-lock and the pinned +fund-address.
-++  test-fund-multisig-lock-binds-fund-address  ^-  tang
-  (expect-eq !>(fund-address:t) !>((hash:lock:t fund-multisig-lock:t)))
+::    +fund-multisig-lock and the pinned +protocol-fund-address.
+++  test-fund-multisig-lock-binds-protocol-fund-address  ^-  tang
+  (expect-eq !>(protocol-fund-address:t) !>((hash:lock:t fund-multisig-lock:t)))
 ::
 --

@@ -9,7 +9,7 @@ exclude = ["pearl", "crates/plonky3-recursion"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.15"
 edition = "2021"
 
 # Lints enforced workspace-wide so `cargo`/`cargo clippy`/rust-analyzer flag these
