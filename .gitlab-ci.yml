@@ -76,10 +76,13 @@ build-kernels:
       nix develop -c bash -c '
         set -euo pipefail
         make update-hoonc
-        # Build all kernels in parallel, each in its own ephemeral PMA dir, to
-        # cut the previously-serial kernel build time. There are 5 kernels, so
-        # KERNEL_JOBS=5 runs them all at once.
-        make build-kernels-ci KERNEL_JOBS=5
+        # Hoon's compiler cache is process-global; build kernel jams serially.
+        make assets/dumb.jam
+        make assets/wal.jam
+        make assets/miner.jam
+        make assets/peek.jam
+        make assets/bridge.jam
+        make assets/roswell.jam
       '
   artifacts:
     paths:
