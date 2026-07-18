@@ -29,6 +29,9 @@ clients that implement later, capability-negotiated LSP versions.
 | Completion | Local symbols shadow imports, and imports shadow the configured prelude using the same nearest-unambiguous import traversal as definition | implementation invariant | imported-gate completion test + synthetic completion test + real `miner.hoon` cases (`dig`, `tip5-hash-atom`, `list`) | Passing |
 | References | Advertised references preserve lexical binding identity across nested shadowing and honor `includeDeclaration` | MUST for advertised capability | `local_references_and_rename_preserve_binding_identity` | Passing |
 | References | Real-source references exclude cord contents and references captured by an inner same-named face | real-source regression | real `miner.hoon` `cause` case | Passing |
+| References | Compiler-resolved imported arms return uses and their declaration across files, preserve exact declaration identity when another module exports the same name, and honor `includeDeclaration` | MUST for advertised capability | `definition_navigates_to_an_imported_gate` (`add-two:math`) | Passing |
+| References | A changed unsaved generation immediately invalidates old compiler references and publishes the refreshed repeated qualified uses only after the matching check | implementation freshness invariant | `definition_navigates_to_an_imported_gate` | Passing |
+| References | Real `miner.hoon` references for `check-target:mine` include its declaration in `common/pow.hoon` | real-source regression | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` | Passing |
 | Rename | Advertised prepare-rename and rename return versioned edits for the exact lexical binding identity | MUST for advertised capability | `local_references_and_rename_preserve_binding_identity` | Passing |
 | Rename | Rename rejects invalid terms and changes that would capture or collide with another visible face | implementation safety invariant | service unit coverage + protocol collision case | Passing |
 | Rename | Renaming a shorthand sample preserves its mold by expanding `=old` to `new=old` | real-source regression | real `miner.hoon` `kernel-state` case | Passing |
@@ -45,6 +48,9 @@ Definition and completion cover lexical faces plus unambiguous arm and mold
 headers in the current document, its resolved Hoon import graph, and the
 configured prelude. Gene rune tokens resolve to their canonical tagged
 alternatives in the prelude's `hoon` mold; core declaration tokens `++`, `+$`,
-and `+|` resolve to their parser arms. References are same-document, and rename
-is intentionally limited to lexical faces until workspace-wide declaration
-provenance can guarantee complete edits.
+and `+|` resolve to their parser arms. References preserve same-document lexical
+binding identity and use compiler-owned declaration identity across the latest
+successfully checked import graph for resolved arms and gates. Structural-only
+mold and standard-library references are not yet workspace-wide. Rename is
+intentionally limited to lexical faces until workspace-wide provenance can
+guarantee complete edits.

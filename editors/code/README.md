@@ -12,12 +12,15 @@ and `+|` navigate to the corresponding hoon-138 parser arms. Lexical faces have
 scope- and shadow-aware definition, references, and safe rename support.
 Completion suggests visible faces, named gate imports, and unambiguous local,
 imported, and standard-library arms and molds, and reports each candidate's
-provenance.
+provenance. Compiler-resolved imported arms and gates have cross-file references
+within the latest successfully checked import graph.
 
 In VS Code, use F12 for definitions, Shift+F12 for references, F2 to rename a
-lexical face, and Control+Space to request completion explicitly. References
-are currently same-document and rename is limited to lexical faces; imported
-and standard-library declarations are not renamed.
+lexical face, and Control+Space to request completion explicitly. References for
+lexical faces are same-document; compiler-resolved arms and gates can span
+files. Structural-only mold and standard-library references remain limited, and
+rename is limited to lexical faces; imported and standard-library declarations
+are not renamed.
 
 ## Development setup
 

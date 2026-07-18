@@ -392,6 +392,14 @@ fn definition_navigates_to_an_imported_gate() {
     std::fs::create_dir(&lib).expect("library directory");
     let helper = lib.join("helper.hoon");
     std::fs::write(&helper, "|=  [a=@ b=@]\n  (add a b)\n").expect("helper source");
+    let math = lib.join("math.hoon");
+    std::fs::write(&math, "|%\n++  add-two\n  |=  [a=@ b=@]\n  (add a b)\n--\n")
+        .expect("math source");
+    let other = lib.join("other.hoon");
+    std::fs::write(
+        &other, "|%\n++  add-two\n  |=  [a=@ b=@]\n  (sub a b)\n--\n",
+    )
+    .expect("other source");
     let entry = temp.path().join("entry.hoon");
     std::fs::write(&entry, "42\n").expect("disk entry");
     let entry_uri = Uri::from_str(
@@ -406,7 +414,19 @@ fn definition_navigates_to_an_imported_gate() {
             .as_str(),
     )
     .expect("helper LSP URI");
-    let source = "/+  helper\n|=  [a=@ b=@]\n  (helper a b)\n";
+    let math_uri = Uri::from_str(
+        url::Url::from_file_path(&math)
+            .expect("math file URI")
+            .as_str(),
+    )
+    .expect("math LSP URI");
+    let other_uri = Uri::from_str(
+        url::Url::from_file_path(&other)
+            .expect("other file URI")
+            .as_str(),
+    )
+    .expect("other LSP URI");
+    let source = "/+  helper, math, other\n|=  [a=@ b=@]\n  [(helper a b) (add-two:math a b) (add-two:other a b)]\n";
     let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
     client
         .sender
@@ -475,6 +495,99 @@ fn definition_navigates_to_an_imported_gate() {
         .detail
         .as_deref()
         .is_some_and(|detail| detail.contains("imported Hoon gate")));
+
+    request_id += 1;
+    let reference_deadline = Instant::now() + Duration::from_secs(30);
+    let add_two_character = source
+        .lines()
+        .nth(2)
+        .expect("entry body")
+        .find("add-two")
+        .expect("add-two use");
+    let references = loop {
+        let references = request_references(
+            &client,
+            request_id,
+            &entry_uri,
+            2,
+            add_two_character + 2,
+            true,
+        );
+        if references.iter().any(|location| location.uri == entry_uri)
+            && references.iter().any(|location| location.uri == math_uri)
+        {
+            break references;
+        }
+        assert!(
+            Instant::now() < reference_deadline,
+            "compiler-owned imported references did not become available"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(references.len(), 2);
+    assert!(references.iter().all(|location| location.uri != other_uri));
+    assert!(references.iter().any(|location| {
+        location.uri == entry_uri
+            && location.range.start.line == 2
+            && location.range.start.character
+                == u32::try_from(add_two_character).expect("small character")
+    }));
+
+    request_id += 1;
+    let uses_only = request_references(
+        &client,
+        request_id,
+        &entry_uri,
+        2,
+        add_two_character + 2,
+        false,
+    );
+    assert_eq!(uses_only.len(), 1);
+    assert_eq!(uses_only[0].uri, entry_uri);
+
+    let edited_source = "/+  helper, math, other\n|=  [a=@ b=@]\n  [(add-two:math a b) (add-two:math b a) (add-two:other a b)]\n";
+    client
+        .sender
+        .send(
+            Notification::new(
+                "textDocument/didChange".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri, "version": 2 },
+                    "contentChanges": [{ "text": edited_source }]
+                }),
+            )
+            .into(),
+        )
+        .expect("send unsaved imported-reference edit");
+    request_id += 1;
+    assert!(
+        request_references(&client, request_id, &entry_uri, 2, 5, true).is_empty(),
+        "reference facts from the previous editor generation must be invalidated"
+    );
+
+    request_id += 1;
+    let updated_deadline = Instant::now() + Duration::from_secs(30);
+    let updated_references = loop {
+        let references = request_references(&client, request_id, &entry_uri, 2, 5, true);
+        let entry_uses = references
+            .iter()
+            .filter(|location| location.uri == entry_uri)
+            .count();
+        if entry_uses == 2 && references.iter().any(|location| location.uri == math_uri) {
+            break references;
+        }
+        assert!(
+            Instant::now() < updated_deadline,
+            "unsaved imported references did not refresh"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(updated_references.len(), 3);
+    assert!(updated_references
+        .iter()
+        .all(|location| location.uri != other_uri));
 
     shutdown_server(&client, server_thread, request_id + 1);
 }
@@ -1072,6 +1185,50 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
         );
         request_id += 1;
     }
+
+    let imported_arm_use_line = source
+        .lines()
+        .position(|line| line.contains("check-target:mine"))
+        .expect("check-target use");
+    let imported_arm_use_character = source
+        .lines()
+        .nth(imported_arm_use_line)
+        .expect("check-target use line")
+        .find("check-target")
+        .expect("check-target use character");
+    let imported_arm_definition_path = root.join("hoon/common/pow.hoon");
+    let imported_arm_definition_uri = Uri::from_str(
+        url::Url::from_file_path(&imported_arm_definition_path)
+            .expect("check-target definition URI")
+            .as_str(),
+    )
+    .expect("check-target LSP URI");
+    let reference_deadline = Instant::now() + Duration::from_secs(30);
+    let imported_arm_references = loop {
+        let references = request_references(
+            &client,
+            request_id,
+            &entry_uri,
+            imported_arm_use_line,
+            imported_arm_use_character + 1,
+            true,
+        );
+        if references.iter().any(|location| location.uri == entry_uri)
+            && references
+                .iter()
+                .any(|location| location.uri == imported_arm_definition_uri)
+        {
+            break references;
+        }
+        assert!(
+            Instant::now() < reference_deadline,
+            "compiler-owned check-target references did not become available"
+        );
+        request_id += 1;
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(imported_arm_references.len() >= 2);
+    request_id += 1;
 
     let prelude_path = root.join("hoon/common/hoon.hoon");
     let prelude_source = std::fs::read_to_string(&prelude_path).expect("read prelude source");

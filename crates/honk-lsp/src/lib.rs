@@ -220,11 +220,53 @@ struct DocumentResolutionFacts {
     facts: Vec<CompilerResolutionFact>,
 }
 
+struct WorkspaceResolutionFacts {
+    generation: u64,
+    target: PathBuf,
+    facts: Arc<[CompilerResolutionFact]>,
+    by_name: HashMap<String, Vec<usize>>,
+    by_definition: HashMap<CompilerDefinitionIdentity, Vec<usize>>,
+}
+
+impl WorkspaceResolutionFacts {
+    fn new(
+        generation: u64,
+        target: PathBuf,
+        dependencies: &Path,
+        facts: Arc<[CompilerResolutionFact]>,
+    ) -> Self {
+        let mut by_name = HashMap::<String, Vec<usize>>::new();
+        let mut by_definition = HashMap::<CompilerDefinitionIdentity, Vec<usize>>::new();
+        for (index, fact) in facts.iter().enumerate() {
+            by_name.entry(fact.name.clone()).or_default().push(index);
+            by_definition
+                .entry(compiler_definition_identity(fact, &target, dependencies))
+                .or_default()
+                .push(index);
+        }
+        Self {
+            generation,
+            target,
+            facts,
+            by_name,
+            by_definition,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SemanticState {
     pending: HashMap<RequestId, PendingSemanticRequest>,
     type_facts: HashMap<PathBuf, DocumentTypeFacts>,
     resolution_facts: HashMap<PathBuf, DocumentResolutionFacts>,
+    workspace_resolution: Option<WorkspaceResolutionFacts>,
+}
+
+impl SemanticState {
+    fn clear_resolution_facts(&mut self) {
+        self.resolution_facts.clear();
+        self.workspace_resolution = None;
+    }
 }
 
 pub fn run_stdio(config: LspConfig) -> Result<()> {
@@ -511,7 +553,7 @@ fn handle_notification(
                 "document was reopened with new contents",
             )?;
             semantics.type_facts.remove(&path);
-            semantics.resolution_facts.clear();
+            semantics.clear_resolution_facts();
             schedule_check(trigger);
         }
         DidChangeTextDocument::METHOD => {
@@ -560,7 +602,7 @@ fn handle_notification(
                 "document changed before the semantic query completed",
             )?;
             semantics.type_facts.remove(&path);
-            semantics.resolution_facts.clear();
+            semantics.clear_resolution_facts();
             schedule_check(trigger);
         }
         DidCloseTextDocument::METHOD => {
@@ -581,7 +623,7 @@ fn handle_notification(
                 "document closed before the semantic query completed",
             )?;
             semantics.type_facts.remove(&path);
-            semantics.resolution_facts.clear();
+            semantics.clear_resolution_facts();
             let _ = semantic_sender.send(SemanticCommand::Close(path));
             publish_diagnostics(
                 connection,
@@ -605,7 +647,7 @@ fn handle_notification(
                 let mut snapshot = lock_snapshot(state)?;
                 snapshot.generation = snapshot.generation.saturating_add(1);
             }
-            semantics.resolution_facts.clear();
+            semantics.clear_resolution_facts();
             schedule_check(trigger);
         }
         CancelNotification::METHOD => {
@@ -811,22 +853,27 @@ fn handle_request(
                     .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
                 return Ok(());
             };
-            let compiler_definition = match definition_at(
-                &semantics.resolution_facts, &path, document.version, &document.text, byte_offset,
-            ) {
-                Some((target, location)) => {
-                    let snapshot = lock_snapshot(state)?.clone();
-                    match compiler_definition_to_lsp(
-                        &snapshot, &target, &config.workspace.dependencies, &location,
-                    ) {
-                        Ok(location) => location.map(GotoDefinitionResponse::Scalar),
-                        Err(error) => {
-                            warn!(%error, "compiler definition location is unavailable");
-                            None
+            let compiler_definition = if hoon_rune_at(&document.text, byte_offset).is_some() {
+                None
+            } else {
+                match definition_at(
+                    &semantics.resolution_facts, &path, document.version, &document.text,
+                    byte_offset,
+                ) {
+                    Some((target, location)) => {
+                        let snapshot = lock_snapshot(state)?.clone();
+                        match compiler_definition_to_lsp(
+                            &snapshot, &target, &config.workspace.dependencies, &location,
+                        ) {
+                            Ok(location) => location.map(GotoDefinitionResponse::Scalar),
+                            Err(error) => {
+                                warn!(%error, "compiler definition location is unavailable");
+                                None
+                            }
                         }
                     }
+                    None => None,
                 }
-                None => None,
             };
             if let Some(definition) = compiler_definition {
                 connection.sender.send(
@@ -884,6 +931,29 @@ fn handle_request(
                     .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
                 return Ok(());
             };
+            if let Some(index) = semantics.workspace_resolution.as_ref() {
+                let editor = lock_snapshot(state)?.clone();
+                match compiler_workspace_references_at(
+                    &editor,
+                    &path,
+                    document.text.as_str(),
+                    byte_offset,
+                    params.context.include_declaration,
+                    &config.workspace.dependencies,
+                    index,
+                ) {
+                    Ok(Some(references)) => {
+                        connection.sender.send(
+                            Response::new_ok(request.id, serde_json::to_value(references)?).into(),
+                        )?;
+                        return Ok(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(%error, "compiler workspace references are unavailable");
+                    }
+                }
+            }
             enqueue_semantic_query(
                 connection,
                 semantic_sender,
@@ -1812,6 +1882,202 @@ fn definition_at(
         .map(|(_, fact)| (document.target.clone(), fact.definition_location.clone()))
 }
 
+type CompilerDefinitionIdentity = (
+    PathBuf,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    String,
+);
+
+fn compiler_workspace_references_at(
+    snapshot: &EditorSnapshot,
+    path: &Path,
+    source: &str,
+    byte_offset: u32,
+    include_declaration: bool,
+    dependencies: &Path,
+    index: &WorkspaceResolutionFacts,
+) -> Result<Option<Vec<Location>>> {
+    if index.generation != snapshot.generation {
+        return Ok(None);
+    }
+    let Some(name) = hoon_term_at(source, byte_offset) else {
+        return Ok(None);
+    };
+    let Some(candidate_indices) = index.by_name.get(name) else {
+        return Ok(None);
+    };
+    let target_fact = candidate_indices
+        .iter()
+        .map(|candidate| &index.facts[*candidate])
+        .filter(|fact| {
+            let use_path =
+                compiler_location_path(Some(&fact.use_location), &index.target, dependencies);
+            paths_match(&use_path, path)
+                && compiler_resolution_use_ranges(source, fact)
+                    .into_iter()
+                    .any(|range| range.contains(byte_offset))
+        })
+        .min_by_key(|fact| {
+            compiler_resolution_use_ranges(source, fact)
+                .into_iter()
+                .filter(|range| range.contains(byte_offset))
+                .map(|range| range.end.saturating_sub(range.start))
+                .min()
+                .unwrap_or(u32::MAX)
+        })
+        .or_else(|| {
+            candidate_indices
+                .iter()
+                .map(|candidate| &index.facts[*candidate])
+                .filter(|fact| {
+                    let definition_path = compiler_location_path(
+                        Some(&fact.definition_location),
+                        &index.target,
+                        dependencies,
+                    );
+                    paths_match(&definition_path, path)
+                        && compiler_location_range(source, &fact.definition_location)
+                            .is_some_and(|range| range.contains(byte_offset))
+                })
+                .min_by_key(|fact| {
+                    compiler_location_range(source, &fact.definition_location)
+                        .map(|range| range.end.saturating_sub(range.start))
+                        .unwrap_or(u32::MAX)
+                })
+        });
+    let Some(target_fact) = target_fact else {
+        return Ok(None);
+    };
+    let target_identity = compiler_definition_identity(target_fact, &index.target, dependencies);
+    let Some(reference_indices) = index.by_definition.get(&target_identity) else {
+        return Ok(None);
+    };
+    let mut source_cache = HashMap::<PathBuf, (Uri, String)>::new();
+    let mut references = Vec::<Location>::new();
+    for fact in reference_indices
+        .iter()
+        .map(|reference| &index.facts[*reference])
+    {
+        let use_path =
+            compiler_location_path(Some(&fact.use_location), &index.target, dependencies);
+        let cache_key = normalized_path(&use_path);
+        if !source_cache.contains_key(&cache_key) {
+            match editor_source(snapshot, &use_path) {
+                Ok(document) => {
+                    source_cache.insert(cache_key.clone(), document);
+                }
+                Err(error) => {
+                    debug!(path = %use_path.display(), %error, "reference source is unavailable");
+                    continue;
+                }
+            }
+        }
+        let Some((uri, use_source)) = source_cache.get(&cache_key) else {
+            continue;
+        };
+        references.extend(
+            compiler_resolution_use_ranges(use_source, fact)
+                .into_iter()
+                .filter_map(|range| {
+                    semantic_range_to_lsp(use_source, range)
+                        .map(|range| Location::new(uri.clone(), range))
+                }),
+        );
+        if let Some(anchor) = compiler_qualified_reference_anchor(use_source, fact) {
+            references.extend(
+                qualified_reference_ranges(use_source, &anchor, &fact.name)
+                    .into_iter()
+                    .filter_map(|range| {
+                        semantic_range_to_lsp(use_source, range)
+                            .map(|range| Location::new(uri.clone(), range))
+                    }),
+            );
+        }
+    }
+    if include_declaration {
+        if let Some(declaration) = compiler_definition_to_lsp(
+            snapshot, &index.target, dependencies, &target_fact.definition_location,
+        )? {
+            references.push(declaration);
+        }
+    }
+    references.sort_by(|left, right| {
+        (
+            left.uri.as_str(),
+            left.range.start.line,
+            left.range.start.character,
+            left.range.end.line,
+            left.range.end.character,
+        )
+            .cmp(&(
+                right.uri.as_str(),
+                right.range.start.line,
+                right.range.start.character,
+                right.range.end.line,
+                right.range.end.character,
+            ))
+    });
+    references.dedup();
+    Ok(Some(references))
+}
+
+fn compiler_definition_identity(
+    fact: &CompilerResolutionFact,
+    target: &Path,
+    dependencies: &Path,
+) -> CompilerDefinitionIdentity {
+    let location = &fact.definition_location;
+    (
+        normalized_path(&compiler_location_path(
+            Some(location),
+            target,
+            dependencies,
+        )),
+        location.start_line,
+        location.start_col,
+        location.end_line,
+        location.end_col,
+        fact.name.clone(),
+    )
+}
+
+fn compiler_location_range(
+    source: &str,
+    location: &CompilerErrorLocation,
+) -> Option<SemanticTextRange> {
+    range_from_one_based_spot(
+        source, location.start_line?, location.start_col?, location.end_line?, location.end_col?,
+    )
+}
+
+fn normalized_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    left == right || normalized_path(left) == normalized_path(right)
+}
+
+fn editor_source(snapshot: &EditorSnapshot, path: &Path) -> Result<(Uri, String)> {
+    let open_document = snapshot.documents.get(path).or_else(|| {
+        snapshot
+            .documents
+            .iter()
+            .find_map(|(candidate, document)| paths_match(candidate, path).then_some(document))
+    });
+    match open_document {
+        Some(document) => Ok((document.uri.clone(), document.text.clone())),
+        None => Ok((
+            file_path_to_uri(path)?,
+            std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read semantic source {}", path.display()))?,
+        )),
+    }
+}
+
 fn compiler_resolution_use_ranges(
     source: &str,
     fact: &CompilerResolutionFact,
@@ -1826,7 +2092,9 @@ fn compiler_resolution_use_ranges(
         return Vec::new();
     };
     if fact.name == "$" {
-        return vec![enclosing];
+        return first_hoon_term_range(source, enclosing)
+            .into_iter()
+            .collect();
     }
     let Ok(start) = usize::try_from(enclosing.start) else {
         return Vec::new();
@@ -1858,6 +2126,75 @@ fn compiler_resolution_use_ranges(
     } else {
         ranges
     }
+}
+
+fn compiler_qualified_reference_anchor(
+    source: &str,
+    fact: &CompilerResolutionFact,
+) -> Option<String> {
+    let name_range = compiler_resolution_use_ranges(source, fact)
+        .into_iter()
+        .find(|range| {
+            let Ok(start) = usize::try_from(range.start) else {
+                return false;
+            };
+            let Ok(end) = usize::try_from(range.end) else {
+                return false;
+            };
+            source.get(start..end) == Some(fact.name.as_str())
+        })?;
+    let start = usize::try_from(name_range.start).ok()?;
+    let end = usize::try_from(name_range.end).ok()?;
+    let suffix = source.get(end..)?.strip_prefix(':')?;
+    let qualifier_len = suffix
+        .bytes()
+        .take_while(|byte| is_hoon_term_byte(*byte))
+        .count();
+    if qualifier_len == 0 {
+        return None;
+    }
+    source
+        .get(start..end + 1 + qualifier_len)
+        .map(str::to_owned)
+}
+
+fn qualified_reference_ranges(source: &str, anchor: &str, name: &str) -> Vec<SemanticTextRange> {
+    source
+        .match_indices(anchor)
+        .filter_map(|(start, _)| {
+            let end = start.checked_add(anchor.len())?;
+            let left_boundary = start == 0 || !is_hoon_term_byte(source.as_bytes()[start - 1]);
+            let right_boundary = end == source.len()
+                || !is_hoon_term_byte(*source.as_bytes().get(end)?)
+                    && source.as_bytes().get(end) != Some(&b':');
+            if !left_boundary || !right_boundary {
+                return None;
+            }
+            Some(SemanticTextRange {
+                start: u32::try_from(start).ok()?,
+                end: u32::try_from(start.checked_add(name.len())?).ok()?,
+            })
+        })
+        .collect()
+}
+
+fn is_hoon_term_byte(byte: u8) -> bool {
+    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+}
+
+fn first_hoon_term_range(source: &str, enclosing: SemanticTextRange) -> Option<SemanticTextRange> {
+    let start = usize::try_from(enclosing.start).ok()?;
+    let end = usize::try_from(enclosing.end).ok()?;
+    let bytes = source.get(start..end)?.as_bytes();
+    let relative_start = bytes.iter().position(u8::is_ascii_lowercase)?;
+    let relative_end = bytes[relative_start..]
+        .iter()
+        .position(|byte| !is_hoon_term_byte(*byte))
+        .map_or(bytes.len(), |length| relative_start + length);
+    Some(SemanticTextRange {
+        start: u32::try_from(start.checked_add(relative_start)?).ok()?,
+        end: u32::try_from(start.checked_add(relative_end)?).ok()?,
+    })
 }
 
 fn compiler_definition_to_lsp(
@@ -2209,7 +2546,7 @@ fn drain_worker_events(
                 clear_published(connection, published)?;
                 if let Some(diagnostic) = diagnostic {
                     semantics.type_facts.clear();
-                    semantics.resolution_facts.clear();
+                    semantics.clear_resolution_facts();
                     let (uri, lsp_diagnostic) = workspace_diagnostic_to_lsp(
                         &diagnostic, &target, &config.workspace.dependencies,
                     )?;
@@ -2225,10 +2562,17 @@ fn drain_worker_events(
                         &snapshot, &target, &config.workspace.dependencies, semantic_facts,
                         &mut semantics.type_facts,
                     );
+                    let workspace_facts = Arc::<[CompilerResolutionFact]>::from(resolution_facts);
                     update_resolution_facts(
-                        &snapshot, &target, &config.workspace.dependencies, resolution_facts,
+                        &snapshot,
+                        &target,
+                        &config.workspace.dependencies,
+                        workspace_facts.as_ref(),
                         &mut semantics.resolution_facts,
                     );
+                    semantics.workspace_resolution = Some(WorkspaceResolutionFacts::new(
+                        generation, target, &config.workspace.dependencies, workspace_facts,
+                    ));
                 }
             }
             Ok(WorkerEvent::Error {
@@ -2238,7 +2582,7 @@ fn drain_worker_events(
                 let current = lock_snapshot(state)?.generation;
                 if generation == u64::MAX || generation == current {
                     semantics.type_facts.clear();
-                    semantics.resolution_facts.clear();
+                    semantics.clear_resolution_facts();
                     clear_published(connection, published)?;
                     send_show_message(connection, MessageType::ERROR, message)?;
                 }
@@ -2304,7 +2648,7 @@ fn update_resolution_facts(
     snapshot: &EditorSnapshot,
     target: &Path,
     dependencies: &Path,
-    facts: Vec<CompilerResolutionFact>,
+    facts: &[CompilerResolutionFact],
     current: &mut HashMap<PathBuf, DocumentResolutionFacts>,
 ) {
     let mut by_path = HashMap::<PathBuf, Vec<CompilerResolutionFact>>::new();
@@ -2317,7 +2661,7 @@ fn update_resolution_facts(
             dependencies,
         );
         if snapshot.documents.contains_key(&path) {
-            by_path.entry(path).or_default().push(fact);
+            by_path.entry(path).or_default().push(fact.clone());
         }
     }
     for (path, document) in &snapshot.documents {
