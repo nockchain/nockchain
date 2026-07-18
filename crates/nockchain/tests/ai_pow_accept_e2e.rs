@@ -145,11 +145,15 @@ fn artifact_for_block(block: &CanonicalBlock) -> NounSlab {
 }
 
 async fn drive_genesis(app: &mut NockApp<Chaff>) {
-    // Fakenet constants with AI-PoW active from height 1 (genesis is height 0), and
-    // a 1s candidate-update interval so a poke shortly after enable-mining re-emits
-    // the candidate.
+    drive_genesis_with_activation(app, 1).await
+}
+
+async fn drive_genesis_with_activation(app: &mut NockApp<Chaff>, ai_pow_activation_height: u64) {
+    // Fakenet constants; AI-PoW activates at `ai_pow_activation_height` (genesis is
+    // height 0), and a 1s candidate-update interval so a poke shortly after
+    // enable-mining re-emits the candidate.
     let constants = fakenet_blockchain_constants(2, 1)
-        .with_ai_pow_activation_height(1)
+        .with_ai_pow_activation_height(ai_pow_activation_height)
         .with_update_candidate_timestamp_interval(Seconds(1));
     setup::poke(app, SetupCommand::PokeFakenetConstants(Box::new(constants)))
         .await
@@ -278,5 +282,77 @@ async fn ai_pow_valid_block_is_admitted() {
     eprintln!(
         "[positive] valid %ai-pow block ADMITTED at height 1 (commit {})",
         hex(&commit32)
+    );
+}
+
+/// Consensus safety BELOW activation: `do-mine` must emit ONLY the legacy
+/// `%mine-zk` candidate, never a `%mine-ai` one, while the candidate height is
+/// below `ai-pow-activation-height`. A node that mined an AI block pre-activation
+/// would produce a version-3 block that every node — upgraded or not — rejects
+/// via `proof-version-valid-at-height`; refusing to emit the AI candidate at all
+/// keeps a pre-activation node's mining effort on valid work and its behavior
+/// identical to a pre-Logos node. Fast: no proving — only the candidate KIND is
+/// inspected.
+#[tokio::test]
+#[ignore = "boots the dumb kernel (~5s); opt-in"]
+async fn no_ai_candidate_below_activation() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut cli = boot::default_boot_cli(true);
+    cli.data_dir = Some(tmp.path().to_path_buf());
+    cli.stack_size = NockStackSize::Large;
+    let mut hot = zkvm_jetpack::hot::produce_prover_hot_state();
+    hot.extend(produce_ai_pow_hot_state());
+    let mut app = boot::setup::<Chaff>(
+        kernels_open_dumb::KERNEL,
+        cli,
+        hot.as_slice(),
+        "nockchain",
+        None,
+    )
+    .await
+    .expect("boot dumb kernel");
+
+    // AI-PoW activation set far above the height-1 candidate this node builds.
+    drive_genesis_with_activation(&mut app, 100).await;
+    assert!(
+        app.peek_handle(heaviest_block_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "genesis must be admitted",
+    );
+
+    app.poke(SystemWire.to_wire(), set_mining_key_poke())
+        .await
+        .expect("set-mining-key");
+    app.poke(SystemWire.to_wire(), enable_mining_poke())
+        .await
+        .expect("enable-mining");
+
+    // Re-emit the height-1 candidate after the 1s update interval.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let effs = app
+        .poke(SystemWire.to_wire(), timer_poke())
+        .await
+        .expect("timer");
+    let candidates: Vec<MiningCandidate> = effs
+        .into_iter()
+        .filter_map(|s| MiningCandidate::from_effect_slab(s).ok().flatten())
+        .collect();
+    assert!(
+        !candidates.is_empty(),
+        "the kernel must emit a mining candidate at height 1",
+    );
+    assert!(
+        candidates
+            .iter()
+            .all(|c| c.kind == MiningCandidateKind::Zk),
+        "below AI-PoW activation the node must emit only %mine-zk candidates, never \
+         %mine-ai (got {:?})",
+        candidates.iter().map(|c| c.kind).collect::<Vec<_>>(),
+    );
+    eprintln!(
+        "[pre-activation] {} candidate(s) emitted at height 1, all %mine-zk",
+        candidates.len()
     );
 }
