@@ -299,12 +299,9 @@
   $(k +(k), prev-page new-page)
 ::
 ::  +build-typed-chain: accept a chain of the given puzzle types on genesis via
-::  the direct dcon path. ZK blocks carry a mock proof (+make-empty-page), AI
-::  blocks a placeholder %ai-pow artifact (+make-ai-pow-garbage-page); both are
-::  valid pre-asert (epoch target + ZK-normalized work). With
-::  ai-pow-activation-height=0, +accept-block records each block's puzzle version,
-::  so a test can walk the mixed chain (e.g. +count-same-type-since-anchor)
-::  without needing a real certificate or the prover.
+::  the direct consensus path. ZK blocks carry a mock proof; AI blocks carry a
+::  placeholder artifact. The helper updates branch-local puzzle state after
+::  every accepted block so ASERT tests exercise the production lineage model.
 ++  build-typed-chain
   |=  types=(list ?(%zk %ai))
   ^-  [con=consensus-state der=derived-state tip=page:t]

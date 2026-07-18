@@ -311,18 +311,9 @@
       ::  median-of-11 (phase-2 of 014-aletheia + the AI activation
       ::  fork).
       ::
-      ::  Stage 6: parent-digest is the most recent ZK ancestor of
-      ::  the heaviest tip (which may itself be ZK). Pre-AI-
-      ::  activation the heaviest is always ZK, so this resolves to
-      ::  heaviest immediately. Post-AI-activation the heaviest may
-      ::  be an AI block, in which case find-same-type-ancestor
-      ::  walks back to the nearest ZK ancestor.
-      =/  zk-parent=block-id:t
-        =/  found=(unit block-id:t)
-          (~(find-same-type-ancestor dcon c d blockchain-constants) u.heaviest-block.c %dumb-zkpow)
-        ?~  found  u.heaviest-block.c  ::  bootstrap: degenerate to global heaviest
-        u.found
-      (~(compute-target-zk-asert dcon c d blockchain-constants) candidate-height zk-parent)
+      ::  The immediate parent's branch-local state carries the latest ZK head
+      ::  and count, so long AI-only gaps remain O(1) and cannot influence ZK.
+      (~(compute-target-zk-asert dcon c d blockchain-constants) candidate-height u.heaviest-block.c)
     (~(got h-by targets.c) u.heaviest-block.c)
   =.  candidate-block.m
     ?^  -.parent

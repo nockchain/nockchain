@@ -214,61 +214,6 @@
     ==
   =(version legacy)
 ::
-::  +find-same-type-ancestor: starting at `start-bid` (a block-id in
-::  blocks.c), walks parent edges and returns the FIRST block-id at
-::  or below start-bid whose puzzle-type matches `target-type`.
-::  Returns ~ if no such block exists within the bounded walk window
-::  (cap = 2 * min-past-blocks * 2 = 44 global hops — §4.2 of the
-::  Stage 6 design).
-::
-::  Used by S3 to route ASERT call sites: pass the candidate's
-::  parent + the candidate's puzzle-type, get back the per-puzzle
-::  parent-digest to feed to compute-target-*-asert.
-::
-::  When start-bid itself matches target-type, returns `start-bid.
-::  This lets callers just say "find me the nearest %dumb-zkpow at
-::  or above the heaviest" without an outer existence check.
-++  find-same-type-ancestor
-  |=  [start-bid=block-id:t target-type=?(%dumb-zkpow %ai-pow)]
-  ^-  (unit block-id:t)
-  =/  cap=@  (mul 2 (mul min-past-blocks:t 2))  ::  44
-  =/  hops=@  0
-  =/  cur-bid=block-id:t  start-bid
-  |-
-  =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
-  ?:  =(target-type (block-id-to-puzzle-type cur-bid))
-    `cur-bid
-  ?:  =(*page-number:t ~(height get:local-page:t cur))
-    ~  ::  hit genesis without a same-type match
-  ?:  (gte hops cap)
-    ~  ::  exceeded the walk window
-  $(cur-bid ~(parent get:local-page:t cur), hops +(hops))
-::
-::  +count-same-type-since-anchor: number of `target-type` blocks strictly above
-::  `anchor-height` on the ancestry of `start-bid` (inclusive of start-bid). This
-::  is the per-puzzle subchain distance from the ASERT anchor: a puzzle's ASERT
-::  must retarget over ITS OWN blocks (each puzzle ideal 300s -> ~150s combined),
-::  not over global height — otherwise both puzzles would drive the GLOBAL cadence
-::  to their ideal and the chain would run at 2x the intended interval.
-::
-::    O(height - anchor-height) walk. Fine for the ASERT window; the fixed
-::    mainnet anchor (height 95,000) makes this grow with the chain, so a
-::    production deployment should cache a per-block subchain index (a local
-::    derived quantity) instead. Correctness here is independent of that
-::    optimization.
-++  count-same-type-since-anchor
-  |=  [start-bid=block-id:t target-type=?(%dumb-zkpow %ai-pow) anchor-height=@]
-  ^-  @
-  =/  count=@  0
-  =/  cur-bid=block-id:t  start-bid
-  |-
-  =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
-  ?:  (lte ~(height get:local-page:t cur) anchor-height)
-    count  ::  reached (or passed) the anchor level
-  =?  count  =(target-type (block-id-to-puzzle-type cur-bid))  +(count)
-  ?:  =(*page-number:t ~(height get:local-page:t cur))
-    count  ::  genesis, no further ancestry
-  $(cur-bid ~(parent get:local-page:t cur))
 ::
 ::  +set-genesis-seal: set .genesis-seal
 ++  set-genesis-seal
@@ -377,137 +322,101 @@
   ~>  %slog.[0 (cat 3 'compute-target: New target: ' (rsh [3 2] (scot %ui next-target-atom)))]
   next-target-bn
 ::
-::  +compute-target-zk-asert: aserti3-2d ZK puzzle target for a
-::  post-zk-asert-activation block. Selects between two ZK ASERT
-::  regimes based on .child-height:
+::  Return the branch-local post-activation puzzle state for a candidate's
+::  immediate parent. At the activation boundary the parent is pre-activation,
+::  so synthesize the zero-count state from that exact branch.
+++  post-ai-parent-state
+  |=  parent-digest=block-id:t
+  ^-  puzzle-asert-state:dk
+  =/  cached=(unit puzzle-asert-state:dk)
+    (~(get h-by puzzle-asert-states.d) parent-digest)
+  ?^  cached  u.cached
+  =/  parent=local-page:t  (~(got h-by blocks.c) parent-digest)
+  =/  parent-height=page-number:t  ~(height get:local-page:t parent)
+  ?>  ?|  =(*page-number:t parent-height)
+          (lth parent-height ai-pow-activation-height.blockchain-constants)
+      ==
+  :*  zk-count=0
+      ai-count=0
+      zk-head=~
+      ai-head=~
+      zk-anchor=[min-ts=(~(got h-by min-timestamps.c) parent-digest) target-atom=anchor-target-atom.zk-asert-post-ai.blockchain-constants]
+      ai-anchor=~
+  ==
 ::
-::    [zk-asert.phase, zk-asert-post-ai.phase)   → zk-asert (150s ideal)
-::    [zk-asert-post-ai.phase, +∞)               → zk-asert-post-ai (300s)
-::
-::  At and after ai-pow-activation-height the ZK puzzle re-anchors at
-::  zk-asert-post-ai.anchor-height with the regime-2 anchor-target.
-::  Each post-activation block walks back to ITS REGIME's anchor (not
-::  the original zk-asert anchor) for the time-diff computation.
-::
-::  Caller must guarantee .child-height >= zk-asert.phase. .parent-digest
-::  identifies the immediate parent — read from .min-timestamps for the
-::  median-of-11.
+::  ZK ASERT keeps Aletheia's original global-height regime before Logos. At
+::  Logos activation it re-anchors on the branch's activation parent and uses
+::  only post-activation ZK count and the latest ZK median timestamp.
 ++  compute-target-zk-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
   =/  is-post-ai-regime=?
     (gte child-height phase.zk-asert-post-ai.blockchain-constants)
-  =/  params
-    ?:  is-post-ai-regime
-      zk-asert-post-ai.blockchain-constants
-    zk-asert.blockchain-constants
-  =/  parent-min-ts=@  (~(got h-by min-timestamps.c) parent-digest)
-  ::  Anchor min-ts + target source priority:
-  ::    1. blockchain-constants AsertParams value if non-zero
-  ::       (phase-2-style hardcoded protocol constant)
-  ::    2. derived-state cache (lazily populated at activation by
-  ::       accept-block via populate-zk-asert-post-ai-anchor:der)
-  ::    3. crash (cache must be populated post-activation)
-  ::  Regime 1 (pre-AI) always uses the phase-2 hardcoded constant.
-  ::  Regime 2 (post-AI) defaults to 0 placeholder + cache; can be
-  ::  hardcoded later for code cleanliness.
-  =/  anchor-min-ts=@
-    ?.  =(0 anchor-min-timestamp.params)
-      anchor-min-timestamp.params
-    ?>  is-post-ai-regime
-    ?~  cached-zk-asert-post-ai-anchor.d
-      ~|  %zk-asert-post-ai-anchor-cache-empty
-      !!
-    min-ts.u.cached-zk-asert-post-ai-anchor.d
-  =/  anchor-target=@
-    ?.  =(0 anchor-target-atom.params)
-      anchor-target-atom.params
-    ?>  is-post-ai-regime
-    ?~  cached-zk-asert-post-ai-anchor.d
-      ~|  %zk-asert-post-ai-anchor-cache-empty
-      !!
-    target-atom.u.cached-zk-asert-post-ai-anchor.d
-  ::  Regime 2 (post-AI) retargets over the ZK SUBCHAIN, mirroring the AI puzzle:
-  ::  count only ZK blocks since the regime-2 anchor and feed that as virtual
-  ::  heights (anchor index 0), so each puzzle targets its own ideal (300s) over
-  ::  its own blocks -> ~150s combined. Regime 1 (pre-AI, single puzzle) keeps
-  ::  global heights: there, global height == ZK-subchain length.
-  =/  block-anchor-height=@  ?:(is-post-ai-regime 0 anchor-height.params)
-  =/  block-height=@
-    ?.  is-post-ai-regime  child-height
-    +((count-same-type-since-anchor parent-digest %dumb-zkpow anchor-height.params))
+  ?.  is-post-ai-regime
+    =/  params  zk-asert.blockchain-constants
+    %-  chunk:bignum:t
+    %-  compute-target:asert
+    :*  anchor-target-atom.params
+        anchor-min-timestamp.params
+        anchor-height.params
+        (~(got h-by min-timestamps.c) parent-digest)
+        child-height
+        ideal-block-time.params
+        half-life.params
+        max-target-atom:t
+    ==
+  =/  params  zk-asert-post-ai.blockchain-constants
+  =/  state  (post-ai-parent-state parent-digest)
+  =/  current-min-ts=@
+    ?~  zk-head.state  min-ts.zk-anchor.state
+    (~(got h-by min-timestamps.c) u.zk-head.state)
   %-  chunk:bignum:t
   %-  compute-target:asert
-  :*  anchor-target
-      anchor-min-ts
-      block-anchor-height
-      parent-min-ts
-      block-height
+  :*  target-atom.zk-anchor.state
+      min-ts.zk-anchor.state
+      0
+      current-min-ts
+      +(zk-count.state)
       ideal-block-time.params
       half-life.params
       max-target-atom:t
   ==
 ::
-::  +compute-target-asert: legacy alias for +compute-target-zk-asert.
-::  Existing callers haven't migrated to the per-puzzle API yet; this
-::  wrapper preserves their semantics. New callers should use
-::  +compute-target-zk-asert directly.
+::  Compatibility wrapper for existing ZK call sites.
 ++  compute-target-asert
   ~/  %compute-target-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
   (compute-target-zk-asert child-height parent-digest)
 ::
-::  +compute-target-ai-asert: aserti3-2d AI puzzle target for a
-::  post-ai-pow-activation block. Single regime — ai-asert is the only
-::  AI ASERT config. Same hardcoded-anchor pattern as compute-target-
-::  zk-asert; reads its anchor params from ai-asert.blockchain-constants.
-::
-::  .parent-digest is the child's nearest AI ancestor (the most recent prior
-::  %ai-pow block, via +find-same-type-ancestor at the call sites). Block
-::  distance is measured over the AI subchain (+count-same-type-since-anchor),
-::  so AI difficulty tracks AI-only cadence, not global block cadence.
+::  AI ASERT uses only the AI lineage on the candidate parent's branch. With a
+::  hardcoded test anchor, the first AI block is index 1. In production the first
+::  AI block establishes the dynamic anchor and later AI blocks use the number of
+::  already-accepted AI blocks as their virtual height.
 ++  compute-target-ai-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
   =/  params  ai-asert.blockchain-constants
-  ::  Anchor sources, per-field: hardcoded constant (non-zero ⇒ in
-  ::  use), else cache (if populated). Bootstrap: when EITHER
-  ::  field has no source (no hardcoded AND cache empty), the AI
-  ::  subchain has no usable anchor yet — degenerate to
-  ::  anchor-target-atom (same value compute-target would produce
-  ::  at the anchor with zero elapsed time). Keeps AI candidate
-  ::  emission alive until the first AI block lands + populates
-  ::  the cache.
-  =/  use-hardcoded-min-ts=?  !=(0 anchor-min-timestamp.params)
-  =/  use-hardcoded-target=?  !=(0 anchor-target-atom.params)
-  =/  anchor-min-ts-opt=(unit @)
-    ?:  use-hardcoded-min-ts  `anchor-min-timestamp.params
-    ?~  cached-ai-asert-anchor.d  ~
-    `min-ts.u.cached-ai-asert-anchor.d
-  =/  anchor-target-opt=(unit @)
-    ?:  use-hardcoded-target  `anchor-target-atom.params
-    ?~  cached-ai-asert-anchor.d  ~
-    `target-atom.u.cached-ai-asert-anchor.d
-  ?~  anchor-min-ts-opt
+  =/  state  (post-ai-parent-state parent-digest)
+  =/  hardcoded-anchor=?  !=(0 anchor-min-timestamp.params)
+  =/  anchor=(unit cached-asert-anchor:dk)
+    ?:  hardcoded-anchor
+      `[min-ts=anchor-min-timestamp.params target-atom=anchor-target-atom.params]
+    ai-anchor.state
+  ?~  anchor
     (chunk:bignum:t anchor-target-atom.params)
-  ?~  anchor-target-opt
-    (chunk:bignum:t anchor-target-atom.params)
-  =/  parent-min-ts=@  (~(got h-by min-timestamps.c) parent-digest)
-  ::  Retarget over the AI SUBCHAIN, not global height: the ASERT block distance
-  ::  is the number of AI blocks between the anchor and this child (parent-digest
-  ::  is the child's nearest AI ancestor, so child index = that count + 1). Feed
-  ::  it to +compute-target as virtual heights (anchor index 0, child index =
-  ::  count) while keeping the real timestamps — so the AI puzzle targets its own
-  ::  ideal-block-time (300s) over its own blocks, giving ~150s combined with ZK.
+  =/  current-min-ts=@
+    ?~  ai-head.state  min-ts.u.anchor
+    (~(got h-by min-timestamps.c) u.ai-head.state)
   =/  blocks-since-anchor=@
-    +((count-same-type-since-anchor parent-digest %ai-pow anchor-height.params))
+    ?:  hardcoded-anchor  +(ai-count.state)
+    ai-count.state
   %-  chunk:bignum:t
   %-  compute-target:asert
-  :*  u.anchor-target-opt
-      u.anchor-min-ts-opt
+  :*  target-atom.u.anchor
+      min-ts.u.anchor
       0
-      parent-min-ts
+      current-min-ts
       blocks-since-anchor
       ideal-block-time.params
       half-life.params
@@ -523,9 +432,9 @@
 ::    +compute-target-ai-asert (validation rejects any other target as
 ::    %page-target-invalid) and its coinbase must pay +ai-fund-address (validation
 ::    rejects a %pow-fund coinbase via +check-fund-split). This deterministically:
-::      - re-targets to the AI ASERT target (over the AI subchain via
-::        +find-same-type-ancestor) and recomputes accumulated-work with the AI
-::        normalizer (+compute-work-ai, matching validation's +block-compute-work);
+::      - re-targets to the AI ASERT target from the parent's branch-local AI
+::        lineage and recomputes accumulated-work with the AI normalizer
+::        (+compute-work-ai, matching validation's +block-compute-work);
 ::      - rebuilds the coinbase from the start with +ai-fund-address via the same
 ::        +new-with-fund-share the ZK candidate uses (only the fund recipient
 ::        differs). `shares` is the miner's coinbase split; fees are recovered
@@ -550,11 +459,7 @@
   ?.  (post-asert-activation:t candidate-height)
     zk-cand
   =/  parent-bid=block-id:t  ~(parent get:page:t zk-cand)
-  =/  ai-parent=block-id:t
-    =/  found=(unit block-id:t)  (find-same-type-ancestor parent-bid %ai-pow)
-    ?~  found  parent-bid  ::  bootstrap: no AI ancestor yet -> degenerate anchor
-    u.found
-  =/  ai-target=bignum:bignum:t  (compute-target-ai-asert candidate-height ai-parent)
+  =/  ai-target=bignum:bignum:t  (compute-target-ai-asert candidate-height parent-bid)
   =/  parent-work=@
     =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) parent-bid))
     (merge:bignum:t ~(accumulated-work get:page:t par))
@@ -778,26 +683,17 @@
   ?.  =(~(height get:page:t pag) +(~(height get:page:t par)))
     [%.n %page-height-invalid]
   ::
-  ::  check target — Stage 6: dispatch by puzzle-type. ZK and AI
-  ::  blocks each use their own ASERT with the per-puzzle parent
-  ::  found via +find-same-type-ancestor. Pre-asert-activation
-  ::  falls back to the epoch-stored target (unchanged).
+  ::  Check target by proven puzzle type. Both ASERT functions receive the
+  ::  immediate parent and read only their own branch-local puzzle lineage.
   =/  expected-target
     ?:  (post-asert-activation:t ~(height get:page:t pag))
-      ::  powless block defaults to %dumb-zkpow (it will fail the pow
-      ::  check regardless); avoids a crash on the flag-off path.
       =/  block-puzzle-type=?(%dumb-zkpow %ai-pow)
         =/  pow-unit  ~(pow get:page:t pag)
         ?~  pow-unit  %dumb-zkpow
         (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit))
-      =/  same-type-parent=block-id:t
-        =/  found=(unit block-id:t)
-          (find-same-type-ancestor ~(parent get:page:t pag) block-puzzle-type)
-        ?~  found  ~(parent get:page:t pag)  ::  bootstrap: degenerate
-        u.found
       ?:  =(%dumb-zkpow block-puzzle-type)
-        (compute-target-zk-asert ~(height get:page:t pag) same-type-parent)
-      (compute-target-ai-asert ~(height get:page:t pag) same-type-parent)
+        (compute-target-zk-asert ~(height get:page:t pag) ~(parent get:page:t pag))
+      (compute-target-ai-asert ~(height get:page:t pag) ~(parent get:page:t pag))
     (~(got h-by targets.c) ~(parent get:page:t pag))
   ?.  =(~(target get:page:t pag) expected-target)
     [%.n %page-target-invalid]
@@ -1029,67 +925,30 @@
 ::    Pre-activation invariant: every walk hop's puzzle-type is
 ::    %dumb-zkpow (height-derived legacy fallback in
 ::    +block-id-to-proof-version), pag-type is also %dumb-zkpow.
-::    Filter is a no-op; output is bit-identical to the pre-Stage-6
-::    walker. This is the compat anchor — verified end-to-end by
-::    the pre-activation fakenet smoke + mainnet sync (S5).
-::
-::    Bounded walk: cap of 2 * min-past-blocks * 2 = 44 global hops
-::    to prevent unbounded walks when one puzzle stalls for many
-::    blocks of the other puzzle. On cap exit with fewer than
-::    min-past-blocks collected, we take the median of what we
-::    have (or fall back to pag's own timestamp if nothing else
-::    matched — pag is always included).
+::  The walk is bounded by `min-past-blocks`: the candidate is included first,
+::  then at most ten parents. Genesis terminates shorter chains.
 ::
 ++  update-min-timestamps
   ~/  %update-min-timestamps
   |=  [now=@da pag=page:t]
   ^-  (h-map block-id:t @)
-  ::  Determine the new block's puzzle-type from its proof version.
-  ::  A powless block (genesis, and any block where pow failed to
-  ::  decode) is %dumb-zkpow by definition: genesis is pre-activation
-  ::  and AI blocks cannot exist there. This guard restores the
-  ::  pre-Stage-6 walker's tolerance — the old walker never read pow
-  ::  at all, so it never crashed on a powless accepted block.
-  =/  pag-type=?(%dumb-zkpow %ai-pow)
-    =/  pow-unit  ~(pow get:page:t pag)
-    ?~  pow-unit  %dumb-zkpow
-    (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit))
+  ::  Median-time-past is a global chain safety rule, independent of puzzle.
+  ::  Puzzle ASERT separation comes from branch-local per-puzzle block counts
+  ::  and heads; changing MTP by puzzle would weaken cross-puzzle time-warp
+  ::  resistance and make timestamp validity depend on the parent puzzle type.
   =/  min-timestamp=@
-    ::  collect up to N=min-past-blocks same-type timestamps,
-    ::  starting with pag itself and walking parent edges.
-    =|  prev-timestamps=(list @)
-    ::  pag is always type-matching (it IS pag-type); seed with its
-    ::  timestamp and one collected count.
-    =.  prev-timestamps  [~(timestamp get:page:t pag) prev-timestamps]
+    =/  prev-timestamps=(list @)  [~(timestamp get:page:t pag) ~]
     =/  collected=@  1
-    =/  hops=@  0
-    =/  cap=@  (mul 2 (mul min-past-blocks:t 2))  ::  44
     =/  cur-bid=block-id:t  ~(parent get:page:t pag)
-    =/  cur-height=@  ~(height get:page:t pag)
     |-
     ?:  =(collected min-past-blocks:t)
-      ::  collected enough; take median
       (median:t prev-timestamps)
-    ?:  =(*page-number:t cur-height)
-      ::  reached genesis; take median of what we have
-      (median:t prev-timestamps)
-    ?:  (gte hops cap)
-      ::  exceeded walk window; take median of what we have
-      (median:t prev-timestamps)
-    =/  cur-lp=local-page:t  (~(got h-by blocks.c) cur-bid)
-    =/  cur-page=page:t  (to-page:local-page:t cur-lp)
-    =/  cur-type=?(%dumb-zkpow %ai-pow)
-      (block-id-to-puzzle-type cur-bid)
-    =?  prev-timestamps  =(cur-type pag-type)
-      [~(timestamp get:page:t cur-page) prev-timestamps]
-    =?  collected  =(cur-type pag-type)
-      +(collected)
-    %=  $
-      hops        +(hops)
-      cur-bid     ~(parent get:local-page:t cur-lp)
-      cur-height  ~(height get:local-page:t cur-lp)
-    ==
-  ::
+    =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
+    =/  cur-page=page:t  (to-page:local-page:t cur)
+    =/  next-timestamps  [~(timestamp get:page:t cur-page) prev-timestamps]
+    ?:  =(*page-number:t ~(height get:local-page:t cur))
+      (median:t next-timestamps)
+    $(collected +(collected), cur-bid ~(parent get:local-page:t cur), prev-timestamps next-timestamps)
   (~(put h-by min-timestamps.c) ~(digest get:page:t pag) min-timestamp)
 ::
 ::::  pending block and tx functionality

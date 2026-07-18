@@ -37,16 +37,16 @@
     |=  arg=load-kernel-state:dk
     ::  cut
     |^
-    =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-11 arg)))
+    =.  k  ~>  %bout  (update-constants (check-checkpoints (state-n-to-12 arg)))
     =.  c.k  ~>  %bout  check-and-repair:con
     ~|  %v1-phase-must-be-lte-zk-asert-phase
     ?>  (lte v1-phase.constants.k phase.zk-asert.constants.k)
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-11
+    ++  state-n-to-12
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%11 -.arg)
+      ?.  ?=(%12 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -61,8 +61,38 @@
           %8   $(arg (state-8-to-9 arg))
           %9   $(arg (state-9-to-10 arg))
           %10  $(arg (state-10-to-11 arg))
+          %11  $(arg (state-11-to-12 arg))
         ==
       arg
+    ::
+    ::  State 12 stores per-puzzle ASERT counts, heads, and anchors per block.
+    ::  The state-11 format cannot reconstruct that branch-local lineage after
+    ::  activation. Refuse such a load rather than derive a divergent target.
+    ::  Coordinated mainnet upgrades occur before activation; genesis-only
+    ::  activation-zero fakenets are also safe.
+    ++  state-11-to-12
+      |=  arg=kernel-state-11:dk
+      ^-  kernel-state-12:dk
+      =/  migration-safe=?
+        ?~  highest-block-height.d.arg
+          %.y
+        ?|  =(*page-number:t u.highest-block-height.d.arg)
+            (lth u.highest-block-height.d.arg ai-pow-activation-height.constants.arg)
+        ==
+      ~|  %state-11-post-ai-lineage-cannot-be-reconstructed
+      ?>  migration-safe
+      =/  new-d=derived-state-11:dk
+        :*  highest-block-height.d.arg
+            heaviest-chain.d.arg
+            puzzle-asert-states=*(h-map block-id:t puzzle-asert-state:dk)
+        ==
+      :*  %12
+          c=c.arg
+          a=a.arg
+          m=m.arg
+          d=new-d
+          constants=constants.arg
+      ==
     ::
     ::  upgrade kernel state 10 to kernel state 11
     ::    consensus-state gained a block-versions map (block-id ->

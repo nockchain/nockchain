@@ -20,6 +20,7 @@
       kernel-state-9
       kernel-state-10
       kernel-state-11
+      kernel-state-12
   ==
 ::
 ::  Per-puzzle ASERT anchor cache. Populated lazily by accept-block when
@@ -35,6 +36,21 @@
 ::  fields; the compute path checks the constant first and falls back
 ::  to the cache when the constant is the 0 placeholder.
 +$  cached-asert-anchor  [min-ts=@ target-atom=@]
+::
+::  Branch-local per-puzzle ASERT state. Every post-activation block stores one
+::  entry derived only from its parent entry and its own verified puzzle type.
+::  Counts are post-activation blocks of each puzzle. Heads point to the latest
+::  block of each puzzle on this ancestry. Anchors are branch-local so block
+::  arrival order and side chains cannot affect target computation.
++$  puzzle-asert-state
+  $:  zk-count=@
+      ai-count=@
+      zk-head=(unit block-id:dt)
+      ai-head=(unit block-id:dt)
+      zk-anchor=cached-asert-anchor
+      ai-anchor=(unit cached-asert-anchor)
+  ==
+::
 ::
 +$  kernel-state-0
   $:  %0
@@ -207,7 +223,21 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-11
+::  kernel-state-12 replaces process-global ASERT anchor caches with a
+::  branch-local map keyed by block id. Consensus-state and all other state are
+::  unchanged.
++$  kernel-state-12
+  $:  %12
+      c=consensus-state-10
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-11
+      constants=blockchain-constants:v1:dt
+  ==
+::
+::
++$  kernel-state  kernel-state-12
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -558,7 +588,17 @@
       cached-ai-asert-anchor=(unit cached-asert-anchor)
   ==
 ::
-+$  derived-state  derived-state-10
+::  Current derived state. `puzzle-asert-states` is complete for every accepted
+::  post-activation block and follows forks independently. Historical state-10
+::  caches remain only in the state-11 migration input.
++$  derived-state-11
+  $+  derived-state-11
+  $:  highest-block-height=(unit page-number:dt)
+      heaviest-chain=(z-map page-number:dt block-id:dt)
+      puzzle-asert-states=(h-map block-id:dt puzzle-asert-state)
+  ==
+::
++$  derived-state  derived-state-11
 ::
 +$  mining-state-0
   $+  mining-state-0
