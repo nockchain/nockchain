@@ -232,6 +232,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     welcome();
 
     cli.validate()?;
+    let effective_fakenet_ai_activation_height = cli.effective_fakenet_ai_activation_height()?;
+    let fakenet_ai_asert_override = cli.fakenet_ai_asert.clone().into_config()?;
 
     let nockapp_cli = cli.nockapp_cli.clone();
 
@@ -431,14 +433,11 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
-        if let Some(ai_activation) = cli.fakenet_ai_pow_activation_height {
-            // Apply to ai-pow-activation-height AND to phase.zk-asert-post-ai
-            // and phase.ai-asert so the ZK regime switch + AI puzzle activation
-            // all happen at the same height. anchor-height for both stays at
-            // (phase - 1) per the design convention. The post-AI regime's
-            // anchor-target-atom keeps its default 2^291; the
-            // anchor-min-timestamp stays 0 placeholder and the cache populates
-            // it lazily when accept-block crosses the boundary.
+        let ai_asert_override = fakenet_ai_asert_override;
+        if let Some(ai_activation) = effective_fakenet_ai_activation_height {
+            // AI admission, the AI ASERT anchor, and the post-AI ZK regime share
+            // one activation boundary. ZK anchors at phase - 1; AI anchors at
+            // phase. Their target and timing parameters remain puzzle-specific.
             fakenet_constants = fakenet_constants.with_ai_pow_activation_height(ai_activation);
             let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
             zk_post.phase = ai_activation;
@@ -488,10 +487,9 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             }
             fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
         }
-        if let Some(asert) = cli.fakenet_ai_asert.into_config()? {
-            // AI-puzzle ASERT overrides (--fakenet-ai-asert-*). Symmetric with the
-            // ZK flags. Applied after the --fakenet-ai-pow-activation-height block
-            // above, so these take precedence over the phase/anchor-height it sets.
+        if let Some(asert) = ai_asert_override {
+            // The effective activation logic guarantees this phase matches AI
+            // admission and the post-AI ZK regime.
             let mut ai_asert = fakenet_constants.ai_asert.clone();
             ai_asert.phase = asert.phase;
             ai_asert.anchor_height = asert.anchor_height;

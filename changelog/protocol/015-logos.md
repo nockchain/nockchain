@@ -376,7 +376,9 @@ No mandatory configuration changes for mainnet. Operators may raise
 buckets resident and avoid page-in latency (bounded RSS; see Operational Impact).
 Fakenet operators may override the activation height and per-puzzle ASERT params
 with `--fakenet-ai-pow-activation-height`, `--fakenet-ai-asert-*`, and
-`--fakenet-zk-asert-*` (all `requires = "fakenet"`).
+`--fakenet-zk-asert-*` (all `requires = "fakenet"`). The AI ASERT phase and AI
+activation are one boundary: either flag family may set it, and conflicting
+values are rejected.
 
 ### Data Migration
 

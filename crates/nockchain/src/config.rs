@@ -196,14 +196,15 @@ impl FakenetAsertArgs {
     }
 }
 
-/// CLI surface for the AI-puzzle ASERT fakenet overrides — the same shape as the
-/// ZK flags, so `--fakenet-ai-asert-*` mirrors `--fakenet-zk-asert-*`.
+/// CLI surface for AI-puzzle ASERT fakenet overrides. Its phase is the AI
+/// admission boundary: it sets activation when the explicit activation flag is
+/// absent, and must equal that flag when both are present.
 #[derive(Args, Debug, Clone, Default)]
 pub struct FakenetAiAsertArgs {
     #[arg(
         id = "fakenet_ai_asert_phase",
         long = "fakenet-ai-asert-phase",
-        help = "AI ASERT phase (aserti3-2d activation height) on fakenet. Requires --fakenet.",
+        help = "AI ASERT phase and AI-PoW activation height on fakenet. Sets activation unless --fakenet-ai-pow-activation-height is supplied; both must match. Requires --fakenet.",
         requires = "fakenet"
     )]
     pub phase: Option<u64>,
@@ -441,15 +442,31 @@ fn stack_size_default_arg(stack_size: NockStackSize) -> &'static str {
 }
 
 impl NockchainCli {
-    pub fn validate(&self) -> Result<(), String> {
-        self.fakenet_asert.clone().into_config().map(|_| ())?;
-        self.fakenet_ai_asert.clone().into_config().map(|_| ())?;
-
-        // The post-AI ZK re-anchor sits at `activation_height - 1`, so activation
-        // at genesis has no valid ZK anchor.
-        if self.fakenet_ai_pow_activation_height == Some(0) {
+    /// Effective AI activation for fakenet. An AI ASERT trio without an explicit
+    /// activation flag sets the activation to its phase; if both are supplied,
+    /// they must agree. This preserves the protocol invariant that AI admission,
+    /// the AI anchor, and the post-AI ZK regime share one boundary.
+    pub(crate) fn effective_fakenet_ai_activation_height(&self) -> Result<Option<u64>, String> {
+        let ai_asert = self.fakenet_ai_asert.clone().into_config()?;
+        let explicit = self.fakenet_ai_pow_activation_height;
+        if explicit == Some(0) {
             return Err("--fakenet-ai-pow-activation-height must be >= 1".to_string());
         }
+        match (explicit, ai_asert) {
+            (Some(activation), Some(asert)) if activation != asert.phase => Err(format!(
+                "--fakenet-ai-pow-activation-height ({activation}) must equal \
+                 --fakenet-ai-asert-phase ({})",
+                asert.phase
+            )),
+            (Some(activation), _) => Ok(Some(activation)),
+            (None, Some(asert)) => Ok(Some(asert.phase)),
+            (None, None) => Ok(None),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        self.fakenet_asert.clone().into_config().map(|_| ())?;
+        self.effective_fakenet_ai_activation_height()?;
 
         Ok(())
     }
@@ -671,11 +688,28 @@ mod tests {
     // anchor-height == phase (unlike ZK's anchor-height == phase - 1). See
     // `AsertParams::ai_default` / `+populate-ai-asert-anchor`.
     #[test]
-    fn validate_accepts_all_three_ai_asert_overrides() {
+    fn validate_ai_asert_phase_sets_activation_when_flag_is_omitted() {
         let mut cli = base_cli();
         cli.fakenet = true;
         cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
         assert!(cli.validate().is_ok());
+        assert_eq!(
+            cli.effective_fakenet_ai_activation_height().unwrap(),
+            Some(10)
+        );
+    }
+
+    #[test]
+    fn validate_rejects_ai_asert_phase_different_from_activation() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_pow_activation_height = Some(11);
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
+        let err = cli
+            .validate()
+            .expect_err("expected AI activation/ASERT boundary mismatch");
+        assert!(err.contains("must equal"));
+        assert!(err.contains("ai-asert-phase"));
     }
 
     // The AI anchor convention is genuinely different from ZK: anchor == phase - 1
