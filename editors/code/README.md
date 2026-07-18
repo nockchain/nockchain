@@ -8,8 +8,16 @@ Go-to-definition follows compiler-resolved core arms and imported gates, with a
 conservative structural fallback for unambiguous arms and molds in the current
 document, its import graph, and the configured prelude. Rune tokens navigate to
 their canonical tagged alternatives in the prelude's `hoon` mold; `++`, `+$`,
-and `+|` navigate to the corresponding hoon-138 parser arms. Local face and
-binding declarations are not covered yet.
+and `+|` navigate to the corresponding hoon-138 parser arms. Lexical faces have
+scope- and shadow-aware definition, references, and safe rename support.
+Completion suggests visible faces, named gate imports, and unambiguous local,
+imported, and standard-library arms and molds, and reports each candidate's
+provenance.
+
+In VS Code, use F12 for definitions, Shift+F12 for references, F2 to rename a
+lexical face, and Control+Space to request completion explicitly. References
+are currently same-document and rename is limited to lexical faces; imported
+and standard-library declarations are not renamed.
 
 ## Development setup
 

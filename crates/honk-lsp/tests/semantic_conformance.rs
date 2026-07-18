@@ -11,8 +11,9 @@ use lsp_server::{
 };
 use lsp_types::notification::{DidOpenTextDocument, Notification as LspNotification};
 use lsp_types::{
-    DidOpenTextDocumentParams, DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location,
-    PrepareRenameResponse, TextDocumentItem, Uri, WorkspaceEdit,
+    CompletionItem, CompletionItemKind, CompletionResponse, DidOpenTextDocumentParams,
+    DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, PrepareRenameResponse,
+    TextDocumentItem, Uri, WorkspaceEdit,
 };
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -110,6 +111,36 @@ fn request_references(
         .unwrap_or_default()
 }
 
+fn request_completion(
+    client: &Connection,
+    request_id: i32,
+    uri: &Uri,
+    line: usize,
+    character: usize,
+) -> Vec<CompletionItem> {
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/completion".to_string(),
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": line, "character": character }
+                }),
+            )
+            .into(),
+        )
+        .expect("request completion");
+    match serde_json::from_value::<Option<CompletionResponse>>(receive_response(client, request_id))
+        .expect("completion response")
+        .expect("completion candidates")
+    {
+        CompletionResponse::Array(items) => items,
+        CompletionResponse::List(list) => list.items,
+    }
+}
+
 fn start_server(
     root: &Path,
     check_delay_ms: u64,
@@ -165,6 +196,7 @@ fn start_server_with_dependencies(
     assert_eq!(initialize["capabilities"]["hoverProvider"], true);
     assert_eq!(initialize["capabilities"]["definitionProvider"], true);
     assert_eq!(initialize["capabilities"]["referencesProvider"], true);
+    assert!(initialize["capabilities"]["completionProvider"].is_object());
     assert_eq!(
         initialize["capabilities"]["renameProvider"]["prepareProvider"],
         true
@@ -431,6 +463,18 @@ fn definition_navigates_to_an_imported_gate() {
     assert_eq!(definition.uri, helper_uri);
     assert_eq!(definition.range.start.line, 1);
     assert_eq!(definition.range.start.character, 2);
+
+    request_id += 1;
+    let completions = request_completion(&client, request_id, &entry_uri, 2, 6);
+    let helper = completions
+        .iter()
+        .find(|item| item.label == "helper")
+        .expect("imported gate completion");
+    assert_eq!(helper.kind, Some(CompletionItemKind::FUNCTION));
+    assert!(helper
+        .detail
+        .as_deref()
+        .is_some_and(|detail| detail.contains("imported Hoon gate")));
 
     shutdown_server(&client, server_thread, request_id + 1);
 }
@@ -710,6 +754,88 @@ fn local_references_and_rename_preserve_binding_identity() {
     assert!(error.message.contains("capture"));
 
     shutdown_server(&client, server_thread, 7);
+}
+
+#[test]
+fn completion_respects_lexical_scope_and_includes_the_standard_library() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let entry = temp.path().join("local-completion.hoon");
+    std::fs::write(&entry, "42\n").expect("disk entry");
+    let entry_uri = Uri::from_str(
+        url::Url::from_file_path(&entry)
+            .expect("entry file URI")
+            .as_str(),
+    )
+    .expect("entry LSP URI");
+    let source = concat!(
+        "|=  outer=@\n", "=/  before  outer\n", "=/  result\n", "  |=  nested=@\n",
+        "  [outer nested]\n", "[before result outer]\n",
+    );
+    let (client, server_thread) = start_server(&root, 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        entry_uri.clone(),
+                        "hoon".to_string(),
+                        3,
+                        source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("send didOpen");
+
+    let final_scope = request_completion(&client, 2, &entry_uri, 5, 1);
+    for local in ["outer", "before", "result"] {
+        let item = final_scope
+            .iter()
+            .find(|item| item.label == local)
+            .unwrap_or_else(|| panic!("missing local completion: {local}"));
+        assert_eq!(item.detail.as_deref(), Some("local face"));
+    }
+    assert!(final_scope.iter().all(|item| item.label != "nested"));
+    assert!(final_scope.iter().any(|item| {
+        item.label == "list"
+            && item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("standard library"))
+    }));
+
+    let nested_scope = request_completion(&client, 3, &entry_uri, 4, 3);
+    assert!(nested_scope
+        .iter()
+        .any(|item| { item.label == "nested" && item.detail.as_deref() == Some("local face") }));
+
+    client
+        .sender
+        .send(
+            Notification::new(
+                "textDocument/didChange".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri, "version": 4 },
+                    "contentChanges": [{ "text": "|=  outer=@\n  [" }]
+                }),
+            )
+            .into(),
+        )
+        .expect("send malformed didChange");
+    let malformed = request_completion(&client, 4, &entry_uri, 1, 3);
+    assert!(malformed.iter().any(|item| {
+        item.label == "list"
+            && item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("standard library"))
+    }));
+
+    shutdown_server(&client, server_thread, 5);
 }
 
 #[test]
@@ -1177,6 +1303,72 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
         edit["range"]["start"]["line"] == u64::try_from(shorthand_line).expect("small line")
     }));
     request_id += 1;
+
+    let completion_cases = [
+        (
+            "dig=tip5-hash-atom",
+            "tip5-hash-atom",
+            4usize,
+            CompletionItemKind::STRUCT,
+            "common/ztd/four.hoon",
+        ),
+        (
+            "^-  [(list effect)",
+            "list",
+            2usize,
+            CompletionItemKind::FUNCTION,
+            "standard library",
+        ),
+        (
+            "check-target:mine dig",
+            "dig",
+            2usize,
+            CompletionItemKind::VARIABLE,
+            "local face",
+        ),
+    ];
+    for (use_text, symbol, prefix_len, kind, detail_fragment) in completion_cases {
+        let line = source
+            .lines()
+            .position(|line| line.contains(use_text))
+            .unwrap_or_else(|| panic!("missing completion use: {use_text}"));
+        let character = source
+            .lines()
+            .nth(line)
+            .expect("completion source line")
+            .find(symbol)
+            .unwrap_or_else(|| panic!("missing completion symbol: {symbol}"));
+        let completions = request_completion(
+            &client,
+            request_id,
+            &entry_uri,
+            line,
+            character + prefix_len,
+        );
+        let item = completions
+            .iter()
+            .find(|item| item.label == symbol)
+            .unwrap_or_else(|| panic!("missing real miner completion: {symbol}"));
+        assert_eq!(item.kind, Some(kind), "wrong completion kind for {symbol}");
+        assert!(
+            item.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains(detail_fragment)),
+            "wrong completion provenance for {symbol}: {:?}",
+            item.detail
+        );
+        let item = serde_json::to_value(item).expect("completion item JSON");
+        assert_eq!(item["textEdit"]["newText"], symbol);
+        assert_eq!(
+            item["textEdit"]["range"]["start"]["character"],
+            u64::try_from(character).expect("small character")
+        );
+        assert_eq!(
+            item["textEdit"]["range"]["end"]["character"],
+            u64::try_from(character + symbol.len()).expect("small character")
+        );
+        request_id += 1;
+    }
 
     shutdown_server(&client, server_thread, request_id);
 }

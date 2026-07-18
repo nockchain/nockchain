@@ -7,16 +7,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, TrySendError};
-use honk::pipeline::{self, NativeImportKind, NativeSourceView, ScopeMode};
+use honk::pipeline::{self, NativeImportKind, NativeSourceView, ResolvedNativeImport, ScopeMode};
 use honk::workspace::{
     WorkspaceCheckRequest, WorkspaceCompileError, WorkspaceConfig, WorkspaceDiagnostic,
     WorkspaceDiagnosticKind, WorkspaceSourceSnapshot,
 };
 use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
-    hoon_rune_at, hoon_term_at, range_from_one_based_spot, structural_definition,
-    structural_rune_definition, SemanticHover, SemanticNodeId, SemanticRename,
-    SemanticRenameTarget, SemanticSession, SemanticSymbol, SemanticSymbolKind, SemanticTextRange,
+    completion_term_range, hoon_rune_at, hoon_term_at, range_from_one_based_spot,
+    structural_completions, structural_definition, structural_rune_definition, SemanticCompletion,
+    SemanticCompletionKind, SemanticHover, SemanticNodeId, SemanticRename, SemanticRenameTarget,
+    SemanticSession, SemanticSymbol, SemanticSymbolKind, SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -26,16 +27,17 @@ use lsp_types::notification::{
     Notification as LspNotification, PublishDiagnostics, ShowMessage,
 };
 use lsp_types::request::{
-    DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
-    Request as LspRequest,
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
+    References, Rename, Request as LspRequest,
 };
 use lsp_types::{
-    CancelParams, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentChanges, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, Location, LogMessageParams,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf,
+    CancelParams, CompletionItem, CompletionItemKind, CompletionList, CompletionOptions,
+    CompletionParams, CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticSeverity,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, Location,
+    LogMessageParams, MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf,
     OptionalVersionedTextDocumentIdentifier, Position, PositionEncodingKind, PrepareRenameResponse,
     PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
     ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind, TextDocumentEdit,
@@ -93,7 +95,7 @@ struct EditorSnapshot {
     documents: HashMap<PathBuf, OpenDocument>,
 }
 
-struct SemanticDefinitionWorkspace {
+struct SemanticWorkspace {
     dependencies: PathBuf,
     prelude: PathBuf,
     sources: WorkspaceSourceSnapshot,
@@ -103,6 +105,16 @@ struct SemanticDefinition {
     path: PathBuf,
     source: Arc<str>,
     range: SemanticTextRange,
+}
+
+struct SemanticCompletionResult {
+    replacement_range: SemanticTextRange,
+    candidates: Vec<RankedCompletion>,
+}
+
+struct RankedCompletion {
+    completion: SemanticCompletion,
+    rank: u16,
 }
 
 impl EditorSnapshot {
@@ -150,7 +162,11 @@ enum SemanticQuery {
     },
     Definition {
         byte_offset: u32,
-        workspace: Arc<SemanticDefinitionWorkspace>,
+        workspace: Arc<SemanticWorkspace>,
+    },
+    Completion {
+        byte_offset: u32,
+        workspace: Arc<SemanticWorkspace>,
     },
     References {
         byte_offset: u32,
@@ -169,6 +185,7 @@ enum SemanticQueryResult {
     DocumentSymbols(Vec<SemanticSymbol>),
     Hover(Option<SemanticHover>),
     Definition(Option<SemanticDefinition>),
+    Completion(SemanticCompletionResult),
     References(Option<Vec<SemanticTextRange>>),
     PrepareRename(Option<SemanticRenameTarget>),
     Rename(Option<SemanticRename>),
@@ -264,6 +281,7 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         document_symbol_provider: Some(OneOf::Left(true)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions::default()),
         references_provider: Some(OneOf::Left(true)),
         rename_provider: Some(OneOf::Right(RenameOptions {
             prepare_provider: Some(true),
@@ -706,6 +724,56 @@ fn handle_request(
                 SemanticQuery::Hover { byte_offset },
             )?;
         }
+        Completion::METHOD => {
+            let params: CompletionParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid completion parameters: {error}"),
+                    );
+                }
+            };
+            let text_document = &params.text_document_position.text_document;
+            let position = params.text_document_position.position;
+            let document = match open_document(state, &text_document.uri) {
+                Ok(document) => document,
+                Err(error) => {
+                    return send_request_error(
+                        connection,
+                        request.id,
+                        ErrorCode::InvalidParams,
+                        format!("invalid completion URI: {error:#}"),
+                    );
+                }
+            };
+            let Some((path, document)) = document else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            let Some(byte_offset) = lsp_position_to_byte(&document.text, position) else {
+                connection
+                    .sender
+                    .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
+                return Ok(());
+            };
+            enqueue_semantic_query(
+                connection,
+                semantic_sender,
+                &mut semantics.pending,
+                request.id,
+                path,
+                document,
+                SemanticQuery::Completion {
+                    byte_offset,
+                    workspace: semantic_workspace(state, config)?,
+                },
+            )?;
+        }
         GotoDefinition::METHOD => {
             let params: GotoDefinitionParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -765,15 +833,6 @@ fn handle_request(
                     Response::new_ok(request.id, serde_json::to_value(Some(definition))?).into(),
                 )?;
             } else {
-                let editor = lock_snapshot(state)?.clone();
-                let sources = WorkspaceSourceSnapshot::try_new(
-                    editor.generation,
-                    editor
-                        .documents
-                        .into_iter()
-                        .map(|(path, document)| (path, document.text)),
-                )
-                .context("failed to snapshot open documents for definition lookup")?;
                 enqueue_semantic_query(
                     connection,
                     semantic_sender,
@@ -783,11 +842,7 @@ fn handle_request(
                     document,
                     SemanticQuery::Definition {
                         byte_offset,
-                        workspace: Arc::new(SemanticDefinitionWorkspace {
-                            dependencies: config.workspace.dependencies.clone(),
-                            prelude: config.workspace.prelude.clone(),
-                            sources,
-                        }),
+                        workspace: semantic_workspace(state, config)?,
                     },
                 )?;
             }
@@ -973,12 +1028,14 @@ fn enqueue_semantic_query(
         SemanticQuery::Hover { byte_offset } => Some(*byte_offset),
         SemanticQuery::DocumentSymbols
         | SemanticQuery::Definition { .. }
+        | SemanticQuery::Completion { .. }
         | SemanticQuery::References { .. }
         | SemanticQuery::PrepareRename { .. }
         | SemanticQuery::Rename { .. } => None,
     };
     let workspace_generation = match &query {
-        SemanticQuery::Definition { workspace, .. } => Some(workspace.sources.revision()),
+        SemanticQuery::Definition { workspace, .. }
+        | SemanticQuery::Completion { workspace, .. } => Some(workspace.sources.revision()),
         SemanticQuery::DocumentSymbols
         | SemanticQuery::Hover { .. }
         | SemanticQuery::References { .. }
@@ -1034,6 +1091,26 @@ fn open_document(
     let path = uri_to_file_path(uri)?;
     let document = lock_snapshot(state)?.documents.get(&path).cloned();
     Ok(document.map(|document| (path, document)))
+}
+
+fn semantic_workspace(
+    state: &Arc<Mutex<EditorSnapshot>>,
+    config: &ResolvedConfig,
+) -> Result<Arc<SemanticWorkspace>> {
+    let editor = lock_snapshot(state)?.clone();
+    let sources = WorkspaceSourceSnapshot::try_new(
+        editor.generation,
+        editor
+            .documents
+            .into_iter()
+            .map(|(path, document)| (path, document.text)),
+    )
+    .context("failed to snapshot open documents for semantic workspace lookup")?;
+    Ok(Arc::new(SemanticWorkspace {
+        dependencies: config.workspace.dependencies.clone(),
+        prelude: config.workspace.prelude.clone(),
+        sources,
+    }))
 }
 
 fn request_id(id: NumberOrString) -> RequestId {
@@ -1145,6 +1222,20 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                         Ok(definition) => SemanticQueryResult::Definition(definition),
                         Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                     },
+                    SemanticQuery::Completion {
+                        byte_offset,
+                        workspace,
+                    } => match structural_workspace_completions(
+                        &mut semantics,
+                        &path,
+                        version,
+                        source.as_ref(),
+                        byte_offset,
+                        &workspace,
+                    ) {
+                        Ok(completions) => SemanticQueryResult::Completion(completions),
+                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                    },
                     SemanticQuery::References {
                         byte_offset,
                         include_declaration,
@@ -1207,7 +1298,7 @@ fn structural_workspace_definition(
     version: i32,
     source: Arc<str>,
     byte_offset: u32,
-    workspace: &SemanticDefinitionWorkspace,
+    workspace: &SemanticWorkspace,
 ) -> Result<Option<SemanticDefinition>> {
     let (name, rune, local) = {
         let snapshot = semantics
@@ -1291,7 +1382,159 @@ fn structural_workspace_definition(
     )
 }
 
-fn hoon_imports(path: &Path, workspace: &SemanticDefinitionWorkspace) -> Vec<PathBuf> {
+fn structural_workspace_completions(
+    semantics: &mut SemanticSession,
+    path: &Path,
+    version: i32,
+    source: &str,
+    byte_offset: u32,
+    workspace: &SemanticWorkspace,
+) -> Result<SemanticCompletionResult> {
+    let replacement_range = completion_term_range(source, byte_offset)
+        .ok_or_else(|| anyhow!("completion cursor is outside the current document"))?;
+    let prefix = source
+        .get(usize::try_from(replacement_range.start)?..usize::try_from(byte_offset)?)
+        .ok_or_else(|| anyhow!("completion prefix is not a valid source range"))?;
+    let local = match semantics.snapshot(path, i64::from(version), source) {
+        Ok(snapshot) => snapshot.completions(byte_offset),
+        Err(error) => {
+            debug!(path = %path.display(), %error, "local completion index is unavailable");
+            Vec::new()
+        }
+    };
+    let mut seen = HashSet::<String>::new();
+    let mut candidates = local
+        .into_iter()
+        .filter_map(|completion| {
+            seen.insert(completion.name.clone()).then(|| {
+                let rank = match completion.kind {
+                    SemanticCompletionKind::Binding => 0,
+                    SemanticCompletionKind::Arm | SemanticCompletionKind::Mold => 10,
+                };
+                RankedCompletion { completion, rank }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let direct_imports = resolved_hoon_imports(path, workspace);
+    let mut imported_faces = HashMap::<String, PathBuf>::new();
+    for import in &direct_imports {
+        if let Some(face) = &import.face {
+            imported_faces.insert(face.clone(), import.path.clone());
+        }
+    }
+    for (name, dependency) in imported_faces {
+        if seen.insert(name.clone()) {
+            candidates.push(RankedCompletion {
+                completion: SemanticCompletion {
+                    name,
+                    kind: SemanticCompletionKind::Arm,
+                    detail: format!(
+                        "imported Hoon gate — {}",
+                        completion_path_label(&dependency, workspace)
+                    ),
+                },
+                rank: 20,
+            });
+        }
+    }
+
+    let mut visited = HashSet::<PathBuf>::new();
+    if let Ok(canonical) = workspace.sources.canonicalize(path) {
+        visited.insert(canonical);
+    }
+    let mut frontier = direct_imports
+        .into_iter()
+        .map(|import| import.path)
+        .collect::<Vec<_>>();
+    let mut depth = 0u16;
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        let mut level = HashMap::<String, Vec<(SemanticCompletion, PathBuf)>>::new();
+        for dependency in frontier {
+            let identity = workspace
+                .sources
+                .canonicalize(&dependency)
+                .unwrap_or_else(|_| dependency.clone());
+            if !visited.insert(identity) {
+                continue;
+            }
+            let Ok(dependency_source) = workspace.sources.read_to_string(&dependency) else {
+                continue;
+            };
+            for completion in structural_completions(&dependency_source) {
+                if !seen.contains(&completion.name) {
+                    level
+                        .entry(completion.name.clone())
+                        .or_default()
+                        .push((completion, dependency.clone()));
+                }
+            }
+            next.extend(hoon_imports(&dependency, workspace));
+        }
+        for (name, mut definitions) in level {
+            seen.insert(name);
+            if definitions.len() == 1 {
+                let (mut completion, dependency) = definitions.pop().expect("one definition");
+                completion.detail = format!(
+                    "imported {} — {}",
+                    completion.detail,
+                    completion_path_label(&dependency, workspace)
+                );
+                candidates.push(RankedCompletion {
+                    completion,
+                    rank: 100u16.saturating_add(depth),
+                });
+            }
+        }
+        frontier = next;
+        depth = depth.saturating_add(1);
+    }
+
+    let prelude_source = workspace
+        .sources
+        .read_to_string(&workspace.prelude)
+        .with_context(|| format!("failed to read prelude {}", workspace.prelude.display()))?;
+    for mut completion in structural_completions(&prelude_source) {
+        if seen.insert(completion.name.clone()) {
+            completion.detail = format!(
+                "standard library {} — {}",
+                completion.detail,
+                completion_path_label(&workspace.prelude, workspace)
+            );
+            candidates.push(RankedCompletion {
+                completion,
+                rank: 10_000,
+            });
+        }
+    }
+
+    candidates.retain(|candidate| candidate.completion.name.starts_with(prefix));
+    candidates.sort_by(|left, right| {
+        (left.rank, left.completion.name.as_str())
+            .cmp(&(right.rank, right.completion.name.as_str()))
+    });
+    Ok(SemanticCompletionResult {
+        replacement_range,
+        candidates,
+    })
+}
+
+fn completion_path_label(path: &Path, workspace: &SemanticWorkspace) -> String {
+    path.strip_prefix(&workspace.dependencies)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn hoon_imports(path: &Path, workspace: &SemanticWorkspace) -> Vec<PathBuf> {
+    resolved_hoon_imports(path, workspace)
+        .into_iter()
+        .map(|import| import.path)
+        .collect()
+}
+
+fn resolved_hoon_imports(path: &Path, workspace: &SemanticWorkspace) -> Vec<ResolvedNativeImport> {
     match pipeline::resolve_native_imports_with_source(
         path,
         &workspace.dependencies,
@@ -1300,10 +1543,10 @@ fn hoon_imports(path: &Path, workspace: &SemanticDefinitionWorkspace) -> Vec<Pat
     ) {
         Ok(imports) => imports
             .into_iter()
-            .filter_map(|import| (import.kind == NativeImportKind::Hoon).then_some(import.path))
+            .filter(|import| import.kind == NativeImportKind::Hoon)
             .collect(),
         Err(error) => {
-            debug!(path = %path.display(), %error, "definition import scan failed");
+            debug!(path = %path.display(), %error, "semantic import scan failed");
             Vec::new()
         }
     }
@@ -1411,6 +1654,41 @@ fn drain_semantic_events(
                     .transpose()?
                     .flatten();
                 serde_json::to_value(definition)?
+            }
+            SemanticQueryResult::Completion(completion) => {
+                let replacement_range =
+                    semantic_range_to_lsp(request.source.as_ref(), completion.replacement_range);
+                let items = replacement_range
+                    .map(|replacement_range| {
+                        completion
+                            .candidates
+                            .into_iter()
+                            .map(|candidate| {
+                                let name = candidate.completion.name;
+                                CompletionItem {
+                                    label: name.clone(),
+                                    kind: Some(match candidate.completion.kind {
+                                        SemanticCompletionKind::Binding => {
+                                            CompletionItemKind::VARIABLE
+                                        }
+                                        SemanticCompletionKind::Arm => CompletionItemKind::FUNCTION,
+                                        SemanticCompletionKind::Mold => CompletionItemKind::STRUCT,
+                                    }),
+                                    detail: Some(candidate.completion.detail),
+                                    sort_text: Some(format!("{:05}-{}", candidate.rank, name)),
+                                    text_edit: Some(CompletionTextEdit::Edit(TextEdit::new(
+                                        replacement_range, name,
+                                    ))),
+                                    ..CompletionItem::default()
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                serde_json::to_value(Some(CompletionResponse::List(CompletionList {
+                    is_incomplete: false,
+                    items,
+                })))?
             }
             SemanticQueryResult::References(references) => {
                 let uri = file_path_to_uri(&request.path)?;

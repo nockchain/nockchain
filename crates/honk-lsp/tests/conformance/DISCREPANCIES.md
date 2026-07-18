@@ -18,14 +18,14 @@
 - **Tests affected:** `cancellation_and_other_requests_remain_responsive_during_semantic_indexing` and `client_cancellation_completes_the_semantic_request_once`.
 - **Review date:** 2026-07-15.
 
-## DISC-003: Limited semantic capability surface
+## DISC-003: Limited workspace-wide semantic provenance
 
 - **Reference:** LSP defines many optional language features.
-- **Implementation:** Honk advertises document symbols and hover backed by an editor-only parsed side table. After a successful compiler check, hover selects the narrowest current debug spot and displays its owned inferred-type summary. Go-to-definition uses a second owned compiler side table for resolved core arms and imported gates, then conservatively falls back to unique arm or mold headers in the same document, the dependency graph returned by Honk's native import resolver, and the configured prelude. Two-glyph gene runes resolve to their canonical tagged alternative in the prelude's `hoon` mold. Core declaration syntax maps explicitly to its hoon-138 parser arm: `++` to `++bola`, `+$` to `++boba`, and `+|` to `++whip`. Open-document overlays shadow disk during these lookups. Duplicate names at the same import depth return null rather than guessing. Native types do not yet retain source provenance for local face or binding declarations.
-- **Impact:** Standard-library molds and types declared as arms, including `list`, transitively imported molds such as `tip5-hash-atom`, gene runes such as `^-`, and core declaration runes such as `++` navigate to their canonical Hoon source. Definition requests for local faces and bindings still return null. No completion, references, formatting, semantic tokens, or pull diagnostics yet.
-- **Resolution:** INVESTIGATING; add declaration provenance at the native resolution boundary without changing the compiler AST or ordinary CLI/batch results.
-- **Tests affected:** all unadvertised optional feature requests.
-- **Review date:** 2026-07-15.
+- **Implementation:** Honk advertises document symbols, hover, definition, completion, references, and rename. An editor-only parsed side table owns lexical scope and structural symbol identity; compiler side tables remain authoritative for inferred types and resolved core arms/gates. Structural definition and completion traverse the native import graph breadth-first and decline ambiguous names. Open-document overlays shadow disk. References preserve exact same-document binding identity, while rename is deliberately restricted to lexical faces and rejects capture or collision.
+- **Impact:** Local faces support definition, references, rename, and completion. Unambiguous local, imported, and standard-library arms and molds support definition and completion, and rune tokens navigate to their canonical prelude implementation. References do not yet search other files, and imported or standard-library declarations cannot be renamed. Formatting, semantic tokens, and pull diagnostics remain unadvertised.
+- **Resolution:** INVESTIGATING; add workspace-wide declaration/reference provenance at the editor/native resolution boundary without changing the compiler AST or ordinary CLI/batch results.
+- **Tests affected:** workspace-wide references and symbol rename, plus unadvertised optional feature requests.
+- **Review date:** 2026-07-17.
 
 ## DISC-004: Whole-document semantic snapshot rebuilds
 
