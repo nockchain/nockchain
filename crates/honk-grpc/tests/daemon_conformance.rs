@@ -14,7 +14,7 @@ use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_client::HealthClient;
 use tonic_health::pb::HealthCheckRequest;
 
-const AURAS_SHA256: &str = "8535630fa4fd1464ecc398ab4d8882ed122b8e8e12435d103518faf64096d378";
+const AURAS_SHA256: &str = "f69e8d53cfa89a8eac53f80e263dd429ffdea6754d7eb6996f278a0de6a8b896";
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -3449,7 +3449,19 @@ fn check_worker_loop(
             }))
             .context("honk editor check request failed")?;
         let (diagnostic, semantic_facts, resolution_facts) = match output.result {
-            Ok(check) => (None, check.semantic_facts, check.resolution_facts),
+            Ok(check) => {
+                debug!(
+                    target = %target.display(),
+                    path_hits = check.cache_stats.path_hits,
+                    path_misses = check.cache_stats.path_misses,
+                    invalidated_paths = check.cache_stats.invalidated_paths,
+                    check_hits = check.cache_stats.check_hits,
+                    check_misses = check.cache_stats.check_misses,
+                    invalidated_checks = check.cache_stats.invalidated_checks,
+                    "honk editor check cache result"
+                );
+                (None, check.semantic_facts, check.resolution_facts)
+            }
             Err(WorkspaceCompileError { diagnostic }) => (Some(diagnostic), Vec::new(), Vec::new()),
         };
         events

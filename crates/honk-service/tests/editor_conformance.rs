@@ -45,17 +45,24 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
     fs::write(&stable, "|=  [a=@ b=@]\n  (sub a b)\n").expect("stable source");
     fs::write(&entry, disk_entry).expect("entry source");
 
-    let service = CompilerService::spawn(CompilerServiceConfig {
-        workspace: WorkspaceConfig {
-            prelude: root.join("hoon/common/hoon.hoon"),
-            dependencies: temp.path().to_path_buf(),
-            subject_type_jam: None,
-            dbug: true,
-            vet: true,
+    let service = CompilerService::spawn_with_documents(
+        CompilerServiceConfig {
+            workspace: WorkspaceConfig {
+                prelude: root.join("hoon/common/hoon.hoon"),
+                dependencies: temp.path().to_path_buf(),
+                subject_type_jam: None,
+                dbug: true,
+                vet: true,
+            },
+            max_compiles: 0,
+            worker_stack_bytes: DEFAULT_WORKER_STACK_BYTES,
         },
-        max_compiles: 0,
-        worker_stack_bytes: DEFAULT_WORKER_STACK_BYTES,
-    })
+        [DocumentUpdate {
+            path: leaf.clone(),
+            version: 0,
+            text: disk_leaf.to_string(),
+        }],
+    )
     .expect("initialize compiler service");
     let compiler = service.handle();
 
@@ -85,6 +92,8 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
             && fact.use_location.start_line.is_some()
             && fact.definition_location.start_line.is_some()
     }));
+    assert_eq!(baseline_check.cache_stats.check_misses, 1);
+    assert_eq!(baseline_check.cache_stats.check_hits, 0);
     let baseline = compiler
         .compile(request(&entry))
         .await
@@ -100,8 +109,14 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         .result
         .expect("cached check");
     assert!(
-        cached_check.cache_stats.path_hits >= 2,
-        "artifact-free check should reuse compiled dependencies"
+        cached_check.cache_stats.check_hits >= 1,
+        "an unchanged artifact-free check should reuse its detached root result"
+    );
+    assert_eq!(cached_check.cache_stats.check_misses, 0);
+    assert_eq!(cached_check.semantic_facts, baseline_check.semantic_facts);
+    assert_eq!(
+        cached_check.resolution_facts,
+        baseline_check.resolution_facts
     );
 
     let update = compiler
@@ -112,21 +127,69 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         })
         .await
         .expect("open leaf document");
-    assert_eq!(update.revision, 1);
+    assert_eq!(update.revision, 2);
     let changed = compiler
         .compile(request(&entry))
         .await
         .expect("overlay response");
-    assert_eq!(changed.document_revision, 1);
+    assert_eq!(changed.document_revision, 2);
     let changed = changed.result.expect("overlay compile");
     assert!(changed.cache_invalidated);
+    assert!(
+        changed.cache_stats.invalidated_checks >= 1,
+        "a dependency edit should invalidate the cached root check"
+    );
     assert_ne!(changed.artifact, baseline.artifact);
     assert_eq!(fs::read_to_string(&leaf).expect("disk leaf"), disk_leaf);
+
+    let changed_check = compiler
+        .check(WorkspaceCheckRequest {
+            entry: entry.clone(),
+        })
+        .await
+        .expect("changed check response")
+        .result
+        .expect("changed check");
+    assert_eq!(changed_check.cache_stats.check_misses, 1);
+    let repeated_changed_check = compiler
+        .check(WorkspaceCheckRequest {
+            entry: entry.clone(),
+        })
+        .await
+        .expect("repeated changed check response")
+        .result
+        .expect("repeated changed check");
+    assert_eq!(repeated_changed_check.cache_stats.check_hits, 1);
+    assert_eq!(repeated_changed_check.cache_stats.check_misses, 0);
+    assert_eq!(
+        repeated_changed_check.semantic_facts,
+        changed_check.semantic_facts
+    );
+
+    let same_contents = compiler
+        .update_document(DocumentUpdate {
+            path: leaf.clone(),
+            version: 2,
+            text: "|=  [a=@ b=@]\n  (mul a b)\n".to_string(),
+        })
+        .await
+        .expect("save unchanged leaf contents");
+    assert_eq!(same_contents.revision, 3);
+    let same_contents_check = compiler
+        .check(WorkspaceCheckRequest {
+            entry: entry.clone(),
+        })
+        .await
+        .expect("same-content check response");
+    assert_eq!(same_contents_check.document_revision, 3);
+    let same_contents_check = same_contents_check.result.expect("same-content check");
+    assert_eq!(same_contents_check.cache_stats.check_hits, 1);
+    assert_eq!(same_contents_check.cache_stats.check_misses, 0);
 
     compiler
         .update_document(DocumentUpdate {
             path: leaf.clone(),
-            version: 2,
+            version: 3,
             text: disk_leaf.to_string(),
         })
         .await
@@ -135,7 +198,7 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         .compile(request(&entry))
         .await
         .expect("equivalent overlay response");
-    assert_eq!(equivalent.document_revision, 2);
+    assert_eq!(equivalent.document_revision, 4);
     let equivalent = equivalent.result.expect("equivalent overlay compile");
     assert!(equivalent.cache_invalidated);
     assert!(
@@ -155,7 +218,7 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
     let stale = compiler
         .update_document(DocumentUpdate {
             path: leaf.clone(),
-            version: 2,
+            version: 3,
             text: "|=  [a=@ b=@]\n  (mul a b)\n".to_string(),
         })
         .await
@@ -177,7 +240,7 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         .compile(request(&entry))
         .await
         .expect("malformed response");
-    assert_eq!(malformed.document_revision, 3);
+    assert_eq!(malformed.document_revision, 5);
     let diagnostic = malformed.result.expect_err("malformed source should fail");
     assert_eq!(diagnostic.diagnostic.kind, WorkspaceDiagnosticKind::Parse);
     assert_eq!(fs::read_to_string(&entry).expect("disk entry"), disk_entry);
@@ -194,7 +257,7 @@ async fn open_documents_shadow_disk_and_close_restores_it() {
         .compile(request(&entry))
         .await
         .expect("restored response");
-    assert_eq!(restored.document_revision, 5);
+    assert_eq!(restored.document_revision, 7);
     let restored = restored.result.expect("restored compile");
     assert!(restored.cache_invalidated);
     assert_eq!(restored.artifact, baseline.artifact);

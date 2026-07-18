@@ -2035,12 +2035,30 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
     assert!(dig_edits
         .iter()
         .all(|edit| edit["newText"] == "mining-digest"));
+    let dig_declaration_line = source
+        .lines()
+        .position(|line| line.contains("=/  [prf=proof:sp dig=tip5-hash-atom]"))
+        .expect("dig declaration");
+    let dig_success_line = source
+        .lines()
+        .position(|line| line.contains("%dumb-zkpow prf dig header.cause"))
+        .expect("successful mine dig uses");
+    let dig_failure_line = source
+        .lines()
+        .position(|line| line.contains("[%mine-result %| (atom-to-digest:tip5 dig)]"))
+        .expect("failed mine dig use");
     assert_eq!(
         dig_edits
             .iter()
             .map(|edit| edit["range"]["start"]["line"].as_u64().expect("line"))
             .collect::<Vec<_>>(),
-        vec![53, 56, 57, 57, 58]
+        vec![
+            u64::try_from(dig_declaration_line).expect("small line"),
+            u64::try_from(dig_use_line).expect("small line"),
+            u64::try_from(dig_success_line).expect("small line"),
+            u64::try_from(dig_success_line).expect("small line"),
+            u64::try_from(dig_failure_line).expect("small line"),
+        ]
     );
     request_id += 1;
 

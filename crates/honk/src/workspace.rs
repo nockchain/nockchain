@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
@@ -233,6 +233,9 @@ pub struct WorkspaceCacheStats {
     pub path_hits: u64,
     pub path_misses: u64,
     pub invalidated_paths: u64,
+    pub check_hits: u64,
+    pub check_misses: u64,
+    pub invalidated_checks: u64,
 }
 
 impl WorkspaceCacheStats {
@@ -243,6 +246,11 @@ impl WorkspaceCacheStats {
             invalidated_paths: self
                 .invalidated_paths
                 .saturating_sub(before.invalidated_paths),
+            check_hits: self.check_hits.saturating_sub(before.check_hits),
+            check_misses: self.check_misses.saturating_sub(before.check_misses),
+            invalidated_checks: self
+                .invalidated_checks
+                .saturating_sub(before.invalidated_checks),
         }
     }
 }
@@ -1678,7 +1686,9 @@ impl Default for WorkspaceArena {
 /// This type is intentionally `!Send`: it borrows compiler nouns and contains
 /// `Rc`-backed state. Servers should construct and use it on one dedicated
 /// compiler thread, then communicate with that thread using Send-safe values.
-/// Source changes must be handled by dropping the surrounding
+/// The explicit editor-overlay constructor may apply content-only updates in
+/// place and invalidate dependency/check caches. Filesystem-only, layout, and
+/// configuration changes still require dropping the surrounding
 /// [`WorkspaceArena`] and constructing a fresh epoch.
 pub struct WorkspaceCompiler<'arena> {
     config: WorkspaceConfig,
@@ -1857,21 +1867,18 @@ impl<'arena> WorkspaceCompiler<'arena> {
         self.builder
             .observe_workspace_file(&request.entry)
             .map_err(WorkspaceCompileError::from_dyn)?;
-        self.builder.begin_semantic_recording();
-        let compile_result = self
+        let check = self
             .builder
-            .compile_entry(&request.entry)
-            .map_err(WorkspaceCompileError::from_dyn);
-        let (semantic_facts, resolution_facts) = self.builder.finish_semantic_recording();
-        compile_result?;
+            .check_entry(&request.entry)
+            .map_err(WorkspaceCompileError::from_dyn)?;
 
         let cache_stats = self.builder.cache_stats.since(cache_stats_before);
         self.reported_cache_stats = self.builder.cache_stats;
         Ok(WorkspaceCheckOutput {
             cache_invalidated: false,
             cache_stats,
-            semantic_facts,
-            resolution_facts,
+            semantic_facts: check.semantic_facts,
+            resolution_facts: check.resolution_facts,
         })
     }
 }
@@ -2134,6 +2141,12 @@ struct NativeBuildProduct {
     standard_jam: Option<Vec<u8>>,
 }
 
+#[derive(Clone)]
+struct CachedWorkspaceCheck {
+    semantic_facts: Vec<CompilerSemanticFact>,
+    resolution_facts: Vec<CompilerResolutionFact>,
+}
+
 struct NativeBuildContext<'a> {
     directory: PathBuf,
     prelude_vase: NativeVase,
@@ -2161,6 +2174,9 @@ struct NativeBuildContext<'a> {
     observed_files: HashMap<PathBuf, blake3::Hash>,
     dependencies: HashMap<PathBuf, HashSet<PathBuf>>,
     reverse_dependencies: HashMap<PathBuf, HashSet<PathBuf>>,
+    // Keep this editor-only addition deterministic and avoid consuming a
+    // RandomState seed in the shared CLI/compiler initialization sequence.
+    check_cache: BTreeMap<PathBuf, CachedWorkspaceCheck>,
     cache_stats: WorkspaceCacheStats,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
@@ -2208,6 +2224,7 @@ impl<'a> NativeBuildContext<'a> {
             observed_files: HashMap::new(),
             dependencies: HashMap::new(),
             reverse_dependencies: HashMap::new(),
+            check_cache: BTreeMap::new(),
             cache_stats: WorkspaceCacheStats::default(),
             visiting: HashSet::new(),
             wrappers: ExactWrapperBatteries::empty(),
@@ -2257,6 +2274,10 @@ impl<'a> NativeBuildContext<'a> {
             if self.cache.remove(&path).is_some() {
                 self.cache_stats.invalidated_paths =
                     self.cache_stats.invalidated_paths.saturating_add(1);
+            }
+            if self.check_cache.remove(&path).is_some() {
+                self.cache_stats.invalidated_checks =
+                    self.cache_stats.invalidated_checks.saturating_add(1);
             }
         }
         for path in changed_paths {
@@ -3103,6 +3124,29 @@ impl<'a> NativeBuildContext<'a> {
             self.queue_cache_object(cache_key, CacheObjectKind::EntryProduct, merkle, root);
         }
         Ok(product)
+    }
+
+    fn check_entry(&mut self, path: &Path) -> Result<CachedWorkspaceCheck> {
+        // This cache is deliberately limited to editor checks and owns only
+        // detached facts. Compiler nouns, types, formulas, and arena-backed
+        // state continue to live solely in the existing per-path cache.
+        let canonical = self.source_canonicalize(path)?;
+        if let Some(cached) = self.check_cache.get(&canonical).cloned() {
+            self.cache_stats.check_hits = self.cache_stats.check_hits.saturating_add(1);
+            return Ok(cached);
+        }
+
+        self.cache_stats.check_misses = self.cache_stats.check_misses.saturating_add(1);
+        self.begin_semantic_recording();
+        let compile_result = self.compile_entry(path);
+        let (semantic_facts, resolution_facts) = self.finish_semantic_recording();
+        compile_result?;
+        let check = CachedWorkspaceCheck {
+            semantic_facts,
+            resolution_facts,
+        };
+        self.check_cache.insert(canonical, check.clone());
+        Ok(check)
     }
 
     fn subject_vase_from_cached(vase: &NativeVase) -> SubjectVase {
