@@ -280,9 +280,10 @@ boot delay; it logs this), caching it and validating it against a committed v0
 consensus digest either way. A node with no valid setup cannot validate `%ai-pow`
 blocks, so any failure is fatal — the node shuts down rather than run blind.
 
-The setup is disk-paged: a bucket's context is read + checksum-verified on first
-use and held in a small LRU (`--ai-pow-verifier-cache-cap`, env
-`AI_POW_VERIFIER_CACHE_CAP`). See Operational Impact.
+The setup is disk-paged: each bucket's context is read + checksum-verified on
+first use and held in an LRU (`--ai-pow-verifier-cache-cap`, env
+`AI_POW_VERIFIER_CACHE_CAP`). The production default retains all seven supported
+buckets once loaded, bounding remote-triggered page-ins to one per bucket.
 
 ### Miner and candidate emission
 
@@ -371,9 +372,10 @@ early block flow and its own dedicated 20%-of-reward funding stream.
 
 ### Configuration
 
-No mandatory configuration changes for mainnet. Operators may raise
-`--ai-pow-verifier-cache-cap` (default 2) toward 7 to pin all trace-height
-buckets resident and avoid page-in latency (bounded RSS; see Operational Impact).
+No mandatory configuration changes for mainnet. The
+`--ai-pow-verifier-cache-cap` default is 7, retaining every supported setup
+bucket after first use. Operators may lower it to reduce RSS only on trusted
+networks; doing so reintroduces attacker-controlled synchronous page-in thrash.
 Fakenet operators may override the activation height and per-puzzle ASERT params
 with `--fakenet-ai-pow-activation-height`, `--fakenet-ai-asert-*`, and
 `--fakenet-zk-asert-*` (all `requires = "fakenet"`). The AI ASERT phase and AI
@@ -453,11 +455,12 @@ structurally valid across the boundary.
   fresh noised matmul; there is no separate nonce that lets a miner skip
   inference. Matrices are miner-chosen (arbitrary model, Pearl parity) but bound
   in-circuit to the committed `H_A`/`H_B` (dense) or routing/jackpot (MoE).
-- **Cache-thrash DoS (mitigated, operator-tunable).** `trace_height` is an
-  attacker-controlled cert field; a cache miss triggers a synchronous disk
-  page-in on the serf thread. An operator can pin all buckets resident
-  (`--ai-pow-verifier-cache-cap ≥ 7`) to neutralize it; the default (2) bounds
-  RSS. Moving the page-in off the consensus thread is a tracked follow-up.
+- **Cache-thrash DoS (closed by default).** `trace_height` is an
+  attacker-controlled cert field and a cache miss triggers a synchronous disk
+  page-in before proof rejection. The default LRU cap is the full seven-bucket
+  accept band, so each bucket pages in at most once and an attacker cannot force
+  eviction/reload cycles. Lowering `--ai-pow-verifier-cache-cap` is an explicit
+  memory-for-liveness tradeoff unsuitable for adversarial validators.
 - **Time-warp.** `check-timestamp` enforces BIP113 median-of-11 + max-future.
   Both puzzles read the same global median, so timestamp manipulation cannot
   create cross-puzzle difficulty asymmetry.
@@ -475,10 +478,10 @@ structurally valid across the boundary.
   (~15 minutes, logged: "Generating the AI-PoW verifier-setup table…"). Do not
   kill a node that appears "hung" during this step; subsequent boots load the
   cache in seconds. Ship the cache to skip it.
-- **Verifier-setup RSS.** A resident bucket context is ~0.8 GB; all seven
-  resident (`cache-cap 7`) is ~5.6–8.6 GB. jemalloc is required (not optional)
-  so paged-out memory is returned to the OS. Choose the cap against available
-  RAM vs page-in latency.
+- **Verifier-setup RSS.** The DoS-safe default retains all seven contexts after
+  first use, requiring ~5.6–8.6 GB. jemalloc is required (not optional).
+  Lowering the cache cap reduces RSS but permits attacker-controlled synchronous
+  page-in thrash and is appropriate only on trusted networks.
 - **Dual mining.** Two miner processes can attach: `zk-pow-mine` and
   `ai-pow-mine` (the latter with a self-contained `--canonical` CPU mode). Each
   receives its own candidate effect (`%mine-zk` / `%mine-ai`) and submits its own
@@ -547,8 +550,6 @@ The following are tracked residuals, not part of this upgrade's consensus rules:
 
 - **External ZK-circuit + recursion audit (`§1.1`)** — the one assumption every
   soundness verdict rests on; required before an adversarial mainnet.
-- **Verifier-setup page-in off the consensus thread** — closes the residual
-  latency of the cache-thrash mitigation for under-provisioned operators.
 - **80/20 → 100% miner reversion.** Aletheia deferred the reversion of its
   coinbase split to "the new fully useful PoW puzzle." Logos ships that puzzle;
   a subsequent upgrade may wire the reversion trigger. Until then the 80/20

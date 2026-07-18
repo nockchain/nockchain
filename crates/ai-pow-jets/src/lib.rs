@@ -713,6 +713,10 @@ mod tests {
     fn production_verifier_setup_buckets_cover_the_capped_band() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         assert!(!buckets.is_empty(), "must return at least one bucket");
+        assert!(
+            crate::setup::AI_POW_VERIFIER_CACHE_CAP_DEFAULT >= buckets.len(),
+            "the production default must retain every attacker-selectable bucket",
+        );
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let mut log2s: Vec<u32> = Vec::new();
         for b in &buckets {

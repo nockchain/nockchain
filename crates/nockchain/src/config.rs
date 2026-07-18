@@ -381,11 +381,11 @@ pub struct NockchainCli {
     pub bind_private_grpc_port: u16,
     #[arg(
         long = "ai-pow-verifier-cache-cap",
-        help = "Max resident AI-PoW verifier contexts (LRU). Raise toward the \
-                production bucket count (7, covering trace heights 2^13..2^19) to make \
-                the node immune to the attacker-controlled trace-height page-in thrash \
-                DoS, at the cost of RSS (~0.8 GB per resident bucket). Defaults low so \
-                the disk-paging RSS optimization holds; overrides AI_POW_VERIFIER_CACHE_CAP."
+        help = "Max resident AI-PoW verifier contexts (LRU). The production default \
+                retains all 7 supported trace-height buckets (2^13..2^19), preventing \
+                attacker-controlled evict/reload thrash at ~5.6–8.6 GiB RSS. Lowering \
+                the cap trades memory for synchronous page-ins and is unsafe for an \
+                adversarial validator. Overrides AI_POW_VERIFIER_CACHE_CAP."
     )]
     pub ai_pow_verifier_cache_cap: Option<usize>,
 }

@@ -434,25 +434,21 @@ pub fn load_verifier_setup_table(
 /// memory at once). See [`verifier_cache_cap`].
 pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 
-/// Default resident-context LRU cap. A node verifies at the current difficulty's
-/// trace height (stable — ASERT adjusts slowly) and admits blocks in height order,
-/// so the honest working set is ~1–2 heights; 2 avoids thrashing on a height shift
-/// while keeping standing RSS to ~2 contexts instead of all 7.
+/// Default resident-context LRU cap. `trace_height` is attacker-controlled and a
+/// cache miss performs a synchronous context page-in before the certificate can
+/// be rejected. The production default therefore retains every supported bucket:
+/// each of the seven contexts can be loaded at most once, so remote inputs cannot
+/// create an unbounded evict/reload loop on the consensus thread.
 ///
-/// DoS knob: `trace_height` is an attacker-controlled certificate field, and a cache
-/// miss triggers a ~0.6 s synchronous context page-in on the single serf/consensus
-/// thread — paid even for INVALID blocks (the page-in precedes the cert reject). An
-/// attacker cycling ≥ cap+1 of the 7 valid buckets (2^13..2^19) forces an
-/// evict+reload each block, stalling consensus. If that thrash is observed, raise the
-/// cap to 7 (all buckets resident, bounded RSS, no page-in) via
-/// `--ai-pow-verifier-cache-cap` or the `AI_POW_VERIFIER_CACHE_CAP` env var. Kept low
-/// by default so the disk-paging RSS optimization holds for the common case.
-pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 2;
+/// All seven resident contexts require roughly 5.6–8.6 GiB. An operator may lower
+/// the cap via `--ai-pow-verifier-cache-cap` or
+/// [`AI_POW_VERIFIER_CACHE_CAP_ENV`] to trade memory for page-ins, but doing so
+/// explicitly re-enables cache-thrash exposure and is unsuitable for an
+/// adversarial validator.
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 7;
 
-/// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
-/// `>= 1`), else the default. Raising it trades RSS for fewer on-demand rebuilds;
-/// `>= 7` keeps every bucket resident once built (≈ the old all-resident behavior,
-/// minus the upfront boot rebuild).
+/// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped
+/// to `>= 1`), else the DoS-safe all-bucket default.
 pub fn verifier_cache_cap() -> usize {
     std::env::var(AI_POW_VERIFIER_CACHE_CAP_ENV)
         .ok()
