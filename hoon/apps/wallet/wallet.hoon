@@ -599,12 +599,12 @@
     =/  first-name-b58=@t  (to-b58:hash:transact first-name)
     =.  keys.state  (watch-first-name:put:v first-name `lock.p.res)
     ::  The on-chain protocol-fund coinbase notes do NOT carry this canonical
-    ::  multisig first-name: +make-name:coinbase wraps fund-address as a single
+    ::  multisig first-name: +make-name:coinbase wraps protocol-fund-address as a single
     ::  %pkh, so every fund note shares +fund-note-firstname instead. When the
-    ::  watched multisig IS the protocol fund (its lock-root == fund-address),
+    ::  watched multisig IS the protocol fund (its lock-root == protocol-fund-address),
     ::  also watch that wrapped first-name so the fund notes are actually
     ::  discovered; +pull:locks resolves them back to this multisig for signing.
-    =/  is-fund=?  =(fund-address:transact (hash:lock:transact lock.p.res))
+    =/  is-fund=?  =(protocol-fund-address:transact (hash:lock:transact lock.p.res))
     =/  fund-note-name-b58=@t  (to-b58:hash:transact fund-note-firstname:transact)
     =?  keys.state  is-fund
       (watch-first-name:put:v fund-note-firstname:transact `lock.p.res)
@@ -937,11 +937,18 @@
         ---
 
         """
+      ::  NOTE: intentionally NO [%exit 0] here. The %nockchain-grpc %send-tx
+      ::  effect is delivered to the grpc listener driver, which performs the
+      ::  actual network broadcast asynchronously. If we emitted [%exit 0] in the
+      ::  same breath, the process would tear down and abort the in-flight send
+      ::  before it reached the node (the tx would silently never be broadcast).
+      ::  Instead, the grpc listener driver triggers a clean exit itself once the
+      ::  node has acknowledged the send. See grpc_listener_driver in
+      ::  crates/nockapp-grpc/.../public_nockchain/v2/driver.rs.
       :_  state
       :~  [%markdown msg]
           [%grpc %poke pid nock-cause]
           [%nockchain-grpc %send-tx raw]
-          [%exit 0]
       ==
     ::
         %.n

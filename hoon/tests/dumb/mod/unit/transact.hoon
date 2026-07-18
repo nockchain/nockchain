@@ -10,6 +10,8 @@
 |_  constants=_bc-v0-phase:helpers
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
+::  +der: pre-activation derived-state (read-only extra arg for consensus/miner doors)
+++  der  ^-  derived-state  *derived-state
 ++  test-add-genesis-page
   =/  con=consensus-state  initial-consensus-state:h
   ::
@@ -64,7 +66,7 @@
   =/  new-page  (make-empty-page:h last-page)
   %+  expect-eq
     !>([%.n %block-too-large])
-  !>((~(validate-page-with-txs dcon con constants) new-page))
+  !>((~(validate-page-with-txs dcon con der constants) new-page))
 ::
 ++  test-exceeds-medium-block-size
   =.  constants  bc-max-block-size-medium-v0:helpers
@@ -78,14 +80,14 @@
     ?:  =(50 i)
       [con min txs]
     =/  new-page  (make-empty-page:h curr-page)
-    =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con constants) new-page)
+    =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der constants) new-page)
     ?.  ?=(%.y -.r)
       ~&  failed-reason++.r  !!
     =/  acc=tx-acc:t  +.r
-    =.  con  (~(accept-page dcon con constants) new-page acc *@da)
-    =.  con  (~(update-heaviest dcon con constants) new-page)
-    =.  con  (~(garbage-collect dcon con constants) default-retain:h)
-    =.  min  (~(heard-new-block dmin min constants) con *@da)
+    =.  con  (~(accept-page dcon con der constants) new-page acc *@da)
+    =.  con  (~(update-heaviest dcon con der constants) new-page)
+    =.  con  (~(garbage-collect dcon con der constants) default-retain:h)
+    =.  min  (~(heard-new-block dmin min der constants) con *@da)
     =/  =coinbase:t  (new:v0:coinbase:t new-page p:default-keys-1:h)
     ?>  ?=(^ -.coinbase)
     =/  raw  (simple-from-note:new:raw-tx:v0:t p:default-keys-2:h coinbase s:default-keys-1:h)
@@ -96,7 +98,7 @@
     %+  roll
       txs
     |=  [=raw-tx:t min=_min]
-    =/  new-min  (~(heard-new-tx dmin min constants) raw-tx)
+    =/  new-min  (~(heard-new-tx dmin min der constants) raw-tx)
     ::  We are asserting that the mining state has changed here
     ::  If it hasn't changed, that means that adding the raw-tx
     ::  causes the block size to exceed the limit.
@@ -176,14 +178,14 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)
     (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t make-default-coinbase:v0:h))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -222,11 +224,11 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx1)
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx2)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx1)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx2)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  -:(~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  -:(~(validate-page-with-txs dcon con der constants) new-page)
   %+  expect-eq
     !>(%.n)
   !>(tac)
@@ -298,14 +300,14 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)
     (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
         (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin2))
@@ -364,13 +366,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
         (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin2))
@@ -431,13 +433,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -505,16 +507,16 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
   ~&  >>  constants+constants
-  =/  valid=(reason ~)  (~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =/  valid=(reason ~)  (~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ?.  -.valid
     ~&  >>  [%failed-reason +:valid]  !!
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -579,14 +581,14 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)
     (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
         (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin2))
@@ -655,13 +657,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
         (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin2))
@@ -730,13 +732,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
         (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin2))
@@ -800,14 +802,14 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx1)
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx2)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx1)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx2)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::  validate and add the new page
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   ::  check balances
   =/  old-in-balance=?
     ?|  (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t coin1))
@@ -841,10 +843,10 @@
   ::
   ::  create a new empty candidate block
   =/  min=mining-state  initial-mining-state:h
-  =.  min  (~(heard-new-block dmin min constants) con *@da)
+  =.  min  (~(heard-new-block dmin min der constants) con *@da)
   =/  raw=raw-tx:t  (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h)
   ?>  ?=(^ -.raw)
-  =.  min  (~(heard-new-tx dmin min constants) raw)
+  =.  min  (~(heard-new-tx dmin min der constants) raw)
   %+  expect-eq
     !>(%.y)
   !>((~(has z-in ~(tx-ids get:page:t candidate-block.min)) ~(id get:raw-tx:t raw)))
@@ -855,14 +857,14 @@
   ::
   ::  create a new empty candidate block
   =/  min=mining-state  initial-mining-state:h
-  =.  min  (~(heard-new-block dmin min constants) con *@da)
+  =.  min  (~(heard-new-block dmin min der constants) con *@da)
   ::
   =/  raw1=raw-tx:t  (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h)
   =/  raw2=raw-tx:t  (make-default-coinbase-raw-tx:v0:h p:default-keys-3:h)
   ?>  ?=(^ -.raw1)
   ?>  ?=(^ -.raw2)
-  =.  min  (~(heard-new-tx dmin min constants) raw1)
-  =.  min  (~(heard-new-tx dmin min constants) raw2)
+  =.  min  (~(heard-new-tx dmin min der constants) raw1)
+  =.  min  (~(heard-new-tx dmin min der constants) raw2)
   %+  expect-eq
     !>  [%.y %.n]
   !>  :-  (~(has z-in ~(tx-ids get:page:t candidate-block.min)) ~(id get:raw-tx:t raw1))
@@ -875,11 +877,11 @@
   =^  par=page:t  con  (add-n-pages:h 1 con default-retain:h)
   ::
   =/  min=mining-state  initial-mining-state:h
-  =.  min  (~(heard-new-block dmin min constants) con *@da)
+  =.  min  (~(heard-new-block dmin min der constants) con *@da)
   ::
   =|  raw=raw-tx:v0:t
   =/  expect-min  min
-  =.  min  (~(heard-new-tx dmin min constants) raw)
+  =.  min  (~(heard-new-tx dmin min der constants) raw)
   %+  expect-eq  :: mining state should not change
     !>(expect-min)
   !>(min)
@@ -903,7 +905,7 @@
   =|  raw=raw-tx:v0:t
   ?>  ?=(^ -.raw)
   =.  id.raw  (compute-id:raw-tx:t raw)
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   =.  new-page
     ?^  -.new-page
       %=  new-page
@@ -921,7 +923,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   =/  tac=(reason tx-acc:t)
-    (~(validate-page-with-txs dcon con constants) new-page)
+    (~(validate-page-with-txs dcon con der constants) new-page)
   %+  expect-eq  !>(%.n)
   !>(-:tac)
 ::
@@ -1124,13 +1126,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t make-default-coinbase:v0:h))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -1170,13 +1172,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
   ::
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)  (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t make-default-coinbase:v0:h))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -1209,7 +1211,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ::  reject a block whose timestamp is more than 2 hours in the future
 ++  test-reject-block-time-traveler
@@ -1231,7 +1233,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-block-epoch-counter
   =/  con=consensus-state  initial-consensus-state:h
@@ -1252,7 +1254,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-block-parent-epoch-counter
   =/  con=consensus-state  (initial-consensus-state-custom:h constants)
@@ -1278,7 +1280,7 @@
   ::
   =/  new-page=page:t  (make-empty-page:h par)
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-block-target
   =/  con=consensus-state  initial-consensus-state:h
@@ -1299,7 +1301,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-block-height
   =/  con=consensus-state  initial-consensus-state:h
@@ -1320,7 +1322,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-block-heaviness
   =/  con=consensus-state  initial-consensus-state:h
@@ -1341,7 +1343,7 @@
       digest  (compute-digest:page:t new-page)
     ==
   %+  expect-eq  !>(%.n)
-  !>(-:(~(validate-page-without-txs dcon con constants) new-page (add 600 ~(timestamp get:page:t par))))
+  !>(-:(~(validate-page-without-txs dcon con der constants) new-page (add 600 ~(timestamp get:page:t par))))
 ::
 ++  test-reject-tx-digest
   =/  raw=raw-tx:t  (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h)
@@ -1577,13 +1579,13 @@
     %=  new-page
       digest  (compute-digest:page:t new-page)
     ==
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
-  ?>  -:(~(validate-page-without-txs dcon con constants) new-page ~(timestamp get:page:t new-page))
-  =/  tac  (~(validate-page-with-txs dcon con constants) new-page)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
+  ?>  -:(~(validate-page-without-txs dcon con der constants) new-page ~(timestamp get:page:t new-page))
+  =/  tac  (~(validate-page-with-txs dcon con der constants) new-page)
   ?:  ?=(%.n -.tac)
     (expect !>(%.n))
-  =.  con  (~(accept-page dcon con constants) new-page +.tac *@da)
-  =.  con  (~(update-heaviest dcon con constants) new-page)
+  =.  con  (~(accept-page dcon con der constants) new-page +.tac *@da)
+  =.  con  (~(update-heaviest dcon con der constants) new-page)
   =/  old-in-balance=?
     (~(has h-bi balance.con) ~(digest get:page:t new-page) ~(name get:nnote:t make-default-coinbase:v0:h))
   =/  outs=outputs:t  ~(outputs get:tx:t tx)
@@ -1615,7 +1617,7 @@
   ::  we hear a new tx
   =/  =tx:t  (new:tx:t (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h) 2)
   =/  raw=raw-tx:t  raw-tx.tx
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   =/  expect-pending-blocks  pending-blocks.con
   =^  par=page:t  con  (add-n-pages:h 1 con (some 20))
   %+  expect-eq
@@ -1630,7 +1632,7 @@
   ::  we hear a new tx
   =/  =tx:t  (new:tx:t (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h) 2)
   =/  raw=raw-tx:t  raw-tx.tx
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   =/  expect-raw-txs  raw-txs.con
   =/  expect-excluded-txs  excluded-txs.con
   ::  add one fewer page than the tx gc window to hit edge case
@@ -1656,7 +1658,7 @@
   ::
   =/  expect-raw-txs  raw-txs.con
   =/  expect-excluded-txs  excluded-txs.con
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   ::  add the tx gc window's worth of pages to hit the edge
   =^  new-page=page:t  con  (add-n-pages:h default-tx-gc-retain:h con default-retain:h)
   ;:  weld
@@ -1681,7 +1683,7 @@
   ::
   =/  expect-raw-txs  raw-txs.con
   =/  expect-excluded-txs  excluded-txs.con
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   =^  new-page=page:t  con  (add-n-pages:h 1 con (some 0))
   ;:  weld
     %+  expect-eq
@@ -1701,7 +1703,7 @@
   ::  we hear a new tx
   =/  =tx:t  (new:tx:t (make-default-coinbase-raw-tx:v0:h p:default-keys-2:h) 2)
   =/  raw=raw-tx:t  raw-tx.tx
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw)
   =/  expect-raw-txs  raw-txs.con
   =/  expect-excluded-txs  excluded-txs.con
   =^  par=page:t  con  (add-n-pages:h (dec default-tx-gc-retain:h) con ~)
@@ -1725,12 +1727,12 @@
   =/  raw2=raw-tx:t  raw-tx.tx2
   ::
   ::  heard first tx
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw1)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw1)
   ::
   ::  heard second tx with same input
   %+  expect-eq
     !>(%.y)
-  !>((~(inputs-spent dcon con constants) raw2))
+  !>((~(inputs-spent dcon con der constants) raw2))
 ::
 ++  test-pending-reject-inputs-not-in-balance
   =/  con=consensus-state  initial-consensus-state:h
@@ -1741,7 +1743,7 @@
   ::  heard tx
   %+  expect-eq
     !>(%.n)
-  !>((~(inputs-in-heaviest-balance dcon con constants) raw))
+  !>((~(inputs-in-heaviest-balance dcon con der constants) raw))
 ::
 ++  test-pending-accepts-inputs-not-in-spent-by
   =/  con=consensus-state  initial-consensus-state:h
@@ -1753,7 +1755,7 @@
   ::  heard tx
   %+  expect-eq
     !>(%.n)
-  !>((~(inputs-spent dcon con constants) raw))
+  !>((~(inputs-spent dcon con der constants) raw))
 ::
 ++  test-pending-accepts-inputs-in-heaviest-balance
   =/  con=consensus-state  initial-consensus-state:h
@@ -1765,7 +1767,7 @@
   ::  heard tx
   %+  expect-eq
     !>(%.y)
-  !>((~(inputs-in-heaviest-balance dcon con constants) raw))
+  !>((~(inputs-in-heaviest-balance dcon con der constants) raw))
 ::
 ++  test-remove-pending-block
   =/  con=consensus-state  initial-consensus-state:h
@@ -1795,9 +1797,9 @@
   ::
   =/  expect-con  con
   ::  add block to pending state
-  =^  miss  con  (~(add-pending-block dcon con constants) new-page)
+  =^  miss  con  (~(add-pending-block dcon con der constants) new-page)
   ::  remove block from pending state
-  =.  con  (~(reject-pending-block dcon con constants) ~(digest get:page:t new-page))
+  =.  con  (~(reject-pending-block dcon con der constants) ~(digest get:page:t new-page))
   ::
   %+  expect-eq
     !>  expect-con
@@ -1830,10 +1832,10 @@
     ==
   ::
   ::  add block to pending state
-  =^  miss  con  (~(add-pending-block dcon con constants) new-page)
+  =^  miss  con  (~(add-pending-block dcon con der constants) new-page)
   ::
   ::  add tx to pending state
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx)
   ::
   =/  expect-ready
     ~[~(digest get:page:t new-page)]
@@ -1871,10 +1873,10 @@
     ==
   ::
   ::  add block to pending state
-  =^  miss  con  (~(add-pending-block dcon con constants) new-page)
+  =^  miss  con  (~(add-pending-block dcon con der constants) new-page)
   ::
   ::
-  =^  ready  con  (~(add-raw-tx dcon con constants) raw-tx.tx2)
+  =^  ready  con  (~(add-raw-tx dcon con der constants) raw-tx.tx2)
   ::
   ::  dont add tx to pending state
   =/  expect-ready  ~
@@ -1911,7 +1913,7 @@
   =/  actual-target-bignums=(list @)
     %+  turn
       %+  turn  compute-targets-bignum-samples
-      ~(compute-target-raw dcon *consensus-state constants)
+      ~(compute-target-raw dcon *consensus-state der constants)
     merge:bn
   =/  bad  (compare-lists expect-target-atoms actual-target-bignums)
   %+  expect-eq  !>(expect-target-atoms)

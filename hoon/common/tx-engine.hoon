@@ -13,6 +13,8 @@
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
 ++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bignum max-target-atom))
+::  AI-PoW jackpots are 256-bit digests; wider targets are meaningless.
+++  max-ai-target-atom  max-ai-target-atom:v0
 ++  nicks-per-nock  ^~((bex 16))
 ::
 ::  +post-asert-activation / +pre-asert-activation: 1-arg activation
@@ -20,17 +22,17 @@
 ::    boundary semantics also live in the 2-arg
 ::    +post-asert-activation:v1 (used by +new-candidate); the inline
 ::    `gte` here is the canonical definition for callers that read
-::    asert-phase from blockchain-constants. See
+::    phase.zk-asert from blockchain-constants. See
 ::    014-aletheia-emissions-audit.md finding #3.
 ++  post-asert-activation
   |=  height=@
   ^-  ?
-  (gte height asert-phase)
+  (gte height phase.zk-asert)
 ::
 ++  pre-asert-activation
   |=  height=@
   ^-  ?
-  (lth height asert-phase)
+  (lth height phase.zk-asert)
 ::
 ++  bignum  bignum:v0
 ++  block-commitment  block-commitment:v0
@@ -82,15 +84,19 @@
 ++  genesis-seal  genesis-seal:v0
 ++  genesis-template  genesis-template:v0
 ++  hash  hash:v0
-::  $fund-address: lock-script hash receiving the 20% protocol-fund
+::  $protocol-fund-address: lock-script hash receiving the 20% protocol-fund
 ::  share of every post-asert-activation coinbase. See tx-engine-1.hoon.
-++  fund-address  fund-address:v1
+++  protocol-fund-address  protocol-fund-address:v1
+::  $ai-fund-address: lock-script hash receiving the 20% fund share of every
+::  post-activation %ai-pow coinbase, in place of +protocol-fund-address. See
+::  tx-engine-1.hoon; +check-fund-split dispatches on the block's puzzle type.
+++  ai-fund-address  ai-fund-address:v1
 ::  $fund-note-firstname: on-chain first-name of every protocol-fund coinbase
 ::  note; +check:check-context routes it to the multisig recovery. See
 ::  tx-engine-1.hoon.
 ++  fund-note-firstname  fund-note-firstname:v1
 ::  $fund-multisig-lock: the 3-of-4 multisig spend-condition behind
-::  +fund-address; the wallet reveals it to spend fund notes. See
+::  +protocol-fund-address; the wallet reveals it to spend fund notes. See
 ::  tx-engine-1.hoon.
 ++  fund-multisig-lock  fund-multisig-lock:v1
 ++  local-page
@@ -150,6 +156,18 @@
 ++  page-summary  page-summary:v0
 ++  pkh-signature  pkh-signature:v1
 ++  proof  proof:v0
+++  ai-blake  ai-blake:v1
+++  ai-pow-nonce  ai-pow-nonce:v1
+++  ai-ext2   ai-ext2:v1
+++  ai-ext2s  ai-ext2s:v1
+++  ai-ext2-vec  ai-ext2-vec:v1
+++  ai-pow-commitments  ai-pow-commitments:v1
+++  ai-pow-public-inputs  ai-pow-public-inputs:v1
+++  ai-proof-node  ai-proof-node:v1
+++  ai-recursive-certificate  ai-recursive-certificate:v1
+++  ai-pow-certificate  ai-pow-certificate:v1
+++  ai-pow-artifact  ai-pow-artifact:v1
+++  pow-artifact  pow-artifact:v1
 ++  reason
   |$  object
   (each object term)
@@ -358,7 +376,7 @@
   ::
   ::  +new-candidate: build candidate page for mining with v1 shares
   ::
-  ::    creates a v1 page with hash-based coinbase-split. `asert-phase`
+  ::    creates a v1 page with hash-based coinbase-split. `zk-asert-phase`
   ::    threads through so post-asert-activation candidates carry the 80/20
   ::    miner/fund split (014-aletheia).
   ++  new-candidate
@@ -420,7 +438,7 @@
       msg.form
     ::
     ++  pow
-      ^-  (unit proof)
+      ^-  (unit pow-artifact)
       ?^  -.form  pow.form
       pow.form
     --
@@ -448,6 +466,11 @@
     |=  target-bn=bignum:bn
     ^-  bignum:bn
     (compute-work:page:v0 target-bn)
+  ::
+  ++  compute-work-ai
+    |=  target-bn=bignum:bn
+    ^-  bignum:bn
+    (compute-work-ai:page:v0 target-bn)
   ::
   ++  compute-digest
     |=  pag=form

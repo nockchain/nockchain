@@ -3,10 +3,10 @@
 /=  zoon  /common/zoon
 /=  *  /common/test
 |%
-++  h  ~(. helpers bc-v1-phase:helpers)
-++  t  ~(. txe bc-v1-phase:helpers)
+++  h  ~(. helpers bc-v1-phase-provable:helpers)
+++  t  ~(. txe bc-v1-phase-provable:helpers)
 ++  bc-v1-timelock
-  %*  .  bc-v1-phase:helpers
+  %*  .  bc-v1-phase-provable:helpers
     coinbase-timelock-min  2
   ==
 ::  v1 mempool context validation tests
@@ -215,8 +215,8 @@
 ::  wedging the chain. Uses a ~10 KB block-size limit and a 25-input coinbase
 ::  fan-in transaction, which is comfortably over the limit.
 ++  test-v1-mempool-reject-oversize-tx
-  =+  h-med=~(. helpers bc-max-block-size-medium-v0:helpers)
-  =+  t-med=~(. txe bc-max-block-size-medium-v0:helpers)
+  =+  h-med=~(. helpers bc-max-block-size-medium-v0-provable:helpers)
+  =+  t-med=~(. txe bc-max-block-size-medium-v0-provable:helpers)
   =+  [nockchain genesis]=init-nockchain:h-med
   =^  pages  nockchain
     (add-n-pages-integration:h-med genesis 85 nockchain)

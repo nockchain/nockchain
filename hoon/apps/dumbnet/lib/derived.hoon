@@ -10,8 +10,8 @@
   ~/  %update
   |=  [c=consensus-state:dk pag=page:t]
   ^-  derived-state:dk
-  ::  update highest height
   =.  d  (update-highest ~(height get:page:t pag))
+  =.  d  (update-puzzle-asert-state c pag)
   :: update view of heaviest chain
   =/  heaviest-page=page:t
     ?:  =(~ heaviest-block.c)
@@ -25,11 +25,9 @@
   ?:  =((~(get z-by heaviest-chain.d) next-height) `next-parent)
     ::  heaviest chain is accurate
     d
-  ::  heaviest chain is wrong, start revising
   =.  heaviest-chain.d
     (~(put z-by heaviest-chain.d) next-height next-parent)
   ?:  =(*page-number:t next-height)
-    ::  genesis block was put into heaviest-chain, so we're done
     d
   %=  $
     next-height   (dec next-height)
@@ -56,6 +54,46 @@
   ?~  (~(get z-by hc) h)  hc
   $(hc (~(del z-by hc) h), h +(h))
 ::
+::
+::  Record the per-puzzle ASERT lineage for this block. The entry is a pure
+::  function of the parent entry and the verified block type, so forks remain
+::  independent and block arrival order cannot alter targets.
+++  update-puzzle-asert-state
+  |=  [c=consensus-state:dk pag=page:t]
+  ^-  derived-state:dk
+  =/  block-height=@  ~(height get:page:t pag)
+  ?:  ?|  =(*page-number:t block-height)
+          (lth block-height ai-pow-activation-height.blockchain-constants)
+      ==
+    d
+  =/  parent-bid=block-id:t  ~(parent get:page:t pag)
+  =/  parent-state=(unit puzzle-asert-state:dk)
+    (~(get h-by puzzle-asert-states.d) parent-bid)
+  =/  parent-height=page-number:t
+    ~(height get:local-page:t (~(got h-by blocks.c) parent-bid))
+  ?>  ?|  ?=(^ parent-state)
+          =(*page-number:t parent-height)
+          (lth parent-height ai-pow-activation-height.blockchain-constants)
+      ==
+  =/  base=puzzle-asert-state:dk
+    ?^  parent-state  u.parent-state
+    :*  zk-count=0
+        ai-count=0
+        zk-head=~
+        ai-head=~
+        zk-anchor=[min-ts=(~(got h-by min-timestamps.c) parent-bid) target-atom=anchor-target-atom.zk-asert-post-ai.blockchain-constants]
+        ai-anchor=~
+    ==
+  =/  bid=block-id:t  ~(digest get:page:t pag)
+  =/  pow  (need ~(pow get:page:t pag))
+  =/  next=puzzle-asert-state:dk
+    ?:  ?=([%ai-pow *] pow)
+      =/  anchor=(unit cached-asert-anchor:dk)
+        ?^  ai-anchor.base  ai-anchor.base
+        `[min-ts=(~(got h-by min-timestamps.c) bid) target-atom=anchor-target-atom.ai-asert.blockchain-constants]
+      base(ai-count +(ai-count.base), ai-head `bid, ai-anchor anchor)
+    base(zk-count +(zk-count.base), zk-head `bid)
+  d(puzzle-asert-states (~(put h-by puzzle-asert-states.d) bid next))
 ++  update-highest
   ~/  %update-highest
   |=  height=page-number:t

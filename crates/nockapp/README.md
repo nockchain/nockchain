@@ -1,17 +1,31 @@
 # NockApp
 
 Status: Active
-Owner: Nockchain Maintainers
-Last Reviewed: 2026-02-19
-Canonical/Legacy: Canonical (Tier 1 scoped authority for NockApp runtime interface and developer usage; protocol authority remains in [`PROTOCOL.md`](../../PROTOCOL.md))
 
-***DEVELOPER ALPHA***
+Canonical/Legacy: Canonical (Tier 1 scoped authority for NockApp runtime behavior; application and protocol authority remain with the embedded kernel)
 
-NockApps are pure-functional state machines with automatic persistence and modular IO.
+`nockapp` is the Rust runtime framework for persistent Nock state machines. It
+boots a kernel noun, serializes `peek` and `poke` interactions, dispatches kernel
+effects to drivers, and coordinates event persistence, shutdown, and telemetry.
+Nockchain, Roswell, wallets, compilers, and other applications embed this same
+runtime contract.
 
-The NockApp framework is built around two core crates, `nockapp` and `nockvm`:
-1. `nockapp` provides a minimal Rust interface to a Nock kernel.
-2. [`nockvm`](https://github.com/nockchain/nockvm) is a modern Nock runtime that achieves durable execution.
+## Place in the system
+
+The kernel owns application semantics. `nockapp` owns the host lifecycle around
+it:
+
+```text
+drivers and RPCs <-> NockApp handle <-> ordered kernel peeks/pokes
+                                         |
+                                  effects and durable state
+                                         |
+                                      NockVM
+```
+
+`nockvm` evaluates nouns and manages persistent memory. Drivers translate
+external IO into kernel wires and translate effects back into IO. `nockapp`
+does not define Nockchain consensus; the embedded Hoon kernel does.
 
 ## Canonical Scope
 
@@ -23,6 +37,30 @@ This document is Tier 1 canonical for:
 This document is NOT canonical for:
 - protocol/consensus rules (use [`PROTOCOL.md`](../../PROTOCOL.md)).
 - cross-crate architecture boundaries (use [`ARCHITECTURE.md`](../../ARCHITECTURE.md)).
+
+## Maintained invariants and trust boundaries
+
+- Kernel pokes are serialized through the runtime; drivers do not mutate kernel
+  state directly.
+- Effects are produced by completed kernel events. The broadcast effect bus is
+  bounded and live-only: lagging subscribers may miss notifications and must
+  recover from current state.
+- Persistence and event-log ordering must not acknowledge a durable transition
+  that cannot be recovered after restart.
+- A driver owns its wire vocabulary. Sharing transport infrastructure does not
+  make two wire sources interchangeable.
+- Nouns crossing thread, persistence, or RPC boundaries retain canonical JAM
+  representation and explicit ownership.
+- Cancellation and shutdown stop new work without exposing partially applied
+  kernel transitions as committed state.
+- Native jets are accelerators or explicitly mandatory protocol components.
+  Their registration and semantics must match the Hoon hint used by the kernel.
+
+NockApp correctness depends on deterministic NockVM execution, the embedded
+kernel's own invariants, canonical noun serialization, and the durability
+ordering of the configured persistence backend. Network authentication,
+consensus validity, and application authorization belong to the embedding
+application and its drivers.
 
 ## Failure Modes And Limits
 

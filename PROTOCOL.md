@@ -29,6 +29,7 @@ Legend:
 
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
+| 015 | Logos                                    | 0.1.15  | draft      | 114300            | 2026-07-31        | [`015-logos.md`](./changelog/protocol/015-logos.md)                                                   |
 | 014 | Aletheia                                 | 0.1.14  | draft      | 65500             | -                 | [`014-aletheia.md`](./changelog/protocol/014-aletheia.md)                                             |
 | 013 | Nous                                     | 1.0.0   | final      | 0                 | 2026-Q2           | [`013-nous.md`](./changelog/protocol/013-nous.md)                                                     |
 | 012 | Bythos                                   | 0.1.11  | final      | 54000             | 2026-03-01        | [`012-bythos.md`](./changelog/protocol/012-bythos.md)                                                 |

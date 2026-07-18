@@ -8,7 +8,7 @@
 ::  this library is where _every_ update to the consensus state
 ::  occurs, no matter how minor.
 ~%  %consensus  ..ut  ~
-|_  [c=consensus-state:dk =blockchain-constants:dumb-transact]
+|_  [c=consensus-state:dk d=derived-state:dk =blockchain-constants:dumb-transact]
 +*  t  ~(. dumb-transact blockchain-constants)
 ::
 ::  assert preconditions, provide reason for failure
@@ -99,9 +99,11 @@
       [%0 (from-b58:hash:t '7pR2bvzoMvfFcxXaHv4ERm8AgEnExcZLuEsjNgLkJziBkqBLidLg39Y')]
   ==
 ::
-::  map a block heigh to a corresponding proof version
-++  height-to-proof-version
-  ~/  %height-to-proof-version
+::  Deterministic ZK proof version for a block height. This is authoritative
+::  before AI activation and remains the ZK branch of the post-activation
+::  version predicate. Persisted post-activation block IDs use
+::  +block-id-to-proof-version because they may be ZK or AI.
+++  height-to-proof-version-legacy
   |=  height=page-number:t
   ^-  proof-version:sp
   ?:  (gte height proof-version-2-start)
@@ -113,6 +115,91 @@
 ++  proof-version-2-start  12.000
 ::  What block to start using proof version 1
 ++  proof-version-1-start  6.750
+::
+::  Puzzle/version mapping, persisted version lookup, and activation predicate.
+::
+::  +version-to-puzzle-type: maps a proof-version (the discriminator
+::  shared by all proof shapes) to a puzzle-type tag.
+::    %0/%1/%2 → %dumb-zkpow (ZK STARK PoW puzzle)
+::    %3       → %ai-pow     (AI PoW puzzle)
+::  Single source of truth for the version↔puzzle mapping. All
+::  consumers MUST go through this arm.
+++  version-to-puzzle-type
+  |=  version=proof-version:sp
+  ^-  ?(%dumb-zkpow %ai-pow)
+  ?:  ?=(%3 version)  %ai-pow
+  %dumb-zkpow
+::
+::  +pow-artifact-to-proof-version: page.pow is a generic persisted noun
+::  so the AI certificate does not force hoonc to expand the recursive proof
+::  mold in every page consumer. Recover the version discriminator locally.
+++  pow-artifact-to-proof-version
+  |=  pow=*
+  ^-  proof-version:sp
+  ?:  ?=([%ai-pow *] pow)
+    %3
+  =/  prf=proof:sp  (need ((soft proof:sp) pow))
+  version.prf
+::
+::  +block-compute-work: a block's heaviness contribution, dispatched by
+::  puzzle type. The ZK and AI puzzles use DIFFERENT work normalizers so
+::  cross-puzzle fork choice is EQUAL-WEIGHT (a block at each puzzle's ASERT
+::  anchor contributes identical work; see +compute-work-ai:page). This is the
+::  single source of truth for a block's work — validation heaviness AND the
+::  finalized block's stored accumulated-work MUST both use it. A powless block
+::  defaults to the ZK normalizer (it fails the pow check regardless).
+++  block-compute-work
+  |=  pag=page:t
+  ^-  bignum:bignum:t
+  =/  target  ~(target get:page:t pag)
+  ::  Cross-puzzle equal-weight AI normalization is active only post-asert
+  ::  (it pairs with the per-puzzle ASERT regime). Pre-asert every block uses the
+  ::  ZK normalizer — legacy behavior; AI blocks do not occur pre-asert on mainnet.
+  ?.  (post-asert-activation:t ~(height get:page:t pag))
+    (compute-work:page:t target)
+  =/  pow-unit  ~(pow get:page:t pag)
+  ?~  pow-unit  (compute-work:page:t target)
+  ?:  =(%ai-pow (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit)))
+    (compute-work-ai:page:t target)
+  (compute-work:page:t target)
+::
+::  +block-id-to-proof-version: returns the proof version of an
+::  already-accepted block, given its block-id. Reads the
+::  block-versions map first (post-activation blocks); falls back
+::  to the deterministic height-derived map for pre-activation
+::  block-ids (block-versions is post-activation-only — see
+::  types.hoon consensus-state-10 doc).
+++  block-id-to-proof-version
+  |=  bid=block-id:t
+  ^-  proof-version:sp
+  =/  cached=(unit proof-version:sp)  (~(get h-by block-versions.c) bid)
+  ?^  cached  u.cached
+  =/  pag=local-page:t  (~(got h-by blocks.c) bid)
+  (height-to-proof-version-legacy ~(height get:local-page:t pag))
+::
+::  +block-id-to-puzzle-type: composition. Consumers walking
+::  ancestors should use this.
+++  block-id-to-puzzle-type
+  |=  bid=block-id:t
+  ^-  ?(%dumb-zkpow %ai-pow)
+  (version-to-puzzle-type (block-id-to-proof-version bid))
+::
+::  +proof-version-valid-at-height:
+::    pre-activation: must equal the height-derived ZK version
+::    post-activation: height-derived ZK version or %3 (AI)
+::
+::  Keeping the height-derived ZK branch permits low-height fakenet activation
+::  without forcing proof version %2 before its normal proof-version height.
+++  proof-version-valid-at-height
+  |=  [version=proof-version:sp height=page-number:t]
+  ^-  ?
+  =/  legacy=proof-version:sp  (height-to-proof-version-legacy height)
+  ?:  (gte height ai-pow-activation-height.blockchain-constants)
+    ?|  ?=(%3 version)
+        =(version legacy)
+    ==
+  =(version legacy)
+::
 ::
 ::  +set-genesis-seal: set .genesis-seal
 ++  set-genesis-seal
@@ -221,40 +308,174 @@
   ~>  %slog.[0 (cat 3 'compute-target: New target: ' (rsh [3 2] (scot %ui next-target-atom)))]
   next-target-bn
 ::
-::  +compute-target-asert: aserti3-2d target for a post-asert-activation block
+::  Return the branch-local post-activation puzzle state for a candidate's
+::  immediate parent. At the activation boundary the parent is pre-activation,
+::  so synthesize the zero-count state from that exact branch.
+++  post-ai-parent-state
+  |=  parent-digest=block-id:t
+  ^-  puzzle-asert-state:dk
+  =/  cached=(unit puzzle-asert-state:dk)
+    (~(get h-by puzzle-asert-states.d) parent-digest)
+  ?^  cached  u.cached
+  =/  parent=local-page:t  (~(got h-by blocks.c) parent-digest)
+  =/  parent-height=page-number:t  ~(height get:local-page:t parent)
+  ?>  ?|  =(*page-number:t parent-height)
+          (lth parent-height ai-pow-activation-height.blockchain-constants)
+      ==
+  :*  zk-count=0
+      ai-count=0
+      zk-head=~
+      ai-head=~
+      zk-anchor=[min-ts=(~(got h-by min-timestamps.c) parent-digest) target-atom=anchor-target-atom.zk-asert-post-ai.blockchain-constants]
+      ai-anchor=~
+  ==
 ::
-::    .child-height is the height the block is (or will be) at;
-::    .parent-digest identifies its parent so we can read the parent's
-::    median-of-11 from .min-timestamps (written during parent acceptance).
-::    callers must guarantee .child-height >= .asert-phase, which implies
-::    the min-timestamps lookup succeeds and the height >= anchor invariant
-::    holds. used both to validate an accepted page and to compute the
-::    target for a candidate block still being constructed.
+::  ZK ASERT keeps Aletheia's original global-height regime before Logos. At
+::  Logos activation it re-anchors on the branch's activation parent and uses
+::  only post-activation ZK count and the latest ZK median timestamp.
+++  compute-target-zk-asert
+  |=  [child-height=@ parent-digest=block-id:t]
+  ^-  bignum:bignum:t
+  =/  is-post-ai-regime=?
+    (gte child-height phase.zk-asert-post-ai.blockchain-constants)
+  ?.  is-post-ai-regime
+    =/  params  zk-asert.blockchain-constants
+    %-  chunk:bignum:t
+    %-  compute-target:asert
+    :*  anchor-target-atom.params
+        anchor-min-timestamp.params
+        anchor-height.params
+        (~(got h-by min-timestamps.c) parent-digest)
+        child-height
+        ideal-block-time.params
+        half-life.params
+        max-target-atom:t
+    ==
+  =/  params  zk-asert-post-ai.blockchain-constants
+  =/  state  (post-ai-parent-state parent-digest)
+  =/  current-min-ts=@
+    ?~  zk-head.state  min-ts.zk-anchor.state
+    (~(got h-by min-timestamps.c) u.zk-head.state)
+  %-  chunk:bignum:t
+  %-  compute-target:asert
+  :*  target-atom.zk-anchor.state
+      min-ts.zk-anchor.state
+      0
+      current-min-ts
+      +(zk-count.state)
+      ideal-block-time.params
+      half-life.params
+      max-target-atom:t
+  ==
+::
+::  Compatibility wrapper for existing ZK call sites.
 ++  compute-target-asert
   ~/  %compute-target-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
-  =/  parent-min-ts=@
-    (~(got h-by min-timestamps.c) parent-digest)
-  ::  phase 2 of 014-aletheia: the anchor's median-of-11 is a hardcoded
-  ::  protocol constant captured at the canonical anchor block (height
-  ::  65,499). paired with the [%65.499 ...] checkpoint in
-  ::  +checkpointed-digests, only one block at the anchor height is
-  ::  admissible network-wide, so reading the constant is consensus-
-  ::  identical to walking ancestry.
-  =/  anchor-min-ts=@
-    asert-anchor-min-timestamp.blockchain-constants
+  (compute-target-zk-asert child-height parent-digest)
+::
+::  AI ASERT uses only the AI lineage on the candidate parent's branch. With a
+::  hardcoded test anchor, the first AI block is index 1. In production the first
+::  AI block establishes the dynamic anchor and later AI blocks use the number of
+::  already-accepted AI blocks as their virtual height.
+++  compute-target-ai-asert
+  |=  [child-height=@ parent-digest=block-id:t]
+  ^-  bignum:bignum:t
+  =/  params  ai-asert.blockchain-constants
+  ?<  =(0 anchor-target-atom.params)
+  =/  state  (post-ai-parent-state parent-digest)
+  =/  hardcoded-anchor=?  !=(0 anchor-min-timestamp.params)
+  =/  anchor=(unit cached-asert-anchor:dk)
+    ?:  hardcoded-anchor
+      `[min-ts=anchor-min-timestamp.params target-atom=anchor-target-atom.params]
+    ai-anchor.state
+  ?~  anchor
+    (chunk:bignum:t (min anchor-target-atom.params max-ai-target-atom:t))
+  =/  current-min-ts=@
+    ?~  ai-head.state  min-ts.u.anchor
+    (~(got h-by min-timestamps.c) u.ai-head.state)
+  =/  blocks-since-anchor=@
+    ?:  hardcoded-anchor  +(ai-count.state)
+    ai-count.state
   %-  chunk:bignum:t
   %-  compute-target:asert
-  :*  asert-anchor-target-atom.blockchain-constants
-      anchor-min-ts
-      asert-anchor-height.blockchain-constants
-      parent-min-ts
-      child-height
-      asert-ideal-block-time.blockchain-constants
-      asert-half-life.blockchain-constants
-      max-target-atom:t
+  :*  target-atom.u.anchor
+      min-ts.u.anchor
+      0
+      current-min-ts
+      blocks-since-anchor
+      ideal-block-time.params
+      half-life.params
+      max-ai-target-atom:t
   ==
+::
+::  +build-ai-candidate: build the AI-puzzle variant of a ZK candidate block.
+::
+::    Post-ai-activation the miner builds ONE candidate, targeted for the ZK
+::    puzzle. The AI puzzle needs the SAME transactions bound to the AI ASERT
+::    target and paying the AI fund instead: an AI certificate commits to the
+::    block commitment + target, so an AI block must carry
+::    +compute-target-ai-asert (validation rejects any other target as
+::    %page-target-invalid) and its coinbase must pay +ai-fund-address (validation
+::    rejects a %pow-fund coinbase via +check-fund-split). This deterministically:
+::      - re-targets to the AI ASERT target from the parent's branch-local AI
+::        lineage and recomputes accumulated-work with the AI normalizer
+::        (+compute-work-ai, matching validation's +block-compute-work);
+::      - rebuilds the coinbase from the start with +ai-fund-address via the same
+::        +new-with-fund-share the ZK candidate uses (only the fund recipient
+::        differs). `shares` is the miner's coinbase split; fees are recovered
+::        from the ZK candidate's coinbase total so the miner-side split matches
+::        the ZK candidate's, keeping this a pure function of (zk-cand, shares).
+::    Emission (the %mine-ai effect) and +do-pow (reconstructing the block from an
+::    AI solution) both call this on the same candidate + shares, so the
+::    commitments match and the solved certificate validates. Validation never
+::    calls this — it reads the submitted block's own coinbase — so `shares` is a
+::    miner-only input.
+::
+::    PRE-asert the AI candidate IS the ZK candidate: validation's target check
+::    and +block-compute-work are both epoch/ZK pre-asert, so re-targeting to the
+::    AI ASERT target here would make validation reject the block as
+::    %page-target-invalid. AI blocks only diverge from ZK post-asert. (On mainnet
+::    AI activates well after asert, so this only matters on fakenets that
+::    activate AI early.)
+++  build-ai-candidate
+  |=  [zk-cand=page:t shares=shares:t]
+  ^-  page:t
+  =/  candidate-height=@  ~(height get:page:t zk-cand)
+  ?.  (post-asert-activation:t candidate-height)
+    zk-cand
+  =/  parent-bid=block-id:t  ~(parent get:page:t zk-cand)
+  =/  ai-target=bignum:bignum:t  (compute-target-ai-asert candidate-height parent-bid)
+  =/  parent-work=@
+    =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) parent-bid))
+    (merge:bignum:t ~(accumulated-work get:page:t par))
+  =/  ai-work=bignum:bignum:t
+    (chunk:bignum:t (add parent-work (merge:bignum:t (compute-work-ai:page:t ai-target))))
+  ::  The %ai-pow coinbase, built from the start with +ai-fund-address (the AI
+  ::  Compute Network fund) via the same +new-with-fund-share the ZK candidate
+  ::  uses. emission is fixed by height; fees are the ZK candidate's coinbase
+  ::  total minus the subsidy, so the miner-side split reproduces the ZK
+  ::  candidate's exactly and only the fund recipient differs.
+  =/  ai-coinbase
+    =/  zk-cb=coinbase-split:t  ~(coinbase get:page:t zk-cand)
+    =/  zk-total=coins:t
+      ?-  -.zk-cb
+        %0  (roll ~(val z-by +.zk-cb) |=([c=coins:t sum=coins:t] (add c sum)))
+        %1  (roll ~(val z-by +.zk-cb) |=([c=coins:t sum=coins:t] (add c sum)))
+      ==
+    =/  emission=coins:t  (emission-calc:coinbase:t candidate-height)
+    =/  fees=coins:t      (sub zk-total emission)
+    (new-with-fund-share:v1:coinbase-split:t ai-fund-address:t emission fees shares)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(target ai-target)  zk-cand(target ai-target)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(accumulated-work ai-work)  zk-cand(accumulated-work ai-work)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand  zk-cand(coinbase ai-coinbase)
+  =.  zk-cand
+    ?^  -.zk-cand  zk-cand(digest (compute-digest:page:t zk-cand))  zk-cand(digest (compute-digest:page:t zk-cand))
+  zk-cand
 ::
 ::  +compute-epoch-duration: computes the duration of an epoch in seconds
 ::
@@ -390,13 +611,13 @@
   ~/  %validate-page-without-txs
   |=  [pag=page:t now-secs=@]
   ^-  (reason:dk ~)
-  =/  version  (height-to-proof-version ~(height get:page:t pag))
-  =/  version-check=?
-    ?.  check-pow-flag:t
-      %.y
-    =(version version:(need ~(pow get:page:t pag)))
-  ?.  version-check
-    ~&  [%expected-vs-actual version version:(need ~(pow get:page:t pag))]
+  ::  Version check: pow is always verified (the no-pow testing path
+  ::  was removed — see below). A powless block fails the `need`,
+  ::  which is correct: every accepted block must carry a proof.
+  ?.  %+  proof-version-valid-at-height
+        (pow-artifact-to-proof-version (need ~(pow get:page:t pag)))
+      ~(height get:page:t pag)
+    ~&  [%proof-version-invalid ~(height get:page:t pag)]
     [%.n %proof-version-invalid]
   =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) ~(parent get:page:t pag)))
   ::  this is already checked in +heard-block but is done here again
@@ -418,13 +639,21 @@
     [%.n %page-epoch-invalid]
   ::
   =/  check-pow-hash=?
-    ?.  check-pow-flag:t
-      ::  this case only happens during testing
-      ::~&  "skipping pow hash check for {(trip (to-b58:hash:t ~(digest get:page:t pag)))}"
+    =/  pow  (need ~(pow get:page:t pag))
+    ?:  ?=([%ai-pow *] pow)
+      ::  Defer the AI-PoW work-meets-target check to +check-pow, whose
+      ::  `%ai-pow` branch runs `++ai-pow-verify` (the recursive-certificate
+      ::  jet), which binds the certificate to `(block-commitment .. target)`
+      ::  and so subsumes this cheap target gate. Deferral is sound: this arm
+      ::  (+validate-page-without-txs) doc-excludes "validating the powork",
+      ::  and its sole caller +heard-block runs +check-pow immediately after,
+      ::  admitting a block to consensus state ONLY once BOTH pass. Returning
+      ::  %.n here would instead reject every %ai-pow block, valid included.
       %.y
+    =/  prf=proof:sp  (need ((soft proof:sp) pow))
     %-  check-target:mine
     :_  ~(target get:page:t pag)
-    (proof-to-pow:t (need ~(pow get:page:t pag)))
+    (proof-to-pow:t prf)
   ?.  check-pow-hash
     [%.n %pow-target-check-failed]
   ::
@@ -441,10 +670,17 @@
   ?.  =(~(height get:page:t pag) +(~(height get:page:t par)))
     [%.n %page-height-invalid]
   ::
-  ::  check target
+  ::  Check target by proven puzzle type. Both ASERT functions receive the
+  ::  immediate parent and read only their own branch-local puzzle lineage.
   =/  expected-target
     ?:  (post-asert-activation:t ~(height get:page:t pag))
-      (compute-target-asert ~(height get:page:t pag) ~(parent get:page:t pag))
+      =/  block-puzzle-type=?(%dumb-zkpow %ai-pow)
+        =/  pow-unit  ~(pow get:page:t pag)
+        ?~  pow-unit  %dumb-zkpow
+        (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit))
+      ?:  =(%dumb-zkpow block-puzzle-type)
+        (compute-target-zk-asert ~(height get:page:t pag) ~(parent get:page:t pag))
+      (compute-target-ai-asert ~(height get:page:t pag) ~(parent get:page:t pag))
     (~(got h-by targets.c) ~(parent get:page:t pag))
   ?.  =(~(target get:page:t pag) expected-target)
     [%.n %page-target-invalid]
@@ -465,7 +701,7 @@
     %-  chunk:bignum:t
     %+  add
       (merge:bignum:t ~(accumulated-work get:page:t par))
-    (merge:bignum:t (compute-work:page:t ~(target get:page:t pag)))
+    (merge:bignum:t (block-compute-work pag))
   ?.  check-heaviness
     [%.n %page-heaviness-invalid]
   ::
@@ -554,7 +790,7 @@
   ::  Phase-gated v1 coinbase entry count. The +based:coinbase-split:v1
   ::  parser allows up to `max-coinbase-split + 1` entries to admit the
   ::  fund slot post-asert-activation, but pre-activation v1 blocks
-  ::  (v1-phase <= height < asert-phase) carry no fund slot and must
+  ::  (v1-phase <= height < zk-asert-phase) carry no fund slot and must
   ::  continue to cap at `max-coinbase-split` entries — matching the
   ::  legacy v0 rule. Without this gate, a miner could pre-activation
   ::  emit a 3-entry v1 coinbase that this branch accepts and stricter
@@ -570,7 +806,12 @@
   ::  Post-activation (014-aletheia): coinbase must split 80/20 between
   ::  the miner and the consensus-known fund address.
   ?:  (post-asert-activation:t height)
-    ?.  (check-fund-split cb emission)
+    ::  015-logos: dispatch the 20% fund recipient on the block's puzzle type.
+    =/  is-ai=?
+      =/  pow-unit  ~(pow get:page:t pag)
+      ?~  pow-unit  %.n
+      =(%ai-pow (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit)))
+    ?.  (check-fund-split cb emission is-ai)
       [%.n %improper-fund-split]
     ~>  %slog.[0 (cat 3 'validate-page-with-txs: Block validated: ' digest-b58)]
     [%.y u.balance-transfer]
@@ -583,14 +824,6 @@
   |=  pag=page:t
   ^-  consensus-state:dk
   =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))
-  =/  log-message
-    %+  rap  3
-    :~  'update-heaviest: '
-        'Checking if block '
-        digest-b58
-        ' is heaviest'
-    ==
-  ~>  %slog.[0 log-message]
   ?:  =(~ heaviest-block.c)
     :: if we have no heaviest block, this must be genesis block.
     ~|  "update-heaviest: Received non-genesis block before genesis block"
@@ -599,23 +832,7 @@
   ::  > rather than >= since we take the first heaviest block we've heard
   ?:  %+  compare-heaviness:page:t  pag
       (~(got h-by blocks.c) (need heaviest-block.c))
-    =/  log-message
-      %+  rap  3
-      :~  'update-heaviest: '
-          'Block '
-          digest-b58
-          ' is new heaviest block'
-      ==
-    ~>  %slog.[0 log-message]
     c(heaviest-block (some ~(digest get:page:t pag)))
-  =/  log-message
-    %+  rap  3
-    :~  'update-heaviest: '
-        'Block '
-        digest-b58
-        ' is NOT new heaviest block'
-    ==
-  ~>  %slog.[0 log-message]
   c
 ::
 ::  +check-fund-split: validate that a post-asert-activation coinbase pays
@@ -626,7 +843,7 @@
 ::    the v1 coinbase-split caps total entries at max-coinbase-split+1.
 ::    So we only need to verify that:
 ::      (a) the split is v1 (post-asert-activation = post-v1-phase),
-::      (b) the fund-address slot exists,
+::      (b) the protocol-fund-address slot exists,
 ::      (c) that slot's coins equal exactly floor(emission/5).
 ::    The miner side is then `emission - fund-coins + fees`,
 ::    distributed across however many miner outputs the miner chose
@@ -639,12 +856,16 @@
 ::    docs/2026-05-01-MR2545-EMISSIONS-REVIEW.md P1 #2.
 ++  check-fund-split
   ~/  %check-fund-split
-  |=  [cb=coinbase-split:t emission=coins:t]
+  |=  [cb=coinbase-split:t emission=coins:t is-ai=?]
   ^-  ?
   ?.  ?=([%1 *] cb)  %.n
   =/  expected-fund-coins=coins:t  (div emission 5)
+  ::  015-logos: the 20% fund share is puzzle-specific. %ai-pow blocks pay the AI
+  ::  Compute Network fund (+ai-fund-address); %pow blocks pay the protocol fund
+  ::  (+protocol-fund-address). The caller reads the puzzle type from the block's page.
+  =/  fund-addr=hash:t  ?:(is-ai ai-fund-address:t protocol-fund-address:t)
   =/  fund-coins=(unit coins:t)
-    (~(get z-by +.cb) fund-address:t)
+    (~(get z-by +.cb) fund-addr)
   ?:  =(0 expected-fund-coins)
     =(~ fund-coins)
   ?~  fund-coins  %.n
@@ -680,31 +901,37 @@
     ~
   $(height prev-height, ids [u.prev-id ids], count +(count))
 ::
-::  +update-min-timestamps: sets min timestamp of children of .id
+::  +update-min-timestamps: store the global median-time-past for a new block,
+::  keyed by its digest. The candidate's timestamp is included first, followed
+::  by up to `min-past-blocks - 1` immediate ancestors regardless of puzzle.
+::  Both puzzles share this clock; their independent ASERT behavior comes from
+::  branch-local puzzle counts and heads. Genesis terminates the ancestry walk.
 ::
 ++  update-min-timestamps
   ~/  %update-min-timestamps
   |=  [now=@da pag=page:t]
   ^-  (h-map block-id:t @)
+  ::  Median-time-past is a global chain safety rule, independent of puzzle.
+  ::  Puzzle ASERT separation comes from branch-local per-puzzle block counts
+  ::  and heads; changing MTP by puzzle would weaken cross-puzzle time-warp
+  ::  resistance and make timestamp validity depend on the parent puzzle type.
   =/  min-timestamp=@
-    ::  get timestamps of up to N=min-past-blocks prior blocks.
-    =|  prev-timestamps=(list @)
-    =/  b=@  (dec min-past-blocks:t)  :: iteration counter
-    =/  cur-block=page:t  pag
+    =/  prev-timestamps=(list @)  [~(timestamp get:page:t pag) ~]
+    =/  collected=@  1
+    =/  cur-bid=block-id:t  ~(parent get:page:t pag)
+    =/  cur-height=@  ~(height get:page:t pag)
     |-
-    =.  prev-timestamps  [~(timestamp get:page:t cur-block) prev-timestamps]
-    ?:  ?|  =(0 b)  :: we've looked back +min-past-blocks blocks
-            ::
-            :: we've reached genesis block
-            =(*page-number:t ~(height get:page:t cur-block))
-        ==
-      ::  return median of timestamps
+    ?:  =(collected min-past-blocks:t)
       (median:t prev-timestamps)
-    %=  $
-      b          (dec b)
-      cur-block  (to-page:local-page:t (~(got h-by blocks.c) ~(parent get:page:t cur-block)))
-    ==
-  ::
+    ?:  =(*page-number:t cur-height)
+      (median:t prev-timestamps)
+    =/  cur=local-page:t  (~(got h-by blocks.c) cur-bid)
+    =/  cur-page=page:t  (to-page:local-page:t cur)
+    =/  next-timestamps  [~(timestamp get:page:t cur-page) prev-timestamps]
+    ?:  =(*page-number:t ~(height get:local-page:t cur))
+      (median:t next-timestamps)
+    =.  cur-height  ~(height get:local-page:t cur)
+    $(collected +(collected), cur-bid ~(parent get:local-page:t cur), prev-timestamps next-timestamps)
   (~(put h-by min-timestamps.c) ~(digest get:page:t pag) min-timestamp)
 ::
 ::::  pending block and tx functionality
@@ -718,6 +945,13 @@
   ?<  (~(has h-by blocks.c) ~(digest get:page:t pag))
   ?<  (~(has h-by pending-blocks.c) ~(digest get:page:t pag))
   =.  blocks.c  (~(put h-by blocks.c) ~(digest get:page:t pag) (to-local-page:page:t pag))
+  ::  Persist proof versions for post-activation blocks, where height alone no
+  ::  longer identifies the puzzle. Pre-activation versions remain derivable.
+  =?  block-versions.c
+      (gte ~(height get:page:t pag) ai-pow-activation-height.blockchain-constants)
+    %+  ~(put h-by block-versions.c)
+      ~(digest get:page:t pag)
+    (pow-artifact-to-proof-version (need ~(pow get:page:t pag)))
   %-  ~(rep z-in ~(tx-ids get:page:t pag))
   |=  [=tx-id:t c=_c]
   =.  blocks-needed-by.c  (~(put h-ju blocks-needed-by.c) tx-id ~(digest get:page:t pag))

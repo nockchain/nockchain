@@ -86,13 +86,9 @@ for file in $TARGET_FILES; do
 
     checked=$((checked + 1))
 
+    # Status and authority change how a reader should rely on a document.
+    # Ownership labels and review dates do not, and quickly become stale.
     if ! check_field_in_header "$file" "Status" '^Status:[[:space:]]+.+$'; then
-        failures=1
-    fi
-    if ! check_field_in_header "$file" "Owner" '^Owner:[[:space:]]+.+$'; then
-        failures=1
-    fi
-    if ! check_field_in_header "$file" "Last Reviewed" '^Last Reviewed:[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
         failures=1
     fi
     if ! check_field_in_header "$file" "Canonical/Legacy" '^Canonical/Legacy:[[:space:]]+.+$'; then

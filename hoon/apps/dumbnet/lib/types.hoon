@@ -18,7 +18,39 @@
       kernel-state-7
       kernel-state-8
       kernel-state-9
+      kernel-state-10
+      kernel-state-11
+      kernel-state-12
   ==
+::
+::  Per-puzzle ASERT anchor cache. Populated lazily by accept-block when
+::  the first block crossing a puzzle's activation boundary lands. Once
+::  populated, replaces the runtime ancestry walk for subsequent
+::  compute-target calls. For ZK puzzle regime 2, the cached anchor is
+::  the block at ai-pow-activation-height-1 (the immediate parent of
+::  the first post-activation block). For AI puzzle, the cached anchor
+::  is the first %ai-pow block itself.
+::
+::  Replaceable later by hardcoding the values into the corresponding
+::  blockchain-constants AsertParams.anchor-{min-timestamp,target-atom}
+::  fields; the compute path checks the constant first and falls back
+::  to the cache when the constant is the 0 placeholder.
++$  cached-asert-anchor  [min-ts=@ target-atom=@]
+::
+::  Branch-local per-puzzle ASERT state. Every post-activation block stores one
+::  entry derived only from its parent entry and its own verified puzzle type.
+::  Counts are post-activation blocks of each puzzle. Heads point to the latest
+::  block of each puzzle on this ancestry. Anchors are branch-local so block
+::  arrival order and side chains cannot affect target computation.
++$  puzzle-asert-state
+  $:  zk-count=@
+      ai-count=@
+      zk-head=(unit block-id:dt)
+      ai-head=(unit block-id:dt)
+      zk-anchor=cached-asert-anchor
+      ai-anchor=(unit cached-asert-anchor)
+  ==
+::
 ::
 +$  kernel-state-0
   $:  %0
@@ -166,7 +198,46 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-9
+::  kernel-state-10 adds per-puzzle ASERT anchor caches to derived-state.
+::  Otherwise identical to kernel-state-9.
++$  kernel-state-10
+  $:  %10
+      c=consensus-state-9
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-10
+      constants=blockchain-constants:v1:dt
+  ==
+::
+::  kernel-state-11 adds a block-versions map to consensus-state so the
+::  per-puzzle median-of-11 walker can read each ancestor's proof
+::  version. Populated lazily at post-activation accept-block only.
++$  kernel-state-11
+  $:  %11
+      c=consensus-state-10
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-10
+      constants=blockchain-constants:v1:dt
+  ==
+::
+::  kernel-state-12 replaces process-global ASERT anchor caches with a
+::  branch-local map keyed by block id. Consensus-state and all other state are
+::  unchanged.
++$  kernel-state-12
+  $:  %12
+      c=consensus-state-10
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-11
+      constants=blockchain-constants:v1:dt
+  ==
+::
+::
++$  kernel-state  kernel-state-12
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -355,7 +426,64 @@
   ==
 
 ::
-+$  consensus-state  consensus-state-9
+::  consensus-state-10 extends -9 with a block-versions map keyed by
+::  block-id, value = proof-version (from ztd/four). Populated only for
+::  post-activation blocks (height >= ai-pow-activation-height); for
+::  pre-activation block-ids, block-id-to-proof-version in consensus.hoon
+::  falls back to the deterministic height->version map.
+::
+::  Fields are inlined (not wrapping consensus-state-9 as a nested cell)
+::  so every existing field-access in consensus.hoon / derived.hoon
+::  remains valid without rewriting `blocks.c` -> `blocks.base.c`.
++$  consensus-state-10
+  $+  consensus-state-10
+  ::
+  ::  indexes and not-fully-validated state
+  $:
+    $:
+    :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        blocks-needed-by=(h-jug tx-id:dt block-id:dt) :: dependencies
+        excluded-txs=(h-set tx-id:dt) :: transactions unneeded by any block
+    ::
+    ::  every tx-id in spent-by must be in raw-txs and vice-versa
+        spent-by=(h-jug nname:dt tx-id:dt)
+    ::
+        pending-blocks=(h-map block-id:dt [=page:dt heard-at=@])  :: pending blocks
+    ==
+  ::
+  ::  core consensus state
+    $:  balance=(h-mip block-id:dt nname:dt nnote:dt)
+        txs=(h-mip block-id:dt tx-id:dt tx:dt) ::  fully validated transactions
+      ::
+      :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        raw-txs=(h-map tx-id:dt [=raw-tx:dt heard-at=@]) :: raw transactions
+      ::
+        blocks=(h-map block-id:dt local-page:dt)  ::  fully validated blocks
+      ::
+        heaviest-block=(unit block-id:dt) ::  most recent heaviest block
+      ::
+      ::  min timestamp of block that is a child of this block
+        min-timestamps=(h-map block-id:dt @)
+      ::  this map is used to calculate epoch duration. it is a map of each
+      ::  block-id to the first block-id in that epoch.
+        epoch-start=(h-map block-id:dt block-id:dt)
+      ::  this map contains the expected target for the child
+      ::  of a given block-id.
+        targets=(h-map block-id:dt bignum:bignum:dt)
+      ::
+      ::  Bitcoin block hash for genesis block
+      ::>)  TODO: change face to btc-hash?
+        btc-data=(unit (unit btc-hash:dt))
+        =genesis-seal:dt  ::  desired seal for genesis block
+      ::
+      ::  proof-version per accepted block, post-activation only.
+      ::  See block-id-to-proof-version in consensus.hoon for the
+      ::  fallback path for pre-activation block-ids.
+        block-versions=(h-map block-id:dt proof-version:sp)
+    ==
+  ==
+::
++$  consensus-state  consensus-state-10
 ::
 ::  you will not have lost any chain state if you lost pending state, you'd just have to
 ::  request data again from peers and reset your mining state
@@ -440,7 +568,37 @@
 ::
 +$  derived-state-9  $+(derived-state-9 derived-state-8)
 ::
-+$  derived-state  derived-state-9
+::  derived-state-10 extends derived-state-9 with per-puzzle ASERT
+::  anchor caches. See `+$ cached-asert-anchor` above for the
+::  cache-population contract.
+::    cached-zk-asert-post-ai-anchor: populated by accept-block when
+::      the first block at height >= ai-pow-activation-height lands;
+::      captures the parent block (at activation-height - 1)'s
+::      stored min-timestamp + target (read directly from
+::      consensus-state's min-timestamps + targets maps).
+::    cached-ai-asert-anchor: populated by accept-block when the
+::      first verified %ai-pow block lands; captures the block itself as
+::      the AI puzzle's anchor. %ai-pow blocks are verified via the
+::      recursive-certificate jet (%ai-pow-verify).
++$  derived-state-10
+  $+  derived-state-10
+  $:  highest-block-height=(unit page-number:dt)
+      heaviest-chain=(z-map page-number:dt block-id:dt)
+      cached-zk-asert-post-ai-anchor=(unit cached-asert-anchor)
+      cached-ai-asert-anchor=(unit cached-asert-anchor)
+  ==
+::
+::  Current derived state. `puzzle-asert-states` is complete for every accepted
+::  post-activation block and follows forks independently. Historical state-10
+::  caches remain only in the state-11 migration input.
++$  derived-state-11
+  $+  derived-state-11
+  $:  highest-block-height=(unit page-number:dt)
+      heaviest-chain=(z-map page-number:dt block-id:dt)
+      puzzle-asert-states=(h-map block-id:dt puzzle-asert-state)
+  ==
+::
++$  derived-state  derived-state-11
 ::
 +$  mining-state-0
   $+  mining-state-0
@@ -498,9 +656,35 @@
       [%command p=command]  ::  originate locally
   ==
 ::
++$  ai-blake  ai-blake:dt
++$  ai-pow-nonce  ai-pow-nonce:dt
++$  ai-ext2  ai-ext2:dt
++$  ai-ext2s  ai-ext2s:dt
++$  ai-ext2-vec  ai-ext2-vec:dt
++$  ai-pow-commitments  ai-pow-commitments:dt
++$  ai-pow-public-inputs  ai-pow-public-inputs:dt
++$  ai-proof-node  ai-proof-node:dt
++$  ai-recursive-certificate  ai-recursive-certificate:dt
++$  ai-pow-certificate  ai-pow-certificate:dt
++$  ai-pow-artifact  ai-pow-artifact:dt
+::
+::  Tagged union of proof-of-work variants. The miner pokes the consensus
+::  kernel with `[%command %pow pv=pow-variant]`; the consensus kernel
+::  dispatches on `-.pv` so additional puzzle types (e.g. %ai-pow) can be
+::  added without changing the outer `%command` shape.
++$  pow-variant
+  $+  pow-variant
+  $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]  ::  the existing puzzle-nock STARK PoW
+      ::  AI matmul PoW wire shape. Carries a Rust-owned nonce plus the
+      ::  recursive certificate only; raw Layer-0 proofs and the plain
+      ::  MatmulProof are not persisted in blocks. This arm is verified via
+      ::  the recursive-certificate jet (%ai-pow-verify).
+      [%ai-pow nonce=ai-pow-nonce cert=ai-pow-certificate]
+  ==
+::
 +$  command
   $+  command
-  $%  [%pow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke] :: check if a proof of work is good for the next block, issue a block if so
+  $%  [%pow pv=pow-variant]  ::  check if a proof of work is good for the next block, issue a block if so
       [%set-mining-key v0=@t v1=@t]  ::  set $lock for coinbase in mined blocks
       [%set-mining-key-advanced v0=(list [share=@ m=@ keys=(list @t)]) v1=(list [share=@ phk=@t])]  :: multisig and/or split coinbases
       [%enable-mining p=?]  ::  switch for generating candidate blocks for mining
@@ -551,7 +735,11 @@
       [%request p=request]  :: request specific tx or block
       [%track p=track]  :: runtime tracking of blocks for %liar-block-id effect
       [%seen p=seen]    ::  seen so don't reprocess
-      [%mine mine-start]
+      ::  Mining candidate emissions. `%mine-zk` is emitted when the
+      ::  candidate block changes. `%mine-ai` is emitted for the AI puzzle
+      ::  once at/after the AI-PoW activation height.
+      [%mine-zk mine-start]
+      [%mine-ai mine-start]
       lie
       span-effect
       [%exit code=@]
@@ -561,6 +749,9 @@
   $%  [%0 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%1 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%2 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
+      ::  %3: AI PoW mining. Emitted post-activation as the [%mine-ai ...]
+      ::  candidate for the ai-pow-miner.
+      [%3 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
   ==
 ::
 +$  seen

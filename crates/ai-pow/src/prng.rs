@@ -1,0 +1,367 @@
+//! Domain-separated BLAKE3-XOF expansion for the Pearl-style PoUW input and
+//! low-rank noise factors.
+//!
+//! Public ranges follow Pearl Whitepaper §4.1 / §4.4:
+//!  * `A` (rows), `B` (columns): signed 7-bit, i.e. `[-64, 63]`. This is one
+//!    value short of Pearl's `[-64, 64]` but lets us mask cleanly from a byte
+//!    stream without rejection sampling; the per-multiply bound `(64+63)^2 =
+//!    16129` still fits inside `k = 2^16` accumulations.
+//!  * `E_L`, `F_R`: signed 6-bit, i.e. `[-32, 31]` (Pearl §4.4 verbatim).
+//!  * `E_R`, `F_L`: choice matrices. Pearl §4.4 specifies that each column of
+//!    `E_R` (resp. each row of `F_L`) has exactly one `+1` and one `-1` at
+//!    two uniformly random distinct positions in `0..r`; all other entries
+//!    are `0`.
+//!
+//! Each named stream is independent: changing the label or the index produces
+//! an unrelated draw. Verifiers can re-derive a single row, column, or pair
+//! of choice-matrix indices addressably without expanding the full noise.
+
+use blake3::Hasher;
+
+// `CTX_A_ROW` / `CTX_B_COL` drive our test-only `synth_matrices` helper for
+// deriving deterministic `A, B` inputs from a seed. They are *not* the
+// Pearl-style PRNG — Pearl's `A, B` are caller-supplied raw bytes — so we
+// keep our own context-string scheme here.
+const CTX_A_ROW: &str = "ai-pow v2 expand A-row";
+const CTX_B_COL: &str = "ai-pow v2 expand B-col";
+
+const fn padded_seed_label(label: [u8; 8]) -> [u8; 32] {
+    let mut result = [0u8; 32];
+    let mut i = 0;
+    while i < label.len() {
+        result[i] = label[i];
+        i += 1;
+    }
+    result
+}
+
+/// Pearl's `SEED_LABEL_A` (`Pearl zk-pow pearl_noise.rs:28`):
+/// 32 bytes = `b"A_tensor"` zero-padded. Fed to `pearl_random_hash` as the
+/// `seed` argument whenever the random draw belongs to the `E` side of the
+/// noise (`E_L` rows or `E_R` columns).
+pub const SEED_LABEL_A: [u8; 32] = padded_seed_label(*b"A_tensor");
+
+/// Pearl's `SEED_LABEL_B` (`Pearl zk-pow pearl_noise.rs:29`):
+/// 32 bytes = `b"B_tensor"` zero-padded. Fed to `pearl_random_hash` whenever
+/// the random draw belongs to the `F` side of the noise (`F_R` columns or
+/// `F_L` rows).
+pub const SEED_LABEL_B: [u8; 32] = padded_seed_label(*b"B_tensor");
+
+/// Pearl's `get_random_hash` (`Pearl zk-pow pearl_noise.rs:45-56`).
+///
+/// Builds a 64-byte BLAKE3 keyed-hash input as:
+///
+/// ```text
+///   message = [0u8; 64]
+///   message[prepend_index * 4 .. prepend_index * 4 + 4] = (1 + index).to_le_bytes()
+///   message[32 .. 64] = seed
+///   BLAKE3-keyed(message, key)
+/// ```
+///
+/// where `seed` is either `SEED_LABEL_A` or `SEED_LABEL_B` and `key` is the
+/// per-block noise seed (`s_A` or `s_B` from the Pearl §4.3 derivation
+/// chain). `prepend_index = 0` is used by the uniform-noise generators
+/// (`E_L`, `F_R`); `prepend_index = 1` is used by the permutation
+/// generators (`E_R` columns, `F_L` rows).
+pub fn pearl_random_hash(
+    index: usize,
+    seed: &[u8; 32],
+    key: &[u8; 32],
+    prepend_index: usize,
+) -> [u8; 32] {
+    let mut message = [0u8; 64];
+    let prepend_value = (1 + index) as i32;
+    message[prepend_index * 4..prepend_index * 4 + 4].copy_from_slice(&prepend_value.to_le_bytes());
+    message[32..64].copy_from_slice(seed);
+    *Hasher::new_keyed(key)
+        .update(&message)
+        .finalize()
+        .as_bytes()
+}
+
+fn xof(context: &str, root: &[u8], idx: u64) -> blake3::OutputReader {
+    let mut hasher = Hasher::new_derive_key(context);
+    hasher.update(root);
+    hasher.update(&idx.to_le_bytes());
+    hasher.finalize_xof()
+}
+
+fn fill_bytes(context: &str, root: &[u8], idx: u64, buf: &mut [u8]) {
+    xof(context, root, idx).fill(buf);
+}
+
+/// Mask a byte into a signed 7-bit integer in `[-64, 63]`.
+#[inline]
+fn byte_to_i7(b: u8) -> i8 {
+    ((b & 0x7F) as i32 - 64) as i8
+}
+
+/// Mask a byte into a signed 6-bit integer in `[-32, 31]`.
+#[inline]
+fn byte_to_i6(b: u8) -> i8 {
+    ((b & 0x3F) as i32 - 32) as i8
+}
+
+/// Row `i` of the input matrix `A` (length `k`), values in `[-64, 63]`.
+pub fn expand_a_row(state: &[u8], i: u32, k: u32, out: &mut [i8]) {
+    debug_assert_eq!(out.len(), k as usize);
+    let mut buf = vec![0u8; k as usize];
+    fill_bytes(CTX_A_ROW, state, i as u64, &mut buf);
+    for (o, b) in out.iter_mut().zip(buf.iter()) {
+        *o = byte_to_i7(*b);
+    }
+}
+
+/// Column `j` of the input matrix `B` (length `k`), values in `[-64, 63]`.
+pub fn expand_b_col(state: &[u8], j: u32, k: u32, out: &mut [i8]) {
+    debug_assert_eq!(out.len(), k as usize);
+    let mut buf = vec![0u8; k as usize];
+    fill_bytes(CTX_B_COL, state, j as u64, &mut buf);
+    for (o, b) in out.iter_mut().zip(buf.iter()) {
+        *o = byte_to_i7(*b);
+    }
+}
+
+/// Pearl `BLAKE3_DIGEST_SIZE` (chunk size for the uniform-random PRNG).
+const PEARL_DIGEST_SIZE: usize = 32;
+
+/// Pearl's `generate_uniform_random_matrix` row addressing
+/// (`Pearl zk-pow pearl_noise.rs:60-79`).
+///
+/// The flat row-major byte stream of the matrix is generated by hashing the
+/// `block`-th 32-byte chunk via `pearl_random_hash(block, seed, key, 0)`.
+/// Row `row_idx` occupies bytes `[row_idx * num_cols, row_idx * num_cols +
+/// num_cols)` in that stream; this function fills `out` (length `num_cols`)
+/// from the relevant chunks. Each output byte is mapped to `[-32, 31]` via
+/// `(byte & 0x3F) - 32`.
+fn fill_uniform_row(seed: &[u8; 32], key: &[u8; 32], row_idx: u32, num_cols: u32, out: &mut [i8]) {
+    let num_cols = num_cols as usize;
+    debug_assert_eq!(out.len(), num_cols);
+    let start_idx = (row_idx as usize) * num_cols;
+    let end_idx = start_idx + num_cols;
+    let first_block = start_idx / PEARL_DIGEST_SIZE;
+    let last_block = end_idx.div_ceil(PEARL_DIGEST_SIZE);
+    for block in first_block..last_block {
+        let hash = pearl_random_hash(block, seed, key, 0);
+        let block_start = block * PEARL_DIGEST_SIZE;
+        // Clamp the in-chunk byte range to the row's span.
+        let lo = start_idx.saturating_sub(block_start).min(PEARL_DIGEST_SIZE);
+        let hi = (end_idx - block_start).min(PEARL_DIGEST_SIZE);
+        for k in lo..hi {
+            let idx = block_start + k;
+            out[idx - start_idx] = byte_to_i6(hash[k]);
+        }
+    }
+}
+
+/// Row `i` of the noise factor `E_L` (length `r`), values in `[-32, 31]`.
+/// Pearl byte-equivalent: `seed = SEED_LABEL_A`, `key = s_A`, `prepend = 0`.
+pub fn expand_e_l_row(s_a: &[u8; 32], i: u32, r: u32, out: &mut [i8]) {
+    fill_uniform_row(&SEED_LABEL_A, s_a, i, r, out);
+}
+
+/// Column `j` of the noise factor `F_R` (length `r`), values in `[-32, 31]`.
+/// Pearl byte-equivalent: `seed = SEED_LABEL_B`, `key = s_B`, `prepend = 0`.
+pub fn expand_f_r_col(s_b: &[u8; 32], j: u32, r: u32, out: &mut [i8]) {
+    fill_uniform_row(&SEED_LABEL_B, s_b, j, r, out);
+}
+
+/// Pearl's `mul_hi_u32` (`Pearl zk-pow pearl_noise.rs:82-84`):
+/// high 32 bits of the 64-bit product `a * b`.
+#[inline]
+fn mul_hi_u32(a: u32, b: u32) -> u32 {
+    ((a as u64 * b as u64) >> 32) as u32
+}
+
+/// Number of `(p_plus, p_minus)` pairs packed into one 32-byte Pearl PRNG
+/// hash output (8 pairs × 4 bytes per u32 = 32 bytes).
+const PEARL_PAIRS_PER_HASH: usize = 8;
+
+/// Pearl's deterministic permutation scheme
+/// (`Pearl zk-pow pearl_noise.rs:89-115`).
+///
+/// Given the `j`-th pair in the global permutation list, Pearl produces it
+/// by hashing the `j / 8`-th chunk index and slicing 4 bytes out of slot
+/// `j % 8`:
+///
+/// ```text
+///   chunk_idx = j / 8
+///   slot_idx  = j % 8
+///   hash      = pearl_random_hash(chunk_idx, seed, key, prepend_index=1)
+///   u32       = LE(hash[slot_idx*4 .. slot_idx*4+4])
+///   first     = u32 & (r - 1)
+///   second    = first XOR (1 + mul_hi(r - 1, u32))
+/// ```
+///
+/// The `first` ↔ `second` distinct-pair guarantee comes from
+/// `1 + mul_hi(r-1, u32) ∈ [1, r-1]` (since both operands are below the
+/// next power of two), so XOR-ing into `first` always flips at least one
+/// bit and keeps the result inside `[0, r-1]`.
+///
+/// Requires `r` to be a power of two (the bitmask trick assumes `r-1` is
+/// an all-ones mask). Our `MatmulParams::validate` enforces this.
+fn pearl_permutation_pair(seed: &[u8; 32], key: &[u8; 32], j: u32, r: u32) -> (u32, u32) {
+    debug_assert!(r >= 2 && r.is_power_of_two());
+    let chunk_idx = (j as usize) / PEARL_PAIRS_PER_HASH;
+    let slot_idx = (j as usize) % PEARL_PAIRS_PER_HASH;
+    let hash = pearl_random_hash(chunk_idx, seed, key, 1);
+    let off = slot_idx * 4;
+    let random_uint32 =
+        u32::from_le_bytes([hash[off], hash[off + 1], hash[off + 2], hash[off + 3]]);
+    let rank_mask = r - 1;
+    let first = random_uint32 & rank_mask;
+    let second = first ^ (1 + mul_hi_u32(rank_mask, random_uint32));
+    (first, second)
+}
+
+/// `(p_plus, p_minus)` for column `j` of `E_R ∈ {-1, 0, 1}^{r × k}`.
+/// `E_R[p_plus, j] = +1`, `E_R[p_minus, j] = -1`, all other entries are `0`.
+/// Pearl byte-equivalent: `seed = SEED_LABEL_A`, `key = s_A`, `prepend = 1`.
+pub fn e_r_col_positions(s_a: &[u8; 32], j: u32, r: u32) -> (u32, u32) {
+    pearl_permutation_pair(&SEED_LABEL_A, s_a, j, r)
+}
+
+/// `(p_plus, p_minus)` for row `k_idx` of `F_L ∈ {-1, 0, 1}^{k × r}`.
+/// `F_L[k_idx, p_plus] = +1`, `F_L[k_idx, p_minus] = -1`, all other entries
+/// are `0`. Pearl byte-equivalent: `seed = SEED_LABEL_B`, `key = s_B`,
+/// `prepend = 1`.
+pub fn f_l_row_positions(s_b: &[u8; 32], k_idx: u32, r: u32) -> (u32, u32) {
+    pearl_permutation_pair(&SEED_LABEL_B, s_b, k_idx, r)
+}
+
+/// Allocate-and-expand wrappers for callers that don't have a buffer.
+pub fn expand_a_row_vec(state: &[u8], i: u32, k: u32) -> Vec<i8> {
+    let mut v = vec![0i8; k as usize];
+    expand_a_row(state, i, k, &mut v);
+    v
+}
+pub fn expand_b_col_vec(state: &[u8], j: u32, k: u32) -> Vec<i8> {
+    let mut v = vec![0i8; k as usize];
+    expand_b_col(state, j, k, &mut v);
+    v
+}
+pub fn expand_e_l_row_vec(noise_seed: &[u8; 32], i: u32, r: u32) -> Vec<i8> {
+    let mut v = vec![0i8; r as usize];
+    expand_e_l_row(noise_seed, i, r, &mut v);
+    v
+}
+pub fn expand_f_r_col_vec(noise_seed: &[u8; 32], j: u32, r: u32) -> Vec<i8> {
+    let mut v = vec![0i8; r as usize];
+    expand_f_r_col(noise_seed, j, r, &mut v);
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_b_in_range() {
+        let state = [7u8; 48];
+        let v = expand_a_row_vec(&state, 0, 4096);
+        for x in &v {
+            assert!(*x >= -64 && *x <= 63, "A entry {x} out of range");
+        }
+        let v = expand_b_col_vec(&state, 0, 4096);
+        for x in &v {
+            assert!(*x >= -64 && *x <= 63, "B entry {x} out of range");
+        }
+    }
+
+    #[test]
+    fn e_l_in_range() {
+        let seed = [3u8; 32];
+        let v = expand_e_l_row_vec(&seed, 0, 256);
+        for x in &v {
+            assert!(*x >= -32 && *x <= 31, "E_L entry {x} out of range");
+        }
+    }
+
+    #[test]
+    fn determinism() {
+        let state = [7u8; 48];
+        let a = expand_a_row_vec(&state, 3, 64);
+        let b = expand_a_row_vec(&state, 3, 64);
+        assert_eq!(a, b);
+
+        let seed = [3u8; 32];
+        let p1 = e_r_col_positions(&seed, 0, 16);
+        let p2 = e_r_col_positions(&seed, 0, 16);
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn idx_separation() {
+        let state = [7u8; 48];
+        let a = expand_a_row_vec(&state, 3, 64);
+        let b = expand_a_row_vec(&state, 4, 64);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn label_separation() {
+        let state = [7u8; 48];
+        let mut seed = [0u8; 32];
+        seed.copy_from_slice(&state[..32]);
+        let a = expand_a_row_vec(&state, 3, 64);
+        let e = expand_e_l_row_vec(&seed, 3, 64);
+        // Different domain-separation contexts -> different streams.
+        assert_ne!(&a[..], &e[..]);
+    }
+
+    #[test]
+    fn state_separation() {
+        let s1 = [7u8; 48];
+        let s2 = [8u8; 48];
+        let a = expand_a_row_vec(&s1, 3, 64);
+        let b = expand_a_row_vec(&s2, 3, 64);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn choice_indices_distinct_and_in_range() {
+        let seed = [42u8; 32];
+        for j in 0..256u32 {
+            let (p, m) = e_r_col_positions(&seed, j, 16);
+            assert!(p < 16, "p out of range: {p}");
+            assert!(m < 16, "m out of range: {m}");
+            assert_ne!(p, m, "p and m must differ");
+        }
+    }
+
+    #[test]
+    fn choice_index_distribution_roughly_uniform() {
+        // Histogram check: over many j, both p_plus and p_minus should hit
+        // every position with roughly equal frequency.
+        let seed = [42u8; 32];
+        let r = 16u32;
+        let trials = 20_000u32;
+        let mut hist = vec![0u32; r as usize];
+        for j in 0..trials {
+            let (p, m) = e_r_col_positions(&seed, j, r);
+            hist[p as usize] += 1;
+            hist[m as usize] += 1;
+        }
+        let expected = (2 * trials) as f64 / r as f64;
+        let mut max_dev = 0.0f64;
+        for &h in &hist {
+            let dev = ((h as f64) - expected).abs() / expected;
+            if dev > max_dev {
+                max_dev = dev;
+            }
+        }
+        // 95% CI with 2500 per bucket is ~4%; allow generous slack.
+        assert!(max_dev < 0.10, "max relative deviation was {max_dev}");
+    }
+
+    #[test]
+    fn distribution_is_centered() {
+        // Sanity: mean of an i7 XOF stream should be near `-0.5` (centered
+        // on the midpoint of `[-64, 63]`).
+        let state = [42u8; 48];
+        let n = 100_000u32;
+        let v = expand_a_row_vec(&state, 0, n);
+        let mean = v.iter().map(|&x| x as i64).sum::<i64>() as f64 / n as f64;
+        assert!(mean.abs() < 1.0, "mean was {mean}");
+    }
+}

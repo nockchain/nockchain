@@ -1,3 +1,6 @@
+use bytes::Bytes;
+use futures::{Stream, StreamExt};
+use nockapp::noun::slab::NounSlab;
 use tonic::transport::Channel;
 
 use crate::error::{NockAppGrpcError, Result};
@@ -47,6 +50,37 @@ impl PrivateNockAppGrpcClient {
     //         None => Err(NockAppGrpcError::Internal("Empty response".to_string())),
     //     }
     // }
+
+    /// Subscribe to the node's effect bus over the `WatchEffects` streaming
+    /// RPC. `head_filter` is a list of byte strings (e.g., `vec![b"mine".to_vec()]`);
+    /// the server forwards only effects whose head atom byte-equals one of
+    /// these. Empty filter ⇒ all effects.
+    ///
+    /// Each yielded item is a `NounSlab` containing the decoded effect noun.
+    pub async fn watch_effects(
+        &mut self,
+        pid: i32,
+        head_filter: Vec<Vec<u8>>,
+    ) -> Result<impl Stream<Item = Result<NounSlab>>> {
+        let request = WatchEffectsRequest { pid, head_filter };
+        let response = self.client.watch_effects(request).await?;
+        let inner = response.into_inner();
+        let stream = inner.map(|item| match item {
+            Ok(msg) => {
+                let mut slab = NounSlab::new();
+                match slab.cue_into(Bytes::from(msg.effect)) {
+                    Ok(_) => Ok(slab),
+                    Err(e) => Err(NockAppGrpcError::Serialization(format!(
+                        "JAM decoding of WatchEffects payload failed: {e:?}"
+                    ))),
+                }
+            }
+            Err(status) => Err(NockAppGrpcError::Internal(format!(
+                "WatchEffects stream error: {status}"
+            ))),
+        });
+        Ok(stream)
+    }
 
     pub async fn poke(&mut self, pid: i32, wire: Wire, payload: Vec<u8>) -> Result<bool> {
         let request = PokeRequest {

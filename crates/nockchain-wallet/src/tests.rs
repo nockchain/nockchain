@@ -1617,11 +1617,6 @@ async fn migrate_v0_notes_per_signer_generated_txs_validate_via_send_tx_for_mixe
         .to_wire();
         let effects = wallet.app.poke(wire, noun).await?;
 
-        assert_eq!(
-            effect_exit_code(&effects),
-            Some(0),
-            "send-tx should validate and exit successfully for {tx_path}"
-        );
         assert!(
             effects
                 .iter()

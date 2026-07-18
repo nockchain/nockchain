@@ -2,11 +2,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{value_parser, ArgAction, Args, CommandFactory, FromArgMatches, Parser};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser};
 use nockapp::kernel::boot::{NockStackSize, PmaSize};
-use nockchain_types::tx_engine::common::Hash;
-
-use crate::mining::MiningPkhConfig;
 
 // TODO: command-line/configure
 /** Path to read current node's identity from */
@@ -34,71 +31,224 @@ pub const CHAIN_INTERVAL: Duration = Duration::from_secs(20);
 /// switched to a future block for launch.
 pub const GENESIS_HEIGHT: u64 = 897767;
 
-/// Validated ASERT fakenet trio. Only constructible via [`FakenetAsertArgs::into_config`].
+/// Validated ASERT fakenet override for one puzzle (ZK or AI). Constructible only
+/// via `into_config` on the corresponding args struct.
 #[derive(Debug, Clone, Copy)]
 pub struct FakenetAsertConfig {
     pub phase: u64,
     pub anchor_height: u64,
     pub anchor_target_bex: u64,
+    /// Optional per-puzzle ideal block time (seconds). None = keep the default.
+    pub ideal_block_time: Option<u64>,
+    /// Optional per-puzzle ASERT half-life (seconds). None = keep the default. A
+    /// short half-life makes retargeting visible on a short fakenet run.
+    pub half_life: Option<u64>,
 }
 
-/// CLI surface for the three ASERT fakenet overrides. All three must be supplied together or not
-/// at all; call [`into_config`][FakenetAsertArgs::into_config] to enforce the invariant and obtain
-/// a [`FakenetAsertConfig`].
+const FAKENET_ASERT_MAX_BEX: u64 = 512;
+
+/// Which puzzle a fakenet ASERT override targets. Selects the anchor-height
+/// invariant, which differs by puzzle (see `AsertParams::{zk_default, ai_default}`
+/// in nockchain-types): the ZK puzzle anchors at the last pre-activation block
+/// (`anchor_height + 1 == phase`, standard aserti3-2d), while the AI puzzle anchors
+/// AT the activation block itself (`anchor_height == phase`) so the first AI block
+/// above it opens the AI subchain that `+count-same-type-since-anchor` measures.
+#[derive(Clone, Copy)]
+enum AsertPuzzle {
+    Zk,
+    Ai,
+}
+
+impl AsertPuzzle {
+    /// Flag family used in error text (`--fakenet-{label}-*`).
+    fn label(self) -> &'static str {
+        match self {
+            AsertPuzzle::Zk => "asert",
+            AsertPuzzle::Ai => "ai-asert",
+        }
+    }
+
+    /// The one anchor-height that is valid for `phase`, plus the suffix that
+    /// describes the relation in an error message. `None` means no anchor-height
+    /// can satisfy this phase (e.g. ZK with `phase == 0`).
+    fn expected_anchor_height(self, phase: u64) -> (Option<u64>, &'static str) {
+        match self {
+            AsertPuzzle::Zk => (phase.checked_sub(1), " minus 1"),
+            AsertPuzzle::Ai => (Some(phase), ""),
+        }
+    }
+}
+
+/// Shared validation for a fakenet ASERT override. The
+/// phase/anchor-height/anchor-target-bex trio is all-or-nothing; ideal-block-time
+/// and half-life are independent optional tweaks that require the trio. The
+/// anchor-height invariant is puzzle-specific (see [`AsertPuzzle`]).
+fn build_fakenet_asert(
+    puzzle: AsertPuzzle,
+    phase: Option<u64>,
+    anchor_height: Option<u64>,
+    anchor_target_bex: Option<u64>,
+    ideal_block_time: Option<u64>,
+    half_life: Option<u64>,
+) -> Result<Option<FakenetAsertConfig>, String> {
+    let label = puzzle.label();
+    match (phase, anchor_height, anchor_target_bex) {
+        (None, None, None) => {
+            if ideal_block_time.is_some() || half_life.is_some() {
+                return Err(format!(
+                    "--fakenet-{label}-ideal-block-time / --fakenet-{label}-half-life require the \
+                     --fakenet-{label}-phase / -anchor-height / -anchor-target-bex trio to be set"
+                ));
+            }
+            Ok(None)
+        }
+        (Some(phase), Some(anchor_height), Some(bex)) => {
+            let (expected, relation) = puzzle.expected_anchor_height(phase);
+            if phase == 0 || Some(anchor_height) != expected {
+                return Err(format!(
+                    "--fakenet-{label}-anchor-height ({anchor_height}) must equal \
+                     --fakenet-{label}-phase ({phase}){relation}"
+                ));
+            }
+            if bex > FAKENET_ASERT_MAX_BEX {
+                return Err(format!(
+                    "--fakenet-{label}-anchor-target-bex ({bex}) must be <= {FAKENET_ASERT_MAX_BEX}"
+                ));
+            }
+            Ok(Some(FakenetAsertConfig {
+                phase,
+                anchor_height,
+                anchor_target_bex: bex,
+                ideal_block_time,
+                half_life,
+            }))
+        }
+        _ => Err(format!(
+            "--fakenet-{label}-phase, --fakenet-{label}-anchor-height, and \
+             --fakenet-{label}-anchor-target-bex must all be specified together or not at all"
+        )),
+    }
+}
+
+/// CLI surface for the ZK-puzzle ASERT fakenet overrides. The trio must be
+/// supplied together or not at all. Aliased `--fakenet-zk-asert-*` for symmetry
+/// with the AI flags; `--fakenet-asert-*` is retained for compatibility.
+///
+/// Every arg carries an explicit `id`: this struct and `FakenetAiAsertArgs` share
+/// Rust field names, and clap derives arg ids from field names — without unique
+/// ids the two flatten into colliding args (the AI flags would cross-wire into the
+/// ZK config).
 #[derive(Args, Debug, Clone, Default)]
 pub struct FakenetAsertArgs {
     #[arg(
+        id = "fakenet_zk_asert_phase",
         long = "fakenet-asert-phase",
-        help = "Override the asert-phase (aserti3-2d activation height) when running on fakenet. Requires --fakenet.",
+        visible_alias = "fakenet-zk-asert-phase",
+        help = "ZK ASERT phase (aserti3-2d activation height) on fakenet. Requires --fakenet.",
         requires = "fakenet"
     )]
     pub phase: Option<u64>,
     #[arg(
+        id = "fakenet_zk_asert_anchor_height",
         long = "fakenet-asert-anchor-height",
-        help = "Override the asert-anchor-height when running on fakenet. Must equal asert-phase - 1. Requires --fakenet.",
+        visible_alias = "fakenet-zk-asert-anchor-height",
+        help = "ZK ASERT anchor height on fakenet. Must equal phase - 1. Requires --fakenet.",
         requires = "fakenet"
     )]
     pub anchor_height: Option<u64>,
     #[arg(
+        id = "fakenet_zk_asert_anchor_target_bex",
         long = "fakenet-asert-anchor-target-bex",
-        help = "Override asert-anchor-target-atom by bex exponent when running on fakenet (target = 2^bex). Requires --fakenet.",
+        visible_alias = "fakenet-zk-asert-anchor-target-bex",
+        help = "ZK ASERT anchor target by bex exponent on fakenet (target = 2^bex). Requires --fakenet.",
         requires = "fakenet"
     )]
     pub anchor_target_bex: Option<u64>,
+    #[arg(
+        id = "fakenet_zk_asert_ideal_block_time",
+        long = "fakenet-asert-ideal-block-time",
+        visible_alias = "fakenet-zk-asert-ideal-block-time",
+        help = "ZK ASERT ideal block time (seconds) on fakenet. Requires the ZK ASERT trio.",
+        requires = "fakenet"
+    )]
+    pub ideal_block_time: Option<u64>,
+    #[arg(
+        id = "fakenet_zk_asert_half_life",
+        long = "fakenet-asert-half-life",
+        visible_alias = "fakenet-zk-asert-half-life",
+        help = "ZK ASERT half-life (seconds) on fakenet; short => faster retarget. Requires the ZK ASERT trio.",
+        requires = "fakenet"
+    )]
+    pub half_life: Option<u64>,
 }
 
 impl FakenetAsertArgs {
-    /// Validates the trio invariant and converts to [`FakenetAsertConfig`].
-    ///
-    /// Returns `Ok(None)` when none of the three flags are set.
-    /// Returns `Err` when only some are set, when `anchor_height + 1 != phase`, or when
-    /// `anchor_target_bex` exceeds the cap.
+    /// Validate + convert. `Ok(None)` when unset; `Err` on a broken trio / cap.
     pub fn into_config(self) -> Result<Option<FakenetAsertConfig>, String> {
-        match (self.phase, self.anchor_height, self.anchor_target_bex) {
-            (None, None, None) => Ok(None),
-            (Some(phase), Some(anchor_height), Some(bex)) => {
-                if phase == 0 || Some(phase) != anchor_height.checked_add(1) {
-                    return Err(format!(
-                        "--fakenet-asert-anchor-height ({anchor_height}) must equal \
-                         --fakenet-asert-phase ({phase}) minus 1"
-                    ));
-                }
-                const MAX_BEX: u64 = 512;
-                if bex > MAX_BEX {
-                    return Err(format!(
-                        "--fakenet-asert-anchor-target-bex ({bex}) must be <= {MAX_BEX}"
-                    ));
-                }
-                Ok(Some(FakenetAsertConfig {
-                    phase,
-                    anchor_height,
-                    anchor_target_bex: bex,
-                }))
-            }
-            _ => Err("--fakenet-asert-phase, --fakenet-asert-anchor-height, and \
-                 --fakenet-asert-anchor-target-bex must all be specified together or not at all"
-                .to_string()),
-        }
+        build_fakenet_asert(
+            AsertPuzzle::Zk,
+            self.phase,
+            self.anchor_height,
+            self.anchor_target_bex,
+            self.ideal_block_time,
+            self.half_life,
+        )
+    }
+}
+
+/// CLI surface for AI-puzzle ASERT fakenet overrides. Its phase is the AI
+/// admission boundary: it sets activation when the explicit activation flag is
+/// absent, and must equal that flag when both are present.
+#[derive(Args, Debug, Clone, Default)]
+pub struct FakenetAiAsertArgs {
+    #[arg(
+        id = "fakenet_ai_asert_phase",
+        long = "fakenet-ai-asert-phase",
+        help = "AI ASERT phase and AI-PoW activation height on fakenet. Sets activation unless --fakenet-ai-pow-activation-height is supplied; both must match. Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub phase: Option<u64>,
+    #[arg(
+        id = "fakenet_ai_asert_anchor_height",
+        long = "fakenet-ai-asert-anchor-height",
+        help = "AI ASERT anchor height on fakenet. Must equal phase (the AI puzzle anchors at its activation block). Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub anchor_height: Option<u64>,
+    #[arg(
+        id = "fakenet_ai_asert_anchor_target_bex",
+        long = "fakenet-ai-asert-anchor-target-bex",
+        help = "AI ASERT anchor target by bex exponent on fakenet (target = 2^bex). Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub anchor_target_bex: Option<u64>,
+    #[arg(
+        id = "fakenet_ai_asert_ideal_block_time",
+        long = "fakenet-ai-asert-ideal-block-time",
+        help = "AI ASERT ideal block time (seconds) on fakenet. Requires the AI ASERT trio.",
+        requires = "fakenet"
+    )]
+    pub ideal_block_time: Option<u64>,
+    #[arg(
+        id = "fakenet_ai_asert_half_life",
+        long = "fakenet-ai-asert-half-life",
+        help = "AI ASERT half-life (seconds) on fakenet; short => faster retarget. Requires the AI ASERT trio.",
+        requires = "fakenet"
+    )]
+    pub half_life: Option<u64>,
+}
+
+impl FakenetAiAsertArgs {
+    /// Validate + convert. `Ok(None)` when unset; `Err` on a broken trio / cap.
+    pub fn into_config(self) -> Result<Option<FakenetAsertConfig>, String> {
+        build_fakenet_asert(
+            AsertPuzzle::Ai,
+            self.phase,
+            self.anchor_height,
+            self.anchor_target_bex,
+            self.ideal_block_time,
+            self.half_life,
+        )
     }
 }
 
@@ -115,20 +265,6 @@ pub const DEFAULT_FAKENET_BYTHOS_PHASE: u64 = 1;
 pub struct NockchainCli {
     #[command(flatten)]
     pub nockapp_cli: nockapp::kernel::boot::Cli,
-    #[arg(long, help = "Mine in-kernel", default_value = "false")]
-    pub mine: bool,
-    #[arg(
-        long,
-        help = "Pubkey hash to mine to (mutually exclusive with --mining-pkh-adv)"
-    )]
-    pub mining_pkh: Option<String>,
-    #[arg(
-        long,
-        help = "Advanced mining pubkey hash configuration (mutually exclusive with --mining-pkh). Format: share,pkh",
-        value_parser = value_parser!(MiningPkhConfig),
-        num_args = 1..,
-    )]
-    pub mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
     #[arg(long, help = "Whether to run as fakenet", default_value_t = false)]
     pub fakenet: bool,
     #[arg(long, short, help = "Initial peer", action = ArgAction::Append)]
@@ -180,8 +316,6 @@ pub struct NockchainCli {
     pub max_system_memory_fraction: Option<f64>,
     #[arg(long, help = "Maximum process memory for connection limits (bytes)")]
     pub max_system_memory_bytes: Option<usize>,
-    #[arg(long, help = "Number of threads to mine with defaults to one less than the number of cpus available.", default_value = None)]
-    pub num_threads: Option<u64>,
     #[arg(
         long,
         help = "Size of Proof of Work puzzle for mining on fakenet. Mainnet uses 64. Must be a power of 2. Defaults to 2. Ignored on mainnet.",
@@ -210,8 +344,20 @@ pub struct NockchainCli {
         requires = "fakenet"
     )]
     pub fakenet_bythos_phase: Option<u64>,
+    #[arg(
+        long,
+        help = "Override the AI-PoW activation height when running on fakenet. Also \
+                sets phase.zk-asert-post-ai and phase.ai-asert to the same value so the \
+                ZK regime switch + AI puzzle activation happen together. \
+                Defaults to mainnet 95000 (effectively never on fakenet). \
+                Requires --fakenet.",
+        requires = "fakenet"
+    )]
+    pub fakenet_ai_pow_activation_height: Option<u64>,
     #[command(flatten)]
     pub fakenet_asert: FakenetAsertArgs,
+    #[command(flatten)]
+    pub fakenet_ai_asert: FakenetAiAsertArgs,
     #[arg(
         long,
         help = "Override the candidate timestamp update interval in seconds when running on fakenet. Requires --fakenet.",
@@ -233,6 +379,15 @@ pub struct NockchainCli {
     pub bind_private_grpc_addr: Option<std::net::SocketAddr>,
     #[arg(long, default_value = "5555")]
     pub bind_private_grpc_port: u16,
+    #[arg(
+        long = "ai-pow-verifier-cache-cap",
+        help = "Max resident AI-PoW verifier contexts (LRU). The production default \
+                retains all 7 supported trace-height buckets (2^13..2^19), preventing \
+                attacker-controlled evict/reload thrash at ~5.6–8.6 GiB RSS. Lowering \
+                the cap trades memory for synchronous page-ins and is unsafe for an \
+                adversarial validator. Overrides AI_POW_VERIFIER_CACHE_CAP."
+    )]
+    pub ai_pow_verifier_cache_cap: Option<usize>,
 }
 
 impl NockchainCli {
@@ -287,32 +442,31 @@ fn stack_size_default_arg(stack_size: NockStackSize) -> &'static str {
 }
 
 impl NockchainCli {
+    /// Effective AI activation for fakenet. An AI ASERT trio without an explicit
+    /// activation flag sets the activation to its phase; if both are supplied,
+    /// they must agree. This preserves the protocol invariant that AI admission,
+    /// the AI anchor, and the post-AI ZK regime share one boundary.
+    pub(crate) fn effective_fakenet_ai_activation_height(&self) -> Result<Option<u64>, String> {
+        let ai_asert = self.fakenet_ai_asert.clone().into_config()?;
+        let explicit = self.fakenet_ai_pow_activation_height;
+        if explicit == Some(0) {
+            return Err("--fakenet-ai-pow-activation-height must be >= 1".to_string());
+        }
+        match (explicit, ai_asert) {
+            (Some(activation), Some(asert)) if activation != asert.phase => Err(format!(
+                "--fakenet-ai-pow-activation-height ({activation}) must equal \
+                 --fakenet-ai-asert-phase ({})",
+                asert.phase
+            )),
+            (Some(activation), _) => Ok(Some(activation)),
+            (None, Some(asert)) => Ok(Some(asert.phase)),
+            (None, None) => Ok(None),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
-        if self.mine && !(self.mining_pkh.is_some() || self.mining_pkh_adv.is_some()) {
-            return Err(
-                "Cannot specify mine without either mining_pkh or mining_pkh_adv".to_string(),
-            );
-        }
-
-        if self.mining_pkh.is_some() && self.mining_pkh_adv.is_some() {
-            return Err(
-                "Cannot specify both mining_pkh and mining_pkh_adv at the same time".to_string(),
-            );
-        }
-
-        if let Some(pkh) = &self.mining_pkh {
-            Hash::from_base58(pkh).map_err(|err| format!("Invalid mining_pkh: {err}"))?;
-        }
-
-        if let Some(pkh_configs) = &self.mining_pkh_adv {
-            for config in pkh_configs {
-                Hash::from_base58(&config.pkh).map_err(|err| {
-                    format!("Invalid mining_pkh_adv entry '{}': {err}", config.pkh)
-                })?;
-            }
-        }
-
         self.fakenet_asert.clone().into_config().map(|_| ())?;
+        self.effective_fakenet_ai_activation_height()?;
 
         Ok(())
     }
@@ -325,15 +479,9 @@ mod tests {
 
     use super::*;
 
-    const VALID_V0_PUBKEY: &str = "2cPnE4Z9RevhTv9is9Hmc1amFubEFbUxzCV2Fxb9GxevJstV5VG92oYt6Sai3d3NjLFcsuVXSLx9hikMbD1agv9M267TVw3hV9MCpMfEnGo5LYtjJ7jPyHg8SERPjJRCWTgZ";
-    const VALID_MINING_PKH: &str = "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV";
-
     fn base_cli() -> NockchainCli {
         NockchainCli {
             nockapp_cli: default_boot_cli(false),
-            mine: false,
-            mining_pkh: None,
-            mining_pkh_adv: None,
             fakenet: false,
             peer: Vec::new(),
             force_peer: Vec::new(),
@@ -352,18 +500,52 @@ mod tests {
             prune_inbound: None,
             max_system_memory_fraction: None,
             max_system_memory_bytes: None,
-            num_threads: None,
             fakenet_pow_len: 2,
             fakenet_log_difficulty: 1,
             fakenet_v1_phase: None,
             fakenet_bythos_phase: None,
+            fakenet_ai_pow_activation_height: None,
             fakenet_asert: FakenetAsertArgs::default(),
+            fakenet_ai_asert: FakenetAiAsertArgs::default(),
             fakenet_update_candidate_interval_secs: None,
             fakenet_genesis_jam_path: None,
             bind_public_grpc_addr: Some("127.0.0.1:5555".parse().unwrap()),
             bind_private_grpc_addr: None,
             bind_private_grpc_port: 5555,
+            ai_pow_verifier_cache_cap: None,
         }
+    }
+
+    // clap requires unique arg ids across all flattened arg structs. Because the
+    // ZK and AI ASERT arg structs share Rust field names, each needs an explicit
+    // `id`; this catches a regression where two args collide (silent in release,
+    // panics here).
+    #[test]
+    fn cli_command_arg_ids_are_unique() {
+        NockchainCli::command_with_default_stack_size(NockStackSize::Large).debug_assert();
+    }
+
+    // The AI and ZK ASERT flags must parse into their OWN structs — a shared arg id
+    // would cross-wire them (e.g. --fakenet-ai-asert-phase leaking into the ZK
+    // config). Parse a mixed command line and confirm the values land separately.
+    #[test]
+    fn zk_and_ai_asert_flags_parse_independently() {
+        let cli = NockchainCli::parse_from_with_default_stack_size(
+            [
+                "nockchain", "--fakenet", "--fakenet-asert-phase", "10",
+                "--fakenet-asert-anchor-height", "9", "--fakenet-asert-anchor-target-bex", "40",
+                "--fakenet-ai-asert-phase", "20", "--fakenet-ai-asert-anchor-height", "20",
+                "--fakenet-ai-asert-anchor-target-bex", "50",
+            ],
+            NockStackSize::Large,
+        );
+        assert_eq!(cli.fakenet_asert.phase, Some(10));
+        assert_eq!(cli.fakenet_asert.anchor_height, Some(9));
+        assert_eq!(cli.fakenet_asert.anchor_target_bex, Some(40));
+        assert_eq!(cli.fakenet_ai_asert.phase, Some(20));
+        assert_eq!(cli.fakenet_ai_asert.anchor_height, Some(20));
+        assert_eq!(cli.fakenet_ai_asert.anchor_target_bex, Some(50));
+        assert!(cli.validate().is_ok());
     }
 
     #[test]
@@ -413,26 +595,39 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_accepts_valid_advanced_configs() {
-        let mut cli = base_cli();
-        cli.mining_pkh_adv = Some(vec![MiningPkhConfig {
-            share: 1,
-            pkh: VALID_MINING_PKH.to_string(),
-        }]);
+    fn zk_asert(
+        phase: Option<u64>,
+        anchor_height: Option<u64>,
+        anchor_target_bex: Option<u64>,
+    ) -> FakenetAsertArgs {
+        FakenetAsertArgs {
+            phase,
+            anchor_height,
+            anchor_target_bex,
+            ideal_block_time: None,
+            half_life: None,
+        }
+    }
 
-        assert!(cli.validate().is_ok());
+    fn ai_asert(
+        phase: Option<u64>,
+        anchor_height: Option<u64>,
+        anchor_target_bex: Option<u64>,
+    ) -> FakenetAiAsertArgs {
+        FakenetAiAsertArgs {
+            phase,
+            anchor_height,
+            anchor_target_bex,
+            ideal_block_time: None,
+            half_life: None,
+        }
     }
 
     #[test]
     fn validate_accepts_all_three_asert_overrides() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_asert = FakenetAsertArgs {
-            phase: Some(10),
-            anchor_height: Some(9),
-            anchor_target_bex: Some(4),
-        };
+        cli.fakenet_asert = zk_asert(Some(10), Some(9), Some(4));
         assert!(cli.validate().is_ok());
     }
 
@@ -446,11 +641,7 @@ mod tests {
     fn validate_rejects_partial_asert_overrides() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_asert = FakenetAsertArgs {
-            phase: Some(10),
-            anchor_height: None,
-            anchor_target_bex: None,
-        };
+        cli.fakenet_asert = zk_asert(Some(10), None, None);
         let err = cli.validate().expect_err("expected partial ASERT error");
         assert!(err.contains("must all be specified together"));
     }
@@ -459,11 +650,7 @@ mod tests {
     fn validate_rejects_anchor_height_not_phase_minus_one() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_asert = FakenetAsertArgs {
-            phase: Some(10),
-            anchor_height: Some(8), // should be 9
-            anchor_target_bex: Some(4),
-        };
+        cli.fakenet_asert = zk_asert(Some(10), Some(8), Some(4)); // anchor should be 9
         let err = cli.validate().expect_err("expected anchor invariant error");
         assert!(err.contains("must equal"));
     }
@@ -472,39 +659,120 @@ mod tests {
     fn validate_rejects_asert_phase_zero() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_asert = FakenetAsertArgs {
-            phase: Some(0),
-            anchor_height: Some(0),
-            anchor_target_bex: Some(4),
-        };
+        cli.fakenet_asert = zk_asert(Some(0), Some(0), Some(4));
         let err = cli.validate().expect_err("expected phase=0 error");
         assert!(err.contains("must equal"));
+    }
+
+    #[test]
+    fn validate_rejects_ai_pow_activation_height_zero() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_pow_activation_height = Some(0);
+        let err = cli
+            .validate()
+            .expect_err("expected activation-height=0 error");
+        assert!(err.contains(">= 1"));
     }
 
     #[test]
     fn validate_rejects_bex_above_cap() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_asert = FakenetAsertArgs {
-            phase: Some(10),
-            anchor_height: Some(9),
-            anchor_target_bex: Some(513),
-        };
+        cli.fakenet_asert = zk_asert(Some(10), Some(9), Some(513));
         let err = cli.validate().expect_err("expected bex cap error");
         assert!(err.contains("must be <="));
     }
 
+    // The AI puzzle anchors AT its activation block, so the AI trio requires
+    // anchor-height == phase (unlike ZK's anchor-height == phase - 1). See
+    // `AsertParams::ai_default` / `+populate-ai-asert-anchor`.
     #[test]
-    fn validate_rejects_invalid_mining_pkh_adv_entry() {
-        // We specifically want to catch if users mix up v0 and v1 addresses, because they are both base58-encoded.
-        // Using a base58-encoded pubkey ensures the input is base58 but not a valid hash.
+    fn validate_ai_asert_phase_sets_activation_when_flag_is_omitted() {
         let mut cli = base_cli();
-        cli.mining_pkh_adv = Some(vec![MiningPkhConfig {
-            share: 1,
-            pkh: VALID_V0_PUBKEY.to_string(),
-        }]);
+        cli.fakenet = true;
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
+        assert!(cli.validate().is_ok());
+        assert_eq!(
+            cli.effective_fakenet_ai_activation_height().unwrap(),
+            Some(10)
+        );
+    }
 
-        let err = cli.validate().expect_err("expected invalid pkh adv");
-        assert!(err.contains("Invalid mining_pkh_adv entry"));
+    #[test]
+    fn validate_rejects_ai_asert_phase_different_from_activation() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_pow_activation_height = Some(11);
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
+        let err = cli
+            .validate()
+            .expect_err("expected AI activation/ASERT boundary mismatch");
+        assert!(err.contains("must equal"));
+        assert!(err.contains("ai-asert-phase"));
+    }
+
+    // The AI anchor convention is genuinely different from ZK: anchor == phase - 1
+    // (the ZK value) must be REJECTED for AI, or the AI subchain count is off by one.
+    #[test]
+    fn validate_rejects_ai_asert_anchor_at_zk_convention() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(4));
+        let err = cli
+            .validate()
+            .expect_err("expected AI anchor invariant error");
+        assert!(err.contains("ai-asert"));
+        assert!(err.contains("must equal"));
+    }
+
+    #[test]
+    fn validate_rejects_partial_ai_asert_overrides() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_asert = ai_asert(Some(10), None, None);
+        let err = cli.validate().expect_err("expected partial AI ASERT error");
+        assert!(err.contains("ai-asert"));
+        assert!(err.contains("must all be specified together"));
+    }
+
+    #[test]
+    fn validate_rejects_ai_asert_bex_above_cap() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(513));
+        let err = cli.validate().expect_err("expected AI bex cap error");
+        assert!(err.contains("ai-asert"));
+        assert!(err.contains("must be <="));
+    }
+
+    // ideal-block-time / half-life are optional but require the trio to be present.
+    #[test]
+    fn validate_accepts_ideal_and_half_life_with_trio() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        let mut zk = zk_asert(Some(10), Some(9), Some(4));
+        zk.ideal_block_time = Some(30);
+        zk.half_life = Some(60);
+        cli.fakenet_asert = zk;
+        let mut ai = ai_asert(Some(10), Some(10), Some(4));
+        ai.ideal_block_time = Some(30);
+        ai.half_life = Some(60);
+        cli.fakenet_ai_asert = ai;
+        assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_ideal_or_half_life_without_trio() {
+        let mut cli = base_cli();
+        cli.fakenet = true;
+        cli.fakenet_asert = FakenetAsertArgs {
+            ideal_block_time: Some(30),
+            ..Default::default()
+        };
+        let err = cli
+            .validate()
+            .expect_err("expected ideal-without-trio error");
+        assert!(err.contains("require the"));
     }
 }

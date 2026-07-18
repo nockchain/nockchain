@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use nockapp::driver::{make_driver, IODriverFn, NockAppHandle};
 use nockchain_types::tx_engine::v1;
@@ -96,22 +97,47 @@ pub fn grpc_listener_driver(addr: String) -> IODriverFn {
 
             match effect {
                 PublicNockchainEffect::SendTx { raw_tx } => {
-                    match client.wallet_send_transaction(raw_tx).await {
-                        Ok(resp) => match resp.result {
-                            Some(wallet_send_transaction_response::Result::Ack(_)) => {
-                                info!("wallet_send_transaction acknowledged: true");
+                    // The wallet kernel deliberately does NOT emit an [%exit]
+                    // effect for send-tx (see do-send-tx in wallet.hoon), so the
+                    // process stays alive until this network round-trip fully
+                    // resolves. We await the broadcast here and only then trigger
+                    // a clean exit -- otherwise the exit races (and beats) the
+                    // send and the tx never reaches the node. A timeout guards
+                    // against a hung/unreachable node so the wallet can't wedge.
+                    let send_fut = client.wallet_send_transaction(raw_tx);
+                    let exit_code: usize =
+                        match tokio::time::timeout(Duration::from_secs(30), send_fut).await {
+                            Ok(Ok(resp)) => match resp.result {
+                                Some(wallet_send_transaction_response::Result::Ack(_)) => {
+                                    info!("wallet_send_transaction acknowledged: true");
+                                    0
+                                }
+                                Some(wallet_send_transaction_response::Result::Error(ref err)) => {
+                                    error!(
+                                        "wallet_send_transaction returned error: {}",
+                                        err.message
+                                    );
+                                    1
+                                }
+                                None => {
+                                    warn!("wallet_send_transaction response missing result");
+                                    1
+                                }
+                            },
+                            Ok(Err(err)) => {
+                                error!("wallet_send_transaction failed: {}", err);
+                                1
                             }
-                            Some(wallet_send_transaction_response::Result::Error(ref err)) => {
-                                error!("wallet_send_transaction returned error: {}", err.message);
+                            Err(_elapsed) => {
+                                error!("wallet_send_transaction timed out after 30s");
+                                1
                             }
-                            None => {
-                                warn!("wallet_send_transaction response missing result");
-                            }
-                        },
-                        Err(err) => {
-                            error!("wallet_send_transaction failed: {}", err);
-                        }
+                        };
+                    // Now that the send has fully resolved, trigger a clean exit.
+                    if let Err(e) = handle.exit.exit(exit_code).await {
+                        error!("failed to trigger wallet exit after send-tx: {}", e);
                     }
+                    return Ok(());
                 }
             }
         }

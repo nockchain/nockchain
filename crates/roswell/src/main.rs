@@ -14,11 +14,11 @@ use nockvm::mem::NockStack;
 use nockvm::noun::{Noun, D, T};
 use noun_serde::{NounDecode, NounEncode};
 use roswell::{
-    check_success, cue_file_to_stack, list_to_noun, make_tas, validate_puzzle_length, Roswell,
+    check_success, cue_file_to_stack, list_to_noun, make_tas, produce_full_hot_state,
+    validate_puzzle_length, Roswell,
 };
 use tracing::info;
 use zkvm_jetpack::form::ProofStreamWindow;
-use zkvm_jetpack::hot::produce_prover_hot_state;
 
 static H_ZOON_BENCH_SALT: AtomicU64 = AtomicU64::new(1);
 
@@ -181,7 +181,7 @@ async fn main() -> Result<(), NockAppError> {
     }
 
     let mut roswell =
-        Roswell::boot_with_hot_state(cli.boot.clone(), &produce_prover_hot_state()).await?;
+        Roswell::boot_with_hot_state(cli.boot.clone(), &produce_full_hot_state()).await?;
     let wire = SystemWire.to_wire();
     let mut dummy_slab = NounSlab::new();
 
@@ -593,7 +593,7 @@ async fn run_h_zoon_bench_arm(
 ) -> Result<Duration, NockAppError> {
     let boot_start = Instant::now();
     let mut roswell =
-        Roswell::boot_with_hot_state(cli.boot.clone(), &produce_prover_hot_state()).await?;
+        Roswell::boot_with_hot_state(cli.boot.clone(), &produce_full_hot_state()).await?;
     eprintln!(
         "booted {} benchmark app in {}",
         kind.label(),

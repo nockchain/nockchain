@@ -14,7 +14,10 @@
 /=  emissions-tests  /tests/dumb/mod/unit/emissions
 /=  coinbase-split-tests  /tests/dumb/mod/unit/coinbase-split
 /=  block-size-tests  /tests/dumb/mod/unit/block-size
+/=  ai-pow-jet-tests  /tests/dumb/mod/unit/ai-pow-jet
+/=  dual-puzzle-tests  /tests/dumb/mod/unit/dual-puzzle
 /=  fund-split-tests  /tests/dumb/mod/integration/fund-split
+/=  pre-ai-activation-tests  /tests/dumb/mod/integration/pre-ai-activation
 /=  benches  /tests/dumb/mod/benchmarks/huge-tx
 /=  h-zoon-benches  /tests/dumb/mod/benchmarks/h-zoon-hot-path
 /=  pending-scale-benches  /tests/dumb/mod/benchmarks/pending-blocks-scale
@@ -36,7 +39,10 @@
   (get-prefix-arms:tt name !>(emissions-tests))
   (get-prefix-arms:tt name !>(coinbase-split-tests))
   (get-prefix-arms:tt name !>(block-size-tests))
+  (get-prefix-arms:tt name !>(ai-pow-jet-tests))
+  (get-prefix-arms:tt name !>(dual-puzzle-tests))
   (get-prefix-arms:tt name !>(fund-split-tests))
+  (get-prefix-arms:tt name !>(pre-ai-activation-tests))
   (get-prefix-arms:tt name !>(benches))
   (get-prefix-arms:tt name !>(h-zoon-benches))
   (get-prefix-arms:tt name !>(pending-scale-benches))

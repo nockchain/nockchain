@@ -159,10 +159,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (constants, genesis) = if from_jam {
             (None, None)
         } else {
-            let mut constants = peek_constants(&mut source).await?;
+            let constants = peek_constants(&mut source).await?;
             if args.skip_pow {
-                info!("bench: --skip-pow set; disabling check-pow flag in replayed constants");
-                constants.check_pow_flag = false;
+                // PoW verification is unconditional in this codebase — the legacy
+                // `check_pow_flag` constant was removed (the noun slot is retained
+                // but always %.y). `--skip-pow` therefore cannot disable it here.
+                info!("bench: --skip-pow set but PoW verification is unconditional; ignoring flag");
             }
             let genesis = extract_block(&mut source, 0)
                 .await?

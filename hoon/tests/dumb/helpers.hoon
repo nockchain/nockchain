@@ -8,6 +8,7 @@
 /=  dcon  /apps/dumbnet/lib/consensus
 /=  dmin  /apps/dumbnet/lib/miner
 /=  dder  /apps/dumbnet/lib/derived
+/=  pow-lib  /common/pow
 /=  *  /common/test
 /=  *  /common/zeke
 /=  *  /common/h-zoon
@@ -107,6 +108,126 @@
     check-pow-flag  %.n
     max-future-timestamp  (bex 32)
   ==
+::  provable variants for KERNEL integration tests (mempool/pending): on
+::  this branch the kernel's +check-pow / +check-genesis do REAL STARK
+::  verification (the check-pow-flag bypass was removed from consensus),
+::  so blocks poked via %heard-block must carry a real, verifiable proof.
+::  These variants set the difficulty target to max (any proof clears
+::  +check-target, so no nonce search is required) and pow-len=1 (proving
+::  a 1-item STARK is ~2s vs ~23s at the mainnet len=64), keeping the
+::  suite fast. Pages are stamped with a real proof by +prove-page below.
+++  bc-v1-phase-provable
+  %*  .  bc-v1-phase
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+  ==
+++  bc-pending-provable
+  %*  .  bc-pending-integration-tests
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+  ==
+::  provable variant with AI-PoW active from genesis: lets a low-height page
+::  carry a version-%3 (%ai-pow) pow so `check-pow`'s `%ai-pow` branch (the
+::  mandatory `ai-pow-verify` jet) runs. `ai-pow-activation-height=0` avoids the
+::  activation-boundary ASERT re-anchor, so ordinary provable blocks stay valid;
+::  `proof-version-valid-at-height` then accepts %3 at every height.
+++  bc-ai-pow-provable
+  %*  .  bc-pending-provable
+    ai-pow-activation-height  0
+  ==
+::  Dual-puzzle test config: AI-PoW active from height 1 (so genesis stays
+::  pre-activation — +accept-block only reads a block's pow to record its version
+::  post-activation, and genesis carries pow=~), plus a hardcoded (non-degenerate)
+::  AI ASERT anchor at height 0 so +compute-target-ai-asert actually retargets
+::  rather than returning the anchor target. Used to check that AI difficulty
+::  tracks the AI SUBCHAIN cadence: interleaved ZK blocks must not shift it.
+++  bc-dual-puzzle
+  %*  .  bc-pending-provable
+    v1-phase                       1
+    ai-pow-activation-height       1
+    anchor-height.ai-asert         0
+    ::  anchor timestamp at the genesis second (chain builds from
+    ::  time-in-secs(*@da)); a tiny value here would make the ASERT exponent huge
+    ::  and saturate the target to max, hiding the subchain-count behaviour.
+    anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
+  ==
+::  Like bc-dual-puzzle but with the AI anchor at height 2 and NO hardcoded
+::  anchor timestamp, so +compute-target-ai-asert must read the anchor from the
+::  derived-state cache — exercising +populate-ai-asert-anchor as the chain
+::  crosses height 2.
+++  bc-ai-anchor-test
+  %*  .  bc-pending-provable
+    v1-phase                  1
+    ai-pow-activation-height  1
+    anchor-height.ai-asert    2
+  ==
+::  Tandem-retargeting config: BOTH puzzles' ASERT active + in their SUBCHAIN
+::  regime at low heights, with hardcoded anchors so neither degenerates. Unlike
+::  bc-dual-post (whose zk-asert-post-ai.phase stays at the 95000 default, so the
+::  ZK ASERT runs in regime 1 / global-height), here zk-asert-post-ai.phase is low
+::  so the ZK ASERT runs in regime 2 (ZK-subchain count), matching the AI ASERT.
+::  Short half-life (600s) + 300s ideal amplify the retarget so a short test chain
+::  shows a clear direction. The AI anchor is the ZK anchor shifted down by 64
+::  bits, so normalized targets are directly comparable. Anchor timestamps equal
+::  the genesis second, making block-distance times the controlled deltas.
+++  bc-tandem
+  %*  .  bc-pending-provable
+    v1-phase                               1
+    blocks-per-epoch                       1.000.000
+    phase.zk-asert                         2
+    anchor-height.zk-asert                 1
+    ideal-block-time.zk-asert              300
+    half-life.zk-asert                     600
+    anchor-min-timestamp.zk-asert          (time-in-secs:page:txe *@da)
+    phase.zk-asert-post-ai                 2
+    anchor-height.zk-asert-post-ai         1
+    anchor-target-atom.zk-asert-post-ai    ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.zk-asert-post-ai      300
+    half-life.zk-asert-post-ai             600
+    anchor-min-timestamp.zk-asert-post-ai  (time-in-secs:page:txe *@da)
+    ai-pow-activation-height               1
+    anchor-height.ai-asert                 1
+    anchor-target-atom.ai-asert            ^~((rsh [0 64] (div max-tip5-atom:tip5 (bex 14))))
+    ideal-block-time.ai-asert              300
+    half-life.ai-asert                     600
+    anchor-min-timestamp.ai-asert          (time-in-secs:page:txe *@da)
+  ==
+::  Post-ASERT dual-puzzle config: low zk-asert phase (2) with a hardcoded ZK
+::  anchor (so accept-page/validation can compute the ZK ASERT without a cache),
+::  AI active from height 1 with a hardcoded AI anchor. Lets a low-height AI block
+::  travel the full +validate-page-without-txs path in the post-asert regime.
+++  bc-dual-post
+  %*  .  bc-pending-provable
+    v1-phase                       1
+    blocks-per-epoch               1.000.000
+    phase.zk-asert                 2
+    anchor-height.zk-asert         1
+    anchor-target-atom.zk-asert    ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.zk-asert      150
+    half-life.zk-asert             43.200
+    anchor-min-timestamp.zk-asert  (add (time-in-secs:page:txe *@da) 1.200)
+    ai-pow-activation-height       1
+    anchor-height.ai-asert         0
+    anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
+  ==
+::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size
+::  limit, but poke-able through the kernel. The oversize-tx mempool test
+::  drives +init-nockchain / +add-n-pages-integration, both of which poke
+::  %heard-block and assert acceptance, so the pages need real proofs.
+::
+::  max-future-timestamp is also lifted, as +bc-pending-integration-tests
+::  does. +pok pokes with now=*@ (0), and +make-empty-page steps each page
+::  600s past its parent, so consensus +check-timestamp
+::  (lte timestamp (add now-secs max-future-timestamp)) caps the chain at
+::  7.200/600 = 12 blocks under the 2-hour default. The oversize test needs
+::  85, so without this the 13th page is rejected and
+::  +add-n-pages-integration's acceptance assertion crashes.
+++  bc-max-block-size-medium-v0-provable
+  %*  .  bc-max-block-size-medium-v0
+    genesis-target-atom  max-tip5-atom:tip5
+    pow-len              1
+    max-future-timestamp  (bex 32)
+  ==
 --
 ::
 ::  structs
@@ -114,6 +235,52 @@
 ::  helper functions
 |_  bc=blockchain-constants:txe
 +*  t  ~(. txe bc)
+::
+::  +der: pre-activation derived-state (read-only extra arg for consensus door)
+++  der
+  ^-  derived-state
+  :*  highest-block-height=~
+      heaviest-chain=~
+      puzzle-asert-states=%hmap
+  ==
+::
+::  +mock-pow: a minimal, well-typed version-%0 ZK proof artifact used as
+::  the pow for library-level (non-kernel) test pages. On this branch the
+::  `check-pow-flag` bypass was removed from consensus, so every block a
+::  test validates via +validate-page-without-txs must carry a proof (the
+::  arm does `(need ~(pow ...))`). That arm's only pow gate is
+::  `check-target` — a difficulty check — NOT a full STARK verification
+::  (real STARK verify lives in the KERNEL's +check-pow, not the lib).
+::  proof-to-pow of this empty-objects %0 proof is a fixed tip5 hash that
+::  is <= the default test genesis-target, so it passes check-target at
+::  the standard test difficulty without any target override. All test
+::  blocks sit far below proof-version-1-start (6.750), so %0 is the
+::  height-correct version. This does NOT weaken any real check: the
+::  kernel pow path (real verify:nv) is untouched and still rejects it.
+++  mock-pow  ^-  (unit proof)  `[%0 objects=~ hashes=~ read-index=0]
+::
+::  +prove-page: stamp a page with a REAL, verifiable ZK proof for the
+::  KERNEL block-acceptance path (+heard-block/+check-genesis run
+::  +check-pow = check-pow-puzzle + verify:nv, which a mock cannot
+::  satisfy). Requires `bc` to be a *-provable constant (target=max so
+::  any proof clears +check-target; pow-len=1 so proving is fast). The
+::  proof's %puzzle object commits to (block-commitment pag), matching
+::  +check-pow-puzzle. Recomputes the digest AFTER attaching the proof
+::  because the block-id hashes the pow (see +hashable-digest).
+++  prove-page
+  |=  pag=page:t
+  ^-  page:t
+  =/  header=noun-digest:tip5  (block-commitment:page:t pag)
+  =/  res=[prf=proof dig=@]
+    (prove-block-inner:pow-lib [%0 header *noun-digest:tip5 pow-len.bc])
+  =.  pag
+    ?^  -.pag
+      pag(pow `prf.res)
+    pag(pow `prf.res)
+  =/  new-digest  (compute-digest:page:t pag)
+  ?^  -.pag
+    pag(digest new-digest)
+  pag(digest new-digest)
 ::
 ::  +add-n-pages: add n empty pages and return the consensus  state
 ::
@@ -129,13 +296,63 @@
   ?:  =(k n)
     [prev-page con]
   =/  new-page=page:t  (make-empty-page prev-page)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con bc) new-page)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) new-page)
   ?>  ?=(%.y -.r)
   =/  acc=tx-acc:t  +.r
-  =.  con  (~(accept-page dcon con bc) new-page acc *@da)
-  =.  con  (~(update-heaviest dcon con bc) new-page)
-  =.  con  (~(garbage-collect dcon con bc) retain)
+  =.  con  (~(accept-page dcon con der bc) new-page acc *@da)
+  =.  con  (~(update-heaviest dcon con der bc) new-page)
+  =.  con  (~(garbage-collect dcon con der bc) retain)
   $(k +(k), prev-page new-page)
+::
+::  +build-typed-chain: accept a chain of the given puzzle types on genesis via
+::  the direct consensus path. ZK blocks carry a mock proof; AI blocks carry a
+::  placeholder artifact. The helper updates branch-local puzzle state after
+::  every accepted block so ASERT tests exercise the production lineage model.
+++  build-typed-chain
+  |=  types=(list ?(%zk %ai))
+  ^-  [con=consensus-state der=derived-state tip=page:t]
+  =/  con=consensus-state  initial-consensus-state
+  =/  d=derived-state  der
+  =/  parent=page:t  default-genesis-page
+  |-
+  ?~  types  [con d parent]
+  =/  new-page=page:t
+    ?:  =(%ai i.types)
+      (make-ai-pow-page parent con d)
+    (make-empty-page parent)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
+  ~|  [%build-typed-chain-validation-failed r]
+  ?>  ?=(%.y -.r)
+  =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
+  =.  con  (~(update-heaviest dcon con d bc) new-page)
+  =.  d  (~(update dder d bc) con new-page)
+  $(types t.types, parent new-page, con con, d d)
+::  +build-typed-chain-timed: like +build-typed-chain but each entry carries an
+::  absolute block timestamp (seconds), so a test can drive a controlled per-puzzle
+::  cadence. Timestamps must be strictly increasing and above the genesis second.
+++  build-typed-chain-timed
+  |=  entries=(list [type=?(%zk %ai) ts=@])
+  ^-  [con=consensus-state der=derived-state tip=page:t]
+  =/  con=consensus-state  initial-consensus-state
+  =/  d=derived-state  der
+  =/  parent=page:t  default-genesis-page
+  |-
+  ?~  entries  [con d parent]
+  =/  base=page:t
+    ?:  =(%ai type.i.entries)
+      (make-ai-pow-page parent con d)
+    (make-empty-page parent)
+  =/  new-page=page:t
+    =.  base
+      ?^  -.base  base(timestamp ts.i.entries)  base(timestamp ts.i.entries)
+    ?^  -.base  base(digest (compute-digest:page:t base))  base(digest (compute-digest:page:t base))
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con d bc) new-page)
+  ~|  [%build-typed-chain-timed-validation-failed r]
+  ?>  ?=(%.y -.r)
+  =.  con  (~(accept-page dcon con d bc) new-page +.r *@da)
+  =.  con  (~(update-heaviest dcon con d bc) new-page)
+  =.  d  (~(update dder d bc) con new-page)
+  $(entries t.entries, parent new-page, con con, d d)
 ::
 ++  default-genesis-page
   ^-  page:t
@@ -170,11 +387,11 @@
 ++  initial-consensus-state
   ^-  consensus-state
   =/  con=consensus-state
-    (~(add-btc-data dcon *consensus-state bc) `*btc-hash:t)
+    (~(add-btc-data dcon *consensus-state der bc) `*btc-hash:t)
   =.  con
-    (~(set-genesis-seal dcon con bc) height=0 msg-hash=default-genesis-seal)
-  =.  con  (~(accept-page dcon con bc) default-genesis-page *tx-acc:t *@da)
-  =.  con  (~(update-heaviest dcon con bc) default-genesis-page)
+    (~(set-genesis-seal dcon con der bc) height=0 msg-hash=default-genesis-seal)
+  =.  con  (~(accept-page dcon con der bc) default-genesis-page *tx-acc:t *@da)
+  =.  con  (~(update-heaviest dcon con der bc) default-genesis-page)
   con
 ::
 
@@ -182,9 +399,9 @@
   |=  cus=blockchain-constants:t
   ^-  consensus-state
   =/  con=consensus-state
-    (~(add-btc-data dcon *consensus-state cus) `*btc-hash:t)
-  =.  con  (~(accept-page dcon con cus) default-genesis-page *tx-acc:t *@da)
-  =.  con  (~(update-heaviest dcon con cus) default-genesis-page)
+    (~(add-btc-data dcon *consensus-state der cus) `*btc-hash:t)
+  =.  con  (~(accept-page dcon con der cus) default-genesis-page *tx-acc:t *@da)
+  =.  con  (~(update-heaviest dcon con der cus) default-genesis-page)
   con
 ::
 ++  initial-mining-state
@@ -380,7 +597,7 @@
           *@da
           ~(target get:page:t default-genesis-page)
           shares-v1
-          asert-phase:default-bc
+          phase.zk-asert:default-bc
       ==
     =/  pkh-hashes=(z-set hash:t)  (~(put z-in *(z-set hash:t)) pk-hash)
     (new:coinbase:t new-page pkh-hashes)
@@ -519,21 +736,21 @@
       pag(coinbase new-coinbase)
     =/  new-coinbase
       %-  new-with-fund-share:v1:coinbase-split:t
-      [pag-emission pag-fees default-keys-1-share-v1]
+      [protocol-fund-address:t pag-emission pag-fees default-keys-1-share-v1]
     pag(coinbase new-coinbase)
   =/  new-digest  (compute-digest:page:t pag)
   =.  pag
     ?^  -.pag
       pag(digest new-digest)
     pag(digest new-digest)
-  =^  ready  con  (~(add-raw-tx dcon con bc) raw)
-  ?>  -:(~(validate-page-without-txs dcon con bc) pag ~(timestamp get:page:t pag))
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con bc) pag)
+  =^  ready  con  (~(add-raw-tx dcon con der bc) raw)
+  ?>  -:(~(validate-page-without-txs dcon con der bc) pag ~(timestamp get:page:t pag))
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc) pag)
   ?:  ?=(%.n -.r)
     ~|  "failed-to-validate-page: {<p.r>}"
     !!
-  =.  con  (~(accept-page dcon con bc) pag +.r *@da)
-  =.  con  (~(update-heaviest dcon con bc) pag)
+  =.  con  (~(accept-page dcon con der bc) pag +.r *@da)
+  =.  con  (~(update-heaviest dcon con der bc) pag)
   [pag con +.r]
 ::
 ++  make-empty-page
@@ -563,14 +780,14 @@
         *@da
         ~(target get:page:t parent)
         shares
-        asert-phase.bc
+        phase.zk-asert.bc
     ==
   =/  new-timestamp  (add ~(timestamp get:page:t parent) 600)
   =.  new-page
     ?^  -.new-page
       new-page(timestamp new-timestamp)
     new-page(timestamp new-timestamp)
-  =/  new-pow  ~
+  =/  new-pow  mock-pow
   =.  new-page
     ?^  -.new-page
       new-page(pow new-pow)
@@ -581,6 +798,66 @@
       new-page(digest new-digest)
     new-page(digest new-digest)
   new-page
+::
+::  +make-ai-pow-garbage-page: like +make-empty-page but stamps a GARBAGE
+::  version-%3 (%ai-pow) pow instead of the mock zk proof, so a poked
+::  %heard-block reaches +check-pow's `%ai-pow` branch (the mandatory
+::  ++ai-pow-verify jet). `page:t` is `$^(page:v0 page:v1)`, so mutation must
+::  branch on `?^ -.new-page` (cell head ⇒ v0, atom head ⇒ v1). +new-candidate
+::  builds a v1 page (atom head), so the v1 (FALSE) branch runs at runtime and
+::  gets the `[%ai-pow 0 0]` pow — v1's pow is `(unit *)`, which accepts it. The
+::  v0 (TRUE) branch is dead but must still type-check, and v0's pow is a
+::  narrower `(unit proof:v0)` that `[%ai-pow ..]` cannot nest into, so it keeps
+::  `mock-pow` there. The artifact is deliberately undecodable ⇒ jet returns %.n.
+++  make-ai-pow-garbage-page
+  |=  parent=page:t
+  ^-  page:t
+  =/  s=sig:t  p:default-keys-1
+  =/  =shares:t  (sig-to-shares:v1 s 1)
+  =/  new-page
+    %-  new-candidate:page:t
+    :*  parent
+        *@da
+        ~(target get:page:t parent)
+        shares
+        phase.zk-asert.bc
+    ==
+  =/  new-timestamp  (add ~(timestamp get:page:t parent) 600)
+  =.  new-page
+    ?^  -.new-page
+      new-page(timestamp new-timestamp)
+    new-page(timestamp new-timestamp)
+  =.  new-page
+    ?^  -.new-page
+      new-page(pow mock-pow)
+    new-page(pow `[%ai-pow 0 0])
+  =.  new-page
+    ?^  -.new-page
+      new-page(digest (compute-digest:page:t new-page))
+    new-page(digest (compute-digest:page:t new-page))
+  new-page
+::  +make-ai-pow-page: a VALID post-asert AI block — the ZK candidate re-targeted
+::  to the AI ASERT target/work (+build-ai-candidate) and stamped with a %ai-pow
+::  artifact + fresh digest. Passes +validate-page-without-txs (the AI cert check
+::  is deferred to +check-pow); unlike +make-ai-pow-garbage-page it carries the
+::  correct AI target and AI-normalized work, so it is accepted rather than
+::  rejected at the target/heaviness gates.
+++  make-ai-pow-page
+  |=  [parent=page:t con=consensus-state d=derived-state]
+  ^-  page:t
+  =/  zk-cand=page:t  (make-empty-page parent)
+  ::  The AI candidate's coinbase is rebuilt from these shares — the same
+  ::  single-miner split +make-empty-page seeds its ZK candidate with.
+  =/  ai-cand=page:t
+    (~(build-ai-candidate dcon con d bc) zk-cand (sig-to-shares:v1 p:default-keys-1 1))
+  ::  v1 page (atom head) runs the FALSE branch and takes the %ai-pow artifact;
+  ::  the v0 branch is dead but must type-check, and v0's narrower pow type cannot
+  ::  hold [%ai-pow ..], so it keeps mock-pow (see +make-ai-pow-garbage-page).
+  =.  ai-cand
+    ?^  -.ai-cand  ai-cand(pow mock-pow)  ai-cand(pow `[%ai-pow 0 0])
+  =.  ai-cand
+    ?^  -.ai-cand  ai-cand(digest (compute-digest:page:t ai-cand))  ai-cand(digest (compute-digest:page:t ai-cand))
+  ai-cand
 ::
 ++  make-default-coinbase
   ^-  coinbase:t
@@ -821,6 +1098,10 @@
   [;;((list effect) effs) nockchain]
 ::
 ++  init-nockchain
+  ::  genesis must carry a real proof for the kernel's +check-genesis
+  ::  (real +check-pow). Prove it, poke the proven page, and return the
+  ::  proven genesis so callers build children on its (proven) digest.
+  =/  genesis=page:t  (prove-page default-genesis-page)
   =/  [effs=(list effect) nockchain=_nockchain]
     (pok [%command %set-constants bc] nockchain)
   =/  [effs=(list effect) nockchain=_nockchain]
@@ -830,27 +1111,27 @@
   =/  [effs=(list effect) nockchain=_nockchain]
     (pok [%command %born ~] nockchain)
   =^  effs=(list effect)  nockchain
-    (pok [%fact %0 %heard-block default-genesis-page] nockchain)
-  ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t default-genesis-page))
-  [nockchain default-genesis-page]
+    (pok [%fact %0 %heard-block genesis] nockchain)
+  ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t genesis))
+  [nockchain genesis]
 ::
 ++  add-n-pages-integration
   |=  [start=page:t num=@ nockchain=_nockchain]
-  =|  i=@
+  ^-  [(list page:t) _nockchain]
   =/  cur=page:t  start
   =|  pages-added=(list page:t)
-  =-  [(flop pages-added) nockchain]
-  %+  roll  (range:z num)
-  |=  [i=@ nockchain=_nockchain cur=_start pages-added=(list page:t)]
-  =/  next=page:t  (make-empty-page cur)
-  ~&  %next
+  =|  i=@
+  |-
+  ?:  =(i num)
+    [(flop pages-added) nockchain]
+  ::  prove each block so the kernel's +heard-block (real +check-pow)
+  ::  accepts it; thread the proven page as the parent for the next.
+  =/  next=page:t  (prove-page (make-empty-page cur))
   =^  effs=(list effect)  nockchain
     (pok [%fact %0 %heard-block next] nockchain)
-  ~&  %new-block-poke
   ::  confirm block was added to consensus state
   ?>  =((need heaviest-block.c.internal.outer.nockchain) ~(digest get:page:t next))
-  [nockchain next [next pages-added]]
-  ::$(nockchain nockchain, cur next, pages-added [next pages-added], i +(i))
+  $(i +(i), cur next, pages-added [next pages-added])
 ::
 ++  filter-heard-tx-effects
   |=  effs=(list effect)
@@ -880,12 +1161,12 @@
 ++  k-by
   |_  nockchain=_nockchain
   ::
-  ++  con  ;;(consensus-state c.internal.outer.nockchain)
+  ++  con  ~+  ;;(consensus-state c.internal.outer.nockchain)
   ::
   ::  the derived state, whose .heaviest-chain is the canonical
   ::  page-number -> block-id index used to tell an orphaned block from one on
   ::  the heaviest chain.
-  ++  der  ;;(derived-state d.internal.outer.nockchain)
+  ++  der  ~+  ;;(derived-state d.internal.outer.nockchain)
   ::
   ::  +strand-tx-on-block: put a tx back exactly the way the OLD kernel left it
   ::  -- still held in raw-txs, still claimed by .bid, absent from excluded-txs.
@@ -907,7 +1188,7 @@
   ++  repair-orphans
     |=  c=consensus-state
     ^-  consensus-state
-    ~(repair-orphaned-claims dcon c bc)
+    ~(repair-orphaned-claims dcon c der bc)
   ::
   ::  +boot-with: run the kernel's REAL +load over a given consensus state, the
   ::  way the runtime does when a new kernel is swapped in over existing state.
@@ -948,9 +1229,9 @@
   ::
   ::  +release-branch: the live reorg release, as +accept-block runs it
   ++  release-branch
-    |=  [c=consensus-state old-heavy=block-id:t hc=(z-map page-number:t block-id:t)]
+    |=  [c=consensus-state d=derived-state old-heavy=block-id:t hc=(z-map page-number:t block-id:t)]
     ^-  consensus-state
-    (~(release-orphaned-branch dcon c bc) old-heavy hc)
+    (~(release-orphaned-branch dcon c d bc) old-heavy hc)
   ::
   ++  heaviest-chain-at
     |=  [d=derived-state =page-number:t]
@@ -995,7 +1276,7 @@
   ++  con-invariants
     |=  c=consensus-state
     ^-  (unit @tas)
-    ~(apt dcon c bc)
+    ~(apt dcon c der bc)
   ::
   ::  +con-referential-integrity: every cross-map reference in .c resolves.
   ::  `~` means sound; each term names an invariant that broke.
@@ -1105,7 +1386,7 @@
   ::    this, not just against hand-picked membership checks.
   ++  consensus-invariants
     ^-  (unit @tas)
-    ~(apt dcon con bc)
+    ~(apt dcon con der bc)
   ::
   ++  has-raw-tx
     |=  =tx-id:t
@@ -1142,7 +1423,7 @@
   ++  get-excluded
     |=  =tx-id:t
     ?:  (has-excluded tx-id)
-      (~(get-raw-tx dcon con bc) tx-id)
+      (~(get-raw-tx dcon con der bc) tx-id)
     ~
   ::
   ++  get-bnb
@@ -1155,7 +1436,7 @@
     ^-  (unit raw-tx:t)
     =/  con=consensus-state  con
     ?:  (~(has h-by blocks-needed-by.con) id)
-      (~(get-raw-tx dcon con bc) id)
+      (~(get-raw-tx dcon con der bc) id)
     ~
   ::
   ++  heaviest-block
@@ -1168,11 +1449,11 @@
   ::
   ++  inputs-in-heaviest-balance
     |=  raw=raw-tx:t
-   (~(inputs-in-heaviest-balance dcon con bc) raw)
+   (~(inputs-in-heaviest-balance dcon con der bc) raw)
   ::
   ++  get-cur-balance
     ^-  (h-map nname:t nnote:t)
-   ~(get-cur-balance dcon con bc)
+   ~(get-cur-balance dcon con der bc)
   ::
   ++  has-pending-block
     |=  id=block-id:t

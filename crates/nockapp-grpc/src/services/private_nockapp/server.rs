@@ -1,7 +1,12 @@
 use std::net::SocketAddr;
+use std::pin::Pin;
 
+use futures::Stream;
 use nockapp::driver::{NockAppHandle, PokeResult};
 use nockapp::noun::slab::NounSlab;
+use nockvm::noun::NounAllocator;
+use tokio::sync::broadcast::error::RecvError;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tonic_health::server::health_reporter;
@@ -126,6 +131,76 @@ impl PrivateNockApp for PrivateNockAppGrpcServer {
                 Ok(Response::new(response))
             }
         }
+    }
+
+    type WatchEffectsStream =
+        Pin<Box<dyn Stream<Item = std::result::Result<EffectMessage, Status>> + Send + 'static>>;
+
+    async fn watch_effects(
+        &self,
+        request: Request<WatchEffectsRequest>,
+    ) -> std::result::Result<Response<Self::WatchEffectsStream>, Status> {
+        let req = request.into_inner();
+        debug!(
+            "WatchEffects request: pid={} filters={}",
+            req.pid,
+            req.head_filter.len()
+        );
+
+        // One fresh broadcast subscriber per client. The bus drops effects
+        // for slow consumers; the client gets a `Lagged` warning in the log
+        // and the stream continues with the next live effect.
+        let mut receiver = self.handle.effect_sender.subscribe();
+        let head_filter = req.head_filter;
+        let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<EffectMessage, Status>>(64);
+
+        tokio::spawn(async move {
+            loop {
+                match receiver.recv().await {
+                    Ok(slab) => {
+                        let effect_noun = unsafe { *slab.root() };
+                        // Filter on the head atom of the effect cell. Empty
+                        // filter ⇒ forward everything. Post-h-zoon: must
+                        // explicitly thread the slab's NounSpace through
+                        // `in_space` to access cell head.
+                        let head_matches = if head_filter.is_empty() {
+                            true
+                        } else {
+                            let space = slab.noun_space();
+                            match effect_noun.in_space(&space).as_cell() {
+                                Ok(cell) => {
+                                    let head = cell.head();
+                                    head_filter.iter().any(|f| head.eq_bytes(f.as_slice()))
+                                }
+                                Err(_) => false,
+                            }
+                        };
+                        if !head_matches {
+                            continue;
+                        }
+                        let jam_bytes = slab.jam();
+                        let msg = EffectMessage {
+                            effect: jam_bytes.to_vec(),
+                        };
+                        if tx.send(Ok(msg)).await.is_err() {
+                            // Client disconnected.
+                            break;
+                        }
+                    }
+                    Err(RecvError::Lagged(n)) => {
+                        warn!("WatchEffects client lagged by {n} effects; some dropped");
+                        continue;
+                    }
+                    Err(RecvError::Closed) => {
+                        debug!("WatchEffects: effect broadcast closed; ending stream");
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream) as Self::WatchEffectsStream))
     }
 
     async fn poke(

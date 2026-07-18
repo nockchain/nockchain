@@ -84,6 +84,31 @@ pub fn permute(sponge: &mut [u64; 16]) {
     }
 }
 
+/// Round count for the **paper-spec 5-round Tip5 variant** (Tip5 paper IACR
+/// ePrint 2023/107 §2.4, N=5). Distinct from the canonical [`NUM_ROUNDS`] (= 7).
+/// Used ONLY by the ai-pow-zk recursive-certificate proving stack; the canonical
+/// Nockchain hash remains the 7-round [`permute`].
+pub const NUM_ROUNDS_5ROUND: usize = 5;
+
+/// **5-round Tip5 variant for ai-pow-zk recursive-certificate proving** —
+/// identical to [`permute`] (same S-box, same cyclomul MDS, same round-constant
+/// schedule) but iterating only the first 5 rounds
+/// (`ROUND_CONSTANTS_MONT_7[0..5*STATE_SIZE]`). Being the first 5 rounds of the
+/// canonical Tip5 round function, it is byte-identical to the branch's original
+/// `permute_5round` and must match the in-circuit Tip5 adapter the recursion uses.
+///
+/// **Do not use this for canonical Nockchain hashing** — use 7-round [`permute`].
+pub fn permute_5round(sponge: &mut [u64; 16]) {
+    for i in 0..NUM_ROUNDS_5ROUND {
+        let a = sbox_layer(array_ref![sponge, 0, STATE_SIZE]);
+        let b = mds_cyclomul(&a);
+
+        for j in 0..STATE_SIZE {
+            sponge[j] = badd(ROUND_CONSTANTS_MONT_7[i * STATE_SIZE + j], b[j]);
+        }
+    }
+}
+
 fn sbox_layer(state: &[u64; STATE_SIZE]) -> [u64; STATE_SIZE] {
     let mut res: [u64; STATE_SIZE] = [0; STATE_SIZE];
 

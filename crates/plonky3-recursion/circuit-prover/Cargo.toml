@@ -1,0 +1,89 @@
+[package]
+name = "p3-circuit-prover"
+description.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+hashbrown.workspace = true
+p3-air.workspace = true
+p3-baby-bear.workspace = true
+p3-batch-stark.workspace = true
+p3-blake3.workspace = true
+p3-challenger.workspace = true
+p3-circle.workspace = true
+p3-circuit.workspace = true
+p3-commit.workspace = true
+p3-dft.workspace = true
+p3-field.workspace = true
+p3-fri.workspace = true
+p3-goldilocks.workspace = true
+p3-keccak.workspace = true
+p3-koala-bear.workspace = true
+p3-lookup.workspace = true
+p3-matrix.workspace = true
+p3-maybe-rayon.workspace = true
+p3-merkle-tree.workspace = true
+p3-poseidon1-air.workspace = true
+p3-poseidon1-circuit-air.workspace = true
+p3-poseidon2.workspace = true
+p3-poseidon2-air.workspace = true
+p3-poseidon2-circuit-air.workspace = true
+p3-symmetric.workspace = true
+p3-tip5-circuit-air.workspace = true
+p3-uni-stark.workspace = true
+p3-util.workspace = true
+rand.workspace = true
+serde.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+unroll.workspace = true
+
+[dev-dependencies]
+p3-batch-stark.workspace = true
+p3-test-utils.workspace = true
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
+rand.workspace = true
+tracing-forest = { workspace = true, features = ["smallvec"] }
+tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
+
+[features]
+# Rayon-parallel prover. `p3-maybe-rayon/parallel` is the central
+# switch: when ON, every Plonky3 crate that imports
+# `p3_maybe_rayon::prelude::*` (uni-stark, dft, fri, batch-stark,
+# merkle-tree, …) uses real rayon parallel iterators; when OFF
+# they fall back to a serial mimic. The per-crate `parallel`
+# convenience features just forward to that same switch — we
+# enumerate them explicitly so Cargo's feature unification is
+# obvious. **Default ON 2026-05-21** to match ai-pow-zk's prover
+# default; serial = `--no-default-features`. Proofs are
+# bit-identical between serial and parallel (deterministic,
+# index-ordered reductions).
+default = ["parallel"]
+parallel = [
+    "p3-maybe-rayon/parallel",
+    # Upstream Plonky3 (the central switch + prover-side parallelism)
+    "p3-uni-stark/parallel",
+    "p3-batch-stark/parallel",
+    "p3-dft/parallel",
+    "p3-poseidon1-air/parallel",
+    "p3-poseidon2-air/parallel",
+    # In-tree (Plonky3-recursion-vendored) AIR trace-gen parallelism
+    "p3-poseidon1-circuit-air/parallel",
+    "p3-poseidon2-circuit-air/parallel",
+    "p3-tip5-circuit-air/parallel",
+]
+# Path B inventory profiling — passthrough to p3-circuit's profiling
+# feature so `CircuitBuilder::scope_op_counts()` is callable. Used by
+# the M-S5b Path B Stage B0 inventory tool for per-scope source
+# attribution. Off by default.
+profiling = ["p3-circuit/profiling"]
+
+[lints]
+workspace = true

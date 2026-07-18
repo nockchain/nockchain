@@ -8,15 +8,23 @@ use nockapp::kernel::form::{PmaConfig, SerfThread};
 use nockapp::noun::slab::NounSlab;
 use nockapp::save::SaveableCheckpoint;
 use nockapp::utils::NOCK_STACK_SIZE_TINY;
-use nockapp::wire::Wire;
+use nockapp::wire::WireRepr;
 use nockapp::AtomExt;
-use nockchain::mining::MiningWire;
 use nockchain_math::noun_ext::NounMathExtHandle;
 use nockchain_math::structs::HoonList;
 use nockchain_types::BlockchainConstants;
 use nockvm::noun::{Atom, Noun, NounAllocator, D, T, YES};
 use nockvm_macros::tas;
 use zkvm_jetpack::hot::produce_prover_hot_state;
+
+/// Construct a wire matching what the production zk-pow-miner pokes the
+/// consensus kernel on (`SOURCE = "zk-pow-miner"`, `VERSION = 1`).
+/// The miner kernel here doesn't actually dispatch on source — this is
+/// just so the test exercises the same wire shape the production path
+/// uses, parallel to `crates/zk-pow-miner/src/wire.rs`.
+fn zk_pow_miner_wire(verb: &str) -> WireRepr {
+    WireRepr::new("zk-pow-miner", 1, vec![verb.into()])
+}
 
 fn tip5_to_noun(slab: &mut NounSlab, values: [u64; 5]) -> Result<Noun, Box<dyn Error>> {
     let mut tuple = Vec::with_capacity(values.len());
@@ -54,7 +62,7 @@ async fn send_set_mining_key(serf: &SerfThread<SaveableCheckpoint>) -> Result<()
     let poke = T(&mut slab, &[head, command, pubkey]);
     slab.set_root(poke);
 
-    serf.poke(MiningWire::SetPubKey.to_wire(), slab)
+    serf.poke(zk_pow_miner_wire("setpubkey"), slab)
         .await
         .map_err(|e| Box::new(e) as Box<dyn Error>)?;
     Ok(())
@@ -71,7 +79,7 @@ async fn send_enable_mining(
     let poke = T(&mut slab, &[head, command, YES]);
     slab.set_root(poke);
 
-    serf.poke(MiningWire::Enable.to_wire(), slab)
+    serf.poke(zk_pow_miner_wire("enable"), slab)
         .await
         .map_err(|e| Box::new(e) as Box<dyn Error>)
 }
@@ -186,7 +194,7 @@ async fn benchmark_open_prover_single_attempt() -> Result<(), Box<dyn Error>> {
     // Execute a single proof attempt and record the elapsed time.
     let start = Instant::now();
     let poke_result = serf
-        .poke(MiningWire::Candidate.to_wire(), poke_slab)
+        .poke(zk_pow_miner_wire("candidate"), poke_slab)
         .await
         .map_err(|e| Box::new(e) as Box<dyn Error>)?;
     let elapsed = start.elapsed();

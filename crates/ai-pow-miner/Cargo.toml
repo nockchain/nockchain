@@ -1,0 +1,74 @@
+[package]
+name = "ai-pow-miner"
+version.workspace = true
+edition.workspace = true
+description = "NockApp-compatible AI-PoW miner for Pearl-compatible ticket search and recursive %ai-pow submission."
+publish = false
+
+[lib]
+name = "ai_pow_miner"
+path = "src/lib.rs"
+
+[[bin]]
+# Production node-connecting miner. Mirrors `zk-pow-mine` in shape:
+# connects to a `nockchain` node's private gRPC, subscribes to %mine
+# effects, mines Pearl-compatible tickets, builds the recursive certificate
+# after a target hit, and submits the canonical %ai-pow command on %mined.
+name = "ai-pow-mine"
+path = "src/bin/ai_pow_mine.rs"
+required-features = ["node"]
+
+[features]
+default = []
+# Out-of-process node-connecting integration: pulls in the gRPC +
+# nockapp stack so `src/run.rs` + `src/wire.rs` + the
+# `ai-pow-mine` binary build. The bare crate (no features) keeps the
+# Pearl-compatible ticket loop buildable without the gRPC tree, which is handy
+# for benchmarks and library users.
+node = [
+    "dep:nockapp",
+    "dep:nockvm",
+    "dep:nockvm_macros",
+    "dep:tokio",
+    "dep:gnort",
+    "dep:nockchain-mining-common",
+    "dep:nockapp-grpc",
+    "dep:futures",
+    "dep:tokio-util",
+    "dep:tracing-subscriber",
+    "dep:num_cpus",
+]
+
+[dependencies]
+ai-pow = { path = "../ai-pow", features = ["zk"] }
+ai-pow-zk = { path = "../ai-pow-zk", features = ["recursion"] }
+anyhow = { workspace = true }
+base64 = "0.22"
+blake3 = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+hex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# `node` feature (out-of-process gRPC integration).
+futures = { workspace = true, optional = true }
+gnort = { workspace = true, optional = true }
+nockapp = { path = "../nockapp", optional = true }
+nockapp-grpc = { workspace = true, optional = true }
+nockchain-mining-common = { workspace = true, optional = true }
+nockvm = { workspace = true, optional = true }
+nockvm_macros = { workspace = true, optional = true }
+num_cpus = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true, features = ["env-filter", "ansi"] }
+
+[dev-dependencies]
+bincode1 = { package = "bincode", version = "1.3.3" }
+once_cell = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

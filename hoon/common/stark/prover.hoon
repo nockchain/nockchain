@@ -229,6 +229,7 @@
         %0  [%0 objects ~ 0]
         %1  [%1 objects ~ 0]
         %2  [%2 objects ~ 0]
+        %3  ~|(%zk-prover-cannot-generate-v3-ai-proof !!)
       ==
     ?.  =(digest.ctx (hash-proof proof))  [%| [%invalid-stream ~]]
     [%& proof]
@@ -825,6 +826,7 @@
       %0  [%& %0 objects.proof ~ 0]
       %1  [%& %1 objects.proof ~ 0]
       %2  [%& %2 objects.proof ~ 0]
+      %3  ~|(%zk-prover-cannot-generate-v3-ai-proof !!)
     ==
   ::
   ::
