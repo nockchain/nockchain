@@ -1930,15 +1930,11 @@ pub fn verify_pearl_moe_recursive_certificate(
         &zk_params, &schedule, &bp, trace_height,
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
-    if !certificate.l0_program_matches(&expected_program) {
-        return Err(BridgeError::PublicInputMismatch(
-            "MOE_OPENED_SCHEDULE (certificate opened rows/cols != committed routing statement)",
-        ));
-    }
 
     // (5) Verify the recursive certificate against the bound program + PIs.
     ai_pow_zk::recursion::verify_recursive_certificate(
         certificate,
+        &expected_program,
         &zk_params,
         &CircuitConfig::for_layer0_trace(trace_height),
         pis,
@@ -4216,6 +4212,7 @@ mod tests {
         );
         ai_pow_zk::recursion::verify_recursive_certificate(
             &run.certificate,
+            run.certificate.l0_program_for_test_support(),
             &run.zk_params,
             &ai_pow_zk::CircuitConfig::PROD,
             &run.pis,
@@ -4983,6 +4980,7 @@ mod tests {
         );
         ai_pow_zk::recursion::verify_recursive_certificate(
             &run.certificate,
+            run.certificate.l0_program_for_test_support(),
             &run.zk_params,
             &ai_pow_zk::CircuitConfig::PROD,
             &run.pis,
@@ -5048,6 +5046,7 @@ mod tests {
         );
         ai_pow_zk::recursion::verify_recursive_certificate(
             &run.certificate,
+            run.certificate.l0_program_for_test_support(),
             &run.zk_params,
             &ai_pow_zk::CircuitConfig::PROD,
             &run.pis,

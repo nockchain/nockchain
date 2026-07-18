@@ -130,20 +130,20 @@ impl AiPowRecursiveCertificate {
         &self.l0_proof
     }
 
-    /// **Opened-statement binding.** Returns `true` iff the certificate's embedded
-    /// Layer-0 program equals `expected`.
-    ///
-    /// [`verify_recursive_certificate`] proves the Layer-0 statement for *this*
-    /// certificate's `l0_program` but does **not** bind that program to any public
-    /// statement — a malicious prover can embed a program that opened a
-    /// prover-favorable strip. A sound node MUST recompute the canonical program
-    /// from the *public* opened schedule
-    /// ([`crate::canonical::canonical_program_for_strip_schedule`]) and require
-    /// this to return `true`, so the certificate is proven over exactly the
-    /// claimed opened rows/columns. Compares the preprocessed program matrix
-    /// (shape + every cell), which pins the entire strip schedule + selectors.
-    pub fn l0_program_matches(&self, expected: &crate::AiPowProgram) -> bool {
+    /// Returns whether the embedded Layer-0 program equals a verifier-derived
+    /// canonical program. Program shape and every preprocessed cell are bound.
+    #[cfg(any(test, feature = "test-support"))]
+    fn l0_program_matches(&self, expected: &crate::AiPowProgram) -> bool {
         self.l0_program.width == expected.width && self.l0_program.values == expected.values
+    }
+
+    /// Exposes the embedded program only to checkpoint regression callers.
+    /// Consensus must derive an independent canonical program and pass it to
+    /// [`verify_recursive_certificate`].
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn l0_program_for_test_support(&self) -> &crate::AiPowProgram {
+        &self.l0_program
     }
 }
 
@@ -1240,36 +1240,35 @@ fn prove_composite_l1_outer_cert_with_config_and_table_packing(
     Ok(batch_proof)
 }
 
-/// Verify the batch-STARK recursive checkpoint certificate against the
-/// verifier-derived Layer-0 AI-PoW public inputs and chain-pinned proving
-/// parameters.
+/// Verify the batch-STARK recursive checkpoint certificate against a
+/// verifier-derived canonical Layer-0 program, public inputs, and chain-pinned
+/// proving parameters.
 ///
-/// This is the hardened batch-STARK checkpoint verifier. It rejects outer
-/// proofs whose circuit-prover metadata is merely self-consistent by rebuilding
-/// the canonical L1 verifier circuit from the certificate's Layer-0
-/// proof/program, running that circuit against the verifier-derived public
-/// inputs, comparing stable rebuilt outer metadata to the submitted outer
-/// proof, and verifying the submitted outer proof with the production
-/// batch-STARK verifier.
+/// This hardened checkpoint verifier rebuilds the canonical L1 verifier circuit
+/// from the certificate's Layer-0 proof, rejects any embedded Layer-0 program
+/// other than `expected_program`, runs the rebuilt circuit against the
+/// verifier-derived public inputs, compares stable rebuilt outer metadata to the
+/// submitted outer proof, and verifies the submitted outer proof.
 ///
 /// **Not a production path, and not compiled into production builds.** The
-/// consensus accept path is the COMPACT verifier (`verify_ai_pow_block_artifact`
-/// -> the `_compact_` verifiers), which binds the canonical Layer-0 program via
-/// the P0/D6 opened-schedule commitment fold. This standalone checkpoint verifier
-/// is retained only as a regression/benchmark intermediate, so it is gated behind
-/// `test`/`test-support` and does not exist in a release binary. A caller MUST
-/// bind the certificate's `l0_program` to the canonical program from the public
-/// opened schedule (see `AiPowRecursiveCertificate::l0_program_matches`) before
-/// trusting the result — this verifier proves the statement for the certificate's
-/// own embedded program.
+/// consensus accept path uses the compact verifier, which binds the canonical
+/// Layer-0 program through the P0/D6 opened-schedule commitment fold.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn verify_recursive_certificate(
     cert: &AiPowRecursiveCertificate,
+    expected_program: &crate::AiPowProgram,
     zk_params: &crate::params::ZkParams,
     profile: &crate::circuit::CircuitConfig,
     public_inputs: &crate::composite_public::CompositePublicInputs,
 ) -> Result<(), VerificationError> {
+    if !cert.l0_program_matches(expected_program) {
+        return Err(VerificationError::InvalidProofShape(
+            "AI-PoW recursive certificate Layer-0 program does not match the \
+             verifier-derived canonical opened schedule"
+                .to_string(),
+        ));
+    }
     verify_recursive_certificate_inner(cert, zk_params, profile, &public_inputs.to_vec())
 }
 
@@ -2742,12 +2741,16 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
-        verify_recursive_certificate(&cert, &zk, &profile, &pis)
+        verify_recursive_certificate(&cert, &program, &zk, &profile, &pis)
             .expect("recursive certificate verifier must accept honest cert");
         verify_recursive_certificate_inner(&cert, &zk, &profile, &[])
             .expect_err("recursive verifier must reject empty statement public inputs");
+        let mut wrong_program = program;
+        wrong_program.values[0] += Val::ONE;
+        verify_recursive_certificate(&cert, &wrong_program, &zk, &profile, &pis)
+            .expect_err("recursive verifier must reject a non-canonical Layer-0 program");
     }
 
     #[test]
@@ -2772,11 +2775,11 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         let bytes = encode_recursive_certificate(&cert).expect("encode recursive certificate");
         let decoded = decode_recursive_certificate(&bytes).expect("decode recursive certificate");
-        verify_recursive_certificate(&decoded, &zk, &profile, &pis)
+        verify_recursive_certificate(&decoded, &program, &zk, &profile, &pis)
             .expect("decoded recursive certificate must verify");
 
         let mut trailing = bytes;
@@ -2809,10 +2812,10 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let mut cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let mut cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         cert.l1_outer_proof.ext_degree = 1;
-        verify_recursive_certificate(&cert, &zk, &profile, &pis)
+        verify_recursive_certificate(&cert, &program, &zk, &profile, &pis)
             .expect_err("recursive verifier must reject non-D=2 recursion envelope");
     }
 
@@ -2838,10 +2841,10 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let mut cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let mut cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         cert.l1_outer_proof.non_primitives.clear();
-        verify_recursive_certificate(&cert, &zk, &profile, &pis)
+        verify_recursive_certificate(&cert, &program, &zk, &profile, &pis)
             .expect_err("recursive verifier must reject non-canonical L1 circuit metadata");
     }
 
@@ -2867,10 +2870,10 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let mut cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let mut cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         cert.l1_outer_proof.stark_common = CommonData::new(None, Vec::new());
-        let err = verify_recursive_certificate(&cert, &zk, &profile, &pis)
+        let err = verify_recursive_certificate(&cert, &program, &zk, &profile, &pis)
             .expect_err("recursive verifier must reject non-canonical preprocessed binding");
         assert!(
             err.to_string().contains("preprocessed commitment"),
@@ -2900,7 +2903,7 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let mut cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let mut cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         let first_opened_value = cert
             .l1_outer_proof
@@ -2912,7 +2915,7 @@ mod tests {
             .expect("outer proof exposes at least one trace opening");
         *first_opened_value += Val::ONE;
 
-        verify_recursive_certificate(&cert, &zk, &profile, &pis)
+        verify_recursive_certificate(&cert, &program, &zk, &profile, &pis)
             .expect_err("recursive verifier must reject tampered L1 proof body");
     }
 
@@ -2938,11 +2941,11 @@ mod tests {
         .expect("build composite L1 verifier circuit");
         let outer =
             prove_composite_l1_outer_cert(&built, &proof).expect("honest recursive certificate");
-        let cert = AiPowRecursiveCertificate::new(proof, program, outer);
+        let cert = AiPowRecursiveCertificate::new(proof, program.clone(), outer);
 
         let mut wrong = pis.clone();
         wrong.job_key[0] ^= 1;
-        verify_recursive_certificate(&cert, &zk, &profile, &wrong)
+        verify_recursive_certificate(&cert, &program, &zk, &profile, &wrong)
             .expect_err("recursive certificate must reject metadata-swapped public inputs");
     }
 
