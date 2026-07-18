@@ -29,7 +29,7 @@ use ai_pow_zk::recursion::{
 };
 
 use crate::setup::SetupError;
-use crate::AiPowVerifierSetup;
+use crate::{AiPowVerifierSetup, VerifierSetupShapeKey};
 
 /// One bucket's canonical 40-byte verifier-key digest.
 type BucketDigest = [u8; AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES];
@@ -43,7 +43,7 @@ type BucketDigest = [u8; AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES];
 const TABLE_DIGEST_DOMAIN_V0: &[u8] = b"ai-pow-v0-verifier-setup-table-digest\0";
 
 /// The committed BLAKE3 digest of the canonical **v0** AI-PoW verifier-setup table
-/// (the seven trace-height buckets `2^13..2^19` produced by
+/// (the reachable `(trace_height, sx_bound)` keys produced by
 /// [`crate::setup::production_verifier_setup_buckets`]).
 ///
 /// This is a CONSENSUS CONSTANT. It is measured once on a reference build by
@@ -53,11 +53,11 @@ const TABLE_DIGEST_DOMAIN_V0: &[u8] = b"ai-pow-v0-verifier-setup-table-digest\0"
 /// the table it built and refuses to run on a mismatch.
 pub const AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST: [u8; 32] = [
     // Measured by `boot_generate_full_production_table` on the reference build
-    // (generate the 7 buckets 2^13..2^19 -> cache -> rebuild -> hash). Re-running
+    // (generate the production shape-key table -> cache -> rebuild -> hash). Re-running
     // that ignored test regenerates the table from scratch and asserts this exact
     // value, so it doubles as a cross-run reproducibility gate.
-    0xe7, 0xee, 0xf3, 0xf4, 0x80, 0x5c, 0xee, 0x01, 0xcf, 0x45, 0xd4, 0xb0, 0x3e, 0xd0, 0x3b, 0x9e,
-    0xe3, 0x6b, 0x4a, 0x57, 0x4f, 0x8c, 0xd8, 0xcb, 0x8a, 0xac, 0x79, 0xe2, 0xb6, 0x82, 0x1a, 0xab,
+    0xd7, 0xdf, 0x5d, 0x38, 0x0f, 0x55, 0xb1, 0x4e, 0x06, 0xb1, 0xf9, 0xf8, 0x39, 0xaf, 0x8b, 0x73,
+    0x0a, 0x04, 0x3d, 0x79, 0xa6, 0x60, 0x8e, 0x8d, 0xc7, 0xe1, 0x55, 0x3c, 0x72, 0x77, 0x65, 0x8d,
 ];
 
 /// Whether the committed digest has been pinned to a real measured value (i.e. is
@@ -67,20 +67,21 @@ pub fn v0_digest_is_pinned() -> bool {
     AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST != [0u8; 32]
 }
 
-/// Pure fingerprint hash over `(trace_height, verifier_key_digest)` pairs.
+/// Pure fingerprint hash over `(shape_key, verifier_key_digest)` pairs.
 ///
-/// Buckets are sorted by trace height first, so the result is independent of table
+/// Buckets are sorted by shape key first, so the result is independent of table
 /// ordering (however the buckets were enumerated or loaded) and of duplicate-free
 /// ordering choices. The length is bound into the hash so a truncated table cannot
 /// collide with a full one. Pure and cheap → unit-testable without real contexts.
-fn hash_table_fingerprints(fps: &[(u64, BucketDigest)]) -> [u8; 32] {
-    let mut sorted: Vec<(u64, BucketDigest)> = fps.to_vec();
-    sorted.sort_by_key(|(h, _)| *h);
+fn hash_table_fingerprints(fps: &[(VerifierSetupShapeKey, BucketDigest)]) -> [u8; 32] {
+    let mut sorted: Vec<(VerifierSetupShapeKey, BucketDigest)> = fps.to_vec();
+    sorted.sort_by_key(|(key, _)| *key);
     let mut hasher = blake3::Hasher::new();
     hasher.update(TABLE_DIGEST_DOMAIN_V0);
     hasher.update(&(sorted.len() as u64).to_le_bytes());
-    for (h, d) in &sorted {
-        hasher.update(&h.to_le_bytes());
+    for (key, d) in &sorted {
+        hasher.update(&(key.trace_height as u64).to_le_bytes());
+        hasher.update(&[u8::from(key.sx_bound)]);
         hasher.update(d);
     }
     *hasher.finalize().as_bytes()
@@ -92,34 +93,34 @@ fn hash_table_fingerprints(fps: &[(u64, BucketDigest)]) -> [u8; 32] {
 /// rebuilt `context`** (the value consensus verification actually binds to), and it
 /// is cross-checked against the cached `digest_bytes` the jet also consumes — so a
 /// cache whose cached bytes and rebuilt context disagree is rejected here rather
-/// than passed to consensus. Rejects an empty table or duplicate trace-height
-/// buckets (each cert must resolve to exactly one setup).
+/// than passed to consensus. Rejects an empty table or duplicate shape keys.
 pub fn verifier_setup_table_digest(table: &[AiPowVerifierSetup]) -> Result<[u8; 32], SetupError> {
     if table.is_empty() {
         return Err(SetupError(
             "cannot fingerprint an empty verifier-setup table".to_string(),
         ));
     }
-    let mut fps: Vec<(u64, BucketDigest)> = Vec::with_capacity(table.len());
-    let mut seen: Vec<usize> = Vec::with_capacity(table.len());
+    let mut fps: Vec<(VerifierSetupShapeKey, BucketDigest)> = Vec::with_capacity(table.len());
+    let mut seen: Vec<VerifierSetupShapeKey> = Vec::with_capacity(table.len());
     for s in table {
+        let key = s.shape_key();
         let ctx_digest =
             compact_batch_verifier_key_digest_to_bytes(s.context.verifier_key_digest());
         if s.digest_bytes.as_slice() != ctx_digest.as_slice() {
             return Err(SetupError(format!(
-                "verifier-setup bucket at trace_height {}: cached digest disagrees with the \
-                 rebuilt context digest (corrupt or format-incompatible cache)",
-                s.trace_height,
+                "verifier-setup bucket {:?}: cached digest disagrees with the rebuilt context \
+                 digest (corrupt or format-incompatible cache)",
+                key,
             )));
         }
-        if seen.contains(&s.trace_height) {
+        if seen.contains(&key) {
             return Err(SetupError(format!(
-                "verifier-setup table has duplicate trace-height bucket {}",
-                s.trace_height,
+                "verifier-setup table has duplicate shape key {:?}",
+                key,
             )));
         }
-        seen.push(s.trace_height);
-        fps.push((s.trace_height as u64, ctx_digest));
+        seen.push(key);
+        fps.push((key, ctx_digest));
     }
     Ok(hash_table_fingerprints(&fps))
 }
@@ -139,27 +140,29 @@ pub fn verifier_setup_seed_table_digest(
             "cannot fingerprint an empty verifier-setup seed table".to_string(),
         ));
     }
-    let mut fps: Vec<(u64, BucketDigest)> = Vec::with_capacity(seeds.len());
-    let mut seen: Vec<usize> = Vec::with_capacity(seeds.len());
+    let mut fps: Vec<(VerifierSetupShapeKey, BucketDigest)> = Vec::with_capacity(seeds.len());
+    let mut seen: Vec<VerifierSetupShapeKey> = Vec::with_capacity(seeds.len());
     for s in seeds {
-        let h = s.trace_height();
-        if seen.contains(&h) {
+        let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
+            .ok_or_else(|| SetupError("seed table has zero noise_rank".to_string()))?;
+        if seen.contains(&key) {
             return Err(SetupError(format!(
-                "seed table has duplicate trace-height bucket {h}"
+                "seed table has duplicate verifier-setup shape key {:?}",
+                key,
             )));
         }
-        seen.push(h);
+        seen.push(key);
         let d: BucketDigest = s
             .verifier_key_digest_bytes
             .as_slice()
             .try_into()
             .map_err(|_| {
                 SetupError(format!(
-                    "seed at trace_height {h}: cached verifier-key digest is not {} bytes",
-                    AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
+                    "seed at {:?}: cached verifier-key digest is not {} bytes",
+                    key, AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES,
                 ))
             })?;
-        fps.push((h as u64, d));
+        fps.push((key, d));
     }
     Ok(hash_table_fingerprints(&fps))
 }
@@ -225,11 +228,15 @@ mod tests {
         [byte; AI_POW_COMPACT_BATCH_VERIFIER_KEY_DIGEST_BYTES]
     }
 
-    /// The fingerprint hash is order-independent: the same buckets in any order
-    /// produce the same digest (buckets are sorted by trace height first).
+    /// The fingerprint hash is order-independent: the same shape keys in any order
+    /// produce the same digest (buckets are sorted by shape key first).
     #[test]
     fn fingerprint_hash_is_order_independent() {
-        let a = vec![(1u64 << 13, d(0x11)), (1u64 << 15, d(0x22)), (1u64 << 19, d(0x33))];
+        let a = vec![
+            (VerifierSetupShapeKey::new(1usize << 13, true), d(0x11)),
+            (VerifierSetupShapeKey::new(1usize << 15, false), d(0x22)),
+            (VerifierSetupShapeKey::new(1usize << 19, true), d(0x33)),
+        ];
         let mut b = a.clone();
         b.reverse();
         let c = vec![a[1], a[2], a[0]];
@@ -237,29 +244,32 @@ mod tests {
         assert_eq!(hash_table_fingerprints(&a), hash_table_fingerprints(&c));
     }
 
-    /// The hash is sensitive to every field: a changed height, a changed digest,
-    /// or a dropped bucket all change the result (no silent collisions).
+    /// The hash is sensitive to every field: a changed height, sx-bound bit,
+    /// digest, or dropped bucket all change the result (no silent collisions).
     #[test]
     fn fingerprint_hash_is_sensitive() {
-        let base = vec![(1u64 << 13, d(0x11)), (1u64 << 15, d(0x22))];
+        let base = vec![
+            (VerifierSetupShapeKey::new(1usize << 13, true), d(0x11)),
+            (VerifierSetupShapeKey::new(1usize << 15, false), d(0x22)),
+        ];
         let h0 = hash_table_fingerprints(&base);
 
-        // changed digest
         let mut v = base.clone();
         v[0].1 = d(0x12);
         assert_ne!(h0, hash_table_fingerprints(&v));
 
-        // changed height
         let mut v = base.clone();
-        v[0].0 = 1 << 14;
+        v[0].0.trace_height = 1 << 14;
         assert_ne!(h0, hash_table_fingerprints(&v));
 
-        // dropped bucket (length is bound into the hash)
+        let mut v = base.clone();
+        v[0].0.sx_bound = !v[0].0.sx_bound;
+        assert_ne!(h0, hash_table_fingerprints(&v));
+
         assert_ne!(h0, hash_table_fingerprints(&base[..1]));
 
-        // added bucket
         let mut v = base.clone();
-        v.push((1u64 << 19, d(0x33)));
+        v.push((VerifierSetupShapeKey::new(1usize << 19, true), d(0x33)));
         assert_ne!(h0, hash_table_fingerprints(&v));
     }
 
@@ -267,7 +277,7 @@ mod tests {
     /// pure hash itself).
     #[test]
     fn fingerprint_hash_is_reproducible() {
-        let v = vec![(1u64 << 16, d(0xab))];
+        let v = vec![(VerifierSetupShapeKey::new(1usize << 16, false), d(0xab))];
         assert_eq!(hash_table_fingerprints(&v), hash_table_fingerprints(&v));
     }
 

@@ -62,21 +62,50 @@ pub mod table_digest;
 /// production admission envelope).
 pub const AI_POW_VERIFY_MAX_PATTERN_LEN: usize = 4096;
 
-/// The boot-injected, proof-independent compact verifier setup for ONE trace
-/// log-height bucket. The compact verifier setup (`context` + `digest`) is
-/// deterministic from the trace height (the padded Layer-0 degree_bits), NOT the
-/// full shape: many Pearl shapes share a bucket, and the Pearl envelope spans a
-/// small, bounded set of buckets (degree_bits ≤ ~19). Supporting EVERY Pearl
-/// combination therefore means a *table* of these, one per reachable bucket —
-/// see [`init_ai_pow_verifier_setup`].
+/// Trusted compact verifier setup for one consensus-reachable verifier shape.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct AiPowVerifierSetup {
-    /// The Layer-0 trace height (power of two) this setup verifies. A cert whose
-    /// `certificate.trace_height` equals this is verified with this setup.
     pub trace_height: usize,
+    pub sx_bound: bool,
     pub context: AiPowCompactBatchVerifierContext,
     /// Canonical 40-byte verifier-key/setup digest.
     pub digest_bytes: Vec<u8>,
+}
+
+/// Verifier setup identity. `sx_bound` is load-bearing because it selects a
+/// different Layer-0 AIR layout for stripe-major R-b schedules.
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub struct VerifierSetupShapeKey {
+    pub trace_height: usize,
+    pub sx_bound: bool,
+}
+
+impl VerifierSetupShapeKey {
+    pub const fn new(trace_height: usize, sx_bound: bool) -> Self {
+        Self {
+            trace_height,
+            sx_bound,
+        }
+    }
+
+    pub fn from_zk_params(zk_params: &ai_pow_zk::ZkParams, trace_height: usize) -> Option<Self> {
+        if zk_params.noise_rank == 0 {
+            return None;
+        }
+        let num_stripes = zk_params.k / zk_params.noise_rank;
+        Some(Self::new(
+            trace_height,
+            (num_stripes as usize) <= ai_pow::params::STRIPE_MAX,
+        ))
+    }
+}
+
+impl AiPowVerifierSetup {
+    pub const fn shape_key(&self) -> VerifierSetupShapeKey {
+        VerifierSetupShapeKey::new(self.trace_height, self.sx_bound)
+    }
 }
 
 /// A per-bucket verifier context living ON DISK: the path of its serialized context
@@ -85,7 +114,7 @@ pub struct AiPowVerifierSetup {
 /// [`ai_pow_verifier_setup_for`]) — a fast page-in (~0.6 s worst case), NEVER a
 /// circuit rebuild. Built once at boot (see the disk-paged residency doc).
 pub struct DiskBucket {
-    trace_height: usize,
+    shape_key: VerifierSetupShapeKey,
     /// The canonical 40-byte verifier-key digest this context must match (the
     /// consensus parameter). Checked at boot and on every page-in.
     committed_digest: Vec<u8>,
@@ -99,17 +128,17 @@ pub struct DiskBucket {
 }
 
 impl DiskBucket {
-    /// Assemble a disk bucket from its trace height, committed verifier-key digest,
+    /// Assemble a disk bucket from its shape key, committed verifier-key digest,
     /// the path of its serialized context file, and the BLAKE3 of that file's bytes.
     /// The boot installer builds these.
     pub fn new(
-        trace_height: usize,
+        shape_key: VerifierSetupShapeKey,
         committed_digest: Vec<u8>,
         context_path: std::path::PathBuf,
         context_file_blake3: [u8; 32],
     ) -> Self {
         Self {
-            trace_height,
+            shape_key,
             committed_digest,
             context_path,
             context_file_blake3,
@@ -129,11 +158,12 @@ pub(crate) enum VerifierSetupLookup {
     LoadFailed,
 }
 
-/// A bounded LRU keyed by trace height. MRU is the back of `order`. Generic over the
-/// value so its eviction/dedup logic is unit-testable without real contexts.
+/// A bounded LRU keyed by verifier setup shape. MRU is the back of `order`.
+/// Generic over the value so its eviction/dedup logic is unit-testable without
+/// real contexts.
 struct Lru<V> {
-    map: HashMap<usize, V>,
-    order: Vec<usize>,
+    map: HashMap<VerifierSetupShapeKey, V>,
+    order: Vec<VerifierSetupShapeKey>,
 }
 
 impl<V: Clone> Lru<V> {
@@ -144,35 +174,35 @@ impl<V: Clone> Lru<V> {
         }
     }
 
-    fn touch(&mut self, h: usize) {
-        if let Some(pos) = self.order.iter().position(|&x| x == h) {
+    fn touch(&mut self, key: VerifierSetupShapeKey) {
+        if let Some(pos) = self.order.iter().position(|&x| x == key) {
             self.order.remove(pos);
         }
-        self.order.push(h);
+        self.order.push(key);
     }
 
-    /// Return the resident value for `h`, bumping it to MRU.
-    fn get_touch(&mut self, h: usize) -> Option<V> {
-        let v = self.map.get(&h)?.clone();
-        self.touch(h);
+    /// Return the resident value for `key`, bumping it to MRU.
+    fn get_touch(&mut self, key: VerifierSetupShapeKey) -> Option<V> {
+        let v = self.map.get(&key)?.clone();
+        self.touch(key);
         Some(v)
     }
 
-    /// Insert `h` (deduping if it is already present, e.g. another thread filled it
+    /// Insert `key` (deduping if it is already present, e.g. another thread filled it
     /// while we rebuilt) and evict the least-recently-used entries beyond `cap`.
-    /// Returns the resident value for `h`.
-    fn insert_capped(&mut self, h: usize, value: V, cap: usize) -> V {
-        if let Some(existing) = self.map.get(&h).cloned() {
-            self.touch(h);
+    /// Returns the resident value for `key`.
+    fn insert_capped(&mut self, key: VerifierSetupShapeKey, value: V, cap: usize) -> V {
+        if let Some(existing) = self.map.get(&key).cloned() {
+            self.touch(key);
             return existing;
         }
-        self.map.insert(h, value.clone());
-        self.order.push(h); // MRU
-                            // Evict the least-recently-used beyond `cap`. Guard `remove(0)` on a non-empty
-                            // `order` so this can never panic even if a prior panic (recovered via a
-                            // poisoned lock) left `order`/`map` momentarily inconsistent.
+        self.map.insert(key, value.clone());
+        self.order.push(key); // MRU
+                              // Evict the least-recently-used beyond `cap`. Guard `remove(0)` on a non-empty
+                              // `order` so this can never panic even if a prior panic (recovered via a
+                              // poisoned lock) left `order`/`map` momentarily inconsistent.
         while self.map.len() > cap.max(1) && !self.order.is_empty() {
-            let lru = self.order.remove(0); // front = LRU; `h` is at the back, so safe
+            let lru = self.order.remove(0); // front = LRU; `key` is at the back, so safe
             self.map.remove(&lru);
         }
         value
@@ -184,9 +214,9 @@ impl<V: Clone> Lru<V> {
 /// pays at most a fast disk read + deserialize (~0.6 s worst case), NEVER a circuit
 /// rebuild. See the disk-paged residency doc.
 struct DiskPagedSetup {
-    /// On-disk buckets, keyed by trace height. Empty for an eager-injected table
-    /// (tests): those contexts are pinned in `resident` and never paged.
-    disk: HashMap<usize, DiskBucket>,
+    /// On-disk buckets, keyed by verifier setup shape. Empty for an eager-injected
+    /// table (tests): those contexts are pinned in `resident` and never paged.
+    disk: HashMap<VerifierSetupShapeKey, DiskBucket>,
     /// Max contexts paged into memory at once — the working-set bound on RSS. For an
     /// eager table it is `>= len` so nothing evicts.
     cap: usize,
@@ -195,22 +225,21 @@ struct DiskPagedSetup {
 
 static SETUP: OnceCell<DiskPagedSetup> = OnceCell::new();
 
-/// Resolve the setup for a given Layer-0 `trace_height`, paging its context in from
-/// disk if it is not already resident. See [`VerifierSetupLookup`] for how the jet
-/// treats each outcome.
+/// Resolve the setup for a given verifier shape, paging its context in from disk if
+/// it is not already resident. See [`VerifierSetupLookup`] for how the jet treats
+/// each outcome.
 ///
-/// - `NoSuchBucket`: the table is missing a bucket for `trace_height`. Because the
-///   committed table pins exactly the seven real heights, an `trace_height` with no
-///   bucket cannot belong to a valid block on ANY honest node — this is a
-///   DETERMINISTIC invalid-block signal (the jet returns `NO`, and consensus marks the
-///   block a liar so it cannot be re-spammed).
+/// - `NoSuchBucket`: the table is missing a bucket for this shape. Because the
+///   committed table pins exactly the reachable verifier shapes, a missing bucket is
+///   a DETERMINISTIC invalid-block signal (the jet returns `NO`, and consensus marks
+///   the block a liar so it cannot be re-spammed).
 /// - `LoadFailed`: the table is uninjected, or a bucket EXISTS but its context could
 ///   not be loaded (missing / corrupt / bit-rotten file, disk error). That is a
 ///   NON-DETERMINISTIC per-node fault — the jet `%fail`s rather than voting.
 ///
 /// The returned `Arc` keeps the context alive for the caller's verify even if the LRU
 /// evicts it concurrently.
-pub(crate) fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLookup {
+pub(crate) fn ai_pow_verifier_setup_for(key: VerifierSetupShapeKey) -> VerifierSetupLookup {
     // Uninjected setup is a per-node boot state (this node cannot verify anything yet),
     // not a property of the block ⇒ non-deterministic fault.
     let Some(s) = SETUP.get() else {
@@ -219,12 +248,12 @@ pub(crate) fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLoo
     // Fast path: already paged into memory.
     {
         let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(arc) = lru.get_touch(trace_height) {
+        if let Some(arc) = lru.get_touch(key) {
             return VerifierSetupLookup::Found(arc);
         }
     }
-    // No committed bucket for this height ⇒ the block is invalid (deterministic).
-    let Some(bucket) = s.disk.get(&trace_height) else {
+    // No committed bucket for this shape ⇒ the block is invalid (deterministic).
+    let Some(bucket) = s.disk.get(&key) else {
         return VerifierSetupLookup::NoSuchBucket;
     };
     // A real bucket: page its context in from disk OUTSIDE the lock (~0.6 s worst
@@ -236,7 +265,7 @@ pub(crate) fn ai_pow_verifier_setup_for(trace_height: usize) -> VerifierSetupLoo
     };
     let arc = Arc::new(setup);
     let mut lru = s.resident.lock().unwrap_or_else(|e| e.into_inner());
-    VerifierSetupLookup::Found(lru.insert_capped(trace_height, arc, s.cap))
+    VerifierSetupLookup::Found(lru.insert_capped(key, arc, s.cap))
 }
 
 /// Page one bucket's verifier context IN from its on-disk file, verifying its file
@@ -250,9 +279,9 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(
-                "ai-pow: reading verifier context {} (trace_height {}) failed: {e}",
+                "ai-pow: reading verifier context {} ({:?}) failed: {e}",
                 bucket.context_path.display(),
-                bucket.trace_height,
+                bucket.shape_key,
             );
             return None;
         }
@@ -263,9 +292,9 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
     let file_blake3 = *blake3::hash(&raw).as_bytes();
     if file_blake3 != bucket.context_file_blake3 {
         tracing::error!(
-            "ai-pow: verifier context file for trace_height {} failed its checksum (on-disk \
-             corruption) — refusing to verify against it",
-            bucket.trace_height,
+            "ai-pow: verifier context file for {:?} failed its checksum (on-disk corruption) — \
+             refusing to verify against it",
+            bucket.shape_key,
         );
         return None;
     }
@@ -282,15 +311,14 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
             tracing::error!(
-                "ai-pow: deserializing verifier context for trace_height {} failed: {e:?}",
-                bucket.trace_height,
+                "ai-pow: deserializing verifier context for {:?} failed: {e:?}", bucket.shape_key,
             );
             return None;
         }
         Err(_panic) => {
             tracing::error!(
-                "ai-pow: deserializing verifier context for trace_height {} panicked (corrupt file)",
-                bucket.trace_height,
+                "ai-pow: deserializing verifier context for {:?} panicked (corrupt file)",
+                bucket.shape_key,
             );
             return None;
         }
@@ -300,14 +328,14 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
     let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
         setup.context.verifier_key_digest(),
     );
-    if setup.trace_height != bucket.trace_height
+    if setup.shape_key() != bucket.shape_key
         || digest.as_slice() != bucket.committed_digest.as_slice()
         || setup.digest_bytes != bucket.committed_digest
     {
         tracing::error!(
-            "ai-pow: on-disk verifier context for trace_height {} does not match its committed \
-             digest — refusing to verify against a divergent/corrupt context",
-            bucket.trace_height,
+            "ai-pow: on-disk verifier context for {:?} does not match its committed digest — \
+             refusing to verify against a divergent/corrupt context",
+            bucket.shape_key,
         );
         return None;
     }
@@ -333,16 +361,17 @@ pub fn ai_pow_verifier_setup_initialized() -> bool {
 // discarded at the call site.
 #[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(), ()> {
-    let heights: Vec<usize> = setups.iter().map(|s| s.trace_height).collect();
-    if !setup_table_heights_valid(&heights) {
+    let keys: Vec<VerifierSetupShapeKey> =
+        setups.iter().map(AiPowVerifierSetup::shape_key).collect();
+    if !setup_table_keys_valid(&keys) {
         return Err(());
     }
     let cap = setups.len().max(1);
     let mut lru = Lru::empty();
     for s in setups {
-        let h = s.trace_height;
-        lru.map.insert(h, Arc::new(s));
-        lru.order.push(h);
+        let key = s.shape_key();
+        lru.map.insert(key, Arc::new(s));
+        lru.order.push(key);
     }
     let setup = DiskPagedSetup {
         disk: HashMap::new(),
@@ -366,12 +395,12 @@ pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(),
 // `Err(())` marker: callers add boot context via `.map_err(|()| ..)`.
 #[allow(clippy::result_unit_err)]
 pub fn init_ai_pow_verifier_setup_disk(buckets: Vec<DiskBucket>, cap: usize) -> Result<(), ()> {
-    let heights: Vec<usize> = buckets.iter().map(|b| b.trace_height).collect();
-    if !setup_table_heights_valid(&heights) {
+    let keys: Vec<VerifierSetupShapeKey> = buckets.iter().map(|b| b.shape_key).collect();
+    if !setup_table_keys_valid(&keys) {
         return Err(());
     }
-    let disk: HashMap<usize, DiskBucket> =
-        buckets.into_iter().map(|b| (b.trace_height, b)).collect();
+    let disk: HashMap<VerifierSetupShapeKey, DiskBucket> =
+        buckets.into_iter().map(|b| (b.shape_key, b)).collect();
     let setup = DiskPagedSetup {
         disk,
         cap: cap.max(1),
@@ -381,15 +410,15 @@ pub fn init_ai_pow_verifier_setup_disk(buckets: Vec<DiskBucket>, cap: usize) -> 
 }
 
 /// A verifier-setup table is well-formed iff it is non-empty and has no duplicate
-/// trace-height bucket (each cert resolves to exactly one setup). Pure so the
-/// admission rule is unit-testable without constructing real setups.
-fn setup_table_heights_valid(heights: &[usize]) -> bool {
-    if heights.is_empty() {
+/// shape keys. Pure so the admission rule is unit-testable without constructing
+/// real setups.
+fn setup_table_keys_valid(keys: &[VerifierSetupShapeKey]) -> bool {
+    if keys.is_empty() {
         return false;
     }
-    for (i, &h) in heights.iter().enumerate() {
-        if heights[..i].contains(&h) {
-            return false; // duplicate bucket
+    for (i, &key) in keys.iter().enumerate() {
+        if keys[..i].contains(&key) {
+            return false;
         }
     }
     true
@@ -498,20 +527,18 @@ pub fn ai_pow_verify_jet(context: &mut Context, subject: Noun) -> Result<Noun, J
         let artifact =
             decode_ai_pow_pearl_merge_artifact_noun(artifact_noun, &space, limits).ok()?;
         let target = target_atom_to_32_saturating(target_noun, &space)?;
-        // Consensus cap: a block claiming a Layer-0 trace height above the accept-band
-        // (2^19) is invalid (the top bucket is deliberately not built).
-        if artifact.certificate.trace_height > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
-            return None;
-        }
-        Some((artifact, target))
+        let setup_key = VerifierSetupShapeKey::from_zk_params(
+            &artifact.certificate.zk_params, artifact.certificate.trace_height,
+        )?;
+        Some((artifact, target, setup_key))
     }));
-    let (artifact, target) = match decoded {
+    let (artifact, target, setup_key) = match decoded {
         Ok(Some(v)) => v,
         Ok(None) | Err(_) => return Ok(NO),
     };
 
-    // Resolve the setup for THIS cert's trace-height bucket.
-    let setup = match ai_pow_verifier_setup_for(artifact.certificate.trace_height) {
+    // Resolve the setup for THIS cert's verifier shape.
+    let setup = match ai_pow_verifier_setup_for(setup_key) {
         VerifierSetupLookup::Found(s) => s,
         // Deterministic: no committed bucket ⇒ the block is invalid on every honest
         // node ⇒ NO (and consensus marks it a liar).
@@ -580,34 +607,38 @@ mod tests {
     /// eviction/recency logic is tested without building real contexts.
     #[test]
     fn lru_evicts_least_recently_used() {
+        let k13 = VerifierSetupShapeKey::new(13, true);
+        let k14 = VerifierSetupShapeKey::new(14, true);
+        let k15 = VerifierSetupShapeKey::new(15, false);
         let mut lru: Lru<u64> = Lru::empty();
         // Fill to cap 2.
-        assert_eq!(lru.insert_capped(13, 130, 2), 130);
-        assert_eq!(lru.insert_capped(14, 140, 2), 140);
+        assert_eq!(lru.insert_capped(k13, 130, 2), 130);
+        assert_eq!(lru.insert_capped(k14, 140, 2), 140);
         assert_eq!(lru.map.len(), 2);
-        // Touch 13 so 14 becomes the LRU.
-        assert_eq!(lru.get_touch(13), Some(130));
-        // Insert 15 → evicts 14 (LRU), keeps 13 (just touched) and 15.
-        lru.insert_capped(15, 150, 2);
+        // Touch k13 so k14 becomes the LRU.
+        assert_eq!(lru.get_touch(k13), Some(130));
+        // Insert k15 → evicts k14 (LRU), keeps k13 (just touched) and k15.
+        lru.insert_capped(k15, 150, 2);
         assert_eq!(lru.map.len(), 2);
         assert_eq!(
-            lru.get_touch(14),
+            lru.get_touch(k14),
             None,
-            "14 was evicted as least-recently-used"
+            "k14 was evicted as least-recently-used"
         );
-        assert_eq!(lru.get_touch(13), Some(130), "13 survived (was touched)");
-        assert_eq!(lru.get_touch(15), Some(150), "15 is resident");
+        assert_eq!(lru.get_touch(k13), Some(130), "k13 survived (was touched)");
+        assert_eq!(lru.get_touch(k15), Some(150), "k15 is resident");
     }
 
-    /// Dedup insert: inserting a height already resident returns the EXISTING value
+    /// Dedup insert: inserting a key already resident returns the EXISTING value
     /// (a concurrent double-rebuild does not double-store or grow past cap).
     #[test]
     fn lru_insert_dedups_existing() {
+        let key = VerifierSetupShapeKey::new(13, true);
         let mut lru: Lru<u64> = Lru::empty();
-        assert_eq!(lru.insert_capped(13, 130, 3), 130);
-        // Second insert of 13 with a DIFFERENT value returns the first (existing).
+        assert_eq!(lru.insert_capped(key, 130, 3), 130);
+        // Second insert of the same key with a DIFFERENT value returns the first.
         assert_eq!(
-            lru.insert_capped(13, 999, 3),
+            lru.insert_capped(key, 999, 3),
             130,
             "existing value kept on dedup"
         );
@@ -618,27 +649,32 @@ mod tests {
     /// progression (the common case) never thrashes: each new height evicts the old.
     #[test]
     fn lru_cap_one_keeps_only_mru() {
+        let a = VerifierSetupShapeKey::new(13, true);
+        let b = VerifierSetupShapeKey::new(14, false);
         let mut lru: Lru<u64> = Lru::empty();
-        lru.insert_capped(13, 130, 1);
-        lru.insert_capped(14, 140, 1);
+        lru.insert_capped(a, 130, 1);
+        lru.insert_capped(b, 140, 1);
         assert_eq!(lru.map.len(), 1);
-        assert_eq!(lru.get_touch(13), None);
-        assert_eq!(lru.get_touch(14), Some(140));
+        assert_eq!(lru.get_touch(a), None);
+        assert_eq!(lru.get_touch(b), Some(140));
     }
 
-    /// The verifier-setup TABLE admission rule (supporting the full Pearl band):
-    /// non-empty, one setup per trace-height bucket, no duplicates.
+    /// The verifier-setup TABLE admission rule: non-empty, one setup per verifier
+    /// shape key, no duplicates.
     #[test]
     fn setup_table_admission_rule() {
-        assert!(!setup_table_heights_valid(&[]), "empty table rejected");
-        assert!(setup_table_heights_valid(&[8192]), "single bucket ok");
+        let h13_sx = VerifierSetupShapeKey::new(8192, true);
+        let h14_sx = VerifierSetupShapeKey::new(16384, true);
+        let h14_rb = VerifierSetupShapeKey::new(16384, false);
+        assert!(!setup_table_keys_valid(&[]), "empty table rejected");
+        assert!(setup_table_keys_valid(&[h13_sx]), "single bucket ok");
         assert!(
-            setup_table_heights_valid(&[8192, 16384, 32768]),
-            "distinct buckets ok"
+            setup_table_keys_valid(&[h13_sx, h14_sx, h14_rb]),
+            "distinct keys ok"
         );
         assert!(
-            !setup_table_heights_valid(&[8192, 16384, 8192]),
-            "duplicate bucket rejected (a cert must resolve to exactly one setup)"
+            !setup_table_keys_valid(&[h13_sx, h14_sx, h14_sx]),
+            "duplicate key rejected (a cert must resolve to exactly one setup)"
         );
     }
 
@@ -704,11 +740,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The production bucket set (what boot generates) must cover EXACTLY the
-    /// consensus accept-band 2^13..2^19 — one distinct-height representative each,
-    /// and NONE above the cap `AI_POW_MAX_TRACE_HEIGHT` (2^19). Blocks above the cap
-    /// are rejected by consensus, so no setup is built for them; in-band blocks must
-    /// each have a bucket. Cheap: heights computed WITHOUT proving.
+    /// The production bucket set (what boot generates) must cover every consensus
+    /// accept-band verifier shape: at least one key for each height 2^13..2^19, and
+    /// both `sx_bound` classes wherever the envelope can reach both layouts.
+    /// Cheap: heights computed WITHOUT proving.
     #[test]
     fn production_verifier_setup_buckets_cover_the_capped_band() {
         let buckets = crate::setup::production_verifier_setup_buckets();
@@ -718,7 +753,9 @@ mod tests {
             "the production default must retain every attacker-selectable bucket",
         );
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
-        let mut log2s: Vec<u32> = Vec::new();
+        let mut keys: Vec<VerifierSetupShapeKey> = Vec::new();
+        let mut by_height: std::collections::BTreeMap<u32, std::collections::BTreeSet<bool>> =
+            std::collections::BTreeMap::new();
         for b in &buckets {
             let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
                 .expect("cheap trace height");
@@ -734,20 +771,36 @@ mod tests {
                 th <= ai_pow::params::AI_POW_MAX_TRACE_HEIGHT,
                 "bucket height {th} must be <= the consensus cap 2^{cap_db}",
             );
-            log2s.push(th.trailing_zeros());
+            let sx_bound =
+                (b.params.k / b.params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX;
+            let key = VerifierSetupShapeKey::new(th, sx_bound);
+            keys.push(key);
+            by_height
+                .entry(th.trailing_zeros())
+                .or_default()
+                .insert(sx_bound);
         }
-        log2s.sort_unstable();
-        let distinct: std::collections::BTreeSet<u32> = log2s.iter().copied().collect();
-        eprintln!("production buckets (log2 heights): {log2s:?}");
+        keys.sort_unstable();
+        let distinct: std::collections::BTreeSet<VerifierSetupShapeKey> =
+            keys.iter().copied().collect();
+        eprintln!("production setup keys: {keys:?}");
         assert_eq!(
             distinct.len(),
             buckets.len(),
-            "buckets must have distinct trace heights",
+            "buckets must have distinct shape keys",
         );
         for db in 13u32..=cap_db {
             assert!(
-                distinct.contains(&db),
-                "production buckets must cover 2^{db}; covered = {distinct:?}",
+                by_height.contains_key(&db),
+                "production buckets must cover 2^{db}; covered = {by_height:?}",
+            );
+        }
+        let both_sx_classes: std::collections::BTreeSet<bool> = [false, true].into_iter().collect();
+        for db in 14u32..=cap_db {
+            assert_eq!(
+                by_height.get(&db),
+                Some(&both_sx_classes),
+                "production buckets must cover both sx_bound classes at 2^{db}",
             );
         }
     }
@@ -880,8 +933,13 @@ mod jet_tests {
             &block.run.verifier_key_digest(),
         )
         .to_vec();
+        let setup_key = VerifierSetupShapeKey::from_zk_params(
+            &block.certificate.zk_params, block.run.trace_height,
+        )
+        .expect("valid setup key");
         let setup = AiPowVerifierSetup {
-            trace_height: block.run.trace_height,
+            trace_height: setup_key.trace_height,
+            sx_bound: setup_key.sx_bound,
             context: block.run.verifier_context,
             digest_bytes,
         };
@@ -957,8 +1015,13 @@ mod jet_tests {
             &block.run.verifier_key_digest(),
         )
         .to_vec();
+        let setup_key = VerifierSetupShapeKey::from_zk_params(
+            &block.certificate.zk_params, block.run.trace_height,
+        )
+        .expect("valid setup key");
         let full_setup = AiPowVerifierSetup {
-            trace_height: block.run.trace_height,
+            trace_height: setup_key.trace_height,
+            sx_bound: setup_key.sx_bound,
             context: block.run.verifier_context,
             digest_bytes: full_digest.clone(),
         };
@@ -968,8 +1031,9 @@ mod jet_tests {
             .expect("rebuild slimmed setup from seed");
 
         assert_eq!(
-            slim_setup.trace_height, full_setup.trace_height,
-            "same bucket"
+            slim_setup.shape_key(),
+            full_setup.shape_key(),
+            "same setup key"
         );
         assert_eq!(
             slim_setup.digest_bytes, full_digest,
@@ -1065,7 +1129,10 @@ mod jet_tests {
             .expect("prove canonical MoE block");
         let commit = block.commit;
         let loose_target = [0xffu8; 32];
-        let trace_height = block.certificate.trace_height;
+        let setup_key = VerifierSetupShapeKey::from_zk_params(
+            &block.certificate.zk_params, block.certificate.trace_height,
+        )
+        .expect("valid setup key");
         let jammed = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
             &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
             block.certificate.found_idx, block.certificate.trace_height,
@@ -1084,7 +1151,7 @@ mod jet_tests {
             .expect("disk-paged init");
 
         // First lookup pages the context in from disk (and validates its digest).
-        let setup = expect_found(crate::ai_pow_verifier_setup_for(trace_height));
+        let setup = expect_found(crate::ai_pow_verifier_setup_for(setup_key));
 
         let slab = cue_artifact(jammed);
         let space = slab.noun_space();
@@ -1109,20 +1176,22 @@ mod jet_tests {
         );
 
         // A second lookup returns the SAME resident context (no page-in).
-        let setup2 = expect_found(crate::ai_pow_verifier_setup_for(trace_height));
+        let setup2 = expect_found(crate::ai_pow_verifier_setup_for(setup_key));
         assert!(
             std::sync::Arc::ptr_eq(&setup, &setup2),
             "the second lookup must return the cached (resident) context, not a fresh page-in",
         );
 
-        // An unknown in-band height has no bucket ⇒ NoSuchBucket (jet returns NO, a
+        // An unknown in-band shape key has no bucket ⇒ NoSuchBucket (jet returns NO, a
         // deterministic invalid-block reject — NOT a %fail).
+        let missing_key =
+            VerifierSetupShapeKey::new(setup_key.trace_height + 1, setup_key.sx_bound);
         assert!(
             matches!(
-                crate::ai_pow_verifier_setup_for(trace_height + 1),
+                crate::ai_pow_verifier_setup_for(missing_key),
                 crate::VerifierSetupLookup::NoSuchBucket
             ),
-            "a height with no disk bucket resolves to NoSuchBucket",
+            "a shape with no disk bucket resolves to NoSuchBucket",
         );
     }
 
@@ -1149,8 +1218,8 @@ mod jet_tests {
         };
         let block =
             prove_canonical_moe_block(&params, 8, 2, 1, CANONICAL_SETUP_COMMIT).expect("prove");
-        let h = block.certificate.trace_height;
         let setup = crate::setup::rebuild_verifier_setup_from_seed(block.seed).expect("build");
+        let setup_key = setup.shape_key();
         let digest = setup.digest_bytes.clone();
         let tmp = tempfile::TempDir::new().unwrap();
         crate::setup::install_verifier_setup_disk_from_setups(vec![setup], tmp.path(), 2)
@@ -1158,7 +1227,7 @@ mod jet_tests {
 
         // Corrupt the context file (flip a byte in the middle — lands in the tree),
         // leaving the sidecar checksum intact.
-        let ctx_path = crate::setup::verifier_context_file_path(tmp.path(), h, &digest);
+        let ctx_path = crate::setup::verifier_context_file_path(tmp.path(), setup_key, &digest);
         let mut bytes = std::fs::read(&ctx_path).unwrap();
         let mid = bytes.len() / 2;
         bytes[mid] ^= 0xff;
@@ -1167,7 +1236,7 @@ mod jet_tests {
         // First page-in reads the corrupt file → checksum mismatch → LoadFailed.
         assert!(
             matches!(
-                crate::ai_pow_verifier_setup_for(h),
+                crate::ai_pow_verifier_setup_for(setup_key),
                 crate::VerifierSetupLookup::LoadFailed
             ),
             "a corrupt context file must page in as LoadFailed (→ %fail), never Found or a \
@@ -1175,13 +1244,13 @@ mod jet_tests {
         );
     }
 
-    /// PRODUCTION BOOT + RSS KAT (~1–2 min + ~8 GB disk; needs the stable seed cache):
-    /// run the real `install_or_build_verifier_setup` — build ALL 7 contexts to disk at
-    /// boot, inject disk-paged — then page through every height with `cap=2` and confirm
+    /// PRODUCTION BOOT + RSS KAT (~1–2 min + large disk; needs the stable seed cache):
+    /// run the real `install_or_build_verifier_setup` — build all production contexts
+    /// to disk at boot, inject disk-paged — then page through every key with `cap=2`
     /// (a) each pages in + resolves, and (b) standing RSS stays bounded to ~2 contexts,
-    /// NOT the ~8 GB of the all-resident table. Sets the process-global setup; run alone.
+    /// NOT the multi-GB all-resident table. Sets the process-global setup; run alone.
     #[test]
-    #[ignore = "builds all 7 contexts to disk (~1–2 min, ~8 GB) + measures paged RSS; run alone"]
+    #[ignore = "builds all production contexts to disk + measures paged RSS; run alone"]
     fn install_or_build_disk_paged_boot_and_rss() {
         if crate::ai_pow_verifier_setup_initialized() {
             eprintln!("skip: verifier setup already initialized in this process");
@@ -1200,8 +1269,8 @@ mod jet_tests {
                 / 1024
         }
         // Use the stable dir (has the seed cache) DIRECTLY so the built context files
-        // persist across runs: the FIRST run builds all 7 (retention shows), a SECOND
-        // run finds the files and reuses them (clean boot — the common case).
+        // persist across runs: the first run builds every context file, and later runs
+        // find the files and reuse them.
         let dir = std::env::temp_dir().join("aipow-rss-cache");
         let src_cache = crate::setup::verifier_setup_seed_cache_path(&dir);
         if !src_cache.exists() {
@@ -1211,42 +1280,45 @@ mod jet_tests {
         // Detect whether this is a build-boot or a reuse-boot (context files present).
         let seeds = crate::setup::load_verifier_setup_seeds(&src_cache).expect("load seeds");
         let reuse = seeds.iter().all(|s| {
-            crate::setup::verifier_context_file_path(
-                &dir,
-                s.trace_height(),
-                &s.verifier_key_digest_bytes,
-            )
-            .exists()
+            let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
+                .expect("valid seed key");
+            crate::setup::verifier_context_file_path(&dir, key, &s.verifier_key_digest_bytes)
+                .exists()
         });
         drop(seeds);
 
         std::env::set_var(crate::setup::AI_POW_VERIFIER_CACHE_CAP_ENV, "2");
         let base = rss_mb();
-        // Production boot: build all 7 contexts to disk (first run) or reuse them
-        // (later runs) + inject disk-paged.
+        // Production boot: build every production context to disk (first run) or reuse
+        // them (later runs) + inject disk-paged.
         let n = crate::setup::install_or_build_verifier_setup(&dir, &[])
             .expect("install_or_build (disk-paged)");
-        assert_eq!(n, 7, "all 7 buckets installed");
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        assert_eq!(n, buckets.len(), "all production buckets installed");
         let after_boot = rss_mb();
         eprintln!(
             "boot mode: {}; after boot (contexts on disk, none paged in): RSS {after_boot} MB (base {base})",
             if reuse { "REUSE (files existed)" } else { "BUILD (first run)" },
         );
 
-        // Page every height in, with cap=2 — RSS must stay ~2 contexts, not 7.
-        for db in 13u32..=19 {
-            let h = 1usize << db;
-            let setup = expect_found(crate::ai_pow_verifier_setup_for(h));
-            assert_eq!(setup.trace_height, h);
+        // Page every key in, with cap=2 — RSS must stay ~2 contexts, not the full table.
+        for b in buckets {
+            let h = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
+                .expect("cheap trace height");
+            let sx_bound =
+                (b.params.k / b.params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX;
+            let key = VerifierSetupShapeKey::new(h, sx_bound);
+            let setup = expect_found(crate::ai_pow_verifier_setup_for(key));
+            assert_eq!(setup.shape_key(), key);
         }
         let after_paging = rss_mb();
         eprintln!(
-            "after paging all 7 (cap=2): RSS {after_paging} MB — bounded to ~2 resident contexts \
-             (eager all-resident is ~8600 MB)",
+            "after paging all contexts (cap=2): RSS {after_paging} MB — bounded to ~2 resident \
+             contexts",
         );
         assert!(
             after_paging < 6000,
-            "disk-paged RSS with cap=2 must stay well under the ~8.6 GB all-resident table \
+            "disk-paged RSS with cap=2 must stay well under the all-resident table \
              (got {after_paging} MB)",
         );
     }
@@ -1282,11 +1354,10 @@ mod jet_tests {
         let mut seeds = crate::setup::load_verifier_setup_seeds(&cache).expect("load seeds");
         seeds.sort_by_key(|s| s.trace_height());
         let big = seeds.pop().expect("a seed");
-        let ctx_path = crate::setup::verifier_context_file_path(
-            &dir,
-            big.trace_height(),
-            &big.verifier_key_digest_bytes,
-        );
+        let big_key = VerifierSetupShapeKey::from_zk_params(&big.zk_params, big.trace_height())
+            .expect("valid seed key");
+        let ctx_path =
+            crate::setup::verifier_context_file_path(&dir, big_key, &big.verifier_key_digest_bytes);
         if !ctx_path.exists() {
             eprintln!(
                 "skip: no built 2^19 context file at {} (run the boot+RSS test first)",
@@ -1324,9 +1395,9 @@ mod jet_tests {
     }
 
     /// LAZY BOOT DIGEST CHECK (fast, no proving; needs the generated seed cache): the
-    /// real 7-bucket seed cache's cached per-bucket digests hash to the committed v0
+    /// real production seed cache's cached per-bucket digests hash to the committed v0
     /// constant via the seed-only path — i.e. the lazy boot check ACCEPTS a valid
-    /// cache without rebuilding. This is the "not over-strict" guard for lazy boot,
+    /// cache without rebuilding.
     /// mirroring the rebuilt-table digest check. Skips if the cache is absent.
     #[test]
     #[ignore = "needs the generated seed cache (a prior run); validates the lazy boot digest check"]
@@ -1338,7 +1409,7 @@ mod jet_tests {
             return;
         }
         let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
-        assert_eq!(seeds.len(), 7, "full 7-bucket cache");
+        assert_eq!(seeds.len(), 13, "full production shape-key cache");
         crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds)
             .expect("stable-cache seeds must hash to the committed v0 digest (no rebuild)");
         eprintln!("stable cache seeds pass the lazy boot digest check ✓");
@@ -1407,8 +1478,13 @@ mod jet_tests {
             &block.run.verifier_key_digest(),
         )
         .to_vec();
+        let setup_key = VerifierSetupShapeKey::from_zk_params(
+            &block.certificate.zk_params, block.run.trace_height,
+        )
+        .expect("valid setup key");
         let setup = AiPowVerifierSetup {
-            trace_height: block.run.trace_height,
+            trace_height: setup_key.trace_height,
+            sx_bound: setup_key.sx_bound,
             context: block.run.verifier_context,
             digest_bytes,
         };
@@ -1630,18 +1706,18 @@ mod jet_tests {
 
     /// C4 CLOSER (generates the FULL production table; ~6 min): consensus caps the
     /// accept-band at 2^19 (`AI_POW_MAX_TRACE_HEIGHT`), so the table is exactly the
-    /// seven buckets 2^13..2^19 — all feasible on a commodity node. Proves one
-    /// canonical block per bucket, logs each seed's trace height + serialized size
+    /// production shape keys across the feasible 2^13..2^19 trace-height band. Proves
+    /// one canonical block per shape, logs each seed's trace height + serialized size
     /// (the L0 program grows with trace height), round-trips the whole table through
-    /// a data-dir cache file, rebuilds them (no proving), and asserts coverage of
-    /// 2^13..2^19. This is exactly what a fresh node does on first boot.
+    /// a data-dir cache file, rebuilds them (no proving), and asserts coverage of the
+    /// capped acceptance band. This is exactly what a fresh node does on first boot.
     #[test]
-    #[ignore = "generates the full 7-bucket table 2^13..2^19 (~6 min); opt-in — closes C4"]
+    #[ignore = "generates the full production shape-key table 2^13..2^19; opt-in — closes C4"]
     fn boot_generate_full_production_table() {
-        use std::collections::BTreeSet;
+        use std::collections::{BTreeMap, BTreeSet};
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let buckets = crate::setup::production_verifier_setup_buckets();
-        assert_eq!(buckets.len(), 7, "expected 7 capped buckets (2^13..2^19)");
+        assert_eq!(buckets.len(), 13, "expected 13 production shape keys");
 
         let mut seeds = Vec::new();
         let mut total_bytes = 0usize;
@@ -1668,13 +1744,32 @@ mod jet_tests {
             total_bytes as f64 / (1024.0 * 1024.0),
         );
 
-        let log2s: BTreeSet<u32> = seeds
-            .iter()
-            .map(|s| s.trace_height().trailing_zeros())
-            .collect();
-        assert_eq!(log2s.len(), 7, "7 distinct-height buckets (2^13..2^19)");
+        let mut by_height: BTreeMap<u32, BTreeSet<bool>> = BTreeMap::new();
+        for s in &seeds {
+            let key = VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
+                .expect("valid seed key");
+            by_height
+                .entry(s.trace_height().trailing_zeros())
+                .or_default()
+                .insert(key.sx_bound);
+        }
+        assert_eq!(by_height.len(), 7, "7 distinct-height buckets (2^13..2^19)");
         for db in 13u32..=cap_db {
-            assert!(log2s.contains(&db), "table must cover 2^{db}");
+            assert!(by_height.contains_key(&db), "table must cover 2^{db}");
+        }
+        let sx_only: BTreeSet<bool> = [true].into_iter().collect();
+        let both_sx_classes: BTreeSet<bool> = [false, true].into_iter().collect();
+        assert_eq!(
+            by_height.get(&13),
+            Some(&sx_only),
+            "2^13 has only the sx-bound shape"
+        );
+        for db in 14u32..=cap_db {
+            assert_eq!(
+                by_height.get(&db),
+                Some(&both_sx_classes),
+                "2^{db} must cover both sx-bound classes"
+            );
         }
 
         // Round-trip the whole set through a data-dir cache file + rebuild.
@@ -1689,12 +1784,20 @@ mod jet_tests {
         );
         let table = crate::setup::load_verifier_setup_table(&path).expect("load+rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
-        assert_eq!(table.len(), 7, "rebuilt table has 7 buckets");
-        let tl2: BTreeSet<u32> = table
+        assert_eq!(table.len(), 13, "rebuilt table has 13 shape keys");
+        let table_keys: BTreeSet<VerifierSetupShapeKey> =
+            table.iter().map(|s| s.shape_key()).collect();
+        let seed_keys: BTreeSet<VerifierSetupShapeKey> = seeds
             .iter()
-            .map(|s| s.trace_height.trailing_zeros())
+            .map(|s| {
+                VerifierSetupShapeKey::from_zk_params(&s.zk_params, s.trace_height())
+                    .expect("valid seed key")
+            })
             .collect();
-        assert_eq!(tl2, log2s, "rebuilt table covers the same 7 buckets");
+        assert_eq!(
+            table_keys, seed_keys,
+            "rebuilt table covers the same shape keys"
+        );
 
         // CONSENSUS FINGERPRINT (v0): compute the table digest over the rebuilt table
         // — the exact generate -> cache -> load path a fresh node runs at boot. Print
@@ -1725,18 +1828,88 @@ mod jet_tests {
         }
     }
 
+    fn production_setup_seed_keys() -> std::collections::BTreeSet<VerifierSetupShapeKey> {
+        crate::setup::production_verifier_setup_buckets()
+            .iter()
+            .map(|bucket| {
+                let trace_height = crate::setup::canonical_moe_trace_height(
+                    &bucket.params, bucket.hw, bucket.e, bucket.top_k,
+                )
+                .expect("production setup bucket has a trace height");
+                let sx_bound = (bucket.params.k / bucket.params.noise_rank) as usize
+                    <= ai_pow::params::STRIPE_MAX;
+                VerifierSetupShapeKey::new(trace_height, sx_bound)
+            })
+            .collect()
+    }
+
+    fn setup_seed_keys(
+        seeds: &[ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed],
+    ) -> std::collections::BTreeSet<VerifierSetupShapeKey> {
+        seeds
+            .iter()
+            .map(|seed| {
+                VerifierSetupShapeKey::from_zk_params(&seed.zk_params, seed.trace_height())
+                    .expect("cached setup seed has a valid shape key")
+            })
+            .collect()
+    }
+
+    fn load_stable_production_setup_seeds(
+        path: &std::path::Path,
+    ) -> Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed> {
+        let expected = production_setup_seed_keys();
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        if path.exists() {
+            match crate::setup::load_verifier_setup_seeds(path) {
+                Ok(seeds) => {
+                    let actual = setup_seed_keys(&seeds);
+                    if actual == expected {
+                        return seeds;
+                    }
+                    eprintln!(
+                        "stable setup seed cache shape keys do not match production; \
+                         cache={actual:?} production={expected:?}; regenerating {}",
+                        path.display(),
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "stable setup seed cache at {} is unreadable ({e}); regenerating",
+                        path.display(),
+                    );
+                }
+            }
+            let _ = std::fs::remove_file(path);
+        }
+        eprintln!(
+            "generating current production setup seed cache at {} ({} buckets)",
+            path.display(),
+            buckets.len(),
+        );
+        crate::setup::build_and_cache_verifier_setup_seeds(path, &buckets)
+            .expect("generate current production setup seed cache");
+        let seeds = crate::setup::load_verifier_setup_seeds(path).expect("load generated seeds");
+        assert_eq!(
+            setup_seed_keys(&seeds),
+            expected,
+            "generated stable setup cache must match current production shape keys",
+        );
+        seeds
+    }
+
     /// RSS + rebuild-latency MEASUREMENT for the boot verifier-setup table.
     ///
     /// Reports (a) the resident memory each rebuilt bucket context costs and the
-    /// total standing RSS of the 7-bucket table, and (b) the wall-clock to rebuild
-    /// each bucket from its cached seed — i.e. the per-height latency an on-demand
-    /// (rebuild-per-verify) design would pay. Feeds the RSS/latency tradeoff work.
-    /// Uses a STABLE cache dir so re-runs skip the ~17-min generation. Run with:
+    /// total standing RSS of the production shape-key table, and (b) the wall-clock
+    /// to rebuild each bucket from its cached seed — i.e. the per-height latency an
+    /// on-demand (rebuild-per-verify) design would pay. The stable measurement cache
+    /// is regenerated when its shape-key set is not the current production set. Run with:
     ///   cargo test -p ai-pow-jets --lib measure_verifier_setup_table_rss -- --ignored --nocapture
     /// Wrap the test binary in `/usr/bin/time -l` to also capture PEAK RSS (the
     /// rebuild transient, which exceeds the steady resident set).
     #[test]
-    #[ignore = "first run generates the table (~17 min), then measures RSS + rebuild latency; opt-in"]
+    #[ignore = "generates the current production table if the stable cache is stale; opt-in"]
     fn measure_verifier_setup_table_rss() {
         use std::time::Instant;
         // Current RSS in MiB via `ps` (macOS/Linux report rss in KiB).
@@ -1754,18 +1927,9 @@ mod jet_tests {
         }
         let dir = std::env::temp_dir().join("aipow-rss-cache");
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
-        if !path.exists() {
-            let buckets = crate::setup::production_verifier_setup_buckets();
-            eprintln!(
-                "no cache; generating the full table to {} (one-time, ~17 min)…",
-                path.display(),
-            );
-            crate::setup::build_and_cache_verifier_setup_seeds(&path, &buckets)
-                .expect("generate+cache");
-        }
+        let seeds = load_stable_production_setup_seeds(&path);
         let cache_mb =
             std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) as f64 / (1024.0 * 1024.0);
-        let seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
         let base = rss_mb();
         eprintln!(
             "cache {cache_mb:.1} MiB on disk; baseline RSS after loading seeds = {base} MB; \
@@ -1799,7 +1963,10 @@ mod jet_tests {
         // CONSENSUS INVARIANCE: dropping the prove-only raw columns must NOT change the
         // committed v0 table digest (the digest is over the verifier-key, not the
         // columns). Re-verify against the pinned constant on the slimmed table.
-        if table.len() == 7 && crate::table_digest::v0_digest_is_pinned() {
+        let table_keys: std::collections::BTreeSet<_> =
+            table.iter().map(|setup| setup.shape_key()).collect();
+        if table_keys == production_setup_seed_keys() && crate::table_digest::v0_digest_is_pinned()
+        {
             let digest =
                 crate::table_digest::verifier_setup_table_digest(&table).expect("table digest");
             assert_eq!(
@@ -1814,21 +1981,16 @@ mod jet_tests {
 
     /// DE-RISK for disk-paged residency: how fast is "page in from disk" — a
     /// read+deserialize of a PREBUILT context — versus the ~10 s circuit rebuild?
-    /// Rebuild the largest bucket (2^19, worst case), serialize it to a file, drop
-    /// it, then time reading + deserializing it back. If this is small, we can build
-    /// all buckets at boot, persist them, and page them from disk (no rebuild on the
-    /// verify path). Needs the stable seed cache; skips otherwise.
+    /// Rebuild the largest production bucket (worst case), serialize it to a file,
+    /// drop it, then time reading + deserializing it back. The stable measurement
+    /// cache is regenerated when its shape-key set is not the current production set.
     #[test]
     #[ignore = "rebuilds the largest bucket, then times serialize/read/deserialize; opt-in"]
     fn measure_context_page_in_latency() {
         use std::time::Instant;
         let dir = std::env::temp_dir().join("aipow-rss-cache");
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
-        if !path.exists() {
-            eprintln!("skip: no stable seed cache at {}", path.display());
-            return;
-        }
-        let mut seeds = crate::setup::load_verifier_setup_seeds(&path).expect("load seeds");
+        let mut seeds = load_stable_production_setup_seeds(&path);
         seeds.sort_by_key(|s| s.trace_height());
         let biggest = seeds.pop().expect("at least one seed");
         let h = (biggest.trace_height() as u64).trailing_zeros();

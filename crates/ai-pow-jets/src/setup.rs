@@ -26,7 +26,7 @@ use ai_pow_miner::certificate_noun::{
 };
 use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 
-use crate::AiPowVerifierSetup;
+use crate::{AiPowVerifierSetup, VerifierSetupShapeKey};
 
 /// Error building the canonical verifier setup.
 #[derive(Debug)]
@@ -43,6 +43,35 @@ fn err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> SetupError + '_ {
     move |e| SetupError(format!("{what}: {e:?}"))
 }
 
+fn shape_key_for_zk_params(
+    zk_params: &ai_pow_zk::ZkParams,
+    trace_height: usize,
+) -> Result<VerifierSetupShapeKey, SetupError> {
+    VerifierSetupShapeKey::from_zk_params(zk_params, trace_height)
+        .ok_or_else(|| SetupError("verifier setup shape has zero noise_rank".to_string()))
+}
+
+fn shape_key_for_seed(
+    seed: &AiPowCompactVerifierSetupSeed,
+) -> Result<VerifierSetupShapeKey, SetupError> {
+    shape_key_for_zk_params(&seed.zk_params, seed.trace_height())
+}
+
+fn shape_key_for_params(
+    params: &MatmulParams,
+    trace_height: usize,
+) -> Result<VerifierSetupShapeKey, SetupError> {
+    if params.noise_rank == 0 {
+        return Err(SetupError(
+            "verifier setup shape has zero noise_rank".to_string(),
+        ));
+    }
+    let num_stripes = params.k / params.noise_rank;
+    Ok(VerifierSetupShapeKey::new(
+        trace_height,
+        (num_stripes as usize) <= ai_pow::params::STRIPE_MAX,
+    ))
+}
 /// An arbitrary fixed commitment for the canonical setup block. The setup is
 /// proof-independent, so the specific block does not matter.
 pub const CANONICAL_SETUP_COMMIT: [u8; 32] = [0x42u8; 32];
@@ -341,8 +370,10 @@ pub fn build_verifier_setup(
         &block.run.verifier_key_digest(),
     )
     .to_vec();
+    let shape_key = shape_key_for_params(params, trace_height)?;
     Ok(AiPowVerifierSetup {
         trace_height,
+        sx_bound: shape_key.sx_bound,
         context: block.run.verifier_context,
         digest_bytes,
     })
@@ -373,13 +404,14 @@ pub fn build_verifier_setup_seed(
 pub fn rebuild_verifier_setup_from_seed(
     seed: AiPowCompactVerifierSetupSeed,
 ) -> Result<AiPowVerifierSetup, SetupError> {
-    let trace_height = seed.trace_height();
+    let shape_key = shape_key_for_seed(&seed)?;
     let digest_bytes = seed.verifier_key_digest_bytes.clone();
     let context = seed
         .rebuild_context()
         .map_err(err("rebuild verifier context from seed"))?;
     Ok(AiPowVerifierSetup {
-        trace_height,
+        trace_height: shape_key.trace_height,
+        sx_bound: shape_key.sx_bound,
         context,
         digest_bytes,
     })
@@ -434,18 +466,16 @@ pub fn load_verifier_setup_table(
 /// memory at once). See [`verifier_cache_cap`].
 pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 
-/// Default resident-context LRU cap. `trace_height` is attacker-controlled and a
-/// cache miss performs a synchronous context page-in before the certificate can
-/// be rejected. The production default therefore retains every supported bucket:
-/// each of the seven contexts can be loaded at most once, so remote inputs cannot
-/// create an unbounded evict/reload loop on the consensus thread.
+/// Default resident-context LRU cap. The verifier shape key is attacker-controlled
+/// and a cache miss performs a synchronous context page-in before the certificate
+/// can be rejected. The production default retains every supported shape, so remote
+/// inputs cannot create an unbounded evict/reload loop on the consensus thread.
 ///
-/// All seven resident contexts require roughly 5.6–8.6 GiB. An operator may lower
-/// the cap via `--ai-pow-verifier-cache-cap` or
+/// An operator may lower the cap via `--ai-pow-verifier-cache-cap` or
 /// [`AI_POW_VERIFIER_CACHE_CAP_ENV`] to trade memory for page-ins, but doing so
-/// explicitly re-enables cache-thrash exposure and is unsuitable for an
-/// adversarial validator.
-pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 7;
+/// explicitly re-enables cache-thrash exposure and is unsuitable for an adversarial
+/// validator.
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 13;
 
 /// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped
 /// to `>= 1`), else the DoS-safe all-bucket default.
@@ -567,16 +597,16 @@ pub fn install_or_build_verifier_setup(
     Ok(n)
 }
 
-/// The on-disk file for one bucket's serialized verifier context. The committed
-/// verifier-key digest is baked into the filename so a seed/table change (⇒ new
-/// digest) yields a new filename and a rebuild, and a stale file is never mistaken
-/// for the current one.
+/// The on-disk file for one bucket's serialized verifier context. The shape key and
+/// committed verifier-key digest are baked into the filename so a seed/table change
+/// yields a new filename and a stale file is never mistaken for the current one.
 pub fn verifier_context_file_path(
     data_dir: &std::path::Path,
-    trace_height: usize,
+    shape_key: VerifierSetupShapeKey,
     committed_digest: &[u8],
 ) -> std::path::PathBuf {
-    let log2 = (trace_height as u64).trailing_zeros();
+    let log2 = (shape_key.trace_height as u64).trailing_zeros();
+    let sx = if shape_key.sx_bound { "sx" } else { "rb" };
     let tag: String = committed_digest
         .iter()
         .take(8)
@@ -584,7 +614,7 @@ pub fn verifier_context_file_path(
         .collect();
     data_dir
         .join("ai-pow")
-        .join(format!("ctx-2p{log2}-{tag}.bin"))
+        .join(format!("ctx-2p{log2}-{sx}-{tag}.bin"))
 }
 
 /// The sidecar file holding the BLAKE3 checksum of a context file's bytes.
@@ -643,9 +673,9 @@ fn build_or_reuse_disk_contexts(
     let mut built = 0usize;
     let total = seeds.len();
     for seed in seeds {
-        let h = seed.trace_height();
+        let shape_key = shape_key_for_seed(&seed)?;
         let committed_digest = seed.verifier_key_digest_bytes.clone();
-        let ctx_path = verifier_context_file_path(data_dir, h, &committed_digest);
+        let ctx_path = verifier_context_file_path(data_dir, shape_key, &committed_digest);
         let checksum = if ctx_path.exists() {
             // Reuse: record the existing file's checksum (page_in re-verifies on use).
             context_file_checksum(&ctx_path)?
@@ -665,8 +695,9 @@ fn build_or_reuse_disk_contexts(
                 || setup.digest_bytes != committed_digest
             {
                 return Err(SetupError(format!(
-                    "built verifier context for trace_height {h} does not match its committed \
-                     digest — refusing to run a divergent verifier"
+                    "built verifier context for {:?} does not match its committed digest — \
+                     refusing to run a divergent verifier",
+                    shape_key,
                 )));
             }
             let ck = write_verifier_context_file(&setup, &ctx_path)?;
@@ -674,7 +705,7 @@ fn build_or_reuse_disk_contexts(
             ck
         };
         disk_buckets.push(crate::DiskBucket::new(
-            h, committed_digest, ctx_path, checksum,
+            shape_key, committed_digest, ctx_path, checksum,
         ));
     }
     if built > 0 {
@@ -694,11 +725,13 @@ pub fn install_verifier_setup_disk_from_setups(
 ) -> Result<(), SetupError> {
     let mut disk_buckets: Vec<crate::DiskBucket> = Vec::with_capacity(setups.len());
     for setup in &setups {
-        let h = setup.trace_height;
+        let shape_key = setup.shape_key();
         let digest = setup.digest_bytes.clone();
-        let ctx_path = verifier_context_file_path(data_dir, h, &digest);
+        let ctx_path = verifier_context_file_path(data_dir, shape_key, &digest);
         let checksum = write_verifier_context_file(setup, &ctx_path)?;
-        disk_buckets.push(crate::DiskBucket::new(h, digest, ctx_path, checksum));
+        disk_buckets.push(crate::DiskBucket::new(
+            shape_key, digest, ctx_path, checksum,
+        ));
     }
     crate::init_ai_pow_verifier_setup_disk(disk_buckets, cap)
         .map_err(|()| SetupError("disk-paged setup rejected or already initialized".to_string()))
@@ -727,15 +760,17 @@ pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<u
     let disk_buckets: Vec<crate::DiskBucket> = seeds
         .iter()
         .map(|seed| {
-            let h = seed.trace_height();
+            let shape_key = shape_key_for_seed(seed)?;
             let digest = seed.verifier_key_digest_bytes.clone();
-            let ctx_path = verifier_context_file_path(data_dir, h, &digest);
+            let ctx_path = verifier_context_file_path(data_dir, shape_key, &digest);
             // Register-only (never paged in by a non-consensus tool): read the sidecar
             // checksum if a node already built the file, else a zero placeholder.
             let checksum = context_file_checksum(&ctx_path).unwrap_or([0u8; 32]);
-            crate::DiskBucket::new(h, digest, ctx_path, checksum)
+            Ok(crate::DiskBucket::new(
+                shape_key, digest, ctx_path, checksum,
+            ))
         })
-        .collect();
+        .collect::<Result<Vec<_>, SetupError>>()?;
     crate::init_ai_pow_verifier_setup_disk(disk_buckets, verifier_cache_cap()).map_err(|()| {
         SetupError(
             "verifier-setup table rejected (empty / duplicate buckets) or already initialized"
@@ -745,9 +780,8 @@ pub fn install_verifier_setup_from_cache(data_dir: &std::path::Path) -> Result<u
     Ok(n)
 }
 
-/// One production trace-height bucket: the puzzle shape that lands in it. The boot
-/// table has one entry per reachable Pearl trace height (shapes sharing a height
-/// share a setup — the setup is height-keyed, not shape-keyed).
+/// One production verifier setup shape: the puzzle shape that lands in it. The boot
+/// table has one entry per reachable `(trace_height, sx_bound)` key.
 #[derive(Clone, Copy, Debug)]
 pub struct VerifierSetupBucketShape {
     pub params: MatmulParams,
@@ -759,33 +793,32 @@ pub struct VerifierSetupBucketShape {
 /// OFFLINE (expensive — one real compact proof per bucket): build the seed table
 /// for the given bucket shapes and cache it to `path`. Run this once (offline / on
 /// first boot); subsequent boots call [`load_verifier_setup_table`] and rebuild in
-/// seconds. Rejects duplicate trace-height buckets (each cert must resolve to
-/// exactly one setup), matching [`crate::init_ai_pow_verifier_setup`]'s admission.
+/// seconds. Rejects duplicate shape keys, matching
+/// [`crate::init_ai_pow_verifier_setup`]'s admission.
 pub fn build_and_cache_verifier_setup_seeds(
     path: &std::path::Path,
     buckets: &[VerifierSetupBucketShape],
 ) -> Result<(), SetupError> {
+    let mut keys: Vec<VerifierSetupShapeKey> = Vec::with_capacity(buckets.len());
     let mut seeds: Vec<AiPowCompactVerifierSetupSeed> = Vec::with_capacity(buckets.len());
     for b in buckets {
         let seed = build_verifier_setup_seed(&b.params, b.hw, b.e, b.top_k)?;
-        let h = seed.trace_height();
-        if seeds.iter().any(|s| s.trace_height() == h) {
+        let key = shape_key_for_seed(&seed)?;
+        if keys.contains(&key) {
             return Err(SetupError(format!(
-                "duplicate trace-height bucket {h} in verifier-setup table"
+                "duplicate verifier-setup shape key {:?} in verifier-setup table",
+                key,
             )));
         }
+        keys.push(key);
         seeds.push(seed);
     }
     save_verifier_setup_seeds(path, &seeds)
 }
 
-/// The production trace-height bucket set the boot generator must cover: one
-/// canonical MoE shape per reachable Layer-0 trace-height bucket (the §4.8 envelope
-/// heights 2^13..2^20). Derived by sweeping consensus-valid MoE shapes and keeping,
-/// for each distinct trace height (computed WITHOUT proving via
-/// [`canonical_moe_trace_height`]), the first (cheapest) representative. One setup
-/// per height covers BOTH dense and MoE blocks (the setup is height-keyed and
-/// schedule-independent), so this MoE-derived table serves the whole accept-band.
+/// The production verifier setup bucket set: one canonical MoE shape per reachable
+/// `(trace_height, sx_bound)` key. Derived by sweeping consensus-valid MoE shapes and
+/// keeping, for each distinct key, the first representative.
 ///
 /// The height climbs with the opened tile side `hw`, `k`, and `num_stripes = k/r`;
 /// `m = n = e·hw` is the minimal MoE-valid width (each of `e` experts gets exactly
@@ -796,11 +829,8 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
     use std::collections::BTreeMap;
     const E: usize = 2;
     const TOP_K: usize = 1;
-    let mut by_bucket: BTreeMap<usize, VerifierSetupBucketShape> = BTreeMap::new();
-    // Prefer the SMALLEST opened tile `hw` that reaches each height (less opened work
-    // ⇒ less proving memory/time). The setup is height-keyed and schedule-independent,
-    // so one representative per height covers blocks mined at any valid shape of that
-    // height (dense or MoE, any tile).
+    let mut by_bucket: BTreeMap<VerifierSetupShapeKey, VerifierSetupBucketShape> = BTreeMap::new();
+    // Prefer the SMALLEST opened tile `hw` that reaches each key.
     for &hw in &[8u32, 12, 16, 24, 32, 48, 64, 96, 128] {
         let mn = E as u32 * hw;
         for &r in &[32u32, 64, 128, 256, 512, 1024] {
@@ -819,14 +849,13 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
                     continue;
                 }
                 if let Ok(th) = canonical_moe_trace_height(&params, hw, E, TOP_K) {
-                    // Consensus caps the accept-band at AI_POW_MAX_TRACE_HEIGHT
-                    // (2^19); the top-of-envelope 2^20 setup is not built (large-RAM
-                    // only), and blocks above the cap are rejected. So the table is
-                    // exactly the seven feasible buckets 2^13..2^19.
                     if th > ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
                         continue;
                     }
-                    by_bucket.entry(th).or_insert(VerifierSetupBucketShape {
+                    let Ok(key) = shape_key_for_params(&params, th) else {
+                        continue;
+                    };
+                    by_bucket.entry(key).or_insert(VerifierSetupBucketShape {
                         params,
                         hw,
                         e: E,
