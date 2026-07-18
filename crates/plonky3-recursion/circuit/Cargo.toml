@@ -1,63 +1,81 @@
 [package]
 name = "p3-circuit"
-description.workspace = true
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+description = "Plonky3 native support for recursive proof composition"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Plonky3/Plonky3-recursion"
+homepage = "https://github.com/Plonky3/Plonky3-recursion"
+keywords = ["cryptography", "SNARK", "PLONK", "FRI", "plonky3"]
+categories = ["cryptography::cryptocurrencies"]
 
 [dependencies]
 
 # Plonky3 dependencies
-p3-air.workspace = true
-p3-baby-bear.workspace = true
-p3-field.workspace = true
-p3-goldilocks.workspace = true
-p3-keccak.workspace = true
-p3-koala-bear.workspace = true
-p3-matrix.workspace = true
-p3-poseidon1-circuit-air.workspace = true
-p3-symmetric.workspace = true
-p3-tip5-circuit-air.workspace = true
-p3-uni-stark.workspace = true
-p3-util.workspace = true
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-keccak = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-koala-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-poseidon1-circuit-air = { path = "../poseidon1-circuit-air", version = "0.1.0" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-tip5-circuit-air = { path = "../tip5-circuit-air", version = "0.1.0" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-util = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
 
 # Other common dependencies
-hashbrown.workspace = true
-itertools.workspace = true
-rand.workspace = true
-serde.workspace = true
-strum.workspace = true
-strum_macros.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-unroll.workspace = true
+hashbrown = "0.16.1"
+itertools = { version = "0.14.0", default-features = false, features = ["use_alloc"] }
+rand = { version = "0.10.0", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+strum = { version = "0.28.0", default-features = false }
+strum_macros = "0.28.0"
+thiserror = { version = "2.0", default-features = false }
+tracing = { version = "0.1.44", default-features = false, features = ["attributes"] }
+unroll = { version = "0.1.5", default-features = false }
 
 [dev-dependencies]
-p3-air.workspace = true
-p3-baby-bear.workspace = true
-p3-batch-stark.workspace = true
-p3-challenger.workspace = true
-p3-commit.workspace = true
-p3-dft.workspace = true
-p3-fri.workspace = true
-p3-matrix.workspace = true
-p3-merkle-tree.workspace = true
-p3-poseidon2-circuit-air.workspace = true
-p3-symmetric.workspace = true
-p3-test-utils.workspace = true
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-baby-bear = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-poseidon2-circuit-air = { path = "../poseidon2-circuit-air", version = "0.1.0" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-test-utils = { path = "../test-utils", version = "0.1.0" }
 
-proptest.workspace = true
-rand.workspace = true
-tracing-forest = { workspace = true, features = ["smallvec"] }
-tracing-subscriber = { workspace = true, features = ["std", "env-filter"] }
+proptest = { version = "1.10", default-features = true }
+rand = { version = "0.10.0", default-features = false }
+tracing-forest = { version = "0.3.1", features = ["smallvec"] }
+tracing-subscriber = { version = "0.3.22", default-features = false, features = ["alloc", "std", "env-filter"] }
 
 [features]
 debugging = []
 profiling = ["debugging"]
 
-[lints]
-workspace = true
+[lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+rust_2024_incompatible_pat = "warn"
+
+[lints.rustdoc]
+all = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+semicolon_if_nothing_returned = "warn"
+match_bool = "warn"
+needless_pass_by_value = "warn"
+redundant_pub_crate = "allow"
+too_long_first_doc_paragraph = "allow"
+unused_peekable = "allow"
+tuple_array_conversions = "allow"
+transmute_undefined_repr = "allow"
+cognitive_complexity = "allow"

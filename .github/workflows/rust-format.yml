@@ -15,5 +15,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt
+      # Workspace-only formatting; `cargo fmt --all` also walks local path
+      # dependencies such as vendored proof-system crates.
       - name: Rustfmt Check
-        uses: actions-rust-lang/rustfmt@v1
+        run: cargo fmt --check

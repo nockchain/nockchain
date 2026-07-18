@@ -1,26 +1,26 @@
 [package]
 name = "p3-tip5-circuit-air"
 description = "A from-scratch AIR for recursive proving's 5-round Tip5 permutation, faithful to nockchain-math::tip5::permute_5round and KAT-anchored to its frozen golden oracle."
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Plonky3/Plonky3-recursion"
+homepage = "https://github.com/Plonky3/Plonky3-recursion"
+keywords = ["cryptography", "SNARK", "PLONK", "FRI", "plonky3"]
+categories = ["cryptography::cryptocurrencies"]
 
 [dependencies]
-p3-air.workspace = true
-p3-field.workspace = true
-p3-goldilocks.workspace = true
-p3-lookup.workspace = true
-p3-matrix.workspace = true
-p3-maybe-rayon.workspace = true
-p3-symmetric.workspace = true
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-lookup = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-maybe-rayon = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
 
 [dev-dependencies]
-p3-test-utils.workspace = true
-p3-uni-stark.workspace = true
+p3-test-utils = { path = "../test-utils", version = "0.1.0" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
 
 [features]
 # Rayon-parallel trace generation. When ON, `generate_lookup_trace`
@@ -36,5 +36,23 @@ p3-uni-stark.workspace = true
 default = ["parallel"]
 parallel = ["p3-maybe-rayon/parallel"]
 
-[lints]
-workspace = true
+[lints.rust]
+rust_2018_idioms = { level = "deny", priority = -1 }
+unused_must_use = "deny"
+rust_2024_incompatible_pat = "warn"
+
+[lints.rustdoc]
+all = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+semicolon_if_nothing_returned = "warn"
+match_bool = "warn"
+needless_pass_by_value = "warn"
+redundant_pub_crate = "allow"
+too_long_first_doc_paragraph = "allow"
+unused_peekable = "allow"
+tuple_array_conversions = "allow"
+transmute_undefined_repr = "allow"
+cognitive_complexity = "allow"
