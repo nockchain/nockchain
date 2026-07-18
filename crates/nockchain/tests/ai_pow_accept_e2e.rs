@@ -133,6 +133,22 @@ fn pow_poke_from_artifact(artifact: &NounSlab) -> NounSlab {
     slab
 }
 
+fn malformed_ai_pow_artifact_poke() -> NounSlab {
+    let mut slab = NounSlab::new();
+    let art = T(&mut slab, &[D(tas!(b"ai-pow")), D(0), D(0)]);
+    let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
+    slab.set_root(payload);
+    slab
+}
+
+fn short_ai_pow_artifact_poke() -> NounSlab {
+    let mut slab = NounSlab::new();
+    let art = T(&mut slab, &[D(tas!(b"ai-pow")), D(0)]);
+    let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
+    slab.set_root(payload);
+    slab
+}
+
 /// Build the `[%ai-pow nonce cert]` artifact noun for a proved canonical block.
 fn artifact_for_block(block: &CanonicalBlock) -> NounSlab {
     build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
@@ -283,6 +299,50 @@ async fn ai_pow_valid_block_is_admitted() {
         "[positive] valid %ai-pow block ADMITTED at height 1 (commit {})",
         hex(&commit32)
     );
+}
+
+#[tokio::test]
+#[ignore = "boots the dumb kernel (~5s); opt-in"]
+async fn malformed_ai_pow_artifact_is_rejected_without_admission() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut cli = boot::default_boot_cli(true);
+    cli.data_dir = Some(tmp.path().to_path_buf());
+    cli.stack_size = NockStackSize::Large;
+    let mut hot = zkvm_jetpack::hot::produce_prover_hot_state();
+    hot.extend(produce_ai_pow_hot_state());
+    let mut app = boot::setup::<Chaff>(
+        kernels_open_dumb::KERNEL,
+        cli,
+        hot.as_slice(),
+        "nockchain",
+        None,
+    )
+    .await
+    .expect("boot dumb kernel");
+
+    drive_genesis(&mut app).await;
+    app.poke(SystemWire.to_wire(), set_mining_key_poke())
+        .await
+        .expect("set-mining-key");
+    app.poke(SystemWire.to_wire(), enable_mining_poke())
+        .await
+        .expect("enable-mining");
+
+    for (label, poke) in [
+        (
+            "undecodable nonce/certificate atoms",
+            malformed_ai_pow_artifact_poke(),
+        ),
+        ("short ai-pow tuple", short_ai_pow_artifact_poke()),
+    ] {
+        app.poke(SystemWire.to_wire(), poke)
+            .await
+            .unwrap_or_else(|err| panic!("poke malformed %ai-pow ({label}): {err}"));
+        assert!(
+            app.peek_handle(heavy_n_path(1)).await.unwrap().is_none(),
+            "a malformed %ai-pow artifact ({label}) must not admit height 1",
+        );
+    }
 }
 
 /// Consensus safety BELOW activation: `do-mine` must emit ONLY the legacy

@@ -2259,6 +2259,13 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
         })
 }
 
+/// Exclusive consensus byte ceiling for canonical compact recursive certificates.
+pub const MAX_COMPACT_CERTIFICATE_BYTES: usize = 150_000;
+
+pub fn compact_batch_recursive_certificate_len_within_limit(len: usize) -> bool {
+    len < MAX_COMPACT_CERTIFICATE_BYTES
+}
+
 pub fn encode_compact_batch_recursive_certificate(
     cert: &AiPowCompactBatchRecursiveCertificate,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -2268,6 +2275,9 @@ pub fn encode_compact_batch_recursive_certificate(
 pub fn decode_compact_batch_recursive_certificate(
     bytes: &[u8],
 ) -> Result<AiPowCompactBatchRecursiveCertificate, postcard::Error> {
+    if !compact_batch_recursive_certificate_len_within_limit(bytes.len()) {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
     let (cert, trailing): (AiPowCompactBatchRecursiveCertificate, &[u8]) =
         postcard::take_from_bytes(bytes)?;
     if !trailing.is_empty() {
@@ -2601,6 +2611,109 @@ mod tests {
                 value: GOLDILOCKS_MODULUS
             }
         ));
+    }
+
+    fn sample_compact_blake3_metadata(
+        public_binding_lanes: usize,
+    ) -> p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata {
+        use p3_circuit_prover::batch_stark_prover::NUM_PRIMITIVE_TABLES;
+
+        p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata {
+            table_packing: compact_batch_l2_table_packing(public_binding_lanes),
+            public_binding_lanes,
+            rows: p3_circuit_prover::RowCounts::new([1; NUM_PRIMITIVE_TABLES]),
+            alu_variant: p3_circuit_prover::AirVariant::Baseline,
+            ext_degree: 1,
+            w_binomial: None,
+            alu_quintic_trinomial: false,
+            non_primitives: Vec::new(),
+            stark_common: CommonData::new(None, Vec::new()),
+        }
+    }
+
+    #[test]
+    fn compact_batch_verifier_key_digest_binds_metadata_and_fri_shape() {
+        let metadata = sample_compact_blake3_metadata(DIGEST_ELEMS);
+        let fri_shape = compact_batch_l2_fri_shape();
+        let base = compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape)
+            .expect("digest base metadata");
+
+        let changed_metadata = sample_compact_blake3_metadata(DIGEST_ELEMS + 1);
+        let changed_metadata_digest =
+            compact_batch_verifier_key_digest_from_parts(&changed_metadata, fri_shape)
+                .expect("digest changed metadata");
+        assert_ne!(
+            base, changed_metadata_digest,
+            "verifier-key digest must bind verifier-owned batch metadata"
+        );
+
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.num_queries += 1;
+        let changed_fri_digest =
+            compact_batch_verifier_key_digest_from_parts(&metadata, changed_fri_shape)
+                .expect("digest changed FRI shape");
+        assert_ne!(
+            base, changed_fri_digest,
+            "verifier-key digest must bind final-layer FRI shape"
+        );
+    }
+
+    #[test]
+    fn compact_batch_l1_statement_digest_binds_l0_program_commitment() {
+        let public_values: Vec<_> = (1..=17).map(Val::from_u64).collect();
+        let l0_program_commitment = vec![Val::from_u64(101), Val::from_u64(202)];
+
+        let without_commitment = compact_batch_l1_public_values_for_statement(&public_values, &[]);
+        let with_commitment =
+            compact_batch_l1_public_values_for_statement(&public_values, &l0_program_commitment);
+        assert_eq!(
+            with_commitment.len(),
+            DIGEST_ELEMS * <Challenge as BasedVectorSpace<Val>>::DIMENSION
+        );
+        assert_ne!(
+            with_commitment, without_commitment,
+            "compact L1 statement digest must include the L0 program commitment"
+        );
+
+        let mut wrong_commitment = l0_program_commitment;
+        wrong_commitment[0] += Val::ONE;
+        let with_wrong_commitment =
+            compact_batch_l1_public_values_for_statement(&public_values, &wrong_commitment);
+        assert_ne!(
+            with_commitment, with_wrong_commitment,
+            "changing the L0 program commitment must change the compact L1 statement digest"
+        );
+    }
+
+    #[test]
+    fn compact_batch_fri_profiles_account_for_sixty_johnson_bits_with_mmcs() {
+        let l1_params = compact_batch_l1_fri_verifier_params();
+        assert_eq!(l1_params.log_blowup, COMPACT_BATCH_L1_LOG_BLOWUP);
+        assert_eq!(
+            l1_params.log_final_poly_len,
+            COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN
+        );
+        assert_eq!(
+            COMPACT_BATCH_L1_LOG_BLOWUP * COMPACT_BATCH_L1_NUM_QUERIES,
+            60
+        );
+        assert_eq!(l1_params.commit_pow_bits, 0);
+        assert_eq!(l1_params.query_pow_bits, 0);
+        assert!(
+            l1_params.permutation_config.is_some(),
+            "compact L1 FRI params must enable recursive MMCS verification"
+        );
+
+        let l2_shape = compact_batch_l2_fri_shape();
+        assert_eq!(l2_shape.log_blowup, COMPACT_BATCH_L2_LOG_BLOWUP);
+        assert_eq!(l2_shape.num_queries, COMPACT_BATCH_L2_NUM_QUERIES);
+        assert_eq!(
+            l2_shape.log_final_poly_len,
+            COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN
+        );
+        assert_eq!(l2_shape.johnson_bits(), 60);
+        assert_eq!(l2_shape.commit_pow_bits, 0);
+        assert_eq!(l2_shape.query_pow_bits, 0);
     }
 
     #[test]
@@ -2945,6 +3058,23 @@ mod tests {
         wrong.job_key[0] ^= 1;
         verify_recursive_certificate(&cert, &program, &zk, &profile, &wrong)
             .expect_err("recursive certificate must reject metadata-swapped public inputs");
+    }
+
+    #[test]
+    fn rb02_compact_decoder_rejects_exclusive_size_limit_before_postcard() {
+        assert_eq!(MAX_COMPACT_CERTIFICATE_BYTES, 150_000);
+        assert!(compact_batch_recursive_certificate_len_within_limit(
+            MAX_COMPACT_CERTIFICATE_BYTES - 1
+        ));
+        assert!(!compact_batch_recursive_certificate_len_within_limit(
+            MAX_COMPACT_CERTIFICATE_BYTES
+        ));
+
+        let oversized = vec![0u8; MAX_COMPACT_CERTIFICATE_BYTES];
+        assert!(
+            decode_compact_batch_recursive_certificate(&oversized).is_err(),
+            "len >= 150_000 must reject before postcard traversal"
+        );
     }
 
     /// S5 TAMPER-REJECT: a composite proof with one corrupted opened

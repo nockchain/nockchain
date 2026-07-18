@@ -619,7 +619,8 @@ pub(crate) const AI_POW_PRODUCTION_MAGIC: [u8; 4] = *b"AIRC";
 #[cfg(test)]
 pub(crate) const AI_POW_PRODUCTION_VERSION: u8 = 1;
 #[cfg(test)]
-pub(crate) const MAX_PRODUCTION_RECURSIVE_CERT_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_PRODUCTION_RECURSIVE_CERT_BYTES: usize =
+    ai_pow_zk::recursion::MAX_COMPACT_CERTIFICATE_BYTES - 1;
 #[cfg(test)]
 const AI_POW_PRODUCTION_HEADER_LEN: usize = 4 + 1 + (4 * 6) + 4 + 8 + (4 * 2) + (32 * 2);
 
@@ -1758,10 +1759,9 @@ pub fn pearl_moe_canonical_trace_height(
     let outer_indices = routing
         .outer_indices(expert_idx, inner_a_rows)
         .map_err(|e| BridgeError::ZkParamsInvalid(format!("moe routing outer_indices: {e:?}")))?;
-    let b_cols_global: Vec<u32> = local_b_cols
-        .iter()
-        .map(|&c| c + (expert_idx * n_e) as u32)
-        .collect();
+    let b_cols_global =
+        crate::pearl_compat::moe_expert_b_cols_from_local(local_b_cols, expert_idx, n_e)
+            .map_err(BridgeError::PearlMergeStatement)?;
     let zk_params = zk_params_from(params);
     let strip_schedule = StripIndexSchedule::from_indices(&zk_params, outer_indices, b_cols_global)
         .map_err(BridgeError::ZkParamsInvalid)?;
@@ -1967,6 +1967,13 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
     max_pattern_len: usize,
 ) -> Result<(), BridgeError> {
     use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
+    if params.difficulty_bits != 0 {
+        return Err(BridgeError::PearlMergeStatement(
+            crate::pearl_compat::PearlCompatError::UnsupportedRecursivePearlParams(
+                "difficulty_bits must be 0; Nockchain target is verifier-supplied",
+            ),
+        ));
+    }
 
     // (1) Routing-consistency binding: opened rows are the expert's routed tokens.
     crate::pearl_compat::verify_pearl_moe_routing_binding(

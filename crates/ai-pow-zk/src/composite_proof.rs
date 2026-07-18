@@ -1383,6 +1383,58 @@ mod tests {
         );
     }
 
+    /// The canonical small Route-A path must reject when the positioned
+    /// `noised_packed` producer store no longer matches the matmul sweep's
+    /// consumed A/B chunks.
+    #[test]
+    fn high2_2_logup_tampered_positioned_store_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x5EED_0000 + i as u32);
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+
+        let (t, k, r, num_stripes) = (8usize, 64usize, 4usize, 16usize);
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+
+        let sweep_start = 8;
+        let (rows_used, x_steps) =
+            trace.place_useful_work_chain(sweep_start, &a_prime, &b_prime, t, r, num_stripes);
+
+        let store_chunks = CompositeTrace::enumerate_noised_chunks_positioned(
+            &a_prime, &b_prime, t, r, num_stripes,
+        );
+        let store_start = sweep_start + rows_used;
+        let a_id_base = crate::composite_trace::NOISED_CHUNK_ID_BASE;
+        let b_id_base = a_id_base + ((t * k).div_ceil(8)) as u64;
+        for (i, chunk) in store_chunks.iter().enumerate() {
+            let id_base = if chunk.side_a { a_id_base } else { b_id_base };
+            let mat_id = crate::composite_trace::noised_chunk_id(id_base, k, &chunk.src)
+                .try_into()
+                .expect("positioned noised chunk id must fit in MAT_ID");
+            let mut wrong = chunk.bytes;
+            wrong[0] = 64;
+            trace.place_noised_store_row(store_start + i, &wrong, mat_id);
+        }
+
+        let xs: Vec<i32> = x_steps[..num_stripes].iter().map(|&u| u as i32).collect();
+        let fold_start = store_start + store_chunks.len() + 4;
+        let m = trace.place_fold_chain(fold_start, &xs);
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let program = extract_program(&trace.matrix);
+        let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &program, &proof, &pis).is_err(),
+            "tampered positioned producers must unbalance the noised_packed bus"
+        );
+    }
+
     /// **CSA S4 — HIGH-2.2 §6(b)-G2 keystone (K3) explicit tamper.**
     ///
     /// The §6(b)-G2 keystone constraint (`composite_full_air.rs:318-334`)
@@ -1631,6 +1683,28 @@ mod tests {
         t
     }
 
+    fn c3_activated_matrix_trace() -> CompositeTrace {
+        let kappa = [0x3Cu8; 32];
+        let matrix: Vec<u8> = (0..1024).map(|i| (i % 65) as u8).collect();
+        let noise = vec![0i8; matrix.len()];
+        let mut t = CompositeTrace::baseline_min();
+        let (_next, root) = t.place_matrix_strip_opening(
+            0,
+            &matrix,
+            0,
+            1,
+            1,
+            &[],
+            &kappa,
+            4, // IS_HASH_A
+            Some(&noise),
+            Some(crate::composite_trace::NOISED_CHUNK_ID_BASE),
+        );
+        let pis = CompositePublicInputs::derive_from_trace(&t);
+        assert_eq!(pis.hash_a, root, "HASH_A binds the co-located strip root");
+        t
+    }
+
     /// Honest pinned round-trip verifies; the difficulty check is
     /// real (a 0 target rejects the non-zero keyed digest).
     #[test]
@@ -1821,6 +1895,168 @@ mod tests {
             Err(PowVerifyError::DifficultyNotMet) => {}
             other => panic!("expected DifficultyNotMet, got {other:?}"),
         }
+    }
+
+    /// HASH_A/HASH_B are statement fields, not prover-selected metadata.
+    /// Route-A verification must reject proofs whose matrix-hash public
+    /// inputs differ from the pinned matrix-hash rows.
+    #[test]
+    fn routea_matrix_hash_public_inputs_tamper_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+
+        let trace_a = honest_trace();
+        let canonical_a = extract_program(&trace_a.matrix);
+        let mut pis_a = CompositePublicInputs::derive_from_trace(&trace_a);
+        assert_ne!(pis_a.hash_a, [0u32; 8], "HASH_A fixture is non-vacuous");
+        pis_a.hash_a[0] ^= 1;
+        let (proof_a, _) = composite_prove_pinned_logup(&cfg, trace_a, &pis_a);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &canonical_a, &proof_a, &pis_a).is_err(),
+            "tampered HASH_A public input must reject under Route A"
+        );
+
+        let trace_b = honest_trace();
+        let canonical_b = extract_program(&trace_b.matrix);
+        let mut pis_b = CompositePublicInputs::derive_from_trace(&trace_b);
+        assert_ne!(pis_b.hash_b, [0u32; 8], "HASH_B fixture is non-vacuous");
+        pis_b.hash_b[0] ^= 1;
+        let (proof_b, _) = composite_prove_pinned_logup(&cfg, trace_b, &pis_b);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &canonical_b, &proof_b, &pis_b).is_err(),
+            "tampered HASH_B public input must reject under Route A"
+        );
+    }
+
+    /// JOB_KEY and COMMITMENT_HASH are bound on their BLAKE3 key rows.
+    #[test]
+    fn routea_c1_public_inputs_tamper_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+
+        let trace_job = honest_trace();
+        let canonical_job = extract_program(&trace_job.matrix);
+        let mut pis_job = CompositePublicInputs::derive_from_trace(&trace_job);
+        assert_ne!(pis_job.job_key, [0u32; 8], "JOB_KEY fixture is non-vacuous");
+        pis_job.job_key[0] ^= 1;
+        let (proof_job, _) = composite_prove_pinned_logup(&cfg, trace_job, &pis_job);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &canonical_job, &proof_job, &pis_job).is_err(),
+            "tampered JOB_KEY public input must reject under Route A"
+        );
+
+        let trace_commitment = honest_trace();
+        let canonical_commitment = extract_program(&trace_commitment.matrix);
+        let mut pis_commitment = CompositePublicInputs::derive_from_trace(&trace_commitment);
+        assert_ne!(
+            pis_commitment.commitment_hash, [0u32; 8],
+            "COMMITMENT_HASH fixture is non-vacuous"
+        );
+        pis_commitment.commitment_hash[0] ^= 1;
+        let (proof_commitment, _) =
+            composite_prove_pinned_logup(&cfg, trace_commitment, &pis_commitment);
+        assert!(
+            composite_verify_pinned_logup(
+                &cfg, &canonical_commitment, &proof_commitment, &pis_commitment
+            )
+            .is_err(),
+            "tampered COMMITMENT_HASH public input must reject under Route A"
+        );
+    }
+
+    /// HASH_JACKPOT is a statement field bound by the jackpot-hash row,
+    /// independent of the outer difficulty comparison.
+    #[test]
+    fn routea_hash_jackpot_public_input_tamper_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let trace = honest_trace();
+        let canonical = extract_program(&trace.matrix);
+        let mut pis = CompositePublicInputs::derive_from_trace(&trace);
+        assert_ne!(
+            pis.hash_jackpot, [0u32; 8],
+            "HASH_JACKPOT fixture is non-vacuous"
+        );
+        pis.hash_jackpot[0] ^= 1;
+        let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &canonical, &proof, &pis).is_err(),
+            "tampered HASH_JACKPOT public input must reject under Route A"
+        );
+    }
+
+    /// The last row owns every cumsum and jackpot public-input lane.
+    #[test]
+    fn routea_final_boundary_public_inputs_tamper_rejects() {
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+
+        for lane in 0..4 {
+            let trace = honest_trace();
+            let canonical = extract_program(&trace.matrix);
+            let mut pis = CompositePublicInputs::derive_from_trace(&trace);
+            pis.cumsum[lane] ^= 1;
+            let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+            assert!(
+                composite_verify_pinned_logup(&cfg, &canonical, &proof, &pis).is_err(),
+                "tampered cumsum public input lane {lane} must reject under Route A"
+            );
+        }
+
+        for lane in 0..16 {
+            let trace = honest_trace();
+            let canonical = extract_program(&trace.matrix);
+            let mut pis = CompositePublicInputs::derive_from_trace(&trace);
+            pis.jackpot[lane] ^= 1;
+            let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+            assert!(
+                composite_verify_pinned_logup(&cfg, &canonical, &proof, &pis).is_err(),
+                "tampered jackpot public input lane {lane} must reject under Route A"
+            );
+        }
+    }
+
+    /// Co-located matrix leaf rows make C3 live under the pinned Route-A
+    /// verifier: changing the byte view while keeping the BLAKE3 message
+    /// fixed must reject.
+    #[test]
+    fn routea_c3_colocated_matrix_row_tamper_rejects() {
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        use crate::composite_layout::{
+            IS_MSG_MAT, IS_NEW_BLAKE, MAT_UNPACK_START, NOISED_PACKED_START, TOTAL_TRACE_WIDTH,
+            UINT8_DATA_START,
+        };
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let trace = c3_activated_matrix_trace();
+        let program = extract_program(&trace.matrix);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+
+        let active_row = (0..trace.height())
+            .find(|&r| {
+                let base = r * TOTAL_TRACE_WIDTH;
+                trace.matrix.values[base + IS_MSG_MAT].as_canonical_u64() == 1
+                    && trace.matrix.values[base + IS_NEW_BLAKE].as_canonical_u64() == 1
+            })
+            .expect("co-located matrix trace has a live C3 row");
+
+        let (ok_proof, _) = composite_prove_pinned_logup(&cfg, trace.clone(), &pis);
+        composite_verify_pinned_logup(&cfg, &program, &ok_proof, &pis)
+            .expect("co-located C3 trace must verify under Route A");
+
+        let mut evil = trace;
+        let base = active_row * TOTAL_TRACE_WIDTH;
+        evil.matrix.values[base + MAT_UNPACK_START] =
+            <Val<AiPowStarkConfig> as QuotientMap<i64>>::from_int(9);
+        evil.matrix.values[base + UINT8_DATA_START] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(9);
+        let packed = 9 + 1 * 256 + 2 * 256 * 256 + 3 * 256 * 256 * 256;
+        evil.matrix.values[base + NOISED_PACKED_START] =
+            <Val<AiPowStarkConfig> as QuotientMap<i64>>::from_int(packed);
+
+        let (bad_proof, _) = composite_prove_pinned_logup(&cfg, evil, &pis);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &program, &bad_proof, &pis).is_err(),
+            "C3 must bind the matrix byte view to the BLAKE3 message under Route A"
+        );
     }
 
     #[test]

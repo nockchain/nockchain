@@ -459,4 +459,49 @@ mod tests {
 
         assert_eq!(mds_cyclomul(&state), dense_mds_reference(&state));
     }
+
+    fn parse_fixture_state(line: &str, prefix: &str, vector_index: usize) -> [u64; STATE_SIZE] {
+        let Some(rest) = line.strip_prefix(prefix) else {
+            panic!("vector {vector_index}: expected {prefix:?} line, got {line:?}");
+        };
+        let mut state = [0u64; STATE_SIZE];
+        let mut fields = rest.split_whitespace();
+        for (i, slot) in state.iter_mut().enumerate() {
+            *slot = fields
+                .next()
+                .unwrap_or_else(|| panic!("vector {vector_index}: missing {prefix} field {i}"))
+                .parse()
+                .unwrap_or_else(|err| {
+                    panic!("vector {vector_index}: invalid {prefix} field {i}: {err}")
+                });
+        }
+        assert!(
+            fields.next().is_none(),
+            "vector {vector_index}: too many {prefix} fields"
+        );
+        state
+    }
+
+    #[test]
+    fn tip5_5round_matches_ai_pow_zk_golden_fixture() {
+        let fixture = include_str!("../../../ai-pow-zk/tests/fixtures/tip5_5round_golden_kat.txt");
+        let mut lines = fixture
+            .lines()
+            .filter(|line| line.starts_with("IN ") || line.starts_with("OUT "));
+        let mut vector_index = 0usize;
+
+        while let Some(input_line) = lines.next() {
+            let expected_line = lines
+                .next()
+                .unwrap_or_else(|| panic!("vector {vector_index}: missing OUT line"));
+            let mut state = parse_fixture_state(input_line, "IN ", vector_index);
+            let expected = parse_fixture_state(expected_line, "OUT ", vector_index);
+
+            permute_5round(&mut state);
+            assert_eq!(state, expected, "vector {vector_index}");
+            vector_index += 1;
+        }
+
+        assert_eq!(vector_index, 315, "fixture vector count changed");
+    }
 }

@@ -681,6 +681,21 @@ pub const PEARL_MOE_MAX_WIRE_SIZE: usize = PEARL_MOE_MIN_WIRE_SIZE
     + PEARL_MOE_MAX_OUTER_INDICES * 4
     + PEARL_MOE_MAX_NUM_EXPERTS * PEARL_MOE_ROUTING_OFFSET_BYTES;
 
+/// Single-atom byte budget that a consensus MoE nonce must fit under.
+pub const PEARL_MOE_NONCE_MAX_ATOM_BYTES: usize = 1 << 20;
+const PEARL_MOE_NONCE_DENSE_ENVELOPE_MAX_BYTES: usize = 4
+    + 2
+    + PEARL_MERGE_PUBLIC_STATEMENT_MAX_SIZE
+    + 4
+    + PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES
+    + 1
+    + 32 * PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH;
+const PEARL_MOE_NONCE_TAIL_FIXED_MAX_BYTES: usize = 2
+    + PEARL_MOE_MAX_NUM_EXPERTS * PEARL_MOE_ROUTING_OFFSET_BYTES
+    + 32
+    + 1
+    + PEARL_MOE_MAX_OUTER_INDICES * 4
+    + 4;
 /// DoS cap on the flat `routing_data` (`m·top_k` u32 token indices) carried for
 /// the native routing binding.
 ///
@@ -691,10 +706,12 @@ pub const PEARL_MOE_MAX_WIRE_SIZE: usize = PEARL_MOE_MIN_WIRE_SIZE
 /// and binds opened routing strips in-circuit, allowing `m·top_k` up to 2³². This
 /// cap bounds the accepted MoE space to `m·top_k ≤ PEARL_MOE_MAX_ROUTING_ENTRIES`
 /// and caps every layer that allocates or hashes `routing_data` (the artifact
-/// nonce codec **and** this binding function). **Documented Pearl-narrowing**;
-/// closing it means moving the routing binding in-circuit. `1 << 20` u32s = 4 MiB,
-/// matching the jammed-artifact DoS budget.
-pub const PEARL_MOE_MAX_ROUTING_ENTRIES: usize = 1 << 20;
+/// nonce codec **and** this binding function). The full `AIM1` nonce, including
+/// dense framing and MoE tail, fits in one 1 MiB consensus noun atom.
+pub const PEARL_MOE_MAX_ROUTING_ENTRIES: usize = (PEARL_MOE_NONCE_MAX_ATOM_BYTES
+    - PEARL_MOE_NONCE_DENSE_ENVELOPE_MAX_BYTES
+    - PEARL_MOE_NONCE_TAIL_FIXED_MAX_BYTES)
+    / 4;
 
 /// The MoE-specific public parameters carried in the `public_data` tail (Pearl
 /// `MoEParams`). `e` and `top_k` live in the mining-config trailer, not here.
@@ -1617,10 +1634,7 @@ pub fn compute_pearl_moe_ticket(
         &routing.routing_offsets_le_bytes(),
     );
     let outer_indices = routing.outer_indices(expert_idx, inner_a_rows)?;
-    let b_cols_global: Vec<u32> = local_b_cols
-        .iter()
-        .map(|&c| c + (expert_idx * n_e) as u32)
-        .collect();
+    let b_cols_global = moe_expert_b_cols_from_local(local_b_cols, expert_idx, n_e)?;
     let (tile_state, jackpot_hash) = compute_moe_tile(
         a_row_major, b_col_major, &outer_indices, &b_cols_global, &s_a, &s_b, k, r, dot_product_len,
     );
@@ -1961,6 +1975,38 @@ pub fn verify_pearl_moe_compatible_work(
 /// The local pattern is checked against `n_e` before adding the expert offset.
 /// A global-only bound would allow a pattern to bleed into a neighbouring
 /// expert's weights.
+pub fn moe_expert_b_cols_from_local(
+    local_b_cols: &[u32],
+    expert_idx: usize,
+    n_e: usize,
+) -> Result<Vec<u32>, PearlCompatError> {
+    let expert_idx_u16 =
+        u16::try_from(expert_idx).map_err(|_| PearlCompatError::PublicParamEnvelope)?;
+    let expert_idx_u32 =
+        u32::try_from(expert_idx).map_err(|_| PearlCompatError::PublicParamEnvelope)?;
+    let n_e_u32 = u32::try_from(n_e).map_err(|_| PearlCompatError::PublicParamEnvelope)?;
+    for &local in local_b_cols {
+        if local >= n_e_u32 {
+            return Err(PearlCompatError::MoeColumnOutsideExpert {
+                local,
+                n_e: n_e_u32,
+                expert_idx: expert_idx_u16,
+            });
+        }
+    }
+    let expert_offset = expert_idx_u32
+        .checked_mul(n_e_u32)
+        .ok_or(PearlCompatError::PublicParamEnvelope)?;
+    local_b_cols
+        .iter()
+        .map(|&local| {
+            local
+                .checked_add(expert_offset)
+                .ok_or(PearlCompatError::PublicParamEnvelope)
+        })
+        .collect()
+}
+
 pub fn moe_expert_b_cols_global(
     mining_config: &PearlMiningConfig,
     e: u16,
@@ -1978,28 +2024,52 @@ pub fn moe_expert_b_cols_global(
     let inner_cols = mining_config
         .cols_pattern
         .indices_with_offset_bounded(t_cols, max_pattern_len)?;
-    // The load-bearing clamp: every intra-expert column stays inside this expert's
-    // n_e-wide block (matches Pearl, which draws pattern indices from n_e).
-    for &local in &inner_cols {
-        if local >= n_e {
-            return Err(PearlCompatError::MoeColumnOutsideExpert {
-                local,
-                n_e,
-                expert_idx,
-            });
-        }
+    moe_expert_b_cols_from_local(&inner_cols, expert_idx as usize, n_e as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rb03_moe_routing_cap_fits_single_atom_budget() {
+        let max_nonce_bytes = PEARL_MOE_NONCE_DENSE_ENVELOPE_MAX_BYTES
+            + PEARL_MOE_NONCE_TAIL_FIXED_MAX_BYTES
+            + PEARL_MOE_MAX_ROUTING_ENTRIES * 4;
+        assert!(max_nonce_bytes <= PEARL_MOE_NONCE_MAX_ATOM_BYTES);
+        assert!(
+            max_nonce_bytes + 4 > PEARL_MOE_NONCE_MAX_ATOM_BYTES,
+            "routing cap should be the largest u32-entry count fitting the atom budget",
+        );
     }
-    let expert_offset = u32::from(expert_idx)
-        .checked_mul(n_e)
-        .ok_or(PearlCompatError::PublicParamEnvelope)?;
-    inner_cols
-        .into_iter()
-        .map(|local| {
-            local
-                .checked_add(expert_offset)
-                .ok_or(PearlCompatError::PublicParamEnvelope)
-        })
-        .collect()
+
+    #[test]
+    fn rb05_moe_expert_columns_reject_bleed_and_overflow() {
+        assert_eq!(
+            moe_expert_b_cols_from_local(&[0, 7], 3, 8).unwrap(),
+            vec![24, 31]
+        );
+        assert!(matches!(
+            moe_expert_b_cols_from_local(&[8], 3, 8),
+            Err(PearlCompatError::MoeColumnOutsideExpert {
+                local: 8,
+                n_e: 8,
+                expert_idx: 3,
+            })
+        ));
+        assert!(matches!(
+            moe_expert_b_cols_from_local(&[0], usize::MAX, 8),
+            Err(PearlCompatError::PublicParamEnvelope)
+        ));
+        assert!(matches!(
+            moe_expert_b_cols_from_local(&[0], 2, usize::MAX),
+            Err(PearlCompatError::PublicParamEnvelope)
+        ));
+        assert!(matches!(
+            moe_expert_b_cols_from_local(&[u32::MAX], 1, u32::MAX as usize + 1),
+            Err(PearlCompatError::PublicParamEnvelope)
+        ));
+    }
 }
 
 pub fn verify_pearl_pattern_ticket(

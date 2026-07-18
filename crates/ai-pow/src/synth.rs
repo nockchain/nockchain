@@ -1,28 +1,23 @@
 //! Deterministic synthesis of input matrices `(A, B)` from a seed.
 //!
 //! Used by tests/benches to construct Pearl-valid matrices without external
-//! data, **and** as the production miner's default matrix source — the
-//! `ai-pow-mine` binary defaults to `synth_matrices(AI_POW_PROD_SYNTH_SEED, ..)`.
+//! data, and as the `ai-pow-mine` binary's default matrix source:
+//! `synth_matrices(AI_POW_PROD_SYNTH_SEED, ..)`.
 //!
-//! # Canonical-matrix soundness (audit)
+//! # Matrix-source policy
 //!
-//! For AI-PoW to be sound, the matrices `A`/`B` a block's proof is built over
-//! **must be canonically pinned** by the protocol — otherwise a miner grinds a
-//! favorable `(A, B)` and the difficulty target loses meaning. The natural,
-//! consensus-derivable pin is `synth_matrices(AI_POW_PROD_SYNTH_SEED, params)`:
-//! every verifying node re-derives the identical matrices from the public seed +
-//! the block's `params`, with no external model distribution. A verifier that
-//! accepts a block MUST verify its proof against these canonical matrices (see
-//! `ai-pow-miner::verify_ai_pow_block_artifact_jam`). Whether production instead
-//! pins *external* weights is a protocol decision; the production binary's synth
-//! default is the derivable, sound choice and the one consensus must enforce.
+//! The proof statement binds the matrix bytes through committed `HASH_A` and
+//! `HASH_B` public inputs. Consensus verifies the proof against those committed
+//! values and the block target; it does not require a globally canonical matrix
+//! seed. Model provenance, economic usefulness, and uniqueness are network
+//! policy concerns outside this deterministic test/default generator.
 
 use crate::params::MatmulParams;
 use crate::prng;
 
-/// The canonical production synth seed. The `ai-pow-mine` binary defaults to it,
-/// and a consensus verifier re-derives `(A, B)` from it (see the module docs) so
-/// no external matrix distribution is needed. Changing it is a hard fork.
+/// Default production synth seed used by `ai-pow-mine` when no external matrix
+/// source is configured. Changing it changes the default miner workload, not the
+/// consensus statement.
 pub const AI_POW_PROD_SYNTH_SEED: &[u8] = b"ai-pow-prod-v1";
 
 /// Deterministically build `(A, B)` of shapes matching `params`, with
