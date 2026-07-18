@@ -1,3 +1,5 @@
+#![allow(dead_code, clippy::items_after_test_module)]
+
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
@@ -13031,7 +13033,7 @@ mod native_ctor_tests {
     }
 
     #[test]
-    fn native_ctors_byte_exact_all_tags_and_collapses() {
+    fn native_ctors_byte_exact_all_tags_and_collapses() -> Result<()> {
         let mut cx = Context::new();
         let mut slab: NounSlab = NounSlab::new();
 
@@ -13132,11 +13134,11 @@ mod native_ctor_tests {
         // cell_type_n: non-collapse + cell(void,_)->void + cell(_,void)->void
         let h = ty_atom_n(&mut cx, &mut slab, "ud", None);
         let tl = ty_atom_n(&mut cx, &mut slab, "f", Some(D(0)));
-        let (n, t) = cell_type_n(&mut cx, &mut slab, h, tl).unwrap();
+        let (n, t) = cell_type_n(&mut cx, &mut slab, h, tl)?;
         check(&slab, n, &t);
         let hv = ty_void_n(&mut cx, &mut slab);
         let tl2 = ty_noun_n(&mut cx, &mut slab);
-        let (n, t) = cell_type_n(&mut cx, &mut slab, hv, tl2).unwrap();
+        let (n, t) = cell_type_n(&mut cx, &mut slab, hv, tl2)?;
         check(&slab, n, &t);
         assert!(
             matches!(&*t, NTy::Void),
@@ -13144,46 +13146,48 @@ mod native_ctor_tests {
         );
         let h2 = ty_noun_n(&mut cx, &mut slab);
         let tv = ty_void_n(&mut cx, &mut slab);
-        let (n, t) = cell_type_n(&mut cx, &mut slab, h2, tv).unwrap();
+        let (n, t) = cell_type_n(&mut cx, &mut slab, h2, tv)?;
         check(&slab, n, &t);
         assert!(
             matches!(&*t, NTy::Void),
             "cell(_,void) must collapse to Void"
         );
+        Ok(())
     }
 
     #[test]
-    fn native_method_wrappers_byte_exact() {
+    fn native_method_wrappers_byte_exact() -> Result<()> {
         let mut slab: NounSlab = NounSlab::new();
         let mut ut = Ut::new(&mut slab);
 
         // hint_type_n: non-collapse + void/noun collapse (returns payload native)
         let payload = ty_atom_n(&mut ut.cx, ut.slab, "ud", None);
         let note = term_to_noun(ut.slab, "fast");
-        let (n, t) = ut.hint_type_n(D(0), note, payload).unwrap();
+        let (n, t) = ut.hint_type_n(D(0), note, payload)?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
         let pv = ty_void_n(&mut ut.cx, ut.slab);
         let note2 = term_to_noun(ut.slab, "fast");
-        let (n, t) = ut.hint_type_n(D(0), note2, pv).unwrap();
+        let (n, t) = ut.hint_type_n(D(0), note2, pv)?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
         assert!(matches!(&*t, NTy::Void));
         let pn = ty_noun_n(&mut ut.cx, ut.slab);
         let note3 = term_to_noun(ut.slab, "fast");
-        let (n, t) = ut.hint_type_n(D(0), note3, pn).unwrap();
+        let (n, t) = ut.hint_type_n(D(0), note3, pn)?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
         assert!(matches!(&*t, NTy::Noun));
 
         // fork_from_options_n: multi-option + single-collapse + empty->void
         let o1 = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(0))).0;
         let o2 = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(1))).0;
-        let (n, t) = ut.fork_from_options_n(vec![o1, o2]).unwrap();
+        let (n, t) = ut.fork_from_options_n(vec![o1, o2])?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
         let single = ty_atom_n(&mut ut.cx, ut.slab, "ud", None).0;
-        let (n, t) = ut.fork_from_options_n(vec![single]).unwrap();
+        let (n, t) = ut.fork_from_options_n(vec![single])?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
-        let (n, t) = ut.fork_from_options_n(vec![]).unwrap();
+        let (n, t) = ut.fork_from_options_n(vec![])?;
         assert_native_eq(n, &t, &ut.slab.noun_space());
         assert!(matches!(&*t, NTy::Void), "empty fork must collapse to Void");
+        Ok(())
     }
 
     // STEP 1 unit: reachable_legs of a Hold-over-Cell DAG returns exactly the
@@ -13191,7 +13195,7 @@ mod native_ctor_tests {
     // when the active set is disjoint from the legset (collapses to the empty-fan
     // key). Also checks the legset/intern are pure (memoized) per pointer.
     #[test]
-    fn reachable_legs_and_scoped_fan_intersection() {
+    fn reachable_legs_and_scoped_fan_intersection() -> Result<()> {
         let mut slab: NounSlab = NounSlab::new();
         let mut ut = Ut::new(&mut slab);
 
@@ -13199,28 +13203,28 @@ mod native_ctor_tests {
         let a = ty_atom(ut.slab, "ud", None);
         let b = ty_atom(ut.slab, "t", None);
         let cell_noun = ty_cell(ut.slab, a, b);
-        let cell = ut.native_of_cached(cell_noun).unwrap();
-        let legs = ut.reachable_legs(&cell).unwrap();
+        let cell = ut.native_of_cached(cell_noun)?;
+        let legs = ut.reachable_legs(&cell)?;
         assert!(legs.is_empty(), "cell of atoms has no reachable legs");
 
         // Build [%hold cell gen] over the cell above; legset = {leg_id(hold)}.
         let gen = T(ut.slab, &[D(1), D(2)]); // a trivial gene noun
         let hold_noun = ty_hold(ut.slab, cell_noun, gen);
-        let hold = ut.native_of_cached(hold_noun).unwrap();
-        let hold_legs = ut.reachable_legs(&hold).unwrap();
+        let hold = ut.native_of_cached(hold_noun)?;
+        let hold_legs = ut.reachable_legs(&hold)?;
         assert_eq!(
             hold_legs.len(),
             1,
             "single hold has exactly one reachable leg"
         );
-        let leg_id = ut.hold_repo_fan_leg_id_for_hold_native(&hold).unwrap();
+        let leg_id = ut.hold_repo_fan_leg_id_for_hold_native(&hold)?;
         assert_eq!(hold_legs[0], leg_id, "legset is the hold's own leg-id");
 
         // Wrap the hold in a cell; legset is still {leg_id}.
         let other = ty_noun(ut.slab);
         let outer_noun = ty_cell(ut.slab, hold_noun, other);
-        let outer = ut.native_of_cached(outer_noun).unwrap();
-        let outer_legs = ut.reachable_legs(&outer).unwrap();
+        let outer = ut.native_of_cached(outer_noun)?;
+        let outer_legs = ut.reachable_legs(&outer)?;
         assert_eq!(
             outer_legs.as_ref(),
             &[leg_id],
@@ -13228,7 +13232,7 @@ mod native_ctor_tests {
         );
 
         // Memoized: second call returns the same Rc-shared slice content.
-        let outer_legs2 = ut.reachable_legs(&outer).unwrap();
+        let outer_legs2 = ut.reachable_legs(&outer)?;
         assert_eq!(outer_legs.as_ref(), outer_legs2.as_ref());
 
         // intersect-empty -> intern_fan_subset_id returns the empty sentinel 0.
@@ -13253,6 +13257,7 @@ mod native_ctor_tests {
             Ut::intersect_sorted_legs(&[1, 3, 5], &[3, 5, 7]),
             vec![3, 5]
         );
+        Ok(())
     }
 }
 

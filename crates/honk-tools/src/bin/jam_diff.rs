@@ -955,8 +955,14 @@ fn set_keys(jam_path: &str, depth: usize) {
     let mut idx = 0usize;
     loop {
         while unsafe { !current.raw_equals(&nockvm::noun::D(0)) } {
-            let cell = current.in_space(&space).as_cell().unwrap();
-            let branches = cell.tail().as_cell().unwrap();
+            let Ok(cell) = current.in_space(&space).as_cell() else {
+                eprintln!("set-keys: malformed set node at axis {current_axis}");
+                process::exit(1);
+            };
+            let Ok(branches) = cell.tail().as_cell() else {
+                eprintln!("set-keys: malformed branch node at axis {current_axis}.3");
+                process::exit(1);
+            };
             stackv.push((current, current_axis.clone()));
             current = branches.tail().noun();
             current_axis = format!("{current_axis}.3.3");
@@ -964,7 +970,10 @@ fn set_keys(jam_path: &str, depth: usize) {
         let Some((node, node_axis)) = stackv.pop() else {
             break;
         };
-        let cell = node.in_space(&space).as_cell().unwrap();
+        let Ok(cell) = node.in_space(&space).as_cell() else {
+            eprintln!("set-keys: malformed set node at axis {node_axis}");
+            process::exit(1);
+        };
         let key = cell.head().noun();
         let mug = nockvm::mug::mug_u32(&mut stack, key);
         let mor = nockvm::mug::mug_u32(&mut stack, nockvm::noun::D(mug as u64));
@@ -974,7 +983,10 @@ fn set_keys(jam_path: &str, depth: usize) {
             preview_with_depth(key, depth, &space)
         );
         idx += 1;
-        let branches = cell.tail().as_cell().unwrap();
+        let Ok(branches) = cell.tail().as_cell() else {
+            eprintln!("set-keys: malformed branch node at axis {node_axis}.3");
+            process::exit(1);
+        };
         current = branches.head().noun();
         current_axis = format!("{node_axis}.3.2");
     }

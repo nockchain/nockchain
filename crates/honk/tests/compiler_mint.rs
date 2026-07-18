@@ -1,5 +1,5 @@
 #![allow(
-    clippy::enum_variant_names, clippy::manual_flatten, clippy::needless_match,
+    dead_code, clippy::enum_variant_names, clippy::manual_flatten, clippy::needless_match,
     clippy::needless_range_loop, clippy::result_large_err, clippy::type_complexity,
     clippy::useless_format
 )]

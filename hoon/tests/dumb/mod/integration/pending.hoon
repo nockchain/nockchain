@@ -874,7 +874,7 @@
   ::  never out-weigh it, and the walk would stop at the fork point without ever
   ::  taking the "index names a different block at this height" branch.
   ::  a different miner key gives a distinct block at the same height
-  =/  block-2-p  (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h)
+  =/  block-2-p  (prove-page:h (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-2-p)
   =/  lowered
@@ -1011,7 +1011,7 @@
   ::  the index as it stood before the reorg: still naming block-4 at height 4,
   ::  while the tip has moved to block-2-p at height 2
   =/  stale-chain  heaviest-chain:~(der k-by:h nockchain)
-  =/  block-2-p  (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h)
+  =/  block-2-p  (prove-page:h (make-empty-page-multisig:h (snag 0 pages) p:default-keys-2:h))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-2-p)
   =/  lowered

@@ -602,7 +602,12 @@ impl<J> NounSlab<J> {
         let space = NounSpace::empty();
         // Make the parent the active region; `child` holds the popped region.
         // Allocations made by the preserve copy below now land in the parent.
-        let child = std::mem::replace(&mut self.current, self.frames.pop().unwrap());
+        let parent = match self.frames.pop() {
+            Some(f) => f,
+            // Unreachable: the assert above guarantees frames is non-empty.
+            None => unreachable!("pop_frame_preserving called without a matching push_frame"),
+        };
+        let child = std::mem::replace(&mut self.current, parent);
         let is_junior = |ptr: *const u8| child.contains_ptr(ptr);
         for root in roots.iter_mut() {
             *root = copy_region_subset(&mut self.current, *root, &space, &is_junior);
@@ -612,7 +617,7 @@ impl<J> NounSlab<J> {
             use std::sync::atomic::Ordering::Relaxed;
             ARENA_POP_FREED_BYTES.fetch_add(child.total_bytes(), Relaxed);
             let n = ARENA_POP_COUNT.fetch_add(1, Relaxed) + 1;
-            if n % 20_000 == 0 && std::env::var_os("HONK_ARENA_STATS").is_some() {
+            if n.is_multiple_of(20_000) && std::env::var_os("HONK_ARENA_STATS").is_some() {
                 arena_stats_dump("periodic");
             }
         }

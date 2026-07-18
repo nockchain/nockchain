@@ -698,7 +698,7 @@ impl<'a> Ut<'a> {
                             Vec::with_capacity(left_arms.len().saturating_add(right_arms.len()));
                         // Arm dedup: the core is a native type (ptr_eq == structural
                         // because interned); the foot is a hoon arm-spec noun (noun_eq).
-                        for (core, foot) in left_arms.into_iter().chain(right_arms.into_iter()) {
+                        for (core, foot) in left_arms.into_iter().chain(right_arms) {
                             let mut duplicate = false;
                             for (prev_core, prev_foot) in merged.iter() {
                                 if !NRc::ptr_eq(prev_core, &core) {

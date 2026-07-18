@@ -105,7 +105,7 @@ cargo-test:
         export PATH="$HOME/.local/bin:$PATH"
         # Install Solidity dependencies for the bridge build script
         make -C crates/bridge/contracts deps
-        cargo fmt --all --check
+        make check-cargo-fmt
         cargo test --release
       '
 
@@ -129,7 +129,7 @@ cargo-clippy:
         # Install Solidity dependencies for the bridge build script
         make -C crates/bridge/contracts deps
         # Same clippy flags as the upstream repo (see `make lint-local`).
-        cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Dwarnings
+        cargo clippy --all-targets -- -Dwarnings -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Aclippy::result_large_err -Aclippy::unnecessary_cast -Aclippy::unnecessary_sort_by -Aclippy::collapsible_match -Aclippy::manual_checked_ops -Aclippy::while_let_loop
       '
 
 sync-to-staging:

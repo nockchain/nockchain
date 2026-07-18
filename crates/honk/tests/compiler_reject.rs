@@ -110,7 +110,10 @@ fn rejection_probes_all_rejected() {
     let mut ut = Ut::new(&mut slab);
     let mut accepted = Vec::new();
     for path in hoon_files(&probes_dir().join("reject")) {
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let Some(stem) = path.file_stem() else {
+            continue;
+        };
+        let name = stem.to_string_lossy().into_owned();
         if name == "rest_loop_alias" {
             continue;
         }
@@ -138,7 +141,10 @@ fn acceptance_probes_all_compile() {
     let mut ut = Ut::new(&mut slab);
     let mut rejected = Vec::new();
     for path in hoon_files(&probes_dir()) {
-        let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+        let Some(stem) = path.file_stem() else {
+            continue;
+        };
+        let name = stem.to_string_lossy().into_owned();
         let src = fs::read_to_string(&path).expect("read probe");
         let expr = match parse_probe(&src) {
             Err(err) => {

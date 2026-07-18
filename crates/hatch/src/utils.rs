@@ -7441,9 +7441,7 @@ impl LineMap {
             String::from_utf8_lossy(&line[cursor + 2..trimmed_end]).into_owned(),
         )];
         for idx in (name_line + 1)..body_line {
-            let Some(doc) = self.doc_comment(idx) else {
-                return None;
-            };
+            let doc = self.doc_comment(idx)?;
             docs.push(doc);
         }
 
@@ -11050,7 +11048,7 @@ pub(crate) fn stack_block_docs_clad(node: Hoon, entries: Vec<(NounExpr, NounExpr
         };
         walk(branches.head().noun(), space, out);
         if let Ok(atom) = kv.tail().noun().in_space(space).as_atom() {
-            if let Some(idx) = atom.as_u64().ok() {
+            if let Ok(idx) = atom.as_u64() {
                 out.push(idx as usize);
             }
         }
@@ -15724,7 +15722,7 @@ mod tests {
                 .expect("rune docs should parse");
 
         let parsed = match parsed {
-            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            Hoon::TisSig(mut items) if items.len() == 1 => items.remove(0),
             other => other,
         };
         let Hoon::BarTis(sample, body) = parsed else {
@@ -15758,7 +15756,7 @@ mod tests {
         .expect("four-space |= doc should parse");
 
         let parsed = match parsed {
-            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            Hoon::TisSig(mut items) if items.len() == 1 => items.remove(0),
             other => other,
         };
         let Hoon::BarTis(sample, body) = parsed else {
@@ -15788,7 +15786,7 @@ mod tests {
         .expect("four-space ^- doc should parse");
 
         let parsed = match parsed {
-            Hoon::TisSig(items) if items.len() == 1 => items.into_iter().next().unwrap(),
+            Hoon::TisSig(mut items) if items.len() == 1 => items.remove(0),
             other => other,
         };
         let Hoon::KetHep(spec, body) = parsed else {
@@ -21406,7 +21404,7 @@ mod fragdoc_recon {
                 }
             }
             Hoon::BarCen(_, tomes) => {
-                for (_, (_, arms)) in tomes {
+                for (_, arms) in tomes.values() {
                     for (name, arm) in arms {
                         out.push_str(&format!("{}arm {name}\n", "  ".repeat(depth)));
                         note_tree(arm, depth + 1, out);

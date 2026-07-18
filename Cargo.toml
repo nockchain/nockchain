@@ -13,14 +13,10 @@ version = "0.1.15"
 edition = "2021"
 
 # Lints enforced workspace-wide so `cargo`/`cargo clippy`/rust-analyzer flag these
-# locally and in-editor, instead of only at the CI `cargo-clippy` / bazel `make
-# lint` gate. Mirrors exactly the flags applied in those gates:
-#   .bazelrc:            -Dwarnings  -Dclippy::unwrap_used  -Aclippy::missing_safety_doc
-#   open/.gitlab-ci.yml: -Dclippy::unwrap_used  -Aclippy::missing_safety_doc  -Dwarnings
-#   Makefile lint-local: (same cargo flags)
-# Each member crate opts in with `[lints] workspace = true`. The `warnings` group
-# is given priority = -1 so the explicit clippy allow (missing_safety_doc) still
-# wins, matching the `-A...` after `-D warnings` ordering on the CLI.
+# locally and in-editor, instead of only at CI/Bazel gates. Cargo-based gates use
+# `CLIPPY_FLAGS` in the Makefile; CI mirrors that invocation. Keep those flags in
+# sync with `.bazelrc` and this table so explicit `allow`s stay after
+# `-Dwarnings`.
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -1 }
 

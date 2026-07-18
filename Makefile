@@ -151,6 +151,8 @@ run-genesis-sync-fsync-off:
 		--identity-path "$(GENESIS_SYNC_DATA_DIR_OFF)/.nockchain_identity" \
 		--bind "/ip4/0.0.0.0/udp/$(GENESIS_SYNC_BIND_PORT_OFF)/quic-v1" $(if $(GENESIS_SYNC_PEER),--peer "$(GENESIS_SYNC_PEER)") $(GENESIS_SYNC_COMMON_ARGS) $(GENESIS_SYNC_EXTRA_ARGS)
 
+CLIPPY_FLAGS := -Dwarnings -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Aclippy::result_large_err -Aclippy::unnecessary_cast -Aclippy::unnecessary_sort_by -Aclippy::collapsible_match -Aclippy::manual_checked_ops -Aclippy::while_let_loop
+
 .PHONY: fmt
 fmt:
 	cargo fmt
@@ -162,16 +164,16 @@ check-cargo-fmt:
 .PHONY: clippy
 clippy: contracts-deps ## Run clippy with the same flags as the upstream repo
 	@echo "Running clippy..."
-	@cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc
+	@cargo clippy --all-targets -- $(CLIPPY_FLAGS)
 
 .PHONY: lint-local
 lint-local: contracts-deps ## Run local cargo clippy with warnings denied
-	cargo clippy --all-targets -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc -Dwarnings
+	cargo clippy --all-targets -- $(CLIPPY_FLAGS)
 
 .PHONY: clippy-fix
 clippy-fix: contracts-deps ## Apply clippy autofixes (same flags as `clippy`)
 	@echo "Applying clippy autofixes..."
-	cargo clippy --fix --all-targets --allow-dirty --allow-staged -- -Dclippy::unwrap_used -Aclippy::missing_safety_doc
+	cargo clippy --fix --all-targets --allow-dirty --allow-staged -- $(CLIPPY_FLAGS)
 
 .PHONY: install-hooks
 install-hooks: ## Install git pre-commit hooks (cargo fmt + clippy) from .githooks

@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Rc as NRc};
 
-use hatch::ast::hoon::{BaseType, Hoon, Note, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
+use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
 use nockapp::noun::slab::NounSlab;
 use nockvm::ext::AtomExt;
 use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
