@@ -341,3 +341,14 @@ fn moe_envelope_shares_dense_dimension_checks() {
         "MoE: the SAME bad common_dim is the SAME envelope error",
     );
 }
+
+#[test]
+fn moe_envelope_caps_total_b_columns_not_just_per_expert_n() {
+    let mut params = dense_public_params();
+    params.n = 1 << 24;
+    params.mining_config.reserved = PearlMiningConfig::moe_trailer(2, 1);
+    assert_eq!(
+        params.sanity_check_allowing_moe(),
+        Err(PearlCompatError::PublicParamEnvelope),
+    );
+}

@@ -29,7 +29,7 @@ use ai_pow::pearl_moe_routing::build_routing_data;
 
 // Envelope-valid MoE dims: k=1024 (≥1024, mult of 64), r=64 (pow2, 32..1024, mult
 // of PEARL_TILE_D=16), h=w=16 (mult of PEARL_TILE_H=2, h·w=256 = PEARL_HW_MAX),
-// m=n=128, e=2 experts (n_e=64), top_k=1.
+// m=128, n_e=64, e=2 experts (128 total B columns), top_k=1.
 const M: usize = 128;
 const K: usize = 1024;
 const N_E: usize = 64;
@@ -38,7 +38,7 @@ const R: usize = 64;
 const TOP_K: usize = 1;
 const HW: usize = 16; // opened tile is 16×16
 const MAX_PATTERN_LEN: usize = 4096;
-const EXPERT_IDX: usize = 0;
+const EXPERT_IDX: usize = 1;
 
 /// Deterministic int7-range matrices (no RNG — resume-safe, reproducible).
 fn synth_matrix(seed: u64, len: usize) -> Vec<i8> {
@@ -126,7 +126,7 @@ fn build_fixture() -> Fixture {
         hash_b: commitments.h_b,
         hash_jackpot: ticket.jackpot_hash,
         m: M as u32,
-        n: n as u32,
+        n: N_E as u32,
         t_rows: 0,
         t_cols: 0,
     };

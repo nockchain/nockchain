@@ -2391,14 +2391,13 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
         return Err(PearlCompatError::JackpotHashMismatch.into());
     }
 
-    // (3) Reconstruct MatmulParams from the AUTHENTICATED statement dims (m/n/k/r).
-    // `tile`/`difficulty_bits` are proof-system metadata not carried in the Pearl
-    // statement, so take them from the certificate — but require its dims to agree
-    // with the authenticated statement, so a prover cannot mis-declare the shape
-    // (any residual disagreement is caught by the P0 program-commitment fold).
+    // (3) Reconstruct MatmulParams from the authenticated statement. Pearl's
+    // GROUPED_GEMM wire stores per-expert `n_e`; the recursive circuit stores
+    // the total committed B width `n_e * e`.
+    let total_b_cols = public_params.total_b_cols()?;
     let zk = &artifact.certificate.zk_params;
     if zk.m != public_params.m
-        || zk.n != public_params.n
+        || zk.n != total_b_cols
         || zk.k != public_params.mining_config.common_dim
         || zk.noise_rank != u32::from(public_params.mining_config.rank)
     {
@@ -2409,7 +2408,7 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
     let params = MatmulParams {
         m: public_params.m,
         k: public_params.mining_config.common_dim,
-        n: public_params.n,
+        n: total_b_cols,
         noise_rank: u32::from(public_params.mining_config.rank),
         tile: zk.tile,
         // ZkParams carries no `spot_checks`; the MoE verify does not read it.
@@ -2437,8 +2436,8 @@ pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_moe_artifact_with_contex
     verify_pearl_moe_compact_recursive_certificate(
         compact_context, cert, &artifact.certificate.public_inputs, &params,
         &work.commitments.kappa, &work.commitments.h_a, &work.commitments.h_b,
-        &public_params.mining_config, &moe_art.moe, public_params.m, public_params.t_rows,
-        public_params.t_cols, &moe_art.routing_data, context.max_pattern_len,
+        &public_params.mining_config, &moe_art.moe, public_params.m, public_params.n,
+        public_params.t_rows, public_params.t_cols, &moe_art.routing_data, context.max_pattern_len,
     )
     .map_err(|e| CertificateNounError::RecursiveCertificate(e.to_string()))?;
 
@@ -7304,7 +7303,7 @@ mod tests {
             hash_b: commitments.h_b,
             hash_jackpot: run.ticket.jackpot_hash,
             m: m as u32,
-            n: n as u32,
+            n: n_e as u32,
             t_rows: 0,
             t_cols: 0,
         };
@@ -7579,7 +7578,7 @@ mod tests {
             hash_b: commitments.h_b,
             hash_jackpot: run.ticket.jackpot_hash,
             m: m as u32,
-            n: n as u32,
+            n: n_e as u32,
             t_rows: 0,
             t_cols: 0,
         };

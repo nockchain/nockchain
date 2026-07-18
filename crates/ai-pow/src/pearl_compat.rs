@@ -106,8 +106,6 @@ pub enum PearlCompatError {
     MoeTopKNotLessThanExperts { top_k: usize, e: usize },
     #[error("Pearl MoE expert {expert} span {span} exceeds the token count m={m} (a token routes to an expert at most once)")]
     MoeExpertSpanExceedsTokens { expert: usize, span: u32, m: u32 },
-    #[error("Pearl MoE column dimension n={n} is not divisible by the number of experts e={e}")]
-    MoeColumnDimIndivisible { n: u32, e: u16 },
     #[error("Pearl MoE local column {local} reaches outside expert {expert_idx}'s block (n_e={n_e}); would bleed into a neighbouring expert's weights")]
     MoeColumnOutsideExpert {
         local: u32,
@@ -658,6 +656,10 @@ pub struct PearlPublicProofParams {
     pub hash_b: [u8; 32],
     pub hash_jackpot: [u8; 32],
     pub m: u32,
+    /// Columns per expert in GROUPED_GEMM mode; total columns otherwise.
+    ///
+    /// Pearl's wire keeps `n_e` here and derives the committed B width as
+    /// `n_e * e`.
     pub n: u32,
     pub t_rows: u32,
     pub t_cols: u32,
@@ -1116,10 +1118,9 @@ impl PearlPublicProofParams {
         self.envelope_check_dims()
     }
 
-    /// Shared dense dimension/pattern envelope for both [`Self::sanity_check`] and
-    /// [`Self::sanity_check_allowing_moe`]. This validates the base matmul tile
-    /// shape and the global row/column pattern fit — quantities that are
-    /// MoE-independent (per-expert routing is layered on top in the full verify).
+    /// Shared dimension/pattern envelope for dense and GROUPED_GEMM statements.
+    /// In GROUPED_GEMM mode `self.n` is the per-expert width and the total
+    /// committed B width is `self.n * e`, matching Pearl.
     fn envelope_check_dims(&self) -> Result<(), PearlCompatError> {
         let k = self.mining_config.common_dim;
         let r = u32::from(self.mining_config.rank);
@@ -1127,6 +1128,7 @@ impl PearlPublicProofParams {
         let w = self.w()?;
         let dot_product_len = self.mining_config.dot_product_length()? as u64;
         let worker_input_size = u64::from(h.saturating_add(w)).saturating_mul(dot_product_len);
+        let total_b_cols = self.total_b_cols()?;
 
         if !r.is_power_of_two()
             || !(32..=1024).contains(&r)
@@ -1149,7 +1151,7 @@ impl PearlPublicProofParams {
             || u64::from(h) * u64::from(w) > PEARL_HW_MAX
             || !dot_product_len.is_multiple_of(u64::from(PEARL_DWORD_SIZE))
             || self.m > PearlPeriodicPattern::MAX_PERIOD
-            || self.n > PearlPeriodicPattern::MAX_PERIOD
+            || total_b_cols > PearlPeriodicPattern::MAX_PERIOD
             || worker_input_size > PEARL_WORKER_INPUT_MAX
         {
             return Err(PearlCompatError::PublicParamEnvelope);
@@ -1167,6 +1169,17 @@ impl PearlPublicProofParams {
             return Err(PearlCompatError::PatternOutOfMatrix);
         }
         Ok(())
+    }
+
+    /// Number of columns in the committed B matrix.
+    pub fn total_b_cols(&self) -> Result<u32, PearlCompatError> {
+        match self.mining_config.moe() {
+            Some(moe) => self
+                .n
+                .checked_mul(u32::from(moe.e))
+                .ok_or(PearlCompatError::PublicParamEnvelope),
+            None => Ok(self.n),
+        }
     }
 
     pub fn difficulty_adjustment_factor(&self) -> Result<u128, PearlCompatError> {
@@ -1939,27 +1952,21 @@ pub fn verify_pearl_moe_compatible_work(
     })
 }
 
-/// Recompute the opened **global** B-columns for a MoE expert tile from the PUBLIC
-/// column pattern, binding them to the expert's own weight block.
+/// Recompute the opened **global** B-columns for a MoE expert tile from the
+/// public per-expert column pattern.
 ///
-/// Pearl stacks the per-expert weight matrices, so expert `expert_idx` owns
-/// **exactly** columns `[expert_idx·n_e, (expert_idx+1)·n_e)` with `n_e = n / e`
-/// (Pearl `proof_utils.rs`: `first_expert_col = n_e · expert_idx`; the intra-expert
-/// pattern indices are drawn from `n_e`). The intra-expert local columns therefore
-/// MUST stay within `n_e`.
+/// Pearl stores `PublicProofParams::n` as the per-expert width `n_e`. Expert
+/// `expert_idx` owns exactly
+/// `[expert_idx·n_e, (expert_idx+1)·n_e)` in the committed B matrix, whose total
+/// width is `n_e·e` (`proof_utils.rs::b_cols_indices`).
 ///
-/// **Soundness (audit N1):** the downstream `validate_strip_indices` only bounds
-/// the *global* column `< n` (total), which does NOT catch a local column
-/// `≥ n_e`. Without the `local < n_e` clamp below, a `cols_pattern`/`t_cols` that
-/// reaches past `n_e` makes `b_cols_global = local + expert_idx·n_e` bleed into a
-/// **neighbouring expert's weights** while still passing `< n` — a divergence from
-/// Pearl (which validates the pattern against the per-expert `n_e`) and a
-/// column-grinding lever (the prover could open a favourable expert's columns
-/// under a different `expert_idx`). This helper enforces the missing clamp.
+/// The local pattern is checked against `n_e` before adding the expert offset.
+/// A global-only bound would allow a pattern to bleed into a neighbouring
+/// expert's weights.
 pub fn moe_expert_b_cols_global(
     mining_config: &PearlMiningConfig,
     e: u16,
-    n: u32,
+    n_e: u32,
     expert_idx: u16,
     t_cols: u32,
     max_pattern_len: usize,
@@ -1970,10 +1977,6 @@ pub fn moe_expert_b_cols_global(
     if expert_idx >= e {
         return Err(PearlCompatError::MoeExpertIdxOutOfRange { expert_idx, e });
     }
-    if !n.is_multiple_of(u32::from(e)) {
-        return Err(PearlCompatError::MoeColumnDimIndivisible { n, e });
-    }
-    let n_e = n / u32::from(e);
     let inner_cols = mining_config
         .cols_pattern
         .indices_with_offset_bounded(t_cols, max_pattern_len)?;
@@ -1988,10 +1991,17 @@ pub fn moe_expert_b_cols_global(
             });
         }
     }
-    Ok(inner_cols
-        .iter()
-        .map(|&local| local + u32::from(expert_idx) * n_e)
-        .collect())
+    let expert_offset = u32::from(expert_idx)
+        .checked_mul(n_e)
+        .ok_or(PearlCompatError::PublicParamEnvelope)?;
+    inner_cols
+        .into_iter()
+        .map(|local| {
+            local
+                .checked_add(expert_offset)
+                .ok_or(PearlCompatError::PublicParamEnvelope)
+        })
+        .collect()
 }
 
 pub fn verify_pearl_pattern_ticket(
@@ -2670,7 +2680,7 @@ fn validate_public_matrix_inputs(
 ) -> Result<(), PearlCompatError> {
     let m = public_params.m as usize;
     let k = public_params.mining_config.common_dim as usize;
-    let n = public_params.n as usize;
+    let n = public_params.total_b_cols()? as usize;
     if a_row_major.len() != m * k {
         return Err(PearlCompatError::InputAShape {
             expected: m * k,

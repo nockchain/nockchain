@@ -7,8 +7,8 @@
 use ai_pow::commit::matrix_commitment;
 use ai_pow::pearl_compat::{
     moe_expert_b_cols_global, verify_pearl_moe_routing_binding, PearlCompatError,
-    PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern, PEARL_MMA_INT7XINT7_TO_INT32,
-    PEARL_MOE_MAX_ROUTING_ENTRIES,
+    PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams, PearlPeriodicPattern,
+    PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32, PEARL_MOE_MAX_ROUTING_ENTRIES,
 };
 use ai_pow::pearl_moe_routing::{build_routing_data, RoutingData};
 
@@ -172,34 +172,30 @@ fn cols_config(pattern: &[u32]) -> PearlMiningConfig {
 }
 
 #[test]
-fn moe_columns_stay_within_expert_block_accept() {
-    // e=2, n=8 → n_e=4. Pattern [0,1], t_cols=0.
+fn moe_columns_use_pearl_per_expert_n_semantics() {
+    // Pearl PublicProofParams::n is n_e, the width of one expert's B block.
+    // With e=2 and n_e=4, expert 1 starts at global column 4.
     let cfg = cols_config(&[0, 1]);
-    // expert 0 → local [0,1] → global [0,1].
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 2, 8, 0, 0, 4096).unwrap(),
+        moe_expert_b_cols_global(&cfg, 2, 4, 0, 0, 4096).unwrap(),
         vec![0, 1]
     );
-    // expert 1 → local [0,1] → global [4,5] (offset by n_e=4).
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 2, 8, 1, 0, 4096).unwrap(),
+        moe_expert_b_cols_global(&cfg, 2, 4, 1, 0, 4096).unwrap(),
         vec![4, 5]
     );
-    // A t_cols offset that keeps local < n_e is fine: t_cols=2 → local [2,3] → global expert1 [6,7].
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 2, 8, 1, 2, 4096).unwrap(),
+        moe_expert_b_cols_global(&cfg, 2, 4, 1, 2, 4096).unwrap(),
         vec![6, 7]
     );
 }
 
 #[test]
 fn moe_column_bleed_via_t_cols_rejected() {
-    // e=2, n=8 → n_e=4. t_cols=4 pushes local to [4,5] ≥ n_e → would bleed into
-    // expert 1's block (global [8,9] for expert 1, or [4,5] under expert 0 = expert
-    // 1's weights). Must be rejected.
+    // Public n is n_e=4. t_cols=4 reaches the next expert's block.
     let cfg = cols_config(&[0, 1]);
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 2, 8, 0, 4, 4096),
+        moe_expert_b_cols_global(&cfg, 2, 4, 0, 4, 4096),
         Err(PearlCompatError::MoeColumnOutsideExpert {
             local: 4,
             n_e: 4,
@@ -210,11 +206,11 @@ fn moe_column_bleed_via_t_cols_rejected() {
 
 #[test]
 fn moe_column_bleed_via_wide_pattern_rejected() {
-    // A pattern whose local index reaches n_e (=4): [0,4]. Under expert 0 this
-    // opens global column 4 = expert 1's first weight column. Reject.
+    // A pattern whose local index reaches n_e (=4) opens the next expert's
+    // first weight column and must be rejected.
     let cfg = cols_config(&[0, 4]);
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 2, 8, 0, 0, 4096),
+        moe_expert_b_cols_global(&cfg, 2, 4, 0, 0, 4096),
         Err(PearlCompatError::MoeColumnOutsideExpert {
             local: 4,
             n_e: 4,
@@ -224,12 +220,41 @@ fn moe_column_bleed_via_wide_pattern_rejected() {
 }
 
 #[test]
-fn moe_column_dim_indivisible_rejected() {
-    // n=8 not divisible by e=3.
+fn moe_per_expert_n_need_not_be_divisible_by_e() {
+    // Pearl stores n_e directly; there is no n/e operation or divisibility
+    // requirement. Three experts of width eight occupy 24 total columns.
     let cfg = cols_config(&[0, 1]);
     assert_eq!(
-        moe_expert_b_cols_global(&cfg, 3, 8, 0, 0, 4096),
-        Err(PearlCompatError::MoeColumnDimIndivisible { n: 8, e: 3 })
+        moe_expert_b_cols_global(&cfg, 3, 8, 2, 0, 4096).unwrap(),
+        vec![16, 17]
+    );
+}
+
+#[test]
+fn moe_public_wire_serializes_per_expert_n() {
+    let mut config = cols_config(&[0, 1]);
+    config.reserved = PearlMiningConfig::moe_trailer(3, 1);
+    let public = PearlPublicProofParams {
+        block_header: PearlIncompleteBlockHeader {
+            version: 0,
+            prev_block: [0; 32],
+            merkle_root: [0; 32],
+            timestamp: 0,
+            nbits: 0x207f_ffff,
+        },
+        mining_config: config,
+        hash_a: [1; 32],
+        hash_b: [2; 32],
+        hash_jackpot: [3; 32],
+        m: 8,
+        n: 8,
+        t_rows: 0,
+        t_cols: 0,
+    };
+    assert_eq!(public.total_b_cols().unwrap(), 24);
+    assert_eq!(
+        &public.to_public_data().unwrap()[152..156],
+        &8u32.to_le_bytes()
     );
 }
 

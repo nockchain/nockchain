@@ -1860,6 +1860,7 @@ pub fn verify_pearl_moe_recursive_certificate(
     mining_config: &crate::pearl_compat::PearlMiningConfig,
     moe: &crate::pearl_compat::PearlMoeParams,
     m: u32,
+    n_e: u32,
     t_rows: u32,
     t_cols: u32,
     routing_data: &[u32],
@@ -1878,13 +1879,10 @@ pub fn verify_pearl_moe_recursive_certificate(
     let cfg = mining_config.moe().ok_or(BridgeError::PearlMergeStatement(
         crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
     ))?;
-    // Recompute the opened B-columns AND enforce the per-expert clamp (audit N1):
-    // local columns must stay within this expert's n_e block, or they bleed into a
-    // neighbouring expert's weights (a fork from Pearl + a column-grinding lever).
-    // `moe_expert_b_cols_global` performs the divisibility check + the `local < n_e`
-    // clamp that the downstream `validate_strip_indices` (global `< n`) misses.
+    // Recompute the opened B-columns and enforce the per-expert clamp: local
+    // columns must stay within the public `n_e` block.
     let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
-        mining_config, cfg.e, params.n, moe.expert_idx, t_cols, max_pattern_len,
+        mining_config, cfg.e, n_e, moe.expert_idx, t_cols, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
@@ -1962,6 +1960,7 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
     mining_config: &crate::pearl_compat::PearlMiningConfig,
     moe: &crate::pearl_compat::PearlMoeParams,
     m: u32,
+    n_e: u32,
     t_rows: u32,
     t_cols: u32,
     routing_data: &[u32],
@@ -1981,7 +1980,7 @@ pub fn verify_pearl_moe_compact_recursive_certificate(
         crate::pearl_compat::PearlCompatError::MoePublicMissingConfig,
     ))?;
     let b_cols_global: Vec<u32> = crate::pearl_compat::moe_expert_b_cols_global(
-        mining_config, cfg.e, params.n, moe.expert_idx, t_cols, max_pattern_len,
+        mining_config, cfg.e, n_e, moe.expert_idx, t_cols, max_pattern_len,
     )
     .map_err(BridgeError::PearlMergeStatement)?;
 
@@ -4558,7 +4557,7 @@ mod tests {
         let verify = |h_a_in: &[u8; 32], routing_in: &[u32], t_cols: u32| {
             verify_pearl_moe_recursive_certificate(
                 &l1.l1_cert, &pis, &params, &kappa, h_a_in, &h_b, &mining_config, &moe_params,
-                m as u32, 0, t_cols, routing_in, 4096,
+                m as u32, n_e as u32, 0, t_cols, routing_in, 4096,
             )
         };
         verify(&h_a, &routing.routing_data, 0).expect("node verifies the MoE certificate");
@@ -4858,7 +4857,7 @@ mod tests {
             .expect("decode for node MoE verify");
         verify_pearl_moe_compact_recursive_certificate(
             &run.verifier_context, node_cert, &pis, &params, &kappa, &h_a, &h_b, &mining_config,
-            &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
+            &moe_params, m as u32, n_e as u32, 0, 0, &routing.routing_data, 4096,
         )
         .expect("full node MoE compact verify (routing + PI + schedule binding)");
 
@@ -4871,7 +4870,7 @@ mod tests {
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
                 &run.verifier_context, node_cert_bad, &pis, &params, &kappa, &h_a, &h_b,
-                &mining_config, &moe_params, m as u32, 0, 0, &bad_routing, 4096,
+                &mining_config, &moe_params, m as u32, n_e as u32, 0, 0, &bad_routing, 4096,
             )
             .is_err(),
             "forged routing must be rejected on the compact node path (M7)"
@@ -4890,7 +4889,8 @@ mod tests {
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
                 &run.verifier_context, node_cert_jp, &forged_pis, &params, &kappa, &h_a, &h_b,
-                &mining_config, &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
+                &mining_config, &moe_params, m as u32, n_e as u32, 0, 0, &routing.routing_data,
+                4096,
             )
             .is_err(),
             "a forged hash_jackpot PI must be rejected by the proof (the (a) soundness \
@@ -4907,7 +4907,8 @@ mod tests {
         assert!(
             verify_pearl_moe_compact_recursive_certificate(
                 &run.verifier_context, node_cert_j, &forged_tile, &params, &kappa, &h_a, &h_b,
-                &mining_config, &moe_params, m as u32, 0, 0, &routing.routing_data, 4096,
+                &mining_config, &moe_params, m as u32, n_e as u32, 0, 0, &routing.routing_data,
+                4096,
             )
             .is_err(),
             "a forged raw-tile `jackpot` PI must be rejected by the proof (the dense (a) \

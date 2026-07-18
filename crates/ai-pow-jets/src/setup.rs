@@ -128,7 +128,6 @@ struct CanonicalMoeInputs {
     local_b: Vec<u32>,
     n_e: usize,
     m: usize,
-    n: usize,
     config: PearlMiningConfig,
     header: PearlIncompleteBlockHeader,
     aux: PearlNockchainAux,
@@ -148,7 +147,6 @@ struct CanonicalMoeSchedule {
     local_b: Vec<u32>,
     n_e: usize,
     m: usize,
-    n: usize,
 }
 
 fn canonical_moe_schedule(
@@ -188,7 +186,6 @@ fn canonical_moe_schedule(
         local_b,
         n_e,
         m,
-        n,
     })
 }
 
@@ -206,7 +203,6 @@ fn canonical_moe_inputs(
         local_b,
         n_e,
         m,
-        n,
     } = canonical_moe_schedule(params, hw, e, top_k)?;
 
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
@@ -225,7 +221,6 @@ fn canonical_moe_inputs(
         local_b,
         n_e,
         m,
-        n,
         config,
         header,
         aux,
@@ -269,7 +264,6 @@ pub fn prove_canonical_moe_block(
         local_b,
         n_e,
         m,
-        n,
         config,
         header,
         aux,
@@ -290,7 +284,7 @@ pub fn prove_canonical_moe_block(
         hash_b: commitments.h_b,
         hash_jackpot: run.ticket.jackpot_hash,
         m: m as u32,
-        n: n as u32,
+        n: n_e as u32,
         t_rows: 0,
         t_cols: 0,
     };

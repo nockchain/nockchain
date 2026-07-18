@@ -177,15 +177,15 @@ must (a) build the context from verifier-pinned constants (never the prover's
 returned `verifier_context()`, else the digest checks are vacuous), (b) call
 `l0_program_matches`, (c) derive PI/profile from chain data. Not a live defect.
 
-## N8 `params.n` vs `n_e` semantic mismatch — **SAFE (exploit closed by N1); doc reconciliation residual**
+## N8 `params.n` vs `n_e` semantic mismatch — **FIXED**
 
-The code is internally consistent: `params.n` is the **total** (`n_e = params.n/e`,
-`zk_bridge.rs:1616`; tests use `n = n_e·e`). The spec docs use the opposite
-convention (`params.n == n_e`). N1's `local < n_e` clamp makes the column derivation
-exploit-safe regardless of the naming. **Residual:** reconcile the spec docs to the
-code's total-`n` convention and confirm the wire maps Pearl's per-expert `n` to our
-total (Pearl `total_b_cols = n_e·e`, so Pearl's public `n` = `n_e`; the artifact
-builder must set `params.n = n_e·e`). Verify at wiring time; no live exploit.
+Pearl's MoE wire stores `n_e`, the per-expert B-column count. Nockchain's
+recursive circuit stores total B columns in `MatmulParams.n`. Artifact builders
+therefore serialize `public_params.n = n_e` and reconstruct
+`MatmulParams.n = n_e * e` at the verifier boundary. The column derivation uses
+`expert_idx * n_e + local` and rejects `local >= n_e`. The three-expert wire KAT
+`moe_public_wire_serializes_per_expert_n` pins the non-accidental case where
+`n_e` is not divisible by `e`.
 
 ## N10 Grouped-GEMM dense/expert-agnostic — **SAFE (rests on N1 + §F)**
 
