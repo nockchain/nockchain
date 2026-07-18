@@ -344,9 +344,7 @@ async fn no_ai_candidate_below_activation() {
         "the kernel must emit a mining candidate at height 1",
     );
     assert!(
-        candidates
-            .iter()
-            .all(|c| c.kind == MiningCandidateKind::Zk),
+        candidates.iter().all(|c| c.kind == MiningCandidateKind::Zk),
         "below AI-PoW activation the node must emit only %mine-zk candidates, never \
          %mine-ai (got {:?})",
         candidates.iter().map(|c| c.kind).collect::<Vec<_>>(),
