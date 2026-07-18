@@ -439,6 +439,12 @@ structurally valid across the boundary.
   in `catch_unwind`; a build guard forbids `panic = "abort"` for the verifier
   crate. Decode is bounded (proof-node depth/count/atom-byte caps), and a
   trace-height above the `2^19` accept-band is rejected before the setup lookup.
+- **Invalid-proof spam escalation.** A `%failed-pow-check` liar effect blocks
+  every peer that supplied the block and records objective cryptographic
+  misbehavior against its authenticated connection address; repeated peer-ID
+  rotation from one IP escalates through the bounded IP-exclusion policy. Other
+  liar reasons remain peer-scoped because protocol-version skew can produce
+  honest disagreement at an upgrade boundary.
 - **Equal-weight soundness.** `compute-work-ai(T) == compute-work(T·2^64)` is an
   exact identity, so the two puzzles sum work faithfully; `check-heaviness` and
   `check-target` re-derive both deterministically, so a forged easy target or

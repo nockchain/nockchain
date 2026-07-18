@@ -8873,6 +8873,10 @@ async fn test_liar_block_id_effect() {
     {
         let mut state_guard = state_arc.lock().await;
         println!("Tracking block_ids and peers");
+        // A non-cryptographic liar reason must remain peer-scoped even when the
+        // runtime has a trusted connection address.
+        seed_connected_peer(&mut state_guard, bad_peer1, 901);
+        seed_connected_peer(&mut state_guard, bad_peer2, 902);
 
         // Associate bad_peer1 with the bad block
         state_guard
@@ -9032,6 +9036,73 @@ async fn test_liar_block_id_effect() {
 
         println!("Verified tracker state is correct after processing effect");
     }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
+async fn failed_pow_liar_block_id_creates_address_exclusion() {
+    let peer = PeerId::random();
+    let metrics = Arc::new(
+        NockchainP2PMetrics::register(gnort::global_metrics_registry()).expect("register metrics"),
+    );
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+
+    let mut block_slab: NounSlab = NounSlab::new();
+    let block_id = T(&mut block_slab, &[D(11), D(12), D(13), D(14), D(15)]);
+    let block_space = block_slab.noun_space();
+    {
+        let mut state_guard = state.lock().await;
+        seed_connected_peer(&mut state_guard, peer, 903);
+        state_guard
+            .track_block_id_and_peer(block_id, peer, &block_space)
+            .expect("track failed-PoW block source");
+    }
+
+    let mut effect_slab: NounSlab = NounSlab::new();
+    let effect_tag = make_tas(&mut effect_slab, "liar-block-id");
+    let effect_block_id = T(&mut effect_slab, &[D(11), D(12), D(13), D(14), D(15)]);
+    let effect_cause = make_tas(&mut effect_slab, "failed-pow-check");
+    let effect = T(
+        &mut effect_slab,
+        &[effect_tag.as_noun(), effect_block_id, effect_cause.as_noun()],
+    );
+    effect_slab.set_root(effect);
+
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(10);
+    let mut swarm_actions = SwarmActionDispatcher::Channel(&swarm_tx);
+    handle_effect_with_dispatcher(
+        effect_slab,
+        &mut swarm_actions,
+        Vec::new(),
+        false,
+        PrefetchConfig::disabled(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        state,
+        metrics,
+        PeerExclusions::default(),
+    )
+    .await
+    .expect("handle failed-PoW liar effect");
+
+    let mut blocked = false;
+    let mut excluded = false;
+    while let Ok(action) = swarm_rx.try_recv() {
+        match action {
+            SwarmAction::BlockPeer { peer_id } => blocked |= peer_id == peer,
+            SwarmAction::RecordExclusionOutcome { outcome, .. } => {
+                excluded |= outcome.address_cooldown.is_some();
+            }
+            other => panic!("unexpected swarm action: {other:?}"),
+        }
+    }
+    assert!(blocked, "the proof sender must be peer-blocked");
+    assert!(
+        excluded,
+        "a cryptographically invalid proof must create an address exclusion"
+    );
 }
 
 #[tokio::test]
