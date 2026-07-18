@@ -14,10 +14,11 @@
 ::  alias, otherwise the blockchain constants set in the kernel
 ::  will not be active.
 ::
+~%  %dumb-inner-lib  ..ut  ~
 |%
 ++  moat  (keep kernel-state:dk)
 ++  inner
-  ~%  %dumb-inner  ..ut  ~
+  ~%  %dumb-inner  ..inner  ~
   |_  k=kernel-state:dk
   +*  min      ~(. dumb-miner m.k d.k constants.k)
       der      ~(. dumb-derived d.k constants.k)
@@ -842,72 +843,75 @@
     ~/  %poke
     |=  [wir=wire eny=@ our=@ux now=@da dat=*]
     ^-  [(list effect:dk) kernel-state:dk]
-    |^
-    =/  old-state  m.k
-    =/  cause  ((soft cause:dk) dat)
-    ?~  cause
-      ~>  %slog.[1 [%leaf "Error: badly formatted cause, should never occur."]]
-      ~&  ;;([thing=@t ver=@ type=@t] [-.dat +<.dat +>-.dat])
-      =/  peer-id  (get-peer-id wir)
-      ?~  peer-id
-        `k
-      ~>  %slog.[1 [leaf+"Peer-id found in wire of badly formatted cause, emitting %liar-peer"]]
-      [[%liar-peer u.peer-id %invalid-fact]~ k]
-    =/  cause  u.cause
-    ::~&  "inner dumbnet cause: {<[-.cause -.+.cause]>}"
-    =^  effs  k
-      ?+    wir  ~|("Unsupported wire: {<wir>}" !!)
-          [%poke src=?(%nc %timer %sys %zk-pow-miner %ai-pow-miner %grpc) ver=@ *]
-        ::  miner sources: the legacy `%miner` source is split into
-        ::  per-puzzle sources (`%zk-pow-miner`, `%ai-pow-miner`) so the
-        ::  kernel can route by source as well as by inner pow-variant
-        ::  tag (see `pow-variant` in lib/types.hoon). Both miner sources
-        ::  share the same command/fact dispatch path here; the inner
-        ::  pow-variant tag is what determines which puzzle verifier runs
-        ::  on a `%pow` command (see do-pow).
-        ?-  -.cause
-          %command  (handle-command now eny p.cause)
-          %fact     (handle-fact wir eny our now p.cause)
+    =<  main
+    ~%  %dumb-poke  +  ~
+    |%
+    ++  main
+      =/  old-state  m.k
+      =/  cause  ((soft cause:dk) dat)
+      ?~  cause
+        ~>  %slog.[1 [%leaf "Error: badly formatted cause, should never occur."]]
+        ~&  ;;([thing=@t ver=@ type=@t] [-.dat +<.dat +>-.dat])
+        =/  peer-id  (get-peer-id wir)
+        ?~  peer-id
+          `k
+        ~>  %slog.[1 [leaf+"Peer-id found in wire of badly formatted cause, emitting %liar-peer"]]
+        [[%liar-peer u.peer-id %invalid-fact]~ k]
+      =/  cause  u.cause
+      ::~&  "inner dumbnet cause: {<[-.cause -.+.cause]>}"
+      =^  effs  k
+        ?+    wir  ~|("Unsupported wire: {<wir>}" !!)
+            [%poke src=?(%nc %timer %sys %zk-pow-miner %ai-pow-miner %grpc) ver=@ *]
+          ::  miner sources: the legacy `%miner` source is split into
+          ::  per-puzzle sources (`%zk-pow-miner`, `%ai-pow-miner`) so the
+          ::  kernel can route by source as well as by inner pow-variant
+          ::  tag (see `pow-variant` in lib/types.hoon). Both miner sources
+          ::  share the same command/fact dispatch path here; the inner
+          ::  pow-variant tag is what determines which puzzle verifier runs
+          ::  on a `%pow` command (see do-pow).
+          ?-  -.cause
+            %command  (handle-command now eny p.cause)
+            %fact     (handle-fact wir eny our now p.cause)
+          ==
+        ::
+           [%poke %libp2p ver=@ typ=?(%gossip %response) %peer-id =peer-id:dk *]
+          ?>  ?=(%fact -.cause)
+          (handle-fact wir eny our now p.cause)
         ==
+      ::  possibly update candidate block for mining
+      =^  candidate-changed  m.k  (update-candidate-block:min c.k now)
+      :_  k
+      ?.  candidate-changed  effs
+      =/  version=proof-version:sp
+        (height-to-proof-version-legacy:con ~(height get:page:t candidate-block.m.k))
+      =/  zk-target  ~(target get:page:t candidate-block.m.k)
+      =/  commit  (block-commitment:page:t candidate-block.m.k)
+      =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
+      =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
+      ::  Always emit the ZK candidate (%mine-zk) for the zk-pow-miner.
+      ::  The height-derived ZK proof-version oracle caps at %2, so `version` is
+      ::  never %3 here; the %3 arm remains only to make the version fork total.
+      =/  zk-effect
+        ?-  version
+          %0  [%mine-zk %0 commit zk-target pow-len:t]
+          %1  [%mine-zk %1 commit zk-target pow-len:t]
+          %2  [%mine-zk %2 commit zk-target pow-len:t]
+          %3  [%mine-zk %2 commit zk-target pow-len:t]
+        ==
+      ::  Post-activation, ALSO emit a %mine-ai candidate for the ai-pow-miner. It
+      ::  carries the AI-puzzle variant of the candidate: the SAME block re-targeted
+      ::  to the AI ASERT target (+build-ai-candidate), with its own commitment. The
+      ::  AI target differs from the ZK target (per-puzzle ASERT), and an AI
+      ::  certificate binds to the AI commitment + AI target, so validation would
+      ::  reject an AI block carrying the ZK target as %page-target-invalid. +do-pow
+      ::  reconstructs the identical variant from the same candidate + state.
+      ?:  (gte candidate-height ai-pow-activation-height.constants.k)
+        =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
+        =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
+        =/  ai-target  ~(target get:page:t ai-cand)
+        [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect effs]
+      [zk-effect effs]
       ::
-         [%poke %libp2p ver=@ typ=?(%gossip %response) %peer-id =peer-id:dk *]
-        ?>  ?=(%fact -.cause)
-        (handle-fact wir eny our now p.cause)
-      ==
-    ::  possibly update candidate block for mining
-    =^  candidate-changed  m.k  (update-candidate-block:min c.k now)
-    :_  k
-    ?.  candidate-changed  effs
-    =/  version=proof-version:sp
-      (height-to-proof-version-legacy:con ~(height get:page:t candidate-block.m.k))
-    =/  zk-target  ~(target get:page:t candidate-block.m.k)
-    =/  commit  (block-commitment:page:t candidate-block.m.k)
-    =/  candidate-height=@  ~(height get:page:t candidate-block.m.k)
-    =/  parent-bid=block-id:t  ~(parent get:page:t candidate-block.m.k)
-    ::  Always emit the ZK candidate (%mine-zk) for the zk-pow-miner.
-    ::  The height-derived ZK proof-version oracle caps at %2, so `version` is
-    ::  never %3 here; the %3 arm remains only to make the version fork total.
-    =/  zk-effect
-      ?-  version
-        %0  [%mine-zk %0 commit zk-target pow-len:t]
-        %1  [%mine-zk %1 commit zk-target pow-len:t]
-        %2  [%mine-zk %2 commit zk-target pow-len:t]
-        %3  [%mine-zk %2 commit zk-target pow-len:t]
-      ==
-    ::  Post-activation, ALSO emit a %mine-ai candidate for the ai-pow-miner. It
-    ::  carries the AI-puzzle variant of the candidate: the SAME block re-targeted
-    ::  to the AI ASERT target (+build-ai-candidate), with its own commitment. The
-    ::  AI target differs from the ZK target (per-puzzle ASERT), and an AI
-    ::  certificate binds to the AI commitment + AI target, so validation would
-    ::  reject an AI block carrying the ZK target as %page-target-invalid. +do-pow
-    ::  reconstructs the identical variant from the same candidate + state.
-    ?:  (gte candidate-height ai-pow-activation-height.constants.k)
-      =/  ai-cand=page:t  (build-ai-candidate:con candidate-block.m.k shares.m.k)
-      =/  ai-commit=block-commitment:t  (block-commitment:page:t ai-cand)
-      =/  ai-target  ~(target get:page:t ai-cand)
-      [[%mine-ai %3 ai-commit ai-target pow-len:t] zk-effect effs]
-    [zk-effect effs]
-    ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
     ++  heard-genesis-block
       ~/  %heard-genesis-block

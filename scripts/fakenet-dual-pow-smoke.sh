@@ -1,46 +1,29 @@
 #!/usr/bin/env bash
 # scripts/fakenet-dual-pow-smoke.sh
 #
-# Dual-puzzle fakenet smoke: ONE nockchain node with BOTH a ZK-PoW miner and an
-# AI-PoW miner attached simultaneously, proving the two puzzles' end-to-end flow
-# runs in tandem (node emits %mine + %mine-ai; each miner subscribes to its own
-# effect; both submit %pow pokes the node validates against its own puzzle path).
+# Dual-puzzle fakenet smoke: one node accepts an AI block, a ZK block extending
+# it, then an AI block extending the interleaved ZK tip. Running one miner at a
+# time avoids turning the test into a nondeterministic stale-proof race while
+# still exercising both production binaries, effect streams, proof paths,
+# branch-local puzzle lineage, and shared fork choice end to end.
 #
-#   node --%mine     (WatchEffects gRPC)--> zk-pow-mine  --%pow %dumb-zkpow-->  node
-#   node --%mine-ai  (WatchEffects gRPC)--> ai-pow-mine  --%pow %ai-pow------>  node
+#   node --%mine-ai  --> ai-pow-mine --%pow %ai-pow------> node
+#   node --%mine     --> zk-pow-mine --%pow %dumb-zkpow--> node
 #
-# Both miners set the SAME mining pkh (idempotent — no key conflict) and watch
-# DIFFERENT effect labels ("mine" vs "mine-ai"), so they coexist cleanly.
+# Success requires exact consecutive acceptance heights (AI -> ZK -> AI) and no
+# dangling jet-hint registration diagnostics.
 #
-# PREREQUISITE — miner.jam must be current: zk-pow-mine embeds assets/miner.jam
-# (kernels-open-miner::KERNEL). A stale miner.jam emits an old %pow the dual-puzzle
-# node rejects as "badly formatted cause", so ZK blocks silently never land. If in
-# doubt: `HOONC=target/release/hoonc make assets/miner.jam && cargo build --release
-# -p zk-pow-miner --bin zk-pow-mine`.
+# `make assets/miner.jam` must precede rebuilding `zk-pow-mine` after miner Hoon
+# changes. This script rebuilds the Rust binaries but does not rebuild jams.
 #
-# RACING DYNAMIC + a known height-1 STALL (empirically observed on this laptop):
-# the canonical AI prove has a ~27s hard floor (grind + certificate). Equal-weight
-# heaviness makes it a first-to-tip race:
-#   * ZK faster than ~27s -> ZK wins every height; AI proofs arrive stale and the
-#     node rejects them ("%ai-pow certificate failed verification").
-#   * ZK slower than ~27s -> the chain tends to STALL after height 1 (the ZK worker
-#     is superseded by candidate refresh before completing its long search, and the
-#     AI's post-bootstrap ASERT target hardens out of reach). A balanced ~50/50 live
-#     chain is NOT achievable by difficulty alone here — it needs a faster AI prove
-#     or decoupling candidate regeneration from the slow AI cycle. See the
-#     fakenet-dual-miner-tuning memory. The retargeting MATH is validated separately
-#     by the tandem unit tests (roswell test-dumb: test-tandem-asert-*).
+# Exact independent-ASERT direction and interleaving invariants are covered by
+# `scripts/test-dual-pow-retarget.sh`; this live smoke prints each accepted tip's
+# target as additional end-to-end evidence.
 #
-# Laptop-normalized difficulty (see the memory): the ZK ASERT anchor target (via
-# --fakenet-asert-* below) governs ZK block time; the AI first block is always
-# bootstrap-trivial (no AI ancestor) and prove-bound (~27s). Use a huge
-# --fakenet-asert-half-life so the ~2^63 wall-clock timestamps are absorbed
-# (constant difficulty), OR regenerate the fakenet genesis with a current timestamp
-# for natural retargeting.
-#
-# NOTE ON TIMING / FIRST BOOT: identical to fakenet-ai-pow-smoke.sh — the node
-# GENERATES the ~6GB AI-PoW verifier-setup table on first boot (one-time, cached
-# under the data dir); the AI candidate refresh interval must exceed the ~30s prove.
+# NOTE ON TIMING / FIRST BOOT: verifier setup generation is a one-time,
+# multi-minute operation. The script reuses only the proof-independent setup
+# cache; each run gets fresh consensus state so an old PMA cannot mask or block
+# a kernel migration.
 
 set -euo pipefail
 
@@ -64,8 +47,8 @@ ZK_HALF_LIFE="${ZK_HALF_LIFE:-600}"
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Persistent data dir so the verifier-setup table is generated once and reused.
-DATA_DIR="${AI_POW_FAKENET_DATA_DIR:-$REPO_ROOT/.fakenet-ai-pow-data}"
+# Persist only the verifier setup. Consensus PMA/event state is per-run.
+SETUP_CACHE_DIR="${AI_POW_VERIFIER_SETUP_CACHE_DIR:-$REPO_ROOT/.fakenet-ai-pow-data/ai-pow}"
 
 echo "== fakenet-dual-pow-smoke =="
 echo "  PRIV_PORT             = $PRIV_PORT"
@@ -73,20 +56,23 @@ echo "  FAKENET_AI_ACTIVATION = $FAKENET_AI_ACTIVATION"
 echo "  CANDIDATE_INTERVAL    = ${CANDIDATE_INTERVAL}s (must exceed the ~30s AI prove)"
 echo "  NUM_THREADS (ZK)      = $NUM_THREADS"
 echo "  ZK_ASERT handicap     = $ZK_ASERT (bex=$ZK_ANCHOR_TARGET_BEX, half-life=${ZK_HALF_LIFE}s)"
-echo "  DATA_DIR              = $DATA_DIR"
+echo "  SETUP_CACHE_DIR       = $SETUP_CACHE_DIR"
 
 echo
 echo "[build] nockchain + zk-pow-mine + ai-pow-mine ..."
-cargo build --release -p nockchain --bin nockchain
-cargo build --release -p zk-pow-miner --bin zk-pow-mine
-cargo build --release -p ai-pow-miner --features node --bin ai-pow-mine
+cargo build --release \
+    -p nockchain --bin nockchain \
+    -p zk-pow-miner --bin zk-pow-mine \
+    -p ai-pow-miner --features ai-pow-miner/node --bin ai-pow-mine
 
 WORK_DIR="$(mktemp -d -t fakenet-dual-pow-smoke.XXXXXX)"
 NODE_LOG="$WORK_DIR/node.log"
 ZK_LOG="$WORK_DIR/zk-miner.log"
 AI_LOG="$WORK_DIR/ai-miner.log"
 echo "[setup] work_dir=$WORK_DIR  logs: node.log, zk-miner.log, ai-miner.log"
-mkdir -p "$DATA_DIR"
+DATA_DIR="$WORK_DIR/node-data"
+mkdir -p "$DATA_DIR" "$SETUP_CACHE_DIR"
+ln -s "$SETUP_CACHE_DIR" "$DATA_DIR/ai-pow"
 
 NODE_PID=""; ZK_PID=""; AI_PID=""
 EXIT_CODE=99
@@ -144,62 +130,101 @@ echo "[boot ] node pid=$NODE_PID; waiting for %born (up to ${BOOT_TIMEOUT_SECS}s
 
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    grep -q "born" "$NODE_LOG" 2>/dev/null && { echo "[boot ] node reached %born (verifier setup ready)"; break; }
-    if grep -qi "badly formatted cause" "$NODE_LOG" 2>/dev/null; then
+    grep -aq "born" "$NODE_LOG" 2>/dev/null && { echo "[boot ] node reached %born (verifier setup ready)"; break; }
+    if grep -aqi "badly formatted cause" "$NODE_LOG" 2>/dev/null; then
         echo "[fail ] node rejected the fakenet %set-constants poke"; EXIT_CODE=8; exit 8; fi
     kill -0 "$NODE_PID" 2>/dev/null || { echo "[fail ] node died before %born"; EXIT_CODE=2; exit 2; }
     sleep 3
 done
-grep -q "born" "$NODE_LOG" 2>/dev/null || { echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2; }
+grep -aq "born" "$NODE_LOG" 2>/dev/null || { echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2; }
 
 sleep 2
-echo
-echo "[boot ] starting zk-pow-mine (num-threads=$NUM_THREADS) ..."
-RUST_LOG="${ZK_RUST_LOG:-info}" "$ZK_BIN" \
-    --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
-    --num-threads "$NUM_THREADS" >"$ZK_LOG" 2>&1 &
-ZK_PID=$!
-echo "[boot ] zk-pow-mine pid=$ZK_PID"
+ZK_PAT='added to validated blocks at [1-9][0-9]* with proof version'
+AI_PAT='added to validated blocks at [1-9][0-9]* with ai-pow certificate'
 
-echo "[boot ] starting ai-pow-mine --canonical ..."
+count_acceptances() {
+    grep -aEc "$1" "$NODE_LOG" 2>/dev/null || true
+}
+
+wait_for_acceptances() {
+    local pattern=$1
+    local wanted=$2
+    local label=$3
+    local deadline=$(( SECONDS + MINE_TIMEOUT_SECS ))
+    local count
+    while (( SECONDS < deadline )); do
+        count=$(count_acceptances "$pattern")
+        (( count >= wanted )) && return 0
+        kill -0 "$NODE_PID" 2>/dev/null || return 1
+        sleep 0.1
+    done
+    echo "[fail ] timeout waiting for $label"
+    return 1
+}
+
+acceptance_height() {
+    local pattern=$1
+    local occurrence=$2
+    grep -aE "$pattern" "$NODE_LOG" 2>/dev/null \
+        | sed -E 's/.* at ([0-9]+) with.*/\1/' \
+        | sed -n "${occurrence}p"
+}
+
+stop_miner() {
+    local pid=$1
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
+echo
+echo "[phase] mine AI block 1 ..."
 RUST_LOG="${AI_RUST_LOG:-info}" "$AI_BIN" \
     --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
     --canonical >"$AI_LOG" 2>&1 &
 AI_PID=$!
-echo "[boot ] ai-pow-mine pid=$AI_PID"
+wait_for_acceptances "$AI_PAT" 1 "first AI block" || { EXIT_CODE=5; exit 5; }
+stop_miner "$AI_PID"
+AI_PID=""
 
-echo
-echo "[wait ] polling for accepted blocks from BOTH puzzles (timeout ${MINE_TIMEOUT_SECS}s) ..."
-ZK_PAT='added to validated blocks at .* with proof version'
-AI_PAT='added to validated blocks at .* with ai-pow certificate'
-DEADLINE=$(( SECONDS + MINE_TIMEOUT_SECS ))
-while (( SECONDS < DEADLINE )); do
-    ZK_N=$(grep -Ec "$ZK_PAT" "$NODE_LOG" 2>/dev/null || echo 0)
-    AI_N=$(grep -Ec "$AI_PAT" "$NODE_LOG" 2>/dev/null || echo 0)
-    (( ZK_N >= 1 && AI_N >= 1 )) && break
-    kill -0 "$NODE_PID" 2>/dev/null || { echo "[fail ] node died"; EXIT_CODE=3; exit 3; }
-    kill -0 "$ZK_PID"   2>/dev/null || { echo "[warn ] zk-pow-mine died"; }
-    kill -0 "$AI_PID"   2>/dev/null || { echo "[warn ] ai-pow-mine died"; }
-    sleep 3
-done
+echo "[phase] mine a ZK block extending the AI tip ..."
+RUST_LOG="${ZK_RUST_LOG:-info}" "$ZK_BIN" \
+    --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
+    --num-threads "$NUM_THREADS" >"$ZK_LOG" 2>&1 &
+ZK_PID=$!
+wait_for_acceptances "$ZK_PAT" 1 "ZK block after AI" || { EXIT_CODE=6; exit 6; }
+stop_miner "$ZK_PID"
+ZK_PID=""
 
-ZK_N=$(grep -Ec "$ZK_PAT" "$NODE_LOG" 2>/dev/null || echo 0)
-AI_N=$(grep -Ec "$AI_PAT" "$NODE_LOG" 2>/dev/null || echo 0)
+echo "[phase] mine AI block 2 across the interleaved ZK block ..."
+RUST_LOG="${AI_RUST_LOG:-info}" "$AI_BIN" \
+    --node-addr "http://127.0.0.1:$PRIV_PORT" --mining-pkh "$MINING_PKH" \
+    --canonical >>"$AI_LOG" 2>&1 &
+AI_PID=$!
+wait_for_acceptances "$AI_PAT" 2 "second AI block" || { EXIT_CODE=7; exit 7; }
+stop_miner "$AI_PID"
+AI_PID=""
+
+AI_1_HEIGHT=$(acceptance_height "$AI_PAT" 1)
+ZK_HEIGHT=$(acceptance_height "$ZK_PAT" 1)
+AI_2_HEIGHT=$(acceptance_height "$AI_PAT" 2)
+ZK_N=$(count_acceptances "$ZK_PAT")
+AI_N=$(count_acceptances "$AI_PAT")
+
 echo
 echo "===== result ====="
-echo "  ZK blocks accepted : $ZK_N"
-echo "  AI blocks accepted : $AI_N"
-echo "--- node: recent acceptances ---"
-grep -E "added to validated blocks at" "$NODE_LOG" 2>/dev/null | tail -12 || true
+echo "  accepted sequence    : AI@$AI_1_HEIGHT -> ZK@$ZK_HEIGHT -> AI@$AI_2_HEIGHT"
+echo "  ZK blocks accepted   : $ZK_N"
+echo "  AI blocks accepted   : $AI_N"
+echo "--- node: recent heaviest-chain targets ---"
+grep -aE "new_heaviest_chain block_height=" "$NODE_LOG" 2>/dev/null | tail -6 || true
 
-if (( ZK_N >= 1 && AI_N >= 1 )); then
-    echo "[ok   ] BOTH puzzles produced accepted blocks with both miners running simultaneously"
-    EXIT_CODE=0
-elif (( ZK_N >= 1 || AI_N >= 1 )); then
-    echo "[partial] both miners ran + coexisted, but only one puzzle landed blocks in the window."
-    echo "          (Expected on trivial ZK difficulty — raise it with ZK_ASERT=1 to let AI win races.)"
-    EXIT_CODE=6
+if (( ZK_HEIGHT != AI_1_HEIGHT + 1 || AI_2_HEIGHT != ZK_HEIGHT + 1 )); then
+    echo "[fail ] puzzle blocks did not extend one linear consensus chain"
+    EXIT_CODE=9
+elif grep -aq "could not match parent battery at given axis" "$NODE_LOG"; then
+    echo "[fail ] dangling jet-hint ancestry detected"
+    EXIT_CODE=10
 else
-    echo "[fail ] no blocks accepted from either puzzle within the window"
-    EXIT_CODE=5
+    echo "[ok   ] AI -> ZK -> AI blocks extended one linear heaviest chain"
+    EXIT_CODE=0
 fi

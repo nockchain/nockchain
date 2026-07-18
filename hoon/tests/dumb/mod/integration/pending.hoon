@@ -970,8 +970,8 @@
   =+  [nockchain genesis]=init-nockchain:h
   =^  pages  nockchain
     (add-n-pages-integration:h genesis 2 nockchain)
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))

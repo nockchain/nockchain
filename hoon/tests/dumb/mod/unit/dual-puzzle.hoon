@@ -133,6 +133,18 @@
     (~(compute-target-ai-asert dcon con.b der.b bc-dual-puzzle:helpers) 3 ~(digest get:page:t tip.b))
   %+  expect-eq  !>((merge:bignum target-a))  !>((merge:bignum target-b))
 ::
+::  Symmetric ZK check: interleaving an AI block does not advance the ZK
+::  subchain count or replace its lineage head.
+++  test-zk-asert-ignores-interleaved-ai
+  ^-  tang
+  =/  a  (build-typed-chain:ht ~[%zk])
+  =/  b  (build-typed-chain:ht ~[%zk %ai])
+  =/  target-a
+    (~(compute-target-zk-asert dcon con.a der.a bc-tandem:helpers) 2 ~(digest get:page:t tip.a))
+  =/  target-b
+    (~(compute-target-zk-asert dcon con.b der.b bc-tandem:helpers) 3 ~(digest get:page:t tip.b))
+  %+  expect-eq  !>((merge:bignum target-a))  !>((merge:bignum target-b))
+::
 ::  PRODUCTION — +build-ai-candidate re-targets the ZK candidate to exactly the
 ::  AI ASERT target and the AI-normalized accumulated-work that validation
 ::  recomputes (+block-compute-work). This is the block the miner solves against;

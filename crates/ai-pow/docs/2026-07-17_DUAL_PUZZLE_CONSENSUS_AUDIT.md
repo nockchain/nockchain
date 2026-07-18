@@ -121,13 +121,32 @@ as independently audited or unconditionally production-ready.
 - Pearl merge-mining compatibility suite: dense/MoE success paths and aux,
   target, offset, routing, jackpot, nonce, metadata, size, malformed-envelope,
   and one-PoW/two-commitment rejection paths passed.
-- A live fakenet node with `zk-pow-mine` and `ai-pow-mine --canonical` advanced
-  one chain with both puzzle types and distinct ASERT targets.
+- `scripts/fakenet-dual-pow-smoke.sh` drove a live node through the exact
+  `AI@1 -> ZK@2 -> AI@3` acceptance sequence. All three blocks extended one
+  linear heaviest chain; the run emitted no unmatched jet-hint registration.
 
-Ignored real-proof/setup tests remain opt-in because they generate multi-gigabyte
-contexts or take minutes. The production setup digest, full seven-bucket
-generation, real compact MoE proof, and disk-paged RSS tests have dedicated
-opt-in commands and were exercised in the prior hardening corpus where recorded.
+### Production proof benchmark
+
+`scripts/benchmark-ai-pow-production.sh` reproducibly compiles one release test
+binary with `RUSTFLAGS=-C target-cpu=native`, then executes each ignored
+production proof fixture in its own `/usr/bin/time -l` process. This isolates
+peak resident memory per proof. Prover wall time and serialized compact
+certificate size come from the proving path; CPU is direct-process
+`user + system`, so it includes fixture and test-process overhead.
+
+Results on Darwin 25.5.0 arm64, Apple M2 Max, with 12-way proving parallelism:
+
+| Fixture | Compact certificate | Prover wall | Process CPU | Peak RSS |
+|---|---:|---:|---:|---:|
+| Dense: `m=512, k=1024, n=512, r=64, tile=8` | 125,056 B (122.12 KiB) | 28.100 s | 302.52 s | 5,947,998,208 B (5.54 GiB) |
+| Canonical MoE miner: `m=64, k=1024, n_e=64, E=2, top_k=1, r=64, tile=8` | 125,764 B (122.82 KiB) | 28.196 s | 299.51 s | 5,956,386,816 B (5.55 GiB) |
+
+The canonical MoE pre-proof attempt path measured 1.6836 ms per attempt
+(594 attempts/s) over 200 attempts. Proof generation dominates a successful
+attempt's latency. The multi-core CPU totals are expected to exceed wall time.
+
+Other ignored real-proof/setup tests remain opt-in because they generate
+multi-gigabyte contexts or take minutes.
 
 ## Remaining assurance gate
 

@@ -1931,9 +1931,14 @@ mod tests {
         let t = std::time::Instant::now();
         let block = prove_canonical_moe_block_at(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, commit, 0)
             .expect("prove");
+        let prove_seconds = t.elapsed().as_secs_f64();
+        let AiProofNode::Bytes(cert_bytes) = &block.certificate.certificate else {
+            panic!("production compact certificate must use the canonical byte node");
+        };
         println!(
-            "canonical prove: {:.3}s (trace_height={})  <-- t_prove",
-            t.elapsed().as_secs_f64(),
+            "canonical MoE prove: {prove_seconds:.3}s compact_cert_bytes={} trace_height={}  \
+             <-- t_prove",
+            cert_bytes.len(),
             block.certificate.trace_height
         );
     }
