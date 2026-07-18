@@ -511,8 +511,10 @@ fn compact_batch_l1_statement_digest_preimage(
 ///
 /// Witness-free: needs only the canonical `program` (rebuilt by the verifier from
 /// the public opened schedule via `canonical_program_for_strip_schedule`) and the
-/// config. Uses the compact prove path's `sx_bound = true`. MoE is handled for
-/// free — a MoE canonical program is just a different `Program`.
+/// config. The preprocessed program commitment is independent of the
+/// params-derived `sx_bound` AIR selector; the verifier context separately
+/// derives and pins that selector. MoE is a different canonical `Program`, not a
+/// different commitment mechanism.
 pub fn canonical_l0_program_commitment_vals(
     zk_params: &crate::params::ZkParams,
     profile: &crate::circuit::CircuitConfig,

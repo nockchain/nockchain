@@ -198,21 +198,16 @@ pub fn extract_program(
 /// commitment fixed in the verifying key (independently rebuilt
 /// by the verifier from `ZkParams`), the prover cannot choose the
 /// selector schedule, so the selector-gated C1/C3/C4 bindings are
-/// forced live. This is the production AIR (used by
-/// `ai-pow::zk_bridge` / the `mine()` gate); the unit
-/// [`CompositeFullAir`] remains a constraint-logic test harness.
+/// forced live. This is the program-pinned base component of the production
+/// [`crate::composite_full_air_with_lookups::CompositeFullAirWithLookupsPinned`];
+/// the unit [`CompositeFullAir`] remains a constraint-logic test harness.
 #[derive(Clone)]
 pub struct CompositeFullAirPinned {
     preprocessed: std::sync::Arc<p3_matrix::dense::RowMajorMatrix<crate::Val>>,
-    /// HIGH-2.2 §6(b) — emit the `FOLD_XSTEP == SX_XR[stripe]`
-    /// keystone. **Verifier-set from the trusted block params**
-    /// (`num_stripes ≤ StripeXor STATE_LEN = 16`), never from the
-    /// proof, so it is as sound as CRIT-1: a malicious prover
-    /// cannot turn the binding off for a params set the verifier
-    /// runs it for. `false` only for the `num_stripes > 16` legacy
-    /// path (rectangular / PROD), where the §6(b) malicious-prover
-    /// binding is the documented residual (wider-register
-    /// generalization) and the StripeXor sweep is not placed.
+    /// HIGH-2.2 §6(b) keystone selection, derived by the verifier from trusted
+    /// block parameters. `true` uses the StripeXor lanes for
+    /// `num_stripes <= STRIPE_MAX`; `false` uses the R-b TileReduce predecessor
+    /// binding for larger stripe-major traces. The proof cannot select it.
     sx_bound: bool,
 }
 
@@ -312,13 +307,11 @@ impl<AB: AirBuilder<F = crate::Val>> Air<AB> for CompositeFullAirPinned {
         // and zeroed the rest — §4.0). Honest traces with no fold
         // activity have JACKPOT_MSG = FOLD_STATE = 0 ⇒ 0 == 0
         // holds; a planted free JACKPOT_MSG (FOLD_STATE = 0) is
-        // still rejected. Residual: X_STEP↔matmul-accumulator
-        // binding (XStepChip-in-composite + subtile sweep) — the
-        // §4.C noised_packed Route-A binds the matmul *inputs*;
-        // full step-transcript binding is the precisely-scoped
-        // remaining item. Pinned production path only; the unit
-        // `CompositeFullAir` keeps independent PIs for the
-        // constraint-logic harness.
+        // still rejected. `X_STEP` is bound to the genuine matmul accumulator
+        // by the StripeXor transport when `sx_bound` is true and by the R-b
+        // TileReduce predecessor keystone otherwise. The FoldChip then binds
+        // that sequence to the final tile state. The unit `CompositeFullAir`
+        // keeps independent PIs only for its constraint-logic harness.
         let main2 = builder.main();
         let c2 = main2.current_slice();
         let fs: [AB::Var; JACKPOT_SIZE] =
@@ -695,17 +688,13 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
             );
         }
 
-        // C3 (M52 step 4.3+) — bind MAT_UNPACK to BLAKE3_MSG.
-        //
-        // Closes the residual matrix-binding soundness gap. The
-        // chain is:
-        //   canonical store ─(noised_packed bus, M52 4.1)─ MAT_UNPACK
+        // C3 binds MAT_UNPACK to BLAKE3_MSG:
+        //   canonical store ─(noised_packed bus)─ MAT_UNPACK
         //   MAT_UNPACK ─(i8u8 bus, IS_MSG_MAT-gated)─ UINT8_DATA
-        //   UINT8_DATA ─(THIS constraint)─ BLAKE3_MSG
-        //   BLAKE3_MSG → mixing rounds → CV_OUT → HASH_A (M52 step 2)
-        // Without this link an adversary could put matrix X in
-        // MAT_UNPACK (what the buses bind) and matrix Y in
-        // BLAKE3_MSG (what actually gets hashed into HASH_A).
+        //   UINT8_DATA ─(this constraint)─ BLAKE3_MSG
+        //   BLAKE3_MSG → mixing rounds → CV_OUT → HASH_A
+        // Thus the bytes consumed by matmul and the bytes committed by BLAKE3
+        // cannot diverge.
         //
         // Gate: IS_MSG_MAT · IS_NEW_BLAKE. `IS_MSG_MAT` alone is
         // *overloaded* — the i8u8 / urange8 / noised_packed bus

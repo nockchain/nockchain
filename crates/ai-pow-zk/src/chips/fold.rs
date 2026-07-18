@@ -28,9 +28,9 @@
 //! (`2026-05-15_HIGH2_2_DESIGN.md` §9.5). The XOR+rotate core reuses the
 //! audited `blake3::round_ops::xor_32_shift_if` gadget.
 //!
-//! The accumulator → `X_STEP` reduction and its binding to the
-//! committed matrices is HIGH-2.2 §4.C's obligation; this chip
-//! only proves the fold given `X_STEP`.
+//! The parent composite AIR binds the accumulator to `X_STEP` through
+//! StripeXor or the R-b TileReduce keystone and binds the accumulator inputs to
+//! committed matrices. This chip proves the local fold relation given `X_STEP`.
 
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::PrimeCharacteristicRing;

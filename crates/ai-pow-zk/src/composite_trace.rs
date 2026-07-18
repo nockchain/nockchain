@@ -3811,20 +3811,14 @@ mod tests {
         );
     }
 
-    /// C3: the IS_MSG_MAT-gated cross-column constraint
-    /// `IS_MSG_MAT · (BLAKE3_MSG[j] − base256(UINT8_DATA[4j..4j+4])) = 0`
-    /// rejects a trace where a row claims IS_MSG_MAT but its
-    /// hashed message word does not equal the matrix-byte view
-    /// the i8u8 / noised_packed buses bind. This is the residual
-    /// soundness gap (M52 step 4.3+): without it an adversary
-    /// hashes matrix Y while the buses bind matrix X.
+    /// C3 pins every matrix BLAKE3 message word to the byte view carried by the
+    /// i8u8/noised_packed buses:
+    /// `IS_MSG_MAT * IS_NEW_BLAKE * (BLAKE3_MSG[j] -
+    /// base256(UINT8_DATA[4j..4j+4])) = 0`.
     ///
-    /// Negative test: a hand-crafted row with IS_MSG_MAT=1,
-    /// UINT8_DATA != 0, BLAKE3_MSG = 0 violates C3 ⇒ verify must
-    /// reject. (The consistent+globally-valid positive case needs
-    /// IS_MSG_MAT on a real blake3 compression row carrying
-    /// matrix bytes — the F1 integration path; C3's constraint is
-    /// what makes that path sound.)
+    /// Negative test: a hand-crafted BLAKE3 matrix row with nonzero
+    /// `UINT8_DATA` and zero `BLAKE3_MSG` must reject. Without C3, those columns
+    /// could describe different matrices.
     #[test]
     fn c3_rejects_is_msg_mat_row_with_mismatched_blake_msg() {
         use p3_field::integers::QuotientMap;

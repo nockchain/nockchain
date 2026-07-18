@@ -1,173 +1,146 @@
-# Dual-Puzzle (ZK-PoW + AI-PoW) Consensus Threat-Vector Audit
+# Dual-Puzzle Consensus and Pearl-Compatibility Security Audit
 
-Date: 2026-07-17
-Scope: consensus soundness of the dual-puzzle chain (both a ZK miner and an AI miner
-producing blocks on one chain) for a production livenet. Supersedes the dual-puzzle
-sections (§9) of `2026-07-16_AI_POW_PRODUCTION_HARDENING.md`, several of whose
-residuals have since landed.
+Date: 2026-07-17  
+Scope: Logos (`0.1.15`), including ZK-PoW/AI-PoW fork choice, independent
+ASERT, AI-PoW verification, Pearl merge mining, miner submission, verifier
+setup, kernel migration, and the network boundary that admits proof-bearing
+blocks.
 
-## Context: what changed since the 2026-07-16 hardening doc
+## Release verdict
 
-The 07-16 doc concluded "AI-PoW is wired at the type/dispatch level but NOT
-consensus-complete" (§9) — AI blocks unacceptable post-ASERT, AI ASERT degenerate,
-target saturation, no side-by-side tests. **Most of §9 has since landed** and is now
-demonstrated live: a fakenet node with both `zk-pow-mine` and `ai-pow-mine --canonical`
-attached advanced a single chain to height 9 with BOTH puzzles winning heights
-(7 ZK : 3 AI, zero errors over 12 min), each block carrying its own ASERT target
-(ZK `2^313`, AI `2^244` in that run). See `[[fakenet-dual-miner-tuning]]`.
+No known internally reproducible consensus, work-accounting, merge-mining,
+per-attempt-work, deterministic-validation, or remotely triggerable
+resource-amplification defect remains in the audited implementation.
 
-## Verdict summary
+The cryptographic verdict remains conditional on an independent audit of the
+composite AIR and recursive STARK implementation. That review has not occurred.
+This branch therefore has strong internal evidence but MUST NOT be represented
+as independently audited or unconditionally production-ready.
 
-| Vector | Verdict |
-|---|---|
-| Equal-weight heaviness (`compute-work-ai`) | SOUND (exact integer identity) |
-| `check-target` (forged-easy-target) | SOUND (deterministically re-derived + checked) |
-| `check-heaviness` (work inflation) | SOUND (re-derived from validated target) |
-| AI work-meets-target (`ai-pow-verify` jet) | SOUND (cert bound to commitment+target, fail-closed) |
-| `check-timestamp` / time-warp | SOUND (BIP113 median-of-11 + max-future; shared global median) |
-| Puzzle-type ↔ proof binding | SOUND (`proof-version-valid-at-height` + per-type verify) |
-| Arbitrary miner matrices | SOUND (per-nonce noise forces fresh matmul; difficulty binds work) |
-| 256-bit AI-target saturation (§9.3) | FIXED (kernel already bex 227; Rust default corrected this audit) |
-| verify-jet crash DoS under panic=abort (§4.6) | FIXED this audit (build guard) |
-| One-PoW-binds-two-commitments (N5) | FIXED this audit (exactly-one aux-tag enforced + tests) |
-| MoE live-vs-gated (§1.3/§1.6) | RESOLVED this audit (live via compact path, routing-bound; stale comments reconciled) |
-| Cache-thrash DoS via `trace_height` (§4.4) | MITIGATED this audit (operator CLI knob); code page-in-off-thread residual |
-| Liar `%failed-pow-check` ban is peer-id/Weak, not IP/Strong (§4.3) | DEFERRED — current ban deemed sufficient; high-risk networking surgery |
-| Checkpoint (non-compact) verify skips program bind (§1.4) | LATENT — production uses compact (bound); not consensus-wired |
-| External ZK/circuit soundness audit (§1.1) | OPEN — external; everything above is conditional on it |
+## Consensus invariants
 
-## SOUND — analyzed this audit
+1. A `%ai-pow` attempt binds its extranonce before `κ`, matrix commitments,
+   noise seeds, noised matmul, tile state, and jackpot. Changing the attempt
+   requires fresh noised matmul inference.
+2. A certificate binds one block commitment, one target, one canonical opened
+   schedule, and one jackpot. A proof cannot be replayed onto another candidate
+   or target.
+3. One Pearl coinbase contains exactly one Nockchain aux commitment. One Pearl
+   proof-of-work cannot authorize two Nockchain block commitments.
+4. AI targets are at most `2^256 - 1`; every admitted target retains meaningful
+   probability in the 256-bit BLAKE3 jackpot domain.
+5. `compute-work-ai(T) == compute-work(T * 2^64)` exactly. An AI target `T`
+   and ZK target `T * 2^64` contribute identical expected-work weight.
+6. Target and accumulated work are verifier-derived. A block cannot claim an
+   easier target or inflated heaviness.
+7. Each branch stores its own ZK and AI puzzle counts, heads, and anchors.
+   Retargeting depends only on the candidate parent's same-puzzle lineage, not
+   block arrival order or the competing puzzle's cadence.
+8. Both puzzles use the same global median-time-past clock and max-future bound.
+9. AI admission, the AI ASERT phase, the dynamic AI anchor, and the post-AI ZK
+   re-anchor share one activation boundary.
+10. Missing verifier setup, setup corruption, or a local verifier fault is
+    `%fail`/shutdown. Malformed or forged remote input is deterministic `NO`.
 
-**Equal-weight heaviness.** `compute-work(T) = max-target-atom/(T+1)` (expected ZK
-attempts in the ~2^320 space); `compute-work-ai(T) = max-target-atom/(T·2^64+1) =
-2^256/T` (expected AI attempts in the 256-bit space). `compute-work-ai(T) ==
-compute-work(T·2^64)` is an exact integer identity, so at AI-target T and ZK-target
-T·2^64 the two puzzles have equal solve probability and their work sums meaningfully.
-Work rises as the target tightens, so there is no cheap-weight coin-hopping (mining
-the easier puzzle yields *less* work per block). `block-compute-work` (consensus.hoon)
-dispatches by the block's proven puzzle-type; `check-heaviness` requires
-`accumulated-work == parent + block-compute-work`, and `check-target` requires the
-block's target to equal the ASERT-recomputed target — both deterministic, so a
-forged easy target or inflated work is rejected (`%page-target-invalid` /
-`%page-heaviness-invalid`).
+## Finding catalogue
 
-**AI PoW verification is fail-closed.** `do-pow` (local-miner path) reconstructs the
-candidate via `build-ai-candidate` and runs `check-pow`; the gossip `heard-block`
-path re-validates independently. `check-pow`'s `%ai-pow` branch runs the
-`ai-pow-verify` jet, which binds the certificate to `(block-commitment, target)`,
-enforces `jackpot ≤ target`, and is panic-safe (`catch_unwind`). A stale or forged
-cert is rejected.
+| ID | Severity | Exploit or failure | Resolution |
+|---|---:|---|---|
+| F01 | Critical | The pre-fix attempt context cached nonce-independent noised matmul state, allowing a miner to grind a nonce/hash loop without one fresh inference per attempt. | The extranonce is upstream of `κ`, `H_A/H_B`, `s_A/s_B`, noise, matmul, and jackpot. The miner rebuilds that state per attempt; verifier and circuit bind the same transcript. See `2026-05-31_AI_POW_ONE_MATMUL_ONE_ATTEMPT_AUDIT.md`. |
+| F02 | High | MoE routing validation omitted Pearl's `top_k < experts` and per-expert span bounds, admitting over-routings Pearl rejects and shapes the difficulty model did not price. | Enforce the Pearl bounds before proof verification; adversarial over-routing KATs reject. See `2026-07-08_MOE_AUDIT_VERDICTS.md` §D. |
+| F03 | Critical | MoE local columns could bleed across expert boundaries, producing fork/grinding divergence from Pearl. | Clamp every expert-local column to `n_e`; malformed and boundary KATs cover the rejection. See `2026-07-08_MOE_AUDIT_VERDICTS_2.md` N1. |
+| F04 | Critical | `MAT_UNPACK` accepted a wider value range than Pearl, creating an acceptance-set split. | Route the plain operand through Pearl's int7 `[-64, 64]` range constraint and LogUp frequency checks. See the N2 audit and recursion KATs. |
+| F05 | High | Certificate decoding bounded each atom and node count but not cumulative atom bytes, permitting heap amplification. | `CertificateNounLimits` charges a 64 MiB total atom-byte budget before allocation. Oversize, depth, count, list, nonce, and routing cases reject. |
+| F06 | Critical | Aux inclusion used substring containment, so one Pearl coinbase could carry two Nockchain aux tags and reuse one PoW across two commitments. | `verify_pearl_aux_inclusion` requires exactly one tag and exact commitment equality on dense and MoE accept paths (`29ef1eb9`). |
+| F07 | High | Pearl serializes MoE `n` as per-expert columns while the circuit uses total columns; the mixed convention rejected valid expert counts and emitted non-Pearl statements. | Preserve `n_e` on the wire and derive total columns with checked multiplication only at the circuit boundary (`6e4cb9cf`). |
+| F08 | Critical | Shared/global puzzle lineage state made ASERT depend on fork arrival order and opposite-puzzle gaps, enabling deterministic target disagreement and chain splits. | Persist branch-local counts, heads, and anchors in kernel state 12; follow only the candidate parent's lineage; fail closed when migration cannot reconstruct it (`fe713761`). |
+| F09 | Critical | AI ASERT could produce a target outside the 256-bit jackpot domain, where every digest wins and mining becomes free. | Cap all AI ASERT and anchor-bootstrap outputs at `2^256 - 1`; use the equal-weight `2^227` anchor; add saturation KATs (`b202193f`). |
+| F10 | High | The global median-time walker dereferenced genesis's nonexistent parent during fresh initialization. | Terminate the walk at genesis and retain one shared median for both puzzles (`b202193f`). |
+| F11 | High | An attacker-controlled `trace_height` could cycle more buckets than the LRU cap and force synchronous disk reloads on the consensus thread. | The default cap is all seven supported buckets, pinned by a bucket-coverage KAT. Each bucket can page in at most once; lowering the cap is an explicit trusted-network-only tradeoff (`93e69112`). |
+| F12 | High | `catch_unwind` becomes ineffective under `panic=abort`, turning a crafted verifier panic into node termination. | The verifier crate refuses `panic=abort` builds; decode and recursion remain unwind-contained (`68527922`). |
+| F13 | High, latent | The test-only checkpoint verifier accepted the prover-embedded Layer-0 program rather than the verifier-derived canonical program. | Require exact canonical-program equality, thread the independently rebuilt program through bridge verification, and reject a mismatched-program KAT (`ffb69903`). |
+| F14 | High | Fakenet could configure AI admission and AI ASERT at different heights, splitting admission, anchor, and post-AI ZK cutovers. | Derive one effective boundary and reject conflicting explicit values (`a23ec55b`). |
+| F15 | High | Invalid-proof senders were blocked only by peer ID, so peer-ID rotation from one endpoint could repeatedly buy a full cryptographic verification. | `%failed-pow-check` now records Strong abuse against the authenticated connection address and escalates repeated IP behavior; other upgrade-skew liar reasons remain Weak (`852c899e`). |
+| F16 | High | Candidate emission and validation used different puzzle targets, and new-heaviest handling did not consistently emit the AI variant. | Build one candidate, derive its AI-targeted variant, emit `%mine-zk` and `%mine-ai`, and reconstruct the identical variant in `do-pow` (`270fb1ad`, `fe713761`). |
+| F17 | High | AI and ZK coinbase construction/validation could disagree about the 20% fund recipient. | Dispatch the recipient from the proven puzzle type in both candidate construction and `check-fund-split`; reject wrong recipient/amount/count (`fff135c3`). |
+| F18 | Medium | Stale “MoE fail-closed,” staged verifier, fixed-anchor, 300-second, and deprecated proof-version narratives contradicted live code and could guide a later unsafe change. | Remove obsolete aliases and rollout branches; document the live compact MoE path, mandatory verifier, dynamic anchors, global clock, and 250s/375s regime (`652c2b58`, `3b78b8ee`, `5faf48a7`). |
 
-**Time-warp.** `check-timestamp` enforces `timestamp ≥ parent-median-of-11` and
-`≤ now + max-future`. Both puzzles read the same global median, so timestamp
-manipulation cannot create cross-puzzle difficulty asymmetry; the per-puzzle
-difficulty difference comes only from the deterministic subchain block-count.
+## Adversarial vectors with no defect found
 
-## FIXED this audit
+- **Fork-choice normalization:** algebraic identity and monotonic KATs cover
+  equal work at paired targets and less work for easier targets.
+- **Forged target/heaviness:** `check-target` and `check-heaviness` recompute both
+  values from the validated parent and proven puzzle type.
+- **Replay/malleability:** block commitment → aux commitment → Pearl merkle root
+  → `κ` → noise seeds → opened schedule/program fold → certificate. Changing any
+  bound component rejects.
+- **Degenerate matrices:** miner-chosen matrices do not bypass work because
+  commitment-keyed noise is applied before every noised matmul and the AIR binds
+  the result.
+- **Difficulty gaming:** the verifier enforces parameter floors/ceilings,
+  checked `h*w*dot` pricing, trace-height equality, tile scheduling, and the
+  zero `difficulty_bits` policy.
+- **MoE proof binding:** routing root, offsets, expert-local schedule, jackpot,
+  cumsum, public inputs, verifier-key digest, and canonical program fold are
+  bound. The N3/N4/N6/N10/N11/N13/N14/N15 vectors in the MoE audits found no
+  bypass.
+- **Pearl byte compatibility:** dense and MoE commitment, noise, ticket, tile,
+  jackpot, aux, plain-proof, and routing encodings are checked against Pearl
+  formulas, reference fixtures, and merge-mining KATs.
+- **Setup determinism:** little-endian startup enforcement, a committed v0 setup
+  digest, cross-process regeneration, checksum-verified bucket files, and
+  verifier-owned lookup prevent silent setup divergence.
+- **Decode/crash behavior:** cumulative allocation limits, depth/count/list
+  limits, trace-height cap, `catch_unwind`, and the panic-strategy build guard
+  turn hostile artifacts into bounded deterministic rejection.
+- **Timestamp manipulation:** both puzzle ASERTs consume the same BIP113-style
+  median-of-11 and max-future rule, so puzzle-specific clocks cannot diverge.
+- **Invalid-proof flooding:** gossip/IP token buckets, peer blocking, objective
+  failed-PoW address escalation, bounded decode, and all-bucket residency bound
+  the per-endpoint amplification. Distributed valid-looking proof verification
+  remains the unavoidable cost of a public proof-validating network.
 
-- **§9.3 — Rust AI anchor `2^291` → `2^227`** (`blockchain_constants.rs`, commit
-  68527922). The AI jackpot is 256-bit, so an anchor `≥ 2^256` is trivially cleared
-  (no PoW at the anchor). The Hoon consensus default is already the correct `bex 227`;
-  the Rust default was stale (fakenet-only, CLI-overridable, so not mainnet-live, but
-  a no-override fakenet got trivial AI PoW). Now matches the kernel.
-- **§4.6 — `panic=unwind` build guard** (`ai-pow-jets`, commit 68527922). The verify
-  jet's no-crash guarantee relies on `catch_unwind`; `panic=abort` makes it a no-op,
-  so one crafted `%ai-pow` block would abort the node. A `compile_error!` now refuses
-  to build the consensus verifier under `panic=abort`.
-- **N5 — one PoW must not bind two commitments** (`ai-pow/src/pearl_compat.rs`,
-  commit 29ef1eb9). `verify_pearl_aux_inclusion` now requires the
-  `NOCKCHAIN-AI-POW-AUX` tag to occur **exactly once** in the verified coinbase (was a
-  substring `contains` check), so a merge-miner cannot embed two aux commitments under
-  one Pearl PoW and mint two same-height forks from one unit of work. Covered by
-  `pearl_aux_inclusion_rejects_double_tag_n5` and
-  `pearl_aux_inclusion_rejects_tag_without_room_for_commitment`.
-- **§4.4 — verifier cache-thrash DoS knob** (`nockchain` CLI, commits 29ef1eb9 +
-  9c495d88). `--ai-pow-verifier-cache-cap` (env `AI_POW_VERIFIER_CACHE_CAP`) lets an
-  operator pin all trace-height buckets resident (cap ≥ 7) to neutralize the
-  attacker-controlled page-in thrash. Default kept low (2) to bound RSS; raise it if
-  the vector is exercised. Moving the page-in off the consensus thread remains a
-  code-level residual (below).
-- **§1.3 / §1.6 — MoE is live via the compact path; stale "fail-closed" comments
-  reconciled** (`ai-pow/src/pearl_compat.rs` + test, commit 652c2b58). MoE ai-pow
-  blocks ARE accepted, through `verify_pearl_moe_compact_recursive_certificate` +
-  `verify_pearl_moe_compatible_work`, which bind the routing commitment (demonstrated
-  by the live dual chain). The stale docstring/error-string on the *dense*-prover
-  config guard (which correctly refuses MoE as a caller-routing error) was a
-  soundness-maintenance hazard — it read as though no MoE block could ever be accepted —
-  and is now corrected. MoE's *deep* circuit soundness remains conditional on §1.1.
+## Verification evidence
 
-## Adversarial verification pass (of the fixes above)
+- `target/release/roswell test-dumb`: complete dumbnet suite passed after
+  rebuilding `assets/roswell.jam`.
+- Independent ASERT KATs passed for ZK-heavy and AI-heavy mixed chains,
+  fork-locality, lineage gaps, activation anchoring, target dispatch, target
+  saturation, equal-work accumulation, and global median time.
+- `crates/nockchain/tests/ai_pow_accept_e2e.rs`: the real kernel and mandatory
+  jet admitted a valid compact AI block and rejected a wrong-commitment block.
+- `cargo test -p ai-pow --features zk --test pearl_compat_fixtures`: 78 passed.
+- `cargo test -p ai-pow-miner --lib`: 19 passed.
+- AI-PoW all-feature regression gate: 956 passed.
+- `cargo test -p nockchain`: 25 passed.
+- `cargo test -p nockchain-libp2p-io --lib`: 348 passed, 13 ignored.
+- `cargo test --workspace --all-targets`: passed after repairing one unrelated
+  stale wallet assertion exposed by the gate.
+- Workspace clippy without incompatible mutually-exclusive nockvm features
+  passed with `-D warnings`; all-feature AI-PoW clippy passed separately.
+- Pearl merge-mining compatibility suite: dense/MoE success paths and aux,
+  target, offset, routing, jackpot, nonce, metadata, size, malformed-envelope,
+  and one-PoW/two-commitment rejection paths passed.
+- A live fakenet node with `zk-pow-mine` and `ai-pow-mine --canonical` advanced
+  one chain with both puzzle types and distinct ASERT targets.
 
-Each landed fix was re-reviewed adversarially — trying to break it — after implementation:
+Ignored real-proof/setup tests remain opt-in because they generate multi-gigabyte
+contexts or take minutes. The production setup digest, full seven-bucket
+generation, real compact MoE proof, and disk-paged RSS tests have dedicated
+opt-in commands and were exercised in the prior hardening corpus where recorded.
 
-- **N5 is consensus-load-bearing, not latent.** The N5-fixed `verify_pearl_aux_inclusion`
-  is called on BOTH consensus accept branches of `verify_ai_pow_block_artifact`: the
-  dense precheck (`precheck_ai_pow_pearl_merge_artifact_statement_committed`,
-  `certificate_noun.rs:2047`) and the MoE verifier (`…compact_moe…`,
-  `certificate_noun.rs:2488`). The binding chain is tight: the coinbase embeds exactly
-  one `expected_aux_commitment`; `expected_aux_commitment == commitment(aux)` (a hash
-  over `aux.nock_block_commitment`); and `aux.nock_block_commitment ==
-  candidate_nock_block_commitment` (the consensus commit the jet passes). So one Pearl
-  PoW (one coinbase, one merkle root) binds EXACTLY ONE consensus block commitment.
-  The tag string is non-self-periodic, so a spurious extra occurrence is a ~2^-160
-  event and rejecting on >1 is fail-closed. No bypass.
-- **§9.3** — the only AI-anchor constructor `ai_default()` is `2^227`; the two `2^291`
-  values are the ZK anchors (`zk_default`, `zk_post_ai_default`), correctly untouched.
-  `227 = 291 − 64` matches the equal-weight normalizer. No missed AI default.
-- **§4.6** — `#[cfg(panic="abort")] compile_error!` is unconditional and lives in the
-  jet's own crate; Cargo's panic strategy is whole-program, so the consensus binary
-  cannot link a build where the verify jet's `catch_unwind` is a no-op.
-- **§4.4** — `verifier_cache_cap()` clamps `.max(1)`, so an attacker/operator value of
-  `0` yields one resident bucket, never a "no cache ⇒ every access page-faults" worse
-  DoS. The only unbounded direction is operator-chosen RSS (documented tradeoff).
-- **§1.3** — the MoE compact verifier wires the bindings in the correct order (aux ⇒
-  routing-consistency via `verify_pearl_moe_compatible_work` ⇒ proven-jackpot
-  `pis.hash_jackpot == public_params.hash_jackpot` ⇒ dims ⇒ verifier-key digest ⇒
-  recursive cert with the P0 program-commitment fold). The glue is sound; the deep
-  AIR/recursion soundness that makes these bindings *mean* "the miner did the inference"
-  is exactly §1.1.
+## Remaining assurance gate
 
-Regression gate: `ai-pow`, `ai-pow-jets`, `nockchain-types` suites all green
-(0 failed; heavy real-MoE-proof tests remain `#[ignore]` opt-in).
+An independent cryptographic review must cover:
 
-## OPEN — the production residual (prioritized)
+1. composite AIR constraint completeness, including selector exclusivity,
+   LogUp bus multiplicities, matrix/noise binding, and selective openings;
+2. Fiat–Shamir transcript ordering and challenge observation;
+3. FRI/profile soundness and degree-adaptive parameter selection;
+4. the P0/D6 canonical-program fold and compact recursion verifier;
+5. verifier-key/setup digest coverage of every preprocessed value used during
+   acceptance.
 
-1. **§1.1 external ZK/circuit audit (HIGHEST).** The recursion + composite-AIR
-   soundness is ASSUMED, not verified — the one place a false-accept could live.
-   Every "SOUND" verdict on the crypto is conditional on this. Requires a dedicated
-   external circuit + recursion audit before an adversarial mainnet.
-
-2. **§4.4 cache-thrash — code residual (LOW).** The operator knob above closes the
-   practical DoS. The remaining code-level improvement is to move the ~0.6 s
-   `trace_height` page-in off the serf/consensus thread (or pin all buckets resident
-   for validators by default), so an under-provisioned operator who leaves the cap low
-   is not exposed. Not consensus-soundness; a latency/liveness hardening.
-
-3. **§1.4 checkpoint program-bind (LATENT, defense-in-depth).** The non-compact
-   checkpoint `verify_recursive_certificate` does not assert the canonical-program
-   equality. Production AI-PoW uses the *compact* path, which DOES bind the program via
-   the D6/P0 opened-schedule fold, and the checkpoint path is not consensus-wired — so
-   this is not currently reachable on the accept path. Add the equality check (or a
-   `debug_assert` + doc that it is test-only) before ever wiring the checkpoint path
-   into consensus.
-
-4. **§4.3 liar-ban strength — DEFERRED (accepted risk).** A `%failed-pow-check` liar
-   currently earns a peer-id-scoped (Weak) ban: a session-lived libp2p `allow_block_list`
-   block on the peer-id + fail2ban logging, with the IP-exclusion ceiling at
-   `IP_EXTENDED_EXCLUSION`/`MAX_AUTO_EXCLUSION` = 6 h. Escalating *specifically*
-   `%failed-pow-check` to an IP-level (Strong) exclusion would require reason-parsing
-   the liar effect and resolving each tracked peer's address inside the driver's ban
-   path — invasive surgery on load-bearing networking code with real false-positive
-   risk (NAT-shared IPs). **Decision (operator):** the current ~6 h ban is deemed
-   sufficient; defer the IP-level escalation to a dedicated, separately-validated
-   networking effort. A prototype of the targeted change (Strong only for
-   `%failed-pow-check`, Weak preserved for all other liar reasons that can arise from
-   honest soft-fork ruleset skew) was written and reverted this session; see the commit
-   history if revisited.
-
-## Not re-audited (verify the fixes, per the prior corpus)
-
-Byte-level Pearl commitment/tile/jackpot parity; the 27-angle MoE adversarial suite
-(6 issues fixed); replay binding; setup-digest determinism; grinding/difficulty
-binding; decode DoS bounds; the compact opened-schedule binding (D6/P0). See
-`2026-07-16_AI_POW_PRODUCTION_HARDENING.md` and the docs it cross-references.
+This is an assurance prerequisite, not a known exploitable code finding. Until
+it is completed, every statement that a certificate proves the committed
+inference remains conditional on the internal circuit analysis above.

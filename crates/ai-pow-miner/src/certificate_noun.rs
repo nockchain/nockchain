@@ -727,10 +727,9 @@ pub struct PearlMergeAiPowArtifactShape {
     pub aux_inclusion: PearlAuxInclusionProof,
     pub certificate: AiPowCertificateShape,
     /// GROUPED_GEMM (MoE) tail from an `AIM1` nonce: `PearlMoeParams` +
-    /// `routing_data`. `None` for a dense (`AIP1`) artifact. Carried so the node
-    /// `e>0` verify branch (M3) can run the routing binding + the MoE
-    /// opened-schedule commitment fold. MoE remains fail-closed at the admission
-    /// guards until M4.
+    /// `routing_data`. `None` for a dense (`AIP1`) artifact. The live MoE
+    /// verification branch uses this data to bind routing consistency, the
+    /// expert-local opened schedule, and the canonical program commitment.
     pub moe: Option<PearlMergeMoeArtifact>,
 }
 
@@ -2249,29 +2248,16 @@ fn canonical_l0_commitment_for_compact(
 /// rejects before proof verification if either the context or certificate uses
 /// a different digest.
 ///
-/// # Soundness — the `compact_context` MUST be canonically derived (audit D6)
+/// # Soundness — verifier-derived canonical program binding
 ///
-/// The checkpoint path binds the opened row/column schedule (and every
-/// constraint selector) to the *public* ticket by recomputing the canonical
-/// Layer-0 program and requiring
-/// [`ai_pow_zk::recursion::AiPowRecursiveCertificate::l0_program_matches`]. The
-/// compact certificate carries **no** `l0_program`, so that check cannot run
-/// here. On this path the entire opened-schedule / selector binding therefore
-/// lives in `compact_context.circuit_prover_data`, which encodes the specific
-/// Layer-0 program. The `verifier_key_digest` this function checks is
-/// **shape-only** (route params + L2 proof metadata + FRI shape); it does NOT
-/// bind which rows/columns were opened.
-///
-/// Consequently, a caller wiring this into consensus MUST construct
-/// `compact_context` (and `expected_verifier_key_digest`) from the *canonical*
-/// program re-derived from the public opened schedule — never from a
-/// prover-supplied context, and never from a single generic context reused
-/// across blocks. Passing the prover's own context (as the `#[ignore]`d
-/// round-trip tests do for convenience) would let a malicious prover open a
-/// favorable strip and still verify. The verifier-side canonical-context builder
-/// that makes this safe is **not yet implemented** (residual M2/M3); until it
-/// exists this function must not be reached by block acceptance. See
-/// `crates/ai-pow/docs/2026-07-13_ZK_POW_PRODUCTION_PUZZLE_VS_PEARL_AUDIT.md` §G.
+/// The compact certificate carries no raw Layer-0 program. The node reconstructs
+/// the canonical program from the public opened schedule in `precheck`, derives
+/// its preprocessed commitment through
+/// [`ai_pow_zk::recursion::canonical_l0_program_commitment_vals`], and supplies
+/// that commitment to compact verification. The P0/D6 statement-digest fold
+/// therefore rejects a certificate proven over any other rows, columns, or
+/// selector schedule. `compact_context` and `expected_verifier_key_digest` must
+/// still come from verifier-owned setup; proof-carried setup is never authority.
 pub(crate) fn verify_decoded_ai_pow_pearl_merge_compact_artifact_with_context_and_limits(
     artifact: &PearlMergeAiPowArtifactShape,
     context: PearlMergeAiPowVerifierContext<'_>,
@@ -7669,8 +7655,9 @@ mod tests {
     // untouched; MoE uses the `AIM1` tag and appends the Pearl MoE tail plus a
     // DoS-capped `routing_data` block. These tests exercise round-trip fidelity,
     // dense/MoE tag disjointness, every cap, and adversarial truncation/trailing
-    // input (a crafted nonce must error, never panic or over-allocate). MoE stays
-    // fail-closed at every verify gate; this layer only carries and bounds bytes.
+    // input (a crafted nonce must error, never panic or over-allocate). This
+    // codec only carries and bounds bytes; live MoE acceptance additionally
+    // requires routing, schedule, work, and compact-certificate verification.
     // ===================================================================
 
     fn moe_nonce_test_statement(

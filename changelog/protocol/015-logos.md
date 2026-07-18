@@ -240,13 +240,13 @@ coin-hopping. At the anchors, `2^227` (AI) and `2^291` (ZK) satisfy `227 + 64 =
 ### Per-puzzle ASERT
 
 Each puzzle retargets with Aletheia's `+compute-target:asert` (unchanged
-polynomial, `rbits = 16`, 12 h half-life). The only new machinery is *subchain
-selection*: `+count-same-type-since-anchor` walks the parent chain counting only
-blocks of the block's own puzzle-type back to that puzzle's anchor, so the ASERT
-`height-diff` for an AI block is "AI blocks since the AI anchor", not raw block
-height, and likewise for ZK. The AI anchor is bootstrapped from the chain: when
-the first `%ai-pow` block lands, `accept-block` captures it as the AI puzzle's
-anchor (`cached-ai-asert-anchor` in `derived-state-10`).
+polynomial, `rbits = 16`, 12 h half-life). Every accepted post-activation block
+stores parent-derived ZK/AI counts, heads, and anchors in
+`puzzle-asert-states`, keyed by block ID. Target computation reads the candidate
+parent's entry, so `height-diff` counts only that branch's blocks of the same
+puzzle type; fork arrival order and the other puzzle's cadence are irrelevant.
+The activation parent initializes the ZK lineage. The first accepted `%ai-pow`
+block on each branch initializes that branch's AI anchor.
 
 ### Block variant and the verify jet
 
@@ -384,10 +384,12 @@ values are rejected.
 
 ### Data Migration
 
-Kernel state advances to `derived-state-10` (per-puzzle ASERT anchors +
-`cached-ai-asert-anchor`), and `blockchain-constants` gains the AI-PoW fields
-(v1 10-slot layout). State auto-upgrades on load. The `blockchain-constants`
-encode/decode round-trip is regression-pinned.
+Kernel state advances to `kernel-state-12`; its `derived-state-11` replaces the
+process-global anchor caches with the branch-local `puzzle-asert-states` map.
+State 11 upgrades only before AI activation (or at genesis), when the lineage is
+empty and deterministic; a post-activation state-11 load fails closed because
+its missing fork lineage cannot be reconstructed. `blockchain-constants` keeps
+the v1 10-slot layout, whose Rust encode/decode round-trip is regression-pinned.
 
 ### Steps
 

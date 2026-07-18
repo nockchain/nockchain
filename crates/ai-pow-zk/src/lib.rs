@@ -73,29 +73,21 @@
 //! dep. The caller in `ai-pow` constructs [`ZkParams`] and the trace +
 //! PIs from its own types at the call site.
 //!
-//! ## Status
+//! ## Consensus binding
 //!
-//! M10.1c is the Layer-0 composite pipeline. The production recursive target is
-//! a recursive certificate, not the raw Layer-0 proof and not the oversized
-//! batch-STARK L1 checkpoint. The selected direction is compact final-layer
-//! batch-STARK L2; it still needs Hoon verifier wiring and a production source
-//! for the verifier-key/setup digest before consensus readiness is claimed.
-//! Earlier M9.1 / M10.1b prototypes were retired once M10.1c had full LogUp +
-//! PI binding + bench data.
-//! See `docs/2026-06-07_COMPACT_RECURSIVE_PRODUCTION_PIPELINE.md` for the
-//! current production pipeline.
+//! The production artifact is the compact final-layer batch-STARK certificate.
+//! Consensus reaches it through the mandatory `ai-pow-verify` jet, which
+//! decodes a bounded noun, derives the public statement and canonical opened
+//! schedule from the candidate, selects verifier-owned setup by the recomputed
+//! trace height, and verifies the compact certificate plus its target-bound
+//! jackpot.
 //!
-//! ## What's not yet bound
-//!
-//! - **Full-matmul recursive statement.** The current recursive certificate
-//!   verifies one selected tile. Production block admission therefore remains
-//!   closed until the recursive statement binds a full-matmul aggregate or
-//!   equivalent full-work certificate.
-//! - **Hoon noun verifier hook.** The structured recursive-certificate noun
-//!   encoder exists in the miner crate, but consensus still needs the jet /
-//!   wiring that decodes the noun at the block boundary, reconstructs the
-//!   verifier-derived statement from block data, and calls the Rust verifier.
-//!   Until that hook is wired, the Hoon/kernel path remains fail-closed.
+//! The proven useful-work statement is Pearl's selected ticket tile, including
+//! commitment-keyed noise, matmul accumulation, tile-state fold, and jackpot.
+//! It does not claim a raw Layer-0 proof or the oversized L1 checkpoint as a
+//! block certificate. The P0/D6 statement-digest fold binds the canonical
+//! Layer-0 program; setup and verifier-key digests come from the node rather
+//! than the prover.
 
 // Test-only lint relaxations: `unwrap()` is fine in tests (repo convention), and the
 // AIR/trace negative tests address cells by the explicit `row * WIDTH + col` index

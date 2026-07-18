@@ -366,11 +366,10 @@ pub fn composite_prove_pinned_logup(
 }
 
 /// [`composite_prove_pinned_logup`] with an explicit HIGH-2.2
-/// §6(b) keystone flag. `sx_bound` MUST be derived by the
-/// verifier from the trusted block params (`num_stripes ≤ 16`),
-/// never from the proof. `true` = production / TEST_SMALL path;
-/// `false` = `num_stripes > 16` legacy path (rectangular / PROD),
-/// the documented §6(b) wider-register residual.
+/// §6(b) keystone flag. `sx_bound` MUST be derived by the verifier from trusted
+/// block parameters, never from the proof. `true` uses the StripeXor transport
+/// for `num_stripes <= STRIPE_MAX`; `false` uses the R-b TileReduce predecessor
+/// keystone for larger stripe-major traces.
 pub fn composite_prove_pinned_logup_sx(
     config: &AiPowStarkConfig,
     mut trace: CompositeTrace,
@@ -472,8 +471,8 @@ pub fn composite_verify_pow_pinned_logup(
 }
 
 /// [`composite_verify_pow_pinned_logup`] with an explicit §6(b)
-/// keystone flag. `sx_bound` MUST be derived by the verifier from
-/// the trusted block params (`num_stripes ≤ 16`), never the proof.
+/// keystone flag. `sx_bound` MUST be derived by the verifier from trusted block
+/// parameters, never from the proof.
 pub fn composite_verify_pow_pinned_logup_sx(
     config: &AiPowStarkConfig,
     program: &Program,
