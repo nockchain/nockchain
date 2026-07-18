@@ -98,10 +98,17 @@ struct EditorSnapshot {
 struct SemanticWorkspace {
     dependencies: PathBuf,
     prelude: PathBuf,
+    roots: Vec<PathBuf>,
     sources: WorkspaceSourceSnapshot,
 }
 
 struct SemanticDefinition {
+    path: PathBuf,
+    source: Arc<str>,
+    range: SemanticTextRange,
+}
+
+struct SemanticReference {
     path: PathBuf,
     source: Arc<str>,
     range: SemanticTextRange,
@@ -171,6 +178,7 @@ enum SemanticQuery {
     References {
         byte_offset: u32,
         include_declaration: bool,
+        workspace: Arc<SemanticWorkspace>,
     },
     PrepareRename {
         byte_offset: u32,
@@ -186,7 +194,7 @@ enum SemanticQueryResult {
     Hover(Option<SemanticHover>),
     Definition(Option<SemanticDefinition>),
     Completion(SemanticCompletionResult),
-    References(Option<Vec<SemanticTextRange>>),
+    References(Option<Vec<SemanticReference>>),
     PrepareRename(Option<SemanticRenameTarget>),
     Rename(Option<SemanticRename>),
     RequestError { code: ErrorCode, message: String },
@@ -964,6 +972,7 @@ fn handle_request(
                 SemanticQuery::References {
                     byte_offset,
                     include_declaration: params.context.include_declaration,
+                    workspace: semantic_workspace(state, config)?,
                 },
             )?;
         }
@@ -1105,10 +1114,10 @@ fn enqueue_semantic_query(
     };
     let workspace_generation = match &query {
         SemanticQuery::Definition { workspace, .. }
-        | SemanticQuery::Completion { workspace, .. } => Some(workspace.sources.revision()),
+        | SemanticQuery::Completion { workspace, .. }
+        | SemanticQuery::References { workspace, .. } => Some(workspace.sources.revision()),
         SemanticQuery::DocumentSymbols
         | SemanticQuery::Hover { .. }
-        | SemanticQuery::References { .. }
         | SemanticQuery::PrepareRename { .. }
         | SemanticQuery::Rename { .. } => None,
     };
@@ -1168,6 +1177,12 @@ fn semantic_workspace(
     config: &ResolvedConfig,
 ) -> Result<Arc<SemanticWorkspace>> {
     let editor = lock_snapshot(state)?.clone();
+    let mut roots = editor.documents.keys().cloned().collect::<Vec<_>>();
+    if let Some(entry) = &config.entry {
+        roots.push(entry.clone());
+    }
+    roots.sort();
+    roots.dedup();
     let sources = WorkspaceSourceSnapshot::try_new(
         editor.generation,
         editor
@@ -1179,6 +1194,7 @@ fn semantic_workspace(
     Ok(Arc::new(SemanticWorkspace {
         dependencies: config.workspace.dependencies.clone(),
         prelude: config.workspace.prelude.clone(),
+        roots,
         sources,
     }))
 }
@@ -1249,6 +1265,7 @@ fn spawn_semantic_worker(
 
 fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<SemanticEvent>) {
     let mut semantics = SemanticSession::default();
+    let mut structural_graph = None::<CachedStructuralWorkspaceGraph>;
     while let Ok(command) = commands.recv() {
         match command {
             SemanticCommand::Query(job) => {
@@ -1309,14 +1326,26 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                     SemanticQuery::References {
                         byte_offset,
                         include_declaration,
-                    } => match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
-                        Ok(snapshot) => SemanticQueryResult::References(snapshot.references(
-                            source.as_ref(),
-                            byte_offset,
-                            include_declaration,
-                        )),
-                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
-                    },
+                        workspace,
+                    } => {
+                        let graph =
+                            cached_structural_workspace_graph(&mut structural_graph, &workspace);
+                        match structural_workspace_references(
+                            &mut semantics,
+                            StructuralReferenceQuery {
+                                path: &path,
+                                version,
+                                source: Arc::clone(&source),
+                                byte_offset,
+                                include_declaration,
+                            },
+                            &workspace,
+                            graph,
+                        ) {
+                            Ok(references) => SemanticQueryResult::References(references),
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
+                        }
+                    }
                     SemanticQuery::PrepareRename { byte_offset } => {
                         match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
                             Ok(snapshot) => SemanticQueryResult::PrepareRename(
@@ -1404,6 +1433,14 @@ fn structural_workspace_definition(
         return Ok(None);
     };
 
+    structural_external_definition(path, &name, workspace)
+}
+
+fn structural_external_definition(
+    path: &Path,
+    name: &str,
+    workspace: &SemanticWorkspace,
+) -> Result<Option<SemanticDefinition>> {
     let mut visited = HashSet::<PathBuf>::new();
     if let Ok(canonical) = workspace.sources.canonicalize(path) {
         visited.insert(canonical);
@@ -1423,7 +1460,7 @@ fn structural_workspace_definition(
             let Ok(dependency_source) = workspace.sources.read_to_string(&dependency) else {
                 continue;
             };
-            if let Some(range) = structural_definition(&dependency_source, &name) {
+            if let Some(range) = structural_definition(&dependency_source, name) {
                 definitions.push(SemanticDefinition {
                     path: dependency.clone(),
                     source: Arc::from(dependency_source.as_str()),
@@ -1444,12 +1481,279 @@ fn structural_workspace_definition(
         .read_to_string(&workspace.prelude)
         .with_context(|| format!("failed to read prelude {}", workspace.prelude.display()))?;
     Ok(
-        structural_definition(&prelude_source, &name).map(|range| SemanticDefinition {
+        structural_definition(&prelude_source, name).map(|range| SemanticDefinition {
             path: workspace.prelude.clone(),
             source: Arc::from(prelude_source),
             range,
         }),
     )
+}
+
+struct StructuralReferenceQuery<'path> {
+    path: &'path Path,
+    version: i32,
+    source: Arc<str>,
+    byte_offset: u32,
+    include_declaration: bool,
+}
+
+fn structural_workspace_references(
+    semantics: &mut SemanticSession,
+    query: StructuralReferenceQuery<'_>,
+    workspace: &SemanticWorkspace,
+    graph: &StructuralWorkspaceGraph,
+) -> Result<Option<Vec<SemanticReference>>> {
+    let StructuralReferenceQuery {
+        path,
+        version,
+        source,
+        byte_offset,
+        include_declaration,
+    } = query;
+    let (name, local, local_definition, lexical_binding) = {
+        let snapshot = semantics
+            .snapshot(path, i64::from(version), source.as_ref())
+            .map_err(anyhow::Error::new)?;
+        (
+            hoon_term_at(source.as_ref(), byte_offset).map(str::to_owned),
+            snapshot.references(source.as_ref(), byte_offset, include_declaration),
+            snapshot.definition(source.as_ref(), byte_offset),
+            snapshot
+                .prepare_rename(source.as_ref(), byte_offset)
+                .is_some(),
+        )
+    };
+    if lexical_binding {
+        let Some(ranges) = local else {
+            return Ok(None);
+        };
+        return Ok(Some(
+            ranges
+                .into_iter()
+                .map(|range| SemanticReference {
+                    path: path.to_path_buf(),
+                    source: Arc::clone(&source),
+                    range,
+                })
+                .collect(),
+        ));
+    }
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let declarations = graph.declarations(&name);
+    let current_identity = semantic_path_identity(path, workspace);
+    let target_identity = local_definition
+        .map(|range| (current_identity.clone(), range))
+        .or_else(|| graph.external_definition(&current_identity, &declarations));
+    let Some(target_identity) = target_identity else {
+        return Ok(None);
+    };
+    let imported_version = i64::try_from(workspace.sources.revision()).unwrap_or(i64::MAX);
+    let mut references = Vec::<SemanticReference>::new();
+    for (candidate_identity, candidate) in &graph.documents {
+        let is_target = candidate_identity == &target_identity.0;
+        if !is_target
+            && graph.external_definition(candidate_identity, &declarations)
+                != Some(target_identity.clone())
+        {
+            continue;
+        }
+        let candidate_version = if candidate_identity == &current_identity {
+            i64::from(version)
+        } else {
+            imported_version
+        };
+        let snapshot = match semantics.snapshot(
+            &candidate.path,
+            candidate_version,
+            candidate.source.as_ref(),
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                debug!(path = %candidate.path.display(), %error, "structural reference index is unavailable");
+                continue;
+            }
+        };
+        let ranges = if is_target {
+            snapshot
+                .references(
+                    candidate.source.as_ref(),
+                    target_identity.1.start,
+                    include_declaration,
+                )
+                .unwrap_or_default()
+        } else {
+            snapshot.external_reference_ranges(candidate.source.as_ref(), &name)
+        };
+        references.extend(ranges.into_iter().map(|range| SemanticReference {
+            path: candidate.path.clone(),
+            source: Arc::clone(&candidate.source),
+            range,
+        }));
+    }
+    if include_declaration
+        && !references.iter().any(|reference| {
+            semantic_path_identity(&reference.path, workspace) == target_identity.0
+                && reference.range == target_identity.1
+        })
+    {
+        if let Some(target) = graph.documents.get(&target_identity.0) {
+            references.push(SemanticReference {
+                path: target.path.clone(),
+                source: Arc::clone(&target.source),
+                range: target_identity.1,
+            });
+        }
+    }
+    references.sort_by(|left, right| {
+        (
+            semantic_path_identity(&left.path, workspace),
+            left.range.start,
+            left.range.end,
+        )
+            .cmp(&(
+                semantic_path_identity(&right.path, workspace),
+                right.range.start,
+                right.range.end,
+            ))
+    });
+    references.dedup_by(|left, right| {
+        semantic_path_identity(&left.path, workspace)
+            == semantic_path_identity(&right.path, workspace)
+            && left.range == right.range
+    });
+    Ok(Some(references))
+}
+
+struct StructuralWorkspaceDocument {
+    path: PathBuf,
+    source: Arc<str>,
+    imports: Vec<PathBuf>,
+}
+
+struct StructuralWorkspaceGraph {
+    documents: HashMap<PathBuf, StructuralWorkspaceDocument>,
+    prelude: PathBuf,
+}
+
+struct CachedStructuralWorkspaceGraph {
+    revision: u64,
+    graph: StructuralWorkspaceGraph,
+}
+
+fn cached_structural_workspace_graph<'a>(
+    cached: &'a mut Option<CachedStructuralWorkspaceGraph>,
+    workspace: &SemanticWorkspace,
+) -> &'a StructuralWorkspaceGraph {
+    let revision = workspace.sources.revision();
+    if cached
+        .as_ref()
+        .is_none_or(|cached| cached.revision != revision)
+    {
+        *cached = Some(CachedStructuralWorkspaceGraph {
+            revision,
+            graph: StructuralWorkspaceGraph::build(workspace),
+        });
+    }
+    &cached.as_ref().expect("structural graph was cached").graph
+}
+
+impl StructuralWorkspaceGraph {
+    fn build(workspace: &SemanticWorkspace) -> Self {
+        let mut pending = workspace.roots.clone();
+        let mut documents = HashMap::<PathBuf, StructuralWorkspaceDocument>::new();
+        while let Some(candidate) = pending.pop() {
+            let identity = semantic_path_identity(&candidate, workspace);
+            if documents.contains_key(&identity) {
+                continue;
+            }
+            let candidate_source = match workspace.sources.read_to_string(&candidate) {
+                Ok(source) => Arc::<str>::from(source),
+                Err(error) => {
+                    debug!(path = %candidate.display(), %error, "structural reference source is unavailable");
+                    continue;
+                }
+            };
+            let resolved_imports = hoon_imports(&candidate, workspace);
+            let imports = resolved_imports
+                .iter()
+                .map(|import| semantic_path_identity(import, workspace))
+                .collect::<Vec<_>>();
+            pending.extend(resolved_imports);
+            documents.insert(
+                identity,
+                StructuralWorkspaceDocument {
+                    path: candidate,
+                    source: candidate_source,
+                    imports,
+                },
+            );
+        }
+        let prelude = semantic_path_identity(&workspace.prelude, workspace);
+        if !documents.contains_key(&prelude) {
+            if let Ok(source) = workspace.sources.read_to_string(&workspace.prelude) {
+                documents.insert(
+                    prelude.clone(),
+                    StructuralWorkspaceDocument {
+                        path: workspace.prelude.clone(),
+                        source: Arc::from(source),
+                        imports: Vec::new(),
+                    },
+                );
+            }
+        }
+        Self { documents, prelude }
+    }
+
+    fn declarations(&self, name: &str) -> HashMap<PathBuf, SemanticTextRange> {
+        self.documents
+            .iter()
+            .filter_map(|(identity, document)| {
+                structural_definition(document.source.as_ref(), name)
+                    .map(|range| (identity.clone(), range))
+            })
+            .collect()
+    }
+
+    fn external_definition(
+        &self,
+        from: &Path,
+        declarations: &HashMap<PathBuf, SemanticTextRange>,
+    ) -> Option<(PathBuf, SemanticTextRange)> {
+        let mut visited = HashSet::<PathBuf>::from([from.to_path_buf()]);
+        let mut frontier = self.documents.get(from)?.imports.clone();
+        while !frontier.is_empty() {
+            let mut definitions = Vec::new();
+            let mut next = Vec::new();
+            for identity in frontier {
+                if !visited.insert(identity.clone()) {
+                    continue;
+                }
+                if let Some(range) = declarations.get(&identity) {
+                    definitions.push((identity.clone(), *range));
+                }
+                if let Some(document) = self.documents.get(&identity) {
+                    next.extend(document.imports.iter().cloned());
+                }
+            }
+            match definitions.len() {
+                0 => frontier = next,
+                1 => return definitions.pop(),
+                _ => return None,
+            }
+        }
+        declarations
+            .get(&self.prelude)
+            .map(|range| (self.prelude.clone(), *range))
+    }
+}
+
+fn semantic_path_identity(path: &Path, workspace: &SemanticWorkspace) -> PathBuf {
+    workspace
+        .sources
+        .canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn structural_workspace_completions(
@@ -1761,16 +2065,21 @@ fn drain_semantic_events(
                 })))?
             }
             SemanticQueryResult::References(references) => {
-                let uri = file_path_to_uri(&request.path)?;
-                let references = references.map(|ranges| {
-                    ranges
-                        .into_iter()
-                        .filter_map(|range| {
-                            semantic_range_to_lsp(request.source.as_ref(), range)
-                                .map(|range| Location::new(uri.clone(), range))
-                        })
-                        .collect::<Vec<_>>()
-                });
+                let references = references
+                    .map(|references| -> Result<Vec<Location>> {
+                        let mut locations = Vec::with_capacity(references.len());
+                        for reference in references {
+                            let Some(range) =
+                                semantic_range_to_lsp(reference.source.as_ref(), reference.range)
+                            else {
+                                continue;
+                            };
+                            locations
+                                .push(Location::new(file_path_to_uri(&reference.path)?, range));
+                        }
+                        Ok(locations)
+                    })
+                    .transpose()?;
                 serde_json::to_value(references)?
             }
             SemanticQueryResult::PrepareRename(target) => {

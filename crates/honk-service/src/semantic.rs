@@ -337,6 +337,24 @@ impl SemanticSnapshot {
         }
     }
 
+    /// Return AST-recognized occurrences of `name` that are not owned by a
+    /// lexical binding or a same-document arm/mold. A workspace resolver can
+    /// attach these unresolved terms to an imported declaration without
+    /// falling back to raw text matching.
+    pub fn external_reference_ranges(&self, source: &str, name: &str) -> Vec<SemanticTextRange> {
+        let whole_document = SemanticTextRange {
+            start: 0,
+            end: u32::try_from(source.len()).unwrap_or(u32::MAX),
+        };
+        self.reference_term_ranges(source, name, whole_document)
+            .into_iter()
+            .filter(|range| {
+                self.visible_binding_at(source, range.start).is_none()
+                    && self.definition(source, range.start).is_none()
+            })
+            .collect()
+    }
+
     /// Only lexical faces are renameable for now. Arms, molds, and imported
     /// symbols need workspace-wide provenance before they can be changed
     /// without risking partial edits.
@@ -2172,6 +2190,31 @@ mod tests {
                 .len(),
             2,
             "cord contents are not references"
+        );
+
+        let imported_source = "=/  local  1\n=/  text  'external'\n[local external]\n";
+        let imported = session
+            .snapshot(
+                Path::new("/tmp/imported-references.hoon"),
+                1,
+                imported_source,
+            )
+            .expect("imported-reference snapshot");
+        let external = imported.external_reference_ranges(imported_source, "external");
+        assert_eq!(
+            external.len(),
+            1,
+            "cord contents are not external references"
+        );
+        assert_eq!(
+            &imported_source[external[0].start as usize..external[0].end as usize],
+            "external"
+        );
+        assert!(
+            imported
+                .external_reference_ranges(imported_source, "local")
+                .is_empty(),
+            "lexically bound terms are not external references"
         );
     }
 
