@@ -15,9 +15,10 @@ use honk::workspace::{
 use honk::{CompilerErrorLocation, CompilerResolutionFact, CompilerSemanticFact};
 use honk_service::semantic::{
     completion_term_range, hoon_rune_at, hoon_term_at, range_from_one_based_spot,
-    structural_completions, structural_definition, structural_rune_definition, SemanticCompletion,
-    SemanticCompletionKind, SemanticHover, SemanticNodeId, SemanticRename, SemanticRenameTarget,
-    SemanticSession, SemanticSymbol, SemanticSymbolKind, SemanticTextRange,
+    structural_completions, structural_declaration_ranges, structural_definition,
+    structural_rune_definition, validate_rename_name, SemanticCompletion, SemanticCompletionKind,
+    SemanticHover, SemanticNodeId, SemanticRename, SemanticRenameEdit, SemanticRenameError,
+    SemanticRenameTarget, SemanticSession, SemanticSymbol, SemanticSymbolKind, SemanticTextRange,
 };
 use honk_service::{CompilerHandle, CompilerService, CompilerServiceConfig, DocumentUpdate};
 use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
@@ -33,19 +34,20 @@ use lsp_types::request::{
 use lsp_types::{
     CancelParams, CompletionItem, CompletionItemKind, CompletionList, CompletionOptions,
     CompletionParams, CompletionResponse, CompletionTextEdit, Diagnostic, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol, DocumentSymbolParams,
-    DocumentSymbolResponse, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, Location,
-    LogMessageParams, MarkupContent, MarkupKind, MessageType, NumberOrString, OneOf,
-    OptionalVersionedTextDocumentIdentifier, Position, PositionEncodingKind, PrepareRenameResponse,
-    PublishDiagnosticsParams, Range, ReferenceParams, RenameOptions, RenameParams,
-    ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind, TextDocumentEdit,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentChanges, DocumentSymbol,
+    DocumentSymbolParams, DocumentSymbolResponse, FileChangeType, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, Location, LogMessageParams, MarkupContent, MarkupKind,
+    MessageType, NumberOrString, OneOf, OptionalVersionedTextDocumentIdentifier, Position,
+    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
+    RenameOptions, RenameParams, ServerCapabilities, ServerInfo, ShowMessageParams, SymbolKind,
+    TextDocumentEdit, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, Uri, WorkspaceEdit,
 };
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
+use walkdir::{DirEntry, WalkDir};
 
 pub const SERVER_NAME: &str = "honk-lsp";
 pub const LSP_BASELINE_VERSION: &str = "3.17";
@@ -66,6 +68,7 @@ pub struct LspConfig {
 #[derive(Clone, Debug)]
 struct ResolvedConfig {
     workspace: WorkspaceConfig,
+    workspace_files: HashSet<PathBuf>,
     entry: Option<PathBuf>,
     max_compiles: u64,
     worker_stack_bytes: usize,
@@ -93,6 +96,8 @@ struct EditorSnapshot {
     generation: u64,
     active: Option<PathBuf>,
     documents: HashMap<PathBuf, OpenDocument>,
+    source_root: PathBuf,
+    workspace_files: HashSet<PathBuf>,
 }
 
 struct SemanticWorkspace {
@@ -100,6 +105,7 @@ struct SemanticWorkspace {
     prelude: PathBuf,
     roots: Vec<PathBuf>,
     sources: WorkspaceSourceSnapshot,
+    versions: HashMap<PathBuf, i32>,
 }
 
 struct SemanticDefinition {
@@ -112,6 +118,13 @@ struct SemanticReference {
     path: PathBuf,
     source: Arc<str>,
     range: SemanticTextRange,
+}
+
+struct SemanticDocumentEdits {
+    path: PathBuf,
+    source: Arc<str>,
+    version: Option<i32>,
+    edits: Vec<SemanticRenameEdit>,
 }
 
 struct SemanticCompletionResult {
@@ -182,10 +195,12 @@ enum SemanticQuery {
     },
     PrepareRename {
         byte_offset: u32,
+        workspace: Arc<SemanticWorkspace>,
     },
     Rename {
         byte_offset: u32,
         new_name: String,
+        workspace: Arc<SemanticWorkspace>,
     },
 }
 
@@ -196,7 +211,7 @@ enum SemanticQueryResult {
     Completion(SemanticCompletionResult),
     References(Option<Vec<SemanticReference>>),
     PrepareRename(Option<SemanticRenameTarget>),
-    Rename(Option<SemanticRename>),
+    Rename(Option<Vec<SemanticDocumentEdits>>),
     RequestError { code: ErrorCode, message: String },
     Unavailable(String),
 }
@@ -231,6 +246,7 @@ struct DocumentResolutionFacts {
 struct WorkspaceResolutionFacts {
     generation: u64,
     target: PathBuf,
+    prelude: PathBuf,
     facts: Arc<[CompilerResolutionFact]>,
     by_name: HashMap<String, Vec<usize>>,
     by_definition: HashMap<CompilerDefinitionIdentity, Vec<usize>>,
@@ -241,6 +257,7 @@ impl WorkspaceResolutionFacts {
         generation: u64,
         target: PathBuf,
         dependencies: &Path,
+        prelude: &Path,
         facts: Arc<[CompilerResolutionFact]>,
     ) -> Self {
         let mut by_name = HashMap::<String, Vec<usize>>::new();
@@ -255,6 +272,7 @@ impl WorkspaceResolutionFacts {
         Self {
             generation,
             target,
+            prelude: prelude.to_path_buf(),
             facts,
             by_name,
             by_definition,
@@ -366,10 +384,15 @@ pub fn run_connection(connection: Connection, config: LspConfig) -> Result<()> {
         prelude = %resolved.workspace.prelude.display(),
         dependencies = %resolved.workspace.dependencies.display(),
         entry = ?resolved.entry,
+        workspace_files = resolved.workspace_files.len(),
         "honk language server initialized"
     );
 
-    let state = Arc::new(Mutex::new(EditorSnapshot::default()));
+    let state = Arc::new(Mutex::new(EditorSnapshot {
+        source_root: resolved.workspace.dependencies.clone(),
+        workspace_files: resolved.workspace_files.clone(),
+        ..EditorSnapshot::default()
+    }));
     let (trigger_sender, trigger_receiver) = crossbeam_channel::bounded(1);
     let (event_sender, event_receiver) = crossbeam_channel::unbounded();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -485,6 +508,7 @@ fn resolve_config(config: LspConfig, initialize: &InitializeParams) -> Result<Re
     let subject_type_jam = config
         .subject_type_jam
         .map(|path| resolve_path(&root, path));
+    let workspace_files = discover_workspace_files(&dependencies)?;
 
     Ok(ResolvedConfig {
         workspace: WorkspaceConfig {
@@ -494,6 +518,7 @@ fn resolve_config(config: LspConfig, initialize: &InitializeParams) -> Result<Re
             dbug: config.dbug,
             vet: config.vet,
         },
+        workspace_files,
         entry,
         max_compiles: config.max_compiles,
         worker_stack_bytes: config.worker_stack_bytes,
@@ -503,6 +528,44 @@ fn resolve_config(config: LspConfig, initialize: &InitializeParams) -> Result<Re
                 .unwrap_or(config.check_delay_ms),
         ),
     })
+}
+
+fn discover_workspace_files(dependencies: &Path) -> Result<HashSet<PathBuf>> {
+    let mut files = HashSet::new();
+    if !dependencies.is_dir() {
+        return Ok(files);
+    }
+    for entry in WalkDir::new(dependencies)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(include_workspace_entry)
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to enumerate Hoon workspace sources under {}",
+                dependencies.display()
+            )
+        })?;
+        if entry.path().is_file() && is_hoon_source(entry.path()) {
+            files.insert(entry.into_path());
+        }
+    }
+    Ok(files)
+}
+
+fn include_workspace_entry(entry: &DirEntry) -> bool {
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return true;
+    }
+    !matches!(
+        entry.file_name().to_str(),
+        Some(".git" | ".direnv" | "node_modules" | "target")
+    )
+}
+
+fn is_hoon_source(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension == "hoon")
 }
 
 fn workspace_root(initialize: &InitializeParams) -> Result<PathBuf> {
@@ -651,9 +714,23 @@ fn handle_notification(
             schedule_check(trigger);
         }
         DidChangeWatchedFiles::METHOD => {
+            let params: DidChangeWatchedFilesParams = parse_notification(notification)?;
             {
                 let mut snapshot = lock_snapshot(state)?;
                 snapshot.generation = snapshot.generation.saturating_add(1);
+                for change in params.changes {
+                    let Ok(path) = uri_to_file_path(&change.uri) else {
+                        continue;
+                    };
+                    if !is_hoon_source(&path) || !path.starts_with(&snapshot.source_root) {
+                        continue;
+                    }
+                    if change.typ == FileChangeType::DELETED || !path.is_file() {
+                        snapshot.workspace_files.remove(&path);
+                    } else {
+                        snapshot.workspace_files.insert(path);
+                    }
+                }
             }
             semantics.clear_resolution_facts();
             schedule_check(trigger);
@@ -861,6 +938,7 @@ fn handle_request(
                     .send(Response::new_ok(request.id, serde_json::Value::Null).into())?;
                 return Ok(());
             };
+            let editor = lock_snapshot(state)?.clone();
             let compiler_definition = if hoon_rune_at(&document.text, byte_offset).is_some() {
                 None
             } else {
@@ -868,10 +946,21 @@ fn handle_request(
                     &semantics.resolution_facts, &path, document.version, &document.text,
                     byte_offset,
                 ) {
+                    Some((target, location))
+                        if paths_match(
+                            &compiler_location_path(
+                                Some(&location),
+                                &target,
+                                &config.workspace.dependencies,
+                            ),
+                            &config.workspace.prelude,
+                        ) =>
+                    {
+                        None
+                    }
                     Some((target, location)) => {
-                        let snapshot = lock_snapshot(state)?.clone();
                         match compiler_definition_to_lsp(
-                            &snapshot, &target, &config.workspace.dependencies, &location,
+                            &editor, &target, &config.workspace.dependencies, &location,
                         ) {
                             Ok(location) => location.map(GotoDefinitionResponse::Scalar),
                             Err(error) => {
@@ -1018,7 +1107,10 @@ fn handle_request(
                 request.id,
                 path,
                 document,
-                SemanticQuery::PrepareRename { byte_offset },
+                SemanticQuery::PrepareRename {
+                    byte_offset,
+                    workspace: semantic_workspace(state, config)?,
+                },
             )?;
         }
         Rename::METHOD => {
@@ -1068,6 +1160,7 @@ fn handle_request(
                 SemanticQuery::Rename {
                     byte_offset,
                     new_name: params.new_name,
+                    workspace: semantic_workspace(state, config)?,
                 },
             )?;
         }
@@ -1115,11 +1208,10 @@ fn enqueue_semantic_query(
     let workspace_generation = match &query {
         SemanticQuery::Definition { workspace, .. }
         | SemanticQuery::Completion { workspace, .. }
-        | SemanticQuery::References { workspace, .. } => Some(workspace.sources.revision()),
-        SemanticQuery::DocumentSymbols
-        | SemanticQuery::Hover { .. }
-        | SemanticQuery::PrepareRename { .. }
-        | SemanticQuery::Rename { .. } => None,
+        | SemanticQuery::References { workspace, .. }
+        | SemanticQuery::PrepareRename { workspace, .. }
+        | SemanticQuery::Rename { workspace, .. } => Some(workspace.sources.revision()),
+        SemanticQuery::DocumentSymbols | SemanticQuery::Hover { .. } => None,
     };
     let job = SemanticJob {
         id: id.clone(),
@@ -1177,12 +1269,18 @@ fn semantic_workspace(
     config: &ResolvedConfig,
 ) -> Result<Arc<SemanticWorkspace>> {
     let editor = lock_snapshot(state)?.clone();
-    let mut roots = editor.documents.keys().cloned().collect::<Vec<_>>();
+    let mut roots = editor.workspace_files.iter().cloned().collect::<Vec<_>>();
+    roots.extend(editor.documents.keys().cloned());
     if let Some(entry) = &config.entry {
         roots.push(entry.clone());
     }
     roots.sort();
     roots.dedup();
+    let versions = editor
+        .documents
+        .iter()
+        .map(|(path, document)| (path.clone(), document.version))
+        .collect();
     let sources = WorkspaceSourceSnapshot::try_new(
         editor.generation,
         editor
@@ -1196,6 +1294,7 @@ fn semantic_workspace(
         prelude: config.workspace.prelude.clone(),
         roots,
         sources,
+        versions,
     }))
 }
 
@@ -1346,29 +1445,52 @@ fn semantic_worker_loop(commands: &Receiver<SemanticCommand>, events: &Sender<Se
                             Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
                     }
-                    SemanticQuery::PrepareRename { byte_offset } => {
-                        match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
-                            Ok(snapshot) => SemanticQueryResult::PrepareRename(
-                                snapshot.prepare_rename(source.as_ref(), byte_offset),
-                            ),
+                    SemanticQuery::PrepareRename {
+                        byte_offset,
+                        workspace,
+                    } => {
+                        let graph =
+                            cached_structural_workspace_graph(&mut structural_graph, &workspace);
+                        match structural_workspace_prepare_rename(
+                            &mut semantics,
+                            &path,
+                            version,
+                            source.as_ref(),
+                            byte_offset,
+                            &workspace,
+                            graph,
+                        ) {
+                            Ok(target) => SemanticQueryResult::PrepareRename(target),
                             Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
                     }
                     SemanticQuery::Rename {
                         byte_offset,
                         new_name,
-                    } => match semantics.snapshot(&path, i64::from(version), source.as_ref()) {
-                        Ok(snapshot) => {
-                            match snapshot.rename(source.as_ref(), byte_offset, &new_name) {
-                                Ok(rename) => SemanticQueryResult::Rename(rename),
-                                Err(error) => SemanticQueryResult::RequestError {
-                                    code: ErrorCode::InvalidParams,
-                                    message: error.to_string(),
-                                },
-                            }
+                        workspace,
+                    } => {
+                        let graph =
+                            cached_structural_workspace_graph(&mut structural_graph, &workspace);
+                        match structural_workspace_rename(
+                            &mut semantics,
+                            StructuralRenameQuery {
+                                path: &path,
+                                version,
+                                source: Arc::clone(&source),
+                                byte_offset,
+                                new_name: &new_name,
+                            },
+                            &workspace,
+                            graph,
+                        ) {
+                            Ok(Ok(rename)) => SemanticQueryResult::Rename(rename),
+                            Ok(Err(error)) => SemanticQueryResult::RequestError {
+                                code: ErrorCode::InvalidParams,
+                                message: error.to_string(),
+                            },
+                            Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
                         }
-                        Err(error) => SemanticQueryResult::Unavailable(error.to_string()),
-                    },
+                    }
                 };
                 if cancelled.load(Ordering::Acquire) {
                     continue;
@@ -1626,6 +1748,266 @@ fn structural_workspace_references(
     Ok(Some(references))
 }
 
+struct StructuralSymbolTarget {
+    name: String,
+    request_range: SemanticTextRange,
+    definition: (PathBuf, SemanticTextRange),
+}
+
+fn structural_workspace_prepare_rename(
+    semantics: &mut SemanticSession,
+    path: &Path,
+    version: i32,
+    source: &str,
+    byte_offset: u32,
+    workspace: &SemanticWorkspace,
+    graph: &StructuralWorkspaceGraph,
+) -> Result<Option<SemanticRenameTarget>> {
+    let snapshot = semantics
+        .snapshot(path, i64::from(version), source)
+        .map_err(anyhow::Error::new)?;
+    if let Some(target) = snapshot.prepare_rename(source, byte_offset) {
+        return Ok(Some(target));
+    }
+    if !graph.complete {
+        return Ok(None);
+    }
+    Ok(
+        structural_symbol_target(snapshot, path, source, byte_offset, workspace, graph).map(
+            |target| SemanticRenameTarget {
+                name: target.name,
+                range: target.request_range,
+            },
+        ),
+    )
+}
+
+struct StructuralRenameQuery<'query> {
+    path: &'query Path,
+    version: i32,
+    source: Arc<str>,
+    byte_offset: u32,
+    new_name: &'query str,
+}
+
+fn structural_workspace_rename(
+    semantics: &mut SemanticSession,
+    query: StructuralRenameQuery<'_>,
+    workspace: &SemanticWorkspace,
+    graph: &StructuralWorkspaceGraph,
+) -> Result<Result<Option<Vec<SemanticDocumentEdits>>, SemanticRenameError>> {
+    let StructuralRenameQuery {
+        path,
+        version,
+        source,
+        byte_offset,
+        new_name,
+    } = query;
+    let snapshot = semantics
+        .snapshot(path, i64::from(version), source.as_ref())
+        .map_err(anyhow::Error::new)?;
+    match snapshot.rename(source.as_ref(), byte_offset, new_name) {
+        Ok(Some(rename)) => {
+            return Ok(Ok(Some(vec![local_rename_document(
+                path, version, source, rename,
+            )])));
+        }
+        Ok(None) => {}
+        Err(error) => return Ok(Err(error)),
+    }
+    if !graph.complete {
+        bail!("workspace source graph is incomplete; structural rename was declined");
+    }
+    if let Err(error) = validate_rename_name(new_name) {
+        return Ok(Err(error));
+    }
+    let Some(target) = structural_symbol_target(
+        snapshot,
+        path,
+        source.as_ref(),
+        byte_offset,
+        workspace,
+        graph,
+    ) else {
+        return Ok(Ok(None));
+    };
+    let Some(references) = structural_workspace_references(
+        semantics,
+        StructuralReferenceQuery {
+            path,
+            version,
+            source: Arc::clone(&source),
+            byte_offset,
+            include_declaration: true,
+        },
+        workspace,
+        graph,
+    )?
+    else {
+        return Ok(Ok(None));
+    };
+
+    if new_name != target.name
+        && structural_rename_would_collide(
+            semantics, &target, &references, new_name, workspace, graph,
+        )?
+    {
+        return Ok(Err(SemanticRenameError::WouldCapture(new_name.to_string())));
+    }
+
+    let mut documents = HashMap::<PathBuf, SemanticDocumentEdits>::new();
+    for reference in references {
+        let identity = semantic_path_identity(&reference.path, workspace);
+        let document = documents
+            .entry(identity)
+            .or_insert_with(|| SemanticDocumentEdits {
+                version: workspace_document_version(&reference.path, workspace),
+                path: reference.path.clone(),
+                source: Arc::clone(&reference.source),
+                edits: Vec::new(),
+            });
+        document.edits.push(SemanticRenameEdit {
+            range: reference.range,
+            new_text: new_name.to_string(),
+        });
+    }
+    let mut documents = documents.into_values().collect::<Vec<_>>();
+    for document in &mut documents {
+        document
+            .edits
+            .sort_by_key(|edit| (edit.range.start, edit.range.end));
+    }
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(Ok(Some(documents)))
+}
+
+fn structural_symbol_target(
+    snapshot: &honk_service::semantic::SemanticSnapshot,
+    path: &Path,
+    source: &str,
+    byte_offset: u32,
+    workspace: &SemanticWorkspace,
+    graph: &StructuralWorkspaceGraph,
+) -> Option<StructuralSymbolTarget> {
+    let name = hoon_term_at(source, byte_offset)?.to_string();
+    let request_range = completion_term_range(source, byte_offset)?;
+    if request_range.start == request_range.end
+        || source.get(request_range.start as usize..request_range.end as usize) != Some(&name)
+    {
+        return None;
+    }
+    let current_identity = semantic_path_identity(path, workspace);
+    let declarations = graph.declarations(&name);
+    let definition = snapshot
+        .definition(source, byte_offset)
+        .map(|range| (current_identity.clone(), range))
+        .or_else(|| graph.external_definition(&current_identity, &declarations))?;
+    Some(StructuralSymbolTarget {
+        name,
+        request_range,
+        definition,
+    })
+}
+
+fn structural_rename_would_collide(
+    semantics: &mut SemanticSession,
+    target: &StructuralSymbolTarget,
+    references: &[SemanticReference],
+    new_name: &str,
+    workspace: &SemanticWorkspace,
+    graph: &StructuralWorkspaceGraph,
+) -> Result<bool> {
+    let Some(target_document) = graph.documents.get(&target.definition.0) else {
+        return Ok(true);
+    };
+    if !structural_declaration_ranges(target_document.source.as_ref(), new_name).is_empty() {
+        return Ok(true);
+    }
+
+    let mut virtual_declarations = graph.declarations(new_name);
+    virtual_declarations.insert(target.definition.0.clone(), target.definition.1);
+    let mut edits_by_document = HashMap::<PathBuf, Vec<SemanticTextRange>>::new();
+    for reference in references {
+        edits_by_document
+            .entry(semantic_path_identity(&reference.path, workspace))
+            .or_default()
+            .push(reference.range);
+    }
+    let imported_version = i64::try_from(workspace.sources.revision()).unwrap_or(i64::MAX);
+    for (identity, document) in &graph.documents {
+        let edited_ranges = edits_by_document.get(identity);
+        let resolves_new_target = identity == &target.definition.0
+            || graph.external_definition(identity, &virtual_declarations)
+                == Some(target.definition.clone());
+        if edited_ranges.is_some() && !resolves_new_target {
+            return Ok(true);
+        }
+        if !resolves_new_target {
+            continue;
+        }
+        if edited_ranges.is_some()
+            && identity != &target.definition.0
+            && !structural_declaration_ranges(document.source.as_ref(), new_name).is_empty()
+        {
+            return Ok(true);
+        }
+        let snapshot_version = workspace_document_version(&document.path, workspace)
+            .map(i64::from)
+            .unwrap_or(imported_version);
+        let snapshot = semantics
+            .snapshot(&document.path, snapshot_version, document.source.as_ref())
+            .map_err(anyhow::Error::new)
+            .with_context(|| {
+                format!(
+                    "failed to prove rename safety in {}",
+                    document.path.display()
+                )
+            })?;
+        if snapshot
+            .external_reference_ranges(document.source.as_ref(), new_name)
+            .into_iter()
+            .next()
+            .is_some()
+        {
+            return Ok(true);
+        }
+        if edited_ranges.is_some_and(|ranges| {
+            let use_ranges = ranges
+                .iter()
+                .copied()
+                .filter(|range| identity != &target.definition.0 || range != &target.definition.1)
+                .collect::<Vec<_>>();
+            snapshot.external_rename_would_capture(&use_ranges, new_name)
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn local_rename_document(
+    path: &Path,
+    version: i32,
+    source: Arc<str>,
+    rename: SemanticRename,
+) -> SemanticDocumentEdits {
+    SemanticDocumentEdits {
+        path: path.to_path_buf(),
+        source,
+        version: Some(version),
+        edits: rename.edits,
+    }
+}
+
+fn workspace_document_version(path: &Path, workspace: &SemanticWorkspace) -> Option<i32> {
+    workspace.versions.get(path).copied().or_else(|| {
+        let identity = semantic_path_identity(path, workspace);
+        workspace.versions.iter().find_map(|(candidate, version)| {
+            (semantic_path_identity(candidate, workspace) == identity).then_some(*version)
+        })
+    })
+}
+
 struct StructuralWorkspaceDocument {
     path: PathBuf,
     source: Arc<str>,
@@ -1635,6 +2017,7 @@ struct StructuralWorkspaceDocument {
 struct StructuralWorkspaceGraph {
     documents: HashMap<PathBuf, StructuralWorkspaceDocument>,
     prelude: PathBuf,
+    complete: bool,
 }
 
 struct CachedStructuralWorkspaceGraph {
@@ -1662,20 +2045,38 @@ fn cached_structural_workspace_graph<'a>(
 impl StructuralWorkspaceGraph {
     fn build(workspace: &SemanticWorkspace) -> Self {
         let mut pending = workspace.roots.clone();
+        let mut preferred_paths = HashMap::<PathBuf, PathBuf>::new();
+        for path in &workspace.roots {
+            preferred_paths
+                .entry(semantic_path_identity(path, workspace))
+                .or_insert_with(|| path.clone());
+        }
+        let prelude = semantic_path_identity(&workspace.prelude, workspace);
+        preferred_paths.insert(prelude.clone(), workspace.prelude.clone());
         let mut documents = HashMap::<PathBuf, StructuralWorkspaceDocument>::new();
+        let mut complete = true;
         while let Some(candidate) = pending.pop() {
             let identity = semantic_path_identity(&candidate, workspace);
             if documents.contains_key(&identity) {
                 continue;
             }
+            let candidate = preferred_paths.get(&identity).unwrap_or(&candidate).clone();
             let candidate_source = match workspace.sources.read_to_string(&candidate) {
                 Ok(source) => Arc::<str>::from(source),
                 Err(error) => {
                     debug!(path = %candidate.display(), %error, "structural reference source is unavailable");
+                    complete = false;
                     continue;
                 }
             };
-            let resolved_imports = hoon_imports(&candidate, workspace);
+            let resolved_imports = match resolved_hoon_imports_result(&candidate, workspace) {
+                Ok(imports) => imports.into_iter().map(|import| import.path).collect(),
+                Err(error) => {
+                    debug!(path = %candidate.display(), %error, "semantic import scan failed");
+                    complete = false;
+                    Vec::new()
+                }
+            };
             let imports = resolved_imports
                 .iter()
                 .map(|import| semantic_path_identity(import, workspace))
@@ -1690,7 +2091,6 @@ impl StructuralWorkspaceGraph {
                 },
             );
         }
-        let prelude = semantic_path_identity(&workspace.prelude, workspace);
         if !documents.contains_key(&prelude) {
             if let Ok(source) = workspace.sources.read_to_string(&workspace.prelude) {
                 documents.insert(
@@ -1701,9 +2101,15 @@ impl StructuralWorkspaceGraph {
                         imports: Vec::new(),
                     },
                 );
+            } else {
+                complete = false;
             }
         }
-        Self { documents, prelude }
+        Self {
+            documents,
+            prelude,
+            complete,
+        }
     }
 
     fn declarations(&self, name: &str) -> HashMap<PathBuf, SemanticTextRange> {
@@ -1909,21 +2315,29 @@ fn hoon_imports(path: &Path, workspace: &SemanticWorkspace) -> Vec<PathBuf> {
 }
 
 fn resolved_hoon_imports(path: &Path, workspace: &SemanticWorkspace) -> Vec<ResolvedNativeImport> {
-    match pipeline::resolve_native_imports_with_source(
-        path,
-        &workspace.dependencies,
-        ScopeMode::Standard,
-        &workspace.sources,
-    ) {
-        Ok(imports) => imports
-            .into_iter()
-            .filter(|import| import.kind == NativeImportKind::Hoon)
-            .collect(),
+    match resolved_hoon_imports_result(path, workspace) {
+        Ok(imports) => imports,
         Err(error) => {
             debug!(path = %path.display(), %error, "semantic import scan failed");
             Vec::new()
         }
     }
+}
+
+fn resolved_hoon_imports_result(
+    path: &Path,
+    workspace: &SemanticWorkspace,
+) -> Result<Vec<ResolvedNativeImport>> {
+    let imports = pipeline::resolve_native_imports_with_source(
+        path,
+        &workspace.dependencies,
+        ScopeMode::Standard,
+        &workspace.sources,
+    )?;
+    Ok(imports
+        .into_iter()
+        .filter(|import| import.kind == NativeImportKind::Hoon)
+        .collect())
 }
 
 fn drain_semantic_events(
@@ -2093,30 +2507,39 @@ fn drain_semantic_events(
                 });
                 serde_json::to_value(target)?
             }
-            SemanticQueryResult::Rename(rename) => {
-                let rename = rename.map(|rename| {
-                    let uri = file_path_to_uri(&request.path)?;
-                    let edits = rename
-                        .edits
-                        .into_iter()
-                        .filter_map(|edit| {
-                            semantic_range_to_lsp(request.source.as_ref(), edit.range)
-                                .map(|range| OneOf::Left(TextEdit::new(range, edit.new_text)))
-                        })
-                        .collect::<Vec<_>>();
-                    Ok::<_, anyhow::Error>(WorkspaceEdit {
-                        changes: None,
-                        document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
-                            text_document: OptionalVersionedTextDocumentIdentifier {
-                                uri,
-                                version: Some(request.version),
-                            },
-                            edits,
-                        }])),
-                        change_annotations: None,
+            SemanticQueryResult::Rename(documents) => {
+                let edit = documents
+                    .map(|documents| {
+                        documents
+                            .into_iter()
+                            .map(|document| {
+                                let edits = document
+                                    .edits
+                                    .into_iter()
+                                    .filter_map(|edit| {
+                                        semantic_range_to_lsp(document.source.as_ref(), edit.range)
+                                            .map(|range| {
+                                                OneOf::Left(TextEdit::new(range, edit.new_text))
+                                            })
+                                    })
+                                    .collect::<Vec<_>>();
+                                Ok::<_, anyhow::Error>(TextDocumentEdit {
+                                    text_document: OptionalVersionedTextDocumentIdentifier {
+                                        uri: file_path_to_uri(&document.path)?,
+                                        version: document.version,
+                                    },
+                                    edits,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()
+                            .map(|edits| WorkspaceEdit {
+                                changes: None,
+                                document_changes: Some(DocumentChanges::Edits(edits)),
+                                change_annotations: None,
+                            })
                     })
-                });
-                serde_json::to_value(rename.transpose()?)?
+                    .transpose()?;
+                serde_json::to_value(edit)?
             }
             SemanticQueryResult::RequestError { code, message } => {
                 send_request_error(connection, event.id, code, message)?;
@@ -2260,6 +2683,14 @@ fn compiler_workspace_references_at(
     let Some(target_fact) = target_fact else {
         return Ok(None);
     };
+    let definition_path = compiler_location_path(
+        Some(&target_fact.definition_location),
+        &index.target,
+        dependencies,
+    );
+    if paths_match(&definition_path, &index.prelude) {
+        return Ok(None);
+    }
     let target_identity = compiler_definition_identity(target_fact, &index.target, dependencies);
     let Some(reference_indices) = index.by_definition.get(&target_identity) else {
         return Ok(None);
@@ -2307,11 +2738,13 @@ fn compiler_workspace_references_at(
         }
     }
     if include_declaration {
-        if let Some(declaration) = compiler_definition_to_lsp(
+        let Some(declaration) = compiler_definition_to_lsp(
             snapshot, &index.target, dependencies, &target_fact.definition_location,
-        )? {
-            references.push(declaration);
-        }
+        )?
+        else {
+            return Ok(None);
+        };
+        references.push(declaration);
     }
     references.sort_by(|left, right| {
         (
@@ -2880,7 +3313,8 @@ fn drain_worker_events(
                         &mut semantics.resolution_facts,
                     );
                     semantics.workspace_resolution = Some(WorkspaceResolutionFacts::new(
-                        generation, target, &config.workspace.dependencies, workspace_facts,
+                        generation, target, &config.workspace.dependencies,
+                        &config.workspace.prelude, workspace_facts,
                     ));
                 }
             }
@@ -3365,6 +3799,7 @@ mod tests {
                 dbug: true,
                 vet: true,
             },
+            workspace_files: Default::default(),
             entry: None,
             max_compiles: 0,
             worker_stack_bytes: 1024 * 1024,

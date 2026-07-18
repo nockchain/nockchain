@@ -355,6 +355,20 @@ impl SemanticSnapshot {
             .collect()
     }
 
+    /// Check whether replacing the supplied unresolved references with
+    /// `new_name` would make any of them resolve to a lexical face.
+    pub fn external_rename_would_capture(
+        &self,
+        ranges: &[SemanticTextRange],
+        new_name: &str,
+    ) -> bool {
+        ranges.iter().any(|range| {
+            self.bindings.iter().any(|binding| {
+                binding.name == new_name && binding.scope_range.contains(range.start)
+            })
+        })
+    }
+
     /// Only lexical faces are renameable for now. Arms, molds, and imported
     /// symbols need workspace-wide provenance before they can be changed
     /// without risking partial edits.
@@ -372,9 +386,7 @@ impl SemanticSnapshot {
         byte_offset: u32,
         new_name: &str,
     ) -> Result<Option<SemanticRename>, SemanticRenameError> {
-        if !is_valid_hoon_term(new_name) {
-            return Err(SemanticRenameError::InvalidName(new_name.to_string()));
-        }
+        validate_rename_name(new_name)?;
         let Some(binding) = self.binding_identity_at(source, byte_offset) else {
             return Ok(None);
         };
@@ -491,6 +503,14 @@ impl SemanticSnapshot {
     }
 }
 
+pub fn validate_rename_name(new_name: &str) -> Result<(), SemanticRenameError> {
+    if is_valid_hoon_term(new_name) {
+        Ok(())
+    } else {
+        Err(SemanticRenameError::InvalidName(new_name.to_string()))
+    }
+}
+
 impl From<SemanticSymbolKind> for SemanticCompletionKind {
     fn from(kind: SemanticSymbolKind) -> Self {
         match kind {
@@ -571,6 +591,18 @@ pub fn structural_definition(source: &str, name: &str) -> Option<SemanticTextRan
         return None;
     }
     Some(definition.selection_range)
+}
+
+/// Return every arm or mold declaration with `name` for collision checks.
+pub fn structural_declaration_ranges(source: &str, name: &str) -> Vec<SemanticTextRange> {
+    if source.len() > u32::MAX as usize {
+        return Vec::new();
+    }
+    scan_arm_headers(source)
+        .into_iter()
+        .filter(|symbol| symbol.name == name)
+        .map(|symbol| symbol.selection_range)
+        .collect()
 }
 
 /// Enumerate unambiguous arm and mold declarations using the same lightweight
@@ -2216,6 +2248,18 @@ mod tests {
                 .is_empty(),
             "lexically bound terms are not external references"
         );
+
+        let capture_source = "=/  gizmo  1\nwidget\n";
+        let capture = session
+            .snapshot(
+                Path::new("/tmp/external-rename-capture.hoon"),
+                1,
+                capture_source,
+            )
+            .expect("external rename capture snapshot");
+        let widget = capture.external_reference_ranges(capture_source, "widget");
+        assert!(capture.external_rename_would_capture(&widget, "gizmo"));
+        assert!(!capture.external_rename_would_capture(&widget, "other"));
     }
 
     #[test]

@@ -120,9 +120,16 @@ those structural definitions and traced Hoon syntax, then merges the narrowest
 compiler type fact for the same open-document version when one is available.
 An edit immediately drops the prior facts; failed or stale checks cannot
 publish them. Go-to-definition follows compiler-resolved core arms and imported
-gates, including definitions in other files. Local faces and bindings do not
-yet carry declaration provenance through native types, and references are not
-implemented.
+gates, including definitions in other files, and uses the structural import
+graph for arms, molds, standard-library terms, and runes that do not yet have a
+compiler resolution fact. Find-references preserves lexical binding identity
+locally and exact declaration/import identity across every Hoon source under
+the configured dependency root. The same complete graph powers rename: local
+faces retain their existing scope-aware edits, while arms and molds produce a
+multi-document edit that includes unopened sources. Structural rename is
+declined when the graph is incomplete, a competing declaration would win or
+make resolution ambiguous, an existing occurrence would change meaning, or a
+lexical face would capture a renamed use.
 
 ## Invalidation and lifetime
 
@@ -132,6 +139,11 @@ separate workspace mode:
 - Every source and data file reached by a request is content-fingerprinted.
 - Dependency-directory layout is fingerprinted so create/delete/rename changes,
   including a new higher-precedence import candidate, invalidate the context.
+- The LSP separately discovers every `.hoon` source under its configured
+  dependency root at initialization. VS Code file-watch create, change, and
+  delete events update that source set and advance the semantic generation, so
+  the cached structural graph never survives a disk-layout change. Open buffers
+  remain authoritative overlays and carry document versions in workspace edits.
 - An unchanged request can reuse path caches.
 - The editor-only source-overlay path records direct and reverse dependency
   edges. A content-only edit to an existing file invalidates that path and its
