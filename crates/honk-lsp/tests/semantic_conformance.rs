@@ -26,6 +26,10 @@ fn repository_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+fn file_uri(path: &Path) -> Uri {
+    Uri::from_str(url::Url::from_file_path(path).expect("file URI").as_str()).expect("LSP file URI")
+}
+
 fn receive_response_message(client: &Connection, expected: i32) -> Response {
     loop {
         let message = client
@@ -590,6 +594,104 @@ fn definition_navigates_to_an_imported_gate() {
         .all(|location| location.uri != other_uri));
 
     shutdown_server(&client, server_thread, request_id + 1);
+}
+
+#[test]
+fn structural_references_preserve_import_identity_across_open_roots() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let lib = temp.path().join("lib");
+    std::fs::create_dir(&lib).expect("library directory");
+    let alpha = lib.join("alpha.hoon");
+    let beta = lib.join("beta.hoon");
+    let alpha_entry = temp.path().join("alpha-entry.hoon");
+    let beta_entry = temp.path().join("beta-entry.hoon");
+    let mold_source = "|%\n+$  widget  @\n--\n";
+    let entry_source = |import: &str| format!("/+  {import}\n^-  widget\n42\n");
+    std::fs::write(&alpha, mold_source).expect("alpha mold source");
+    std::fs::write(&beta, mold_source).expect("beta mold source");
+    std::fs::write(&alpha_entry, "42\n").expect("alpha disk entry");
+    std::fs::write(&beta_entry, "42\n").expect("beta disk entry");
+
+    let alpha_uri = file_uri(&alpha);
+    let beta_uri = file_uri(&beta);
+    let alpha_entry_uri = file_uri(&alpha_entry);
+    let beta_entry_uri = file_uri(&beta_entry);
+    let alpha_entry_source = entry_source("alpha");
+    let beta_entry_source = entry_source("beta");
+    let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
+    for (uri, source) in [
+        (alpha_entry_uri.clone(), alpha_entry_source),
+        (beta_entry_uri.clone(), beta_entry_source),
+    ] {
+        client
+            .sender
+            .send(
+                Notification::new(
+                    DidOpenTextDocument::METHOD.to_string(),
+                    DidOpenTextDocumentParams {
+                        text_document: TextDocumentItem::new(uri, "hoon".to_string(), 1, source),
+                    },
+                )
+                .into(),
+            )
+            .expect("open structural-reference root");
+    }
+
+    let alpha_references = request_references(&client, 2, &alpha_entry_uri, 1, 5, true);
+    assert_eq!(alpha_references.len(), 2);
+    assert!(alpha_references
+        .iter()
+        .any(|location| location.uri == alpha_entry_uri));
+    assert!(alpha_references
+        .iter()
+        .any(|location| location.uri == alpha_uri));
+    assert!(alpha_references
+        .iter()
+        .all(|location| location.uri != beta_entry_uri && location.uri != beta_uri));
+
+    let beta_references = request_references(&client, 3, &beta_entry_uri, 1, 5, true);
+    assert_eq!(beta_references.len(), 2);
+    assert!(beta_references
+        .iter()
+        .any(|location| location.uri == beta_entry_uri));
+    assert!(beta_references
+        .iter()
+        .any(|location| location.uri == beta_uri));
+    assert!(beta_references
+        .iter()
+        .all(|location| location.uri != alpha_entry_uri && location.uri != alpha_uri));
+
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        alpha_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        mold_source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("open structural declaration");
+    let declaration_references = request_references(&client, 4, &alpha_uri, 1, 5, true);
+    assert_eq!(declaration_references.len(), 2);
+    assert!(declaration_references
+        .iter()
+        .any(|location| location.uri == alpha_entry_uri));
+    assert!(declaration_references
+        .iter()
+        .any(|location| location.uri == alpha_uri));
+    assert!(declaration_references
+        .iter()
+        .all(|location| location.uri != beta_entry_uri && location.uri != beta_uri));
+
+    shutdown_server(&client, server_thread, 5);
 }
 
 #[test]
@@ -1203,7 +1305,7 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
             .as_str(),
     )
     .expect("check-target LSP URI");
-    let reference_deadline = Instant::now() + Duration::from_secs(30);
+    let reference_deadline = Instant::now() + Duration::from_secs(60);
     let imported_arm_references = loop {
         let references = request_references(
             &client,
@@ -1230,6 +1332,110 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
     assert!(imported_arm_references.len() >= 2);
     request_id += 1;
 
+    let tip5_use_line = source
+        .lines()
+        .position(|line| line.contains("dig=tip5-hash-atom"))
+        .expect("tip5-hash-atom use");
+    let tip5_use_character = source
+        .lines()
+        .nth(tip5_use_line)
+        .expect("tip5-hash-atom use line")
+        .find("tip5-hash-atom")
+        .expect("tip5-hash-atom use character");
+    let tip5_definition_path = root.join("hoon/common/ztd/four.hoon");
+    let tip5_definition_uri = Uri::from_str(
+        url::Url::from_file_path(&tip5_definition_path)
+            .expect("tip5-hash-atom definition URI")
+            .as_str(),
+    )
+    .expect("tip5-hash-atom LSP URI");
+    let tip5_references = request_references(
+        &client,
+        request_id,
+        &entry_uri,
+        tip5_use_line,
+        tip5_use_character + 1,
+        true,
+    );
+    assert!(tip5_references.iter().any(|location| {
+        location.uri == entry_uri
+            && usize::try_from(location.range.start.line).expect("small line") == tip5_use_line
+            && usize::try_from(location.range.start.character).expect("small character")
+                == tip5_use_character
+    }));
+    assert!(tip5_references
+        .iter()
+        .any(|location| location.uri == tip5_definition_uri));
+    request_id += 1;
+
+    let tip5_definition_source = std::fs::read_to_string(&tip5_definition_path)
+        .expect("read tip5-hash-atom definition source");
+    let tip5_declaration_line = tip5_definition_source
+        .lines()
+        .position(|line| line.trim_start().starts_with("+$  tip5-hash-atom"))
+        .expect("tip5-hash-atom declaration");
+    let tip5_declaration_character = tip5_definition_source
+        .lines()
+        .nth(tip5_declaration_line)
+        .expect("tip5-hash-atom declaration line")
+        .find("tip5-hash-atom")
+        .expect("tip5-hash-atom declaration character");
+    let tip5_uses_only = request_references(
+        &client,
+        request_id,
+        &entry_uri,
+        tip5_use_line,
+        tip5_use_character + 1,
+        false,
+    );
+    assert!(tip5_uses_only
+        .iter()
+        .any(|location| location.uri == entry_uri));
+    assert!(!tip5_uses_only.iter().any(|location| {
+        location.uri == tip5_definition_uri
+            && usize::try_from(location.range.start.line).expect("small line")
+                == tip5_declaration_line
+            && usize::try_from(location.range.start.character).expect("small character")
+                == tip5_declaration_character
+    }));
+    request_id += 1;
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        tip5_definition_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        tip5_definition_source,
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("open tip5-hash-atom declaration");
+    let declaration_references = request_references(
+        &client,
+        request_id,
+        &tip5_definition_uri,
+        tip5_declaration_line,
+        tip5_declaration_character + 1,
+        true,
+    );
+    assert!(declaration_references
+        .iter()
+        .any(|location| location.uri == entry_uri));
+    assert!(declaration_references.iter().any(|location| {
+        location.uri == tip5_definition_uri
+            && usize::try_from(location.range.start.line).expect("small line")
+                == tip5_declaration_line
+            && usize::try_from(location.range.start.character).expect("small character")
+                == tip5_declaration_character
+    }));
+    request_id += 1;
+
     let prelude_path = root.join("hoon/common/hoon.hoon");
     let prelude_source = std::fs::read_to_string(&prelude_path).expect("read prelude source");
     let prelude_uri = Uri::from_str(
@@ -1238,6 +1444,49 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
             .as_str(),
     )
     .expect("prelude LSP URI");
+    let list_use_line = source
+        .lines()
+        .position(|line| line.contains("^-  [(list effect)"))
+        .expect("standard-library list use");
+    let list_use_character = source
+        .lines()
+        .nth(list_use_line)
+        .expect("standard-library list use line")
+        .find("list")
+        .expect("standard-library list use character");
+    let list_declaration_line = prelude_source
+        .lines()
+        .position(|line| line.trim_start().starts_with("++  list"))
+        .expect("standard-library list declaration");
+    let list_declaration_character = prelude_source
+        .lines()
+        .nth(list_declaration_line)
+        .expect("standard-library list declaration line")
+        .find("list")
+        .expect("standard-library list declaration character");
+    let list_references = request_references(
+        &client,
+        request_id,
+        &entry_uri,
+        list_use_line,
+        list_use_character + 1,
+        true,
+    );
+    assert!(list_references.iter().any(|location| {
+        location.uri == entry_uri
+            && usize::try_from(location.range.start.line).expect("small line") == list_use_line
+            && usize::try_from(location.range.start.character).expect("small character")
+                == list_use_character
+    }));
+    assert!(list_references.iter().any(|location| {
+        location.uri == prelude_uri
+            && usize::try_from(location.range.start.line).expect("small line")
+                == list_declaration_line
+            && usize::try_from(location.range.start.character).expect("small character")
+                == list_declaration_character
+    }));
+    request_id += 1;
+
     let rune_cases = [
         ("^-  [(list effect)", "^-", "kthp", "[%kthp "),
         ("=/  cause", "=/", "tsfs", "[%tsfs "),

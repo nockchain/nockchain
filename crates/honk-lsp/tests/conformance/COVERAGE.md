@@ -32,6 +32,8 @@ clients that implement later, capability-negotiated LSP versions.
 | References | Compiler-resolved imported arms return uses and their declaration across files, preserve exact declaration identity when another module exports the same name, and honor `includeDeclaration` | MUST for advertised capability | `definition_navigates_to_an_imported_gate` (`add-two:math`) | Passing |
 | References | A changed unsaved generation immediately invalidates old compiler references and publishes the refreshed repeated qualified uses only after the matching check | implementation freshness invariant | `definition_navigates_to_an_imported_gate` | Passing |
 | References | Real `miner.hoon` references for `check-target:mine` include its declaration in `common/pow.hoon` | real-source regression | `real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols` | Passing |
+| References | Structurally resolved molds follow the nearest-unique transitive import identity, work from both a use and an opened declaration, and exclude cords and lexically captured terms | implementation fallback | `structural_references_preserve_import_identity_across_open_roots` + real `miner.hoon` `tip5-hash-atom` cases + service external-reference filtering | Passing |
+| References | Standard-library symbols include uses in the open-root import graph and their declaration in the configured prelude | implementation fallback | real `miner.hoon` `list` case | Passing |
 | Rename | Advertised prepare-rename and rename return versioned edits for the exact lexical binding identity | MUST for advertised capability | `local_references_and_rename_preserve_binding_identity` | Passing |
 | Rename | Rename rejects invalid terms and changes that would capture or collide with another visible face | implementation safety invariant | service unit coverage + protocol collision case | Passing |
 | Rename | Renaming a shorthand sample preserves its mold by expanding `=old` to `new=old` | real-source regression | real `miner.hoon` `kernel-state` case | Passing |
@@ -50,7 +52,8 @@ configured prelude. Gene rune tokens resolve to their canonical tagged
 alternatives in the prelude's `hoon` mold; core declaration tokens `++`, `+$`,
 and `+|` resolve to their parser arms. References preserve same-document lexical
 binding identity and use compiler-owned declaration identity across the latest
-successfully checked import graph for resolved arms and gates. Structural-only
-mold and standard-library references are not yet workspace-wide. Rename is
-intentionally limited to lexical faces until workspace-wide provenance can
-guarantee complete edits.
+successfully checked import graph for resolved arms and gates. Structural molds
+and standard-library symbols use the same nearest-unique import resolver as
+definition across every open or configured root. Rename is intentionally
+limited to lexical faces until workspace-wide provenance can guarantee complete
+edits.
