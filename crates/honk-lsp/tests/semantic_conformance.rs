@@ -9,7 +9,9 @@ use honk_service::DEFAULT_WORKER_STACK_BYTES;
 use lsp_server::{
     Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseKind,
 };
-use lsp_types::notification::{DidOpenTextDocument, Notification as LspNotification};
+use lsp_types::notification::{
+    DidChangeWatchedFiles, DidOpenTextDocument, Notification as LspNotification,
+};
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionResponse, DidOpenTextDocumentParams,
     DocumentSymbolResponse, GotoDefinitionResponse, Hover, Location, PrepareRenameResponse,
@@ -692,6 +694,273 @@ fn structural_references_preserve_import_identity_across_open_roots() {
         .all(|location| location.uri != beta_entry_uri && location.uri != beta_uri));
 
     shutdown_server(&client, server_thread, 5);
+}
+
+#[test]
+fn workspace_references_index_unopened_sources_and_follow_watcher_changes() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let lib = temp.path().join("lib");
+    std::fs::create_dir(&lib).expect("library directory");
+    let declaration = lib.join("types.hoon");
+    let first = temp.path().join("first.hoon");
+    let second = temp.path().join("second.hoon");
+    let third = temp.path().join("third.hoon");
+    let declaration_source = "|%\n+$  widget  @\n--\n";
+    let use_source = "/+  types\n^-  widget\n42\n";
+    std::fs::write(&declaration, declaration_source).expect("mold declaration");
+    std::fs::write(&first, use_source).expect("first source");
+    std::fs::write(&second, use_source).expect("second source");
+
+    let declaration_uri = file_uri(&declaration);
+    let first_uri = file_uri(&first);
+    let second_uri = file_uri(&second);
+    let third_uri = file_uri(&third);
+    let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        first_uri.clone(),
+                        "hoon".to_string(),
+                        1,
+                        use_source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("open first source");
+
+    let initial = request_references(&client, 2, &first_uri, 1, 5, true);
+    assert_eq!(initial.len(), 3);
+    assert!(initial
+        .iter()
+        .any(|location| location.uri == declaration_uri));
+    assert!(initial.iter().any(|location| location.uri == first_uri));
+    assert!(initial.iter().any(|location| location.uri == second_uri));
+
+    std::fs::write(&second, "42\n").expect("update second source");
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidChangeWatchedFiles::METHOD.to_string(),
+                json!({ "changes": [{ "uri": second_uri, "type": 2 }] }),
+            )
+            .into(),
+        )
+        .expect("notify changed source");
+    let after_change = request_references(&client, 3, &first_uri, 1, 5, true);
+    assert_eq!(after_change.len(), 2);
+    assert!(after_change
+        .iter()
+        .all(|location| location.uri != second_uri));
+
+    std::fs::write(&third, use_source).expect("create third source");
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidChangeWatchedFiles::METHOD.to_string(),
+                json!({ "changes": [{ "uri": third_uri, "type": 1 }] }),
+            )
+            .into(),
+        )
+        .expect("notify created source");
+    let after_create = request_references(&client, 4, &first_uri, 1, 5, true);
+    assert_eq!(after_create.len(), 3);
+    assert!(after_create
+        .iter()
+        .any(|location| location.uri == third_uri));
+
+    std::fs::remove_file(&third).expect("delete third source");
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidChangeWatchedFiles::METHOD.to_string(),
+                json!({ "changes": [{ "uri": third_uri, "type": 3 }] }),
+            )
+            .into(),
+        )
+        .expect("notify deleted source");
+    let after_delete = request_references(&client, 5, &first_uri, 1, 5, true);
+    assert_eq!(after_delete.len(), 2);
+    assert!(after_delete
+        .iter()
+        .all(|location| location.uri != third_uri));
+
+    shutdown_server(&client, server_thread, 6);
+}
+
+#[test]
+fn workspace_rename_edits_unopened_sources_and_rejects_import_collisions() {
+    let root = repository_root();
+    let temp = TempDir::new().expect("temporary workspace");
+    let lib = temp.path().join("lib");
+    std::fs::create_dir(&lib).expect("library directory");
+    let declaration = lib.join("types.hoon");
+    let competing = lib.join("other.hoon");
+    let first = temp.path().join("first.hoon");
+    let second = temp.path().join("second.hoon");
+    let captured = temp.path().join("captured.hoon");
+    let declaration_source = "|%\n+$  widget  @\n--\n";
+    let competing_source = "|%\n+$  gizmo  @\n--\n";
+    let use_source = "/+  types, other\n^-  widget\n42\n";
+    let captured_source = "/+  types, other\n=/  captured  1\n^-  widget\n42\n";
+    std::fs::write(&declaration, declaration_source).expect("mold declaration");
+    std::fs::write(&competing, competing_source).expect("competing mold declaration");
+    std::fs::write(&first, use_source).expect("first source");
+    std::fs::write(&second, use_source).expect("second source");
+    std::fs::write(&captured, captured_source).expect("capturing source");
+
+    let declaration_uri = file_uri(&declaration);
+    let first_uri = file_uri(&first);
+    let second_uri = file_uri(&second);
+    let captured_uri = file_uri(&captured);
+    let (client, server_thread) = start_server_with_dependencies(&root, temp.path(), 0);
+    client
+        .sender
+        .send(
+            Notification::new(
+                DidOpenTextDocument::METHOD.to_string(),
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem::new(
+                        first_uri.clone(),
+                        "hoon".to_string(),
+                        7,
+                        use_source.to_string(),
+                    ),
+                },
+            )
+            .into(),
+        )
+        .expect("open first source");
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(2),
+                "textDocument/prepareRename".to_string(),
+                json!({
+                    "textDocument": { "uri": first_uri },
+                    "position": { "line": 1, "character": 5 }
+                }),
+            )
+            .into(),
+        )
+        .expect("prepare workspace rename");
+    let prepared =
+        serde_json::from_value::<Option<PrepareRenameResponse>>(receive_response(&client, 2))
+            .expect("prepare rename response")
+            .expect("imported mold can be renamed");
+    assert_eq!(
+        prepared,
+        PrepareRenameResponse::RangeWithPlaceholder {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(1, 4),
+                lsp_types::Position::new(1, 10),
+            ),
+            placeholder: "widget".to_string(),
+        }
+    );
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(3),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": first_uri },
+                    "position": { "line": 1, "character": 5 },
+                    "newName": "renamed-widget"
+                }),
+            )
+            .into(),
+        )
+        .expect("request workspace rename");
+    let edit = serde_json::from_value::<Option<WorkspaceEdit>>(receive_response(&client, 3))
+        .expect("workspace rename response")
+        .expect("workspace rename edit");
+    let edit_json = serde_json::to_value(edit).expect("workspace edit JSON");
+    let document_changes = edit_json["documentChanges"]
+        .as_array()
+        .expect("document changes");
+    assert_eq!(document_changes.len(), 4);
+    for uri in [&captured_uri, &declaration_uri, &first_uri, &second_uri] {
+        let document = document_changes
+            .iter()
+            .find(|document| document["textDocument"]["uri"] == uri.as_str())
+            .unwrap_or_else(|| panic!("missing rename edits for {uri:?}"));
+        assert_eq!(document["edits"].as_array().expect("text edits").len(), 1);
+        assert_eq!(document["edits"][0]["newText"], "renamed-widget");
+    }
+    let first_edits = document_changes
+        .iter()
+        .find(|document| document["textDocument"]["uri"] == first_uri.as_str())
+        .expect("open document edits");
+    assert_eq!(first_edits["textDocument"]["version"], 7);
+    for uri in [&captured_uri, &declaration_uri, &second_uri] {
+        let unopened = document_changes
+            .iter()
+            .find(|document| document["textDocument"]["uri"] == uri.as_str())
+            .expect("unopened document edits");
+        assert!(unopened["textDocument"]["version"].is_null());
+    }
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(4),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": first_uri },
+                    "position": { "line": 1, "character": 5 },
+                    "newName": "gizmo"
+                }),
+            )
+            .into(),
+        )
+        .expect("request colliding workspace rename");
+    let collision = receive_response_message(&client, 4);
+    let ResponseKind::Err { error } = collision.response_kind else {
+        panic!("workspace rename collision must be rejected");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+    assert!(error.message.contains("gizmo"));
+    assert!(error.message.contains("capture"));
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(5),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": first_uri },
+                    "position": { "line": 1, "character": 5 },
+                    "newName": "captured"
+                }),
+            )
+            .into(),
+        )
+        .expect("request capturing workspace rename");
+    let capture = receive_response_message(&client, 5);
+    let ResponseKind::Err { error } = capture.response_kind else {
+        panic!("workspace rename lexical capture must be rejected");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidParams as i32);
+    assert!(error.message.contains("captured"));
+    assert!(error.message.contains("capture"));
+
+    shutdown_server(&client, server_thread, 6);
 }
 
 #[test]
@@ -1399,6 +1668,57 @@ fn real_miner_definitions_resolve_local_transitive_prelude_and_rune_symbols() {
                 == tip5_declaration_character
     }));
     request_id += 1;
+
+    client
+        .sender
+        .send(
+            Request::new(
+                RequestId::from(request_id),
+                "textDocument/rename".to_string(),
+                json!({
+                    "textDocument": { "uri": entry_uri },
+                    "position": {
+                        "line": tip5_use_line,
+                        "character": tip5_use_character + 1
+                    },
+                    "newName": "tip5-hash-atom-lsp-probe"
+                }),
+            )
+            .into(),
+        )
+        .expect("rename real imported mold");
+    let tip5_rename =
+        serde_json::from_value::<Option<WorkspaceEdit>>(receive_response(&client, request_id))
+            .expect("real imported mold rename response")
+            .expect("real imported mold rename edit");
+    let tip5_rename = serde_json::to_value(tip5_rename).expect("imported mold rename JSON");
+    let tip5_documents = tip5_rename["documentChanges"]
+        .as_array()
+        .expect("imported mold document edits");
+    let miner_edits = tip5_documents
+        .iter()
+        .find(|document| document["textDocument"]["uri"] == entry_uri.as_str())
+        .expect("miner imported mold edits");
+    assert_eq!(miner_edits["textDocument"]["version"], 1);
+    assert!(miner_edits["edits"].as_array().is_some_and(|edits| {
+        edits
+            .iter()
+            .any(|edit| edit["newText"] == "tip5-hash-atom-lsp-probe")
+    }));
+    let definition_edits = tip5_documents
+        .iter()
+        .find(|document| document["textDocument"]["uri"] == tip5_definition_uri.as_str())
+        .expect("tip5 declaration edits");
+    assert!(definition_edits["textDocument"]["version"].is_null());
+    assert!(definition_edits["edits"].as_array().is_some_and(|edits| {
+        edits.iter().any(|edit| {
+            edit["range"]["start"]["line"]
+                == u64::try_from(tip5_declaration_line).expect("small line")
+                && edit["newText"] == "tip5-hash-atom-lsp-probe"
+        })
+    }));
+    request_id += 1;
+
     client
         .sender
         .send(
