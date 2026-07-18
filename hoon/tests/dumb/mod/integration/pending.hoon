@@ -351,7 +351,7 @@
   ?>  (~(check-excluded k-by:h nockchain) id.raw1)
   ::
   ::  block 3 mines tx1 and becomes heaviest: the tx leaves the mempool
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
   ?>  =(~(digest get:page:t block-3) ~(heaviest-block k-by:h nockchain))
@@ -360,8 +360,8 @@
       ==
   ::
   ::  a competing fork from block 2 that does NOT carry tx1, and outweighs it
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ::  the fork won: block 3 (and tx1 with it) is now orphaned
@@ -390,21 +390,21 @@
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
   ::
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
   ?>  !(~(has-excluded k-by:h nockchain) id.raw1)
   ::
   ::  losing fork overtakes, orphaning block 3 and returning tx1
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  (~(has-excluded k-by:h nockchain) id.raw1)
   ::
   ::  extend the winning chain: tx1 is in the mempool, so this block's
   ::  new-heaviest re-gossip must carry it
-  =/  block-5-p  (make-empty-page:h block-4-p)
+  =/  block-5-p  (prove-page:h (make-empty-page:h block-4-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-5-p)
   =/  regossiped=(z-set:zoon raw-tx:t)  (filter-heard-tx-effects:h effs)
@@ -429,8 +429,8 @@
   =^  effs=(list effect:h)  nockchain
     (~(heard-txs k-by:h nockchain) ~[raw1 raw2])
   ::
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-4  (make-page-with-txs:v0:h block-3 ~[id.raw2])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-4  (prove-page:h (make-page-with-txs:v0:h block-3 ~[id.raw2]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
   ?>  =(~(digest get:page:t block-4) ~(heaviest-block k-by:h nockchain))
@@ -440,9 +440,9 @@
       ==
   ::
   ::  a three-block fork from block 2 outweighs the two-block branch
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
-  =/  block-5-p  (make-empty-page:h block-4-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
+  =/  block-5-p  (prove-page:h (make-empty-page:h block-4-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p block-5-p])
   ?>  =(~(digest get:page:t block-5-p) ~(heaviest-block k-by:h nockchain))
@@ -478,7 +478,7 @@
   ::
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
   ?>  =(~(digest get:page:t block-3) ~(heaviest-block k-by:h nockchain))
@@ -490,14 +490,14 @@
   ::  really reaches us is behind a block -- 3' parks as a PENDING block waiting
   ::  on the tx, and the pending path in +heard-tx admits it without the
   ::  mempool's spent check.
-  =/  block-3-p  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1-alt])
+  =/  block-3-p  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1-alt]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3-p)
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1-alt)
   ::
   ::  4' extends the fork, making it heaviest and orphaning block 3
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-4-p)
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -540,11 +540,11 @@
     (~(heard-tx k-by:h nockchain) raw1)
   ::
   ::  block 3 mines raw1, then a longer fork orphans it
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -590,11 +590,11 @@
     (~(heard-tx k-by:h nockchain) raw1)
   ::  block-3 carries raw1; the block-3-p / block-4-p fork then out-weighs it,
   ::  so block-3 is orphaned and block-3-p is the winner at the same height.
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -630,13 +630,13 @@
   ::  a TWO-block orphan branch (block-3 -> block-4), out-weighed by a three
   ::  block fork. Both orphans must go: keeping block-4 while deleting its
   ::  parent block-3 is exactly the dangling-parent break.
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-4  (make-empty-page:h block-3)
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-4  (prove-page:h (make-empty-page:h block-3))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
-  =/  block-5-p  (make-empty-page:h block-4-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
+  =/  block-5-p  (prove-page:h (make-empty-page:h block-4-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p block-5-p])
   ?>  =(~(digest get:page:t block-5-p) ~(heaviest-block k-by:h nockchain))
@@ -672,11 +672,11 @@
   =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -686,7 +686,7 @@
   ?>  .=  ~
       (~(con-block-residue k-by:h nockchain) booted ~(digest get:page:t block-3))
   =/  booted-chain  (~(with-con k-by:h nockchain) booted)
-  =/  block-4  (make-empty-page:h block-3)
+  =/  block-4  (prove-page:h (make-empty-page:h block-3))
   =^  effs=(list effect:h)  booted-chain
     (~(heard-block k-by:h booted-chain) block-4)
   ::  not accepted (its parent is gone), heaviest chain untouched, state sound
@@ -713,11 +713,11 @@
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
   ::  block-3 is orphaned by the block-3-p / block-4-p fork, as before
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -726,7 +726,7 @@
   ::  Its parent (block-3) is still present here, so it passes +heard-block's
   ::  parent check and parks in .pending-blocks awaiting the tx.
   =/  raw2  (make-raw-tx-from-coinbase:v0:h p:default-keys-3:h (snag 1 pages))
-  =/  block-4  (make-page-with-txs:v0:h block-3 ~[id.raw2])
+  =/  block-4  (prove-page:h (make-page-with-txs:v0:h block-3 ~[id.raw2]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-4)
   ?>  (~(has-pending-block k-by:h nockchain) ~(digest get:page:t block-4))
@@ -771,11 +771,11 @@
   ?>  (~(check-excluded k-by:h nockchain) id.raw1)
   ::
   ::  mined at height 3, on a branch we then extend to height 7
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-4  (make-empty-page:h block-3)
-  =/  block-5  (make-empty-page:h block-4)
-  =/  block-6  (make-empty-page:h block-5)
-  =/  block-7  (make-empty-page:h block-6)
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-4  (prove-page:h (make-empty-page:h block-3))
+  =/  block-5  (prove-page:h (make-empty-page:h block-4))
+  =/  block-6  (prove-page:h (make-empty-page:h block-5))
+  =/  block-7  (prove-page:h (make-empty-page:h block-6))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3 block-4 block-5 block-6 block-7])
   ?>  =(~(digest get:page:t block-7) ~(heaviest-block k-by:h nockchain))
@@ -784,12 +784,12 @@
   ::  a longer fork from block 2 overtakes it, orphaning the whole branch. tx1
   ::  comes back with heard-at = 8, so the retention sweep in this same event
   ::  (which drops excluded txs older than ~4 blocks) must NOT evict it.
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
-  =/  block-5-p  (make-empty-page:h block-4-p)
-  =/  block-6-p  (make-empty-page:h block-5-p)
-  =/  block-7-p  (make-empty-page:h block-6-p)
-  =/  block-8-p  (make-empty-page:h block-7-p)
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
+  =/  block-5-p  (prove-page:h (make-empty-page:h block-4-p))
+  =/  block-6-p  (prove-page:h (make-empty-page:h block-5-p))
+  =/  block-7-p  (prove-page:h (make-empty-page:h block-6-p))
+  =/  block-8-p  (prove-page:h (make-empty-page:h block-7-p))
   =^  effs=(list effect:h)  nockchain
     %-  ~(heard-blocks k-by:h nockchain)
     ~[block-3-p block-4-p block-5-p block-6-p block-7-p block-8-p]
@@ -818,15 +818,15 @@
     (~(heard-tx k-by:h nockchain) raw1)
   ?>  (~(check-excluded k-by:h nockchain) id.raw1)
   ::
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
   ?>  =(~(digest get:page:t block-3) ~(heaviest-block k-by:h nockchain))
   ?>  !(~(has-excluded k-by:h nockchain) id.raw1)
   ::
   ::  the winning fork re-mines tx1 at height 4
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-page-with-txs:v0:h block-3-p ~[id.raw1])
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-page-with-txs:v0:h block-3-p ~[id.raw1]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3-p block-4-p])
   ?>  =(~(digest get:page:t block-4-p) ~(heaviest-block k-by:h nockchain))
@@ -858,8 +858,8 @@
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw2)
   ::  blocks 3 and 4 carry the txs and become the tip
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-4  (make-page-with-txs:v0:h block-3 ~[id.raw2])
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-4  (prove-page:h (make-page-with-txs:v0:h block-3 ~[id.raw2]))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
   ?>  =(~(digest get:page:t block-4) ~(heaviest-block k-by:h nockchain))
@@ -932,9 +932,9 @@
   =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-3-p  (make-empty-page:h (snag 1 pages))
-  =/  block-4-p  (make-empty-page:h block-3-p)
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-3-p  (prove-page:h (make-empty-page:h (snag 1 pages)))
+  =/  block-4-p  (prove-page:h (make-empty-page:h block-3-p))
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block-3)
   =^  effs=(list effect:h)  nockchain
@@ -1003,8 +1003,8 @@
   =/  raw1  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h (snag 0 pages))
   =^  effs=(list effect:h)  nockchain
     (~(heard-tx k-by:h nockchain) raw1)
-  =/  block-3  (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1])
-  =/  block-4  (make-empty-page:h block-3)
+  =/  block-3  (prove-page:h (make-page-with-txs:v0:h (snag 1 pages) ~[id.raw1]))
+  =/  block-4  (prove-page:h (make-empty-page:h block-3))
   =^  effs=(list effect:h)  nockchain
     (~(heard-blocks k-by:h nockchain) ~[block-3 block-4])
   ?>  =(~(digest get:page:t block-4) ~(heaviest-block k-by:h nockchain))
