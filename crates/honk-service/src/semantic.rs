@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -92,6 +92,20 @@ pub struct SemanticHover {
     pub id: SemanticNodeId,
     pub range: SemanticTextRange,
     pub markdown: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SemanticCompletionKind {
+    Binding,
+    Arm,
+    Mold,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticCompletion {
+    pub name: String,
+    pub kind: SemanticCompletionKind,
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -223,6 +237,58 @@ impl SemanticSnapshot {
             return None;
         }
         Some(definition.selection_range)
+    }
+
+    /// Return editor completion candidates visible at the cursor. Lexical
+    /// faces are selected by their exact scope and shadow same-named arms or
+    /// molds. Structural symbols are only offered when their name is unique in
+    /// the document, matching the fallback definition resolver.
+    pub fn completions(&self, byte_offset: u32) -> Vec<SemanticCompletion> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::<String>::new();
+        let mut bindings = self
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.scope_range.start <= byte_offset && byte_offset <= binding.scope_range.end
+            })
+            .collect::<Vec<_>>();
+        bindings.sort_by_key(|binding| {
+            (
+                binding.scope_range.len(),
+                Reverse(binding.declaration_range.start),
+            )
+        });
+        for binding in bindings {
+            if seen.insert(binding.name.clone()) {
+                candidates.push(SemanticCompletion {
+                    name: binding.name.clone(),
+                    kind: SemanticCompletionKind::Binding,
+                    detail: "local face".to_string(),
+                });
+            }
+        }
+
+        let mut symbol_counts = HashMap::<&str, usize>::new();
+        for symbol in &self.symbols {
+            *symbol_counts.entry(symbol.name.as_str()).or_default() += 1;
+        }
+        for symbol in &self.symbols {
+            if symbol_counts.get(symbol.name.as_str()) == Some(&1)
+                && seen.insert(symbol.name.clone())
+            {
+                candidates.push(SemanticCompletion {
+                    name: symbol.name.clone(),
+                    kind: symbol.kind.into(),
+                    detail: match symbol.kind {
+                        SemanticSymbolKind::Arm => "local Hoon arm",
+                        SemanticSymbolKind::Mold => "local Hoon mold",
+                    }
+                    .to_string(),
+                });
+            }
+        }
+        candidates
     }
 
     /// Return same-document references that resolve to the exact lexical face
@@ -407,6 +473,15 @@ impl SemanticSnapshot {
     }
 }
 
+impl From<SemanticSymbolKind> for SemanticCompletionKind {
+    fn from(kind: SemanticSymbolKind) -> Self {
+        match kind {
+            SemanticSymbolKind::Arm => Self::Arm,
+            SemanticSymbolKind::Mold => Self::Mold,
+        }
+    }
+}
+
 enum SemanticIdentity<'a> {
     Binding(&'a SemanticBinding),
     Symbol(&'a SemanticSymbol),
@@ -478,6 +553,32 @@ pub fn structural_definition(source: &str, name: &str) -> Option<SemanticTextRan
         return None;
     }
     Some(definition.selection_range)
+}
+
+/// Enumerate unambiguous arm and mold declarations using the same lightweight
+/// source index as structural go-to-definition.
+pub fn structural_completions(source: &str) -> Vec<SemanticCompletion> {
+    if source.len() > u32::MAX as usize {
+        return Vec::new();
+    }
+    let mut counts = HashMap::<String, usize>::new();
+    let headers = scan_arm_headers(source);
+    for symbol in &headers {
+        *counts.entry(symbol.name.clone()).or_default() += 1;
+    }
+    headers
+        .into_iter()
+        .filter(|symbol| counts.get(&symbol.name) == Some(&1))
+        .map(|symbol| SemanticCompletion {
+            name: symbol.name,
+            kind: symbol.kind.into(),
+            detail: match symbol.kind {
+                SemanticSymbolKind::Arm => "Hoon arm",
+                SemanticSymbolKind::Mold => "Hoon mold",
+            }
+            .to_string(),
+        })
+        .collect()
 }
 
 /// Locate a rune's canonical tagged alternative in the standard-library
@@ -592,6 +693,31 @@ fn hoon_term_range_at(source: &str, byte_offset: u32) -> Option<SemanticTextRang
     }
     if !source.as_bytes()[start].is_ascii_lowercase() {
         return None;
+    }
+    Some(SemanticTextRange {
+        start: u32::try_from(start).ok()?,
+        end: u32::try_from(end).ok()?,
+    })
+}
+
+/// Return the complete term range surrounding an insertion-point cursor. An
+/// empty range is valid when completion is invoked between terms.
+pub fn completion_term_range(source: &str, byte_offset: u32) -> Option<SemanticTextRange> {
+    let offset = usize::try_from(byte_offset).ok()?;
+    if offset > source.len() || !source.is_char_boundary(offset) {
+        return None;
+    }
+    let mut start = offset;
+    while start > 0 && is_hoon_term_byte(source.as_bytes()[start - 1]) {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < source.len() && is_hoon_term_byte(source.as_bytes()[end]) {
+        end += 1;
+    }
+    if start < end && !source.as_bytes()[start].is_ascii_lowercase() {
+        start = offset;
+        end = offset;
     }
     Some(SemanticTextRange {
         start: u32::try_from(start).ok()?,
@@ -1676,9 +1802,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        hoon_rune_at, range_from_one_based_spot, scan_arm_headers, structural_definition,
-        structural_rune_definition, LineIndex, SemanticRenameError, SemanticSession,
-        SemanticSymbolKind, SemanticTextRange,
+        completion_term_range, hoon_rune_at, range_from_one_based_spot, scan_arm_headers,
+        structural_completions, structural_definition, structural_rune_definition, LineIndex,
+        SemanticCompletionKind, SemanticRenameError, SemanticSession, SemanticSymbolKind,
+        SemanticTextRange,
     };
 
     const SOURCE: &str = "|%\n++  answer\n  42\n+$  pair\n  $:  left=@  right=@  ==\n--\n";
@@ -1759,6 +1886,50 @@ mod tests {
         );
         let duplicated_source = source.replace("++  moat", "+$  kernel-state  @\n++  moat");
         assert!(structural_definition(&duplicated_source, "kernel-state").is_none());
+    }
+
+    #[test]
+    fn completion_candidates_preserve_scope_and_structural_ambiguity() {
+        let source = concat!(
+            "|=  outer=@\n", "=/  before  outer\n", "=/  result\n", "  |=  nested=@\n",
+            "  [outer nested]\n", "[before result outer]\n",
+        );
+        let mut session = SemanticSession::default();
+        let snapshot = session
+            .snapshot(Path::new("/tmp/completion.hoon"), 1, source)
+            .expect("completion snapshot");
+        let nested_cursor = source.find("[outer nested]").expect("nested body") + 1;
+        let nested = snapshot.completions(u32::try_from(nested_cursor).expect("small source"));
+        assert!(nested
+            .iter()
+            .any(|item| { item.name == "nested" && item.kind == SemanticCompletionKind::Binding }));
+        let final_cursor = source.rfind("[before").expect("final body") + 1;
+        let final_scope = snapshot.completions(u32::try_from(final_cursor).expect("small source"));
+        assert!(final_scope.iter().all(|item| item.name != "nested"));
+        for name in ["outer", "before", "result"] {
+            assert!(final_scope.iter().any(|item| item.name == name));
+        }
+
+        let structural_source =
+            "++  read\n  1\n+$  state\n  @\n++  duplicate\n  2\n++  duplicate\n  3\n";
+        let structural = structural_completions(structural_source);
+        assert!(structural
+            .iter()
+            .any(|item| { item.name == "read" && item.kind == SemanticCompletionKind::Arm }));
+        assert!(structural
+            .iter()
+            .any(|item| { item.name == "state" && item.kind == SemanticCompletionKind::Mold }));
+        assert!(structural.iter().all(|item| item.name != "duplicate"));
+
+        let term_source = "  tip5-hash-atom";
+        let cursor = term_source.find("tip5").expect("term") + 4;
+        let replacement =
+            completion_term_range(term_source, u32::try_from(cursor).expect("small source"))
+                .expect("completion replacement range");
+        assert_eq!(
+            &term_source[replacement.start as usize..replacement.end as usize],
+            "tip5-hash-atom"
+        );
     }
 
     #[test]
