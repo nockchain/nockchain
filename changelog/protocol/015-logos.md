@@ -350,9 +350,9 @@ early block flow and its own dedicated 20%-of-reward funding stream.
   per-puzzle ASERT regimes, and `%mine-ai` emission all activate at this height.
 - **AI anchor**: the first `%ai-pow` block at or after 114,300 becomes the AI
   puzzle's ASERT anchor (bootstrapped by `accept-block`).
-- **ZK re-anchor**: at 114,299 the ZK puzzle switches to the `zk-asert-post-ai`
-  375 s regime (its 40% share of the 150 s global cadence). Pre-activation ZK
-  targets are unchanged (Aletheia's 150 s regime).
+- **ZK re-anchor**: block 114,299 is the anchor for the new
+  `zk-asert-post-ai` 375 s regime. Target computation switches for candidate
+  height 114,300; block 114,299 itself remains in the pre-activation 150 s regime.
 - **Verifier setup**: every validating node must have the AI-PoW verifier setup
   installed before it needs to validate an `%ai-pow` block (first boot generates
   it, ~15 min; subsequent boots load the cache). A node without it shuts down on
@@ -409,8 +409,9 @@ This is a **consensus-critical** upgrade. After activation:
   variant; no `%ai-pow-verify` jet) and will reject them.
 - Heaviness diverges: pre-0.1.15 nodes lack `compute-work-ai`, so they cannot
   reproduce the accumulated work of any chain containing an `%ai-pow` block.
-- Per-puzzle ASERT changes ZK target computation at 114,299 (the
-  `zk-asert-post-ai` re-anchor), which pre-0.1.15 nodes will not reproduce.
+- Per-puzzle ASERT changes ZK target computation for candidate height 114,300,
+  using block 114,299 as the new regime's anchor; pre-0.1.15 nodes will not
+  reproduce it.
 - The `blockchain-constants` noun gains the AI-PoW fields, causing decode
   failures on pre-0.1.15 software.
 

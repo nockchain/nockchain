@@ -269,7 +269,7 @@ pub fn challenge_indices(seed: &[u8; 32], count: u32, range: u64) -> Vec<u64> {
 mod tests {
     use super::*;
 
-    // ── Track B2: MoE routing-commitment splice ──────────────────────────
+    // MoE routing-commitment splice.
 
     /// The composed helpers reproduce the exact Pearl `compute_hash_activations`
     /// chain, verified against an independent inline recomputation (blake3

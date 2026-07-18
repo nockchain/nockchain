@@ -1,6 +1,6 @@
-//! Track B5 (de-risk) — off-circuit MoE routing-commitment reference.
+//! Off-circuit MoE routing-commitment reference.
 //!
-//! The **canonical spec** the in-circuit MoE sub-AIR (B5a) must reproduce:
+//! The canonical reference reproduced by the in-circuit MoE sub-AIR:
 //! Pearl `zk-pow/src/api/proof_utils.rs::compute_hash_activations`, which folds
 //! the routing commitment into A's noise seed:
 //!
@@ -16,8 +16,7 @@
 //! cycle), so this re-derives from the `blake3` primitive and
 //! [`crate::blake3_tree`]; the decisive cross-crate byte-equivalence KAT
 //! (`moe_ref` == `ai-pow` MoE splice) lives on the `ai-pow` side (it may depend
-//! on `ai-pow-zk`, `--features zk`). Pure / off-circuit — de-risks the spec
-//! before the sub-AIR (the codebase's KAT-first discipline, cf. `noise_ref`).
+//! on `ai-pow-zk`, `--features zk`). This remains an independent parity oracle.
 
 use blake3::Hasher;
 

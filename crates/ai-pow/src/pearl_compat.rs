@@ -541,8 +541,9 @@ pub struct PearlMoeConfig {
 /// all-zero trailer) or `Some(cfg)` for GROUPED_GEMM. Mirrors Pearl's structural
 /// checks (`trailer[4..] == 0`, `top_k == 0` when `e == 0`) so a dense trailer
 /// round-trips unchanged. MoE-specific envelope validation (`top_k < e`,
-/// `e ≤ MAX`, `n·e ≤ 2²⁴`, …) is layered on at use sites; and MoE *proving /
-/// acceptance* remains fail-closed until the recursive circuit (Track B5) lands.
+/// `e ≤ MAX`, `n·e ≤ 2²⁴`, …) is layered on at use sites. Production admission
+/// requires the compact MoE recursive-certificate branch; this parser alone is
+/// never an acceptance gate.
 fn parse_mining_config_trailer(
     reserved: &[u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
 ) -> Result<Option<PearlMoeConfig>, PearlCompatError> {
@@ -781,8 +782,8 @@ impl PearlPublicProofParams {
     /// from the mining-config trailer and fixes the routing-offsets length; the
     /// total length is checked exactly.
     ///
-    /// This is the byte-level MoE decoder; it does **not** by itself accept an MoE
-    /// proof — the recursive certificate path stays fail-closed until Track B5.
+    /// This is only the byte-level decoder. Production admission additionally
+    /// requires the compact MoE recursive certificate and routing binding.
     pub fn from_wire_bytes_moe(
         block_header: PearlIncompleteBlockHeader,
         bytes: &[u8],
@@ -926,15 +927,13 @@ impl PearlPublicProofParams {
         block_header: PearlIncompleteBlockHeader,
         bytes: &[u8],
     ) -> Result<Self, PearlCompatError> {
-        // Fail closed on MoE (GROUPED_GEMM) public data regardless of length: the
-        // MoE variant carries a variable-length tail after the 164-byte dense core
-        // (Pearl `PublicProofParams::to_wire_bytes`), so a length check alone would
-        // report `BadPublicParamsLen` for what is really an unsupported MoE proof.
-        // The mode discriminant `e` lives at bytes[20..22] (mining-config trailer).
-        // MoE (GROUPED_GEMM) public data carries a variable-length tail after the
-        // 164-byte dense core (Track B3b). Until that parser lands, fail closed on
-        // the MoE discriminant `e` (trailer bytes 20..22) with a precise error
-        // rather than a misleading length error.
+        // Fail closed on MoE (GROUPED_GEMM) public data: this is the dense parser.
+        // The MoE variant carries a variable-length Pearl wire tail, while the
+        // Nockchain compact artifact carries its routing data separately. The
+        // mode discriminant `e` lives at bytes[20..22] (mining-config trailer);
+        // report it precisely rather than as a misleading dense-length error.
+        // MoE admission uses `from_public_data_allowing_moe` only inside the
+        // compact MoE certificate-verification branch.
         if bytes.len() >= PEARL_MINING_CONFIG_SIZE {
             let e = u16::from_le_bytes([bytes[20], bytes[21]]);
             if e != 0 {
@@ -1513,7 +1512,7 @@ pub fn compute_pearl_pattern_ticket(
     })
 }
 
-/// Off-circuit MoE grouped-tile reference (Track B3d).
+/// Off-circuit MoE grouped-tile reference.
 ///
 /// Builds `A' = A + E` over the opened global token rows (`outer_indices`, from
 /// [`crate::pearl_moe_routing::RoutingData::outer_indices`]) and `B' = B + F` over
@@ -1525,8 +1524,8 @@ pub fn compute_pearl_pattern_ticket(
 /// equivalence is the reference test); the only MoE-specific inputs are *which*
 /// global rows/columns are opened and *which* `s_a` is used.
 ///
-/// This is the reference the recursive circuit (Track B5) must reproduce. It does
-/// **not** by itself accept an MoE proof — acceptance stays fail-closed until B5.
+/// The recursive circuit reproduces this reference; this function itself only
+/// computes a ticket and is never an acceptance gate.
 ///
 /// `a_row_major` is the `m × k` token matrix (row-major); `b_col_major` is the
 /// full `k × (n·e)` weight matrix (column-major, column `c` at `c·k`).
@@ -1574,11 +1573,10 @@ pub fn compute_moe_tile(
     (tile_state, jackpot)
 }
 
-/// A fully-assembled off-circuit MoE work ticket (Track B end-to-end, Rust side):
-/// routing (B1) → routing-commitment splice + `s_A` (B2) → `outer_indices` gather
-/// (B3d) → grouped tile + jackpot (B3d). This is the prover-side reference the
-/// recursive certificate binds; MoE acceptance stays fail-closed until the
-/// in-circuit `outer_indices`↔routing CTL (the sole remaining soundness change).
+/// A fully-assembled off-circuit MoE work ticket:
+/// routing → routing-commitment splice + `s_A` → `outer_indices` gather →
+/// grouped tile + jackpot. The compact recursive certificate binds this
+/// reference, including the in-circuit `outer_indices`↔routing constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PearlMoeTicket {
     pub s_a: [u8; 32],

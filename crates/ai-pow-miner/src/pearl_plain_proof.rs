@@ -65,10 +65,9 @@ pub enum PlainProofWireFormat {
 /// preserved for bincode 1 fixint compatibility). Present on an MoE share; `None`
 /// for a dense share.
 ///
-/// NOTE (Track B3c): this pins the byte-exact *serialization*. Constructing a
-/// valid `routing_proof` (the routing Merkle membership witness) and wiring MoE
-/// shares end-to-end into the mined attempt is Track B3d/B5; MoE proof acceptance
-/// stays fail-closed until the recursive circuit lands.
+/// V2 serialization supports this tail byte-for-byte. The production
+/// [`PearlPlainProof::from_attempt`] constructor currently builds dense Gateway
+/// shares; Nockchain MoE admission uses the separate compact recursive artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PearlMoeProof {
     pub e: usize,
@@ -102,8 +101,8 @@ pub struct PearlPlainProof {
     pub noise_rank: usize,
     pub a: PearlMatrixMerkleProof,
     pub bt: PearlMatrixMerkleProof,
-    /// MoE tail. `None` for a dense (standard) share — the only mode supported
-    /// today. `Some(..)` is Track B and fails closed on encode.
+    /// MoE tail. `None` for a dense share. V2 can encode `Some(..)`; legacy V1
+    /// cannot carry it.
     pub moe: Option<PearlMoeProof>,
 }
 

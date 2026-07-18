@@ -385,9 +385,9 @@ pub(crate) fn decode_pearl_merge_ai_pow_nonce(
 /// per-expert-sorted token array the node needs to recompute the routing
 /// commitment (`verify_pearl_moe_routing_binding`). This codec only carries and
 /// bounds these values; it performs **no** semantic validation (routing length
-/// vs `m·top_k`, token ranges, root binding, gather) — that is the verifier's
-/// job, and MoE stays fail-closed at every production admission gate until the
-/// compact prove/verify path (M2/M3) and the D6 binding land.
+/// vs `m·top_k`, token ranges, root binding, gather). Production admission
+/// performs those checks in the compact MoE verifier and requires its recursive
+/// certificate; this codec alone is never an acceptance gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PearlMergeMoeArtifact {
     pub moe: PearlMoeParams,

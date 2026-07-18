@@ -1,6 +1,5 @@
-//! §4.C.2 / Phase-A3.0 — off-circuit Pearl low-rank-noise
-//! reference (the **canonical spec** the in-circuit B2 sub-AIR,
-//! A3.1/A3.2, must reproduce).
+//! Off-circuit Pearl low-rank-noise reference reproduced by the in-circuit
+//! noise constraints.
 //!
 //! Bit-for-bit mirror of `ai-pow::prng` + `ai-pow::matmul`'s
 //! `BlockNoise` for the *single value* a verifier needs:
@@ -19,8 +18,7 @@
 //! byte-equivalence KAT (`noise_ref` == `ai-pow::BlockNoise`)
 //! lives on the `ai-pow` side (it may depend on `ai-pow-zk`).
 //!
-//! Pure / off-circuit — no AIR, no trace. De-risks the spec
-//! before any sub-AIR work (the P-B.2.0 KAT-first discipline).
+//! Pure and off-circuit: this remains an independent parity oracle for the AIR.
 
 use blake3::Hasher;
 

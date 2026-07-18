@@ -490,8 +490,8 @@ fn subtree_from_opened(
 // scatter across ~m rows, so the covering range `[min,max)` is O(m) and breaches
 // `PEARL_TRACE_BOUND` at scale. A *selective* opening authenticates an arbitrary
 // SORTED SET of chunks in O(|set|·log n) recomputation instead. This is the
-// off-circuit reference / de-risk foundation; the in-circuit selective schedule
-// (`canonical.rs` strip-block generation + the AIR) is a separate staged change.
+// independent off-circuit reference for the in-circuit selective schedule
+// (`canonical.rs` strip-block generation + the AIR).
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Number of selected chunks (from the sorted, distinct `sel`) that lie in

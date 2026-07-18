@@ -7,14 +7,10 @@
 //! concrete `CompositeFullAirWithLookupsPinned` + `AiPowStarkConfig`.
 //! The recursion substrate stays application-agnostic.
 //!
-//! Staging:
-//! - S2 — cross-workspace build path established.
-//! - S3a — composite AIR confirmed `RecursiveAir`-conformant.
-//! - S3b/c — `build_composite_l1_verifier_circuit`: the composite's
-//!   batch-STARK proof is verified in-circuit by `verify_batch_circuit`.
-//!   The composite is a single LogUp AIR proven by `p3_batch_stark`, so
-//!   it routes through the lookup-aware batch entrypoint with the
-//!   composite AIR as the single generic `A` (the de-risk's path 3a).
+//! `build_composite_l1_verifier_circuit` verifies the composite batch-STARK
+//! in-circuit through `verify_batch_circuit`. The composite is a single LogUp
+//! AIR proven by `p3_batch_stark`, so it routes through the lookup-aware batch
+//! entrypoint with the composite AIR as the single generic `A`.
 //!
 //! ## Recommended entrypoints
 //!
