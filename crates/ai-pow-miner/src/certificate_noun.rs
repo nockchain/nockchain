@@ -2687,7 +2687,7 @@ fn validate_pearl_merge_recursive_params(
     {
         return Err(CertificateNounError::PearlMergeUnsupportedTileShape);
     }
-    if (params.k / params.noise_rank) as usize > ai_pow::params::STRIPE_MAX {
+    if (params.k / params.noise_rank) as usize > ai_pow::params::PEARL_STRIPE_MAX {
         return Err(CertificateNounError::PearlMergeUnsupportedTileShape);
     }
     Ok(())
@@ -5543,6 +5543,51 @@ mod tests {
 
         assert_eq!(from_wire, statement);
         assert_eq!(from_bytes, statement);
+    }
+
+    #[test]
+    fn pearl_merge_certificate_noun_accepts_full_rb_stripe_band() {
+        let params = MatmulParams {
+            m: 8,
+            k: 65_536,
+            n: 8,
+            noise_rank: 128,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params
+            .validate_prod_envelope()
+            .expect("full 512-stripe Pearl shape is in the production envelope");
+
+        let aux = pearl_test_aux();
+        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let config = PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: pearl_test_pattern(8),
+            cols_pattern: pearl_test_pattern(8),
+            reserved: [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
+        };
+        let (a, b) = synth_matrices(b"pearl-full-rb-stripe-band-noun", &params);
+        let attempt = evaluate_pearl_merge_ticket_attempt(
+            &header, &config, &params, 0, 0, &a, &b, &[0xff; 32], 16, aux,
+        )
+        .expect("evaluate full R-b stripe-band ticket");
+        let public_inputs =
+            pearl_merge_recursive_public_inputs_from_work(&attempt.commitments, &attempt.ticket);
+
+        build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node(
+            &attempt,
+            &aux_inclusion,
+            &a,
+            &b,
+            16,
+            &public_inputs,
+            &AiProofNode::Unit,
+        )
+        .expect("certificate noun path must admit the full R-b stripe band");
     }
 
     #[test]
