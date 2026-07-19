@@ -1,9 +1,9 @@
 # Nockchain Logos production-release assurance ledger
 
 Date: 2026-07-18
-Release candidate: `bd1d714d1e91cb18554951a4e5c9cb21bd964eef` (`logos-integration-squashed`)
+Release candidate: `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a` (`logos-integration-squashed`)
 Base commit: `f412d132f76aaf97e0222c1ed020c4ba96d62046` (`origin/master`)
-Branch delta: 5 commits ahead of `origin/master`
+Branch delta: 18 commits ahead of `origin/master`
 Reference hardware: Apple M2 Max, Darwin 25.5.0 arm64, 32 GiB RAM
 Supported release targets under assurance: Darwin arm64, Linux x86_64
 Activation height: 114,300
@@ -112,14 +112,16 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 
 ## Release binary checksums
 
+Darwin rows were rebuilt locally at `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a`. Linux rows are retained from earlier cross-build provenance and are not final-candidate release evidence.
+
 | Platform | Binary | SHA-256 |
 |---|---|---|
-| Darwin arm64 | `target/release/nockchain` | `b69c97b687d3b48829c04b1edc9e997e76be5136c13c4db45ee27921b793a5c9` |
-| Darwin arm64 | `target/release/nockchain-wallet` | `4e74f22c50a6273f80a7be85ed6d7cdb0bfa057e18e446e0d06c8de72862482e` |
-| Darwin arm64 | `target/release/nockchain-peek` | `d08dfb68bea0f5ccc68ee97ba1855e302a14aa80e82efefcb7e8dd0d3b5bffca` |
-| Darwin arm64 | `target/release/roswell` | `4022764bfc5162758e8cea1cae56433d7dbb7380fa25da56b732ee158305e933` |
-| Darwin arm64 | `target/release/ai-pow-mine` | `a5475533e67aa8b66c580551ac50bd166322dcbb63c959ed0b76f333baa95f0b` |
-| Darwin arm64 | `target/release/zk-pow-mine` | `c828c6c75fb717cdaaa6a53a587b72b5ef1bde91f9b08b95092a64a049d4ac33` |
+| Darwin arm64 | `target/release/nockchain` | `c082d475c4f448f0cb32ca6af6f94f0ee04b2849771c62159e164cff2836eea8` |
+| Darwin arm64 | `target/release/nockchain-wallet` | `677d9f55b01fdbb7b21a479a9f1206dc19c598aa3a92fa75cd541efbf93010c9` |
+| Darwin arm64 | `target/release/nockchain-peek` | `ba194621ac65913db32b971a2a0e4c758ba34852c76a39170d1b129b9ddf4093` |
+| Darwin arm64 | `target/release/roswell` | `9f4d4946c98a0bb9a4107ba70e4deaf74f5bee865c2d378d616381834da71709` |
+| Darwin arm64 | `target/release/ai-pow-mine` | `d1f41cd6ce953a5be069dd36bd9fc356d8e34713fb7a1d5f8cca16efbed17f38` |
+| Darwin arm64 | `target/release/zk-pow-mine` | `5bb876b79f4f8b5641801be02d92ebe42a8d94a26be67d3b554f04e0a1850e9e` |
 | Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain` | `32c685f2e6e578fd0d449a080099852badbf3f9c98d108c76343d53abeac2707` |
 | Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain-wallet` | `85ed88b49daa7bbccb0cf2f820692521eaa5d37ecfe6d9c9c92de29b7b6c58f0` |
 | Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain-peek` | `d3250bc9d6c77096a3528885c521cd56307d6862681f695d1ed5961f2220cb92` |
@@ -131,20 +133,38 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 
 | Reviewer | Scope | Commit | Report | Findings | Closure commits | Sign-off |
 |---|---|---|---|---|---|---|
-| pending | composite AIR, LogUp, matrix/noise binding, MoE/R-b routing, Tip5 transcript/MMCS, FRI profiles, recursion, setup digests | pending final candidate | pending | pending | pending | pending |
+| external reviewer | composite AIR, LogUp, matrix/noise binding, MoE/R-b routing, Tip5 transcript/MMCS, FRI profiles, recursion, setup digests, Hoon ingress, miner lifecycle, and release evidence | `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a` | `target/release-assurance/reviewer-evidence-bundle.json` | critical/high blockers open | none | no |
+
+Open critical/high findings:
+
+| Area | Priority | Finding | Evidence |
+|---|---:|---|---|
+| Composite AIR | P0 | Jackpot BLAKE3 compression inputs are not bound to the public jackpot key and fold message; `IS_MSG_JACKPOT` is unused. | `crates/ai-pow-zk/src/chips/blake3/chip.rs:160-168` |
+| Composite AIR | P0 | Matrix hash blocks do not use the active CV bus; production canonical rows do not activate `IS_CV_IN`, and BLAKE3 reads separate `BLAKE3_CV`/message columns. | `crates/ai-pow-zk/src/composite_full_air_with_lookups.rs:496-512` |
+| Composite AIR | P0 | BLAKE3 rounds do not constrain the message permutation between rounds. | `crates/ai-pow-zk/src/chips/blake3/chip.rs:270-271` |
+| Composite AIR | P1 | `SX_IS_ACTIVE`/lane controls are witness-owned and can deactivate the dense/MoE matmul-to-XOR transport. | `crates/ai-pow-zk/src/chips/stripe_xor.rs:213-230` |
+| Composite AIR | P1 | R-b `TA_*`/`TR_*` controls are witness-owned and can deactivate the wide-stripe reduce-to-fold keystone. | `crates/ai-pow-zk/src/composite_full_air.rs:380-396` |
+| Recursion/FRI | P1 | Commit-phase commitment and PoW-witness counts are zipped in target transcript construction, so missing witnesses truncate challenges before later slice/panic behavior. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs:719-782`, `1116-1172` |
+| Recursion/FRI | P1 | Recursive FRI target verification derives query count from the proof instead of verifier-owned parameters, so reduced-query proofs are not rejected by shape. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs:778-795`, `1168-1185` |
+| Recursion/certificate noun | P1 | Dense certificate parameter validation still caps `num_stripes` at `STRIPE_MAX=64` while production R-b admission supports `PEARL_STRIPE_MAX=512`. | `crates/ai-pow-miner/src/certificate_noun.rs:2690` |
+| Verifier setup | P1 | Setup page-in trusts serialized context digest fields instead of recomputing the complete metadata/FRI/common-data binding before classifying a context as found. | `crates/ai-pow-jets/src/lib.rs:327-334` |
+| Hoon consensus ingress | P1 | Malformed non-AI PoW artifacts can crash the kernel event path instead of producing clean invalid-PoW rejection. | `hoon/common/tx-engine-1.hoon:70-71` |
+| Hoon consensus ingress | P1 | `%ai-pow` artifacts are jammed, expanded, and hashed before Rust-side artifact/JAM limits apply, and block size accounting uses a fixed AI artifact weight. | `hoon/common/tx-engine-1.hoon:251-256` |
+| Miner lifecycle | P1 | Candidate-stream reconnect can detach an in-flight recursive prover; cancellation is not awaited once proving starts. | `crates/ai-pow-miner/src/run.rs:982-986` |
+| Release evidence | P1 | Final-candidate artifact provenance, mandatory release CI, node E2E tamper evidence, cross-platform setup evidence, production feature proof, packaging, Linux runtime validation, operator sign-off, and external sign-off remain incomplete. | `target/release-assurance/reviewer-evidence-bundle.json` |
 
 ## Operator checklist
 
 | Item | State | Evidence |
 |---|---|---|
 | Activation height and rollback boundary documented | open | pending final operator runbook |
-| Verifier setup generation, cache, corruption, and digest paths exercised | pass | full table generation `artifact://66`; corruption/page-in tests `artifact://72`; lifecycle measurement regenerated 13-shape cache, rebuilt in `125196` ms, page-in `468` ms, and matched pinned digest |
+| Verifier setup generation, cache, corruption, and digest paths exercised | partial | full table generation `artifact://66`; corruption/page-in tests `artifact://72`; lifecycle measurement regenerated 13-shape cache, rebuilt in `125196` ms, page-in `468` ms, and matched pinned digest; external review requires complete page-in recomputation of metadata/FRI/common-data binding |
 | Serial Hoon jam rebuilds match embedded release binaries | partial | Roswell retarget, focused AI, and `test-dumb` gates passed against rebuilt release Roswell; full jam set and release binaries pending |
 | Dense and MoE hard budgets reproduced with three fresh processes each | pass | `scripts/benchmark-ai-pow-production.sh` enforces strict `<150000` B and `<30`s; dense `125056` B at `27.310/27.324/27.340`s; MoE `125764` B at `27.196/27.221/27.488`s |
-| Darwin arm64 and Linux x86_64 locked binaries built and checksummed | pass | Darwin and Linux x86_64 locked release binaries built and checksummed; Darwin binaries passed `--help` smoke and live fakenet AI/ZK/dual smoke; Linux runtime smoke is not a local release gate |
-| Compact transcript, FRI, and setup digest accounting pinned | pass | `artifact://310`; fixed compact transcript KATs are frozen, L0/L1/L2 are each 60 Johnson bits, the three-layer union bound is recorded as >58 bits, the L1 statement preimage is fixed at 60 public limbs + 5 L0 commitment limbs, and route/metadata/FRI digest mutations change the verifier-key digest |
+| Darwin arm64 and Linux x86_64 locked binaries built and checksummed | partial | Darwin arm64 release binaries rebuilt and checksummed at `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a`; Linux x86_64 hashes are stale relative to the reviewed candidate |
+| Compact transcript, FRI, and setup digest accounting pinned | partial | `artifact://310`; fixed compact transcript KATs are frozen, L0/L1/L2 are each 60 Johnson bits, the three-layer union bound is recorded as >58 bits, the L1 statement preimage is fixed at 60 public limbs + 5 L0 commitment limbs, and route/metadata/FRI digest mutations change the verifier-key digest; external review requires exact FRI query-count guards and intermediate challenge checkpoints |
 | SBOM, license, Pearl fixture provenance, vendored recursion provenance attached | partial | SPDX SBOM, locked Cargo metadata, binary checksums, and provenance JSON written under `target/release-assurance/`; vendored recursion path/pin recorded; Pearl ISC license and fixture hashes recorded; exact Pearl upstream commit remains open |
-| Independent critical/high findings closed | open | pending Stage 10 |
+| Independent critical/high findings closed | open | external review found open P0/P1 blockers; no external sign-off |
 
 ## Final release matrix
 
