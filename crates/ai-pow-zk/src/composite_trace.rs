@@ -72,10 +72,11 @@ use crate::composite_layout::{
     FOLD_XSTEP_BITS_START, I8U8_FREQ, IRANGE7P1_FREQ, IRANGE8_FREQ, IS_CV_IN, IS_MSG_MAT,
     IS_RESET_CUMSUM, IS_UPDATE_CUMSUM, JACKPOT_MSG_START, JACKPOT_SIZE, JACKPOT_SLOT_SEL_START,
     JACKPOT_X_BITS_START, MAT_FREQ, MAT_ID, MAT_ID_LIMBS_LEN, MAT_ID_LIMBS_START, MAT_UNPACK_START,
-    MAT_UNPACK_WIN, NOISED_PACKED_START, NOISE_UNPACK_START, NOISE_UNPACK_WIN, STARK_ROW_IDX,
-    STRIPE_MAX, SX_IN_BITS_START, SX_IN_START, SX_IS_ACTIVE, SX_LANE_SEL_START, SX_NEW_SEL,
-    SX_NEW_SEL_BITS_START, SX_Q_START, SX_XR_SEL_BITS_START, SX_XR_START, TILE_D, TILE_H,
-    TOTAL_TRACE_WIDTH, UINT8_DATA_START, UINT8_DATA_WIN, URANGE13_FREQ, URANGE8_FREQ,
+    MAT_UNPACK_WIN, NOISED_PACKED_START, NOISE_UNPACK_START, NOISE_UNPACK_WIN, RB_CONTROL_PREP,
+    STARK_ROW_IDX, STRIPE_MAX, SX_CONTROL_PREP, SX_IN_BITS_START, SX_IN_START, SX_IS_ACTIVE,
+    SX_LANE_SEL_START, SX_NEW_SEL, SX_NEW_SEL_BITS_START, SX_Q_START, SX_XR_SEL_BITS_START,
+    SX_XR_START, TILE_D, TILE_H, TOTAL_TRACE_WIDTH, UINT8_DATA_START, UINT8_DATA_WIN,
+    URANGE13_FREQ, URANGE8_FREQ,
 };
 use crate::Val;
 
@@ -1954,6 +1955,8 @@ impl CompositeTrace {
                             // forced value the keystone binds).
                             rs[SX_IS_ACTIVE] = <Val as QuotientMap<u64>>::from_int(1);
                             rs[SX_LANE_SEL_START + step] = <Val as QuotientMap<u64>>::from_int(1);
+                            rs[SX_CONTROL_PREP] =
+                                <Val as QuotientMap<u64>>::from_int(1 + 2 * step as u64);
                             let mut xin = 0u32;
                             for c in 0..CUMSUM_LEN {
                                 let u = cumsum_new[c] as u32;
@@ -2217,6 +2220,12 @@ impl CompositeTrace {
                         // into it), else the threaded `v`.
                         let is_reduce = chunk == chunks - 1;
                         let is_reset_row = is_reduce && sb == 0;
+                        let rb_control = 1
+                            + if ta_reset { 2 } else { 0 }
+                            + 4 * sb as u64
+                            + if is_reduce { 256 } else { 0 }
+                            + if is_reset_row { 512 } else { 0 };
+                        rs[RB_CONTROL_PREP] = <Val as QuotientMap<u64>>::from_int(rb_control);
                         let entering = if is_reset_row { 0u32 } else { v };
                         rs[TR_XSTEP] = <Val as QuotientMap<u64>>::from_int(entering as u64);
                         set_bits(rs, TR_XSTEP_BITS_START, entering);

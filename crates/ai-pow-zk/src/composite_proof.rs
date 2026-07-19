@@ -672,6 +672,58 @@ mod tests {
             .expect("§6(b) useful-work chain must verify through unit CompositeFullAir");
     }
 
+    #[test]
+    fn pinned_zeroed_sx_controls_reject() {
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        use crate::composite_layout::{
+            SX_CONTROL_PREP, SX_IS_ACTIVE, SX_LANE_SEL_START, TOTAL_TRACE_WIDTH,
+        };
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x1234_0000 + i as u32);
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (t, r, num_stripes) = (8usize, 4usize, 16usize);
+        let a_prime: Vec<i8> = (0..(t * num_stripes * r) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * num_stripes * r) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let (rows_used, x_steps) =
+            trace.place_useful_work_chain(8, &a_prime, &b_prime, t, r, num_stripes);
+        let xs: Vec<i32> = x_steps[..num_stripes].iter().map(|&u| u as i32).collect();
+        let m = trace.place_fold_chain(8 + rows_used + 4, &xs);
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+        let canonical = extract_program(&trace.matrix);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let sx_row = (0..trace.height())
+            .find(|&rr| {
+                trace.matrix.values[rr * TOTAL_TRACE_WIDTH + SX_IS_ACTIVE].as_canonical_u64() == 1
+            })
+            .expect("SX trace has an active row");
+        let base = sx_row * TOTAL_TRACE_WIDTH;
+        trace.matrix.values[base + SX_IS_ACTIVE] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        for lane in 0..num_stripes {
+            trace.matrix.values[base + SX_LANE_SEL_START + lane] =
+                <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        }
+        assert_ne!(
+            trace.matrix.values[base + SX_CONTROL_PREP].as_canonical_u64(),
+            0,
+            "fixture keeps the verifier-pinned SX schedule word live"
+        );
+
+        let (proof, _) = composite_prove_pinned(&cfg, trace, &pis);
+        assert!(
+            composite_verify_pinned(&cfg, &canonical, &proof, &pis).is_err(),
+            "zeroed SX activity/lane controls must reject against the pinned schedule"
+        );
+    }
+
     /// §6(b)-R-b — the STRIPE-MAJOR sweep (`place_useful_work_chain_rb`:
     /// held h·w accumulator + per-stripe reduce + interleaved fold)
     /// satisfies the base `CompositeFullAir` (matmul recurrence + noised
@@ -703,6 +755,62 @@ mod tests {
                 panic!("R-b stripe-major sweep (num_stripes={num_stripes}) must verify: {e:?}")
             });
         }
+    }
+
+    #[test]
+    fn routea_zeroed_rb_ta_tr_controls_reject() {
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        use crate::composite_layout::{
+            RB_CONTROL_PREP, TA_IS_ACTIVE, TA_SB_SEL_LEN, TA_SB_SEL_START, TOTAL_TRACE_WIDTH,
+            TR_IS_ACTIVE, TR_STRIPE_RESET,
+        };
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let ch: [u32; 8] = core::array::from_fn(|i| 0x7B00 + i as u32);
+        let (t, r, num_stripes) = (8usize, 4usize, 16usize);
+        let k = num_stripes * r;
+        let a_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(7) ^ (i >> 3)) & 0x7F) - 64) as i8)
+            .collect();
+        let b_prime: Vec<i8> = (0..(t * k) as i32)
+            .map(|i| (((i.wrapping_mul(5) ^ (i << 1) ^ 0x2A) & 0x7F) - 64) as i8)
+            .collect();
+        let mut trace = CompositeTrace::baseline_min();
+        let h = trace.height();
+        let (_rows, m) =
+            trace.place_useful_work_chain_rb(8, &a_prime, &b_prime, t, t, r, num_stripes);
+        let _ = trace.place_jackpot_hash_block(h - 8, &m, &ch);
+        let program = extract_program(&trace.matrix);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let reduce_row = (0..trace.height())
+            .find(|&rr| {
+                trace.matrix.values[rr * TOTAL_TRACE_WIDTH + TR_IS_ACTIVE].as_canonical_u64() == 1
+            })
+            .expect("R-b trace has a reduce row");
+        let base = reduce_row * TOTAL_TRACE_WIDTH;
+        trace.matrix.values[base + TA_IS_ACTIVE] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        for s in 0..TA_SB_SEL_LEN {
+            trace.matrix.values[base + TA_SB_SEL_START + s] =
+                <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        }
+        trace.matrix.values[base + TR_IS_ACTIVE] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        trace.matrix.values[base + TR_STRIPE_RESET] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(0);
+        assert_ne!(
+            trace.matrix.values[base + RB_CONTROL_PREP].as_canonical_u64(),
+            0,
+            "fixture keeps the verifier-pinned R-b schedule word live"
+        );
+
+        let (proof, _) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, false);
+        assert!(
+            composite_verify_pinned_logup_sx(&cfg, &program, &proof, &pis, false).is_err(),
+            "zeroed R-b TA/TR controls must reject against the pinned schedule"
+        );
     }
 
     /// §6(b)-R-b soundness — a tampered TileReduce input on a reduce row

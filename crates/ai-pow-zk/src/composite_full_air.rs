@@ -119,7 +119,7 @@ impl<F> BaseAir<F> for CompositeFullAir {
 // preprocessed column order (`extract_program` iterates this;
 // the pin asserts `main[PROGRAM_COLS[k]] == preproc[k]`;
 // `build_preprocessed_columns` emits in this order).
-pub const PROGRAM_COLS: [usize; 20] = [
+pub const PROGRAM_COLS: [usize; 22] = [
     crate::composite_layout::CONTROL_PREP,
     crate::composite_layout::NOISE_PACKED_PREP,
     crate::composite_layout::NOISE_PACKED_PREP + 1,
@@ -140,6 +140,8 @@ pub const PROGRAM_COLS: [usize; 20] = [
     crate::composite_layout::B_ID + 2,
     crate::composite_layout::B_ID + 3,
     crate::composite_layout::STARK_ROW_IDX,
+    crate::composite_layout::SX_CONTROL_PREP,
+    crate::composite_layout::RB_CONTROL_PREP,
 ];
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -434,6 +436,43 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
             builder.assert_eq(cur[A_ID], a_id.clone());
             builder.assert_eq(cur[B_ID], b_id.clone());
             builder.assert_eq(cur[AB_ID_PREP], a_id + b_id * base2);
+        }
+
+        // Compact schedule words. These columns are included in PROGRAM_COLS
+        // for the pinned AIR, so the active/lane controls that gate SX and R-b
+        // transport are verifier-fixed without widening preprocessed trace by
+        // every one-hot lane.
+        {
+            use crate::composite_layout::{
+                RB_CONTROL_PREP, SX_CONTROL_PREP, SX_IS_ACTIVE, SX_LANE_SEL_LEN, SX_LANE_SEL_START,
+                TA_IS_ACTIVE, TA_IS_RESET, TA_SB_SEL_LEN, TA_SB_SEL_START, TR_IS_ACTIVE,
+                TR_STRIPE_RESET,
+            };
+            let main = builder.main();
+            let cur = main.current_slice();
+            let two = <AB::F as PrimeCharacteristicRing>::TWO;
+
+            let mut sx_lane_idx: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
+            for s in 0..SX_LANE_SEL_LEN {
+                sx_lane_idx += cur[SX_LANE_SEL_START + s]
+                    * <AB::F as PrimeCharacteristicRing>::from_u32(s as u32);
+            }
+            builder.assert_eq(
+                cur[SX_CONTROL_PREP].into(),
+                cur[SX_IS_ACTIVE].into() + sx_lane_idx * two.clone(),
+            );
+
+            let mut ta_sb_idx: AB::Expr = <AB::Expr as PrimeCharacteristicRing>::ZERO;
+            for s in 0..TA_SB_SEL_LEN {
+                ta_sb_idx += cur[TA_SB_SEL_START + s]
+                    * <AB::F as PrimeCharacteristicRing>::from_u32(s as u32);
+            }
+            let rb_word: AB::Expr = cur[TA_IS_ACTIVE].into()
+                + cur[TA_IS_RESET].into() * two.clone()
+                + ta_sb_idx * <AB::F as PrimeCharacteristicRing>::from_u32(4)
+                + cur[TR_IS_ACTIVE].into() * <AB::F as PrimeCharacteristicRing>::from_u32(256)
+                + cur[TR_STRIPE_RESET].into() * <AB::F as PrimeCharacteristicRing>::from_u32(512);
+            builder.assert_eq(cur[RB_CONTROL_PREP].into(), rb_word);
         }
 
         // Input chip: NOISE_PACKED_PREP unpacking + NOISED_PACKED

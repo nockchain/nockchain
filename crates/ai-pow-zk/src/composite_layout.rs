@@ -666,13 +666,25 @@ pub const TR_Q_LEN: usize = 32;
 pub const TR_END: usize = TR_Q_START + TR_Q_LEN;
 
 // =====================================================================
+//  Verifier-pinned compact schedule controls
+// =====================================================================
+
+/// Compact StripeXor schedule word: `SX_IS_ACTIVE + 2·lane_idx`.
+/// The pinned AIR recomputes it from `SX_IS_ACTIVE`/`SX_LANE_SEL`.
+pub const SX_CONTROL_PREP: usize = TR_END;
+/// Compact R-b schedule word:
+/// `TA_IS_ACTIVE + 2·TA_IS_RESET + 4·ta_sb_idx
+///  + 256·TR_IS_ACTIVE + 512·TR_STRIPE_RESET`.
+pub const RB_CONTROL_PREP: usize = SX_CONTROL_PREP + 1;
+
+// =====================================================================
 //  Total trace width
 // =====================================================================
 
 /// Total trace width: pinned end-of-layout cursor. Phases 3+ extend
 /// chip-internal sub-columns but must not exceed this without bumping
 /// the constant.
-pub const TOTAL_TRACE_WIDTH: usize = TR_END;
+pub const TOTAL_TRACE_WIDTH: usize = RB_CONTROL_PREP + 1;
 
 #[cfg(test)]
 mod tests {
@@ -737,8 +749,9 @@ mod tests {
         let msg_pair_sel = MSG_PAIR_SEL_LEN; // 8
                                              // §6(b)-R-b stripe-major block (TA_* + TR_*, contiguous).
         let r_b = TR_END - TA_IS_ACTIVE; // 558
+        let pinned_schedule = TOTAL_TRACE_WIDTH - TR_END; // 2
 
-        let groups: [(&str, usize); 16] = [
+        let groups: [(&str, usize); 17] = [
             ("range_tables", range_tables),
             ("control", control),
             ("input_unpacking", input_unpacking),
@@ -755,6 +768,7 @@ mod tests {
             ("fold_stripe_sel", fold_stripe_sel),
             ("msg_pair_sel", msg_pair_sel),
             ("r_b_stripe_major", r_b),
+            ("pinned_schedule", pinned_schedule),
         ];
 
         let sum: usize = groups.iter().map(|(_, n)| *n).sum();
@@ -799,8 +813,9 @@ mod tests {
         assert_eq!(msg_pair_sel, 8);
         // §6(b)-R-b: TA (1+1+64+4+256=326) + TR (1+1+4+128+1+32+1+32+32=232).
         assert_eq!(r_b, 558);
+        assert_eq!(pinned_schedule, 2);
 
-        // (b) the 15 groups exactly partition the trace.
+        // (b) the groups exactly partition the trace.
         assert_eq!(
             sum, TOTAL_TRACE_WIDTH,
             "inventory groups ({sum}) must sum to TOTAL_TRACE_WIDTH ({TOTAL_TRACE_WIDTH})"

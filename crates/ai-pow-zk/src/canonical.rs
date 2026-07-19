@@ -1325,11 +1325,30 @@ fn row_descriptor(
             let b_ids = ids_for(false, sbj * TILE_H);
             let mut selectors = [false; NUM_SELECTORS];
             selectors[if is_reset { 0 } else { 1 }] = true;
+            let sb = sbi * n_sbj + sbj;
+            let sx_control = if !layout.rb && chunk == chunks - 1 {
+                1 + 2 * step as u64
+            } else {
+                0
+            };
+            let rb_control = if layout.rb {
+                let ta_reset = step == 0 && chunk == 0;
+                let tr_active = chunk == chunks - 1;
+                let tr_reset = tr_active && sb == 0;
+                1 + if ta_reset { 2 } else { 0 }
+                    + 4 * sb as u64
+                    + if tr_active { 256 } else { 0 }
+                    + if tr_reset { 512 } else { 0 }
+            } else {
+                0
+            };
             RowDescriptor {
                 selectors,
                 ab_id: crate::composite_preprocess::pack_ab_id(a_ids[0], b_ids[0]),
                 a_ids,
                 b_ids,
+                sx_control,
+                rb_control,
                 ..RowDescriptor::padding()
             }
         }
