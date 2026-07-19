@@ -122,7 +122,7 @@ echo "[boot ] node pid=$NODE_PID; waiting for %born (up to ${BOOT_TIMEOUT_SECS}s
 
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    if grep -aq "born" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null; then
         echo "[boot ] node reached %born (verifier setup ready)"
         break
     fi
@@ -135,7 +135,7 @@ while (( SECONDS < DEADLINE )); do
     fi
     sleep 3
 done
-if ! grep -aq "born" "$NODE_LOG" 2>/dev/null; then
+if ! grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null; then
     echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2
 fi
 

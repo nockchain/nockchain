@@ -1,9 +1,9 @@
 # Nockchain Logos production-release assurance ledger
 
-Date: 2026-07-18
-Release candidate: `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a` (`logos-integration-squashed`)
+Date: 2026-07-19
+Release candidate: `logos-integration-squashed` worktree over `96b437eb` with 2026-07-19 Hoon ingress and fakenet-readiness fixes
 Base commit: `f412d132f76aaf97e0222c1ed020c4ba96d62046` (`origin/master`)
-Branch delta: 18 commits ahead of `origin/master`
+Branch delta at refresh start: 32 commits ahead of `origin/master`
 Reference hardware: Apple M2 Max, Darwin 25.5.0 arm64, 32 GiB RAM
 Supported release targets under assurance: Darwin arm64, Linux x86_64
 Activation height: 114,300
@@ -20,10 +20,10 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 
 | Gate | Requirement | State | Evidence |
 |---|---:|---|---|
-| Dense canonical compact certificate | `< 150,000` bytes | reported-pass, not reproduced | 125,056 B in the 2026-07-17 audit |
-| Dense canonical recursive proof wall time | `< 30.000 s` on Apple M2 Max | reported-pass, not reproduced | 28.100 s in the 2026-07-17 audit |
-| Canonical MoE compact certificate | `< 150,000` bytes | reported-pass, not reproduced | 125,764 B in the 2026-07-17 audit |
-| Canonical MoE recursive proof wall time | `< 30.000 s` on Apple M2 Max | reported-pass, not reproduced | 28.196 s in the 2026-07-17 audit |
+| Dense canonical compact certificate | `< 150,000` bytes | pass at `8d9f1eeb`; final commit refresh required | 125,056 B x3 in `scripts/benchmark-ai-pow-production.sh` |
+| Dense canonical recursive proof wall time | `< 30.000 s` on Apple M2 Max | pass at `8d9f1eeb`; final commit refresh required | 27.310 / 27.324 / 27.340 s |
+| Canonical MoE compact certificate | `< 150,000` bytes | pass at `8d9f1eeb`; final commit refresh required | 125,764 B x3 in `scripts/benchmark-ai-pow-production.sh` |
+| Canonical MoE recursive proof wall time | `< 30.000 s` on Apple M2 Max | pass at `8d9f1eeb`; final commit refresh required | 27.196 / 27.221 / 27.488 s |
 | Proof-system profile | current 60-Johnson-bit L0/L1/L2 profiles | fixed decision | no 128-bit uplift or FRI weakening without a new release decision |
 | Recursive hash | full 5-round Tip5 in the AI recursive stack | fixed decision | reduced-round attack literature is review input, not a reason to change the primitive |
 | Artifact resource limits | 1 MiB atom cap and 4 MiB JAM cap | fixed decision | MoE routing cap must fit inside these limits |
@@ -50,20 +50,20 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 
 | ID | Severity | Invariant / exploit | Affected symbols | Owner | State | Fix commit | Evidence link |
 |---|---:|---|---|---|---|---|---|
-| RB-01 | High DoS | Recursive FRI challenge construction must reject malformed commit-phase / PoW-witness shapes before `zip`, index, or slice. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs` | release engineering | validated worktree | pending | `artifact://60` |
-| RB-02 | High resource | Compact certificate decode must reject `>= 150,000` bytes before postcard traversal and all production callers must use the bounded decoder. | `ai_pow_zk::recursion::decode_compact_batch_recursive_certificate`; `ai_pow_miner::certificate_noun` | release engineering | validated worktree | pending | `artifact://58` |
-| RB-03 | High liveness/DoS | Dense and MoE artifact dispatch must apply route-specific caps that fit the 1 MiB atom and 4 MiB JAM limits. | `ai_pow_miner::certificate_noun`; `AIP1` / `AIM1` artifact decode | release engineering | validated worktree | pending | `artifact://58`, `artifact://109`, `artifact://111` |
-| RB-04 | Critical liveness/setup | Every admitted `(trace_height, sx_bound)` shape must resolve to exactly one trusted verifier setup key. | `validate_pearl_merge_recursive_params`; `ai_pow_jets::setup`; `ai_pow_jets::table_digest` | release engineering | validated worktree | pending | `artifact://62`, `artifact://66` |
-| RB-05 | Medium/High hardening | MoE precheck must require `difficulty_bits == 0` and derive expert columns with checked arithmetic shared by producer and verifier. | MoE precheck and grouped-column derivation paths | release engineering | validated worktree | pending | `artifact://58` |
-| RB-06 | Medium/High operations | Lagged private gRPC effects must force reconnect/job invalidation; ZK pool work/results must be generation-tagged; canonical AI grind workers must observe reconnect cancellation. | `WatchEffects`; `zk_pow_miner::pool`; `zk_pow_miner::run`; `ai_pow_miner::run_canonical` | release engineering | validated worktree | pending | `artifact://145`, `artifact://155`, `artifact://158` |
-| RB-07 | Release process | Nested recursion workspace and release-critical gates must be reproducible and CI-visible; Hoon builds must be serialized. | `crates/plonky3-recursion`; `.gitlab-ci.yml`; `Makefile` | release engineering | validated worktree | pending | `artifact://60`, `artifact://158`; `make -n build-kernels-ci` |
-| AR-01 | Review | AIR completeness and LogUp constraints require a malicious-witness audit. | `CompositeFullAirWithLookupsPinned` and related chips | external reviewer | internal KATs validated; external open | pending | `agent://AirStatementMapScout`, `agent://CompositeAirKats`, `artifact://105` |
-| AR-02 | Review | Production dense, MoE, and R-b traces must activate every required C3 relation. | C3 matrix-message rows | external reviewer | internal C3 KAT validated; external open | pending | `artifact://105` |
-| AR-03 | Review | `cumsum` slots are proof-derived outputs and must be constrained and statement-bound. | composite public inputs | external reviewer | internal final-boundary KATs validated; external open | pending | `artifact://105` |
-| AR-04 | Review | Attacker-supplied verifier context plus matching attacker certificate must reject at the production boundary. | verifier setup and digest gate | external reviewer | open |  | pending Stages 2 and 3 |
-| AR-05 | Review | Fresh alternate committed matrices are valid by design; proof reuse across roots, nonce, schedule, or block must reject. | matrix policy and public-input binding | external reviewer | internal matrix-policy KATs validated; external open | pending | `artifact://162` |
-| AR-06 | Review | Full-block proof nouns must not crash or amplify before Rust rejects them. | `heard-block`, `do-pow`, noun/JAM decode | external reviewer | partial kernel malformed-artifact KATs validated; full adversarial corpus open | pending | `artifact://173` |
-| AR-07 | Review | FRI soundness terms must be recomputed against the pinned implementation. | L0/L1/L2 FRI profiles | external reviewer | internal transcript/MMCS KATs validated; external open | pending | `agent://TranscriptAccounting` |
+| RB-01 | High DoS | Recursive FRI challenge construction must reject malformed commit-phase / PoW-witness shapes before `zip`, index, or slice. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs` | release engineering | internally closed; external review open | `83c5be30` | `artifact://60`; release/adversarial gates below |
+| RB-02 | High resource | Compact certificate decode must reject `>= 150,000` bytes before postcard traversal and all production callers must use the bounded decoder. | `ai_pow_zk::recursion::decode_compact_batch_recursive_certificate`; `ai_pow_miner::certificate_noun` | release engineering | internally closed; external review open | `d6592a79` | `artifact://58`; release/adversarial gates below |
+| RB-03 | High liveness/DoS | Dense and MoE artifact dispatch must apply route-specific caps that fit the 1 MiB atom and 4 MiB JAM limits. | `ai_pow_miner::certificate_noun`; `AIP1` / `AIM1` artifact decode; Hoon AI artifact accounting | release engineering | internally closed; external review open | `d6592a79`, `ea70920d`, `5dabdfa4`, 2026-07-19 worktree | `artifact://58`, `artifact://109`, `artifact://111`; block-size and fakenet gates below |
+| RB-04 | Critical liveness/setup | Every admitted `(trace_height, sx_bound)` shape must resolve to exactly one trusted verifier setup key. | `validate_pearl_merge_recursive_params`; `ai_pow_jets::setup`; `ai_pow_jets::table_digest` | release engineering | internally closed; external review open | `5d1adfd5`, `7b493aa3`, `ea70920d` | `artifact://62`, `artifact://66`, `artifact://72`; release/adversarial gates below |
+| RB-05 | Medium/High hardening | MoE precheck must require `difficulty_bits == 0` and derive expert columns with checked arithmetic shared by producer and verifier. | MoE precheck and grouped-column derivation paths | release engineering | internally closed; external review open | `d6592a79` | `artifact://58`; release/adversarial gates below |
+| RB-06 | Medium/High operations | Lagged private gRPC effects must force reconnect/job invalidation; ZK pool work/results must be generation-tagged; canonical AI grind workers must observe reconnect cancellation. | `WatchEffects`; `zk_pow_miner::pool`; `zk_pow_miner::run`; `ai_pow_miner::run_canonical` | release engineering | internally closed; external review open | `e6a5e5b3`, `bd92b97f` | `artifact://145`, `artifact://155`, `artifact://158`; fakenet gates below |
+| RB-07 | Release process | Nested recursion workspace and release-critical gates must be reproducible and CI-visible; Hoon builds must be serialized. | `crates/plonky3-recursion`; `.gitlab-ci.yml`; `Makefile` | release engineering | internally closed; external review open | `907704bf`, 2026-07-19 worktree | `artifact://60`, `artifact://158`; serial jam rebuild gate below |
+| AR-01 | Review | AIR completeness and LogUp constraints require a malicious-witness audit. | `CompositeFullAirWithLookupsPinned` and related chips | external reviewer | internal KATs validated; external open | `004770a0`, `b9955764`, `ce9c78d8`, `36af7dae`, `8e929b16`, `804ff456`, `96b437eb` | `agent://AirStatementMapScout`, `agent://CompositeAirKats`, `artifact://105`; release/adversarial gates below |
+| AR-02 | Review | Production dense, MoE, and R-b traces must activate every required C3 relation. | C3 matrix-message rows | external reviewer | internal C3 KAT validated; external open | `004770a0`, `b9955764`, `ce9c78d8`, `36af7dae`, `8e929b16`, `804ff456`, `96b437eb` | `artifact://105`; release/adversarial gates below |
+| AR-03 | Review | `cumsum` slots are proof-derived outputs and must be constrained and statement-bound. | composite public inputs | external reviewer | internal final-boundary KATs validated; external open | `004770a0`, `b9955764`, `ce9c78d8`, `36af7dae` | `artifact://105`; release/adversarial gates below |
+| AR-04 | Review | Attacker-supplied verifier context plus matching attacker certificate must reject at the production boundary. | verifier setup and digest gate | external reviewer | internal setup/digest KATs validated; external open | `5d1adfd5`, `7b493aa3`, `8d9f1eeb` | `artifact://62`, `artifact://66`, `artifact://72`, `artifact://310` |
+| AR-05 | Review | Fresh alternate committed matrices are valid by design; proof reuse across roots, nonce, schedule, or block must reject. | matrix policy and public-input binding | external reviewer | internal matrix-policy KATs validated; external open | `d6592a79` | `artifact://162`; release/adversarial gates below |
+| AR-06 | Review | Full-block proof nouns must not crash or amplify before Rust rejects them. | `heard-block`, `do-pow`, noun/JAM decode | external reviewer | internal malformed-artifact, pre-activation, and block-size KATs validated; external open | `5dabdfa4`, `d716d8ee`, 2026-07-19 worktree | `artifact://173`, `artifact://167`; Hoon block-size and fakenet gates below |
+| AR-07 | Review | FRI soundness terms must be recomputed against the pinned implementation. | L0/L1/L2 FRI profiles | external reviewer | internal transcript/MMCS KATs validated; external open | `83c5be30`, `8d9f1eeb` | `agent://TranscriptAccounting`, `artifact://310` |
 
 ## Gate log
 
@@ -103,6 +103,9 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 | Locked release binary builds | `cargo build --release --locked ...` for Darwin arm64; `cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.39 ...` for Linux x86_64; Darwin `--help` smoke for all six binaries | `d3081651` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB; Linux x86_64 cross target | release `nockchain`, `nockchain-wallet`, `nockchain-peek`, `roswell`, `ai-pow-mine`, `zk-pow-mine`; Darwin `RUSTFLAGS=-C target-cpu=native`; Linux `RUSTFLAGS=-C target-cpu=x86-64-v3`; `nockchain/jemalloc`, `ai-pow-miner/node` | 2026-07-18 | 2026-07-18 | pass | `artifact://266` plus terminal output | 0 |  | Darwin build `55.14`s; Linux build `258.32`s; Darwin help smoke `2.67`s |  | internal; `file` identified Mach-O arm64 and ELF x86-64 outputs |
 | SBOM and provenance export | `cargo metadata --locked --format-version 1 --features nockchain/jemalloc,ai-pow-miner/node` plus custom SPDX/provenance exporter | `0dec46e4` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | release workspace dependency graph; binary checksums; Pearl/vendored recursion provenance | 2026-07-18 | 2026-07-18 | pass | `target/release-assurance/artifact-manifest.json` | 0 |  |  |  | internal; 1114 metadata packages; SPDX SBOM `426c5afae5cf205f941abfc0e5f94cf066707ef4a80d513d39050ee150b694cf`; provenance `b369d92fb20fc3e677c9a5a4cf5adb429d0a602f3fe26908a7a81709e36cf661`; Pearl fixture upstream commit remains a recorded provenance gap |
 | Compact transcript/setup digest accounting | `cargo test -p ai-pow-zk --features recursion --lib compact_batch_ -- --nocapture && cargo test -p ai-pow-jets --lib setup_table_digest_rejects_empty_tables -- --nocapture` | worktree over `bd1d714d1e91cb18554951a4e5c9cb21bd964eef` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | `recursion`, `ai-pow-jets`; workspace defaults | 2026-07-18 | 2026-07-18 | pass | `artifact://310` | 1 ignored opt-in compact route test not selected |  | 263.49s including rebuild |  | internal; pins fixed compact transcript KATs, fixed L1 statement preimage length, L0 commitment binding, route/metadata/FRI digest mutation sensitivity, three-layer FRI union-bound accounting, and empty setup-table rejection |
+| Hoon AI artifact byte-padding ingress | `make assets/roswell.jam && cargo build --release --bin roswell && target/release/roswell test block-size` | worktree over `96b437eb` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | release Roswell; serial `assets/roswell.jam` rebuild | 2026-07-19 | 2026-07-19 | pass | terminal output | 0 |  | 306.99s |  | internal; declared byte envelopes with trailing zero padding stay on actual-JAM accounting |
+| Serial Hoon jam rebuild refresh | `make assets/dumb.jam && make assets/miner.jam && make assets/wal.jam && make assets/peek.jam && make assets/bridge.jam && make assets/roswell.jam` | worktree over `96b437eb` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | `hoonc` serialized by explicit loop | 2026-07-19 | 2026-07-19 | pass | `artifact://721` | 0 |  |  |  | internal; no concurrent `hoonc` |
+| Live fakenet AI/ZK/dual/retarget refresh | `scripts/fakenet-zk-pow-smoke.sh && scripts/fakenet-zk-pow-post-ai-smoke.sh && scripts/fakenet-ai-pow-smoke.sh && scripts/fakenet-dual-pow-smoke.sh && scripts/test-dual-pow-retarget.sh` | worktree over `96b437eb` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | release `nockchain`, `ai-pow-mine`, `zk-pow-mine`, release Roswell; shared verifier setup cache only; fresh node PMA per run; `RUSTFLAGS=-C target-cpu=native` | 2026-07-19 | 2026-07-19 | pass | terminal output | 0 |  | ZK `134.7`s; post-AI ZK `35.5`s; AI `367.72`s; dual `514.9`s; retarget `179.8`s |  | internal; ZK accepted h>=1; post-AI ZK accepted h>=4; AI accepted h1 with `%ai-pow`; dual accepted AI@1 -> ZK@2 -> AI@3 |
 
 ## Setup manifest
 
@@ -112,7 +115,7 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 
 ## Release binary checksums
 
-Darwin rows were rebuilt locally at `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a`. Linux rows are retained from earlier cross-build provenance and are not final-candidate release evidence.
+Darwin and Linux rows below are stale after the 2026-07-19 Hoon ingress checkpoint. Final-candidate release evidence must rebuild, checksum, and provenance-record both target sets again.
 
 | Platform | Binary | SHA-256 |
 |---|---|---|
@@ -133,25 +136,19 @@ Darwin rows were rebuilt locally at `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a`. 
 
 | Reviewer | Scope | Commit | Report | Findings | Closure commits | Sign-off |
 |---|---|---|---|---|---|---|
-| external reviewer | composite AIR, LogUp, matrix/noise binding, MoE/R-b routing, Tip5 transcript/MMCS, FRI profiles, recursion, setup digests, Hoon ingress, miner lifecycle, and release evidence | `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a` | `target/release-assurance/reviewer-evidence-bundle.json` | critical/high blockers open | none | no |
+| external reviewer | composite AIR, LogUp, matrix/noise binding, MoE/R-b routing, Tip5 transcript/MMCS, FRI profiles, recursion, setup digests, Hoon ingress, miner lifecycle, and release evidence | pending final reviewed commit after 2026-07-19 internal closure | `target/release-assurance/reviewer-evidence-bundle.json` | internal closure evidence attached; independent closure open | internal closure commits listed in the finding ledger | no |
 
-Open critical/high findings:
+Internal critical/high closure status:
 
-| Area | Priority | Finding | Evidence |
+| Area | Priority | State | Evidence |
 |---|---:|---|---|
-| Composite AIR | P0 | Jackpot BLAKE3 compression inputs are not bound to the public jackpot key and fold message; `IS_MSG_JACKPOT` is unused. | `crates/ai-pow-zk/src/chips/blake3/chip.rs:160-168` |
-| Composite AIR | P0 | Matrix hash blocks do not use the active CV bus; production canonical rows do not activate `IS_CV_IN`, and BLAKE3 reads separate `BLAKE3_CV`/message columns. | `crates/ai-pow-zk/src/composite_full_air_with_lookups.rs:496-512` |
-| Composite AIR | P0 | BLAKE3 rounds do not constrain the message permutation between rounds. | `crates/ai-pow-zk/src/chips/blake3/chip.rs:270-271` |
-| Composite AIR | P1 | `SX_IS_ACTIVE`/lane controls are witness-owned and can deactivate the dense/MoE matmul-to-XOR transport. | `crates/ai-pow-zk/src/chips/stripe_xor.rs:213-230` |
-| Composite AIR | P1 | R-b `TA_*`/`TR_*` controls are witness-owned and can deactivate the wide-stripe reduce-to-fold keystone. | `crates/ai-pow-zk/src/composite_full_air.rs:380-396` |
-| Recursion/FRI | P1 | Commit-phase commitment and PoW-witness counts are zipped in target transcript construction, so missing witnesses truncate challenges before later slice/panic behavior. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs:719-782`, `1116-1172` |
-| Recursion/FRI | P1 | Recursive FRI target verification derives query count from the proof instead of verifier-owned parameters, so reduced-query proofs are not rejected by shape. | `crates/plonky3-recursion/recursion/src/pcs/fri/targets.rs:778-795`, `1168-1185` |
-| Recursion/certificate noun | P1 | Dense certificate parameter validation still caps `num_stripes` at `STRIPE_MAX=64` while production R-b admission supports `PEARL_STRIPE_MAX=512`. | `crates/ai-pow-miner/src/certificate_noun.rs:2690` |
-| Verifier setup | P1 | Setup page-in trusts serialized context digest fields instead of recomputing the complete metadata/FRI/common-data binding before classifying a context as found. | `crates/ai-pow-jets/src/lib.rs:327-334` |
-| Hoon consensus ingress | P1 | Malformed non-AI PoW artifacts can crash the kernel event path instead of producing clean invalid-PoW rejection. | `hoon/common/tx-engine-1.hoon:70-71` |
-| Hoon consensus ingress | P1 | `%ai-pow` artifacts are jammed, expanded, and hashed before Rust-side artifact/JAM limits apply, and block size accounting uses a fixed AI artifact weight. | `hoon/common/tx-engine-1.hoon:251-256` |
-| Miner lifecycle | P1 | Candidate-stream reconnect can detach an in-flight recursive prover; cancellation is not awaited once proving starts. | `crates/ai-pow-miner/src/run.rs:982-986` |
-| Release evidence | P1 | Final-candidate artifact provenance, mandatory release CI, node E2E tamper evidence, cross-platform setup evidence, production feature proof, packaging, Linux runtime validation, operator sign-off, and external sign-off remain incomplete. | `target/release-assurance/reviewer-evidence-bundle.json` |
+| Composite AIR | P0/P1 | internal adversarial KATs pass; external review open | BLAKE3 key/message binding, active CV bus, message permutation, StripeXor controls, R-b controls, and program-pin gates validated by Route-A/LogUp/AIR release gates |
+| Recursion/FRI | P1 | internal malformed-shape and verifier-owned query-count KATs pass; external review open | RB-01 regressions, nested recursion tests, transcript/MMCS accounting gates |
+| Recursion/certificate noun | P1 | internal full R-b stripe-band and compact-boundary KATs pass; external review open | full R-b admission, bounded compact decoders, MoE/dense dispatch, max-envelope verifier proof |
+| Verifier setup | P1 | internal shape-key, digest, corruption, and page-in gates pass; external review open | setup shape-key coverage, full table digest regeneration, corruption/page-in, lifecycle measurement |
+| Hoon consensus ingress | P1 | internal malformed-artifact, byte-padding, pre-activation, and live AI admission gates pass; external review open | Hoon block-size KAT, malformed full-kernel KAT, pre-activation KAT, AI fakenet acceptance |
+| Miner lifecycle | P1 | internal reconnect and stale-work gates pass; external review open | gRPC lag/reconnect regressions and live dual fakenet |
+| Release evidence | P1 | partial | current Darwin/Linux locked binaries, SBOM, provenance, and external sign-off must be regenerated for the final reviewed commit |
 
 ## Operator checklist
 
@@ -159,15 +156,15 @@ Open critical/high findings:
 |---|---|---|
 | Activation height and rollback boundary documented | open | pending final operator runbook |
 | Verifier setup generation, cache, corruption, and digest paths exercised | partial | full table generation `artifact://66`; corruption/page-in tests `artifact://72`; lifecycle measurement regenerated 13-shape cache, rebuilt in `125196` ms, page-in `468` ms, and matched pinned digest; external review requires complete page-in recomputation of metadata/FRI/common-data binding |
-| Serial Hoon jam rebuilds match embedded release binaries | partial | Roswell retarget, focused AI, and `test-dumb` gates passed against rebuilt release Roswell; full jam set and release binaries pending |
-| Dense and MoE hard budgets reproduced with three fresh processes each | pass | `scripts/benchmark-ai-pow-production.sh` enforces strict `<150000` B and `<30`s; dense `125056` B at `27.310/27.324/27.340`s; MoE `125764` B at `27.196/27.221/27.488`s |
-| Darwin arm64 and Linux x86_64 locked binaries built and checksummed | partial | Darwin arm64 release binaries rebuilt and checksummed at `8d9f1eeb81db08f3bff7c1e9f97a4e514ecba46a`; Linux x86_64 hashes are stale relative to the reviewed candidate |
-| Compact transcript, FRI, and setup digest accounting pinned | partial | `artifact://310`; fixed compact transcript KATs are frozen, L0/L1/L2 are each 60 Johnson bits, the three-layer union bound is recorded as >58 bits, the L1 statement preimage is fixed at 60 public limbs + 5 L0 commitment limbs, and route/metadata/FRI digest mutations change the verifier-key digest; external review requires exact FRI query-count guards and intermediate challenge checkpoints |
-| SBOM, license, Pearl fixture provenance, vendored recursion provenance attached | partial | SPDX SBOM, locked Cargo metadata, binary checksums, and provenance JSON written under `target/release-assurance/`; vendored recursion path/pin recorded; Pearl ISC license and fixture hashes recorded; exact Pearl upstream commit remains open |
-| Independent critical/high findings closed | open | external review found open P0/P1 blockers; no external sign-off |
+| Serial Hoon jam rebuilds match embedded release binaries | pass for current Hoon sources; final binary packaging still pending | all six jams rebuilt serially on 2026-07-19; AI/ZK/dual/retarget fakenet gates rebuilt affected release binaries and passed |
+| Dense and MoE hard budgets reproduced with three fresh processes each | pass for `8d9f1eeb`; refresh recommended on final reviewed commit | `scripts/benchmark-ai-pow-production.sh` enforces strict `<150000` B and `<30`s; dense `125056` B at `27.310/27.324/27.340`s; MoE `125764` B at `27.196/27.221/27.488`s |
+| Darwin arm64 and Linux x86_64 locked binaries built and checksummed | stale after 2026-07-19 Hoon ingress checkpoint | previous Darwin arm64 release binaries and Linux x86_64 hashes are retained for provenance only; final-candidate rebuild/checksum is required |
+| Compact transcript, FRI, and setup digest accounting pinned | internal pass; external review open | `artifact://310`; fixed compact transcript KATs are frozen, L0/L1/L2 are each 60 Johnson bits, the three-layer union bound is recorded as >58 bits, the L1 statement preimage is fixed at 60 public limbs + 5 L0 commitment limbs, and route/metadata/FRI digest mutations change the verifier-key digest |
+| SBOM, license, Pearl fixture provenance, vendored recursion provenance attached | stale after final Hoon ingress checkpoint | SPDX SBOM, locked Cargo metadata, binary checksums, and provenance JSON written under `target/release-assurance/`; vendored recursion path/pin recorded; Pearl ISC license and fixture hashes recorded; exact Pearl upstream commit remains open |
+| Independent critical/high findings closed | internal closure evidence complete; external sign-off open | finding ledger maps every P0/P1 to commits and gates; no independent reviewer sign-off |
 
 ## Final release matrix
 
-The final candidate must attach logs or artifacts for root and nested Rust gates; serial Hoon jam builds and Roswell/dumbnet; dense, MoE, R-b, AIR mutation, LogUp imbalance, recursion-shape, digest, and malformed-page adversarial suites; real AI admission/tamper/pre-activation behavior; full verifier setup generation and corruption tests; three-sample production proof budgets; live dual-puzzle soak; locked Darwin arm64 and Linux x86_64 binaries; checksums; SBOM; provenance; and independent cryptographic sign-off.
+The final candidate must attach logs or artifacts for the current root and nested Rust gates; serial Hoon jam builds and Roswell/dumbnet; dense, MoE, R-b, AIR mutation, LogUp imbalance, recursion-shape, digest, and malformed-page adversarial suites; real AI admission/tamper/pre-activation behavior; full verifier setup generation and corruption tests; three-sample production proof budgets; live AI/ZK/dual/retarget fakenet soaks; locked Darwin arm64 and Linux x86_64 binaries; checksums; SBOM; provenance; and independent cryptographic sign-off.
 
-Until that matrix is complete, the release verdict remains **NO-SHIP**.
+Until the final reviewed commit has fresh locked binaries, provenance, and independent cryptographic sign-off, the release verdict remains **NO-SHIP**.

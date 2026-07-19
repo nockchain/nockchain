@@ -130,13 +130,13 @@ echo "[boot ] node pid=$NODE_PID; waiting for %born (up to ${BOOT_TIMEOUT_SECS}s
 
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    grep -aq "born" "$NODE_LOG" 2>/dev/null && { echo "[boot ] node reached %born (verifier setup ready)"; break; }
+    grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null && { echo "[boot ] node reached %born (verifier setup ready)"; break; }
     if grep -aqi "badly formatted cause" "$NODE_LOG" 2>/dev/null; then
         echo "[fail ] node rejected the fakenet %set-constants poke"; EXIT_CODE=8; exit 8; fi
     kill -0 "$NODE_PID" 2>/dev/null || { echo "[fail ] node died before %born"; EXIT_CODE=2; exit 2; }
     sleep 3
 done
-grep -aq "born" "$NODE_LOG" 2>/dev/null || { echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2; }
+grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null || { echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2; }
 
 sleep 2
 ZK_PAT='added to validated blocks at [1-9][0-9]* with proof version'

@@ -98,7 +98,7 @@
   =/  bytes=(unit ai-proof-bytes-envelope)  ((soft ai-proof-bytes-envelope) node)
   ?~  bytes
     %.n
-  ?&  =(len.u.bytes (met 3 data.u.bytes))
+  ?&  (lte (met 3 data.u.bytes) len.u.bytes)
       (lth len.u.bytes ai-pow-max-compact-certificate-bytes)
   ==
 ::
@@ -113,7 +113,7 @@
   =/  nonce=ai-pow-nonce  nonce.u.art
   =/  cert=ai-pow-certificate-envelope  certificate.u.art
   ?&  (gth len.nonce 0)
-      =(len.nonce (met 3 data.nonce))
+      (lte (met 3 data.nonce) len.nonce)
       (lte len.nonce ai-pow-max-atom-bytes)
       (ai-pow-compact-certificate-ok certificate.cert)
   ==

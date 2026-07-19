@@ -106,4 +106,23 @@
     (expect !>((gth page-delta 0)))
     (expect-eq !>(artifact-delta) !>(page-delta))
   ==
+:::
+:::  +test-ai-pow-resource-allows-zero-padded-byte-atoms: declared byte lengths
+:::  are consensus-visible. The atom may have a shorter canonical byte length
+:::  when the declared bytes end in zero.
+++  test-ai-pow-resource-allows-zero-padded-byte-atoms
+  ^-  tang
+  =/  cert=ai-pow-certificate:t  *ai-pow-certificate:t
+  =/  base=page:t  sample-v1-page
+  =/  padded-page=page:t
+    ?^  -.base
+      base
+    base(pow `[%ai-pow [4 0] cert(version 1, certificate [%bytes 4 0])])
+  =/  ref-page=page:t
+    ?^  -.base
+      base
+    base(pow `[%ai-pow [4 1] cert(version 1, certificate [%bytes 4 1])])
+  =/  padded-size=@  (compute-size-without-txs:page:t padded-page)
+  =/  ref-size=@  (compute-size-without-txs:page:t ref-page)
+  (expect !>((lth padded-size (add ref-size 1.000))))
 --

@@ -7,41 +7,18 @@
 #   3. Wait for the node to log "added to validated blocks at <h>" for h ≥ 1,
 #      which proves the miner found a block AND the node accepted it.
 #
-# KNOWN RESIDUAL (2026-05-26): this smoke currently fails to produce a block
-# because of a pre-existing bug in `nockchain` that lives outside the
-# zk-pow-miner scope. The fakenet `set-constants` poke (built in
-# `crates/nockchain/src/setup.rs::poke::PokeFakenetConstants` from a
-# `nockchain_types::BlockchainConstants` noun) is silently rejected by the
-# kernel with "Error: badly formatted cause, should never occur." The kernel
-# therefore keeps the mainnet defaults (pow-len=64) instead of the fakenet
-# values (pow-len=2). The bundled fakenet genesis jam
-# (`jams/fakenet-genesis-pow-2-bex-1.jam`) was built for pow-len=2, so when
-# the node tries to validate it, `check-pow-valid` / `check-target` /
-# `check-work` all fail and the kernel emits
-# `liar-effect: ATTN: received a bad genesis block`. No heaviest-block ⇒
-# no `%mine` effect emission ⇒ the miner correctly stays idle.
-#
-# Evidence that the *miner* itself works end-to-end up to that point:
-#   miner.log:
-#     "zk-pow-mine: starting node=... threads=1"
-#     "zk-pow-miner: pool ready; entering main loop"
-#     "zk-pow-miner: subscribed + mining enabled; awaiting candidates"
-#   node.log:
-#     "handle-command: set-mining-key-advanced"  ← miner-side poke landed
-#     "handle-command: enable-mining"            ← miner-side poke landed
-#
-# This smoke flips green automatically once the BlockchainConstants noun
-# encoding (or the Hoon-side blockchain-constants:v1 schema soft) is
-# repaired. Until then it is a useful diagnostic — it correctly identifies
-# the chain bring-up bug and preserves both logs at `WORK_DIR` for triage.
+# Verifier setup is mandatory node state even in this ZK-only smoke. First boot
+# may spend several minutes generating the table; the script reuses only that
+# proof-independent setup cache while keeping consensus PMA/event state fresh.
 #
 # Tunables via env vars:
-#   PRIV_PORT      — node private gRPC port               (default: 25555)
-#   FAKENET_POW_LEN — fakenet pow-len                     (default: 2)
-#   FAKENET_LOG_DIFF — log target difficulty (2^N)        (default: 1)
-#   NUM_THREADS    — miner pool size                      (default: 1)
-#   TIMEOUT_SECS   — overall wait                         (default: 180)
-#   MINING_PKH     — payout pkh (defaults to a valid stub)
+#   PRIV_PORT         — node private gRPC port               (default: 25555)
+#   FAKENET_POW_LEN   — fakenet pow-len                      (default: 2)
+#   FAKENET_LOG_DIFF  — log target difficulty (2^N)          (default: 1)
+#   NUM_THREADS       — miner pool size                      (default: 1)
+#   TIMEOUT_SECS      — post-boot mining wait                (default: 180)
+#   BOOT_TIMEOUT_SECS — verifier setup / born wait           (default: 1200)
+#   MINING_PKH        — payout pkh (defaults to a valid stub)
 
 set -euo pipefail
 
@@ -50,10 +27,14 @@ FAKENET_POW_LEN="${FAKENET_POW_LEN:-2}"
 FAKENET_LOG_DIFF="${FAKENET_LOG_DIFF:-1}"
 NUM_THREADS="${NUM_THREADS:-1}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-180}"
+BOOT_TIMEOUT_SECS="${BOOT_TIMEOUT_SECS:-1200}"
 MINING_PKH="${MINING_PKH:-9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV}"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Persist only verifier setup; consensus PMA/event state is per-run.
+SETUP_CACHE_DIR="${AI_POW_VERIFIER_SETUP_CACHE_DIR:-$REPO_ROOT/.fakenet-ai-pow-data/ai-pow}"
 
 echo "== fakenet-zk-pow-smoke =="
 echo "  PRIV_PORT       = $PRIV_PORT"
@@ -61,6 +42,8 @@ echo "  FAKENET_POW_LEN = $FAKENET_POW_LEN"
 echo "  FAKENET_LOG_DIFF= $FAKENET_LOG_DIFF"
 echo "  NUM_THREADS     = $NUM_THREADS"
 echo "  TIMEOUT_SECS    = $TIMEOUT_SECS"
+echo "  BOOT_TIMEOUT    = $BOOT_TIMEOUT_SECS"
+echo "  SETUP_CACHE_DIR = $SETUP_CACHE_DIR"
 echo "  MINING_PKH      = $MINING_PKH"
 
 echo
@@ -72,6 +55,12 @@ WORK_DIR="$(mktemp -d -t fakenet-zk-pow-smoke.XXXXXX)"
 NODE_LOG="$WORK_DIR/node.log"
 MINER_LOG="$WORK_DIR/miner.log"
 echo "[setup] work_dir=$WORK_DIR"
+DATA_DIR="$WORK_DIR/node-data"
+mkdir -p "$DATA_DIR"
+if [[ -d "$SETUP_CACHE_DIR" ]]; then
+    mkdir -p "$DATA_DIR/ai-pow"
+    cp -R "$SETUP_CACHE_DIR/." "$DATA_DIR/ai-pow/"
+fi
 
 NODE_PID=""
 MINER_PID=""
@@ -89,6 +78,10 @@ cleanup() {
     if [[ -n "$NODE_PID" ]]; then
         kill "$NODE_PID" 2>/dev/null
         wait "$NODE_PID" 2>/dev/null
+    fi
+    if [[ -d "$DATA_DIR/ai-pow" ]]; then
+        mkdir -p "$SETUP_CACHE_DIR"
+        cp -R "$DATA_DIR/ai-pow/." "$SETUP_CACHE_DIR/"
     fi
     echo "[cleanup] logs preserved at $WORK_DIR"
     if [[ "$EXIT_CODE" -ne 0 ]]; then
@@ -113,6 +106,7 @@ pushd "$WORK_DIR" >/dev/null
 RUST_LOG="${NODE_RUST_LOG:-info}" \
     "$NODE_BIN" \
     --fakenet \
+    --data-dir "$DATA_DIR" \
     --bind-private-grpc-port "$PRIV_PORT" \
     --fakenet-pow-len "$FAKENET_POW_LEN" \
     --fakenet-log-difficulty "$FAKENET_LOG_DIFF" \
@@ -121,12 +115,13 @@ RUST_LOG="${NODE_RUST_LOG:-info}" \
     >"$NODE_LOG" 2>&1 &
 NODE_PID=$!
 popd >/dev/null
-echo "[boot ] node pid=$NODE_PID; waiting for born..."
+echo "[boot ] node pid=$NODE_PID; waiting for %born (up to ${BOOT_TIMEOUT_SECS}s for setup gen)..."
 
-# Wait for the node to print %born so we know the kernel is past init.
-DEADLINE=$(( SECONDS + 60 ))
+# Wait for the kernel's born command to run. The driver-level "born poke sent"
+# line is not readiness: verifier setup can still be generating.
+DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    if grep -q "born" "$NODE_LOG" 2>/dev/null || grep -q "born poke sent" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null; then
         echo "[boot ] node reached %born"
         break
     fi
@@ -137,6 +132,11 @@ while (( SECONDS < DEADLINE )); do
     fi
     sleep 1
 done
+if ! grep -aq "handle-command: born" "$NODE_LOG" 2>/dev/null; then
+    echo "[fail ] timeout waiting for %born"
+    EXIT_CODE=2
+    exit 2
+fi
 
 # Brief settle.
 sleep 2
