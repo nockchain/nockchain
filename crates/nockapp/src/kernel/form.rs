@@ -52,7 +52,12 @@ const PEEK_AXIS: u64 = 22;
 const POKE_AXIS: u64 = 23;
 
 const SERF_FINISHED_INTERVAL: Duration = Duration::from_millis(100);
-const SERF_THREAD_STACK_SIZE: usize = 256 * 1024 * 1024; // 8MB
+// The Serf interpreter can build very deep temporary call stacks while
+// processing a large block/state transition. 256 MiB was observed to end in
+// a native SIGSEGV at the stack guard page (rather than a recoverable Rust
+// error), so reserve 1 GiB for the Serf thread. This is virtual address space;
+// pages are committed on demand.
+const SERF_THREAD_STACK_SIZE: usize = 1024 * 1024 * 1024;
 const REPLAY_PRESERVE_BATCH: usize = 64;
 const PMA_GC_DROP_ALLOCATED_PREFIX_NUMERATOR: usize = 1;
 const PMA_GC_DROP_ALLOCATED_PREFIX_DENOMINATOR: usize = 1;
