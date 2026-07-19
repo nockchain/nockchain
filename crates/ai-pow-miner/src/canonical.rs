@@ -515,4 +515,42 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn canonical_moe_route_kat_snapshot() {
+        let params = canonical_params();
+        let ticket =
+            evaluate_canonical_moe_ticket(&params, 8, 2, 1, [0x42u8; 32], 7).expect("ticket");
+
+        assert_eq!(
+            hex::encode(ticket.s_a),
+            "46d897d456311f976f1fa4758d52918f86206f1e4bab33073f6858512ec14030"
+        );
+        assert_eq!(
+            hex::encode(ticket.s_b),
+            "5d318162e3b6e8295f7ecc52e921c0e9908f5a8a93f278c793d8895ed029d025"
+        );
+        assert_eq!(
+            hex::encode(ticket.commitment.routing_root),
+            "047fb8f5f5cba41b1e3833f7f4a5ae97b001ef49d05e6e0a13533ebe2db1491e"
+        );
+        assert_eq!(
+            hex::encode(ticket.commitment.hash_offsets),
+            "377df38b484a8e8ab75f7ac71e9f6cde8e3b6e267d2c3bc606543379a9e87046"
+        );
+        assert_eq!(
+            hex::encode(ticket.commitment.hash_routing),
+            "ca0f1c078cc35278f16df8d34ceb64acab6d3ae481bf4b271f3f36fc47a91f43"
+        );
+        assert_eq!(
+            hex::encode(ticket.commitment.hash_activations),
+            "dc84495571334a616815207fa1f3e512c2e6438a190748825a645c5534b09dba"
+        );
+        assert_eq!(ticket.outer_indices, vec![0, 2, 4, 6, 8, 10, 12, 14]);
+        assert_eq!(ticket.b_cols_global, vec![0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(
+            hex::encode(ticket.jackpot_hash),
+            "c8afda2eed193defe13b8b0553909afb93eda8f079f4533d61b1076c8025d5a1"
+        );
+    }
 }

@@ -43,7 +43,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
@@ -64,6 +64,7 @@ use nockapp::nockapp::wire::Wire;
 use nockapp::noun::slab::NounSlab;
 use nockchain_mining_common::{
     MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient, NodeClientError,
+    PokeTransportOutcome, PokeTransportStatus,
 };
 use nockvm::noun::{NounAllocator, D, T};
 use nockvm_macros::tas;
@@ -99,6 +100,32 @@ use crate::{DifficultyTarget, MiningCancel};
 const PEARL_GATEWAY_MAX_RESPONSE_LINE_BYTES: usize = 160 * 1024;
 const MAX_CHAIN_TARGET_U32_LIMBS: usize = 10;
 const AI_POW_MINE_CANDIDATE_VERSION: u64 = 3;
+const NODE_POKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiPowProveTimings {
+    pub certificate_build_ms: u128,
+    pub poke_build_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiPowSubmitTimings {
+    pub jam_ms: u128,
+    pub transport_ms: u128,
+    pub status: PokeTransportStatus,
+    pub send_started: bool,
+}
+
+impl AiPowSubmitTimings {
+    fn from_outcome(jam_elapsed: Duration, outcome: &PokeTransportOutcome) -> Self {
+        Self {
+            jam_ms: jam_elapsed.as_millis(),
+            transport_ms: outcome.elapsed().as_millis(),
+            status: outcome.status(),
+            send_started: outcome.send_started(),
+        }
+    }
+}
 
 type AiPowPearlMergeCertificateBuilder = dyn Fn(&PearlMergeTicketAttempt) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError>
     + Send
@@ -649,6 +676,7 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                 }
                                 continue;
                             }
+                            let proof_start = Instant::now();
                             let proof = match pearl_cfg.build_certificate_for_attempt(&mined.ticket.attempt) {
                                 Ok(proof) => proof,
                                 Err(e) => {
@@ -656,6 +684,8 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                     break InnerOutcome::Fatal(MinerError::CertificateBuild(e.to_string()));
                                 }
                             };
+                            let certificate_build_ms = proof_start.elapsed().as_millis();
+                            let poke_start = Instant::now();
                             let poke = match build_ai_pow_pearl_merge_certificate_poke_from_ticket_proof(
                                 &mined.ticket.attempt,
                                 &mined.aux_inclusion,
@@ -670,11 +700,43 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                     break InnerOutcome::Fatal(MinerError::CertificateBuild(e.to_string()));
                                 }
                             };
-                            if let Err(e) = client
-                                .poke_wire(AiPowMinerWire::Mined.to_wire(), poke)
-                                .await
-                            {
-                                warn!(error = %e, "submit Pearl-compatible ai-pow certificate poke failed (likely stale candidate)");
+                            let prove_timings = AiPowProveTimings {
+                                certificate_build_ms,
+                                poke_build_ms: poke_start.elapsed().as_millis(),
+                            };
+                            let jam_start = Instant::now();
+                            let prepared =
+                                NodeClient::prepare_poke_wire(AiPowMinerWire::Mined.to_wire(), poke);
+                            let jam_elapsed = jam_start.elapsed();
+                            let outcome = client
+                                .send_prepared_poke_with_timeout_or_cancel(
+                                    prepared,
+                                    NODE_POKE_ACK_TIMEOUT,
+                                    shutdown.cancelled(),
+                                )
+                                .await;
+                            let submit_timings =
+                                AiPowSubmitTimings::from_outcome(jam_elapsed, &outcome);
+                            match outcome.into_result() {
+                                Ok(()) => info!(
+                                    certificate_build_ms = prove_timings.certificate_build_ms,
+                                    poke_build_ms = prove_timings.poke_build_ms,
+                                    jam_ms = submit_timings.jam_ms,
+                                    transport_ms = submit_timings.transport_ms,
+                                    submit_status = ?submit_timings.status,
+                                    send_started = submit_timings.send_started,
+                                    "Pearl-compatible ai-pow certificate submission acked by node"
+                                ),
+                                Err(e) => warn!(
+                                    error = %e,
+                                    certificate_build_ms = prove_timings.certificate_build_ms,
+                                    poke_build_ms = prove_timings.poke_build_ms,
+                                    jam_ms = submit_timings.jam_ms,
+                                    transport_ms = submit_timings.transport_ms,
+                                    submit_status = ?submit_timings.status,
+                                    send_started = submit_timings.send_started,
+                                    "submit Pearl-compatible ai-pow certificate poke failed (likely stale candidate)"
+                                ),
                             }
                             latest_candidate = None;
                             current_pearl_header = None;
@@ -970,11 +1032,43 @@ pub async fn run_canonical(
                                 trace_height = block.certificate.trace_height,
                                 "canonical AI-PoW block proved; submitting %pow to node"
                             );
+                            let poke_start = Instant::now();
                             match build_canonical_poke(&block) {
                                 Ok(poke) => {
-                                    match client.poke_wire(AiPowMinerWire::Mined.to_wire(), poke).await {
-                                        Ok(()) => info!("canonical %ai-pow submission acked by node"),
-                                        Err(e) => warn!(error = %e, "submit canonical %pow failed (likely stale candidate)"),
+                                    let poke_build_ms = poke_start.elapsed().as_millis();
+                                    let jam_start = Instant::now();
+                                    let prepared = NodeClient::prepare_poke_wire(
+                                        AiPowMinerWire::Mined.to_wire(),
+                                        poke,
+                                    );
+                                    let jam_elapsed = jam_start.elapsed();
+                                    let outcome = client
+                                        .send_prepared_poke_with_timeout_or_cancel(
+                                            prepared,
+                                            NODE_POKE_ACK_TIMEOUT,
+                                            shutdown.cancelled(),
+                                        )
+                                        .await;
+                                    let submit_timings =
+                                        AiPowSubmitTimings::from_outcome(jam_elapsed, &outcome);
+                                    match outcome.into_result() {
+                                        Ok(()) => info!(
+                                            poke_build_ms,
+                                            jam_ms = submit_timings.jam_ms,
+                                            transport_ms = submit_timings.transport_ms,
+                                            submit_status = ?submit_timings.status,
+                                            send_started = submit_timings.send_started,
+                                            "canonical %ai-pow submission acked by node"
+                                        ),
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            poke_build_ms,
+                                            jam_ms = submit_timings.jam_ms,
+                                            transport_ms = submit_timings.transport_ms,
+                                            submit_status = ?submit_timings.status,
+                                            send_started = submit_timings.send_started,
+                                            "submit canonical %pow failed (likely stale candidate)"
+                                        ),
                                     }
                                 }
                                 Err(e) => warn!(error = %e, "build canonical poke failed"),
@@ -1965,6 +2059,35 @@ mod tests {
             cert_bytes.len(),
             block.certificate.trace_height
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn canonical_moe_repeat_no_cache_costs() {
+        let warmup_commit = [0x5au8; 32];
+        let timed_commit = [0x5bu8; 32];
+        let warmup =
+            prove_canonical_moe_block_at(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, warmup_commit, 0)
+                .expect("warmup prove");
+        let AiProofNode::Bytes(warmup_cert_bytes) = &warmup.certificate.certificate else {
+            panic!("production compact certificate must use the canonical byte node");
+        };
+        assert!(warmup_cert_bytes.len() <= 150_000);
+
+        let t = std::time::Instant::now();
+        let block =
+            prove_canonical_moe_block_at(&CANONICAL_MATMUL_PARAMS, 8, 2, 1, timed_commit, 0)
+                .expect("timed repeat prove");
+        let prove_seconds = t.elapsed().as_secs_f64();
+        let AiProofNode::Bytes(cert_bytes) = &block.certificate.certificate else {
+            panic!("production compact certificate must use the canonical byte node");
+        };
+        println!(
+            "canonical MoE repeat/no-cache control: {prove_seconds:.3}s compact_cert_bytes={} trace_height={} cache_unavailable=true",
+            cert_bytes.len(),
+            block.certificate.trace_height
+        );
+        assert!(cert_bytes.len() <= 150_000);
     }
 
     #[test]
@@ -4605,6 +4728,111 @@ mod tests {
         stop_gateway.store(true, Ordering::SeqCst);
         gateway_thread.join().expect("gateway fixture exited");
         node.shutdown().await;
+    }
+
+    #[ignore = "real dense production proof plus mock-node endpoint; opt-in"]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn run_loop_dense_production_shape_reaches_mock_node() {
+        let gateway = spawn_static_aux_pearl_gateway(
+            pearl_test_header(),
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+        );
+        let node = MockNode::spawn().await;
+        let params = crate::DENSE_PRODUCTION_PARAMS;
+        let (a, b) = synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let mut cfg = test_cfg(node.url());
+        cfg.puzzle.params = params;
+        cfg.puzzle.a = Arc::new(a);
+        cfg.puzzle.b = Arc::new(b);
+        cfg.puzzle.pearl_merge = PearlMergeSubmissionConfig::new_compact_recursive(
+            gateway.config.clone(),
+            PearlMiningConfig {
+                common_dim: params.k,
+                rank: params.noise_rank as u16,
+                mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+                rows_pattern: pearl_test_pattern(params.tile),
+                cols_pattern: pearl_test_pattern(params.tile),
+                reserved: [0u8; PEARL_MINING_CONFIG_RESERVED_SIZE],
+            },
+            pearl_test_aux(),
+            params.tile as usize,
+            PearlMergeMineOptions {
+                max_attempts: Some(1),
+                ..PearlMergeMineOptions::default()
+            },
+            params,
+            cfg.puzzle.a.clone(),
+            cfg.puzzle.b.clone(),
+        );
+
+        let shutdown = CancellationToken::new();
+        let shutdown_clone = shutdown.clone();
+        let mining_task = tokio::spawn(async move { run(cfg, shutdown_clone).await });
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_node_received_pkh_only_set_key(&node).await;
+        let commitment_seed = 710;
+        node.publish_synth_mine_effect_with_target_limbs(
+            commitment_seed,
+            &[u64::from(u32::MAX); 8],
+            64,
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        let poke = loop {
+            if let Some(poke) = node.mined_pokes.lock().await.pop() {
+                break poke;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dense production route did not submit a %mined poke within 120s; observed {} total pokes",
+                node.pokes_observed.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+
+        let expected_nock_commitment =
+            *blake3::hash(&synth_block_commitment_slab(commitment_seed).jam()).as_bytes();
+        let space = poke.noun_space();
+        let root = unsafe { *poke.root() };
+        let command_cell = root.in_space(&space).as_cell().expect("poke cell");
+        assert!(command_cell.head().eq_bytes("command"));
+        let pow_cell = command_cell
+            .tail()
+            .noun()
+            .in_space(&space)
+            .as_cell()
+            .expect("pow cell");
+        assert!(pow_cell.head().eq_bytes("pow"));
+        let ai_pow_noun = pow_cell.tail().noun();
+        let decoded = decode_ai_pow_pearl_merge_artifact_noun(
+            ai_pow_noun,
+            &space,
+            CertificateNounLimits::default(),
+        )
+        .expect("decode dense production ai-pow artifact");
+        assert_eq!(
+            decoded.statement.aux.nock_block_commitment,
+            expected_nock_commitment
+        );
+        assert_eq!(decoded.certificate.zk_params.m, 512);
+        assert_eq!(decoded.certificate.zk_params.k, 1024);
+        assert_eq!(decoded.certificate.zk_params.n, 512);
+        assert_eq!(decoded.certificate.zk_params.noise_rank, 64);
+        assert!(matches!(
+            decoded.certificate.certificate,
+            AiProofNode::Bytes(_)
+        ));
+
+        shutdown.cancel();
+        let r = tokio::time::timeout(Duration::from_secs(5), mining_task)
+            .await
+            .expect("miner task did not exit")
+            .expect("miner panicked");
+        assert!(matches!(r, Ok(())), "unexpected miner result: {r:?}");
+        node.shutdown().await;
+        gateway.shutdown();
     }
 
     /// Heavy: runs the real ai-pow prover on TEST_SMALL with a trivial

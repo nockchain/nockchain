@@ -11,7 +11,21 @@ export RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}"
 
 MAX_CERT_BYTES="${AI_POW_BENCH_MAX_CERT_BYTES:-150000}"
 MAX_PROVE_SECONDS="${AI_POW_BENCH_MAX_PROVE_SECONDS:-30}"
-SAMPLES="${AI_POW_BENCH_SAMPLES:-3}"
+PROTOCOL="${AI_POW_BENCH_PROTOCOL:-release}"
+case "$PROTOCOL" in
+  release | cold-warm) ;;
+  *)
+    printf 'unknown AI_POW_BENCH_PROTOCOL=%s (expected release or cold-warm)\n' "$PROTOCOL" >&2
+    exit 2
+    ;;
+esac
+if [[ -n "${AI_POW_BENCH_SAMPLES+x}" ]]; then
+  SAMPLES="$AI_POW_BENCH_SAMPLES"
+elif [[ "$PROTOCOL" == "cold-warm" ]]; then
+  SAMPLES=7
+else
+  SAMPLES=3
+fi
 TIME_BIN="${TIME_BIN:-/usr/bin/time}"
 
 case "$(uname -s)" in
@@ -22,7 +36,8 @@ esac
 printf '== AI-PoW production proof benchmark ==\n'
 printf 'host: %s %s\n' "$(uname -srm)" "$(sysctl -n machdep.cpu.brand_string 2>/dev/null || true)"
 printf 'rustflags: %s\n' "$RUSTFLAGS"
-printf 'limits: proof_bytes < %s, prove_seconds < %s, samples=%s\n' \
+printf 'protocol: %s\n' "$PROTOCOL"
+printf 'limits: proof_bytes < %s, prove_seconds < %s, samples_per_cell=%s\n' \
   "$MAX_CERT_BYTES" "$MAX_PROVE_SECONDS" "$SAMPLES"
 printf 'fixtures:\n'
 printf '  dense: m=512 k=1024 n=512 rank=64 tile=8\n'
@@ -75,6 +90,12 @@ elif kind == "moe":
     m = re.search(r"canonical MoE prove:\s*([0-9.]+)s\s+compact_cert_bytes=(\d+)", text)
     if not m:
         raise SystemExit(f"{label} sample {sample}: missing MoE prove line")
+    prove_seconds = float(m.group(1))
+    proof_bytes = int(m.group(2))
+elif kind == "moe_warm":
+    m = re.search(r"canonical MoE repeat/no-cache control:\s*([0-9.]+)s\s+compact_cert_bytes=(\d+)", text)
+    if not m:
+        raise SystemExit(f"{label} sample {sample}: missing MoE repeat/no-cache line")
     prove_seconds = float(m.group(1))
     proof_bytes = int(m.group(2))
 else:
@@ -130,14 +151,36 @@ run_benchmark() {
   done
 }
 
-run_benchmark \
-  "dense production compact proof" \
-  "dense" \
-  "real_compact_pearl_merge_prod_scale_m_size_and_latency"
-run_benchmark \
-  "canonical MoE miner proof" \
-  "moe" \
-  "canonical_mining_costs"
+case "$PROTOCOL" in
+  release)
+    run_benchmark \
+      "dense production compact proof" \
+      "dense" \
+      "real_compact_pearl_merge_prod_scale_m_size_and_latency"
+    run_benchmark \
+      "canonical MoE miner proof" \
+      "moe" \
+      "canonical_mining_costs"
+    ;;
+  cold-warm)
+    run_benchmark \
+      "dense cold production compact proof" \
+      "dense" \
+      "real_compact_pearl_merge_prod_scale_m_size_and_latency"
+    run_benchmark \
+      "dense warm production compact proof" \
+      "dense" \
+      "real_compact_pearl_merge_prod_scale_m_warm_cache_size_and_latency"
+    run_benchmark \
+      "canonical MoE cold miner proof" \
+      "moe" \
+      "canonical_mining_costs"
+    run_benchmark \
+      "canonical MoE repeat no-cache control" \
+      "moe_warm" \
+      "canonical_moe_repeat_no_cache_costs"
+    ;;
+esac
 
 printf '\nPASS: every sample met proof_bytes < %s and prove_seconds < %s.\n' \
   "$MAX_CERT_BYTES" "$MAX_PROVE_SECONDS"

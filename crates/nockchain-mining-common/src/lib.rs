@@ -22,4 +22,6 @@ pub mod node_client;
 
 pub use candidate::{CandidateDecodeError, MiningCandidate, MiningCandidateKind};
 pub use key_config::{MiningKeyConfig, MiningPkhConfig};
-pub use node_client::{NodeClient, NodeClientError};
+pub use node_client::{
+    NodeClient, NodeClientError, PokeTransportOutcome, PokeTransportStatus, PreparedPoke,
+};

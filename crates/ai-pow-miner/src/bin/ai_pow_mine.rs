@@ -48,6 +48,7 @@ use ai_pow_miner::run::{
     run, run_canonical, AiPuzzleInputs, MinerConfig, MinerError, PearlGatewayMinerRpcConfig,
     PearlGatewayTransport, PearlMergeSubmissionConfig,
 };
+use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use nockchain_mining_common::MiningPkhConfig;
@@ -103,6 +104,10 @@ struct Args {
     /// `--fakenet-update-candidate-interval-secs` larger than the prove time.
     #[arg(long)]
     canonical: bool,
+
+    /// Pearl-compatible dense production benchmark shape (`m=512,k=1024,n=512,r=64,tile=8`).
+    #[arg(long, conflicts_with = "canonical")]
+    dense_production: bool,
 
     /// Log filter (env-filter syntax). Override with the `RUST_LOG` env var.
     #[arg(
@@ -219,7 +224,11 @@ fn build_pkh_configs(args: &Args) -> Option<Vec<MiningPkhConfig>> {
 }
 
 fn build_puzzle_inputs(args: &Args) -> Result<AiPuzzleInputs> {
-    let params = DEFAULT_MATMUL_PARAMS;
+    let params = if args.dense_production {
+        DENSE_PRODUCTION_PARAMS
+    } else {
+        DEFAULT_MATMUL_PARAMS
+    };
     params
         .validate()
         .map_err(|e| anyhow!("matmul params invalid: {e}"))?;
@@ -248,9 +257,9 @@ fn validate_pearl_recursive_cli_params(params: MatmulParams) -> Result<()> {
     params
         .validate_prod_envelope()
         .map_err(|e| anyhow!("Pearl-compatible params are not production-admissible: {e}"))?;
-    if params.num_tiles() > 1 {
+    if params.num_tiles() > 1 && params != DENSE_PRODUCTION_PARAMS {
         bail!(
-            "Pearl-compatible recursive certificates require exactly one tile; current params have {} tiles",
+            "Pearl-compatible recursive certificates require the default single-tile shape or --dense-production's admitted shape; current params have {} tiles",
             params.num_tiles()
         );
     }
@@ -401,6 +410,24 @@ mod tests {
     }
 
     #[test]
+    fn cli_dense_production_uses_only_admitted_multi_tile_shape() {
+        let args = Args::parse_from([
+            "ai-pow-mine", "--dense-production", "--mining-pkh",
+            "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV",
+        ]);
+        let puzzle = build_puzzle_inputs(&args).expect("dense production Pearl gateway config");
+        assert_eq!(puzzle.params, DENSE_PRODUCTION_PARAMS);
+        assert!(puzzle.params.num_tiles() > 1);
+        let (expected_a, expected_b) =
+            ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &puzzle.params);
+        assert_eq!(puzzle.a.as_slice(), expected_a.as_slice());
+        assert_eq!(puzzle.b.as_slice(), expected_b.as_slice());
+        puzzle
+            .validate_canonical_submission_ready()
+            .expect("dense production shape should pass the named preflight");
+    }
+
+    #[test]
     fn cli_requires_v1_reward_configs() {
         let args = Args::parse_from(["ai-pow-mine"]);
         assert!(build_pkh_configs(&args).is_none());
@@ -482,6 +509,7 @@ mod tests {
         assert!(help.contains("[default: unix:/tmp/pearlgw.sock]"));
         assert!(help.contains("--node-addr <NODE_ADDR>"));
         assert!(help.contains("--mining-pkh <MINING_PKH>"));
+        assert!(help.contains("--dense-production"));
         assert!(!help.contains("--pearl-work-source"));
         assert!(!help.contains("--pearl-gateway-transport"));
         assert!(!help.contains("--pearl-gateway-socket"));

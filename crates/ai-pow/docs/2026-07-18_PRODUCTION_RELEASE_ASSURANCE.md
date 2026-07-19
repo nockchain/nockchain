@@ -28,6 +28,18 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 | Recursive hash | full 5-round Tip5 in the AI recursive stack | fixed decision | reduced-round attack literature is review input, not a reason to change the primitive |
 | Artifact resource limits | 1 MiB atom cap and 4 MiB JAM cap | fixed decision | MoE routing cap must fit inside these limits |
 
+### AI-PoW prover performance pass ceilings
+
+| Gate | Frozen ceiling |
+|---|---:|
+| M2 Max prover peak RSS | `≤ 16 GiB` |
+| Warm-idle miner prover-cache RSS | `< 1.5 GiB` additional |
+| Resident miner prover cache | one full prep by default; `< 2 GiB` byte-accounted LRU |
+| Verifier resident context | `< 3 GiB` per context |
+| Verifier-cache total RSS | `< 16 GiB` on the 32-GiB reference host |
+| Setup disk footprint | `< 40 GiB` and `≤ 105%` of the current all-key baseline |
+| Setup rebuild, boot, page-in, churn, verifier latency | `≤ 110%` of frozen baselines |
+
 ## Residual-risk register
 
 | Risk | Required disposition | State | Evidence |

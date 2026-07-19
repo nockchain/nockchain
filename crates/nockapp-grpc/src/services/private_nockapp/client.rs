@@ -4,13 +4,19 @@ use nockapp::noun::slab::NounSlab;
 use tonic::transport::Channel;
 
 use crate::error::{NockAppGrpcError, Result};
-use crate::pb::common::v1::Wire;
+use crate::pb::common::v1::{ErrorStatus, Wire};
 use crate::pb::private::v1::nock_app_service_client::NockAppServiceClient as PrivateNockAppClient;
 use crate::pb::private::v1::*;
 
 #[derive(Clone)]
 pub struct PrivateNockAppGrpcClient {
     client: PrivateNockAppClient<Channel>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PokeResponseResult {
+    Acknowledged(bool),
+    Error(ErrorStatus),
 }
 
 impl PrivateNockAppGrpcClient {
@@ -82,7 +88,12 @@ impl PrivateNockAppGrpcClient {
         Ok(stream)
     }
 
-    pub async fn poke(&mut self, pid: i32, wire: Wire, payload: Vec<u8>) -> Result<bool> {
+    pub async fn poke_response(
+        &mut self,
+        pid: i32,
+        wire: Wire,
+        payload: Vec<u8>,
+    ) -> Result<PokeResponseResult> {
         let request = PokeRequest {
             pid,
             wire: Some(wire),
@@ -93,11 +104,18 @@ impl PrivateNockAppGrpcClient {
         let response = response.into_inner();
 
         match response.result {
-            Some(poke_response::Result::Acknowledged(ack)) => Ok(ack),
-            Some(poke_response::Result::Error(error)) => {
-                Err(NockAppGrpcError::Internal(error.message))
+            Some(poke_response::Result::Acknowledged(ack)) => {
+                Ok(PokeResponseResult::Acknowledged(ack))
             }
+            Some(poke_response::Result::Error(error)) => Ok(PokeResponseResult::Error(error)),
             None => Err(NockAppGrpcError::Internal("Empty response".to_string())),
+        }
+    }
+
+    pub async fn poke(&mut self, pid: i32, wire: Wire, payload: Vec<u8>) -> Result<bool> {
+        match self.poke_response(pid, wire, payload).await? {
+            PokeResponseResult::Acknowledged(ack) => Ok(ack),
+            PokeResponseResult::Error(error) => Err(NockAppGrpcError::Internal(error.message)),
         }
     }
 }

@@ -289,4 +289,91 @@ mod tests {
         server_handle.abort();
         let _ = server_handle.await;
     }
+
+    #[tokio::test]
+    async fn poke_response_preserves_kernel_nack_error_status() {
+        use std::net::{SocketAddr, TcpListener};
+        use std::sync::{Arc, LazyLock};
+        use std::time::Duration;
+
+        use nockapp::driver::{IOAction, NockAppHandle, PokeResult};
+        use nockapp::noun::slab::NounSlab;
+        use nockapp::NockAppExit;
+        use nockvm::noun::D;
+        use tokio::sync::{broadcast, mpsc, Mutex};
+
+        use crate::pb::common::v1::{ErrorCode, Wire};
+        use crate::services::private_nockapp::client::{
+            PokeResponseResult, PrivateNockAppGrpcClient,
+        };
+        use crate::services::private_nockapp::server::PrivateNockAppGrpcServer;
+
+        static METRICS: LazyLock<Arc<nockapp::nockapp::metrics::NockAppMetrics>> =
+            LazyLock::new(|| {
+                Arc::new(
+                    nockapp::nockapp::metrics::NockAppMetrics::register(
+                        gnort::global_metrics_registry(),
+                    )
+                    .expect("register NockAppMetrics"),
+                )
+            });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr: SocketAddr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let server_url = format!("http://{addr}");
+
+        let (action_tx, mut action_rx) = mpsc::channel::<IOAction>(64);
+        let (effect_tx, effect_rx_for_handle) = broadcast::channel::<NounSlab>(64);
+        let (exit, _exit_rx) = NockAppExit::new();
+        let handle = NockAppHandle {
+            io_sender: action_tx,
+            effect_sender: Arc::new(effect_tx),
+            effect_receiver: Mutex::new(effect_rx_for_handle),
+            metrics: METRICS.clone(),
+            exit,
+        };
+
+        let action_handler = tokio::spawn(async move {
+            match action_rx.recv().await.expect("poke action") {
+                IOAction::Poke { ack_channel, .. } => {
+                    ack_channel.send(PokeResult::Nack).expect("send nack");
+                }
+                IOAction::Peek { .. } => panic!("unexpected peek"),
+            }
+        });
+
+        let server = PrivateNockAppGrpcServer::new(handle);
+        let server_handle = tokio::spawn(async move { server.serve(addr).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut slab: NounSlab<nockapp::noun::slab::NockJammer> = NounSlab::new();
+        slab.set_root(D(42));
+        let payload = slab.jam().to_vec();
+        let wire = Wire {
+            source: "grpc".to_string(),
+            version: 1,
+            tags: vec![],
+        };
+
+        let mut client = PrivateNockAppGrpcClient::connect(server_url)
+            .await
+            .expect("client connect");
+        let response = client
+            .poke_response(1, wire, payload)
+            .await
+            .expect("poke response");
+
+        match response {
+            PokeResponseResult::Error(error) => {
+                assert_eq!(error.code, ErrorCode::PokeFailed as i32);
+                assert!(error.message.contains("Poke operation failed"));
+            }
+            other => panic!("expected preserved poke error status, got {other:?}"),
+        }
+
+        action_handler.await.expect("action handler");
+        server_handle.abort();
+        let _ = server_handle.await;
+    }
 }

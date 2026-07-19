@@ -1492,6 +1492,19 @@
           ::  tell driver we've seen this block so don't process it again
           [%seen %block ~(digest get:page:t pag) `~(height get:page:t pag)]
         ~
+      =/  ai-acceptance=(unit effect:dk)
+        =/  pow  ~(pow get:page:t pag)
+        ?.  ?=(^ pow)  ~
+        ?.  ?=([%ai-pow *] u.pow)  ~
+        =/  commit  (block-commitment:page:t pag)
+        :-  ~
+        :+  %span  %ai-pow-accepted
+        :~  'block_height'^n+~(height get:page:t pag)
+            'block_id'^s+(to-b58:hash:t ~(digest get:page:t pag))
+            'candidate_commitment'^s+(scot %ux (digest-to-atom:tip5:zeke commit))
+        ==
+      =?  effs  ?=(^ ai-acceptance)
+        [u.ai-acceptance effs]
       ::
       =/  old-heavy  heaviest-block.c.k
       =.  c.k  (update-heaviest:con pag)

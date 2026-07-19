@@ -27,6 +27,22 @@ use std::time::Duration;
 /// little-endian (`ai_pow::tile_hash::hash_le_target` semantics).
 pub type DifficultyTarget = [u8; 32];
 
+/// Exact dense production benchmark/miner fixture admitted by the named dense route.
+pub const DENSE_PRODUCTION_PARAMS: ai_pow::params::MatmulParams = ai_pow::params::MatmulParams {
+    m: 512,
+    k: 1024,
+    n: 512,
+    noise_rank: 64,
+    tile: 8,
+    spot_checks: 1,
+    difficulty_bits: 0,
+};
+
+/// Return the exact dense production fixture parameters.
+pub const fn dense_production_params() -> ai_pow::params::MatmulParams {
+    DENSE_PRODUCTION_PARAMS
+}
+
 /// Snapshot for progress callbacks and the final solution.
 #[derive(Clone, Debug, Default)]
 pub struct MiningStats {
