@@ -686,6 +686,9 @@ impl<AB: AirBuilder> Air<AB> for CompositeFullAir {
                 cur_is_use_commitment_hash.into()
                     * (cur_cv_in[i].into() - pi_commitment_hash[i].into()),
             );
+            builder.assert_zero(
+                cur_is_hash_jackpot.into() * (cur_cv_in[i].into() - pi_commitment_hash[i].into()),
+            );
         }
 
         // C3 binds MAT_UNPACK to BLAKE3_MSG:

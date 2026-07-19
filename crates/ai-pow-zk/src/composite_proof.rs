@@ -1962,6 +1962,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn routea_jackpot_hash_uses_public_commitment_key() {
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        use crate::composite_layout::{CV_IN_START, TOTAL_TRACE_WIDTH};
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let mut trace = honest_trace();
+        let canonical = extract_program(&trace.matrix);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let last = (trace.height() - 1) * TOTAL_TRACE_WIDTH;
+        let cur = trace.matrix.values[last + CV_IN_START].as_canonical_u64();
+        trace.matrix.values[last + CV_IN_START] =
+            <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(cur ^ 1);
+
+        let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &canonical, &proof, &pis).is_err(),
+            "jackpot BLAKE3 must use the public COMMITMENT_HASH key"
+        );
+    }
+
     /// HASH_JACKPOT is a statement field bound by the jackpot-hash row,
     /// independent of the outer difficulty comparison.
     #[test]

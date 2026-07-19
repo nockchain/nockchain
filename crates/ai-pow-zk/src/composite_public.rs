@@ -196,7 +196,13 @@ impl CompositePublicInputs {
         let hash_b = read_cv_at_selector(matrix, n, IS_HASH_B, CV_OUT_START);
         let hash_jackpot = read_cv_at_selector(matrix, n, IS_HASH_JACKPOT, CV_OUT_START);
         let job_key = read_cv_at_selector(matrix, n, IS_USE_JOB_KEY, CV_IN_START);
-        let commitment_hash = read_cv_at_selector(matrix, n, IS_USE_COMMITMENT_HASH, CV_IN_START);
+        let keyed_commitment_hash =
+            read_cv_at_selector(matrix, n, IS_USE_COMMITMENT_HASH, CV_IN_START);
+        let commitment_hash = if keyed_commitment_hash == [0; CV_IN_LEN] {
+            read_cv_at_selector(matrix, n, IS_HASH_JACKPOT, CV_IN_START)
+        } else {
+            keyed_commitment_hash
+        };
 
         Self {
             cumsum,
