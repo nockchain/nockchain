@@ -281,6 +281,18 @@ mod tests {
         assert_eq!(hash_table_fingerprints(&v), hash_table_fingerprints(&v));
     }
 
+    #[test]
+    fn setup_table_digest_rejects_empty_tables() {
+        let empty_setup: Vec<AiPowVerifierSetup> = Vec::new();
+        let err = verifier_setup_table_digest(&empty_setup).expect_err("empty setup table rejects");
+        assert!(err.0.contains("empty verifier-setup table"));
+
+        let empty_seeds: Vec<ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed> = Vec::new();
+        let err =
+            verifier_setup_seed_table_digest(&empty_seeds).expect_err("empty seed table rejects");
+        assert!(err.0.contains("empty verifier-setup seed table"));
+    }
+
     /// A shipping build MUST have the consensus digest pinned to a real (non-zero)
     /// value — the boot check refuses to run against the all-zero placeholder, so a
     /// build that forgot to pin it would never validate a real table.

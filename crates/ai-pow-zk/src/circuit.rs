@@ -77,16 +77,12 @@ pub type Val = Goldilocks;
 /// known-insecure floor; 20 bits below the prior conservative ceiling —
 /// "reasonable and optimistic."
 ///
-/// **Time-bounded threat model (rationale):** PoW forgery is bounded
-/// by the **2.5-min block cadence**. An attacker has ≤150 s to forge
-/// before a fresh honest block obsoletes the target; at 60 bits, 2^60
-/// ops ≈ 1.15·10^18 ops in 150 s ⇒ ~7.7 PetaOps sustained throughput
-/// needed. FRI verification is Merkle-path-random-access dominated
-/// (not matmul), favoring CPU over GPU/ASIC — the wall-clock budget is
-/// well beyond the 2.5-min window even for state-actor-scale compute.
-/// The 80-bit margin was an offline-attacker threshold that this
-/// cadence forecloses. Maintainer 2026-05-21: "an attacker has 2.5
-/// minutes to make a proof in our context, hence our optimism."
+/// **Time-bounded threat model (rationale):** the 2.5-minute block cadence is
+/// an economic exposure window for public-chain attempts, not a cryptographic
+/// deadline that prevents private precomputation or private-fork attacks. The
+/// release claim is therefore the Johnson-bound bit count below, plus the
+/// operational assumption that useful block forgery must land before honest
+/// work makes the target stale.
 #[derive(Debug, Clone, Copy)]
 pub struct CircuitConfig {
     /// Log2 of the FRI blowup factor. The committed evaluation domain
@@ -160,8 +156,9 @@ impl CircuitConfig {
     /// | ≤ 14 (e.g. 2¹³ default) | `PROD` (lb=4/nq=15) | 28.8 s |
     /// | ≥ 15 (e.g. 2¹⁶ max env) | `PROD_LB2_NQ30` | 55.4 s (vs 95.1 s) |
     ///
-    /// Pearl's `stark_degree_bits ∈ 13..18`, so both regimes occur; this picks the
-    /// faster profile per degree while preserving the security floor exactly.
+    /// Pearl's consensus-reachable trace buckets span `2^13..=2^19`, so both
+    /// regimes occur; this picks the faster profile per degree while preserving
+    /// the security floor exactly.
     pub const fn prod_adaptive(stark_degree_bits: usize) -> Self {
         if stark_degree_bits >= 15 {
             Self::PROD_LB2_NQ30

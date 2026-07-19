@@ -332,6 +332,12 @@ pub const COMPACT_BATCH_L2_ALU_LANES: usize = 8;
 pub const COMPACT_BATCH_L2_HORNER_PACK_K: usize = 5;
 pub const COMPACT_BATCH_L2_RECOMPOSE_LANES: usize = 2;
 
+pub const COMPACT_BATCH_L1_JOHNSON_BITS: usize =
+    COMPACT_BATCH_L1_LOG_BLOWUP * COMPACT_BATCH_L1_NUM_QUERIES;
+pub const COMPACT_BATCH_L2_JOHNSON_BITS: usize =
+    COMPACT_BATCH_L2_LOG_BLOWUP * COMPACT_BATCH_L2_NUM_QUERIES;
+pub const COMPACT_BATCH_RECURSIVE_LAYER_COUNT: usize = 3;
+
 fn production_l1_table_packing(public_binding_lanes: usize) -> p3_circuit_prover::TablePacking {
     p3_circuit_prover::TablePacking::new(DIGEST_ELEMS, 8)
         .with_public_binding_lanes(public_binding_lanes)
@@ -411,26 +417,26 @@ fn append_len_prefixed_bytes_as_fields(out: &mut Vec<Val>, bytes: &[u8]) {
     }
 }
 
-fn compact_batch_verifier_key_digest_from_parts(
-    metadata: &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
-    fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape,
-) -> Result<AiPowCompactBatchVerifierKeyDigest, postcard::Error> {
-    let route_params = (
+fn compact_batch_route_params_bytes() -> Result<Vec<u8>, postcard::Error> {
+    postcard::to_allocvec(&(
         COMPACT_BATCH_L1_LOG_BLOWUP, COMPACT_BATCH_L1_NUM_QUERIES, COMPACT_BATCH_L1_CAP_HEIGHT,
         COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN, COMPACT_BATCH_L1_ALU_LANES,
         COMPACT_BATCH_L1_HORNER_PACK_K, COMPACT_BATCH_L2_LOG_BLOWUP, COMPACT_BATCH_L2_NUM_QUERIES,
         COMPACT_BATCH_L2_CAP_HEIGHT, COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN,
         COMPACT_BATCH_L2_MAX_LOG_ARITY, COMPACT_BATCH_L2_ALU_LANES, COMPACT_BATCH_L2_HORNER_PACK_K,
-    );
-    let route_params = postcard::to_allocvec(&route_params)?;
-    let metadata = postcard::to_allocvec(metadata)?;
-    let fri_shape = postcard::to_allocvec(&fri_shape)?;
+    ))
+}
 
+fn compact_batch_verifier_key_digest_from_serialized_parts(
+    route_params: &[u8],
+    metadata: &[u8],
+    fri_shape: &[u8],
+) -> AiPowCompactBatchVerifierKeyDigest {
     let mut inputs = Vec::new();
     append_len_prefixed_bytes_as_fields(&mut inputs, b"ai-pow-compact-batch-blake3-v1");
-    append_len_prefixed_bytes_as_fields(&mut inputs, &route_params);
-    append_len_prefixed_bytes_as_fields(&mut inputs, &metadata);
-    append_len_prefixed_bytes_as_fields(&mut inputs, &fri_shape);
+    append_len_prefixed_bytes_as_fields(&mut inputs, route_params);
+    append_len_prefixed_bytes_as_fields(&mut inputs, metadata);
+    append_len_prefixed_bytes_as_fields(&mut inputs, fri_shape);
 
     let mut state = [Val::ZERO; WIDTH];
     for chunk in inputs.chunks(RATE) {
@@ -439,9 +445,21 @@ fn compact_batch_verifier_key_digest_from_parts(
         }
         state = RecTip5Perm.permute(state);
     }
-    Ok(state[..DIGEST_ELEMS]
+    state[..DIGEST_ELEMS]
         .try_into()
-        .expect("digest slice width is fixed"))
+        .expect("digest slice width is fixed")
+}
+
+fn compact_batch_verifier_key_digest_from_parts(
+    metadata: &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+    fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape,
+) -> Result<AiPowCompactBatchVerifierKeyDigest, postcard::Error> {
+    let route_params = compact_batch_route_params_bytes()?;
+    let metadata = postcard::to_allocvec(metadata)?;
+    let fri_shape = postcard::to_allocvec(&fri_shape)?;
+    Ok(compact_batch_verifier_key_digest_from_serialized_parts(
+        &route_params, &metadata, &fri_shape,
+    ))
 }
 
 fn statement_public_digest(public_values: &[Val]) -> Vec<Val> {
@@ -459,6 +477,16 @@ fn compact_batch_l1_public_values_for_statement(
     public_values: &[Val],
     l0_program_commitment: &[Val],
 ) -> Vec<Val> {
+    debug_assert_eq!(
+        public_values.len(),
+        crate::composite_public::NUM_PUBLIC_VALUES,
+        "compact L1 statement fold uses the fixed Layer-0 public-input layout"
+    );
+    debug_assert_eq!(
+        l0_program_commitment.len(),
+        DIGEST_ELEMS,
+        "compact L1 statement fold uses one Layer-0 preprocessed commitment digest"
+    );
     // P0/D6: fold the L0 program commitment into the statement-digest preimage,
     // exactly as the in-circuit sponge does. The caller supplies the *canonical*
     // commitment (verifier-derived via `logup_common_for`), so the L2 proof only
@@ -2234,10 +2262,19 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
         )));
     }
 
-    let l1_statement_public_values = compact_batch_l1_public_values_for_statement(
-        &public_inputs.to_vec(),
-        l0_program_commitment,
+    if l0_program_commitment.len() != DIGEST_ELEMS {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "compact batch L0 program commitment has {} limbs; expected {DIGEST_ELEMS}",
+            l0_program_commitment.len()
+        )));
+    }
+    let public_values = public_inputs.to_vec();
+    debug_assert_eq!(
+        public_values.len(),
+        crate::composite_public::NUM_PUBLIC_VALUES
     );
+    let l1_statement_public_values =
+        compact_batch_l1_public_values_for_statement(&public_values, l0_program_commitment);
     let l2_statement_public_values =
         compact_batch_l2_statement_public_values_for_l1(&l1_statement_public_values);
     let compact_context = p3_circuit_prover::GoldilocksBlake3PathPrunedCompactVerifierContext::new(
@@ -2647,23 +2684,122 @@ mod tests {
             "verifier-key digest must bind verifier-owned batch metadata"
         );
 
+        let assert_fri_mutation_changes =
+            |label: &str, changed_fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape| {
+                let changed_fri_digest =
+                    compact_batch_verifier_key_digest_from_parts(&metadata, changed_fri_shape)
+                        .expect("digest changed FRI shape");
+                assert_ne!(
+                    base, changed_fri_digest,
+                    "verifier-key digest must bind final-layer FRI shape field {label}"
+                );
+            };
+
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.log_blowup += 1;
+        assert_fri_mutation_changes("log_blowup", changed_fri_shape);
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.log_final_poly_len += 1;
+        assert_fri_mutation_changes("log_final_poly_len", changed_fri_shape);
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.max_log_arity += 1;
+        assert_fri_mutation_changes("max_log_arity", changed_fri_shape);
         let mut changed_fri_shape = fri_shape;
         changed_fri_shape.num_queries += 1;
-        let changed_fri_digest =
-            compact_batch_verifier_key_digest_from_parts(&metadata, changed_fri_shape)
-                .expect("digest changed FRI shape");
+        assert_fri_mutation_changes("num_queries", changed_fri_shape);
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.commit_pow_bits += 1;
+        assert_fri_mutation_changes("commit_pow_bits", changed_fri_shape);
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.query_pow_bits += 1;
+        assert_fri_mutation_changes("query_pow_bits", changed_fri_shape);
+        let mut changed_fri_shape = fri_shape;
+        changed_fri_shape.cap_height += 1;
+        assert_fri_mutation_changes("cap_height", changed_fri_shape);
+    }
+
+    #[test]
+    fn compact_batch_verifier_key_digest_binds_route_params_and_metadata_fields() {
+        use p3_circuit_prover::batch_stark_prover::NUM_PRIMITIVE_TABLES;
+
+        let metadata = sample_compact_blake3_metadata(DIGEST_ELEMS);
+        let fri_shape = compact_batch_l2_fri_shape();
+        let base = compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape)
+            .expect("digest base metadata");
+
+        let route_params = compact_batch_route_params_bytes().expect("route params serialize");
+        let metadata_bytes = postcard::to_allocvec(&metadata).expect("metadata serializes");
+        let fri_shape_bytes = postcard::to_allocvec(&fri_shape).expect("FRI shape serializes");
+        let mut changed_route_params = route_params.clone();
+        changed_route_params[0] ^= 1;
+        let changed_route_digest = compact_batch_verifier_key_digest_from_serialized_parts(
+            &changed_route_params, &metadata_bytes, &fri_shape_bytes,
+        );
         assert_ne!(
-            base, changed_fri_digest,
-            "verifier-key digest must bind final-layer FRI shape"
+            base, changed_route_digest,
+            "verifier-key digest must bind compact route constants"
+        );
+
+        let mut changed_rows = sample_compact_blake3_metadata(DIGEST_ELEMS);
+        changed_rows.rows = p3_circuit_prover::RowCounts::new([2; NUM_PRIMITIVE_TABLES]);
+        let changed_rows_digest =
+            compact_batch_verifier_key_digest_from_parts(&changed_rows, fri_shape)
+                .expect("digest changed row counts");
+        assert_ne!(
+            base, changed_rows_digest,
+            "verifier-key digest must bind table row counts"
+        );
+
+        let mut changed_variant = metadata;
+        changed_variant.alu_variant = p3_circuit_prover::AirVariant::Optimized;
+        let changed_variant_digest =
+            compact_batch_verifier_key_digest_from_parts(&changed_variant, fri_shape)
+                .expect("digest changed AIR variant");
+        assert_ne!(
+            base, changed_variant_digest,
+            "verifier-key digest must bind AIR variants"
+        );
+    }
+
+    #[test]
+    fn compact_batch_l1_statement_digest_preimage_is_fixed_length() {
+        let profile = CircuitConfig::TEST_PEARL;
+        let cfg = build_config(&test_zk_params(), &profile);
+        let trace = CompositeTrace::baseline_min();
+        let pis = CompositePublicInputs::derive_from_trace(&trace).to_vec();
+        assert_eq!(pis.len(), crate::composite_public::NUM_PUBLIC_VALUES);
+
+        let program = crate::composite_full_air::extract_program(&trace.matrix);
+        let pd = logup_common_for(&cfg, &program, true);
+        let commitment = l0_program_commitment_vals(&pd.common);
+        assert_eq!(commitment.len(), DIGEST_ELEMS);
+
+        let preimage = compact_batch_l1_statement_digest_preimage(&pis, &pd.common);
+        assert_eq!(
+            preimage.len(),
+            crate::composite_public::NUM_PUBLIC_VALUES + DIGEST_ELEMS,
+            "compact L1 statement digest preimage is the fixed public-input layout plus one L0 commitment"
+        );
+        assert_eq!(&preimage[..pis.len()], pis.as_slice());
+        assert_eq!(&preimage[pis.len()..], commitment.as_slice());
+        assert_eq!(
+            compact_batch_l1_public_values_for_statement(&pis, &commitment).len(),
+            DIGEST_ELEMS * <Challenge as BasedVectorSpace<Val>>::DIMENSION
         );
     }
 
     #[test]
     fn compact_batch_l1_statement_digest_binds_l0_program_commitment() {
-        let public_values: Vec<_> = (1..=17).map(Val::from_u64).collect();
-        let l0_program_commitment = vec![Val::from_u64(101), Val::from_u64(202)];
+        let public_values: Vec<_> = (0..crate::composite_public::NUM_PUBLIC_VALUES)
+            .map(|i| Val::from_u64(i as u64 + 1))
+            .collect();
+        let zero_commitment = vec![Val::ZERO; DIGEST_ELEMS];
+        let l0_program_commitment: Vec<_> = (0..DIGEST_ELEMS)
+            .map(|i| Val::from_u64(101 + i as u64))
+            .collect();
 
-        let without_commitment = compact_batch_l1_public_values_for_statement(&public_values, &[]);
+        let without_commitment =
+            compact_batch_l1_public_values_for_statement(&public_values, &zero_commitment);
         let with_commitment =
             compact_batch_l1_public_values_for_statement(&public_values, &l0_program_commitment);
         assert_eq!(
@@ -2686,6 +2822,53 @@ mod tests {
     }
 
     #[test]
+    fn compact_batch_transcript_checkpoint_kat_vectors_are_frozen() {
+        let metadata = sample_compact_blake3_metadata(DIGEST_ELEMS);
+        let fri_shape = compact_batch_l2_fri_shape();
+        let verifier_digest = compact_batch_verifier_key_digest_from_parts(&metadata, fri_shape)
+            .expect("digest base metadata");
+        assert_eq!(
+            verifier_digest.map(|v| v.as_canonical_u64()),
+            [
+                17883367793332197318,
+                7881178106775974951,
+                8180291831027492031,
+                4891427350557653848,
+                8414763441743673108,
+            ],
+            "compact verifier-key digest checkpoint binds route parameters, sample metadata, and FRI shape"
+        );
+
+        let public_values: Vec<_> = (0..crate::composite_public::NUM_PUBLIC_VALUES)
+            .map(|i| Val::from_u64(i as u64 + 1))
+            .collect();
+        let l0_program_commitment: Vec<_> = (0..DIGEST_ELEMS)
+            .map(|i| Val::from_u64(101 + i as u64))
+            .collect();
+        let statement_public_values =
+            compact_batch_l1_public_values_for_statement(&public_values, &l0_program_commitment);
+        assert_eq!(
+            statement_public_values
+                .iter()
+                .map(|v| v.as_canonical_u64())
+                .collect::<Vec<_>>(),
+            vec![
+                18119964943405146140,
+                0,
+                9321468420226534153,
+                0,
+                17449032543589138508,
+                0,
+                4580802888962226412,
+                0,
+                9948373553220972457,
+                0,
+            ],
+            "compact L1 statement public-value checkpoint binds the fixed L0 public inputs and commitment"
+        );
+    }
+
+    #[test]
     fn compact_batch_fri_profiles_account_for_sixty_johnson_bits_with_mmcs() {
         let l1_params = compact_batch_l1_fri_verifier_params();
         assert_eq!(l1_params.log_blowup, COMPACT_BATCH_L1_LOG_BLOWUP);
@@ -2693,10 +2876,7 @@ mod tests {
             l1_params.log_final_poly_len,
             COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN
         );
-        assert_eq!(
-            COMPACT_BATCH_L1_LOG_BLOWUP * COMPACT_BATCH_L1_NUM_QUERIES,
-            60
-        );
+        assert_eq!(COMPACT_BATCH_L1_JOHNSON_BITS, 60);
         assert_eq!(l1_params.commit_pow_bits, 0);
         assert_eq!(l1_params.query_pow_bits, 0);
         assert!(
@@ -2711,9 +2891,18 @@ mod tests {
             l2_shape.log_final_poly_len,
             COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN
         );
-        assert_eq!(l2_shape.johnson_bits(), 60);
+        assert_eq!(COMPACT_BATCH_L2_JOHNSON_BITS, 60);
+        assert_eq!(l2_shape.johnson_bits(), COMPACT_BATCH_L2_JOHNSON_BITS);
         assert_eq!(l2_shape.commit_pow_bits, 0);
         assert_eq!(l2_shape.query_pow_bits, 0);
+        let recursive_fri_union_loss_bits = COMPACT_BATCH_RECURSIVE_LAYER_COUNT
+            .next_power_of_two()
+            .ilog2() as usize;
+        assert_eq!(recursive_fri_union_loss_bits, 2);
+        assert_eq!(
+            COMPACT_BATCH_L1_JOHNSON_BITS - recursive_fri_union_loss_bits,
+            58
+        );
     }
 
     #[test]
@@ -2721,13 +2910,16 @@ mod tests {
     fn compact_batch_recursive_certificate_round_trip_for_test_pearl() {
         use std::time::Instant;
 
+        assert_eq!(COMPACT_BATCH_L1_JOHNSON_BITS, 60);
+        assert_eq!(COMPACT_BATCH_L2_JOHNSON_BITS, 60);
+        let recursive_fri_union_loss_bits = COMPACT_BATCH_RECURSIVE_LAYER_COUNT
+            .next_power_of_two()
+            .ilog2() as usize;
+        assert_eq!(recursive_fri_union_loss_bits, 2);
         assert_eq!(
-            COMPACT_BATCH_L1_LOG_BLOWUP * COMPACT_BATCH_L1_NUM_QUERIES,
-            60
-        );
-        assert_eq!(
-            COMPACT_BATCH_L2_LOG_BLOWUP * COMPACT_BATCH_L2_NUM_QUERIES,
-            60
+            COMPACT_BATCH_L1_JOHNSON_BITS - recursive_fri_union_loss_bits,
+            58,
+            "three 60-bit FRI checks union-bound to more than 58 bits"
         );
         assert_eq!(
             p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS,

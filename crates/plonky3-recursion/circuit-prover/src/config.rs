@@ -308,22 +308,20 @@ pub fn goldilocks_tip5() -> GoldilocksTipsConfig {
 ///  | `max_log_arity: 1 → 3`      | −5% (sep.)   | none — fold-shape only      |
 ///  | `log_final_poly_len: 0 → 2` | (combined)   | none — final-poly tail only |
 ///
-/// **FRI parameters (current production):** `log_blowup = 4,
+/// **FRI parameters (legacy non-compact checkpoint):** `log_blowup = 4,
 /// num_queries = 9, max_log_arity = 3, log_final_poly_len = 2,
 /// commit_proof_of_work_bits = 1, query_proof_of_work_bits = 24,
 /// cap_height = 5, digest = 5`. Unconditional Johnson soundness
 /// = `log_blowup · num_queries + query_pow
-/// = 4 · 9 + 24 = 60` bits — anchored between the known
-/// insecure (22) and the prior conservative ceiling (80), with
-/// a 60-bit floor target.
+/// = 4 · 9 + 24 = 60` bits. The active compact production route uses
+/// pure-query L1/L2 profiles in `ai-pow-zk::recursion`; this profile remains
+/// for the retained non-compact recursive checkpoint path.
 ///
 /// **Trade-off:** `log_blowup = 4` ⇒ 16× LDE (vs the pre-2026-05-20
-/// 4×) ⇒ ~4× prover memory + slower proving wall (the dominant
-/// operational cost; size win is at the prover's expense, not the
-/// verifier's). Per-block PoW at 2.5-min cadence does not need the
-/// 120/128-bit long-horizon margin; see
-/// `crates/ai-pow-zk/docs/2026-05-19_M_S5B_TERMINAL_COMPRESSION_DESIGN.md`
-/// §1.4.
+/// 4×) ⇒ ~4× prover memory + slower proving wall. The 2.5-minute block
+/// cadence is an economic exposure window, not a cryptographic deadline for
+/// private precomputation; the enforceable claim is the 60-bit Johnson bound
+/// plus the surrounding AIR/transcript/setup assumptions.
 ///
 /// Proximity testing stays at γ < J(δ)−η (Johnson radius J(δ) =
 /// 1 − √(1/16) = 0.75 at this rate; never beyond — paper IACR
