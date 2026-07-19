@@ -23,10 +23,7 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::{
-    prove_pearl_moe_compact_recursive_certificate_with_seed, PearlMoeCompactProveRun,
-};
-use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
+use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate;
 
 use crate::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -47,16 +44,15 @@ fn err<E: std::fmt::Debug>(what: &str) -> impl FnOnce(E) -> CanonicalProveError 
     move |e| CanonicalProveError(format!("{what}: {e:?}"))
 }
 
-/// The canonical (setup-shaped) block: its prove run plus the pieces needed to
-/// assemble its `%ai-pow` artifact noun.
+/// The canonical submission block: the pieces needed to assemble its `%ai-pow`
+/// artifact noun after proving.
 pub struct CanonicalBlock {
-    pub run: PearlMoeCompactProveRun,
     pub statement: PearlMergePublicStatementShape,
     pub aux_inclusion: PearlAuxInclusionProof,
     pub moe_art: PearlMergeMoeArtifact,
     pub certificate: AiPowCertificateShape,
     pub commit: [u8; 32],
-    pub seed: AiPowCompactVerifierSetupSeed,
+    pub jackpot_hash: [u8; 32],
 }
 
 fn setup_pattern(len: u32) -> PearlPeriodicPattern {
@@ -325,7 +321,7 @@ pub fn prove_canonical_moe_block_at(
         aux_inclusion,
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
-    let (run, seed) = prove_pearl_moe_compact_recursive_certificate_with_seed(
+    let run = prove_pearl_moe_compact_recursive_certificate(
         params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
         &inner, &local_b, n_e,
     )
@@ -371,13 +367,12 @@ pub fn prove_canonical_moe_block_at(
     };
 
     Ok(CanonicalBlock {
-        run,
         statement,
         aux_inclusion,
         moe_art,
         certificate,
         commit: nock_commit,
-        seed,
+        jackpot_hash: run.ticket.jackpot_hash,
     })
 }
 
@@ -425,15 +420,15 @@ mod tests {
         // Grind eval == certified jackpot, for a nonzero extranonce.
         let block = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 1).expect("prove 1");
         assert_eq!(
-            block.run.ticket.jackpot_hash, j1,
+            block.jackpot_hash, j1,
             "certified jackpot must equal the cheap grind jackpot for the same extranonce"
         );
 
         // extranonce 0 back-compat: same wrapper result as prove_canonical_moe_block.
         let b0a = prove_canonical_moe_block(&params, 8, 2, 1, commit).expect("prove wrapper");
         let b0b = prove_canonical_moe_block_at(&params, 8, 2, 1, commit, 0).expect("prove at 0");
-        assert_eq!(b0a.run.ticket.jackpot_hash, b0b.run.ticket.jackpot_hash);
-        assert_eq!(b0a.run.ticket.jackpot_hash, j0);
+        assert_eq!(b0a.jackpot_hash, b0b.jackpot_hash);
+        assert_eq!(b0a.jackpot_hash, j0);
 
         // Sanity: a trivial (all-ones) target is cleared; a zero target is not.
         assert!(hash_le_target(&j1, &[0xFFu8; 32]));
