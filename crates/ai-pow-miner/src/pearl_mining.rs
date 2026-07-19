@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    evaluate_pearl_merge_ticket_attempt, PearlCompatError, PearlIncompleteBlockHeader,
-    PearlMergeTicketAttempt, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
+    evaluate_pearl_merge_checked_ticket_attempt, PearlCompatError, PearlIncompleteBlockHeader,
+    PearlMergeCheckedTicketAttempt, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
 };
 
 use crate::{DifficultyTarget, MiningCancel, MiningStats};
@@ -53,7 +53,7 @@ impl Default for PearlMergeMineOptions {
 /// Returned on a successful Pearl-compatible shared ticket.
 #[derive(Debug, Clone)]
 pub struct PearlMergeMinedTicket {
-    pub attempt: PearlMergeTicketAttempt,
+    pub attempt: PearlMergeCheckedTicketAttempt,
     pub pearl_target_hit: bool,
     pub nockchain_target_hit: bool,
     pub stats: MiningStats,
@@ -134,7 +134,7 @@ pub fn run(
             .offset_at(linear % col_count)
             .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
 
-        let attempt = evaluate_pearl_merge_ticket_attempt(
+        let checked_attempt = evaluate_pearl_merge_checked_ticket_attempt(
             job.header,
             job.config,
             job.params,
@@ -146,6 +146,7 @@ pub fn run(
             job.max_pattern_len,
             job.aux.clone(),
         )?;
+        let attempt = checked_attempt.attempt();
         stats.matmul_attempts_tried += 1;
         stats.elapsed = start.elapsed();
 
@@ -160,7 +161,7 @@ pub fn run(
 
         if pearl_target_hit || nockchain_target_hit {
             return Ok(PearlMergeMinedTicket {
-                attempt,
+                attempt: checked_attempt,
                 pearl_target_hit,
                 nockchain_target_hit,
                 stats,

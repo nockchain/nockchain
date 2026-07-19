@@ -49,12 +49,14 @@ use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
     pearl_nbits_to_target_le, validate_pearl_merge_config_for_recursive_prover,
     verify_pearl_aux_inclusion, PearlAuxInclusionProof, PearlCompatError,
-    PearlIncompleteBlockHeader, PearlMergeTicketAttempt, PearlMiningConfig, PearlNockchainAux,
-    PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES, PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH,
-    PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
+    PearlIncompleteBlockHeader, PearlMergeCheckedTicketAttempt, PearlMergeTicketAttempt,
+    PearlMiningConfig, PearlNockchainAux, PEARL_AUX_INCLUSION_MAX_COINBASE_TX_BYTES,
+    PEARL_AUX_INCLUSION_MAX_MERKLE_BRANCH, PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::tile_hash::hash_le_target;
 use ai_pow::zk_bridge::{
+    prove_pearl_merge_compact_recursive_certificate_checked,
+    prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache,
     AiPowCompactRecursiveCertificateRun, AiPowCompactRecursiveProverCache,
     AiPowRecursiveCertificateRun, ZkPublicCommitments,
 };
@@ -127,7 +129,9 @@ impl AiPowSubmitTimings {
     }
 }
 
-type AiPowPearlMergeCertificateBuilder = dyn Fn(&PearlMergeTicketAttempt) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError>
+type AiPowPearlMergeCertificateBuilder = dyn Fn(
+        &PearlMergeCheckedTicketAttempt,
+    ) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError>
     + Send
     + Sync
     + 'static;
@@ -200,7 +204,7 @@ impl PearlMergeSubmissionConfig {
     ) -> Self {
         let compact_prover_cache: Arc<Mutex<Option<Arc<AiPowCompactRecursiveProverCache>>>> =
             Arc::new(Mutex::new(None));
-        let certificate_builder = Arc::new(move |attempt: &PearlMergeTicketAttempt| {
+        let certificate_builder = Arc::new(move |attempt: &PearlMergeCheckedTicketAttempt| {
             let cached = compact_prover_cache
                 .lock()
                 .map_err(|_| {
@@ -213,21 +217,19 @@ impl PearlMergeSubmissionConfig {
                 debug!("using warmed compact recursive prover cache");
             }
             let run = if let Some(cache) = cached.as_deref() {
-                ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
+                prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache(
                     attempt,
                     &params,
                     a.as_slice(),
                     b.as_slice(),
-                    max_pattern_len,
                     cache,
                 )
             } else {
-                ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate(
+                prove_pearl_merge_compact_recursive_certificate_checked(
                     attempt,
                     &params,
                     a.as_slice(),
                     b.as_slice(),
-                    max_pattern_len,
                 )
             }
             .map_err(|e| {
@@ -260,7 +262,7 @@ impl PearlMergeSubmissionConfig {
 
     pub(crate) fn build_certificate_for_attempt(
         &self,
-        attempt: &PearlMergeTicketAttempt,
+        attempt: &PearlMergeCheckedTicketAttempt,
     ) -> Result<PearlMergeCertificateProof, AiPowCertificateBuildError> {
         (self.certificate_builder)(attempt)
     }
@@ -1987,9 +1989,10 @@ mod tests {
 
     use ai_pow::params::MatmulParams;
     use ai_pow::pearl_compat::{
-        evaluate_pearl_merge_ticket_attempt, verify_pearl_aux_inclusion,
-        PearlIncompleteBlockHeader, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
-        PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
+        evaluate_pearl_merge_checked_ticket_attempt, evaluate_pearl_merge_ticket_attempt,
+        verify_pearl_aux_inclusion, PearlIncompleteBlockHeader, PearlMiningConfig,
+        PearlNockchainAux, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
+        PEARL_MMA_INT7XINT7_TO_INT32,
     };
     use ai_pow::synth::synth_matrices;
     use ai_pow::zk_bridge::ZkPublicCommitments;
@@ -2405,12 +2408,16 @@ mod tests {
                 max_attempts: Some(1),
                 ..PearlMergeMineOptions::default()
             },
-            certificate_builder: Arc::new(|attempt: &PearlMergeTicketAttempt| {
+            certificate_builder: Arc::new(|attempt: &PearlMergeCheckedTicketAttempt| {
                 let params = pearl_test_params();
                 let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
-                let parts =
-                    pearl_merge_recursive_certificate_parts_from_ticket(attempt, &a, &b, 16)
-                        .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
+                let parts = pearl_merge_recursive_certificate_parts_from_ticket(
+                    attempt.attempt(),
+                    &a,
+                    &b,
+                    16,
+                )
+                .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
                 Ok(PearlMergeCertificateProof {
                     zk_params: parts.zk_params,
                     found_idx: parts.found_idx,
@@ -2736,7 +2743,7 @@ mod tests {
         );
 
         let params = cfg.puzzle.params;
-        let attempt = evaluate_pearl_merge_ticket_attempt(
+        let attempt = evaluate_pearl_merge_checked_ticket_attempt(
             &mined_header, &pearl_cfg.mining_config, &params, 0, 0, &cfg.puzzle.a, &cfg.puzzle.b,
             &[0xffu8; 32], pearl_cfg.max_pattern_len, aux,
         )
@@ -4001,11 +4008,12 @@ mod tests {
         let mut cfg = test_cfg(node.url());
         cfg.puzzle.pearl_merge.gateway = gateway.config.clone();
         let pearl_cfg = &mut cfg.puzzle.pearl_merge;
-        pearl_cfg.certificate_builder = Arc::new(|attempt: &PearlMergeTicketAttempt| {
+        pearl_cfg.certificate_builder = Arc::new(|attempt: &PearlMergeCheckedTicketAttempt| {
             let params = pearl_test_params();
             let (a, b) = synth_matrices(b"pearl-node-run-submit", &params);
-            let parts = pearl_merge_recursive_certificate_parts_from_ticket(attempt, &a, &b, 16)
-                .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
+            let parts =
+                pearl_merge_recursive_certificate_parts_from_ticket(attempt.attempt(), &a, &b, 16)
+                    .map_err(|e| AiPowCertificateBuildError(e.to_string()))?;
             Ok(PearlMergeCertificateProof {
                 zk_params: parts.zk_params,
                 found_idx: parts.found_idx + 1,
@@ -4063,12 +4071,13 @@ mod tests {
             max_attempts: Some(1),
             ..PearlMergeMineOptions::default()
         };
-        pearl_cfg.certificate_builder = Arc::new(move |_attempt: &PearlMergeTicketAttempt| {
-            builder_calls_for_cfg.fetch_add(1, Ordering::SeqCst);
-            Err(AiPowCertificateBuildError(
-                "certificate builder must not be called on a target miss".to_string(),
-            ))
-        });
+        pearl_cfg.certificate_builder =
+            Arc::new(move |_attempt: &PearlMergeCheckedTicketAttempt| {
+                builder_calls_for_cfg.fetch_add(1, Ordering::SeqCst);
+                Err(AiPowCertificateBuildError(
+                    "certificate builder must not be called on a target miss".to_string(),
+                ))
+            });
 
         let shutdown = CancellationToken::new();
         let shutdown_clone = shutdown.clone();

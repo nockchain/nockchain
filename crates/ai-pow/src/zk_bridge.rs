@@ -81,7 +81,8 @@ use crate::fiat_shamir::{
 use crate::params::{MatmulParams, ParamError};
 use crate::pearl_compat::{
     verify_pearl_merge_public_statement_bytes, PearlCompatError, PearlIncompleteBlockHeader,
-    PearlMergePublicStatement, PearlMergeTicketAttempt, PearlNockchainAux, PearlPublicProofParams,
+    PearlMergeCheckedTicketAttempt, PearlMergeMiningPrecheck, PearlMergePublicStatement,
+    PearlMergeTicketAttempt, PearlNockchainAux, PearlPublicProofParams,
 };
 use crate::prover::{params_tag, BlockContext};
 use crate::tile_hash::hash_le_target;
@@ -2083,6 +2084,35 @@ pub fn prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
     )
 }
 
+/// Build the compact recursive certificate from an already checked mining ticket.
+pub fn prove_pearl_merge_compact_recursive_certificate_checked(
+    checked: &PearlMergeCheckedTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+    prove_pearl_merge_compact_recursive_certificate_checked_inner(
+        checked, params, a_row_major, b_col_major, None,
+    )
+}
+
+/// Cached-setup variant of [`prove_pearl_merge_compact_recursive_certificate_checked`].
+pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache(
+    checked: &PearlMergeCheckedTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    cache: &AiPowCompactRecursiveProverCache,
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+    prove_pearl_merge_compact_recursive_certificate_checked_inner(
+        checked,
+        params,
+        a_row_major,
+        b_col_major,
+        Some(cache),
+    )
+}
+
 fn prove_pearl_merge_compact_recursive_certificate_inner(
     attempt: &PearlMergeTicketAttempt,
     params: &MatmulParams,
@@ -2140,6 +2170,64 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
         return Err(BridgeError::PublicInputMismatch("ticket.aux-commitment"));
     }
 
+    prove_pearl_merge_compact_recursive_certificate_prechecked(
+        &precheck, &public_params, params, a_row_major, b_col_major, cache,
+    )
+}
+
+fn prove_pearl_merge_compact_recursive_certificate_checked_inner(
+    checked: &PearlMergeCheckedTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    cache: Option<&AiPowCompactRecursiveProverCache>,
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+    if params.difficulty_bits != 0 || params.spot_checks != 1 {
+        return Err(BridgeError::PearlMergeUnsupportedTileShape);
+    }
+    validate_scheduled_params(params)?;
+
+    let attempt = checked.attempt();
+    let precheck = checked.precheck();
+    if precheck.aux_commitment != attempt.aux_commitment {
+        return Err(BridgeError::PublicInputMismatch("ticket.aux-commitment"));
+    }
+    if precheck.aux != attempt.aux {
+        return Err(BridgeError::PublicInputMismatch("ticket.aux"));
+    }
+    if precheck.work.commitments != attempt.commitments {
+        return Err(BridgeError::PublicInputMismatch("ticket.commitments"));
+    }
+    if precheck.work.ticket != attempt.ticket {
+        return Err(BridgeError::PublicInputMismatch("ticket.work"));
+    }
+    if precheck.work.pearl_target != attempt.pearl_target {
+        return Err(BridgeError::PublicInputMismatch("ticket.pearl-target"));
+    }
+    if precheck.work.nockchain_target != attempt.nockchain_target {
+        return Err(BridgeError::PublicInputMismatch("ticket.nockchain-target"));
+    }
+    if !hash_le_target(
+        &precheck.work.ticket.jackpot_hash, &precheck.work.nockchain_adjusted_target,
+    ) {
+        return Err(BridgeError::PearlMergeStatement(
+            PearlCompatError::NockchainTargetNotMet,
+        ));
+    }
+
+    prove_pearl_merge_compact_recursive_certificate_prechecked(
+        precheck, &attempt.public_params, params, a_row_major, b_col_major, cache,
+    )
+}
+
+fn prove_pearl_merge_compact_recursive_certificate_prechecked(
+    precheck: &PearlMergeMiningPrecheck,
+    public_params: &PearlPublicProofParams,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    cache: Option<&AiPowCompactRecursiveProverCache>,
+) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
     if params.m != public_params.m
         || params.k != public_params.mining_config.common_dim
         || params.n != public_params.n
@@ -2166,7 +2254,7 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
         precheck.work.ticket.b_cols.clone(),
     )
     .map_err(BridgeError::ZkParamsInvalid)?;
-    let legacy_tile = pearl_merge_legacy_ticket(params, &public_params);
+    let legacy_tile = pearl_merge_legacy_ticket(params, public_params);
     let found_idx = legacy_tile.map(|(idx, _, _)| idx).unwrap_or(0);
     let (tile_i, tile_j) = legacy_tile
         .map(|(_, tile_i, tile_j)| (tile_i, tile_j))

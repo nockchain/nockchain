@@ -2643,6 +2643,30 @@ pub struct PearlMergeTicketAttempt {
     pub statement: PearlMergePublicStatement,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PearlMergeCheckedTicketAttempt {
+    attempt: PearlMergeTicketAttempt,
+    precheck: PearlMergeMiningPrecheck,
+}
+
+impl PearlMergeCheckedTicketAttempt {
+    pub const fn attempt(&self) -> &PearlMergeTicketAttempt {
+        &self.attempt
+    }
+
+    pub(crate) const fn precheck(&self) -> &PearlMergeMiningPrecheck {
+        &self.precheck
+    }
+}
+
+impl std::ops::Deref for PearlMergeCheckedTicketAttempt {
+    type Target = PearlMergeTicketAttempt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.attempt
+    }
+}
+
 /// Build the exact Pearl-compatible ticket statement for one explicit
 /// `t_rows`/`t_cols` attempt.
 ///
@@ -2710,6 +2734,40 @@ pub fn evaluate_pearl_merge_ticket_attempt(
         aux_commitment,
         statement,
     })
+}
+
+pub fn evaluate_pearl_merge_checked_ticket_attempt(
+    header: &PearlIncompleteBlockHeader,
+    config: &PearlMiningConfig,
+    params: &MatmulParams,
+    t_rows: u32,
+    t_cols: u32,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    nockchain_target: &[u8; 32],
+    max_pattern_len: usize,
+    aux: PearlNockchainAux,
+) -> Result<PearlMergeCheckedTicketAttempt, PearlCompatError> {
+    let attempt = evaluate_pearl_merge_ticket_attempt(
+        header, config, params, t_rows, t_cols, a_row_major, b_col_major, nockchain_target,
+        max_pattern_len, aux,
+    )?;
+    let nockchain_adjusted_target = attempt
+        .public_params
+        .nockchain_adjusted_target(&attempt.nockchain_target)?;
+    let precheck = PearlMergeMiningPrecheck {
+        work: PearlCompatibleWorkPrecheck {
+            commitments: attempt.commitments,
+            ticket: attempt.ticket.clone(),
+            pearl_target: attempt.pearl_target,
+            nockchain_target: attempt.nockchain_target,
+            nockchain_adjusted_target,
+        },
+        aux: attempt.aux.clone(),
+        aux_commitment: attempt.aux_commitment,
+    };
+
+    Ok(PearlMergeCheckedTicketAttempt { attempt, precheck })
 }
 
 /// Return the canonical Pearl-format-compatible Nockchain public statement for
