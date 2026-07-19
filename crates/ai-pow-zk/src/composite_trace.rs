@@ -367,6 +367,20 @@ impl CompositeTrace {
         tweak: &Blake3Tweak,
         extra_selectors_on_finalize: &[usize],
     ) -> [u32; 8] {
+        self.place_blake3_hash_with_selectors_and_cv_source(
+            row_start, message, cv_in, tweak, extra_selectors_on_finalize, None,
+        )
+    }
+
+    fn place_blake3_hash_with_selectors_and_cv_source(
+        &mut self,
+        row_start: usize,
+        message: &[u32; 16],
+        cv_in: &[u32; 8],
+        tweak: &Blake3Tweak,
+        extra_selectors_on_finalize: &[usize],
+        cv_source_row: Option<usize>,
+    ) -> [u32; 8] {
         use p3_field::integers::QuotientMap;
 
         assert!(
@@ -467,17 +481,27 @@ impl CompositeTrace {
                 row[BLAKE3_MSG_START + i] =
                     <Val as QuotientMap<u64>>::from_int(round_msgs[r][i] as u64);
             }
-            // BLAKE3_CV (replicated across all 8 rows).
+            // CV words are written to both the legacy BLAKE3_CV buffer and
+            // CV_IN. The composite BLAKE3 chip reads CV_IN so public-input and
+            // CV-routing constraints bind the actual compression input.
             for i in 0..8 {
                 row[BLAKE3_CV_START + i] = <Val as QuotientMap<u64>>::from_int(cv_in[i] as u64);
+                row[CV_IN_START + i] = <Val as QuotientMap<u64>>::from_int(cv_in[i] as u64);
             }
-            // CV_OR_TWEAK_PREP.
-            row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(tweak_packed);
 
-            // Selectors: IS_NEW_BLAKE on row 0.
             let mut selectors = [false; 21];
             if r == 0 {
                 selectors[8] = true; // IS_NEW_BLAKE index in SELECTOR_COLS
+            }
+            if r == 1 {
+                if let Some(src) = cv_source_row {
+                    selectors[7] = true; // IS_CV_IN
+                    row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(src as u64);
+                } else {
+                    row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(tweak_packed);
+                }
+            } else {
+                row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(tweak_packed);
             }
             ControlChip.fill_row(&selectors, 0, row);
 
@@ -529,6 +553,7 @@ impl CompositeTrace {
         }
         for i in 0..8 {
             row[BLAKE3_CV_START + i] = <Val as QuotientMap<u64>>::from_int(cv_in[i] as u64);
+            row[CV_IN_START + i] = <Val as QuotientMap<u64>>::from_int(cv_in[i] as u64);
         }
         row[CV_OR_TWEAK_PREP] = <Val as QuotientMap<u64>>::from_int(tweak_packed);
 

@@ -48,6 +48,7 @@ use p3_matrix::dense::RowMajorMatrix;
 
 use super::compress::{
     blake3_permute_msg, compress_full_state, round_with_snapshots, Blake3Tweak, BLAKE3_IV,
+    BLAKE3_MSG_PERMUTATION,
 };
 use super::layout::LIMBS_PER_STATE_SNAPSHOT;
 use super::round_air::{finalize_blake, verify_init_state, verify_round, Blake3State};
@@ -156,15 +157,13 @@ impl Blake3Chip {
         round_gate_excl: None,
     };
 
-    /// Composite-trace offsets. Maps each of the chip's column
-    /// blocks onto `composite_layout::*` positions. Note we read
-    /// CV from `BLAKE3_CV_START` (the value "ready for BLAKE3"
-    /// on this row) rather than `CV_IN_START` (the value pulled
-    /// in from a previous hash via LogUp).
+    /// Composite-trace offsets. The compression CV is read from
+    /// `CV_IN_START`, the same cells bound by public-input and
+    /// CV-routing constraints.
     pub const COMPOSITE_OFFSETS: Blake3Offsets = Blake3Offsets {
         state_start: crate::composite_layout::BLAKE3_ROUND_START,
         msg_start: crate::composite_layout::BLAKE3_MSG_START,
-        cv_start: crate::composite_layout::BLAKE3_CV_START,
+        cv_start: crate::composite_layout::CV_IN_START,
         tweak_col: crate::composite_layout::CV_OR_TWEAK_PREP,
         cv_out_start: crate::composite_layout::CV_OUT_START,
         is_new_blake_col: crate::composite_layout::IS_NEW_BLAKE,
@@ -265,10 +264,27 @@ impl Blake3Chip {
         let is_round_active: AB::Expr = first_factor * next_factor;
 
         // verify_round only makes sense across two consecutive rows,
-        // so guard with when_transition() (skips the last trace row).
+        // so guard with when_transition() (skips the last trace row). The
+        // same transition gate pins the per-round message schedule through
+        // the six mixing-round-to-mixing-round edges and pins CV through
+        // all seven compression edges.
         {
             let mut tb = builder.when_transition();
-            verify_round::<_>(&mut tb, &states, &msg, is_round_active);
+            verify_round::<_>(&mut tb, &states, &msg, is_round_active.clone());
+            let next_main = tb.main();
+            let next = next_main.next_slice();
+            let schedule_gate: AB::Expr = is_round_active.clone()
+                * (<AB::Expr as PrimeCharacteristicRing>::ONE
+                    - <AB::Var as Into<AB::Expr>>::into(next[off.is_last_round_col]));
+            for i in 0..16 {
+                let want = msg[BLAKE3_MSG_PERMUTATION[i]].clone();
+                tb.assert_zero(schedule_gate.clone() * (next[off.msg_start + i].into() - want));
+            }
+            for i in 0..8 {
+                tb.assert_zero(
+                    is_round_active.clone() * (next[off.cv_start + i].into() - cv_in[i].clone()),
+                );
+            }
         }
 
         // ---- Init constraint, gated by is_new_blake ----
@@ -624,6 +640,88 @@ mod tests {
         let proof = prove::<AiPowStarkConfig, _>(&cfg, &Blake3Chip, trace, &[]);
         verify::<AiPowStarkConfig, _>(&cfg, &Blake3Chip, &proof, &[])
             .expect("valid 8-row BLAKE3 trace must verify");
+    }
+
+    fn build_trace_with_round_messages(
+        cv: &[u32; 8],
+        round_msgs: &[[u32; 16]; 7],
+        tweak: &Blake3Tweak,
+    ) -> RowMajorMatrix<crate::Val> {
+        let mut values = vec![crate::Val::default(); 8 * cols::ROW_W];
+        let tweak_packed = pack_tweak(tweak);
+        let mut state = [
+            cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7], BLAKE3_IV[0], BLAKE3_IV[1],
+            BLAKE3_IV[2], BLAKE3_IV[3], tweak.counter_low, tweak.counter_high as u32,
+            tweak.block_len, tweak.flags,
+        ];
+        for r in 0..7 {
+            let mut s = state;
+            let snaps = round_with_snapshots(&mut s, &round_msgs[r]);
+            fill_row(
+                &mut values[r * cols::ROW_W..(r + 1) * cols::ROW_W],
+                &state,
+                &snaps[0],
+                &snaps[1],
+                &snaps[2],
+                &round_msgs[r],
+                cv,
+                tweak_packed,
+                &[0u32; 8],
+                r == 0,
+                false,
+            );
+            state = snaps[3];
+        }
+
+        let final_input = state;
+        let mut state1_for_finalize = [0u32; 16];
+        state1_for_finalize[0..4].copy_from_slice(&final_input[0..4]);
+        state1_for_finalize[4..8].copy_from_slice(&final_input[0..4]);
+        state1_for_finalize[8..12].copy_from_slice(&final_input[8..12]);
+        state1_for_finalize[12..16].copy_from_slice(&final_input[8..12]);
+        let mut full = final_input;
+        for i in 0..8 {
+            full[i] ^= full[i + 8];
+            full[i + 8] ^= cv[i];
+        }
+        let cv_out: [u32; 8] = core::array::from_fn(|i| full[i]);
+        fill_row(
+            &mut values[7 * cols::ROW_W..8 * cols::ROW_W],
+            &final_input,
+            &state1_for_finalize,
+            &[0u32; 16],
+            &[0u32; 16],
+            &round_msgs[6],
+            cv,
+            tweak_packed,
+            &cv_out,
+            false,
+            true,
+        );
+        RowMajorMatrix::new(values, cols::ROW_W)
+    }
+
+    #[test]
+    fn verify_rejects_non_permuted_message_schedule() {
+        let cfg = build_stark_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let (cv, msg, tweak) = canonical_inputs();
+        let mut round_msgs = [[0u32; 16]; 7];
+        round_msgs[0] = msg;
+        for r in 1..7 {
+            round_msgs[r] = round_msgs[r - 1];
+            blake3_permute_msg(&mut round_msgs[r]);
+        }
+        round_msgs[1].swap(0, 1);
+        for r in 2..7 {
+            round_msgs[r] = round_msgs[r - 1];
+            blake3_permute_msg(&mut round_msgs[r]);
+        }
+        let trace = build_trace_with_round_messages(&cv, &round_msgs, &tweak);
+        let proof = prove::<AiPowStarkConfig, _>(&cfg, &Blake3Chip, trace, &[]);
+        assert!(
+            verify::<AiPowStarkConfig, _>(&cfg, &Blake3Chip, &proof, &[]).is_err(),
+            "BLAKE3 rows must use the canonical message permutation between rounds"
+        );
     }
 
     #[test]
