@@ -1035,7 +1035,12 @@ const F_KEYED_HASH: u32 = 1 << 4;
 /// → `F_KEYED_HASH | F_PARENT | F_ROOT(is_root)`; the root
 /// block's finalize row gets the `IS_HASH_A/B` extra
 /// (`selector_idx`).
-fn strip_row_descriptor(spec: StripBlock, j: usize, selector_idx: usize) -> RowDescriptor {
+fn strip_row_descriptor(
+    spec: StripBlock,
+    j: usize,
+    selector_idx: usize,
+    row_idx: usize,
+) -> RowDescriptor {
     let (tweak, is_root) = match spec {
         StripBlock::Leaf {
             chunk_index,
@@ -1085,6 +1090,12 @@ fn strip_row_descriptor(spec: StripBlock, j: usize, selector_idx: usize) -> RowD
         &[]
     };
     let mut desc = blake3_block_descriptor(j, pack_tweak(&tweak), extra);
+    if let StripBlock::Leaf { b, .. } = spec {
+        if b > 0 && j == 1 {
+            desc.selectors[7] = true; // IS_CV_IN
+            desc.cv_or_tweak = (row_idx - 2) as u64;
+        }
+    }
     // CR.4b: co-located leaf round-0 producer row (16|r path —
     // `row_schedule` guarantees 16|r, and `place_leaf_chunk`
     // co-locates every leaf block's round-0 row when noise is
@@ -1189,7 +1200,7 @@ fn row_descriptor(
                 "strip row offset {offset} past block list"
             );
             let spec = blocks[block];
-            let mut desc = strip_row_descriptor(spec, j, selector_idx);
+            let mut desc = strip_row_descriptor(spec, j, selector_idx, row_idx);
             // CR.4c: layer the 8 noise sub-slice pins onto the
             // co-located leaf round-0 producer rows (16|r path).
             if let StripBlock::Leaf { chunk_index, b, .. } = spec {

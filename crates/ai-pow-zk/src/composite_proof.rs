@@ -2083,6 +2083,33 @@ mod tests {
     }
 
     #[test]
+    fn routea_active_cv_route_tamper_rejects() {
+        use p3_field::integers::QuotientMap;
+        use p3_field::PrimeField64;
+
+        use crate::composite_layout::{CV_IN_START, IS_CV_IN, TOTAL_TRACE_WIDTH};
+
+        let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
+        let mut trace = c3_activated_matrix_trace();
+        let program = extract_program(&trace.matrix);
+        let pis = CompositePublicInputs::derive_from_trace(&trace);
+        let cv_row = (0..trace.height())
+            .find(|&r| {
+                trace.matrix.values[r * TOTAL_TRACE_WIDTH + IS_CV_IN].as_canonical_u64() == 1
+            })
+            .expect("co-located matrix trace has an active CV route");
+        let cell = cv_row * TOTAL_TRACE_WIDTH + CV_IN_START;
+        let cur = trace.matrix.values[cell].as_canonical_u64();
+        trace.matrix.values[cell] = <Val<AiPowStarkConfig> as QuotientMap<u64>>::from_int(cur ^ 1);
+
+        let (proof, _) = composite_prove_pinned_logup(&cfg, trace, &pis);
+        assert!(
+            composite_verify_pinned_logup(&cfg, &program, &proof, &pis).is_err(),
+            "matrix BLAKE3 chaining must consume an active CV-routing bus value"
+        );
+    }
+
+    #[test]
     fn routea_malformed_program_returns_error_not_panic() {
         let cfg = build_config(&test_zk_params(), &CircuitConfig::TEST_PEARL);
         let trace = honest_trace();
