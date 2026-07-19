@@ -8,7 +8,7 @@ use p3_batch_stark::symbolic::get_log_num_quotient_chunks as get_batch_log_num_q
 use p3_batch_stark::{BatchProof, BatchTranscript, CommonData};
 use p3_challenger::{CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger};
 use p3_commit::{BatchOpening, Mmcs, OpenedValues, Pcs, PolynomialSpace};
-use p3_field::{Algebra, BasedVectorSpace, PrimeCharacteristicRing, PrimeField, TwoAdicField};
+use p3_field::{Algebra, BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField, TwoAdicField};
 use p3_fri::{FriProof, HidingFriPcs, TwoAdicFriPcs};
 use p3_lookup::symbolic::InteractionSymbolicBuilder;
 use p3_lookup::{Kind, Lookup, LookupProtocol};
@@ -477,6 +477,19 @@ type InnerFriProof<SC, InputMmcs, FriMmcs> = FriProof<
     Vec<BatchOpening<Val<SC>, InputMmcs>>,
 >;
 
+fn validate_commit_phase_pow_generation_shape<EF: Field, FriMmcs: Mmcs<EF>, Witness, InputProof>(
+    opening_proof: &FriProof<EF, FriMmcs, Witness, InputProof>,
+) -> Result<(), GenerationError> {
+    if opening_proof.commit_phase_commits.len() != opening_proof.commit_pow_witnesses.len() {
+        return Err(GenerationError::InvalidProofShape(
+            "commit-phase commitments and pow witnesses length mismatch",
+        ));
+    }
+
+    Ok(())
+}
+
+
 impl<SC: StarkGenericConfig, Dft, InputMmcs: Mmcs<Val<SC>>, FriMmcs: Mmcs<SC::Challenge>>
     PcsGeneration<SC, InnerFriProof<SC, InputMmcs, FriMmcs>>
     for TwoAdicFriPcs<Val<SC>, Dft, InputMmcs, FriMmcs>
@@ -494,6 +507,8 @@ where
         opening_proof: &InnerFriProof<SC, InputMmcs, FriMmcs>,
         extra_params: Option<&[usize]>,
     ) -> Result<Vec<SC::Challenge>, GenerationError> {
+        validate_commit_phase_pow_generation_shape(opening_proof)?;
+
         let num_challenges =
             <Self as PcsGeneration<SC, InnerFriProof<SC, InputMmcs, FriMmcs>>>::num_challenges(
                 opening_proof,
@@ -578,6 +593,8 @@ where
         opening_proof: &InnerFriProof<SC, InputMmcs, FriMmcs>,
         _extra_params: Option<&[usize]>,
     ) -> Result<usize, GenerationError> {
+        validate_commit_phase_pow_generation_shape(opening_proof)?;
+
         let num_challenges =
             1 + opening_proof.commit_phase_commits.len() + opening_proof.query_proofs.len();
 
@@ -608,6 +625,8 @@ where
         extra_params: Option<&[usize]>,
     ) -> Result<Vec<SC::Challenge>, GenerationError> {
         let inner_proof = &opening_proof.1;
+        validate_commit_phase_pow_generation_shape(inner_proof)?;
+
         let num_challenges = <Self as PcsGeneration<
             SC,
             HidingInnerFriProof<SC, InputMmcs, FriMmcs>,
@@ -676,6 +695,8 @@ where
         _extra_params: Option<&[usize]>,
     ) -> Result<usize, GenerationError> {
         let inner_proof = &opening_proof.1;
+        validate_commit_phase_pow_generation_shape(inner_proof)?;
+
         Ok(1 + inner_proof.commit_phase_commits.len() + inner_proof.query_proofs.len())
     }
 }
@@ -722,4 +743,71 @@ pub fn get_different_perm_challenges<SC: StarkGenericConfig, LG: LookupProtocol>
         }
     });
     different_challenges
+}
+
+#[cfg(test)]
+mod rb01_tests {
+    use alloc::vec;
+
+    use p3_field::PrimeCharacteristicRing;
+    use p3_symmetric::MerkleCap;
+    use p3_test_utils::baby_bear_params as params;
+    use p3_uni_stark::StarkGenericConfig;
+
+    use super::*;
+
+    type TestFriProof = InnerFriProof<params::MyConfig, params::MyMmcs, params::ChallengeMmcs>;
+    type TestHidingFriProof =
+        HidingInnerFriProof<params::MyConfig, params::MyMmcs, params::ChallengeMmcs>;
+    type TestHidingPcs =
+        HidingFriPcs<params::F, params::Dft, params::MyMmcs, params::ChallengeMmcs, ()>;
+
+    fn commitment() -> MerkleCap<params::F, [params::F; params::DIGEST_ELEMS]> {
+        MerkleCap::new(vec![[params::F::ZERO; params::DIGEST_ELEMS]])
+    }
+
+    fn missing_commit_pow_witness_proof() -> TestFriProof {
+        FriProof {
+            commit_phase_commits: vec![commitment()],
+            commit_pow_witnesses: vec![],
+            query_proofs: vec![],
+            final_poly: vec![],
+            query_pow_witness: params::F::ZERO,
+        }
+    }
+
+    #[test]
+    fn rb01_two_adic_generation_rejects_missing_commit_pow_witness_before_zip() {
+        let config = params::make_test_config();
+        let mut challenger = config.initialise_challenger();
+        let proof = missing_commit_pow_witness_proof();
+
+        let err = config
+            .pcs()
+            .generate_challenges(&config, &mut challenger, &[], &proof, Some(&[0, 0]))
+            .expect_err("missing commit-phase PoW witness must reject before zip");
+
+        assert!(matches!(
+            err,
+            GenerationError::InvalidProofShape(message)
+                if message.contains("commit-phase commitments and pow witnesses")
+        ));
+    }
+
+    #[test]
+    fn rb01_hiding_generation_rejects_missing_commit_pow_witness_before_zip() {
+        let proof: TestHidingFriProof = (vec![], missing_commit_pow_witness_proof());
+
+        let err = <TestHidingPcs as PcsGeneration<params::MyConfig, TestHidingFriProof>>::num_challenges(
+            &proof,
+            None,
+        )
+        .expect_err("missing hiding commit-phase PoW witness must reject before zip");
+
+        assert!(matches!(
+            err,
+            GenerationError::InvalidProofShape(message)
+                if message.contains("commit-phase commitments and pow witnesses")
+        ));
+    }
 }

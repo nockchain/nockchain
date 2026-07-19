@@ -386,6 +386,7 @@ fn compact_batch_l1_fri_verifier_params() -> FriVerifierParams {
     FriVerifierParams::with_mmcs(
         COMPACT_BATCH_L1_LOG_BLOWUP,
         COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN,
+        COMPACT_BATCH_L1_NUM_QUERIES,
         p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS,
         p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_QUERY_POW_BITS,
         Tip5Config::GOLDILOCKS_W16,
@@ -815,6 +816,7 @@ fn build_composite_l1_verifier_circuit_with_recompose_coeff_ctl(
     let fri_verifier_params = FriVerifierParams::with_mmcs(
         profile.log_blowup as usize,
         0,
+        profile.num_queries as usize,
         profile.pow_bits as usize,
         profile.pow_bits as usize,
         Tip5Config::GOLDILOCKS_W16,
@@ -2876,6 +2878,7 @@ mod tests {
             l1_params.log_final_poly_len,
             COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN
         );
+        assert_eq!(l1_params.num_queries, COMPACT_BATCH_L1_NUM_QUERIES);
         assert_eq!(COMPACT_BATCH_L1_JOHNSON_BITS, 60);
         assert_eq!(l1_params.commit_pow_bits, 0);
         assert_eq!(l1_params.query_pow_bits, 0);

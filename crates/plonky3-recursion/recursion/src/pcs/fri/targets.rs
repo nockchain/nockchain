@@ -136,6 +136,54 @@ impl<
     }
 }
 
+fn validate_commit_phase_pow_shape_for_challenge_derivation(
+    commit_phase_commits_len: usize,
+    commit_pow_witnesses_len: usize,
+) -> Result<(), CircuitBuilderError> {
+    if commit_phase_commits_len != commit_pow_witnesses_len {
+        return Err(CircuitBuilderError::WrongBatchSize {
+            expected: commit_phase_commits_len,
+            got: commit_pow_witnesses_len,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_commit_phase_pow_shape_for_verification(
+    commit_phase_commits_len: usize,
+    commit_pow_witnesses_len: usize,
+    expected_query_count: usize,
+    actual_query_count: usize,
+    challenges_len: usize,
+) -> Result<(), VerificationError> {
+    if commit_phase_commits_len != commit_pow_witnesses_len {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "Number of commit-phase commitments must equal number of commit-phase pow witnesses: expected {commit_phase_commits_len}, got {commit_pow_witnesses_len}"
+        )));
+    }
+    if actual_query_count != expected_query_count {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "FRI query proof count must match verifier parameters: expected {expected_query_count}, got {actual_query_count}"
+        )));
+    }
+
+
+    let required_challenges = 1usize.checked_add(commit_phase_commits_len).ok_or_else(|| {
+        VerificationError::InvalidProofShape(
+            "FRI challenge count overflow for commit phases".to_string(),
+        )
+    })?;
+    if challenges_len < required_challenges {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "FRI challenges length must include alpha and one beta per commit phase: expected at least {required_challenges}, got {challenges_len}"
+        )));
+    }
+
+    Ok(())
+}
+
+
 /// `Recursive` version of `QueryProof`.
 pub struct QueryProofTargets<
     F: Field,
@@ -710,6 +758,11 @@ where
         // For batch-STARK, the caller must observe in per-instance order to match native.
         // For single-STARK, the caller can use opened_values.observe() directly.
 
+        validate_commit_phase_pow_shape_for_challenge_derivation(
+            fri_proof.commit_phase_commits.len(),
+            fri_proof.commit_pow_witnesses.len(),
+        )?;
+
         // Sample FRI alpha (for batch opening reduction) - extension field
         let fri_alpha = challenger.sample_ext(circuit);
 
@@ -771,12 +824,20 @@ where
         let FriVerifierParams {
             log_blowup,
             log_final_poly_len,
+            num_queries,
             commit_pow_bits: _,
             query_pow_bits: _,
             permutation_config,
         } = *params;
+        validate_commit_phase_pow_shape_for_verification(
+            opening_proof.commit_phase_commits.len(),
+            opening_proof.commit_pow_witnesses.len(),
+            num_queries,
+            opening_proof.query_proofs.len(),
+            challenges.len(),
+        )?;
+
         let num_betas = opening_proof.commit_phase_commits.len();
-        let num_queries = opening_proof.query_proofs.len();
 
         let alpha = challenges[0];
         let betas = &challenges[1..1 + num_betas];
@@ -803,6 +864,7 @@ where
             &index_bits_per_query,
             commitments_with_opening_points,
             log_blowup,
+            num_queries,
             permutation_config,
         )
     }
@@ -1110,6 +1172,11 @@ where
     {
         let fri_proof = &proof_targets.inner_proof;
 
+        validate_commit_phase_pow_shape_for_challenge_derivation(
+            fri_proof.commit_phase_commits.len(),
+            fri_proof.commit_pow_witnesses.len(),
+        )?;
+
         let fri_alpha = challenger.sample_ext(circuit);
 
         let mut betas = Vec::with_capacity(fri_proof.commit_phase_commits.len());
@@ -1160,13 +1227,21 @@ where
         let FriVerifierParams {
             log_blowup,
             log_final_poly_len,
+            num_queries,
             commit_pow_bits: _,
             query_pow_bits: _,
             permutation_config,
         } = *params;
         let fri_proof = &opening_proof.inner_proof;
+        validate_commit_phase_pow_shape_for_verification(
+            fri_proof.commit_phase_commits.len(),
+            fri_proof.commit_pow_witnesses.len(),
+            num_queries,
+            fri_proof.query_proofs.len(),
+            challenges.len(),
+        )?;
+
         let num_betas = fri_proof.commit_phase_commits.len();
-        let num_queries = fri_proof.query_proofs.len();
 
         let alpha = challenges[0];
         let betas = &challenges[1..1 + num_betas];
@@ -1198,6 +1273,7 @@ where
             &index_bits_per_query,
             &merged_commitments,
             log_blowup,
+            num_queries,
             permutation_config,
         )
     }
@@ -1272,5 +1348,158 @@ where
         >,
     ) -> &[Vec<Vec<Vec<Target>>>] {
         &proof.random_opened_values.rounds
+    }
+}
+
+#[cfg(test)]
+mod rb01_tests {
+    use alloc::vec;
+    use core::marker::PhantomData;
+
+    use p3_circuit::{CircuitBuilderError, ExprId};
+    use p3_test_utils::baby_bear_params as params;
+
+    use super::*;
+
+    type RecInputMmcs = RecValMmcs<
+        params::F,
+        { params::DIGEST_ELEMS },
+        params::MyHash,
+        params::MyCompress,
+    >;
+    type RecFriMmcs = RecExtensionValMmcs<
+        params::F,
+        params::Challenge,
+        { params::DIGEST_ELEMS },
+        RecInputMmcs,
+    >;
+    type TestInputProof = InputProofTargets<params::F, params::Challenge, RecInputMmcs>;
+    type TestProof = FriProofTargets<
+        params::F,
+        params::Challenge,
+        RecFriMmcs,
+        TestInputProof,
+        Witness<params::F>,
+    >;
+    type TestHidingProof = HidingFriProofTargets<
+        params::F,
+        params::Challenge,
+        RecFriMmcs,
+        TestInputProof,
+        Witness<params::F>,
+    >;
+
+    fn target(id: u32) -> Target {
+        ExprId(id)
+    }
+
+    fn commitment(id: u32) -> MerkleCapTargets<params::F, { params::DIGEST_ELEMS }> {
+        MerkleCapTargets {
+            cap_targets: vec![[target(id); params::DIGEST_ELEMS]],
+            _phantom: PhantomData,
+        }
+    }
+
+    fn witness(id: u32) -> Witness<params::F> {
+        Witness {
+            witness: target(id),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn proof(commit_count: usize, pow_count: usize) -> TestProof {
+        FriProofTargets {
+            commit_phase_commits: (0..commit_count as u32).map(commitment).collect(),
+            commit_pow_witnesses: (0..pow_count as u32).map(witness).collect(),
+            query_proofs: vec![],
+            final_poly: vec![],
+            pow_witness: witness(99),
+            log_arities: vec![],
+        }
+    }
+
+    #[test]
+    fn rb01_two_adic_challenge_derivation_rejects_missing_commit_pow_witness_before_zip() {
+        let proof = proof(1, 0);
+
+        let err = validate_commit_phase_pow_shape_for_challenge_derivation(
+            proof.commit_phase_commits.len(),
+            proof.commit_pow_witnesses.len(),
+        )
+        .expect_err("missing commit-phase PoW witness must reject before zip");
+
+        assert!(matches!(
+            err,
+            CircuitBuilderError::WrongBatchSize {
+                expected: 1,
+                got: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn rb01_two_adic_verify_rejects_missing_commit_pow_witness_before_challenge_slice() {
+        let proof = proof(1, 0);
+
+        let err = validate_commit_phase_pow_shape_for_verification(
+            proof.commit_phase_commits.len(),
+            proof.commit_pow_witnesses.len(),
+            1,
+            proof.query_proofs.len(),
+            1,
+        )
+        .expect_err("missing commit-phase PoW witness must reject before beta slice");
+
+        assert!(matches!(
+            err,
+            VerificationError::InvalidProofShape(message)
+                if message.contains("commit-phase pow witnesses")
+        ));
+    }
+
+    #[test]
+    fn rb01_hiding_verify_rejects_missing_commit_pow_witness_before_challenge_slice() {
+        let proof = TestHidingProof {
+            random_opened_values: HidingOpenedValuesTargets {
+                rounds: vec![],
+                _phantom: PhantomData,
+            },
+            inner_proof: proof(1, 0),
+        };
+
+        let err = validate_commit_phase_pow_shape_for_verification(
+            proof.inner_proof.commit_phase_commits.len(),
+            proof.inner_proof.commit_pow_witnesses.len(),
+            1,
+            proof.inner_proof.query_proofs.len(),
+            1,
+        )
+        .expect_err("missing hiding commit-phase PoW witness must reject before beta slice");
+
+        assert!(matches!(
+            err,
+            VerificationError::InvalidProofShape(message)
+                if message.contains("commit-phase pow witnesses")
+        ));
+    }
+
+    #[test]
+    fn rb01_query_count_is_verifier_owned() {
+        let proof = proof(0, 0);
+
+        let err = validate_commit_phase_pow_shape_for_verification(
+            proof.commit_phase_commits.len(),
+            proof.commit_pow_witnesses.len(),
+            1,
+            proof.query_proofs.len(),
+            1,
+        )
+        .expect_err("proof query count below verifier-owned params must reject");
+
+        assert!(matches!(
+            err,
+            VerificationError::InvalidProofShape(message)
+                if message.contains("FRI query proof count")
+        ));
     }
 }

@@ -10,6 +10,8 @@ pub struct FriVerifierParams {
     pub log_blowup: usize,
     /// Log₂ of the final polynomial length (after all folding rounds)
     pub log_final_poly_len: usize,
+    /// Verifier-owned number of FRI queries.
+    pub num_queries: usize,
     /// Number of commit-phase proof-of-work bits required
     pub commit_pow_bits: usize,
     /// Number of query proof-of-work bits required
@@ -27,6 +29,7 @@ impl FriVerifierParams {
     pub fn with_mmcs(
         log_blowup: usize,
         log_final_poly_len: usize,
+        num_queries: usize,
         commit_pow_bits: usize,
         query_pow_bits: usize,
         permutation_config: impl Into<PermConfig>,
@@ -34,6 +37,7 @@ impl FriVerifierParams {
         Self {
             log_blowup,
             log_final_poly_len,
+            num_queries,
             commit_pow_bits,
             query_pow_bits,
             permutation_config: Some(permutation_config.into()),
@@ -58,12 +62,14 @@ impl FriVerifierParams {
     pub const fn unsafe_arithmetic_only_for_tests(
         log_blowup: usize,
         log_final_poly_len: usize,
+        num_queries: usize,
         commit_pow_bits: usize,
         query_pow_bits: usize,
     ) -> Self {
         Self {
             log_blowup,
             log_final_poly_len,
+            num_queries,
             commit_pow_bits,
             query_pow_bits,
             permutation_config: None,
@@ -86,7 +92,7 @@ mod tests {
     /// checks.
     #[test]
     fn with_mmcs_always_enables_mmcs_verification() {
-        let params = FriVerifierParams::with_mmcs(1, 0, 0, 0, p2());
+        let params = FriVerifierParams::with_mmcs(1, 0, 1, 0, 0, p2());
         assert!(
             params.permutation_config.is_some(),
             "with_mmcs must enable MMCS verification"
@@ -97,7 +103,7 @@ mod tests {
     /// test-only constructor — there is no implicit (`From`/`into`) path.
     #[test]
     fn arithmetic_only_is_the_only_way_to_disable_mmcs() {
-        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 0, 0);
+        let params = FriVerifierParams::unsafe_arithmetic_only_for_tests(1, 0, 1, 0, 0);
         assert!(
             params.permutation_config.is_none(),
             "arithmetic-only params must not perform MMCS verification"

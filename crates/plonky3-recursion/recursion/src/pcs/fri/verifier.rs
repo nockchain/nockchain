@@ -1369,6 +1369,7 @@ pub fn verify_fri_circuit<F, EF, RecMmcs, Inner, Witness, Comm>(
     index_bits_per_query: &[Vec<Target>],
     commitments_with_opening_points: &ComsWithOpeningsTargets<Comm, TwoAdicMultiplicativeCoset<F>>,
     log_blowup: usize,
+    expected_num_queries: usize,
     permutation_config: Option<PermConfig>,
 ) -> Result<Vec<NonPrimitiveOpId>, VerificationError>
 where
@@ -1385,7 +1386,7 @@ where
     builder.push_scope("verify_fri");
 
     let num_phases = betas.len();
-    let num_queries = fri_proof_targets.query_proofs.len();
+    let num_queries = expected_num_queries;
     let log_arities = &fri_proof_targets.log_arities;
 
     let total_log_reduction: usize = log_arities.iter().sum();
@@ -1397,6 +1398,8 @@ where
         log_blowup,
         log_arities,
     );
+
+    let actual_query_proofs = fri_proof_targets.query_proofs.len();
 
     // Validate shape.
     if num_phases != fri_proof_targets.commit_phase_commits.len() {
@@ -1423,9 +1426,14 @@ where
         )));
     }
 
+    if actual_query_proofs != num_queries {
+        return Err(VerificationError::InvalidProofShape(format!(
+            "FRI query proof count must match verifier parameters: expected {num_queries}, got {actual_query_proofs}"
+        )));
+    }
     if num_queries != index_bits_per_query.len() {
         return Err(VerificationError::InvalidProofShape(format!(
-            "index_bits_per_query length must equal number of query proofs: expected {}, got {}",
+            "index_bits_per_query length must equal verifier query count: expected {}, got {}",
             num_queries,
             index_bits_per_query.len()
         )));
