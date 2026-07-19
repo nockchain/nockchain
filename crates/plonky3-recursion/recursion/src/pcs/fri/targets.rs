@@ -136,7 +136,7 @@ impl<
     }
 }
 
-fn validate_commit_phase_pow_shape_for_challenge_derivation(
+const fn validate_commit_phase_pow_shape_for_challenge_derivation(
     commit_phase_commits_len: usize,
     commit_pow_witnesses_len: usize,
 ) -> Result<(), CircuitBuilderError> {
@@ -168,12 +168,13 @@ fn validate_commit_phase_pow_shape_for_verification(
         )));
     }
 
-
-    let required_challenges = 1usize.checked_add(commit_phase_commits_len).ok_or_else(|| {
-        VerificationError::InvalidProofShape(
-            "FRI challenge count overflow for commit phases".to_string(),
-        )
-    })?;
+    let required_challenges = 1usize
+        .checked_add(commit_phase_commits_len)
+        .ok_or_else(|| {
+            VerificationError::InvalidProofShape(
+                "FRI challenge count overflow for commit phases".to_string(),
+            )
+        })?;
     if challenges_len < required_challenges {
         return Err(VerificationError::InvalidProofShape(format!(
             "FRI challenges length must include alpha and one beta per commit phase: expected at least {required_challenges}, got {challenges_len}"
@@ -182,7 +183,6 @@ fn validate_commit_phase_pow_shape_for_verification(
 
     Ok(())
 }
-
 
 /// `Recursive` version of `QueryProof`.
 pub struct QueryProofTargets<
@@ -1361,18 +1361,10 @@ mod rb01_tests {
 
     use super::*;
 
-    type RecInputMmcs = RecValMmcs<
-        params::F,
-        { params::DIGEST_ELEMS },
-        params::MyHash,
-        params::MyCompress,
-    >;
-    type RecFriMmcs = RecExtensionValMmcs<
-        params::F,
-        params::Challenge,
-        { params::DIGEST_ELEMS },
-        RecInputMmcs,
-    >;
+    type RecInputMmcs =
+        RecValMmcs<params::F, { params::DIGEST_ELEMS }, params::MyHash, params::MyCompress>;
+    type RecFriMmcs =
+        RecExtensionValMmcs<params::F, params::Challenge, { params::DIGEST_ELEMS }, RecInputMmcs>;
     type TestInputProof = InputProofTargets<params::F, params::Challenge, RecInputMmcs>;
     type TestProof = FriProofTargets<
         params::F,

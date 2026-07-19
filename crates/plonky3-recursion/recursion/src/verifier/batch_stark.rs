@@ -60,10 +60,7 @@ enum OpenedValuesTranscriptMode {
 
 impl OpenedValuesTranscriptMode {
     const fn tag_challenger_phases_for_profile_only(self) -> bool {
-        matches!(
-            self,
-            Self::FullNativeWithChallengerPhaseTagsForProfileOnly
-        )
+        matches!(self, Self::FullNativeWithChallengerPhaseTagsForProfileOnly)
     }
 
     const fn observe_preprocessed_opened_values(self) -> bool {
@@ -551,11 +548,10 @@ where
         CircuitTablesAir::Const(ConstAir::<Val<SC>, TRACE_D>::new(
             rows[PrimitiveTable::Const],
         )),
-        CircuitTablesAir::Public(PublicAir::<Val<SC>, TRACE_D>::new(
-            rows[PrimitiveTable::Public],
-            public_lanes,
-        )
-        .with_public_binding_lanes(proof.public_binding_lanes)),
+        CircuitTablesAir::Public(
+            PublicAir::<Val<SC>, TRACE_D>::new(rows[PrimitiveTable::Public], public_lanes)
+                .with_public_binding_lanes(proof.public_binding_lanes),
+        ),
         CircuitTablesAir::Alu(alu_air),
     ];
 
@@ -568,7 +564,7 @@ where
                     "unknown non-primitive op: {:?}",
                     entry.op_type
                 ))
-        })?;
+            })?;
         let air = plugin
             .batch_air_from_table_entry_with_min_height(
                 config,
@@ -582,8 +578,7 @@ where
     }
 
     let mut air_public_counts = vec![0usize; NUM_PRIMITIVE_TABLES];
-    air_public_counts[PrimitiveTable::Public as usize] =
-        proof.public_binding_lanes * TRACE_D;
+    air_public_counts[PrimitiveTable::Public as usize] = proof.public_binding_lanes * TRACE_D;
     for entry in &proof.non_primitives {
         air_public_counts.push(entry.public_values.len());
     }

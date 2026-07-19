@@ -2,13 +2,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
-use p3_air::{Air, BaseAir};
 use p3_air::symbolic::AirLayout;
+use p3_air::{Air, BaseAir};
 use p3_batch_stark::symbolic::get_log_num_quotient_chunks as get_batch_log_num_quotient_chunks;
 use p3_batch_stark::{BatchProof, BatchTranscript, CommonData};
 use p3_challenger::{CanObserve, CanSample, CanSampleBits, FieldChallenger, GrindingChallenger};
 use p3_commit::{BatchOpening, Mmcs, OpenedValues, Pcs, PolynomialSpace};
-use p3_field::{Algebra, BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField, TwoAdicField};
+use p3_field::{
+    Algebra, BasedVectorSpace, Field, PrimeCharacteristicRing, PrimeField, TwoAdicField,
+};
 use p3_fri::{FriProof, HidingFriPcs, TwoAdicFriPcs};
 use p3_lookup::symbolic::InteractionSymbolicBuilder;
 use p3_lookup::{Kind, Lookup, LookupProtocol};
@@ -306,12 +308,9 @@ where
                         ))?;
                 points.push((
                     zeta_next,
-                    inst.base_opened_values
-                        .trace_next
-                        .clone()
-                        .ok_or(GenerationError::InvalidProofShape(
-                            "trace_next values should exist",
-                        ))?,
+                    inst.base_opened_values.trace_next.clone().ok_or(
+                        GenerationError::InvalidProofShape("trace_next values should exist"),
+                    )?,
                 ));
             }
             Ok((*ext_dom, points))
@@ -477,7 +476,12 @@ type InnerFriProof<SC, InputMmcs, FriMmcs> = FriProof<
     Vec<BatchOpening<Val<SC>, InputMmcs>>,
 >;
 
-fn validate_commit_phase_pow_generation_shape<EF: Field, FriMmcs: Mmcs<EF>, Witness, InputProof>(
+const fn validate_commit_phase_pow_generation_shape<
+    EF: Field,
+    FriMmcs: Mmcs<EF>,
+    Witness,
+    InputProof,
+>(
     opening_proof: &FriProof<EF, FriMmcs, Witness, InputProof>,
 ) -> Result<(), GenerationError> {
     if opening_proof.commit_phase_commits.len() != opening_proof.commit_pow_witnesses.len() {
@@ -488,7 +492,6 @@ fn validate_commit_phase_pow_generation_shape<EF: Field, FriMmcs: Mmcs<EF>, Witn
 
     Ok(())
 }
-
 
 impl<SC: StarkGenericConfig, Dft, InputMmcs: Mmcs<Val<SC>>, FriMmcs: Mmcs<SC::Challenge>>
     PcsGeneration<SC, InnerFriProof<SC, InputMmcs, FriMmcs>>
@@ -798,11 +801,11 @@ mod rb01_tests {
     fn rb01_hiding_generation_rejects_missing_commit_pow_witness_before_zip() {
         let proof: TestHidingFriProof = (vec![], missing_commit_pow_witness_proof());
 
-        let err = <TestHidingPcs as PcsGeneration<params::MyConfig, TestHidingFriProof>>::num_challenges(
-            &proof,
-            None,
-        )
-        .expect_err("missing hiding commit-phase PoW witness must reject before zip");
+        let err =
+            <TestHidingPcs as PcsGeneration<params::MyConfig, TestHidingFriProof>>::num_challenges(
+                &proof, None,
+            )
+            .expect_err("missing hiding commit-phase PoW witness must reject before zip");
 
         assert!(matches!(
             err,

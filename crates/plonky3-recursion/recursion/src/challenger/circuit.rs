@@ -10,9 +10,8 @@
 //! (in `p3_circuit`) delegate to the standard Poseidon2 non-primitive op with full input and rate-output CTL exposure,
 //! and the executor runs the real permutation so the lookup argument enforces correctness.
 
-use alloc::format;
-use alloc::vec;
 use alloc::vec::Vec;
+use alloc::{format, vec};
 
 use p3_circuit::ops::{Poseidon1Config, Poseidon2Config, Tip5Config};
 use p3_circuit::{CircuitBuilder, CircuitBuilderError, NonPrimitiveOpId};
@@ -88,15 +87,12 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
     ///
     /// The label is recorded only in circuit metadata via `CircuitBuilder::tag_op`.
     /// It does not affect the transcript state, proof constraints, or witness data.
-    pub fn set_profile_phase(&mut self, phase: Option<&'static str>) {
+    pub const fn set_profile_phase(&mut self, phase: Option<&'static str>) {
         self.profile_phase = phase;
     }
 
-    fn tag_profile_phase<EF>(
-        &mut self,
-        circuit: &mut CircuitBuilder<EF>,
-        op_id: NonPrimitiveOpId,
-    ) where
+    fn tag_profile_phase<EF>(&mut self, circuit: &mut CircuitBuilder<EF>, op_id: NonPrimitiveOpId)
+    where
         EF: p3_field::Field,
     {
         if let Some(phase) = self.profile_phase {

@@ -512,15 +512,19 @@ where
                 }
                 all_base.extend(salts[mat_idx].iter().copied());
             }
-            with_npo_profile_phase(circuit, "mmcs_leaf_extension_salted_base_coeffs", |circuit| {
-                add_hash_base_coeffs_overwrite::<F, EF>(
-                    circuit,
-                    &permutation_config,
-                    &all_base,
-                    true,
-                    true,
-                )
-            })?
+            with_npo_profile_phase(
+                circuit,
+                "mmcs_leaf_extension_salted_base_coeffs",
+                |circuit| {
+                    add_hash_base_coeffs_overwrite::<F, EF>(
+                        circuit,
+                        &permutation_config,
+                        &all_base,
+                        true,
+                        true,
+                    )
+                },
+            )?
         } else {
             let all_ext: Vec<Target> = mats_at_height
                 .iter()
@@ -1971,7 +1975,7 @@ mod tip5_mmcs_test {
 
     #[test]
     fn tip5_mmcs_verify_8x3() {
-        let mut rng = SmallRng::seed_from_u64(0xC2_3_7);
+        let mut rng = SmallRng::seed_from_u64(0xC237);
         let mat = RowMajorMatrix::<F>::rand(&mut rng, 8, 3);
         run_all_openings(vec![mat], 0);
     }
