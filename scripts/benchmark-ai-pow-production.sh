@@ -93,9 +93,9 @@ elif kind == "moe":
     prove_seconds = float(m.group(1))
     proof_bytes = int(m.group(2))
 elif kind == "moe_warm":
-    m = re.search(r"canonical MoE repeat/no-cache control:\s*([0-9.]+)s\s+compact_cert_bytes=(\d+)", text)
+    m = re.search(r"canonical MoE repeat/cache:\s*([0-9.]+)s\s+compact_cert_bytes=(\d+)", text)
     if not m:
-        raise SystemExit(f"{label} sample {sample}: missing MoE repeat/no-cache line")
+        raise SystemExit(f"{label} sample {sample}: missing MoE repeat/cache line")
     prove_seconds = float(m.group(1))
     proof_bytes = int(m.group(2))
 else:
@@ -176,9 +176,9 @@ case "$PROTOCOL" in
       "moe" \
       "canonical_mining_costs"
     run_benchmark \
-      "canonical MoE repeat no-cache control" \
+      "canonical MoE warm miner proof" \
       "moe_warm" \
-      "canonical_moe_repeat_no_cache_costs"
+      "canonical_moe_repeat_uses_prover_cache"
     ;;
 esac
 

@@ -23,7 +23,11 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::prove_pearl_moe_compact_recursive_certificate;
+use ai_pow::zk_bridge::{
+    prove_pearl_moe_compact_recursive_certificate,
+    prove_pearl_moe_compact_recursive_certificate_with_prover_cache,
+    AiPowCompactRecursiveProverCache, PearlMoeCompactProveRun,
+};
 
 use crate::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -53,6 +57,11 @@ pub struct CanonicalBlock {
     pub certificate: AiPowCertificateShape,
     pub commit: [u8; 32],
     pub jackpot_hash: [u8; 32],
+}
+
+pub(crate) struct CanonicalProvedBlock {
+    pub block: CanonicalBlock,
+    pub prover_cache: Option<AiPowCompactRecursiveProverCache>,
 }
 
 fn setup_pattern(len: u32) -> PearlPeriodicPattern {
@@ -305,6 +314,24 @@ pub fn prove_canonical_moe_block_at(
     nock_commit: [u8; 32],
     extranonce: u32,
 ) -> Result<CanonicalBlock, CanonicalProveError> {
+    Ok(
+        prove_canonical_moe_block_at_for_miner(
+            params, hw, e, top_k, nock_commit, extranonce, None,
+        )?
+        .block,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prove_canonical_moe_block_at_for_miner(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
+    cache: Option<&AiPowCompactRecursiveProverCache>,
+) -> Result<CanonicalProvedBlock, CanonicalProveError> {
     let CanonicalMoeInputs {
         a,
         b,
@@ -321,18 +348,36 @@ pub fn prove_canonical_moe_block_at(
         aux_inclusion,
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
-    let run = prove_pearl_moe_compact_recursive_certificate(
-        params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-        &inner, &local_b, n_e,
-    )
+    let run = if let Some(cache) = cache {
+        prove_pearl_moe_compact_recursive_certificate_with_prover_cache(
+            params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+            &inner, &local_b, n_e, cache,
+        )
+    } else {
+        prove_pearl_moe_compact_recursive_certificate(
+            params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+            &inner, &local_b, n_e,
+        )
+    }
     .map_err(err("prove"))?;
+
+    let PearlMoeCompactProveRun {
+        compact_cert,
+        verifier_context: _,
+        pis,
+        zk_params,
+        trace_height,
+        commitments: proof_commitments,
+        ticket,
+        prover_cache,
+    } = run;
 
     let public = PearlPublicProofParams {
         block_header: header,
         mining_config: config,
         hash_a: commitments.h_a,
         hash_b: commitments.h_b,
-        hash_jackpot: run.ticket.jackpot_hash,
+        hash_jackpot: ticket.jackpot_hash,
         m: m as u32,
         n: n_e as u32,
         t_rows: 0,
@@ -345,34 +390,37 @@ pub fn prove_canonical_moe_block_at(
         aux,
     };
     let cert_bytes =
-        ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&run.compact_cert)
+        ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&compact_cert)
             .map_err(err("encode cert"))?;
     let certificate = AiPowCertificateShape {
         version: 1,
-        zk_params: run.zk_params,
+        zk_params,
         found_idx: 0,
-        trace_height: run.trace_height,
-        commitments: run.commitments,
-        public_inputs: run.pis.clone(),
+        trace_height,
+        commitments: proof_commitments,
+        public_inputs: pis,
         certificate: AiProofNode::Bytes(cert_bytes),
     };
     let moe_art = PearlMergeMoeArtifact {
         moe: PearlMoeParams {
             expert_idx: 0,
             routing_offsets: routing.routing_offsets.clone(),
-            hash_routing: run.ticket.commitment.routing_root,
-            outer_indices: run.ticket.outer_indices.clone(),
+            hash_routing: ticket.commitment.routing_root,
+            outer_indices: ticket.outer_indices.clone(),
         },
         routing_data: routing.routing_data.clone(),
     };
 
-    Ok(CanonicalBlock {
-        statement,
-        aux_inclusion,
-        moe_art,
-        certificate,
-        commit: nock_commit,
-        jackpot_hash: run.ticket.jackpot_hash,
+    Ok(CanonicalProvedBlock {
+        block: CanonicalBlock {
+            statement,
+            aux_inclusion,
+            moe_art,
+            certificate,
+            commit: nock_commit,
+            jackpot_hash: ticket.jackpot_hash,
+        },
+        prover_cache,
     })
 }
 

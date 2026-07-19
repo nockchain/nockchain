@@ -1599,11 +1599,16 @@ pub struct PearlMoeCompactProveRun {
     pub trace_height: usize,
     pub commitments: ZkPublicCommitments,
     pub ticket: crate::pearl_compat::PearlMoeTicket,
+    pub prover_cache: Option<AiPowCompactRecursiveProverCache>,
 }
 
 impl PearlMoeCompactProveRun {
     pub fn verifier_key_digest(&self) -> ai_pow_zk::recursion::AiPowCompactBatchVerifierKeyDigest {
         *self.compact_cert.verifier_key_digest()
+    }
+
+    pub fn into_prover_cache(self) -> Option<AiPowCompactRecursiveProverCache> {
+        self.prover_cache
     }
 }
 
@@ -1631,6 +1636,58 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
     local_b_cols: &[u32],
     n_e: usize,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    prove_pearl_moe_compact_recursive_certificate_inner(
+        params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
+        local_b_cols, n_e, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn prove_pearl_moe_compact_recursive_certificate_with_prover_cache(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    cache: &AiPowCompactRecursiveProverCache,
+) -> Result<PearlMoeCompactProveRun, BridgeError> {
+    prove_pearl_moe_compact_recursive_certificate_inner(
+        params,
+        a_row_major,
+        b_col_major,
+        kappa,
+        h_a,
+        h_b,
+        routing,
+        expert_idx,
+        inner_a_rows,
+        local_b_cols,
+        n_e,
+        Some(cache),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_pearl_moe_compact_recursive_certificate_inner(
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    kappa: &[u8; 32],
+    h_a: &[u8; 32],
+    h_b: &[u8; 32],
+    routing: &crate::pearl_moe_routing::RoutingData,
+    expert_idx: usize,
+    inner_a_rows: &[u32],
+    local_b_cols: &[u32],
+    n_e: usize,
+    cache: Option<&AiPowCompactRecursiveProverCache>,
+) -> Result<PearlMoeCompactProveRun, BridgeError> {
     let (proof, prover_program, pis, zk_params, trace_height, ticket) =
         prove_pearl_moe_l0_and_ticket(
             params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
@@ -1647,7 +1704,7 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
             &pis,
         )
     };
-    let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
+    let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
 
     Ok(PearlMoeCompactProveRun {
         compact_cert: run.compact_cert,
@@ -1660,6 +1717,9 @@ pub fn prove_pearl_moe_compact_recursive_certificate(
             h_b_chunk: *h_b,
         },
         ticket,
+        prover_cache: run
+            .prover_cache
+            .map(AiPowCompactRecursiveProverCache::from_inner),
     })
 }
 
@@ -1840,6 +1900,9 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
             h_b_chunk: *h_b,
         },
         ticket,
+        prover_cache: run
+            .prover_cache
+            .map(AiPowCompactRecursiveProverCache::from_inner),
     };
     Ok((prove_run, seed))
 }
