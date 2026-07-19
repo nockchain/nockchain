@@ -100,12 +100,30 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 | Parser Miri regressions | `cargo miri test -p ai-pow-zk --features recursion rb02_compact_decoder_rejects_exclusive_size_limit_before_postcard && cargo miri test -p ai-pow-miner --features node dense_and_moe_decoders_reject_each_others_tags && cargo miri test -p ai-pow-miner --features node moe_decode_rejects_routing_len_over_cap_without_allocating` | worktree over `bd1d714d1e91cb18554951a4e5c9cb21bd964eef` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | Miri; `recursion`, `node`; `RUSTFLAGS=-C target-cpu=native` | 2026-07-18 | 2026-07-18 | pass | terminal output | 0 |  | 145.23s |  | internal |
 | Release critical Rust regression | `cargo test --release` | `b9b9131b` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | release workspace defaults; `RUSTFLAGS=-C target-cpu=native` | 2026-07-18 | 2026-07-18 | pass | `artifact://218` | 107 ignored tests not selected |  | 2636.81s |  | internal; 3801 passed across 187 suites |
 | Live fakenet AI/ZK/dual smoke | `MINE_TIMEOUT_SECS=900 scripts/fakenet-ai-pow-smoke.sh && scripts/fakenet-dual-pow-smoke.sh && scripts/fakenet-zk-pow-post-ai-smoke.sh` | `26082978` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB | release `nockchain`, `ai-pow-mine`, `zk-pow-mine`; shared verifier setup cache only; fresh node PMA per run; `RUSTFLAGS=-C target-cpu=native` | 2026-07-18 | 2026-07-18 | pass | terminal output | legacy `fakenet-zk-pow-smoke.sh` remains diagnostic, not this gate |  | AI `207.74`s; dual `522.10`s; post-AI ZK `33.34`s |  | internal; AI accepted height 1 with `%ai-pow`; dual accepted AI@1 -> ZK@2 -> AI@3; post-AI ZK accepted through height 4 |
+| Locked release binary builds | `cargo build --release --locked ...` for Darwin arm64; `cargo zigbuild --release --locked --target x86_64-unknown-linux-gnu.2.39 ...` for Linux x86_64; Darwin `--help` smoke for all six binaries | `d3081651` | Darwin 25.5.0 arm64 / Apple M2 Max / 32 GiB; Linux x86_64 cross target | release `nockchain`, `nockchain-wallet`, `nockchain-peek`, `roswell`, `ai-pow-mine`, `zk-pow-mine`; Darwin `RUSTFLAGS=-C target-cpu=native`; Linux `RUSTFLAGS=-C target-cpu=x86-64-v3`; `nockchain/jemalloc`, `ai-pow-miner/node` | 2026-07-18 | 2026-07-18 | pass | `artifact://266` plus terminal output | 0 |  | Darwin build `55.14`s; Linux build `258.32`s; Darwin help smoke `2.67`s |  | internal; `file` identified Mach-O arm64 and ELF x86-64 outputs |
 
 ## Setup manifest
 
 | Shape key `(trace_height, sx_bound)` | Context digest | Table digest | Seed checksum | Context checksum | Disk bytes | RSS bytes | Darwin arm64 | Linux x86_64 | State |
 |---|---|---|---|---|---:|---:|---|---|---|
 | 13 production shape keys: `2^13/sx=true`; `2^14..2^19/sx=false,true` | pending per-bucket digest export | `d7df5d380f55b14e06b1f9f839af8b730a043d79a6608e8dc7e1553c7277658d` | `fac2c09e331ca1ef159804fd8b7bf7592578821f0e1327bc54899bc53bdbdb5e` | page-in checksum path exercised; per-context checksum export pending | `77.9` MiB seed cache; largest serialized context `821` MB | standing `11213` MB; peak `25269993472` B | generated, stale-cache refreshed, digest-verified | pending | table digest pinned; per-context checksums pending |
+
+## Release binary checksums
+
+| Platform | Binary | SHA-256 |
+|---|---|---|
+| Darwin arm64 | `target/release/nockchain` | `b69c97b687d3b48829c04b1edc9e997e76be5136c13c4db45ee27921b793a5c9` |
+| Darwin arm64 | `target/release/nockchain-wallet` | `4e74f22c50a6273f80a7be85ed6d7cdb0bfa057e18e446e0d06c8de72862482e` |
+| Darwin arm64 | `target/release/nockchain-peek` | `d08dfb68bea0f5ccc68ee97ba1855e302a14aa80e82efefcb7e8dd0d3b5bffca` |
+| Darwin arm64 | `target/release/roswell` | `4022764bfc5162758e8cea1cae56433d7dbb7380fa25da56b732ee158305e933` |
+| Darwin arm64 | `target/release/ai-pow-mine` | `a5475533e67aa8b66c580551ac50bd166322dcbb63c959ed0b76f333baa95f0b` |
+| Darwin arm64 | `target/release/zk-pow-mine` | `c828c6c75fb717cdaaa6a53a587b72b5ef1bde91f9b08b95092a64a049d4ac33` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain` | `32c685f2e6e578fd0d449a080099852badbf3f9c98d108c76343d53abeac2707` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain-wallet` | `85ed88b49daa7bbccb0cf2f820692521eaa5d37ecfe6d9c9c92de29b7b6c58f0` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/nockchain-peek` | `d3250bc9d6c77096a3528885c521cd56307d6862681f695d1ed5961f2220cb92` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/roswell` | `17b2523af17d393b5b5d7edcf851be69870923e5ba739c1f3c7fcae338959801` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/ai-pow-mine` | `85bbd8e593b402b696299c0bf36162a58454e66f0e0dd120fa03cf8e608f0d7e` |
+| Linux x86_64 glibc 2.39 | `target/x86_64-unknown-linux-gnu/release/zk-pow-mine` | `e5eb2ce99b4bed6879545fe8118a8900dc4c5d27288b288e4c4ca513dd65d315` |
 
 ## External review
 
@@ -121,7 +139,7 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 | Verifier setup generation, cache, corruption, and digest paths exercised | pass | full table generation `artifact://66`; corruption/page-in tests `artifact://72`; lifecycle measurement regenerated 13-shape cache, rebuilt in `125196` ms, page-in `468` ms, and matched pinned digest |
 | Serial Hoon jam rebuilds match embedded release binaries | partial | Roswell retarget, focused AI, and `test-dumb` gates passed against rebuilt release Roswell; full jam set and release binaries pending |
 | Dense and MoE hard budgets reproduced with three fresh processes each | pass | `scripts/benchmark-ai-pow-production.sh` enforces strict `<150000` B and `<30`s; dense `125056` B at `27.310/27.324/27.340`s; MoE `125764` B at `27.196/27.221/27.488`s |
-| Darwin arm64 and Linux x86_64 locked binaries built and smoked | open | pending Stage 9; live Darwin fakenet AI/ZK/dual smoke passed against release binaries |
+| Darwin arm64 and Linux x86_64 locked binaries built and smoked | partial | Darwin and Linux x86_64 locked release binaries built and checksummed; Darwin binaries passed `--help` smoke and live fakenet AI/ZK/dual smoke; Linux runtime smoke pending |
 | SBOM, license, Pearl fixture provenance, vendored recursion provenance attached | open | pending Stage 9 |
 | Independent critical/high findings closed | open | pending Stage 10 |
 
