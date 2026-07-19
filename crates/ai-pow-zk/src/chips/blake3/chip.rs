@@ -245,8 +245,8 @@ impl Blake3Chip {
         let mut next_factor: AB::Expr =
             <AB::Expr as PrimeCharacteristicRing>::ONE - next_is_new_blake;
         for &excl in off.round_gate_excl {
-            first_factor = first_factor - cur[excl].into();
-            next_factor = next_factor - nxt[excl].into();
+            first_factor -= cur[excl].into();
+            next_factor -= nxt[excl].into();
         }
         let is_round_active: AB::Expr = first_factor * next_factor;
 
