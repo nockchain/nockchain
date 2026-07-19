@@ -687,9 +687,16 @@ fn build_or_reuse_disk_contexts(
                 );
             }
             let setup = rebuild_verifier_setup_from_seed(seed)?;
-            // Digest gate: the built context must match its seed's committed digest.
+            // Digest gate: the built context must internally bind its setup metadata
+            // and match its seed's committed digest.
+            let recomputed_digest = setup.context.validate_setup_binding().map_err(|e| {
+                SetupError(format!(
+                    "built verifier context for {:?} failed setup binding validation: {e:?}",
+                    shape_key,
+                ))
+            })?;
             let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-                setup.context.verifier_key_digest(),
+                &recomputed_digest,
             );
             if digest.as_slice() != committed_digest.as_slice()
                 || setup.digest_bytes != committed_digest
@@ -726,7 +733,21 @@ pub fn install_verifier_setup_disk_from_setups(
     let mut disk_buckets: Vec<crate::DiskBucket> = Vec::with_capacity(setups.len());
     for setup in &setups {
         let shape_key = setup.shape_key();
-        let digest = setup.digest_bytes.clone();
+        let recomputed_digest = setup.context.validate_setup_binding().map_err(|e| {
+            SetupError(format!(
+                "verifier context for {:?} failed setup binding validation: {e:?}",
+                shape_key,
+            ))
+        })?;
+        let digest =
+            ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&recomputed_digest)
+                .to_vec();
+        if setup.digest_bytes != digest {
+            return Err(SetupError(format!(
+                "verifier context for {:?} does not match its committed digest",
+                shape_key,
+            )));
+        }
         let ctx_path = verifier_context_file_path(data_dir, shape_key, &digest);
         let checksum = write_verifier_context_file(setup, &ctx_path)?;
         disk_buckets.push(crate::DiskBucket::new(

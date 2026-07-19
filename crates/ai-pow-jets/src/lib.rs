@@ -323,11 +323,21 @@ fn page_in_bucket(bucket: &DiskBucket) -> Option<AiPowVerifierSetup> {
             return None;
         }
     };
-    // Consensus + integrity gate: the deserialized context's verifier-key digest must
-    // equal the committed value (catches a wrong/swapped/stale context file).
-    let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
-        setup.context.verifier_key_digest(),
-    );
+    // Consensus + integrity gate: the deserialized context must internally bind its
+    // verifier-key digest to its metadata, FRI shape, and common data, then match the
+    // committed bucket digest.
+    let recomputed_digest = match setup.context.validate_setup_binding() {
+        Ok(digest) => digest,
+        Err(e) => {
+            tracing::error!(
+                "ai-pow: on-disk verifier context for {:?} failed setup binding validation: {e:?}",
+                bucket.shape_key,
+            );
+            return None;
+        }
+    };
+    let digest =
+        ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(&recomputed_digest);
     if setup.shape_key() != bucket.shape_key
         || digest.as_slice() != bucket.committed_digest.as_slice()
         || setup.digest_bytes != bucket.committed_digest
@@ -1241,6 +1251,73 @@ mod jet_tests {
             ),
             "a corrupt context file must page in as LoadFailed (→ %fail), never Found or a \
              silent reject",
+        );
+    }
+
+    /// DIVERGENT-SETUP FAIL-SAFE KAT: a bincode-valid context file whose
+    /// serialized setup metadata no longer matches the committed bucket is a local
+    /// setup fault at page-in. Uses the stable verifier-setup seed cache when present.
+    #[test]
+    #[ignore = "rebuilds one cached verifier context; installs process-global setup; run alone"]
+    fn divergent_serialized_setup_pages_in_as_load_failed() {
+        if crate::ai_pow_verifier_setup_initialized() {
+            eprintln!("skip: verifier setup already initialized in this process");
+            return;
+        }
+        let cache_dir = std::env::temp_dir().join("aipow-rss-cache");
+        let cache_path = crate::setup::verifier_setup_seed_cache_path(&cache_dir);
+        if !cache_path.exists() {
+            eprintln!(
+                "skip: no stable verifier-setup seed cache at {}",
+                cache_path.display()
+            );
+            return;
+        }
+        let seeds =
+            crate::setup::load_verifier_setup_seeds(&cache_path).expect("load stable setup seeds");
+        let mut setup = match seeds.into_iter().find_map(|seed| {
+            let rebuilt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::setup::rebuild_verifier_setup_from_seed(seed)
+            }));
+            match rebuilt {
+                Ok(Ok(setup)) => Some(setup),
+                Ok(Err(e)) => {
+                    eprintln!("skip seed: cached verifier setup is not rebuildable here: {e}");
+                    None
+                }
+                Err(_) => {
+                    eprintln!("skip seed: cached verifier setup rebuild panicked");
+                    None
+                }
+            }
+        }) {
+            Some(setup) => setup,
+            None => {
+                eprintln!("skip: no cached verifier setup seed rebuilt successfully");
+                return;
+            }
+        };
+        let setup_key = setup.shape_key();
+        let committed_digest = setup.digest_bytes.clone();
+        setup.digest_bytes[0] ^= 0xff;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx_path =
+            crate::setup::verifier_context_file_path(tmp.path(), setup_key, &committed_digest);
+        std::fs::create_dir_all(ctx_path.parent().unwrap()).unwrap();
+        let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
+            .expect("serialize divergent setup");
+        std::fs::write(&ctx_path, &bytes).unwrap();
+        let checksum = *blake3::hash(&bytes).as_bytes();
+        let bucket = crate::DiskBucket::new(setup_key, committed_digest, ctx_path, checksum);
+        crate::init_ai_pow_verifier_setup_disk(vec![bucket], 1).expect("inject disk bucket");
+
+        assert!(
+            matches!(
+                crate::ai_pow_verifier_setup_for(setup_key),
+                crate::VerifierSetupLookup::LoadFailed
+            ),
+            "a divergent context file must page in as LoadFailed (→ %fail), never invalid-block NO",
         );
     }
 

@@ -255,6 +255,53 @@ impl AiPowCompactBatchVerifierContext {
                 VerificationError::InvalidProofShape(format!("metadata deserialize: {e:?}"))
             })
     }
+
+    pub fn validate_setup_binding(
+        &self,
+    ) -> Result<AiPowCompactBatchVerifierKeyDigest, VerificationError> {
+        self.metadata.validate().map_err(|e| {
+            VerificationError::InvalidProofShape(format!(
+                "compact batch verifier context metadata invalid: {e:?}"
+            ))
+        })?;
+        if !p3_circuit_prover::common_preprocessed_binding_eq(
+            &self.metadata.stark_common, &self.circuit_prover_data.prover_data.common,
+        ) {
+            return Err(VerificationError::InvalidProofShape(
+                "compact batch verifier context metadata/common-data binding mismatch".to_string(),
+            ));
+        }
+        let expected_l2_packing =
+            compact_batch_l2_table_packing(self.metadata.public_binding_lanes);
+        if self.metadata.table_packing != expected_l2_packing {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "compact batch verifier context uses table packing {:?}; expected {:?}",
+                self.metadata.table_packing, expected_l2_packing
+            )));
+        }
+        if self.fri_shape != compact_batch_l2_fri_shape() {
+            return Err(VerificationError::InvalidProofShape(format!(
+                "compact batch verifier context uses FRI shape {:?}; expected {:?}",
+                self.fri_shape,
+                compact_batch_l2_fri_shape()
+            )));
+        }
+        let expected_digest = compact_batch_verifier_key_digest_from_parts(
+            &self.metadata, self.fri_shape,
+        )
+        .map_err(|e| {
+            VerificationError::InvalidProofShape(format!(
+                "compact batch verifier-key digest reconstruction failed: {e:?}"
+            ))
+        })?;
+        if self.verifier_key_digest != expected_digest {
+            return Err(VerificationError::InvalidProofShape(
+                "compact batch verifier context digest does not match its metadata/FRI/common-data binding"
+                    .to_string(),
+            ));
+        }
+        Ok(expected_digest)
+    }
 }
 
 /// Tip5 digest width (`DIGEST_ELEMS`), sponge `WIDTH`, sponge `RATE` —
@@ -2229,39 +2276,12 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
     // check. Pass the prover's own for a self-verify sanity check.
     l0_program_commitment: &[Val],
 ) -> Result<(), VerificationError> {
-    let expected_digest =
-        compact_batch_verifier_key_digest_from_parts(&context.metadata, context.fri_shape)
-            .map_err(|e| {
-                VerificationError::InvalidProofShape(format!(
-                    "compact batch verifier-key digest reconstruction failed: {e:?}"
-                ))
-            })?;
-    if context.verifier_key_digest != expected_digest {
-        return Err(VerificationError::InvalidProofShape(
-            "compact batch verifier context digest does not match its metadata/FRI shape"
-                .to_string(),
-        ));
-    }
+    let expected_digest = context.validate_setup_binding()?;
     if cert.verifier_key_digest != expected_digest {
         return Err(VerificationError::InvalidProofShape(
             "compact batch certificate verifier-key digest does not match verifier context"
                 .to_string(),
         ));
-    }
-
-    let expected_l2_packing = compact_batch_l2_table_packing(context.metadata.public_binding_lanes);
-    if context.metadata.table_packing != expected_l2_packing {
-        return Err(VerificationError::InvalidProofShape(format!(
-            "compact batch verifier context uses table packing {:?}; expected {:?}",
-            context.metadata.table_packing, expected_l2_packing
-        )));
-    }
-    if context.fri_shape != compact_batch_l2_fri_shape() {
-        return Err(VerificationError::InvalidProofShape(format!(
-            "compact batch verifier context uses FRI shape {:?}; expected {:?}",
-            context.fri_shape,
-            compact_batch_l2_fri_shape()
-        )));
     }
 
     if l0_program_commitment.len() != DIGEST_ELEMS {
@@ -2283,6 +2303,7 @@ pub fn verify_compact_batch_recursive_certificate_with_context(
         &context.metadata, &context.circuit_prover_data, context.fri_shape,
         &l2_statement_public_values,
     );
+    let expected_l2_packing = compact_batch_l2_table_packing(context.metadata.public_binding_lanes);
     let mut verifier = p3_circuit_prover::BatchStarkProver::new(compact_batch_l2_stark_config())
         .with_table_packing(expected_l2_packing);
     verifier.register_tip5_table::<2>(Tip5Config::GOLDILOCKS_W16);
@@ -3000,6 +3021,9 @@ mod tests {
 
         let mut wrong_context = run.verifier_context;
         wrong_context.verifier_key_digest[0] += Val::ONE;
+        wrong_context
+            .validate_setup_binding()
+            .expect_err("divergent setup context must fail local setup-binding validation");
         let decoded_for_wrong_context = decode_compact_batch_recursive_certificate(&bytes)
             .expect("decode compact batch recursive certificate for context digest test");
         verify_compact_batch_recursive_certificate_with_context(
