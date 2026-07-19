@@ -26,11 +26,15 @@ FAKENET_LOG_DIFF="${FAKENET_LOG_DIFF:-1}"
 FAKENET_AI_ACTIVATION="${FAKENET_AI_ACTIVATION:-2}"
 NUM_THREADS="${NUM_THREADS:-1}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-360}"
+BOOT_TIMEOUT_SECS="${BOOT_TIMEOUT_SECS:-1200}"
 MIN_HEIGHT="${MIN_HEIGHT:-4}"
 MINING_PKH="${MINING_PKH:-9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV}"
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
+
+# Persist only verifier setup; consensus PMA/event state is per-run.
+SETUP_CACHE_DIR="${AI_POW_VERIFIER_SETUP_CACHE_DIR:-$REPO_ROOT/.fakenet-ai-pow-data/ai-pow}"
 
 echo "== fakenet-zk-pow-post-ai-smoke =="
 echo "  PRIV_PORT             = $PRIV_PORT"
@@ -38,8 +42,10 @@ echo "  FAKENET_POW_LEN       = $FAKENET_POW_LEN"
 echo "  FAKENET_LOG_DIFF      = $FAKENET_LOG_DIFF"
 echo "  FAKENET_AI_ACTIVATION = $FAKENET_AI_ACTIVATION (chain crosses regime-2 at this height)"
 echo "  NUM_THREADS           = $NUM_THREADS"
+echo "  BOOT_TIMEOUT_SECS     = $BOOT_TIMEOUT_SECS"
 echo "  TIMEOUT_SECS          = $TIMEOUT_SECS"
 echo "  MIN_HEIGHT            = $MIN_HEIGHT (must exceed activation by at least 2)"
+echo "  SETUP_CACHE_DIR       = $SETUP_CACHE_DIR"
 echo "  MINING_PKH            = $MINING_PKH"
 
 echo
@@ -51,6 +57,9 @@ WORK_DIR="$(mktemp -d -t fakenet-zk-pow-post-ai-smoke.XXXXXX)"
 NODE_LOG="$WORK_DIR/node.log"
 MINER_LOG="$WORK_DIR/miner.log"
 echo "[setup] work_dir=$WORK_DIR"
+DATA_DIR="$WORK_DIR/node-data"
+mkdir -p "$DATA_DIR" "$SETUP_CACHE_DIR"
+ln -s "$SETUP_CACHE_DIR" "$DATA_DIR/ai-pow"
 
 NODE_PID=""
 MINER_PID=""
@@ -91,6 +100,7 @@ pushd "$WORK_DIR" >/dev/null
 RUST_LOG="${NODE_RUST_LOG:-info}" \
     "$NODE_BIN" \
     --fakenet \
+    --data-dir "$DATA_DIR" \
     --bind-private-grpc-port "$PRIV_PORT" \
     --fakenet-pow-len "$FAKENET_POW_LEN" \
     --fakenet-log-difficulty "$FAKENET_LOG_DIFF" \
@@ -100,11 +110,11 @@ RUST_LOG="${NODE_RUST_LOG:-info}" \
     >"$NODE_LOG" 2>&1 &
 NODE_PID=$!
 popd >/dev/null
-echo "[boot ] node pid=$NODE_PID; waiting for born..."
+echo "[boot ] node pid=$NODE_PID; waiting for born (up to ${BOOT_TIMEOUT_SECS}s for setup gen)..."
 
-DEADLINE=$(( SECONDS + 60 ))
+DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    if grep -q "born" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "born" "$NODE_LOG" 2>/dev/null; then
         echo "[boot ] node reached %born"
         break
     fi
@@ -135,7 +145,7 @@ DEADLINE=$(( SECONDS + TIMEOUT_SECS ))
 SAW_BLOCK=0
 PATTERN="added to validated blocks at ([${MIN_HEIGHT}-9]|[1-9][0-9]+)"
 while (( SECONDS < DEADLINE )); do
-    if grep -E -q "$PATTERN" "$NODE_LOG" 2>/dev/null; then
+    if grep -aE -q "$PATTERN" "$NODE_LOG" 2>/dev/null; then
         SAW_BLOCK=1
         break
     fi
@@ -155,9 +165,9 @@ done
 if (( SAW_BLOCK == 1 )); then
     echo "[ok   ] node accepted a mined block at height >= $MIN_HEIGHT"
     echo "[ok   ] full block-accept log:"
-    grep -E "added to validated blocks at" "$NODE_LOG" | head -8
+    grep -aE "added to validated blocks at" "$NODE_LOG" | head -8
     # Sanity check: kernel must NOT have logged the empty-cache panic.
-    if grep -q "zk-asert-post-ai-anchor-cache-empty" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "zk-asert-post-ai-anchor-cache-empty" "$NODE_LOG" 2>/dev/null; then
         echo "[fail ] kernel logged cache-empty panic — cache population is broken"
         EXIT_CODE=6
         exit 6
@@ -167,9 +177,9 @@ if (( SAW_BLOCK == 1 )); then
     # %proof-version-invalid. The predicate accepts the height-derived
     # legacy ZK version OR %3 (AI) post-activation. If anything else
     # were accepted by the miner, this catches it.
-    if grep -q "proof-version-invalid" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "proof-version-invalid" "$NODE_LOG" 2>/dev/null; then
         echo "[fail ] kernel rejected block(s) with proof-version-invalid — predicate is wrong"
-        grep -E "proof-version-invalid" "$NODE_LOG" | head -5
+        grep -aE "proof-version-invalid" "$NODE_LOG" | head -5
         EXIT_CODE=7
         exit 7
     fi
@@ -179,8 +189,8 @@ else
     echo "[fail ] timeout waiting for accepted block at height >= $MIN_HEIGHT"
     # Diagnostic: show what blocks did land + any cache-related errors.
     echo "===== blocks accepted ====="
-    grep -E "added to validated blocks at" "$NODE_LOG" 2>/dev/null | tail -10 || true
+    grep -aE "added to validated blocks at" "$NODE_LOG" 2>/dev/null | tail -10 || true
     echo "===== any cache errors ====="
-    grep -i "cache\|asert" "$NODE_LOG" 2>/dev/null | tail -10 || true
+    grep -ai "cache\|asert" "$NODE_LOG" 2>/dev/null | tail -10 || true
     EXIT_CODE=5
 fi

@@ -20,9 +20,9 @@
 # LARGER than the prove time so the candidate commitment stays stable long enough
 # for the proved certificate to still bind when it lands.
 #
-# NOTE ON FIRST BOOT: the node GENERATES the ~6GB AI-PoW verifier-setup table on
-# its first boot (a one-time multi-minute stall; it logs this) and caches it under
-# the data dir. We use a persistent data dir so re-runs skip regeneration.
+# NOTE ON FIRST BOOT: the node GENERATES the AI-PoW verifier-setup table on
+# first use and caches it under data-dir/ai-pow. Each smoke run uses fresh node
+# state and copies only that setup cache in/out, so stale PMA cannot affect boot.
 
 set -euo pipefail
 
@@ -46,14 +46,14 @@ MINING_PKH="${MINING_PKH:-9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWo
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# Persistent data dir so the verifier-setup table is generated once and reused.
-DATA_DIR="${AI_POW_FAKENET_DATA_DIR:-$REPO_ROOT/.fakenet-ai-pow-data}"
+# Persist only verifier setup; node PMA/event state is per-run.
+SETUP_CACHE_DIR="${AI_POW_VERIFIER_SETUP_CACHE_DIR:-$REPO_ROOT/.fakenet-ai-pow-data/ai-pow}"
 
 echo "== fakenet-ai-pow-smoke =="
 echo "  PRIV_PORT             = $PRIV_PORT"
 echo "  FAKENET_AI_ACTIVATION = $FAKENET_AI_ACTIVATION"
 echo "  CANDIDATE_INTERVAL    = ${CANDIDATE_INTERVAL}s (must exceed the ~30s prove)"
-echo "  DATA_DIR              = $DATA_DIR"
+echo "  SETUP_CACHE_DIR       = $SETUP_CACHE_DIR"
 echo "  MIN_HEIGHT            = $MIN_HEIGHT"
 echo "  MINING_PKH            = $MINING_PKH"
 
@@ -66,7 +66,12 @@ WORK_DIR="$(mktemp -d -t fakenet-ai-pow-smoke.XXXXXX)"
 NODE_LOG="$WORK_DIR/node.log"
 MINER_LOG="$WORK_DIR/miner.log"
 echo "[setup] work_dir=$WORK_DIR  logs: node.log, miner.log"
+DATA_DIR="$WORK_DIR/node-data"
 mkdir -p "$DATA_DIR"
+if [[ -d "$SETUP_CACHE_DIR" ]]; then
+    mkdir -p "$DATA_DIR/ai-pow"
+    cp -R "$SETUP_CACHE_DIR/." "$DATA_DIR/ai-pow/"
+fi
 
 NODE_PID=""
 MINER_PID=""
@@ -79,6 +84,10 @@ cleanup() {
     echo "[cleanup] tearing down (rc=$rc)"
     [[ -n "$MINER_PID" ]] && { kill "$MINER_PID" 2>/dev/null; wait "$MINER_PID" 2>/dev/null; }
     [[ -n "$NODE_PID" ]]  && { kill "$NODE_PID"  2>/dev/null; wait "$NODE_PID"  2>/dev/null; }
+    if [[ -d "$DATA_DIR/ai-pow" ]]; then
+        mkdir -p "$SETUP_CACHE_DIR"
+        cp -R "$DATA_DIR/ai-pow/." "$SETUP_CACHE_DIR/"
+    fi
     echo "[cleanup] logs preserved at $WORK_DIR"
     if [[ "$EXIT_CODE" -ne 0 ]]; then
         echo; echo "===== node.log (tail) ====="; tail -80 "$NODE_LOG" 2>/dev/null || true
@@ -113,11 +122,11 @@ echo "[boot ] node pid=$NODE_PID; waiting for %born (up to ${BOOT_TIMEOUT_SECS}s
 
 DEADLINE=$(( SECONDS + BOOT_TIMEOUT_SECS ))
 while (( SECONDS < DEADLINE )); do
-    if grep -q "born" "$NODE_LOG" 2>/dev/null; then
+    if grep -aq "born" "$NODE_LOG" 2>/dev/null; then
         echo "[boot ] node reached %born (verifier setup ready)"
         break
     fi
-    if grep -qi "badly formatted cause" "$NODE_LOG" 2>/dev/null; then
+    if grep -aqi "badly formatted cause" "$NODE_LOG" 2>/dev/null; then
         echo "[fail ] node rejected the fakenet %set-constants poke ('badly formatted cause')"
         EXIT_CODE=8; exit 8
     fi
@@ -126,7 +135,7 @@ while (( SECONDS < DEADLINE )); do
     fi
     sleep 3
 done
-if ! grep -q "born" "$NODE_LOG" 2>/dev/null; then
+if ! grep -aq "born" "$NODE_LOG" 2>/dev/null; then
     echo "[fail ] timeout waiting for %born"; EXIT_CODE=2; exit 2
 fi
 
@@ -148,7 +157,7 @@ DEADLINE=$(( SECONDS + MINE_TIMEOUT_SECS ))
 SAW_BLOCK=0
 PATTERN="added to validated blocks at ([${MIN_HEIGHT}-9]|[1-9][0-9]+)"
 while (( SECONDS < DEADLINE )); do
-    if grep -E -q "$PATTERN" "$NODE_LOG" 2>/dev/null; then SAW_BLOCK=1; break; fi
+    if grep -aE -q "$PATTERN" "$NODE_LOG" 2>/dev/null; then SAW_BLOCK=1; break; fi
     if ! kill -0 "$NODE_PID" 2>/dev/null; then echo "[fail ] node died"; EXIT_CODE=3; exit 3; fi
     if ! kill -0 "$MINER_PID" 2>/dev/null; then echo "[fail ] miner died"; EXIT_CODE=4; exit 4; fi
     sleep 3
@@ -157,15 +166,15 @@ done
 echo
 echo "===== node<->miner communication (observed) ====="
 echo "--- node: %mine-ai emission + block acceptance ---"
-grep -E "mine-ai|added to validated blocks at|do-pow|Generating the AI-PoW|verifier" "$NODE_LOG" 2>/dev/null | tail -20 || true
+grep -aE "mine-ai|added to validated blocks at|do-pow|Generating the AI-PoW|verifier" "$NODE_LOG" 2>/dev/null | tail -20 || true
 echo "--- miner: subscribe -> prove -> submit ---"
-grep -E "subscribed|candidate|proving canonical|proved|submission|acked" "$MINER_LOG" 2>/dev/null | tail -20 || true
+grep -aE "subscribed|candidate|proving canonical|proved|submission|acked" "$MINER_LOG" 2>/dev/null | tail -20 || true
 
 if (( SAW_BLOCK == 1 )); then
     echo
     echo "[ok   ] node ACCEPTED a mined AI-PoW block at height >= $MIN_HEIGHT"
-    grep -E "added to validated blocks at" "$NODE_LOG" | head -8
-    if grep -q "proof-version-invalid\|failed-pow-check\|page-target-invalid\|page-heaviness-invalid" "$NODE_LOG" 2>/dev/null; then
+    grep -aE "added to validated blocks at" "$NODE_LOG" | head -8
+    if grep -aq "proof-version-invalid\|failed-pow-check\|page-target-invalid\|page-heaviness-invalid" "$NODE_LOG" 2>/dev/null; then
         echo "[warn ] node also logged a rejection reason (inspect node.log)"
     fi
     EXIT_CODE=0
