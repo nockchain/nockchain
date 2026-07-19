@@ -138,8 +138,9 @@
   ^-  proof-version:sp
   ?:  ?=([%ai-pow *] pow)
     %3
-  =/  prf=proof:sp  (need ((soft proof:sp) pow))
-  version.prf
+  =/  prf=(unit proof:sp)  ((soft proof:sp) pow)
+  ?~  prf  %0
+  version.u.prf
 ::
 ::  +block-compute-work: a block's heaviness contribution, dispatched by
 ::  puzzle type. The ZK and AI puzzles use DIFFERENT work normalizers so
@@ -650,10 +651,12 @@
       ::  admitting a block to consensus state ONLY once BOTH pass. Returning
       ::  %.n here would instead reject every %ai-pow block, valid included.
       %.y
-    =/  prf=proof:sp  (need ((soft proof:sp) pow))
+    =/  prf=(unit proof:sp)  ((soft proof:sp) pow)
+    ?~  prf
+      %.n
     %-  check-target:mine
     :_  ~(target get:page:t pag)
-    (proof-to-pow:t prf)
+    (proof-to-pow:t u.prf)
   ?.  check-pow-hash
     [%.n %pow-target-check-failed]
   ::

@@ -53,6 +53,7 @@
       [%none ~]
       [%some value=*]
   ==
++$  ai-proof-bytes-envelope  [%bytes len=@ud data=@]
 +$  ai-recursive-certificate  ai-proof-node
 +$  ai-pow-certificate
   $:  version=@ud
@@ -63,12 +64,69 @@
       public-inputs=ai-pow-public-inputs
       certificate=ai-recursive-certificate
   ==
++$  ai-pow-certificate-envelope
+  $:  version=@ud
+      params=[m=@ud k=@ud n=@ud noise-rank=@ud tile=@ud difficulty-bits=@ud]
+      found-idx=@ud
+      trace-height=@ud
+      commitments=*
+      public-inputs=*
+      certificate=*
+  ==
++$  ai-pow-artifact-envelope
+  $:  nonce=ai-pow-nonce
+      certificate=ai-pow-certificate-envelope
+  ==
 +$  ai-pow-artifact
   $:  nonce=ai-pow-nonce
       certificate=ai-pow-certificate
   ==
 +$  pow-artifact
   *
+::
+::  AI-PoW artifact resource limits mirrored from the Rust consensus decoder.
+::  Hoon only performs cheap top-level shape and declared-byte checks before it
+::  jams or hashes the artifact; the mandatory verifier jet owns full decoding.
+++  ai-pow-max-atom-bytes  1.048.576
+++  ai-pow-max-artifact-jam-bytes  4.194.304
+++  ai-pow-max-artifact-jam-size  ^~((mul 8 ai-pow-max-artifact-jam-bytes))
+++  ai-pow-max-compact-certificate-bytes  150.000
+::
+++  ai-pow-compact-certificate-ok
+  |=  node=*
+  ^-  ?
+  =/  bytes=(unit ai-proof-bytes-envelope)  ((soft ai-proof-bytes-envelope) node)
+  ?~  bytes
+    %.n
+  ?&  =(len.u.bytes (met 3 data.u.bytes))
+      (lth len.u.bytes ai-pow-max-compact-certificate-bytes)
+  ==
+::
+++  ai-pow-artifact-resource-ok
+  |=  pow=*
+  ^-  ?
+  ?.  ?=([%ai-pow *] pow)
+    %.n
+  =/  art=(unit ai-pow-artifact-envelope)  ((soft ai-pow-artifact-envelope) +.pow)
+  ?~  art
+    %.n
+  =/  nonce=ai-pow-nonce  nonce.u.art
+  =/  cert=ai-pow-certificate-envelope  certificate.u.art
+  ?&  (gth len.nonce 0)
+      =(len.nonce (met 3 data.nonce))
+      (lte len.nonce ai-pow-max-atom-bytes)
+      (ai-pow-compact-certificate-ok certificate.cert)
+  ==
+::
+++  ai-pow-artifact-size
+  |=  pow=*
+  ^-  size
+  ?.  (ai-pow-artifact-resource-ok pow)
+    ai-pow-max-artifact-jam-size
+  =/  actual=size  (compute-size-jam pow)
+  ?:  (lte actual ai-pow-max-artifact-jam-size)
+    actual
+  ai-pow-max-artifact-jam-size
 ++  reason
   |$  object
   (each object term)
@@ -242,16 +300,13 @@
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
         ?:  ?=([%ai-pow *] u.pow.pag)
-          ::  Commit to the %ai-pow certificate belt-safely: jam it and hash the
-          ::  jam as a list of 32-bit belts. `leaf+(jam ..)` was wrong — a leaf
-          ::  is a single tip5 belt (< goldilocks prime), but any real cert's jam
-          ::  is far larger, so +hash-noun-varlen's +leaf-sequence (which does not
-          ::  rip) fed the whole atom to +belt-to-u32s and crashed `?> (lth sam p)`
-          ::  on every %ai-pow block. `(rip 5 ..)` splits into <2^32 belts, each
-          ::  valid. Mirrors the zk arm's `[leaf+tag hash+<digest>]` shape.
-          [leaf+%ai-pow hash+(hash-belts-list:tip5 (rip 5 (jam u.pow.pag)))]
-        =/  prf=form:proof  (need ((soft form:proof) u.pow.pag))
-        [leaf+~ hash+(hash-proof:v0 prf)]
+          ?:  (ai-pow-artifact-resource-ok u.pow.pag)
+            [leaf+%ai-pow hash+(hash-belts-list:tip5 (rip 5 (jam u.pow.pag)))]
+          [leaf+%ai-pow leaf+0]
+        =/  prf=(unit form:proof)  ((soft form:proof) u.pow.pag)
+        ?~  prf
+          [leaf+~ leaf+0]
+        [leaf+~ hash+(hash-proof:v0 u.prf)]
     (hashable-block-commitment pag)
   ::
   ++  block-commitment
@@ -274,25 +329,18 @@
   ++  compute-size-without-txs
     |=  pag=form
     ^-  size
-    ::  size the jam of the page WITHOUT the digest or the powork: both are
-    ::  variable-length but bounded, so they are accounted for by the
-    ::  +max-size constants below instead of being jammed here.
-    ::
-    ::  the v1 $page prepends a `version` head that v0 does not have, so the
-    ::  layout is [version digest pow parent ...]. that shifts every field by
-    ::  one axis versus v0's [digest pow parent ...]. v0 jams `+>.pag`
-    ::  (axis 7 = [parent ...]), which on a v1 page is [pow parent ...] --
-    ::  i.e. it wrongly folds the proof into the jam. because a candidate
-    ::  block carries `pow=~` while a mined block carries the full proof, the
-    ::  miner's +candidate-block-below-max-size guard (run on the candidate)
-    ::  then disagreed with consensus +check-size (run on the mined page),
-    ::  letting a miner produce a block it immediately self-rejected as
-    ::  %block-too-large -- wedging the chain. `+>+.pag` (axis 15 =
-    ::  [parent ...]) excludes version, digest, AND pow, matching v0's intent
-    ::  and making the two size checks agree.
+    ::  Size the jam of the page WITHOUT the digest or the powork body.
+    ::  Non-AI proof bodies reserve the legacy fixed bound; AI artifacts are
+    ::  charged by their actual jam size after cheap top-level resource checks.
+    =/  pow-size=size
+      ?~  pow.pag
+        max-size:proof:v0
+      ?:  ?=([%ai-pow *] u.pow.pag)
+        (ai-pow-artifact-size u.pow.pag)
+      max-size:proof:v0
     ;:  add
         max-size:block-id:v0
-        max-size:proof:v0
+        pow-size
         (compute-size-jam `*`+>+.pag)
     ==
   --

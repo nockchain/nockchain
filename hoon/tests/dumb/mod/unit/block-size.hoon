@@ -20,6 +20,7 @@
 ::    not depend on whether the proof is present.
 ::
 /=  txe  /common/tx-engine
+/=  *  /common/zeke
 /=  *  /common/zoon
 /=  *  /common/test
 |_  constants=blockchain-constants:txe
@@ -36,6 +37,20 @@
     tx-ids    (~(put z-in *(z-set tx-id:t)) a-hash)
     coinbase  (~(put z-by *coinbase-split:v1:t) a-hash 123.456)
   ==
+::
+++  sample-ai-pow-cert
+  |=  cert-len=@ud
+  ^-  ai-pow-certificate:t
+  =/  cert-data=@
+    ?:  =(0 cert-len)  0
+    (bex (dec (mul 8 cert-len)))
+  =/  cert=ai-pow-certificate:t  *ai-pow-certificate:t
+  cert(version 1, certificate [%bytes cert-len cert-data])
+::
+++  sample-ai-pow-artifact
+  |=  cert-len=@ud
+  ^-  pow-artifact:t
+  [%ai-pow [4 (bex 31)] (sample-ai-pow-cert cert-len)]
 ::
 ::  +test-compute-size-ignores-pow: a mining candidate (pow=~) and the same
 ::  block once mined (pow set to a proof) must size identically. Before the
@@ -64,4 +79,31 @@
   %+  expect-eq
     !>((compute-size-without-txs:page:t candidate))
     !>((compute-size-without-txs:page:t mined))
+::
+::  +test-ai-pow-size-charges-actual-artifact: AI artifacts are charged by
+::  their actual jam size instead of the legacy fixed 90,000-byte proof weight.
+++  test-ai-pow-size-charges-actual-artifact
+  ^-  tang
+  =/  small-art=*  (sample-ai-pow-artifact 4)
+  =/  large-art=*  (sample-ai-pow-artifact 256)
+  =/  base=page:t  sample-v1-page
+  =/  small-page=page:t
+    ?^  -.base
+      base
+    base(pow `[%ai-pow [4 (bex 31)] (sample-ai-pow-cert 4)])
+  =/  large-page=page:t
+    ?^  -.base
+      base
+    base(pow `[%ai-pow [4 (bex 31)] (sample-ai-pow-cert 256)])
+  =/  small-size=@  (compute-size-without-txs:page:t small-page)
+  =/  large-size=@  (compute-size-without-txs:page:t large-page)
+  =/  page-delta=@  (sub large-size small-size)
+  =/  artifact-delta=@
+    %+  sub
+      (compute-size-jam `*`large-art)
+    (compute-size-jam `*`small-art)
+  ;:  weld
+    (expect !>((gth page-delta 0)))
+    (expect-eq !>(artifact-delta) !>(page-delta))
+  ==
 --

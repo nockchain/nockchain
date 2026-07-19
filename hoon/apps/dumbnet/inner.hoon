@@ -1140,10 +1140,17 @@
      ^-  ?
      =/  check-digest  (check-digest:page:t pag)
      =/  check-pow-hash=?
-       =/  prf=proof:sp  (need ((soft proof:sp) (need ~(pow get:page:t pag))))
+       =/  pow=(unit pow-artifact:t)  ~(pow get:page:t pag)
+       ?~  pow
+         %.n
+       ?:  ?=([%ai-pow *] u.pow)
+         %.n
+       =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+       ?~  prf
+         %.n
        %-  check-target:mine
        :_  ~(target get:page:t pag)
-       (proof-to-pow:zeke prf)
+       (proof-to-pow:zeke u.prf)
      =/  check-pow-valid=?  (check-pow pag)
      ::
      ::  check if timestamp is in base field, this will anchor subsequent timestamp checks
@@ -1213,14 +1220,16 @@
       ?:  ?=([%ai-pow *] u.pow)
         %+  ai-pow-verify:mine  u.pow
         [(block-commitment:page:t pag) (merge:bignum:t ~(target get:page:t pag))]
-      =/  prf=proof:sp  (need ((soft proof:sp) u.pow))
+      =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+      ?~  prf
+        %.n
       ::
       ::  validate that powork puzzle in the proof is correct.
-      ?&  (check-pow-puzzle prf pag)
+      ?&  (check-pow-puzzle u.prf pag)
           ::
           ::  validate the powork. this is done separately since the
           ::  other checks are much cheaper.
-          (verify:nv prf ~ eny)
+          (verify:nv u.prf ~ eny)
       ==
     ::
     ++  check-pow-puzzle
@@ -1462,9 +1471,11 @@
           ?>  ?=(^ pow)
           ?:  ?=([%ai-pow *] u.pow)
             ' with ai-pow certificate'
-          =/  prf=proof:sp  (need ((soft proof:sp) u.pow))
+          =/  prf=(unit proof:sp)  ((soft proof:sp) u.pow)
+          ?~  prf
+            ' with malformed proof'
           %+  rap  3
-          :~  ' with proof version '  (rsh [3 2] (scot %ui version.prf))
+          :~  ' with proof version '  (rsh [3 2] (scot %ui version.u.prf))
           ==
         %-  trip
         ^-  @t

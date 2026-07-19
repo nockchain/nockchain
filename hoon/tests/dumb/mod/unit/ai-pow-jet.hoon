@@ -12,6 +12,49 @@
 ++  h  ~(. helpers bc-ai-pow-provable:helpers)
 ++  t  ~(. txe bc-ai-pow-provable:helpers)
 ::
+++  has-liar-cause
+  |=  [expected=term effs=(list effect:h)]
+  ^-  ?
+  %+  lien  effs
+  |=  e=effect:h
+  ?&  ?=([%liar-block-id *] e)
+      =(expected cause.e)
+  ==
+::
+++  sample-ai-pow-cert
+  |=  cert-len=@ud
+  ^-  ai-pow-certificate:t
+  =/  cert-data=@
+    ?:  =(0 cert-len)  0
+    (bex (dec (mul 8 cert-len)))
+  =/  cert=ai-pow-certificate:t  *ai-pow-certificate:t
+  cert(version 1, certificate [%bytes cert-len cert-data])
+::
+  ++  make-malformed-non-ai-page
+  |=  parent=page:t
+  ^-  page:t
+  =/  pag=page:t  (make-empty-page:h parent)
+  =.  pag
+    ?^  -.pag
+      pag
+    pag(pow `[%not-a-proof 1])
+  ?^  -.pag
+    pag(digest (compute-digest:page:t pag))
+  pag(digest (compute-digest:page:t pag))
+::
+  ++  make-oversized-ai-page
+  |=  parent=page:t
+  ^-  page:t
+  =/  pag=page:t  (make-empty-page:h parent)
+  =/  cert=ai-pow-certificate:t  (sample-ai-pow-cert 4)
+  =.  pag
+    ?^  -.pag
+      pag
+    pag(pow `[%ai-pow [1.048.577 0] cert])
+  ?^  -.pag
+    pag(digest (compute-digest:page:t pag))
+  pag(digest (compute-digest:page:t pag))
+::
 ::  Unit: call the jet directly with a deliberately-undecodable %ai-pow artifact.
 ::  The jet decodes first, fails, and returns %.n — WITHOUT needing the boot
 ::  setup. A clean %.n proves the `~%`/`~/` hint chain matches the hot state and
@@ -35,11 +78,27 @@
   =/  block1=page:t  (make-ai-pow-garbage-page:h genesis)
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block1)
+  =/  rejected=?  (has-liar-cause %failed-pow-check effs)
+  (expect-eq !>(%.y) !>(rejected))
+::
+++  test-malformed-non-ai-pow-cleanly-rejected
+  ^-  tang
+  =+  [nockchain genesis]=init-nockchain:h
+  =/  block1=page:t  (make-malformed-non-ai-page genesis)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-block k-by:h nockchain) block1)
   =/  rejected=?
-    %+  lien  effs
-    |=  e=effect:h
-    ?&  ?=([%liar-block-id *] e)
-        =(%failed-pow-check cause.e)
+    ?|  (has-liar-cause %pow-target-check-failed effs)
+        (has-liar-cause %failed-pow-check effs)
     ==
+  (expect-eq !>(%.y) !>(rejected))
+::
+++  test-oversized-ai-pow-artifact-cleanly-rejected
+  ^-  tang
+  =+  [nockchain genesis]=init-nockchain:h
+  =/  block1=page:t  (make-oversized-ai-page genesis)
+  =^  effs=(list effect:h)  nockchain
+    (~(heard-block k-by:h nockchain) block1)
+  =/  rejected=?  (has-liar-cause %failed-pow-check effs)
   (expect-eq !>(%.y) !>(rejected))
 --
