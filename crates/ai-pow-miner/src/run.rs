@@ -778,6 +778,19 @@ async fn await_canonical_worker(worker: &mut Option<JoinHandle<GrindResult>>) ->
     }
 }
 
+async fn cancel_and_await_canonical_worker(
+    worker: &mut Option<JoinHandle<GrindResult>>,
+    cancel: &AtomicBool,
+) -> Result<(), MinerError> {
+    cancel.store(true, Ordering::Relaxed);
+    if let Some(handle) = worker.take() {
+        let _ = handle
+            .await
+            .map_err(|e| MinerError::WorkerJoin(format!("{e}")))?;
+    }
+    Ok(())
+}
+
 /// Proof-of-work grind for the gateway-free canonical miner. Iterates the
 /// extranonce (header timestamp), and for each attempt computes the cheap MoE
 /// tile jackpot ([`evaluate_canonical_moe_jackpot`]) and tests it against the
@@ -895,7 +908,7 @@ pub async fn run_canonical(
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
-                    grind_cancel.store(true, Ordering::Relaxed);
+                    cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
                     return Ok(());
                 }
                 maybe_c = candidates.next() => {
@@ -981,8 +994,7 @@ pub async fn run_canonical(
             }
         };
 
-        grind_cancel.store(true, Ordering::Relaxed);
-
+        cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
         let _ = client
             .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
             .await;
@@ -1961,6 +1973,40 @@ mod tests {
         assert!(grind_canonical_block([0u8; 32], [0xff; 32], cancel)
             .expect("cancelled grind should exit cleanly")
             .is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canonical_reconnect_cleanup_awaits_in_flight_worker() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let active = Arc::new(AtomicU64::new(0));
+        let cancel_for_worker = cancel.clone();
+        let active_for_worker = active.clone();
+        let mut worker = Some(tokio::task::spawn_blocking(move || {
+            active_for_worker.fetch_add(1, Ordering::SeqCst);
+            while !cancel_for_worker.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            active_for_worker.fetch_sub(1, Ordering::SeqCst);
+            Ok(None)
+        }));
+
+        while active.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        let started = std::time::Instant::now();
+        cancel_and_await_canonical_worker(&mut worker, &cancel)
+            .await
+            .expect("cleanup should join worker");
+
+        assert!(worker.is_none());
+        assert!(cancel.load(Ordering::SeqCst));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(
+            started.elapsed() >= Duration::from_millis(100),
+            "cleanup returned before the worker finished"
+        );
     }
 
     // Shared NockAppMetrics — gnort rejects double-registration.
