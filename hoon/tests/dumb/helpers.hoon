@@ -836,12 +836,25 @@
       new-page(digest (compute-digest:page:t new-page))
     new-page(digest (compute-digest:page:t new-page))
   new-page
-::  +make-ai-pow-page: a VALID post-asert AI block — the ZK candidate re-targeted
-::  to the AI ASERT target/work (+build-ai-candidate) and stamped with a %ai-pow
-::  artifact + fresh digest. Passes +validate-page-without-txs (the AI cert check
-::  is deferred to +check-pow); unlike +make-ai-pow-garbage-page it carries the
-::  correct AI target and AI-normalized work, so it is accepted rather than
-::  rejected at the target/heaviness gates.
+:::
+++  sample-ai-pow-cert
+  |=  cert-len=@ud
+  ^-  ai-pow-certificate:txe
+  =/  cert-data=@
+    ?:  =(0 cert-len)  0
+    (bex (dec (mul 8 cert-len)))
+  =/  cert=ai-pow-certificate:txe  *ai-pow-certificate:txe
+  cert(version 1, certificate [%bytes cert-len cert-data])
+:::
+++  sample-ai-pow-artifact
+  |=  cert-len=@ud
+  ^-  pow-artifact:txe
+  [%ai-pow [4 (bex 31)] (sample-ai-pow-cert cert-len)]
+:::
+::  +make-ai-pow-page: a post-ASERT AI header fixture for tests that exercise
+::  target, heaviness, coinbase, and ASERT state without invoking the verifier
+::  jet. It carries a small resource-bounded `%ai-pow` artifact so block-size
+::  accounting follows the production AI path.
 ++  make-ai-pow-page
   |=  [parent=page:t con=consensus-state d=derived-state]
   ^-  page:t
@@ -854,7 +867,7 @@
   ::  the v0 branch is dead but must type-check, and v0's narrower pow type cannot
   ::  hold [%ai-pow ..], so it keeps mock-pow (see +make-ai-pow-garbage-page).
   =.  ai-cand
-    ?^  -.ai-cand  ai-cand(pow mock-pow)  ai-cand(pow `[%ai-pow 0 0])
+    ?^  -.ai-cand  ai-cand(pow mock-pow)  ai-cand(pow `(sample-ai-pow-artifact 4))
   =.  ai-cand
     ?^  -.ai-cand  ai-cand(digest (compute-digest:page:t ai-cand))  ai-cand(digest (compute-digest:page:t ai-cand))
   ai-cand
