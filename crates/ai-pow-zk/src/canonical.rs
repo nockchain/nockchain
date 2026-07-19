@@ -1942,9 +1942,15 @@ mod tests {
                 continue;
             }
             saw_pad = true;
-            // Pad row: all PROGRAM_COLS zero except STARK_ROW_IDX
-            // (the final program column, the monotonic row counter).
-            for c in 0..w - 1 {
+            let stark_program_col = PROGRAM_COLS
+                .iter()
+                .position(|&col| col == crate::composite_layout::STARK_ROW_IDX)
+                .expect("STARK_ROW_IDX is verifier-pinned");
+            // Pad row: all PROGRAM_COLS zero except STARK_ROW_IDX.
+            for c in 0..w {
+                if c == stark_program_col {
+                    continue;
+                }
                 assert_eq!(
                     prog.values[r * w + c].as_canonical_u64(),
                     0,
@@ -1952,7 +1958,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                prog.values[r * w + (w - 1)].as_canonical_u64(),
+                prog.values[r * w + stark_program_col].as_canonical_u64(),
                 r as u64,
                 "Pad row {r} STARK_ROW_IDX must be row_idx"
             );
@@ -1988,8 +1994,15 @@ mod tests {
                 "key-pin row {row} CONTROL_PREP must pack only \
                  SELECTOR_COLS idx {sel_idx}"
             );
+            let stark_program_col = PROGRAM_COLS
+                .iter()
+                .position(|&col| col == crate::composite_layout::STARK_ROW_IDX)
+                .expect("STARK_ROW_IDX is verifier-pinned");
             // Every non-control program column except STARK_ROW_IDX is zero.
-            for c in 1..w - 1 {
+            for c in 1..w {
+                if c == stark_program_col {
+                    continue;
+                }
                 assert_eq!(
                     prog.values[row * w + c].as_canonical_u64(),
                     0,
@@ -1997,7 +2010,7 @@ mod tests {
                 );
             }
             assert_eq!(
-                prog.values[row * w + (w - 1)].as_canonical_u64(),
+                prog.values[row * w + stark_program_col].as_canonical_u64(),
                 row as u64,
                 "key-pin row {row} STARK_ROW_IDX"
             );
@@ -2032,9 +2045,9 @@ mod tests {
                 sel[6] = true; // IS_HASH_JACKPOT
             }
             let want_cp = ControlChip::pack_control_prep_full(&sel, 0, false, 0, 0, 0, false);
-            // PROGRAM_COLS: [0]=CONTROL_PREP, [1..9]=NOISE×8,
-            // [9]=CV_OR_TWEAK_PREP, [10]=AB_ID, then A/B IDs,
-            // final=STARK_ROW_IDX.
+            // PROGRAM_COLS: [0]=CONTROL_PREP; the noise, tweak, AB/A/B ID,
+            // STARK_ROW_IDX, and compact schedule columns follow in
+            // `composite_full_air::PROGRAM_COLS` order.
             assert_eq!(
                 prog.values[row * w].as_canonical_u64(),
                 want_cp,
@@ -2058,8 +2071,22 @@ mod tests {
                 0,
                 "jackpot row j={j} AB_ID_PREP must be 0"
             );
+            let stark_program_col = PROGRAM_COLS
+                .iter()
+                .position(|&col| col == crate::composite_layout::STARK_ROW_IDX)
+                .expect("STARK_ROW_IDX is verifier-pinned");
+            for c in 11..w {
+                if c == stark_program_col {
+                    continue;
+                }
+                assert_eq!(
+                    prog.values[row * w + c].as_canonical_u64(),
+                    0,
+                    "jackpot row j={j} col {c} must be 0"
+                );
+            }
             assert_eq!(
-                prog.values[row * w + (w - 1)].as_canonical_u64(),
+                prog.values[row * w + stark_program_col].as_canonical_u64(),
                 row as u64,
                 "jackpot row j={j} STARK_ROW_IDX"
             );

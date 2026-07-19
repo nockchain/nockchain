@@ -1133,7 +1133,17 @@ mod tests {
             (TA_ACC_START + TA_ACC_LEN, TA_END, "TA_ACC → TA_END"),
             (TA_END, TR_IS_ACTIVE, "TA_END → TR_IS_ACTIVE"),
             (TR_Q_START + TR_Q_LEN, TR_END, "TR_Q → TR_END"),
-            (TR_END, TOTAL_TRACE_WIDTH, "TR_END → TOTAL_TRACE_WIDTH"),
+            (TR_END, SX_CONTROL_PREP, "TR_END → SX_CONTROL_PREP"),
+            (
+                SX_CONTROL_PREP + 1,
+                RB_CONTROL_PREP,
+                "SX_CONTROL_PREP → RB_CONTROL_PREP",
+            ),
+            (
+                RB_CONTROL_PREP + 1,
+                TOTAL_TRACE_WIDTH,
+                "RB_CONTROL_PREP → TOTAL_TRACE_WIDTH",
+            ),
         ];
         for &(end, next, name) in checkpoints {
             assert_eq!(end, next, "layout discontinuity at {name}: {end} != {next}");
