@@ -588,12 +588,18 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         info!("ai-pow-miner: subscribed + mining enabled; awaiting candidates");
 
         // ── inner loop ──
-        // Mining, Pearl Gateway submission, recursive proof construction, and
-        // poke serialization run outside this async loop. A generation guards
-        // every worker result so superseded candidates cannot submit stale
-        // proofs after cancellation races.
+        // Pearl Gateway fetches, mining, Gateway submission, recursive proof
+        // construction, and poke serialization run outside this async loop. A
+        // generation guards every worker result so superseded candidates cannot
+        // submit stale proofs after cancellation races.
         let mut workers: JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)> =
             JoinSet::new();
+        let mut gateway_workers: JoinSet<(
+            u64,
+            PearlGatewayWorkKind,
+            NockchainCandidateInputs,
+            Result<PearlMergeCandidateJob, String>,
+        )> = JoinSet::new();
         let mut current_cancel: Option<MiningCancel> = None;
         let mut current_generation = 0_u64;
         let mut latest_candidate: Option<NockchainCandidateInputs> = None;
@@ -605,6 +611,9 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
+                    if let Err(e) = abort_and_drain_pearl_gateway_workers(&mut gateway_workers).await {
+                        break InnerOutcome::Fatal(e);
+                    }
                     if let Err(e) = cancel_and_drain_pearl_workers(&mut workers, &mut current_cancel).await {
                         break InnerOutcome::Fatal(e);
                     }
@@ -637,49 +646,76 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                     if let Some(cancel) = current_cancel.take() {
                         cancel.cancel();
                     }
-                    let pearl_job = match derive_pearl_merge_job_inputs_from_nockchain(&cfg, &candidate_inputs) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            current_pearl_header = None;
-                            warn!(error = %e, "could not derive Pearl merge job inputs from candidate; skipping");
-                            continue;
-                        }
-                    };
-                    current_pearl_header = Some(pearl_job.header);
-                    let cancel = MiningCancel::new();
-                    info!(pow_len = candidate_inputs.pow_len, "new candidate; dispatching Pearl-compatible ai-pow attempt");
-                    spawn_pearl_merge_attempt(
-                        &mut workers,
+                    spawn_pearl_gateway_work(
+                        &mut gateway_workers,
                         current_generation,
+                        PearlGatewayWorkKind::Candidate,
                         &cfg,
-                        pearl_job,
-                        pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
-                        cancel.clone(),
+                        candidate_inputs,
                     );
-                    current_cancel = Some(cancel);
                 }
                 _ = pearl_refresh.tick() => {
                     let Some(candidate_inputs) = latest_candidate else {
                         continue;
                     };
-                    let pearl_job = match derive_pearl_merge_job_inputs_from_nockchain(&cfg, &candidate_inputs) {
-                        Ok(x) => x,
+                    if !gateway_workers.is_empty() {
+                        continue;
+                    }
+                    spawn_pearl_gateway_work(
+                        &mut gateway_workers,
+                        current_generation,
+                        PearlGatewayWorkKind::Refresh,
+                        &cfg,
+                        candidate_inputs,
+                    );
+                }
+                joined = gateway_workers.join_next(), if !gateway_workers.is_empty() => {
+                    let Some(joined) = joined else {
+                        continue;
+                    };
+                    let joined: PearlGatewayWorkerJoin = joined;
+                    let (generation, kind, candidate_inputs, result) = match joined {
+                        Ok(joined) => joined,
+                        Err(e) => break InnerOutcome::Fatal(MinerError::WorkerJoin(format!("{e}"))),
+                    };
+                    if generation != current_generation {
+                        debug!(
+                            generation,
+                            current_generation,
+                            "dropping stale Pearl Gateway work result"
+                        );
+                        continue;
+                    }
+                    let pearl_job = match result {
+                        Ok(pearl_job) => pearl_job,
                         Err(e) => {
-                            warn!(error = %e, "could not refresh Pearl Gateway work for current Nockchain candidate");
+                            current_pearl_header = None;
+                            match kind {
+                                PearlGatewayWorkKind::Candidate => {
+                                    warn!(error = %e, "could not derive Pearl merge job inputs from candidate");
+                                }
+                                PearlGatewayWorkKind::Refresh => {
+                                    warn!(error = %e, "could not refresh Pearl Gateway work for current Nockchain candidate");
+                                }
+                            }
                             continue;
                         }
                     };
-                    if current_pearl_header == Some(pearl_job.header) {
-                        continue;
-                    }
-                    current_generation = current_generation.wrapping_add(1);
-                    if let Some(cancel) = current_cancel.take() {
-                        cancel.cancel();
+                    if kind == PearlGatewayWorkKind::Refresh {
+                        if current_pearl_header == Some(pearl_job.header) {
+                            continue;
+                        }
+                        current_generation = current_generation.wrapping_add(1);
+                        if let Some(cancel) = current_cancel.take() {
+                            cancel.cancel();
+                        }
+                        next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
+                        info!(pow_len = candidate_inputs.pow_len, "Pearl Gateway work changed; redispatching ai-pow attempt for current Nockchain candidate");
+                    } else {
+                        info!(pow_len = candidate_inputs.pow_len, "new candidate; dispatching Pearl-compatible ai-pow attempt");
                     }
                     current_pearl_header = Some(pearl_job.header);
-                    next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
                     let cancel = MiningCancel::new();
-                    info!(pow_len = candidate_inputs.pow_len, "Pearl Gateway work changed; redispatching ai-pow attempt for current Nockchain candidate");
                     spawn_pearl_merge_attempt(
                         &mut workers,
                         current_generation,
@@ -819,6 +855,9 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         };
 
         // ── cleanup before reconnect or exit ──
+        if let Err(e) = abort_and_drain_pearl_gateway_workers(&mut gateway_workers).await {
+            return Err(e);
+        }
         if let Err(e) = cancel_and_drain_pearl_workers(&mut workers, &mut current_cancel).await {
             return Err(e);
         }
@@ -1240,6 +1279,41 @@ enum InnerOutcome {
 
 type PearlMergeWorkerJoin =
     Result<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>), tokio::task::JoinError>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PearlGatewayWorkKind {
+    Candidate,
+    Refresh,
+}
+
+type PearlGatewayWorkerJoin = Result<
+    (
+        u64,
+        PearlGatewayWorkKind,
+        NockchainCandidateInputs,
+        Result<PearlMergeCandidateJob, String>,
+    ),
+    tokio::task::JoinError,
+>;
+
+async fn abort_and_drain_pearl_gateway_workers(
+    workers: &mut JoinSet<(
+        u64,
+        PearlGatewayWorkKind,
+        NockchainCandidateInputs,
+        Result<PearlMergeCandidateJob, String>,
+    )>,
+) -> Result<(), MinerError> {
+    workers.abort_all();
+    while let Some(joined) = workers.join_next().await {
+        match joined {
+            Ok(_) => {}
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => return Err(MinerError::WorkerJoin(format!("{e}"))),
+        }
+    }
+    Ok(())
+}
 
 async fn cancel_and_drain_pearl_workers(
     workers: &mut JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)>,
@@ -1827,6 +1901,30 @@ fn noun_is_zero_atom(
             .map_err(|_| "target bignum list terminator does not fit in u64".to_string()),
         Err(_) => Ok(false),
     }
+}
+
+/// Resolve Pearl Gateway work for a candidate generation off the async loop.
+fn spawn_pearl_gateway_work(
+    workers: &mut JoinSet<(
+        u64,
+        PearlGatewayWorkKind,
+        NockchainCandidateInputs,
+        Result<PearlMergeCandidateJob, String>,
+    )>,
+    generation: u64,
+    kind: PearlGatewayWorkKind,
+    cfg: &MinerConfig,
+    candidate_inputs: NockchainCandidateInputs,
+) {
+    let cfg = cfg.clone();
+    workers.spawn_blocking(move || {
+        (
+            generation,
+            kind,
+            candidate_inputs,
+            derive_pearl_merge_job_inputs_from_nockchain(&cfg, &candidate_inputs),
+        )
+    });
 }
 
 /// Spawn a Pearl-compatible worker for the given candidate generation.
