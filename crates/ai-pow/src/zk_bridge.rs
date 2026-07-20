@@ -542,6 +542,12 @@ impl AiPowCompactRecursiveProverCache {
         Ok(Self { inner })
     }
 
+    pub fn into_l2_only(self) -> Self {
+        Self {
+            inner: self.inner.into_l2_only(),
+        }
+    }
+
     pub fn l2_statement_public_binding_lanes(&self) -> usize {
         self.inner.l2_statement_public_binding_lanes()
     }

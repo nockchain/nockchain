@@ -1053,8 +1053,8 @@ pub async fn run_canonical(
                                         "canonical compact prover cache lock poisoned".to_string(),
                                     )
                                 })?;
-                                debug!("stored canonical compact recursive prover cache");
-                                *guard = Some(Arc::new(new_cache));
+                                debug!("stored canonical compact recursive L2 prover cache");
+                                *guard = Some(Arc::new(new_cache.into_l2_only()));
                             }
                             info!(
                                 commit = %hex::encode(block.commit),
@@ -2103,7 +2103,8 @@ mod tests {
         .expect("warmup prove");
         let cache = warmup
             .prover_cache
-            .expect("cold canonical prove should return reusable compact prover cache");
+            .expect("cold canonical prove should return reusable compact prover cache")
+            .into_l2_only();
         let AiProofNode::Bytes(warmup_cert_bytes) = &warmup.block.certificate.certificate else {
             panic!("production compact certificate must use the canonical byte node");
         };

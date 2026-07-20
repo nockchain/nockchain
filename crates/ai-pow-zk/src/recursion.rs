@@ -1761,6 +1761,13 @@ impl AiPowCompactBatchProverCache {
     pub const fn l2_statement_public_binding_lanes(&self) -> usize {
         self.l2_prep.l2_statement_public_binding_lanes
     }
+
+    pub fn into_l2_only(self) -> Self {
+        Self {
+            l1_prep: None,
+            l2_prep: self.l2_prep,
+        }
+    }
 }
 
 /// Build reusable compact-L2 prover setup from a representative canonical L1
