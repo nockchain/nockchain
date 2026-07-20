@@ -48,10 +48,39 @@ const BLOCKS_PER_CHUNK: usize = CHUNK_LEN / BLOCK_LEN; // 16
 /// byte-identical to `ai-pow::commit::pad_to_chunk_boundary`
 /// composed with `place_matrix_hash`'s `.max(CHUNK_LEN)`.
 pub fn pad_to_chunk_boundary(data: &[u8]) -> Vec<u8> {
-    let pad_to = data.len().div_ceil(CHUNK_LEN) * CHUNK_LEN;
-    let mut v = data.to_vec();
-    v.resize(pad_to.max(CHUNK_LEN), 0);
+    let pad_to = padded_chunk_count(data.len()) * CHUNK_LEN;
+    let mut v = Vec::with_capacity(pad_to);
+    v.extend_from_slice(data);
+    v.resize(pad_to, 0);
     v
+}
+
+fn padded_chunk_count(data_len: usize) -> usize {
+    data_len.div_ceil(CHUNK_LEN).max(1)
+}
+
+fn copy_padded_chunk(data: &[u8], chunk_index: usize, out: &mut [u8; CHUNK_LEN]) {
+    let n = padded_chunk_count(data.len());
+    assert!(chunk_index < n, "chunk {chunk_index} out of 0..{n}");
+    out.fill(0);
+    let start = chunk_index
+        .checked_mul(CHUNK_LEN)
+        .expect("padded chunk offset overflow");
+    if start < data.len() {
+        let end = (start + CHUNK_LEN).min(data.len());
+        out[..end - start].copy_from_slice(&data[start..end]);
+    }
+}
+
+/// Materialize selected padded chunks without copying the full padded matrix.
+pub fn padded_chunk_bytes(data: &[u8], chunks: &[usize]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(chunks.len() * CHUNK_LEN);
+    let mut chunk = [0u8; CHUNK_LEN];
+    for &chunk_index in chunks {
+        copy_padded_chunk(data, chunk_index, &mut chunk);
+        out.extend_from_slice(&chunk);
+    }
+    out
 }
 
 /// `left_len(n)` — BLAKE3's split: the largest power of two
@@ -120,15 +149,15 @@ pub fn parent_cv(left: &[u8; 32], right: &[u8; 32], kappa: &[u8; 32], is_root: b
     blake3_compress(&msg, kappa, tweak)
 }
 
-/// All per-chunk leaf CVs of `padded` (length a multiple of
-/// `CHUNK_LEN`). For a single chunk the `F_ROOT` is **not** set
-/// here (callers handle the lone-chunk root via [`merkle_root`]).
-fn leaf_cvs(padded: &[u8], kappa: &[u8; 32]) -> Vec<[u8; 32]> {
-    let n = padded.len() / CHUNK_LEN;
+/// All per-chunk leaf CVs of `matrix_bytes`, including zero-padding to one
+/// full final chunk. For a single chunk the `F_ROOT` is **not** set here
+/// (callers handle the lone-chunk root via [`merkle_root`]).
+fn leaf_cvs(matrix_bytes: &[u8], kappa: &[u8; 32]) -> Vec<[u8; 32]> {
+    let n = padded_chunk_count(matrix_bytes.len());
+    let mut chunk = [0u8; CHUNK_LEN];
     (0..n)
         .map(|c| {
-            let mut chunk = [0u8; CHUNK_LEN];
-            chunk.copy_from_slice(&padded[c * CHUNK_LEN..(c + 1) * CHUNK_LEN]);
+            copy_padded_chunk(matrix_bytes, c, &mut chunk);
             chunk_cv(&chunk, c as u64, kappa, false)
         })
         .collect()
@@ -159,14 +188,13 @@ fn subtree_root(
 /// `blake3::Hasher::new_keyed(kappa).update(pad(matrix_bytes))
 /// .finalize()` (and to `ai-pow::commit::matrix_commitment`).
 pub fn merkle_root(matrix_bytes: &[u8], kappa: &[u8; 32]) -> [u8; 32] {
-    let padded = pad_to_chunk_boundary(matrix_bytes);
-    let n = padded.len() / CHUNK_LEN;
+    let n = padded_chunk_count(matrix_bytes.len());
     if n == 1 {
         let mut chunk = [0u8; CHUNK_LEN];
-        chunk.copy_from_slice(&padded[..CHUNK_LEN]);
+        copy_padded_chunk(matrix_bytes, 0, &mut chunk);
         return chunk_cv(&chunk, 0, kappa, true);
     }
-    let cvs = leaf_cvs(&padded, kappa);
+    let cvs = leaf_cvs(matrix_bytes, kappa);
     subtree_root(&cvs, 0, n, kappa, true)
 }
 
@@ -371,10 +399,9 @@ pub fn open_strip(
     c0: usize,
     c1: usize,
 ) -> (Vec<[u8; 32]>, Vec<AuthSibling>) {
-    let padded = pad_to_chunk_boundary(matrix_bytes);
-    let n = padded.len() / CHUNK_LEN;
+    let n = padded_chunk_count(matrix_bytes.len());
     assert!(c0 < c1 && c1 <= n, "range [{c0},{c1}) out of 0..{n}");
-    let cvs = leaf_cvs(&padded, kappa);
+    let cvs = leaf_cvs(matrix_bytes, kappa);
     let opened = cvs[c0..c1].to_vec();
     let mut sibs = Vec::new();
     collect_siblings(&cvs, 0, n, c0, c1, kappa, &mut sibs);
@@ -509,8 +536,7 @@ pub fn open_strip_set(
     kappa: &[u8; 32],
     sel: &[usize],
 ) -> (Vec<[u8; 32]>, Vec<AuthSibling>) {
-    let padded = pad_to_chunk_boundary(matrix_bytes);
-    let n = padded.len() / CHUNK_LEN;
+    let n = padded_chunk_count(matrix_bytes.len());
     assert!(!sel.is_empty(), "selective opening requires >= 1 chunk");
     assert!(
         sel.windows(2).all(|w| w[0] < w[1]),
@@ -520,7 +546,7 @@ pub fn open_strip_set(
         *sel.last().expect("sel non-empty (asserted above)") < n,
         "selective chunk out of 0..{n}"
     );
-    let cvs = leaf_cvs(&padded, kappa);
+    let cvs = leaf_cvs(matrix_bytes, kappa);
     let opened: Vec<[u8; 32]> = sel.iter().map(|&c| cvs[c]).collect();
     let mut sibs = Vec::new();
     collect_siblings_set(&cvs, 0, n, sel, kappa, &mut sibs);
@@ -684,6 +710,20 @@ mod tests {
                 .finalize()
                 .as_bytes()
         );
+    }
+
+    #[test]
+    fn padded_chunk_bytes_matches_full_padding_slices() {
+        let raw = bytes(3 * CHUNK_LEN - 17);
+        let padded = pad_to_chunk_boundary(&raw);
+        for chunks in [vec![0usize], vec![2], vec![0, 2], vec![1, 2]] {
+            let got = padded_chunk_bytes(&raw, &chunks);
+            let want: Vec<u8> = chunks
+                .iter()
+                .flat_map(|&c| padded[c * CHUNK_LEN..(c + 1) * CHUNK_LEN].iter().copied())
+                .collect();
+            assert_eq!(got, want);
+        }
     }
 
     /// **Real shipped-model scale.** `Llama-3.1-8B-Instruct-pearl`

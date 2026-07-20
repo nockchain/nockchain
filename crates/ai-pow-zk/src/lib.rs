@@ -159,5 +159,8 @@ pub use crate::params::ZkParams;
 /// artifact.
 pub type AiPowBatchProof = p3_batch_stark::BatchProof<AiPowStarkConfig>;
 
+/// Concrete verifier/common data type for the pinned+LogUp Layer-0 proof.
+pub type AiPowCommonData = p3_batch_stark::CommonData<AiPowStarkConfig>;
+
 /// Concrete preprocessed program matrix type used by the pinned AI PoW circuit.
 pub type AiPowProgram = p3_matrix::dense::RowMajorMatrix<p3_uni_stark::Val<AiPowStarkConfig>>;

@@ -372,10 +372,25 @@ pub fn composite_prove_pinned_logup(
 /// keystone for larger stripe-major traces.
 pub fn composite_prove_pinned_logup_sx(
     config: &AiPowStarkConfig,
-    mut trace: CompositeTrace,
+    trace: CompositeTrace,
     public_inputs: &CompositePublicInputs,
     sx_bound: bool,
 ) -> (p3_batch_stark::BatchProof<AiPowStarkConfig>, Program) {
+    let (proof, program, _) =
+        composite_prove_pinned_logup_sx_with_common(config, trace, public_inputs, sx_bound);
+    (proof, program)
+}
+
+pub fn composite_prove_pinned_logup_sx_with_common(
+    config: &AiPowStarkConfig,
+    mut trace: CompositeTrace,
+    public_inputs: &CompositePublicInputs,
+    sx_bound: bool,
+) -> (
+    p3_batch_stark::BatchProof<AiPowStarkConfig>,
+    Program,
+    p3_batch_stark::CommonData<AiPowStarkConfig>,
+) {
     use p3_batch_stark::{prove_batch, ProverData, StarkInstance};
 
     trace.populate_lookup_freq();
@@ -394,7 +409,7 @@ pub fn composite_prove_pinned_logup_sx(
     }];
     let pd = ProverData::from_instances(config, &instances);
     let proof = prove_batch(config, &instances, &pd);
-    (proof, program)
+    (proof, program, pd.common)
 }
 
 /// Verifier-side `CommonData` for the canonical `program` —

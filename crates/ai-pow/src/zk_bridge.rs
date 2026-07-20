@@ -67,11 +67,11 @@
 
 use ai_pow_zk::canonical::StripIndexSchedule;
 use ai_pow_zk::composite_proof::{
-    build_config, composite_prove_pinned_logup_sx, composite_verify_pow_pinned_logup_sx,
+    build_config, composite_prove_pinned_logup_sx_with_common, composite_verify_pow_pinned_logup_sx,
 };
 use ai_pow_zk::{
-    AiPowBatchProof, AiPowProgram, CircuitConfig, CompositePublicInputs, CompositeTrace,
-    PowVerifyError, ZkParams,
+    AiPowBatchProof, AiPowCommonData, AiPowProgram, CircuitConfig, CompositePublicInputs,
+    CompositeTrace, PowVerifyError, ZkParams,
 };
 
 use crate::fiat_shamir::{
@@ -319,6 +319,7 @@ pub(crate) struct ZkProofArtifact {
     pub proof: AiPowBatchProof,
     pub pis: CompositePublicInputs,
     pub trace_height: usize,
+    pub l0_common: AiPowCommonData,
 }
 
 /// Prover-side result for the large checkpoint recursive AI-PoW certificate.
@@ -1237,16 +1238,20 @@ pub fn prove_ai_pow_recursive_certificate(
         proof,
         pis,
         trace_height,
+        l0_common,
     } = artifact;
     let verified_l0 = unsafe {
         // SAFETY: `derive_ai_pow_statement` plus
         // `verify_ai_pow_tiled_with_statement` above checked the
         // canonical program, public inputs, target, selected work unit,
-        // commitments, nonce, and production/full-work boundary.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        // commitments, nonce, and production/full-work boundary. The
+        // common data comes from the same Layer-0 prover-data build as
+        // `prover_program`.
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
@@ -1344,16 +1349,20 @@ fn prove_ai_pow_compact_recursive_certificate_inner(
         proof,
         pis,
         trace_height,
+        l0_common,
     } = artifact;
     let verified_l0 = unsafe {
         // SAFETY: `derive_ai_pow_statement` plus
         // `verify_ai_pow_tiled_with_statement` above checked the
         // canonical program, public inputs, target, selected work unit,
-        // commitments, nonce, and production/full-work boundary.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        // commitments, nonce, and production/full-work boundary. The
+        // common data comes from the same Layer-0 prover-data build as
+        // `prover_program`.
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let compact = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
@@ -1546,16 +1555,19 @@ pub fn prove_pearl_merge_recursive_certificate(
         proof,
         pis,
         trace_height,
+        l0_common,
     } = artifact;
     let verified_l0 = unsafe {
         // SAFETY: the Pearl merge path validates the Pearl statement,
         // commitments, target, explicit strip schedule, canonical
         // program, and public inputs before reaching this recursion
-        // boundary.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        // boundary. The common data comes from the same Layer-0
+        // prover-data build as `prover_program`.
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let l1 = ai_pow_zk::recursion::prove_recursive_certificate_from_chain_verified_composite_proof(
@@ -1709,7 +1721,7 @@ fn prove_pearl_moe_compact_recursive_certificate_inner(
     n_e: usize,
     cache: Option<&AiPowCompactRecursiveProverCache>,
 ) -> Result<PearlMoeCompactProveRun, BridgeError> {
-    let (proof, prover_program, pis, zk_params, trace_height, ticket) =
+    let (proof, prover_program, pis, zk_params, trace_height, ticket, l0_common) =
         prove_pearl_moe_l0_and_ticket(
             params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
             local_b_cols, n_e,
@@ -1719,10 +1731,11 @@ fn prove_pearl_moe_compact_recursive_certificate_inner(
         // SAFETY: the MoE ticket + routing splice + explicit strip schedule are
         // computed here from the caller's authenticated inputs; the node re-derives
         // and re-binds all of them (`verify_pearl_moe_compact_recursive_certificate`).
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
@@ -1773,6 +1786,7 @@ fn prove_pearl_moe_l0_and_ticket(
         ZkParams,
         usize,
         crate::pearl_compat::PearlMoeTicket,
+        AiPowCommonData,
     ),
     BridgeError,
 > {
@@ -1817,9 +1831,12 @@ fn prove_pearl_moe_l0_and_ticket(
         proof,
         pis,
         trace_height,
+        l0_common,
     } = artifact;
 
-    Ok((proof, prover_program, pis, zk_params, trace_height, ticket))
+    Ok((
+        proof, prover_program, pis, zk_params, trace_height, ticket, l0_common,
+    ))
 }
 
 /// The Layer-0 trace height a canonical MoE block at this shape WOULD have —
@@ -1877,7 +1894,7 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
     ),
     BridgeError,
 > {
-    let (proof, prover_program, pis, zk_params, trace_height, ticket) =
+    let (proof, prover_program, pis, zk_params, trace_height, ticket, l0_common) =
         prove_pearl_moe_l0_and_ticket(
             params, a_row_major, b_col_major, kappa, h_a, h_b, routing, expert_idx, inner_a_rows,
             local_b_cols, n_e,
@@ -1886,10 +1903,11 @@ pub fn prove_pearl_moe_compact_recursive_certificate_with_seed(
     let verified_l0 = unsafe {
         // SAFETY: as in `prove_pearl_moe_compact_recursive_certificate` — the
         // ticket/routing/schedule are derived here and re-bound by the node verifier.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let run = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, None)?;
@@ -2412,16 +2430,19 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
         proof,
         pis,
         trace_height,
+        l0_common,
     } = artifact;
     let verified_l0 = unsafe {
         // SAFETY: the Pearl merge path validates the Pearl statement,
         // commitments, target, explicit strip schedule, canonical
         // program, and public inputs before reaching this recursion
-        // boundary.
-        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_after_chain_statement_verification(
+        // boundary. The common data comes from the same Layer-0
+        // prover-data build as `prover_program`.
+        ai_pow_zk::recursion::ChainVerifiedCompositeProof::from_parts_with_l0_common_after_chain_statement_verification(
             prover_program,
             proof,
             &pis,
+            l0_common,
         )
     };
     let compact = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
@@ -2803,6 +2824,115 @@ fn prove_ai_pow_tiled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     )
 }
 
+struct SelectedNoisedStrips {
+    a_strips: Vec<i8>,
+    b_strips: Vec<i8>,
+    a_noise_strips: Vec<i8>,
+    b_noise_strips: Vec<i8>,
+}
+
+fn selected_noised_strips(
+    a: &[i8],
+    b: &[i8],
+    noise: &crate::matmul::BlockNoise,
+    params: &MatmulParams,
+    a_indices: &[u32],
+    b_indices: &[u32],
+) -> SelectedNoisedStrips {
+    let m = params.m as usize;
+    let k = params.k as usize;
+    let n = params.n as usize;
+    assert_eq!(a.len(), m * k, "A length mismatch");
+    assert_eq!(b.len(), n * k, "B length mismatch");
+
+    let mut a_strips = Vec::with_capacity(a_indices.len() * k);
+    let mut a_noise_strips = Vec::with_capacity(a_indices.len() * k);
+    let mut e_row = vec![0i8; k];
+    for &i in a_indices {
+        noise.e_row_into(i, &mut e_row);
+        a_noise_strips.extend_from_slice(&e_row);
+        let off = (i as usize) * k;
+        for l in 0..k {
+            a_strips.push((a[off + l] as i16 + e_row[l] as i16) as i8);
+        }
+    }
+
+    let mut b_strips = Vec::with_capacity(b_indices.len() * k);
+    let mut b_noise_strips = Vec::with_capacity(b_indices.len() * k);
+    let mut f_col = vec![0i8; k];
+    for &j in b_indices {
+        noise.f_col_into(j, &mut f_col);
+        b_noise_strips.extend_from_slice(&f_col);
+        let off = (j as usize) * k;
+        for l in 0..k {
+            b_strips.push((b[off + l] as i16 + f_col[l] as i16) as i8);
+        }
+    }
+
+    SelectedNoisedStrips {
+        a_strips,
+        b_strips,
+        a_noise_strips,
+        b_noise_strips,
+    }
+}
+
+fn a_noise_chunk_bytes(
+    noise: &crate::matmul::BlockNoise,
+    params: &MatmulParams,
+    chunks: &[usize],
+) -> Vec<i8> {
+    let k = params.k as usize;
+    let total = params.m as usize * k;
+    let mut out = Vec::with_capacity(chunks.len() * 1024);
+    let mut row_noise = vec![0i8; k];
+    let mut current_row = None;
+    for &c in chunks {
+        for off in 0..1024 {
+            let p = c * 1024 + off;
+            if p < total {
+                let row = (p / k) as u32;
+                if current_row != Some(row) {
+                    noise.e_row_into(row, &mut row_noise);
+                    current_row = Some(row);
+                }
+                out.push(row_noise[p % k]);
+            } else {
+                out.push(0);
+            }
+        }
+    }
+    out
+}
+
+fn b_noise_chunk_bytes(
+    noise: &crate::matmul::BlockNoise,
+    params: &MatmulParams,
+    chunks: &[usize],
+) -> Vec<i8> {
+    let k = params.k as usize;
+    let total = params.n as usize * k;
+    let mut out = Vec::with_capacity(chunks.len() * 1024);
+    let mut col_noise = vec![0i8; k];
+    let mut current_col = None;
+    for &c in chunks {
+        for off in 0..1024 {
+            let p = c * 1024 + off;
+            if p < total {
+                let col = (p / k) as u32;
+                if current_col != Some(col) {
+                    noise.f_col_into(col, &mut col_noise);
+                    current_col = Some(col);
+                }
+                out.push(col_noise[p % k]);
+            } else {
+                out.push(0);
+            }
+        }
+    }
+    out
+}
+
 fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     zctx: &ZkProverContext<'_>,
     params: &MatmulParams,
@@ -2858,20 +2988,20 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // schedule (P-B.2.3) — a pure fn of public params + the
     // attested tile, so the prover cannot open a cheaper region.
     // O(t·k), size-independent ⇒ one tile = one STARK.
-    use ai_pow_zk::blake3_tree::{indexed_strips_chunk_set, open_strip_set, pad_to_chunk_boundary};
-    let a_bytes: Vec<u8> = zctx.a.iter().map(|&v| v as u8).collect();
-    let b_bytes: Vec<u8> = zctx.b.iter().map(|&v| v as u8).collect();
+    use ai_pow_zk::blake3_tree::{indexed_strips_chunk_set, open_strip_set, padded_chunk_bytes};
+    // i8 and u8 share one-byte storage; the consensus byte string is the raw
+    // two's-complement matrix encoding used by `BlockContext` commitments.
+    let a_bytes: &[u8] =
+        unsafe { core::slice::from_raw_parts(zctx.a.as_ptr() as *const u8, zctx.a.len()) };
+    let b_bytes: &[u8] =
+        unsafe { core::slice::from_raw_parts(zctx.b.as_ptr() as *const u8, zctx.b.len()) };
     let kk = params.k as usize;
     // A row-major (m rows × k): tile_i's `t` rows, span t·k.
-    let a_pad = pad_to_chunk_boundary(&a_bytes);
     let a_indices = &strip_schedule.a_indices;
     // B5b selective opening: authenticate only the chunks the opened rows touch.
     let (a_chunks, a_nc) = indexed_strips_chunk_set(a_indices, kk, a_bytes.len());
-    let (_oa, a_sibs) = open_strip_set(&a_bytes, &zctx.kappa, &a_chunks);
-    let a_strip_bytes: Vec<u8> = a_chunks
-        .iter()
-        .flat_map(|&c| a_pad[c * 1024..(c + 1) * 1024].iter().copied())
-        .collect();
+    let (_oa, a_sibs) = open_strip_set(a_bytes, &zctx.kappa, &a_chunks);
+    let a_strip_bytes = padded_chunk_bytes(a_bytes, &a_chunks);
     // Producer-key / sweep-lane base = min selected chunk (== the range c0).
     let ca0 = a_chunks[0];
     // §4.C.2 c-exact cx.2 g=1 co-location: the Pearl `noise_ref`
@@ -2890,25 +3020,12 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // `noised_packed` (the cmset.1a finding). `coloc` gates BOTH
     // the leaf-row noise strips AND retiring the separate store.
     let coloc = params.noise_rank.is_multiple_of(16);
-    let rr = params.noise_rank;
+    let noise = crate::matmul::BlockNoise::expand(&zctx.s_a, &zctx.s_b, params);
     let a_id_base = ai_pow_zk::composite_trace::NOISED_CHUNK_ID_BASE;
     let b_id_base = a_id_base + ((strip_schedule.a_indices.len() * kk).div_ceil(8)) as u64;
-    // noise_ref parallel to the SELECTED strip bytes: each byte at its ACTUAL
+    // Noise bytes parallel to the SELECTED strip bytes: each byte at its ACTUAL
     // matrix position `c*1024 + off` (0 on chunk-padding p >= |A|).
-    let a_len = a_bytes.len();
-    let a_noise_strip: Vec<i8> = a_chunks
-        .iter()
-        .flat_map(|&c| {
-            (0..1024).map(move |off| {
-                let p = c * 1024 + off;
-                if p < a_len {
-                    ai_pow_zk::noise_ref::e_value(&zctx.s_a, (p / kk) as u32, (p % kk) as u32, rr)
-                } else {
-                    0
-                }
-            })
-        })
-        .collect();
+    let a_noise_strip = a_noise_chunk_bytes(&noise, params, &a_chunks);
     let (next, _root_a) = trace.place_matrix_strip_opening_set(
         0,
         &a_strip_bytes,
@@ -2921,31 +3038,14 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
         if coloc { Some(a_id_base) } else { None },
     );
     // B col-major (n cols × k, col j at j·k): tile_j's `t` cols.
-    let b_pad = pad_to_chunk_boundary(&b_bytes);
     let b_indices = &strip_schedule.b_indices;
     let (b_chunks, b_nc) = indexed_strips_chunk_set(b_indices, kk, b_bytes.len());
-    let (_ob, b_sibs) = open_strip_set(&b_bytes, &zctx.kappa, &b_chunks);
-    let b_strip_bytes: Vec<u8> = b_chunks
-        .iter()
-        .flat_map(|&c| b_pad[c * 1024..(c + 1) * 1024].iter().copied())
-        .collect();
+    let (_ob, b_sibs) = open_strip_set(b_bytes, &zctx.kappa, &b_chunks);
+    let b_strip_bytes = padded_chunk_bytes(b_bytes, &b_chunks);
     let cb0 = b_chunks[0];
     // B is col-major flattened [col0(k)|col1(k)|…]: for byte p the
-    // matrix col = p/k, k-index = p%k ⇒ f_value(s_b, k-idx, col).
-    let b_len = b_bytes.len();
-    let b_noise_strip: Vec<i8> = b_chunks
-        .iter()
-        .flat_map(|&c| {
-            (0..1024).map(move |off| {
-                let p = c * 1024 + off;
-                if p < b_len {
-                    ai_pow_zk::noise_ref::f_value(&zctx.s_b, (p % kk) as u32, (p / kk) as u32, rr)
-                } else {
-                    0
-                }
-            })
-        })
-        .collect();
+    // matrix col = p/k and k-index = p%k.
+    let b_noise_strip = b_noise_chunk_bytes(&noise, params, &b_chunks);
     let (mh_end, _root_b) = trace.place_matrix_strip_opening_set(
         next,
         &b_strip_bytes,
@@ -2992,13 +3092,11 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // (`high2_2_xstep_fold_pipeline_byte_equiv_plain`). Tile (0,0)
     // is attested; threading the specific *found* tile + binding
     // its index is §4.E (does not change this binding).
-    let noise = crate::matmul::BlockNoise::expand(&zctx.s_a, &zctx.s_b, params);
     // §4.C.10 adversarial seam: the §6(b) matmul sweep + the
     // `noised_packed` producer store are built from `sweep_override`
     // when present; the strip-opening + `HASH_A`/`HASH_B` (above)
     // always stay the committed `ctx.a`/`ctx.b`. Production = `None`.
     let (sweep_a, sweep_b) = sweep_override.unwrap_or((zctx.a, zctx.b));
-    let mats = crate::matmul::Matrices::build(sweep_a, sweep_b, &noise, params);
     let h_tile = strip_schedule.a_indices.len();
     let w_tile = strip_schedule.b_indices.len();
     let r = params.noise_rank as usize;
@@ -3011,18 +3109,18 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // params-pure R-b schedule (Stage A). `≤ STRIPE_MAX` is unchanged:
     // sub-block-major sweep + `place_fold_chain`, `sx_bound = true`.
     let sx_bound = num_stripes <= crate::params::STRIPE_MAX;
+    let SelectedNoisedStrips {
+        a_strips,
+        b_strips,
+        a_noise_strips,
+        b_noise_strips,
+    } = selected_noised_strips(
+        sweep_a, sweep_b, &noise, params, &strip_schedule.a_indices, &strip_schedule.b_indices,
+    );
     // `t·k` row-major A-strips / col-major B-strips for the tile
     // (the `compute_tile_from_slices` layout).
-    let a_strips: Vec<i8> = strip_schedule
-        .a_indices
-        .iter()
-        .flat_map(|&i| mats.a_prime_row(i).to_vec())
-        .collect();
-    let b_strips: Vec<i8> = strip_schedule
-        .b_indices
-        .iter()
-        .flat_map(|&j| mats.b_prime_col(j).to_vec())
-        .collect();
+    debug_assert_eq!(a_strips.len(), h_tile * params.k as usize);
+    debug_assert_eq!(b_strips.len(), w_tile * params.k as usize);
     // HIGH-2.2 §6(b)+G1+G2: `StripeXorChip` now has
     // `STRIPE_MAX = 64` per-stripe lanes and `place_useful_work_chain`
     // chunks the `r`-wide stripe dot into `⌈r/TILE_D⌉` accumulating
@@ -3068,12 +3166,14 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
             if let Some((lane, l)) = s.src[m] {
                 if s.side_a {
                     let i = strip_schedule.a_indices[lane as usize];
+                    let base = lane as usize * kk2 + l as usize;
                     plain[m] = zctx.a[(i as usize) * kk2 + l as usize];
-                    noise[m] = ai_pow_zk::noise_ref::e_value(&zctx.s_a, i, l, r as u32);
+                    noise[m] = a_noise_strips[base];
                 } else {
                     let jc = strip_schedule.b_indices[lane as usize];
+                    let base = lane as usize * kk2 + l as usize;
                     plain[m] = zctx.b[(jc as usize) * kk2 + l as usize];
-                    noise[m] = ai_pow_zk::noise_ref::f_value(&zctx.s_b, l, jc, r as u32);
+                    noise[m] = b_noise_strips[base];
                 }
             }
         }
@@ -3229,11 +3329,13 @@ fn prove_ai_pow_scheduled_full_with_context<F: FnOnce(&mut CompositeTrace)>(
     // co-located leaf row's committed plain here, after the PI
     // checks, so the only defect is the tampered cell.
     tamper(&mut trace);
-    let (proof, prover_program) = composite_prove_pinned_logup_sx(&cfg, trace, &pis, sx_bound);
+    let (proof, prover_program, l0_common) =
+        composite_prove_pinned_logup_sx_with_common(&cfg, trace, &pis, sx_bound);
     let artifact = ZkProofArtifact {
         proof,
         pis,
         trace_height: height,
+        l0_common,
     };
     Ok((artifact, prover_program, coloc))
 }
@@ -3414,6 +3516,86 @@ mod tests {
     use crate::tile_hash::difficulty_target;
 
     const TEST_NONCE: &[u8] = b"zk-bridge-test-nonce";
+
+    #[test]
+    fn selected_noised_strips_match_full_matrices() {
+        let params = MatmulParams {
+            m: 16,
+            k: 32,
+            n: 16,
+            noise_rank: 8,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = synth_matrices(b"selected-noised-strips", &params);
+        let noise = crate::matmul::BlockNoise::expand(&[3u8; 32], &[7u8; 32], &params);
+        let a_indices = vec![0, 3, 8, 15];
+        let b_indices = vec![1, 2, 9, 14];
+        let selected = selected_noised_strips(&a, &b, &noise, &params, &a_indices, &b_indices);
+        let mats = crate::matmul::Matrices::build(&a, &b, &noise, &params);
+        let expected_a: Vec<i8> = a_indices
+            .iter()
+            .flat_map(|&i| mats.a_prime_row(i).iter().copied())
+            .collect();
+        let expected_b: Vec<i8> = b_indices
+            .iter()
+            .flat_map(|&j| mats.b_prime_col(j).iter().copied())
+            .collect();
+        assert_eq!(selected.a_strips, expected_a);
+        assert_eq!(selected.b_strips, expected_b);
+        for (row_pos, &row) in a_indices.iter().enumerate() {
+            let mut expected_noise = vec![0i8; params.k as usize];
+            noise.e_row_into(row, &mut expected_noise);
+            assert_eq!(
+                &selected.a_noise_strips
+                    [row_pos * params.k as usize..(row_pos + 1) * params.k as usize],
+                expected_noise.as_slice()
+            );
+        }
+        for (col_pos, &col) in b_indices.iter().enumerate() {
+            let mut expected_noise = vec![0i8; params.k as usize];
+            noise.f_col_into(col, &mut expected_noise);
+            assert_eq!(
+                &selected.b_noise_strips
+                    [col_pos * params.k as usize..(col_pos + 1) * params.k as usize],
+                expected_noise.as_slice()
+            );
+        }
+        let total_a = params.m as usize * params.k as usize;
+        let expected_a_chunk: Vec<i8> = (0..1024)
+            .map(|p| {
+                if p < total_a {
+                    ai_pow_zk::noise_ref::e_value(
+                        &[3u8; 32],
+                        (p / params.k as usize) as u32,
+                        (p % params.k as usize) as u32,
+                        params.noise_rank,
+                    )
+                } else {
+                    0
+                }
+            })
+            .collect();
+        assert_eq!(a_noise_chunk_bytes(&noise, &params, &[0]), expected_a_chunk);
+
+        let total_b = params.n as usize * params.k as usize;
+        let expected_b_chunk: Vec<i8> = (0..1024)
+            .map(|p| {
+                if p < total_b {
+                    ai_pow_zk::noise_ref::f_value(
+                        &[7u8; 32],
+                        (p % params.k as usize) as u32,
+                        (p / params.k as usize) as u32,
+                        params.noise_rank,
+                    )
+                } else {
+                    0
+                }
+            })
+            .collect();
+        assert_eq!(b_noise_chunk_bytes(&noise, &params, &[0]), expected_b_chunk);
+    }
 
     /// **Tracy profiling harness — isolated Layer-0 batch-STARK prove.** Proves a
     /// single 2¹⁶-trace tile (tile=16, k=4096, r=64 = the max prod envelope),

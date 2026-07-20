@@ -57,11 +57,14 @@ pub fn pad_to_chunk_boundary(data: &[u8]) -> Vec<u8> {
 /// padded byte stream, byte-equivalent to
 /// `pearl_blake3::MerkleTree::new(padded, kappa).root()`.
 pub fn matrix_commitment(matrix_bytes: &[u8], kappa: &[u8; 32]) -> [u8; 32] {
-    let padded = pad_to_chunk_boundary(matrix_bytes);
-    *Hasher::new_keyed(kappa)
-        .update(&padded)
-        .finalize()
-        .as_bytes()
+    let mut hasher = Hasher::new_keyed(kappa);
+    hasher.update(matrix_bytes);
+    let padding = padded_chunk_len(matrix_bytes.len()) - matrix_bytes.len();
+    if padding != 0 {
+        const ZERO_CHUNK: [u8; CHUNK_LEN] = [0u8; CHUNK_LEN];
+        hasher.update(&ZERO_CHUNK[..padding]);
+    }
+    *hasher.finalize().as_bytes()
 }
 
 /// Leaf hash for a row of `A` under `H_A` (Pearl §4.3 line 2). Keyed by

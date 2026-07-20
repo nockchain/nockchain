@@ -1659,6 +1659,7 @@ impl AiPowCompactVerifierSetupSeed {
             program,
             proof,
             public_inputs,
+            common_data: _,
         } = verified_l0;
         Self {
             zk_params: *zk_params,
@@ -1691,6 +1692,7 @@ pub struct ChainVerifiedCompositeProof<'a> {
     program: crate::AiPowProgram,
     proof: BatchProof<AiPowStarkConfig>,
     public_inputs: &'a crate::composite_public::CompositePublicInputs,
+    common_data: Option<CommonData<AiPowStarkConfig>>,
 }
 
 impl<'a> ChainVerifiedCompositeProof<'a> {
@@ -1715,6 +1717,29 @@ impl<'a> ChainVerifiedCompositeProof<'a> {
             program,
             proof,
             public_inputs,
+            common_data: None,
+        }
+    }
+
+    /// Construct a recursion input with Layer-0 common data produced from the
+    /// same canonical program/profile as the verified proof.
+    ///
+    /// # Safety
+    ///
+    /// The caller must have verified the Layer-0 proof against the chain-derived
+    /// statement and must supply common data derived from that verified canonical
+    /// program and FRI profile.
+    pub unsafe fn from_parts_with_l0_common_after_chain_statement_verification(
+        program: crate::AiPowProgram,
+        proof: BatchProof<AiPowStarkConfig>,
+        public_inputs: &'a crate::composite_public::CompositePublicInputs,
+        common_data: CommonData<AiPowStarkConfig>,
+    ) -> Self {
+        Self {
+            program,
+            proof,
+            public_inputs,
+            common_data: Some(common_data),
         }
     }
 
@@ -1814,12 +1839,19 @@ pub fn prove_recursive_certificate_from_chain_verified_composite_proof(
     let sx_bound =
         (zk_params.k / zk_params.noise_rank) as usize <= crate::composite_layout::STRIPE_MAX;
     let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
-    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+    let rebuilt_l0_common;
+    let l0_common = if let Some(common) = verified.common_data.as_ref() {
+        common
+    } else {
+        rebuilt_l0_common =
+            crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+        &rebuilt_l0_common.common
+    };
     let built = build_composite_l1_verifier_circuit(
         &cfg,
         &air,
         &verified.proof,
-        &pd.common,
+        l0_common,
         &verified.public_inputs.to_vec(),
         profile,
     )?;
@@ -2150,12 +2182,19 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
     let cfg = crate::composite_proof::build_config(zk_params, profile);
     let t = Instant::now();
     let air = CompositeFullAirWithLookupsPinned::new_with(verified.program.clone(), sx_bound);
-    let pd = crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+    let rebuilt_l0_common;
+    let l0_common = if let Some(common) = verified.common_data.as_ref() {
+        common
+    } else {
+        rebuilt_l0_common =
+            crate::composite_proof::logup_common_for(&cfg, &verified.program, sx_bound);
+        &rebuilt_l0_common.common
+    };
     let built = build_composite_l1_verifier_circuit(
         &cfg,
         &air,
         &verified.proof,
-        &pd.common,
+        l0_common,
         &verified.public_inputs.to_vec(),
         profile,
     )?;
@@ -2249,7 +2288,7 @@ fn prove_compact_batch_recursive_certificate_from_chain_verified_composite_proof
         &verifier_context,
         verify_cert,
         verified.public_inputs,
-        &l0_program_commitment_vals(&pd.common),
+        &l0_program_commitment_vals(l0_common),
     )?;
     let l2_compact_verify_ms = t.elapsed().as_millis();
 

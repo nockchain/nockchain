@@ -2654,6 +2654,7 @@ impl PearlMergeCheckedTicketAttempt {
         &self.attempt
     }
 
+    #[cfg(feature = "zk")]
     pub(crate) const fn precheck(&self) -> &PearlMergeMiningPrecheck {
         &self.precheck
     }
