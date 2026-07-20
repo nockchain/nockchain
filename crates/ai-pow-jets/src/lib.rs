@@ -22,7 +22,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 // SOUNDNESS (consensus DoS): the verify jet's guarantee that a crafted `%ai-pow`
 // block can never crash the node relies on `std::panic::catch_unwind` converting an
-// attacker-induced panic (in decode or the vendored recursion verifier) into a
+// attacker-induced panic (in decode or the recursion verifier) into a
 // deterministic invalid-block `NO`. Under `panic = "abort"` catch_unwind is a no-op
 // and a panic aborts the whole process — turning one crafted block into a
 // network-wide crash. Refuse to build the consensus verifier that way.

@@ -28,8 +28,8 @@ serde = { workspace = true, features = ["derive"] }
 blake3 = { workspace = true }
 
 # Plonky3. Pin all direct crates to the same upstream v0.6.2 commit so the
-# vendored recursion workspace and the production Layer-0 LogUp prover share one
-# exact dependency graph.
+# recursion fork and the production Layer-0 LogUp prover share one exact
+# dependency graph.
 #
 # Stack choice (see 2026-05-13_DESIGN.md for rationale):
 #   * Goldilocks base field (2^64 − 2^32 + 1) — Plonky3-native, matches
@@ -70,10 +70,10 @@ nockchain-math = { workspace = true }
 # branch, so Cargo resolution is reproducible even as the fork branch advances.
 # Off by default — the default `ai-pow-zk` build pulls none of these;
 # `--features recursion` enables them.
-p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
-p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
-p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
-p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
+p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "eb95c5162f437b9320c309676faffecd851c3c75", optional = true }
+p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "eb95c5162f437b9320c309676faffecd851c3c75", optional = true }
+p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "eb95c5162f437b9320c309676faffecd851c3c75", optional = true }
+p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "eb95c5162f437b9320c309676faffecd851c3c75", optional = true }
 postcard = { version = "1.1.3", features = ["alloc"], optional = true }
 
 [features]
@@ -110,8 +110,8 @@ parallel = [
     "p3-uni-stark/parallel",
     "p3-batch-stark/parallel",
 ]
-# §recursion integration — opt-in. Pulls the vendored Plonky3-recursion
-# crates so the composite proof can be recursively verified
+# §recursion integration — opt-in. Pulls the pinned Plonky3-recursion
+# fork so the composite proof can be recursively verified
 # (`crate::recursion`). See the dep block above.
 recursion = [
     "dep:p3-recursion",
