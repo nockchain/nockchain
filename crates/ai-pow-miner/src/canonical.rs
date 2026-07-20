@@ -23,11 +23,7 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::{
-    prove_pearl_moe_compact_recursive_certificate,
-    prove_pearl_moe_compact_recursive_certificate_with_prover_cache,
-    AiPowCompactRecursiveProverCache, PearlMoeCompactProveRun,
-};
+use ai_pow::zk_bridge::{prove_pearl_moe_compact_recursive_certificate, PearlMoeCompactProveRun};
 
 use crate::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -57,11 +53,6 @@ pub struct CanonicalBlock {
     pub certificate: AiPowCertificateShape,
     pub commit: [u8; 32],
     pub jackpot_hash: [u8; 32],
-}
-
-pub(crate) struct CanonicalProvedBlock {
-    pub block: CanonicalBlock,
-    pub prover_cache: Option<AiPowCompactRecursiveProverCache>,
 }
 
 fn setup_pattern(len: u32) -> PearlPeriodicPattern {
@@ -314,12 +305,7 @@ pub fn prove_canonical_moe_block_at(
     nock_commit: [u8; 32],
     extranonce: u32,
 ) -> Result<CanonicalBlock, CanonicalProveError> {
-    Ok(
-        prove_canonical_moe_block_at_for_miner(
-            params, hw, e, top_k, nock_commit, extranonce, None,
-        )?
-        .block,
-    )
+    prove_canonical_moe_block_at_for_miner(params, hw, e, top_k, nock_commit, extranonce)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -330,8 +316,7 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
     top_k: usize,
     nock_commit: [u8; 32],
     extranonce: u32,
-    cache: Option<&AiPowCompactRecursiveProverCache>,
-) -> Result<CanonicalProvedBlock, CanonicalProveError> {
+) -> Result<CanonicalBlock, CanonicalProveError> {
     let CanonicalMoeInputs {
         a,
         b,
@@ -348,17 +333,10 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
         aux_inclusion,
     } = canonical_moe_inputs(params, hw, e, top_k, nock_commit, extranonce)?;
 
-    let run = if let Some(cache) = cache {
-        prove_pearl_moe_compact_recursive_certificate_with_prover_cache(
-            params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-            &inner, &local_b, n_e, cache,
-        )
-    } else {
-        prove_pearl_moe_compact_recursive_certificate(
-            params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
-            &inner, &local_b, n_e,
-        )
-    }
+    let run = prove_pearl_moe_compact_recursive_certificate(
+        params, &a, &b, &commitments.kappa, &commitments.h_a, &commitments.h_b, &routing, 0,
+        &inner, &local_b, n_e,
+    )
     .map_err(err("prove"))?;
 
     let PearlMoeCompactProveRun {
@@ -369,7 +347,7 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
         trace_height,
         commitments: proof_commitments,
         ticket,
-        prover_cache,
+        prover_cache: _,
     } = run;
 
     let public = PearlPublicProofParams {
@@ -411,16 +389,13 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
         routing_data: routing.routing_data.clone(),
     };
 
-    Ok(CanonicalProvedBlock {
-        block: CanonicalBlock {
-            statement,
-            aux_inclusion,
-            moe_art,
-            certificate,
-            commit: nock_commit,
-            jackpot_hash: ticket.jackpot_hash,
-        },
-        prover_cache,
+    Ok(CanonicalBlock {
+        statement,
+        aux_inclusion,
+        moe_art,
+        certificate,
+        commit: nock_commit,
+        jackpot_hash: ticket.jackpot_hash,
     })
 }
 

@@ -37,12 +37,11 @@ use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_goldilocks::Goldilocks;
 use p3_lookup::builder::InteractionBuilder;
-use p3_matrix::Matrix;
-use p3_matrix::dense::RowMajorMatrix;
+use p3_matrix::{Matrix, dense::RowMajorMatrix};
 
 use crate::air_lookup::{
-    PREP_WIDTH as L_PREP_WIDTH, TABLE_ROWS, Tip5PermLookupAir, tip5_in_col, tip5_lookup_air_width,
-    tip5_out_col,
+    PREP_WIDTH as L_PREP_WIDTH, TABLE_ROWS, Tip5PermLookupAir, tip5_in_col,
+    tip5_lookup_air_width, tip5_out_col,
 };
 use crate::generation_lookup::generate_lookup_trace;
 use crate::tip5_spec::{NUM_ROUNDS, STATE_SIZE};
@@ -146,8 +145,7 @@ pub fn build_tip5_circuit_main_with_mmcs_bits<F>(
     for r in 0..height {
         let src = r * lookup_width;
         let dst = r * width;
-        values[dst..dst + lookup_width]
-            .copy_from_slice(&lookup_main.values[src..src + lookup_width]);
+        values[dst..dst + lookup_width].copy_from_slice(&lookup_main.values[src..src + lookup_width]);
     }
 
     let mmcs_col = lookup_width;

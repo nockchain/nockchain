@@ -155,11 +155,11 @@ CLIPPY_FLAGS := -Dwarnings -Dclippy::unwrap_used -Aclippy::missing_safety_doc -A
 
 .PHONY: fmt
 fmt:
-	cargo fmt
+	scripts/fmt-rust-workspace.sh
 
 .PHONY: check-cargo-fmt
 check-cargo-fmt:
-	@cargo fmt --check || (echo "Hint: run 'make fmt' to format Rust code." >&2; exit 1)
+	@scripts/fmt-rust-workspace.sh --check || (echo "Hint: run 'make fmt' to format owned Rust workspace packages." >&2; exit 1)
 
 .PHONY: clippy
 clippy: contracts-deps ## Run clippy with the same flags as the upstream repo

@@ -5787,69 +5787,6 @@ mod tests {
         );
     }
 
-    #[ignore = "real compact recursive proof generation is intentionally opt-in"]
-    #[test]
-    fn real_compact_pearl_merge_prod_scale_m_warm_cache_size_and_latency() {
-        let params = crate::DENSE_PRODUCTION_PARAMS;
-        let config = pearl_test_config();
-        let (a, b) = synth_matrices(b"pearl-prod-scale-m-512", &params);
-
-        let warmup_aux = pearl_test_aux();
-        let (warmup_header, _warmup_aux_inclusion) =
-            pearl_test_aux_inclusion(&warmup_aux.commitment().unwrap());
-        let warmup_attempt = evaluate_pearl_merge_ticket_attempt(
-            &warmup_header, &config, &params, 0, 0, &a, &b, &[0xff; 32], 16, warmup_aux,
-        )
-        .expect("evaluate warmup prod-scale Pearl merge ticket attempt");
-        let warmup_run = ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate(
-            &warmup_attempt, &params, &a, &b, 16,
-        )
-        .expect("prove warmup compact Pearl recursive certificate (prod-scale m)");
-        let cache = warmup_run
-            .into_prover_cache()
-            .expect("warmup run must return reusable compact prover cache");
-
-        let mut timed_aux = pearl_test_aux();
-        timed_aux.nock_block_commitment = [0x43; 32];
-        let (timed_header, _timed_aux_inclusion) =
-            pearl_test_aux_inclusion(&timed_aux.commitment().unwrap());
-        let timed_attempt = evaluate_pearl_merge_ticket_attempt(
-            &timed_header, &config, &params, 0, 0, &a, &b, &[0xff; 32], 16, timed_aux,
-        )
-        .expect("evaluate timed prod-scale Pearl merge ticket attempt");
-
-        let start = std::time::Instant::now();
-        let run =
-            ai_pow::zk_bridge::prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
-                &timed_attempt, &params, &a, &b, 16, &cache,
-            )
-            .expect("prove cached compact Pearl recursive certificate (prod-scale m)");
-        let prove_wall_ms = start.elapsed().as_millis();
-        let compact_bytes =
-            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(run.certificate())
-                .expect("encode compact recursive certificate");
-        eprintln!(
-            "D1a prod-scale-m warm-cache (m=n=512, tile=8, k=1024, r=64): compact_cert={} bytes ({:.2} KiB), \
-             prove_wall_ms={}, l1_build_ms={}, l1_outer_ms={}, l2_prep_ms={}, l2_prove_ms={}, \
-             l2_compact_ms={}, l2_compact_verify_ms={}, trace_height={}, cache_hit=true",
-            compact_bytes.len(),
-            compact_bytes.len() as f64 / 1024.0,
-            prove_wall_ms,
-            run.l1_circuit_build_ms(),
-            run.l1_outer_cert_ms(),
-            run.l2_prep_ms(),
-            run.l2_prove_ms(),
-            run.l2_compact_ms(),
-            run.l2_compact_verify_ms(),
-            run.trace_height(),
-        );
-        assert!(
-            compact_bytes.len() <= 150_000,
-            "prod-scale compact cert exceeded 150,000 bytes: {}",
-            compact_bytes.len()
-        );
-    }
-
     /// **D1a (worst case) — max prod-envelope tile compact size/latency.**
     /// `tile=16` (h·w=256 = `PEARL_HW_MAX`), `k=4096`, `r=64`
     /// (num_stripes=64=`STRIPE_MAX`) — the largest in-circuit tile the prod

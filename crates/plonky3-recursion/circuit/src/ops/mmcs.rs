@@ -115,7 +115,8 @@ impl<F: Field> CircuitBuilder<F> {
                 for (j, &d) in row_digest.iter().take(digest_ext).enumerate() {
                     inputs[digest_ext + j] = Some(d);
                 }
-                let previous_phase = self.set_npo_profile_phase(Some("mmcs_path_digest_injection"));
+                let previous_phase =
+                    self.set_npo_profile_phase(Some("mmcs_path_digest_injection"));
                 let inject_result = self.add_perm(
                     permutation_config,
                     &PermCall {

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Refuse accidental commits of vendored Plonky3-recursion churn. Intentional
+# vendored recursion work must opt in explicitly for that commit.
+
+set -euo pipefail
+
+if [[ "${ALLOW_VENDORED_RECURSION_CHANGES:-}" == "1" ]]; then
+  exit 0
+fi
+
+changed="$(git diff --cached --name-only -- crates/plonky3-recursion || true)"
+if [[ -n "$changed" ]]; then
+  cat >&2 <<'EOF'
+Refusing to commit changes under crates/plonky3-recursion.
+This tree is vendored for upstream comparison; formatting churn makes rebases painful.
+If this commit intentionally edits the vendored recursion substrate, rerun with:
+  ALLOW_VENDORED_RECURSION_CHANGES=1 git commit ...
+EOF
+  printf '%s\n' "$changed" >&2
+  exit 1
+fi

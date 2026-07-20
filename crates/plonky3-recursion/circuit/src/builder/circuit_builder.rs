@@ -436,9 +436,7 @@ where
         );
 
         let exec: Tip5PermExec<F> = Arc::new(move |input: &[F]| {
-            let arr: [F; 16] = input
-                .try_into()
-                .expect("Tip5 D=1 input must have 16 elements");
+            let arr: [F; 16] = input.try_into().expect("Tip5 D=1 input must have 16 elements");
             perm.permute(arr).to_vec()
         });
 
@@ -2143,9 +2141,7 @@ impl<BF: PrimeField64 + Send + Sync, EF: ExtensionField<BF>> HintExecutor<EF>
             let out_wid = outputs[j];
             let out_idx = out_wid.0 as usize;
             if out_idx >= witness_len {
-                return Err(CircuitError::WitnessIdOutOfBounds {
-                    witness_id: out_wid,
-                });
+                return Err(CircuitError::WitnessIdOutOfBounds { witness_id: out_wid });
             }
             let slot = &mut witness[out_idx];
             if let Some(existing) = slot.as_ref() {
@@ -2169,9 +2165,7 @@ impl<BF: PrimeField64 + Send + Sync, EF: ExtensionField<BF>> HintExecutor<EF>
         let high_wid = outputs[self.num_bits];
         let high_idx = high_wid.0 as usize;
         if high_idx >= witness_len {
-            return Err(CircuitError::WitnessIdOutOfBounds {
-                witness_id: high_wid,
-            });
+            return Err(CircuitError::WitnessIdOutOfBounds { witness_id: high_wid });
         }
         let slot = &mut witness[high_idx];
         if let Some(existing) = slot.as_ref() {
@@ -3330,9 +3324,7 @@ mod proptests {
 
         let mut b1 = CircuitBuilder::<BabyBear>::new();
         let v1 = b1.define_const(BabyBear::from_u64(raw));
-        let bits_old = b1
-            .decompose_to_bits::<BabyBear>(v1, BabyBear::bits())
-            .unwrap();
+        let bits_old = b1.decompose_to_bits::<BabyBear>(v1, BabyBear::bits()).unwrap();
         let c1 = b1.build().expect("c1 build");
         let map1 = c1.expr_to_widx.clone();
         let t1 = c1.runner().run().expect("c1 run");

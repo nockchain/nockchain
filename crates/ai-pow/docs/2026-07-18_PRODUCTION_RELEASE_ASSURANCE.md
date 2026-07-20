@@ -33,8 +33,7 @@ This ledger is the release-assurance execution record for Logos. It links the ma
 | Gate | Frozen ceiling |
 |---|---:|
 | M2 Max prover peak RSS | `≤ 16 GiB` |
-| Warm-idle miner prover-cache RSS | `< 1.5 GiB` additional |
-| Resident miner prover cache | one full prep by default; `< 2 GiB` byte-accounted LRU |
+| Resident miner prover cache | disabled; no miner-side prover setup retained |
 | Verifier resident context | `< 3 GiB` per context |
 | Verifier-cache total RSS | `< 16 GiB` on the 32-GiB reference host |
 | Setup disk footprint | `< 40 GiB` and `≤ 105%` of the current all-key baseline |
