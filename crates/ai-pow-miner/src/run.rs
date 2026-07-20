@@ -67,14 +67,14 @@ use nockapp::nockapp::wire::Wire;
 use nockapp::noun::slab::NounSlab;
 use nockchain_mining_common::{
     MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient, NodeClientError,
-    PokeTransportOutcome, PokeTransportStatus,
+    PokeTransportOutcome, PokeTransportStatus, PreparedPoke,
 };
 use nockvm::noun::{NounAllocator, D, T};
 use nockvm_macros::tas;
 use serde::Deserialize;
 use serde_json::json;
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -588,12 +588,14 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         info!("ai-pow-miner: subscribed + mining enabled; awaiting candidates");
 
         // ── inner loop ──
-        // `worker` is the currently-running spawn-blocking task (if any).
-        // `latest_candidate` stores only sendable decoded candidate inputs,
-        // which lets Gateway-backed Pearl work refreshes restart from the same
-        // Nockchain candidate when Pearl emits a newer block template. On
-        // shutdown we cancel + drain.
-        let mut worker: Option<MiningWorker> = None;
+        // Mining, Pearl Gateway submission, recursive proof construction, and
+        // poke serialization run outside this async loop. A generation guards
+        // every worker result so superseded candidates cannot submit stale
+        // proofs after cancellation races.
+        let mut workers: JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)> =
+            JoinSet::new();
+        let mut current_cancel: Option<MiningCancel> = None;
+        let mut current_generation = 0_u64;
         let mut latest_candidate: Option<NockchainCandidateInputs> = None;
         let mut current_pearl_header: Option<PearlIncompleteBlockHeader> = None;
         let mut next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
@@ -602,7 +604,12 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         let inner_result: InnerOutcome = loop {
             tokio::select! {
                 biased;
-                _ = shutdown.cancelled() => break InnerOutcome::Shutdown,
+                _ = shutdown.cancelled() => {
+                    if let Err(e) = cancel_and_drain_pearl_workers(&mut workers, &mut current_cancel).await {
+                        break InnerOutcome::Fatal(e);
+                    }
+                    break InnerOutcome::Shutdown;
+                }
                 maybe_c = candidates.next() => {
                     let Some(c_res) = maybe_c else {
                         warn!("watch_candidates stream ended; will reconnect");
@@ -626,14 +633,9 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                     };
                     latest_candidate = Some(candidate_inputs);
                     next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
-                    // Cancel any in-flight attempt; await its join so we
-                    // don't accumulate handles. Drop the result — we're
-                    // moving on.
-                    if let Some(w) = worker.take() {
-                        w.cancel();
-                        if let Err(e) = w.await_join().await {
-                            debug!(error = %e, "prior worker join error (ignored)");
-                        }
+                    current_generation = current_generation.wrapping_add(1);
+                    if let Some(cancel) = current_cancel.take() {
+                        cancel.cancel();
                     }
                     let pearl_job = match derive_pearl_merge_job_inputs_from_nockchain(&cfg, &candidate_inputs) {
                         Ok(x) => x,
@@ -646,13 +648,15 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                     current_pearl_header = Some(pearl_job.header);
                     let cancel = MiningCancel::new();
                     info!(pow_len = candidate_inputs.pow_len, "new candidate; dispatching Pearl-compatible ai-pow attempt");
-                    let h = spawn_pearl_merge_attempt(
+                    spawn_pearl_merge_attempt(
+                        &mut workers,
+                        current_generation,
                         &cfg,
                         pearl_job,
                         pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
                         cancel.clone(),
                     );
-                    worker = Some(MiningWorker::PearlMerge { handle: h, cancel });
+                    current_cancel = Some(cancel);
                 }
                 _ = pearl_refresh.tick() => {
                     let Some(candidate_inputs) = latest_candidate else {
@@ -668,34 +672,47 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                     if current_pearl_header == Some(pearl_job.header) {
                         continue;
                     }
-                    if let Some(w) = worker.take() {
-                        w.cancel();
-                        if let Err(e) = w.await_join().await {
-                            debug!(error = %e, "prior worker join error after Pearl refresh (ignored)");
-                        }
+                    current_generation = current_generation.wrapping_add(1);
+                    if let Some(cancel) = current_cancel.take() {
+                        cancel.cancel();
                     }
                     current_pearl_header = Some(pearl_job.header);
                     next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
                     let cancel = MiningCancel::new();
                     info!(pow_len = candidate_inputs.pow_len, "Pearl Gateway work changed; redispatching ai-pow attempt for current Nockchain candidate");
-                    let h = spawn_pearl_merge_attempt(
+                    spawn_pearl_merge_attempt(
+                        &mut workers,
+                        current_generation,
                         &cfg,
                         pearl_job,
                         pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
                         cancel.clone(),
                     );
-                    worker = Some(MiningWorker::PearlMerge { handle: h, cancel });
+                    current_cancel = Some(cancel);
                 }
-                done = await_worker(&mut worker) => {
-                    // worker is now None.
-                    match done {
-                        WorkerOutcome::None => {
-                            // No worker was running; await_worker yielded
-                            // immediately. Park ourselves until the next
-                            // candidate / shutdown.
-                            tokio::time::sleep(Duration::from_millis(50)).await;
-                        }
-                        WorkerOutcome::PearlJoined(Ok(Ok(mined))) => {
+                joined = workers.join_next(), if !workers.is_empty() => {
+                    let Some(joined) = joined else {
+                        continue;
+                    };
+                    let joined: PearlMergeWorkerJoin = joined;
+                    let (generation, result) = match joined {
+                        Ok(joined) => joined,
+                        Err(e) => break InnerOutcome::Fatal(MinerError::WorkerJoin(format!("{e}"))),
+                    };
+                    if generation != current_generation {
+                        debug!(
+                            generation,
+                            current_generation,
+                            "dropping stale Pearl-compatible worker result"
+                        );
+                        continue;
+                    }
+                    current_cancel = None;
+                    match result {
+                        Ok(PearlMergeWorkerOutput::PearlOnly {
+                            mined,
+                            pearl_submit_failed,
+                        }) => {
                             info!(
                                 matmul_attempts = mined.ticket.stats.matmul_attempts_tried,
                                 elapsed_s = mined.ticket.stats.elapsed.as_secs_f64(),
@@ -704,103 +721,69 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                 nockchain_target_hit = mined.ticket.nockchain_target_hit,
                                 "ai-pow-miner: Pearl-compatible solution found"
                             );
-                            let pearl_cfg = &cfg.puzzle.pearl_merge;
-                            let mut pearl_submit_failed = false;
-                            if mined.ticket.pearl_target_hit {
-                                if let Err(e) = submit_pearl_solution_to_gateway(&cfg, pearl_cfg, &mined) {
-                                    pearl_submit_failed = true;
-                                    warn!(error = %e, "submit Pearl Gateway plain proof failed");
-                                }
-                            }
-                            if !mined.ticket.nockchain_target_hit {
-                                if pearl_submit_failed {
-                                    current_pearl_header = None;
-                                } else {
-                                    next_pearl_attempt_start = match next_pearl_attempt_start
-                                        .checked_add(mined.ticket.stats.matmul_attempts_tried)
-                                    {
-                                        Some(next) => next,
-                                        None => {
-                                            warn!(
-                                                attempt_start = next_pearl_attempt_start,
-                                                attempts_tried = mined.ticket.stats.matmul_attempts_tried,
-                                                "Pearl-compatible attempt offset overflow; waiting for refreshed work"
-                                            );
-                                            current_pearl_header = None;
-                                            continue;
-                                        }
-                                    };
-                                    let pearl_job = PearlMergeCandidateJob {
-                                        header: mined.ticket.attempt.public_params.block_header,
-                                        gateway_mining_job: mined.gateway_mining_job.clone(),
-                                        aux_inclusion: mined.aux_inclusion.clone(),
-                                        target: mined.ticket.attempt.nockchain_target,
-                                        aux: mined.ticket.attempt.aux.clone(),
-                                    };
-                                    current_pearl_header = Some(pearl_job.header);
-                                    let cancel = MiningCancel::new();
-                                    info!(
-                                        attempt_start = next_pearl_attempt_start,
-                                        "Pearl-only solution submitted; continuing Nockchain search on same Pearl work"
-                                    );
-                                    let h = spawn_pearl_merge_attempt(
-                                        &cfg,
-                                        pearl_job,
-                                        pearl_mine_opts_with_attempt_start(
-                                            &cfg,
-                                            next_pearl_attempt_start,
-                                        ),
-                                        cancel.clone(),
-                                    );
-                                    worker = Some(MiningWorker::PearlMerge { handle: h, cancel });
-                                }
+                            if pearl_submit_failed {
+                                current_pearl_header = None;
                                 continue;
                             }
-                            let proof_start = Instant::now();
-                            let proof = match pearl_cfg.build_certificate_for_attempt(&mined.ticket.attempt) {
-                                Ok(proof) => proof,
-                                Err(e) => {
-                                    warn!(error = %e, "Pearl-compatible recursive AI-PoW certificate build failed");
-                                    break InnerOutcome::Fatal(MinerError::CertificateBuild(e.to_string()));
+                            next_pearl_attempt_start = match next_pearl_attempt_start
+                                .checked_add(mined.ticket.stats.matmul_attempts_tried)
+                            {
+                                Some(next) => next,
+                                None => {
+                                    warn!(
+                                        attempt_start = next_pearl_attempt_start,
+                                        attempts_tried = mined.ticket.stats.matmul_attempts_tried,
+                                        "Pearl-compatible attempt offset overflow; waiting for refreshed work"
+                                    );
+                                    current_pearl_header = None;
+                                    continue;
                                 }
                             };
-                            let certificate_build_ms = proof_start.elapsed().as_millis();
-                            let poke_start = Instant::now();
-                            let poke = match build_ai_pow_pearl_merge_certificate_poke_from_ticket_proof(
-                                &mined.ticket.attempt,
-                                &mined.aux_inclusion,
-                                &cfg.puzzle.a,
-                                &cfg.puzzle.b,
-                                pearl_cfg.max_pattern_len,
-                                &proof,
-                            ) {
-                                Ok(poke) => poke,
-                                Err(e) => {
-                                    warn!(error = %e, "canonical Pearl-compatible AI-PoW certificate poke build failed");
-                                    break InnerOutcome::Fatal(MinerError::CertificateBuild(e.to_string()));
-                                }
+                            let pearl_job = PearlMergeCandidateJob {
+                                header: mined.ticket.attempt.public_params.block_header,
+                                gateway_mining_job: mined.gateway_mining_job.clone(),
+                                aux_inclusion: mined.aux_inclusion.clone(),
+                                target: mined.ticket.attempt.nockchain_target,
+                                aux: mined.ticket.attempt.aux.clone(),
                             };
-                            let prove_timings = AiPowProveTimings {
-                                certificate_build_ms,
-                                poke_build_ms: poke_start.elapsed().as_millis(),
-                            };
-                            let jam_start = Instant::now();
-                            let prepared =
-                                NodeClient::prepare_poke_wire(AiPowMinerWire::Mined.to_wire(), poke);
-                            let jam_elapsed = jam_start.elapsed();
+                            current_pearl_header = Some(pearl_job.header);
+                            let cancel = MiningCancel::new();
+                            info!(
+                                attempt_start = next_pearl_attempt_start,
+                                "Pearl-only solution submitted; continuing Nockchain search on same Pearl work"
+                            );
+                            spawn_pearl_merge_attempt(
+                                &mut workers,
+                                current_generation,
+                                &cfg,
+                                pearl_job,
+                                pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
+                                cancel.clone(),
+                            );
+                            current_cancel = Some(cancel);
+                        }
+                        Ok(PearlMergeWorkerOutput::NockchainPrepared(submission)) => {
+                            info!(
+                                matmul_attempts = submission.mined.ticket.stats.matmul_attempts_tried,
+                                elapsed_s = submission.mined.ticket.stats.elapsed.as_secs_f64(),
+                                matmul_attempt_rate = submission.mined.ticket.stats.matmul_attempt_rate_per_sec(),
+                                pearl_target_hit = submission.mined.ticket.pearl_target_hit,
+                                nockchain_target_hit = submission.mined.ticket.nockchain_target_hit,
+                                "ai-pow-miner: Pearl-compatible solution found"
+                            );
                             let outcome = client
                                 .send_prepared_poke_with_timeout_or_cancel(
-                                    prepared,
+                                    submission.prepared,
                                     NODE_POKE_ACK_TIMEOUT,
                                     shutdown.cancelled(),
                                 )
                                 .await;
                             let submit_timings =
-                                AiPowSubmitTimings::from_outcome(jam_elapsed, &outcome);
+                                AiPowSubmitTimings::from_outcome(submission.jam_elapsed, &outcome);
                             match outcome.into_result() {
                                 Ok(()) => info!(
-                                    certificate_build_ms = prove_timings.certificate_build_ms,
-                                    poke_build_ms = prove_timings.poke_build_ms,
+                                    certificate_build_ms = submission.prove_timings.certificate_build_ms,
+                                    poke_build_ms = submission.prove_timings.poke_build_ms,
                                     jam_ms = submit_timings.jam_ms,
                                     transport_ms = submit_timings.transport_ms,
                                     submit_status = ?submit_timings.status,
@@ -809,8 +792,8 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                 ),
                                 Err(e) => warn!(
                                     error = %e,
-                                    certificate_build_ms = prove_timings.certificate_build_ms,
-                                    poke_build_ms = prove_timings.poke_build_ms,
+                                    certificate_build_ms = submission.prove_timings.certificate_build_ms,
+                                    poke_build_ms = submission.prove_timings.poke_build_ms,
                                     jam_ms = submit_timings.jam_ms,
                                     transport_ms = submit_timings.transport_ms,
                                     submit_status = ?submit_timings.status,
@@ -821,14 +804,14 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                             latest_candidate = None;
                             current_pearl_header = None;
                         }
-                        WorkerOutcome::PearlJoined(Ok(Err(PearlMergeMiningError::Cancelled))) => {
+                        Err(PearlMergeMiningError::Cancelled) => {
                             debug!("Pearl-compatible worker cancelled (expected on candidate supersede / shutdown)");
                         }
-                        WorkerOutcome::PearlJoined(Ok(Err(e))) => {
-                            warn!(error = %e, "Pearl-compatible ai-pow attempt terminated without solution");
+                        Err(PearlMergeMiningError::CertificateBuild(e)) => {
+                            break InnerOutcome::Fatal(MinerError::CertificateBuild(e));
                         }
-                        WorkerOutcome::PearlJoined(Err(e)) => {
-                            break InnerOutcome::Fatal(MinerError::WorkerJoin(format!("{e}")));
+                        Err(e) => {
+                            warn!(error = %e, "Pearl-compatible ai-pow attempt terminated without solution");
                         }
                     }
                 }
@@ -836,9 +819,8 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         };
 
         // ── cleanup before reconnect or exit ──
-        if let Some(w) = worker.take() {
-            w.cancel();
-            let _ = w.await_join().await;
+        if let Err(e) = cancel_and_drain_pearl_workers(&mut workers, &mut current_cancel).await {
+            return Err(e);
         }
         let _ = client
             .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
@@ -1256,51 +1238,21 @@ enum InnerOutcome {
     Fatal(MinerError),
 }
 
-enum MiningWorker {
-    PearlMerge {
-        handle: JoinHandle<Result<PearlMergeMinedSubmission, PearlMergeMiningError>>,
-        cancel: MiningCancel,
-    },
-}
+type PearlMergeWorkerJoin =
+    Result<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>), tokio::task::JoinError>;
 
-impl MiningWorker {
-    fn cancel(&self) {
-        match self {
-            MiningWorker::PearlMerge { cancel, .. } => {
-                cancel.cancel();
-            }
-        }
+async fn cancel_and_drain_pearl_workers(
+    workers: &mut JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)>,
+    current_cancel: &mut Option<MiningCancel>,
+) -> Result<(), MinerError> {
+    if let Some(cancel) = current_cancel.take() {
+        cancel.cancel();
     }
-
-    async fn await_join(self) -> Result<(), tokio::task::JoinError> {
-        match self {
-            MiningWorker::PearlMerge { handle, .. } => handle.await.map(|_| ()),
-        }
+    while let Some(joined) = workers.join_next().await {
+        let _ = joined.map_err(|e| MinerError::WorkerJoin(format!("{e}")))?;
     }
+    Ok(())
 }
-
-enum WorkerOutcome {
-    /// No worker was running; the future returned immediately.
-    None,
-    /// Worker joined: outer Result = tokio JoinError, inner = mining result.
-    PearlJoined(
-        Result<Result<PearlMergeMinedSubmission, PearlMergeMiningError>, tokio::task::JoinError>,
-    ),
-}
-
-/// Helper to make `tokio::select!` work over an `Option<JoinHandle>`.
-/// If the slot is empty, returns `WorkerOutcome::None` immediately
-/// (caller pauses to avoid a busy-loop). If the slot has a handle,
-/// awaits it (drops it on join). Mutates `worker` in place so the
-/// caller doesn't need to thread the take/put.
-async fn await_worker(worker: &mut Option<MiningWorker>) -> WorkerOutcome {
-    match worker.take() {
-        Some(MiningWorker::PearlMerge { handle, .. }) => WorkerOutcome::PearlJoined(handle.await),
-        None => WorkerOutcome::None,
-    }
-}
-
-/// Derive the per-candidate job inputs the AI-PoW prover needs:
 /// the 32-byte chain difficulty target and Nockchain block commitment.
 ///
 /// **`nck_commitment`** is `BLAKE3(jam(candidate.block_header))`, where
@@ -1365,6 +1317,20 @@ struct PearlMergeMinedSubmission {
     aux_inclusion: PearlAuxInclusionProof,
 }
 
+struct PearlMergePreparedSubmission {
+    mined: PearlMergeMinedSubmission,
+    prove_timings: AiPowProveTimings,
+    jam_elapsed: Duration,
+    prepared: PreparedPoke,
+}
+
+enum PearlMergeWorkerOutput {
+    PearlOnly {
+        mined: PearlMergeMinedSubmission,
+        pearl_submit_failed: bool,
+    },
+    NockchainPrepared(PearlMergePreparedSubmission),
+}
 #[derive(Clone, Debug)]
 struct PearlGatewayResolvedMiningJob {
     header: PearlIncompleteBlockHeader,
@@ -1863,20 +1829,24 @@ fn noun_is_zero_atom(
     }
 }
 
-/// Spawn the Pearl-compatible ticket worker. This evaluates ticket attempts
-/// only; recursive proof construction happens in the async submission path
-/// after the worker returns a Nockchain-target hit.
+/// Spawn a Pearl-compatible worker for the given candidate generation.
+/// Ticket search, Pearl Gateway submission, recursive proof construction, and
+/// poke jam run off the async client loop. The caller submits only the prepared
+/// Nockchain poke for the still-current generation.
 fn spawn_pearl_merge_attempt(
+    workers: &mut JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)>,
+    generation: u64,
     cfg: &MinerConfig,
     job_inputs: PearlMergeCandidateJob,
     mine_opts: PearlMergeMineOptions,
     cancel: MiningCancel,
-) -> JoinHandle<Result<PearlMergeMinedSubmission, PearlMergeMiningError>> {
-    let params = cfg.puzzle.params;
-    let a = cfg.puzzle.a.clone();
-    let b = cfg.puzzle.b.clone();
-    let pearl = cfg.puzzle.pearl_merge.clone();
-    tokio::task::spawn_blocking(move || {
+) {
+    let cfg = cfg.clone();
+    workers.spawn_blocking(move || {
+        let params = cfg.puzzle.params;
+        let a = cfg.puzzle.a.clone();
+        let b = cfg.puzzle.b.clone();
+        let pearl = cfg.puzzle.pearl_merge.clone();
         let job = PearlMergeMiningJob {
             header: &job_inputs.header,
             config: &pearl.mining_config,
@@ -1887,13 +1857,82 @@ fn spawn_pearl_merge_attempt(
             max_pattern_len: pearl.max_pattern_len,
             aux: job_inputs.aux,
         };
-        let ticket = pearl_mining::run(&job, &mine_opts, cancel)?;
-        Ok(PearlMergeMinedSubmission {
+        let proof_cancel = cancel.clone();
+        let ticket = match pearl_mining::run(&job, &mine_opts, cancel) {
+            Ok(ticket) => ticket,
+            Err(e) => return (generation, Err(e)),
+        };
+        let mined = PearlMergeMinedSubmission {
             ticket,
             gateway_mining_job: job_inputs.gateway_mining_job,
             aux_inclusion: job_inputs.aux_inclusion,
-        })
-    })
+        };
+
+        let mut pearl_submit_failed = false;
+        if mined.ticket.pearl_target_hit {
+            if let Err(e) = submit_pearl_solution_to_gateway(&cfg, &pearl, &mined) {
+                pearl_submit_failed = true;
+                warn!(error = %e, "submit Pearl Gateway plain proof failed");
+            }
+        }
+
+        if !mined.ticket.nockchain_target_hit {
+            return (
+                generation,
+                Ok(PearlMergeWorkerOutput::PearlOnly {
+                    mined,
+                    pearl_submit_failed,
+                }),
+            );
+        }
+
+        if proof_cancel.is_cancelled() {
+            return (generation, Err(PearlMergeMiningError::Cancelled));
+        }
+
+        let proof_start = Instant::now();
+        let proof = match pearl.build_certificate_for_attempt(&mined.ticket.attempt) {
+            Ok(proof) => proof,
+            Err(e) => {
+                return (
+                    generation,
+                    Err(PearlMergeMiningError::CertificateBuild(e.to_string())),
+                );
+            }
+        };
+        let certificate_build_ms = proof_start.elapsed().as_millis();
+        let poke_start = Instant::now();
+        let poke = match build_ai_pow_pearl_merge_certificate_poke_from_ticket_proof(
+            &mined.ticket.attempt, &mined.aux_inclusion, &a, &b, pearl.max_pattern_len, &proof,
+        ) {
+            Ok(poke) => poke,
+            Err(e) => {
+                return (
+                    generation,
+                    Err(PearlMergeMiningError::CertificateBuild(e.to_string())),
+                );
+            }
+        };
+        let prove_timings = AiPowProveTimings {
+            certificate_build_ms,
+            poke_build_ms: poke_start.elapsed().as_millis(),
+        };
+        let jam_start = Instant::now();
+        let prepared = NodeClient::prepare_poke_wire(AiPowMinerWire::Mined.to_wire(), poke);
+        let jam_elapsed = jam_start.elapsed();
+
+        (
+            generation,
+            Ok(PearlMergeWorkerOutput::NockchainPrepared(
+                PearlMergePreparedSubmission {
+                    mined,
+                    prove_timings,
+                    jam_elapsed,
+                    prepared,
+                },
+            )),
+        )
+    });
 }
 
 fn pearl_mine_opts_with_attempt_start(

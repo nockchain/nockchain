@@ -71,6 +71,8 @@ pub enum PearlMergeMiningError {
     BudgetExhausted { max: u64 },
     #[error("Pearl-valid ticket offset space exhausted")]
     AttemptSpaceExhausted,
+    #[error("recursive certificate build failed: {0}")]
+    CertificateBuild(String),
 }
 
 /// Run Pearl-compatible ticket mining.
