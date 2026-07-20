@@ -14,16 +14,14 @@
 //! 2. (re)connect to the node with backoff.
 //! 3. `set_mining_key` → `watch_candidates` → `enable_mining(true)`
 //!    (subscribe before enable to avoid the candidate-emit race).
-//! 4. Inner loop (single worker for v1):
-//!    - shutdown → cancel current attempt + best-effort
-//!      `enable_mining(false)` + exit.
-//!    - new candidate -> cancel any in-flight attempt, derive the
-//!      Pearl-compatible mining job, and spawn the worker.
-//!    - worker result:
-//!      - success → build the recursive certificate artifact only after a
-//!        target hit, then poke the node with a `%ai-pow` command on
-//!        [`crate::wire::AiPowMinerWire::Mined`].
-//!      - error → log + idle.
+//! 4. Inner loop:
+//!    - shutdown → cancel/drain candidate, Gateway, and mining workers, then
+//!      best-effort `enable_mining(false)` + exit.
+//!    - new candidate → bump the generation, cancel current mining, ingest
+//!      candidate data, resolve Pearl Gateway work, and spawn the mining worker.
+//!    - worker results are accepted only for the current generation; target hits
+//!      carry a prepared `%ai-pow` poke for [`crate::wire::AiPowMinerWire::Mined`].
+//!    - worker errors fail closed for certificate construction and otherwise log.
 //! 5. Stream drop → outer loop reconnects.
 //!
 //! ## Note on submission
