@@ -518,6 +518,9 @@ pub struct AiPowCompactRecursiveProverCache {
     inner: ai_pow_zk::recursion::AiPowCompactBatchProverCache,
 }
 
+const COMPACT_RECURSIVE_PROVER_CACHE_L2_ONLY_ESTIMATED_BYTES: usize = 800 * 1024 * 1024;
+const COMPACT_RECURSIVE_PROVER_CACHE_FULL_ESTIMATED_BYTES: usize = 3500 * 1024 * 1024;
+
 impl AiPowCompactRecursiveProverCache {
     fn from_inner(inner: ai_pow_zk::recursion::AiPowCompactBatchProverCache) -> Self {
         Self { inner }
@@ -545,6 +548,18 @@ impl AiPowCompactRecursiveProverCache {
     pub fn into_l2_only(self) -> Self {
         Self {
             inner: self.inner.into_l2_only(),
+        }
+    }
+
+    pub fn has_l1_prep(&self) -> bool {
+        self.inner.has_l1_prep()
+    }
+
+    pub fn estimated_resident_bytes(&self) -> usize {
+        if self.has_l1_prep() {
+            COMPACT_RECURSIVE_PROVER_CACHE_FULL_ESTIMATED_BYTES
+        } else {
+            COMPACT_RECURSIVE_PROVER_CACHE_L2_ONLY_ESTIMATED_BYTES
         }
     }
 

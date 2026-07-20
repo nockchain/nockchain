@@ -37,6 +37,7 @@
 //! the Nockchain `%ai-pow` command, which consensus verifies via the
 //! `%ai-pow-verify` jet before admitting the block.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 #[cfg(unix)]
@@ -103,6 +104,9 @@ const PEARL_GATEWAY_MAX_RESPONSE_LINE_BYTES: usize = 160 * 1024;
 const MAX_CHAIN_TARGET_U32_LIMBS: usize = 10;
 const AI_POW_MINE_CANDIDATE_VERSION: u64 = 3;
 const NODE_POKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPACT_PROVER_CACHE_BUDGET_BYTES: usize = 1536 * 1024 * 1024;
+const DENSE_COMPACT_PROVER_CACHE_KEY: &str = "dense";
+const CANONICAL_MOE_COMPACT_PROVER_CACHE_KEY: &str = "canonical-moe";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AiPowProveTimings {
@@ -126,6 +130,66 @@ impl AiPowSubmitTimings {
             status: outcome.status(),
             send_started: outcome.send_started(),
         }
+    }
+}
+
+struct ProverCacheEntry {
+    key: &'static str,
+    bytes: usize,
+    cache: Arc<AiPowCompactRecursiveProverCache>,
+}
+
+struct ProverCacheLru {
+    max_bytes: usize,
+    total_bytes: usize,
+    entries: VecDeque<ProverCacheEntry>,
+}
+
+impl ProverCacheLru {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            max_bytes,
+            total_bytes: 0,
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &'static str) -> Option<Arc<AiPowCompactRecursiveProverCache>> {
+        let pos = self.entries.iter().position(|entry| entry.key == key)?;
+        let entry = self
+            .entries
+            .remove(pos)
+            .expect("position came from entries");
+        let cache = Arc::clone(&entry.cache);
+        self.entries.push_back(entry);
+        Some(cache)
+    }
+
+    fn insert(&mut self, key: &'static str, cache: AiPowCompactRecursiveProverCache) -> bool {
+        let bytes = cache.estimated_resident_bytes();
+        if bytes > self.max_bytes {
+            return false;
+        }
+        if let Some(pos) = self.entries.iter().position(|entry| entry.key == key) {
+            let old = self
+                .entries
+                .remove(pos)
+                .expect("position came from entries");
+            self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+        }
+        while self.total_bytes + bytes > self.max_bytes {
+            let Some(old) = self.entries.pop_front() else {
+                break;
+            };
+            self.total_bytes = self.total_bytes.saturating_sub(old.bytes);
+        }
+        self.total_bytes += bytes;
+        self.entries.push_back(ProverCacheEntry {
+            key,
+            bytes,
+            cache: Arc::new(cache),
+        });
+        true
     }
 }
 
@@ -202,17 +266,18 @@ impl PearlMergeSubmissionConfig {
         a: Arc<Vec<i8>>,
         b: Arc<Vec<i8>>,
     ) -> Self {
-        let compact_prover_cache: Arc<Mutex<Option<Arc<AiPowCompactRecursiveProverCache>>>> =
-            Arc::new(Mutex::new(None));
+        let compact_prover_cache = Arc::new(Mutex::new(ProverCacheLru::new(
+            COMPACT_PROVER_CACHE_BUDGET_BYTES,
+        )));
         let certificate_builder = Arc::new(move |attempt: &PearlMergeCheckedTicketAttempt| {
-            let cached = compact_prover_cache
-                .lock()
-                .map_err(|_| {
+            let cached = {
+                let mut guard = compact_prover_cache.lock().map_err(|_| {
                     AiPowCertificateBuildError(
                         "compact recursive prover cache lock poisoned".to_string(),
                     )
-                })?
-                .clone();
+                })?;
+                guard.get(DENSE_COMPACT_PROVER_CACHE_KEY)
+            };
             if cached.is_some() {
                 debug!("using warmed compact recursive prover cache");
             }
@@ -239,13 +304,26 @@ impl PearlMergeSubmissionConfig {
             })?;
             let proof = PearlMergeCertificateProof::from_compact_recursive_run(&run)?;
             if let Some(new_cache) = run.into_prover_cache() {
+                let new_cache = new_cache.into_l2_only();
+                let cache_bytes = new_cache.estimated_resident_bytes();
                 let mut guard = compact_prover_cache.lock().map_err(|_| {
                     AiPowCertificateBuildError(
                         "compact recursive prover cache lock poisoned".to_string(),
                     )
                 })?;
-                debug!("stored compact recursive prover cache from certificate run");
-                *guard = Some(Arc::new(new_cache));
+                if guard.insert(DENSE_COMPACT_PROVER_CACHE_KEY, new_cache) {
+                    debug!(
+                        cache_bytes,
+                        cache_budget_bytes = COMPACT_PROVER_CACHE_BUDGET_BYTES,
+                        "stored compact recursive L2 prover cache from certificate run"
+                    );
+                } else {
+                    warn!(
+                        cache_bytes,
+                        cache_budget_bytes = COMPACT_PROVER_CACHE_BUDGET_BYTES,
+                        "dropping compact recursive prover cache over budget"
+                    );
+                }
             }
             Ok(proof)
         });
@@ -928,8 +1006,9 @@ pub async fn run_canonical(
         params = ?CANONICAL_MATMUL_PARAMS,
         "ai-pow-miner: entering CANONICAL (gateway-free CPU) loop"
     );
-    let canonical_prover_cache: Arc<Mutex<Option<Arc<AiPowCompactRecursiveProverCache>>>> =
-        Arc::new(Mutex::new(None));
+    let canonical_prover_cache = Arc::new(Mutex::new(ProverCacheLru::new(
+        COMPACT_PROVER_CACHE_BUDGET_BYTES,
+    )));
     loop {
         if shutdown.is_cancelled() {
             break;
@@ -1027,12 +1106,14 @@ pub async fn run_canonical(
                         "new %mine-ai candidate; grinding canonical AI-PoW block against target"
                     );
                     let cancel = grind_cancel.clone();
-                    let cache = canonical_prover_cache
-                        .lock()
-                        .map_err(|_| MinerError::CertificateBuild(
-                            "canonical compact prover cache lock poisoned".to_string(),
-                        ))?
-                        .clone();
+                    let cache = {
+                        let mut guard = canonical_prover_cache.lock().map_err(|_| {
+                            MinerError::CertificateBuild(
+                                "canonical compact prover cache lock poisoned".to_string(),
+                            )
+                        })?;
+                        guard.get(CANONICAL_MOE_COMPACT_PROVER_CACHE_KEY)
+                    };
                     if cache.is_some() {
                         debug!("using warmed canonical compact recursive prover cache");
                     }
@@ -1048,13 +1129,26 @@ pub async fn run_canonical(
                         CanonicalOutcome::Joined(Ok(Ok(Some(proved)))) => {
                             let CanonicalProvedBlock { block, prover_cache } = proved;
                             if let Some(new_cache) = prover_cache {
+                                let new_cache = new_cache.into_l2_only();
+                                let cache_bytes = new_cache.estimated_resident_bytes();
                                 let mut guard = canonical_prover_cache.lock().map_err(|_| {
                                     MinerError::CertificateBuild(
                                         "canonical compact prover cache lock poisoned".to_string(),
                                     )
                                 })?;
-                                debug!("stored canonical compact recursive L2 prover cache");
-                                *guard = Some(Arc::new(new_cache.into_l2_only()));
+                                if guard.insert(CANONICAL_MOE_COMPACT_PROVER_CACHE_KEY, new_cache) {
+                                    debug!(
+                                        cache_bytes,
+                                        cache_budget_bytes = COMPACT_PROVER_CACHE_BUDGET_BYTES,
+                                        "stored canonical compact recursive L2 prover cache"
+                                    );
+                                } else {
+                                    warn!(
+                                        cache_bytes,
+                                        cache_budget_bytes = COMPACT_PROVER_CACHE_BUDGET_BYTES,
+                                        "dropping canonical compact recursive prover cache over budget"
+                                    );
+                                }
                             }
                             info!(
                                 commit = %hex::encode(block.commit),

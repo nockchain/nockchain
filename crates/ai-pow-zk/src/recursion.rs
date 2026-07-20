@@ -1762,6 +1762,10 @@ impl AiPowCompactBatchProverCache {
         self.l2_prep.l2_statement_public_binding_lanes
     }
 
+    pub const fn has_l1_prep(&self) -> bool {
+        self.l1_prep.is_some()
+    }
+
     pub fn into_l2_only(self) -> Self {
         Self {
             l1_prep: None,
