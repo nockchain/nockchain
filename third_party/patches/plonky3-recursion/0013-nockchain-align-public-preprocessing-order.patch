@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 17:26:53 -0400
-Subject: [PATCH 13/17] nockchain: align public preprocessing order
+Subject: [PATCH 13/18] nockchain: align public preprocessing order
 
 Public trace rows follow public input declaration order so the first binding lanes are canonical. The Public AIR preprocessed witness-index rows now use the same order; otherwise lookup sends pair a value row with the wrong witness id and the WitnessChecks bus terminal sum is non-zero.
 

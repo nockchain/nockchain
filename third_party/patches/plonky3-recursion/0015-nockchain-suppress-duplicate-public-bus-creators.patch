@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 17:43:18 -0400
-Subject: [PATCH 15/17] nockchain: suppress duplicate public bus creators
+Subject: [PATCH 15/18] nockchain: suppress duplicate public bus creators
 
 Public input rows can share a witness with Const(0) or with another public row after connect-based aliasing. The Public AIR now assigns WitnessChecks multiplicity only to the first non-Const public creator for a witness, leaving duplicate public rows available for public binding without double-sending the same witness on the bus.
 

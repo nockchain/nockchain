@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 16:21:10 -0400
-Subject: [PATCH 10/17] nockchain: allocate primitive public verifier inputs
+Subject: [PATCH 10/18] nockchain: allocate primitive public verifier inputs
 
 Recursive batch-STARK verification now allocates public input targets for the primitive Public table using proof.public_binding_lanes * proof.ext_degree. The packer already supplies those values; without the allocation, recursive verification rejected valid circuit proofs with a public binding lane statement.
 

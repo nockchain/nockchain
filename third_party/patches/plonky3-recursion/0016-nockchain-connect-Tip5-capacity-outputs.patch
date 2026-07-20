@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 17:59:03 -0400
-Subject: [PATCH 16/17] nockchain: connect Tip5 capacity outputs
+Subject: [PATCH 16/18] nockchain: connect Tip5 capacity outputs
 
 Tip5 sponge state chaining can feed capacity limbs into later permutation inputs. The circuit AIR and preprocessor now carry WitnessChecks output columns for all 16 state limbs, while inactive/unreturned outputs remain zero-multiplicity. This prevents returned capacity witnesses from being read without a producer on the witness bus.
 

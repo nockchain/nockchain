@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 16:43:52 -0400
-Subject: [PATCH 11/17] nockchain: order public trace by input position
+Subject: [PATCH 11/18] nockchain: order public trace by input position
 
 Public table rows now follow the public input declaration position instead of lowered operation order. STARK public binding lanes refer to the first public table rows, so recursive certificates can bind an external statement only if those rows are canonical public input positions.
 

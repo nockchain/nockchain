@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 13:59:33 -0400
-Subject: [PATCH 04/17] nockchain: restore compact metadata API
+Subject: [PATCH 04/18] nockchain: restore compact metadata API
 
 Restore the Nockchain compact proof metadata types and public-binding lane plumbing on the Plonky3 0.6.2 recursion fork.
 

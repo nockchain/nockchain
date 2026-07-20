@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 13:21:53 -0400
-Subject: [PATCH 01/17] nockchain: add Tip5 recursive backend
+Subject: [PATCH 01/18] nockchain: add Tip5 recursive backend
 
 Pin the recursion workspace to Plonky3 v0.6.2 and add the Nockchain Tip5 non-primitive AIR, circuit builder dispatch, batch-STARK table registration, digest-width handling, and executor metadata needed by the recursive AI-PoW verifier.
 

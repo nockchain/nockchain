@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 14:29:30 -0400
-Subject: [PATCH 06/17] nockchain: use digest width in MMCS recursion
+Subject: [PATCH 06/18] nockchain: use digest width in MMCS recursion
 
 The recursion circuit now wires Merkle-path roots, sibling injection, and exposed outputs using the configured MMCS digest width rather than the sponge rate. Tip5 uses rate 10 but digest 5, so recursive certificate verification must bind exactly the five root limbs that native Tip5 MMCS commits.
 

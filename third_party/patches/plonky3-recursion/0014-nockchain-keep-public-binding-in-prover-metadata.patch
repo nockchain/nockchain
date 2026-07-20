@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 17:33:56 -0400
-Subject: [PATCH 14/17] nockchain: keep public binding in prover metadata
+Subject: [PATCH 14/18] nockchain: keep public binding in prover metadata
 
 Circuit prover setup now builds the primitive Public AIR with the same public_binding_lanes used during proving. ProverData therefore derives quotient degrees and symbolic constraints for the proof shape actually emitted when the recursive certificate binds statement limbs as STARK public values.
 

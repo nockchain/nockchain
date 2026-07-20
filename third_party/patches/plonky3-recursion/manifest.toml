@@ -2,91 +2,96 @@ official_url = "https://github.com/Plonky3/Plonky3-recursion.git"
 official_base_commit = "b36339709a7a67ee9760fb578b3d4339fd983709"
 official_base_tree = "d9587b73246a53924ba3b7555c6865a70c066731"
 fork_url = "https://github.com/nockchain/Plonky3-recursion.git"
-patched_fork_commit = "eb95c5162f437b9320c309676faffecd851c3c75"
-patched_fork_tree = "9cb119512e6a8c2fc84be49840146e65584f7062"
+patched_fork_commit = "a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+patched_fork_tree = "56f32b6d4837ada88e18e226819d373a98c30eaa"
 core_plonky3_commit = "11cc5849a1b57a2f520d6edc608b9e516517d841"
 
 [[patches]]
 file = "0001-nockchain-add-Tip5-recursive-backend.patch"
-sha256 = "47bf8588d44304727c0c4bcfee7680923bc5792dd2cb0a41ee327892e32713ae"
+sha256 = "be998bbab61fe6f37b0b90794da6cd7c3c155d880668a831c74d84fd6b526f29"
 patch_id = "9f7426ec6e080dab9784c17545b604f2f093743f"
 
 [[patches]]
 file = "0002-nockchain-wire-Tip5-recursion-backend.patch"
-sha256 = "53ca194b1e6d16511f48941bafbd52a22d29a0f377242ef8a2cf741a0319f10c"
+sha256 = "55555a9de78d26c917b176091a58afd5d75ce05afdbf4c58478813066a222a39"
 patch_id = "8c5b941e15cc68554c7e64f4baddbac676c54226"
 
 [[patches]]
 file = "0003-nockchain-restore-recursive-prover-interfaces.patch"
-sha256 = "2216d6c567bdabd72b4e815e0dbd32926ed2900739c04c756a90eb9f5e971426"
+sha256 = "06d76fdc169153fd665641d113ab3ae941f4cf401a1e6ea93da5e9393ab7483d"
 patch_id = "f0697beecb877653896e6cceea0c5d8e865f364a"
 
 [[patches]]
 file = "0004-nockchain-restore-compact-metadata-API.patch"
-sha256 = "2ff06b8005d4aba27320a289f7ec5433be5af22ba7a77b50a5c074e550ab279d"
+sha256 = "b1f8807521677a9537ec4db494cf9d21a34a5047d7d2125f8cba1e3713892b46"
 patch_id = "4e263ffbe69ae2ff9a02755f6828fea356ee67a7"
 
 [[patches]]
 file = "0005-nockchain-add-Blake3-compact-verifier-wrappers.patch"
-sha256 = "b385a26cc9246aa908cd6c7daf04d028e8b471063c2d6137cdef6318d21de408"
+sha256 = "64e3d5125d796865b56d6c2a6b54e7f71e77b51ec1ad3ad164f4c48e9dd5281b"
 patch_id = "2afbd56c0e512bfd251661f29939882060d5f723"
 
 [[patches]]
 file = "0006-nockchain-use-digest-width-in-MMCS-recursion.patch"
-sha256 = "2bd4422ab761f5a249c768af07e39f6b8df2c738fbeacf35d51ff5be4b7f2de0"
+sha256 = "ab64b30164443924e9b087c8f6c54f519f87186b1884361bb934b9707ed1f7b2"
 patch_id = "134962e1a8295796be115f0962d7e993801690b3"
 
 [[patches]]
 file = "0007-nockchain-preserve-creator-witnesses-during-CSE.patch"
-sha256 = "1656214a161392aa37dcadd428329fc17f2d12d49968079f66633f3dd3653294"
+sha256 = "111c18ed966b1229285c81f67b3945a15aa3bf8abd3b1bf3baee2caa34c1fcac"
 patch_id = "0a6ef3f82ea3f4e83da58c9ba5e2b5efb81025fc"
 
 [[patches]]
 file = "0008-nockchain-place-Tip5-MMCS-sibling-digests-contiguous.patch"
-sha256 = "1e3f6eb49d219f19a6f13f1e7e4afa60a294805c024addf0f68c9b55c4803900"
+sha256 = "ee3f89ceffe15d1173e18b55569b1b1480e942b55f85b4230fda58c6b67eb4b4"
 patch_id = "8ec099988a937a6c3472d9dd5b2f5d9ade7e4701"
 
 [[patches]]
 file = "0009-nockchain-pack-Tip5-commitment-caps-by-digest-width.patch"
-sha256 = "52f180a1b95d0621599e60092d4769a82c85d4b4caf31d13c369447e370a9704"
+sha256 = "2bca0f7deb7712873b5a896bb64405c8785e36eb900c9a80bbcf57e0ab65244e"
 patch_id = "029ee82785d65c18032a8e0df85d5f770698be5c"
 
 [[patches]]
 file = "0010-nockchain-allocate-primitive-public-verifier-inputs.patch"
-sha256 = "cb4692373f15ab032133fbaa986c2ef6ddda3c1d809d6231c488e132c3975f5c"
+sha256 = "92673d0bcd4cd7212aa05b62e5a3081f01df375acc74ba74a707405c6652dd16"
 patch_id = "4a732d61deeb9b73921dc5883c7068bf41b879eb"
 
 [[patches]]
 file = "0011-nockchain-order-public-trace-by-input-position.patch"
-sha256 = "4abd91d3fd5e337913a05faf06004851f6306b61da2704f46dd19f245436d54e"
+sha256 = "862b49a7ff0e643f85e44dac5f9e5ec069d6249d0404687883e995f9b4849b99"
 patch_id = "5197a9d849fc696172d108c54aa75fa5635b6729"
 
 [[patches]]
 file = "0012-nockchain-verify-primitive-public-binding-constraint.patch"
-sha256 = "f96ebb12f1043a174289893b63b62e5bef35dc0fdcc463c5667c18deceac95a8"
+sha256 = "99f332d552f488f33a70c475656e716a3866d8fe9e06d8727d82e86f5d85da91"
 patch_id = "d15965f144e40f127dd55ed61b4d2ba16cc93d2e"
 
 [[patches]]
 file = "0013-nockchain-align-public-preprocessing-order.patch"
-sha256 = "b5f0da4d8e6cf146b554465e243644d22b1c3d396ecfc5a9f00d906afe5250f2"
+sha256 = "2f02f5db1b7815c826da3ab89e4e787cf61a95d237789978a60f96aac8302ad2"
 patch_id = "47d3772a1408ac70465bb8f094f8f57fc9545bda"
 
 [[patches]]
 file = "0014-nockchain-keep-public-binding-in-prover-metadata.patch"
-sha256 = "dab4aa87a93a881c903b71de0b08a025086e8f2f94575b31e8bd30e49b7824a1"
+sha256 = "116e3cb30b2241a978cf89751ac531cfa76e992e45d17a233d654fd355b9b270"
 patch_id = "41f133de488162c11886dd16d648348763938809"
 
 [[patches]]
 file = "0015-nockchain-suppress-duplicate-public-bus-creators.patch"
-sha256 = "b864972a715d898d00c643732b4c31a64b864b46d8521822cef1c8f3c7541f5e"
+sha256 = "07e9b8083444c539b34ff9fa9d76dfb76ce6abf5ff0fb4bb668c4f8b691dab62"
 patch_id = "26fbdf6a938d84a8805572127c0bbefb4c83aa4c"
 
 [[patches]]
 file = "0016-nockchain-connect-Tip5-capacity-outputs.patch"
-sha256 = "76edb297ffa32c409facfd1e33edf0dd767362e58aa06aced9c88bbb0d5e5699"
+sha256 = "176b48d72e14762053a96b3f14e0d7ec1b697b498005de27783e095b19ac109a"
 patch_id = "b321a3dab05ee19aacd8dfb8989f7634c6a2adad"
 
 [[patches]]
 file = "0017-nockchain-read-const-witness-columns-precisely.patch"
-sha256 = "51b0ed26b8675ebd391b81187154dc3c71d6f4299c0e0c1212f2590f30dafa71"
+sha256 = "d7f9ff9e7ac70ea042dd5ea59b74bff57c5b6831dac752da91314b31052d755d"
 patch_id = "2956d9ae87a3af70082bb2ab8199c49d0f579da6"
+
+[[patches]]
+file = "0018-nockchain-make-prover-data-cache-shareable.patch"
+sha256 = "732d400cae094bb2962902e04694fc333c6bb09d7b81c4d69ef3f0aeadbae649"
+patch_id = "eadfc6d9515b211c3cbc3fe8fd4a7d8259d384c6"

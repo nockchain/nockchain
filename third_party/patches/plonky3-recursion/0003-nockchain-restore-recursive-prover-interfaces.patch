@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 13:43:46 -0400
-Subject: [PATCH 03/17] nockchain: restore recursive prover interfaces
+Subject: [PATCH 03/18] nockchain: restore recursive prover interfaces
 
 Restore the Nockchain-facing Tip5 and BLAKE3 recursive prover configuration surface, public-binding table packing metadata, and common-data binding helpers on top of the Plonky3 0.6.2 recursion fork.
 

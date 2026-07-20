@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 16:52:16 -0400
-Subject: [PATCH 12/17] nockchain: verify primitive public binding constraints
+Subject: [PATCH 12/18] nockchain: verify primitive public binding constraints
 
 Recursive batch-STARK verification now reconstructs the primitive Public AIR with proof.public_binding_lanes. The verifier already allocates and packs the external public values; the AIR must include the same first-row binding constraints the prover used or the folded quotient check is evaluated against a different constraint system.
 

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 15:46:05 -0400
-Subject: [PATCH 08/17] nockchain: place Tip5 MMCS sibling digests contiguously
+Subject: [PATCH 08/18] nockchain: place Tip5 MMCS sibling digests contiguously
 
 Tip5 recursive MMCS compression now lays the running digest and sibling digest into the first two digest-width chunks of the permutation state. The pre-sibling injection row uses digest width for both placement and exposed-output metadata, matching the native TruncatedPermutation<Tip5,2,5,16> shape and avoiding rate-width overrun.
 

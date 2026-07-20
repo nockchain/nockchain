@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 15:51:04 -0400
-Subject: [PATCH 09/17] nockchain: pack Tip5 commitment caps by digest width
+Subject: [PATCH 09/18] nockchain: pack Tip5 commitment caps by digest width
 
 Recursive FRI verification now splits observed arity-2 MMCS caps by the native digest width, not the sponge rate. Poseidon arity-2 configs still have digest == rate; Tip5 has digest 5 and rate 10, so L2 verification of L1 Tip5 certificates must compare five-limb cap rows to the computed five-limb digest.
 

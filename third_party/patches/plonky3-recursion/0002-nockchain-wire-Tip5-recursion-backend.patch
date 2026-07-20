@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 13:34:28 -0400
-Subject: [PATCH 02/17] nockchain: wire Tip5 recursion backend
+Subject: [PATCH 02/18] nockchain: wire Tip5 recursion backend
 
 Teach the recursion challenger and FRI backend to use the Tip5 permutation configuration, including the Goldilocks Tip5 circuit challenger path and Tip5 table/preprocessor registration for D=2 verifier circuits.
 

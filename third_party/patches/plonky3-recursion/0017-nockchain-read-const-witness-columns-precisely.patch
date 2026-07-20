@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
 Date: Mon, 20 Jul 2026 18:36:56 -0400
-Subject: [PATCH 17/17] nockchain: read const witness columns precisely
+Subject: [PATCH 17/18] nockchain: read const witness columns precisely
 
 The public-table duplicate suppression compares public output indices against const creator indices. Const preprocessing has already been expanded to [multiplicity, index] pairs at that point, so only the index column is a creator. This prevents public rows from being disabled when a const read-count happens to equal their witness index.
 
