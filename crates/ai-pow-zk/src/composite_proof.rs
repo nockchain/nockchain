@@ -37,13 +37,12 @@
 //! `CompositePublicInputs::derive_from_trace` helper that snapshots
 //! the values from a generated trace.
 
-use p3_commit::Pcs;
 #[cfg(any(test, feature = "dev-unsafe"))]
 use p3_uni_stark::{
     prove, prove_with_preprocessed, setup_preprocessed, verify, verify_with_preprocessed,
     PreprocessedProverData, PreprocessedVerifierKey, Proof,
 };
-use p3_uni_stark::{StarkGenericConfig, Val, VerificationError};
+use p3_uni_stark::{StarkGenericConfig, Val};
 use thiserror::Error;
 
 use crate::circuit::{build_stark_config, AiPowStarkConfig, CircuitConfig};
@@ -54,20 +53,15 @@ use crate::composite_public::CompositePublicInputs;
 use crate::composite_trace::CompositeTrace;
 use crate::params::ZkParams;
 
-/// Concrete type of the underlying STARK verification error for the composite AIR.
-/// Equivalent to `VerificationError<PcsError<AiPowStarkConfig>>`.
-pub type StarkVerificationError = VerificationError<
-    <<AiPowStarkConfig as StarkGenericConfig>::Pcs as Pcs<
-        <AiPowStarkConfig as StarkGenericConfig>::Challenge,
-        <AiPowStarkConfig as StarkGenericConfig>::Challenger,
-    >>::Error,
->;
+/// Concrete STARK verification failures are stringified at this API boundary because
+/// the uni-STARK and batch-STARK paths return different verifier error enums.
+pub type StarkVerificationError = String;
 
 #[derive(Debug, Error)]
 pub enum CompositeVerificationError {
     #[error("invalid verifier program: {0}")]
     InvalidProgram(#[from] ProgramShapeError),
-    #[error("stark verification failed: {0:?}")]
+    #[error("stark verification failed: {0}")]
     Stark(StarkVerificationError),
 }
 
@@ -118,7 +112,7 @@ pub fn composite_verify(
 ) -> Result<(), CompositeVerificationError> {
     let pis = public_inputs.to_vec();
     verify::<AiPowStarkConfig, _>(config, &CompositeFullAir, proof, &pis)
-        .map_err(CompositeVerificationError::Stark)
+        .map_err(|e| CompositeVerificationError::Stark(format!("{e:?}")))
 }
 
 /// Encode the 8×u32 `HASH_JACKPOT` PI as a 32-byte little-endian
@@ -304,7 +298,7 @@ pub fn composite_verify_pinned(
     let (_pp, vk) = composite_setup(config, program);
     let pis = public_inputs.to_vec();
     verify_with_preprocessed(config, &air, proof, &pis, Some(&vk))
-        .map_err(CompositeVerificationError::Stark)
+        .map_err(|e| CompositeVerificationError::Stark(format!("{e:?}")))
 }
 
 /// Program-pinned full PoW verify: pinned STARK verify + the C2
@@ -470,7 +464,7 @@ pub(crate) fn composite_verify_pinned_logup_sx(
         &[public_inputs.to_vec()],
         &pd.common,
     )
-    .map_err(CompositeVerificationError::Stark)
+    .map_err(|e| CompositeVerificationError::Stark(format!("{e:?}")))
 }
 
 /// Route-A pinned full PoW verify: pinned+LogUp STARK verify +
@@ -562,54 +556,58 @@ mod tests {
         let bincode_commitments = bincode_len(&proof.commitments, "Layer-0 commitments");
         let bincode_opened_values = bincode_len(&proof.opened_values, "Layer-0 opened values");
         let bincode_opening_proof = bincode_len(&proof.opening_proof, "Layer-0 opening proof");
-        let bincode_global_lookup_data =
-            bincode_len(&proof.global_lookup_data, "Layer-0 global lookup data");
+        let bincode_lookup_terminals =
+            bincode_len(&proof.lookup_terminals, "Layer-0 lookup terminals");
         let bincode_component_sum = bincode_commitments
             + bincode_opened_values
             + bincode_opening_proof
-            + bincode_global_lookup_data;
+            + bincode_lookup_terminals;
 
         let postcard_total = postcard_len(&proof, "Layer-0 batch proof");
         let postcard_commitments = postcard_len(&proof.commitments, "Layer-0 commitments");
         let postcard_opened_values = postcard_len(&proof.opened_values, "Layer-0 opened values");
         let postcard_opening_proof = postcard_len(&proof.opening_proof, "Layer-0 opening proof");
-        let postcard_global_lookup_data =
-            postcard_len(&proof.global_lookup_data, "Layer-0 global lookup data");
+        let postcard_lookup_terminals =
+            postcard_len(&proof.lookup_terminals, "Layer-0 lookup terminals");
         let postcard_component_sum = postcard_commitments
             + postcard_opened_values
             + postcard_opening_proof
-            + postcard_global_lookup_data;
+            + postcard_lookup_terminals;
 
         let table_count = proof.opened_values.instances.len();
-        let global_lookup_entries: usize = proof.global_lookup_data.iter().map(Vec::len).sum();
+        let lookup_terminal_count = proof
+            .lookup_terminals
+            .iter()
+            .filter(|t| t.is_some())
+            .count();
 
         eprintln!(
-            "ai-pow Layer-0 pinned+LogUp size breakdown [{label}]: profile=lb{} nq{} pow{} prove_ms={} verify_ms={} tables={} global_lookup_entries={}",
+            "ai-pow Layer-0 pinned+LogUp size breakdown [{label}]: profile=lb{} nq{} pow{} prove_ms={} verify_ms={} tables={} lookup_terminals={}",
             profile.log_blowup,
             profile.num_queries,
             profile.pow_bits,
             prove_ms,
             verify_ms,
             table_count,
-            global_lookup_entries,
+            lookup_terminal_count,
         );
         eprintln!(
-            "ai-pow Layer-0 pinned+LogUp bincode bytes [{label}]: total={} commitments={} opened_values={} opening_proof={} global_lookup_data={} component_sum={} serde_overhead={}",
+            "ai-pow Layer-0 pinned+LogUp bincode bytes [{label}]: total={} commitments={} opened_values={} opening_proof={} lookup_terminals={} component_sum={} serde_overhead={}",
             bincode_total,
             bincode_commitments,
             bincode_opened_values,
             bincode_opening_proof,
-            bincode_global_lookup_data,
+            bincode_lookup_terminals,
             bincode_component_sum,
             bincode_total.saturating_sub(bincode_component_sum),
         );
         eprintln!(
-            "ai-pow Layer-0 pinned+LogUp postcard bytes [{label}]: total={} commitments={} opened_values={} opening_proof={} global_lookup_data={} component_sum={} serde_overhead={}",
+            "ai-pow Layer-0 pinned+LogUp postcard bytes [{label}]: total={} commitments={} opened_values={} opening_proof={} lookup_terminals={} component_sum={} serde_overhead={}",
             postcard_total,
             postcard_commitments,
             postcard_opened_values,
             postcard_opening_proof,
-            postcard_global_lookup_data,
+            postcard_lookup_terminals,
             postcard_component_sum,
             postcard_total.saturating_sub(postcard_component_sum),
         );

@@ -27,11 +27,9 @@ serde = { workspace = true, features = ["derive"] }
 # that the composite AIR proves the keyed-hash relation directly.
 blake3 = { workspace = true }
 
-# Plonky3. Pin all direct crates to the same upstream commit so the vendored
-# recursion workspace and the production Layer-0 LogUp prover share one exact
-# dependency graph. This intentionally stops before upstream commit 895572b7,
-# which requires a newer Rust std `MaybeUninit` slice API than this workspace
-# toolchain currently exposes.
+# Plonky3. Pin all direct crates to the same upstream v0.6.2 commit so the
+# vendored recursion workspace and the production Layer-0 LogUp prover share one
+# exact dependency graph.
 #
 # Stack choice (see 2026-05-13_DESIGN.md for rationale):
 #   * Goldilocks base field (2^64 − 2^32 + 1) — Plonky3-native, matches
@@ -44,20 +42,20 @@ blake3 = { workspace = true }
 #     matrix commits, jackpot hash); the sub-AIR proves the keyed-hash
 #     transitions inside the circuit so we don't have to re-prove BLAKE3
 #     by hand.
-p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-blake3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-lookup = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
-p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1" }
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-blake3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-lookup = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
 
 # Tip5 sponge — Plonky3 upstream does NOT ship a `p3-tip5` crate.
 # Nockchain has its own in-repo Tip5 implementation in
@@ -68,17 +66,14 @@ p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "83ec3062
 nockchain-math = { workspace = true }
 
 # §recursion integration (2026-05-22) — opt-in wiring of the composite
-# proof into the vendored `crates/plonky3-recursion` substrate. Path-deps on
-# the recursion workspace's crates; this is the correct dependency
-# direction (the generic `p3-recursion` substrate does NOT depend on
-# `ai-pow-zk` — the caller supplies `CompositeFullAirWithLookups` as the
-# generic AIR). Both workspaces pin the same Plonky3 rev (see S1), so
-# the `p3-*` git crates unify. Off by default — the default `ai-pow-zk`
-# build pulls none of these; `--features recursion` enables them.
-p3-recursion = { path = "../plonky3-recursion/recursion", optional = true }
-p3-circuit = { path = "../plonky3-recursion/circuit", optional = true }
-p3-circuit-prover = { path = "../plonky3-recursion/circuit-prover", optional = true }
-p3-tip5-circuit-air = { path = "../plonky3-recursion/tip5-circuit-air", optional = true }
+# proof into Nockchain's pinned Plonky3-recursion fork. Pin the commit, not the
+# branch, so Cargo resolution is reproducible even as the fork branch advances.
+# Off by default — the default `ai-pow-zk` build pulls none of these;
+# `--features recursion` enables them.
+p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
+p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
+p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
+p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "1f3fda2ef4b42696a648e3fb86f24f0a96951a98", optional = true }
 postcard = { version = "1.1.3", features = ["alloc"], optional = true }
 
 [features]

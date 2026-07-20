@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Format or check only root-owned workspace packages. Broad formatter commands
-# are too easy to aim at excluded or nested vendor crates and create
-# upstream-hostile formatting churn.
+# Format or check only root-owned workspace packages. Package-scoped formatting
+# avoids formatting dependency sources outside the root workspace.
 
 set -euo pipefail
 
@@ -38,7 +37,7 @@ if ((${#PACKAGES[@]} == 0)); then
   exit 1
 fi
 
-printf 'Formatting %s root workspace package(s); vendored crates/plonky3-recursion is excluded.\n' "${#PACKAGES[@]}"
+printf 'Formatting %s root workspace package(s).\n' "${#PACKAGES[@]}"
 for package in "${PACKAGES[@]}"; do
   cargo fmt --package "$package" "${MODE_ARGS[@]}"
 done

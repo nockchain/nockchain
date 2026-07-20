@@ -1621,7 +1621,7 @@ fn verify_recursive_certificate_inner(
         ));
     }
     expected_outer_prover
-        .verify_all_tables(outer)
+        .verify_all_tables::<p3_field::extension::BinomialExtensionField<Val, 2>>(outer)
         .map_err(|e| {
             VerificationError::InvalidProofShape(format!(
                 "AI-PoW recursive certificate outer proof failed production \

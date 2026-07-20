@@ -26,7 +26,7 @@
 
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_field::PrimeCharacteristicRing;
-use p3_lookup::InteractionBuilder;
+use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::Val;
@@ -97,8 +97,7 @@ where
         builder.push_interaction(
             BUS_URANGE8,
             [<AB::Var as Into<AB::Expr>>::into(cur[COL_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[COL_FREQ]),
-            0, // count_weight = 0 for table entries
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[COL_FREQ]), 0),
         );
 
         // Query interaction: each row queries QUERY with
@@ -106,8 +105,7 @@ where
         builder.push_interaction(
             BUS_URANGE8,
             [<AB::Var as Into<AB::Expr>>::into(cur[COL_QUERY])],
-            <AB::Var as Into<AB::Expr>>::into(cur[COL_QUERY_FLAG]),
-            1, // count_weight = 1 for queries
+            Count::bounded(<AB::Var as Into<AB::Expr>>::into(cur[COL_QUERY_FLAG]), 1),
         );
     }
 }

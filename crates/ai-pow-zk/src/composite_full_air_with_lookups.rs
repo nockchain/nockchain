@@ -43,7 +43,7 @@
 //! see [`crate::chips::range_table`].
 
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
-use p3_lookup::InteractionBuilder;
+use p3_lookup::{Count, InteractionBuilder};
 
 use crate::composite_full_air::{CompositeFullAir, CompositeFullAirPinned, ProgramShapeError};
 use crate::composite_layout::{
@@ -220,14 +220,12 @@ mod bus_emit {
         builder.push_interaction(
             BUS_URANGE8,
             [<AB::Var as Into<AB::Expr>>::into(cur[URANGE8_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[URANGE8_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[URANGE8_FREQ]), 0),
         );
         builder.push_interaction(
             BUS_URANGE8,
             [<AB::Var as Into<AB::Expr>>::into(cur[UINT8_DATA_START])],
-            <AB::Var as Into<AB::Expr>>::into(cur[IS_MSG_MAT]),
-            1,
+            Count::bounded(<AB::Var as Into<AB::Expr>>::into(cur[IS_MSG_MAT]), 1),
         );
     }
 
@@ -241,23 +239,20 @@ mod bus_emit {
         builder.push_interaction(
             BUS_URANGE13,
             [<AB::Var as Into<AB::Expr>>::into(cur[URANGE13_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[URANGE13_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[URANGE13_FREQ]), 0),
         );
         for i in 0..MAT_ID_LIMBS_LEN {
             builder.push_interaction(
                 BUS_URANGE13,
                 [<AB::Var as Into<AB::Expr>>::into(cur[MAT_ID_LIMBS_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
         for i in 0..AB_ID_LIMBS_LEN {
             builder.push_interaction(
                 BUS_URANGE13,
                 [<AB::Var as Into<AB::Expr>>::into(cur[AB_ID_LIMBS_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
     }
@@ -273,15 +268,13 @@ mod bus_emit {
         builder.push_interaction(
             BUS_IRANGE7P1,
             [<AB::Var as Into<AB::Expr>>::into(cur[IRANGE7P1_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[IRANGE7P1_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[IRANGE7P1_FREQ]), 0),
         );
         for i in 0..NOISE_UNPACK_WIN {
             builder.push_interaction(
                 BUS_IRANGE7P1,
                 [<AB::Var as Into<AB::Expr>>::into(cur[NOISE_UNPACK_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
         // Pearl parity (audit N2): the PLAIN matrix operand `MAT_UNPACK` is
@@ -294,8 +287,7 @@ mod bus_emit {
             builder.push_interaction(
                 BUS_IRANGE7P1,
                 [<AB::Var as Into<AB::Expr>>::into(cur[MAT_UNPACK_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
     }
@@ -312,23 +304,20 @@ mod bus_emit {
         builder.push_interaction(
             BUS_IRANGE8,
             [<AB::Var as Into<AB::Expr>>::into(cur[IRANGE8_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[IRANGE8_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[IRANGE8_FREQ]), 0),
         );
         for i in 0..A_NOISED_UNPACK_LEN {
             builder.push_interaction(
                 BUS_IRANGE8,
                 [<AB::Var as Into<AB::Expr>>::into(cur[A_NOISED_UNPACK_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
         for i in 0..B_NOISED_UNPACK_LEN {
             builder.push_interaction(
                 BUS_IRANGE8,
                 [<AB::Var as Into<AB::Expr>>::into(cur[B_NOISED_UNPACK_START + i])],
-                <AB::Expr as p3_field::PrimeCharacteristicRing>::ONE,
-                1,
+                Count::bounded(<AB::Expr as p3_field::PrimeCharacteristicRing>::ONE, 1),
             );
         }
     }
@@ -351,14 +340,13 @@ mod bus_emit {
         builder.push_interaction(
             BUS_I8U8,
             [<AB::Var as Into<AB::Expr>>::into(cur[I8U8_TABLE])],
-            -<AB::Var as Into<AB::Expr>>::into(cur[I8U8_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[I8U8_FREQ]), 0),
         );
         for i in 0..MAT_UNPACK_WIN.min(UINT8_DATA_WIN) {
             let signed: AB::Expr = cur[MAT_UNPACK_START + i].into();
             let unsigned: AB::Expr = cur[UINT8_DATA_START + i].into();
             let pack = signed * two_fifty_six.clone() + unsigned;
-            builder.push_interaction(BUS_I8U8, [pack], is_msg_mat.clone(), 1);
+            builder.push_interaction(BUS_I8U8, [pack], Count::bounded(is_msg_mat.clone(), 1));
         }
     }
 
@@ -409,8 +397,7 @@ mod bus_emit {
                     <AB::Var as Into<AB::Expr>>::into(cur[NOISED_PACKED_START + 2 * s]),
                     <AB::Var as Into<AB::Expr>>::into(cur[NOISED_PACKED_START + 2 * s + 1]),
                 ],
-                -table_mult,
-                0,
+                Count::bounded(-table_mult, 0),
             );
         }
 
@@ -436,8 +423,7 @@ mod bus_emit {
                     <AB::Var as Into<AB::Expr>>::into(cur[A_NOISED_START + 2 * j]),
                     <AB::Var as Into<AB::Expr>>::into(cur[A_NOISED_START + 2 * j + 1]),
                 ],
-                matmul_active.clone(),
-                1,
+                Count::bounded(matmul_active.clone(), 1),
             );
         }
         for j in 0..B_ID_LEN {
@@ -448,8 +434,7 @@ mod bus_emit {
                     <AB::Var as Into<AB::Expr>>::into(cur[B_NOISED_START + 2 * j]),
                     <AB::Var as Into<AB::Expr>>::into(cur[B_NOISED_START + 2 * j + 1]),
                 ],
-                matmul_active.clone(),
-                1,
+                Count::bounded(matmul_active.clone(), 1),
             );
         }
 
@@ -469,8 +454,7 @@ mod bus_emit {
                     <AB::Var as Into<AB::Expr>>::into(cur[NOISED_PACKED_START + 2 * s]),
                     <AB::Var as Into<AB::Expr>>::into(cur[NOISED_PACKED_START + 2 * s + 1]),
                 ],
-                blake_msg_mat.clone(),
-                1,
+                Count::bounded(blake_msg_mat.clone(), 1),
             );
         }
     }
@@ -496,8 +480,7 @@ mod bus_emit {
         builder.push_interaction(
             BUS_CV_ROUTING,
             table_key,
-            -<AB::Var as Into<AB::Expr>>::into(cur[CV_OUT_FREQ]),
-            0,
+            Count::bounded(-<AB::Var as Into<AB::Expr>>::into(cur[CV_OUT_FREQ]), 0),
         );
 
         let mut query_key: Vec<AB::Expr> = Vec::with_capacity(1 + CV_IN_LEN);
@@ -508,8 +491,7 @@ mod bus_emit {
         builder.push_interaction(
             BUS_CV_ROUTING,
             query_key,
-            <AB::Var as Into<AB::Expr>>::into(cur[IS_CV_IN]),
-            1,
+            Count::bounded(<AB::Var as Into<AB::Expr>>::into(cur[IS_CV_IN]), 1),
         );
     }
 }

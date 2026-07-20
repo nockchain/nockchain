@@ -86,7 +86,7 @@ pub struct CircuitConfig {
 
 pub const PROD_JOHNSON_FLOOR_BITS: u32 = 60;
 
-pub const PLONKY3_SOUNDNESS_REV: &str = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1";
+pub const PLONKY3_SOUNDNESS_REV: &str = "11cc5849a1b57a2f520d6edc608b9e516517d841";
 pub const FRI_SOUNDNESS_MODEL: &str = "IACR ePrint 2025/2055 Theorem 1.5 Johnson-radius bound";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -927,7 +927,7 @@ mod tests {
     fn fri_soundness_calculator_accepts_prod_and_rejects_underbounds() {
         assert_eq!(
             PLONKY3_SOUNDNESS_REV,
-            "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1"
+            "11cc5849a1b57a2f520d6edc608b9e516517d841"
         );
         assert_eq!(
             FRI_SOUNDNESS_MODEL,
@@ -1059,6 +1059,7 @@ mod tests {
         // For each SIMD lane, running Tip5 on the packed state must
         // produce the same field element as running scalar Tip5 on the
         // corresponding lane's scalar inputs.
+        use p3_field::PackedValue;
         use p3_goldilocks::PackedGoldilocksNeon;
         type P = PackedGoldilocksNeon;
         let perm = Tip5Perm;
