@@ -594,6 +594,8 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         // submit stale proofs after cancellation races.
         let mut workers: JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)> =
             JoinSet::new();
+        let mut candidate_workers: JoinSet<(u64, Result<NockchainCandidateInputs, String>)> =
+            JoinSet::new();
         let mut gateway_workers: JoinSet<(
             u64,
             PearlGatewayWorkKind,
@@ -604,6 +606,8 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         let mut current_generation = 0_u64;
         let mut latest_candidate: Option<NockchainCandidateInputs> = None;
         let mut current_pearl_header: Option<PearlIncompleteBlockHeader> = None;
+        let mut candidate_gateway_generation: Option<u64> = None;
+        let mut refresh_gateway_generation: Option<u64> = None;
         let mut next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
         let mut pearl_refresh = tokio::time::interval(pearl_work_refresh_interval(&cfg));
         pearl_refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -611,6 +615,9 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
+                    if let Err(e) = abort_and_drain_candidate_workers(&mut candidate_workers).await {
+                        break InnerOutcome::Fatal(e);
+                    }
                     if let Err(e) = abort_and_drain_pearl_gateway_workers(&mut gateway_workers).await {
                         break InnerOutcome::Fatal(e);
                     }
@@ -632,39 +639,65 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                         }
                         Err(e) => break InnerOutcome::Fatal(MinerError::CandidateDecode(format!("{e}"))),
                     };
-                    let candidate_inputs = match derive_nockchain_candidate_inputs(&candidate) {
-                        Ok(x) => x,
-                        Err(e) => {
-                            current_pearl_header = None;
-                            warn!(error = %e, "could not derive Nockchain candidate inputs; skipping");
-                            continue;
-                        }
-                    };
-                    latest_candidate = Some(candidate_inputs);
-                    next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
                     current_generation = current_generation.wrapping_add(1);
+                    latest_candidate = None;
+                    current_pearl_header = None;
+                    refresh_gateway_generation = None;
+                    candidate_gateway_generation = None;
+                    next_pearl_attempt_start = cfg.puzzle.pearl_merge.mine_opts.attempt_start;
                     if let Some(cancel) = current_cancel.take() {
                         cancel.cancel();
                     }
-                    spawn_pearl_gateway_work(
-                        &mut gateway_workers,
-                        current_generation,
-                        PearlGatewayWorkKind::Candidate,
-                        &cfg,
-                        candidate_inputs,
-                    );
+                    spawn_candidate_ingestion(&mut candidate_workers, current_generation, candidate);
                 }
                 _ = pearl_refresh.tick() => {
                     let Some(candidate_inputs) = latest_candidate else {
                         continue;
                     };
-                    if !gateway_workers.is_empty() {
+                    if candidate_gateway_generation == Some(current_generation)
+                        || refresh_gateway_generation == Some(current_generation)
+                    {
                         continue;
                     }
+                    refresh_gateway_generation = Some(current_generation);
                     spawn_pearl_gateway_work(
                         &mut gateway_workers,
                         current_generation,
                         PearlGatewayWorkKind::Refresh,
+                        &cfg,
+                        candidate_inputs,
+                    );
+                }
+                joined = candidate_workers.join_next(), if !candidate_workers.is_empty() => {
+                    let Some(joined) = joined else {
+                        continue;
+                    };
+                    let joined: CandidateWorkerJoin = joined;
+                    let (generation, result) = match joined {
+                        Ok(joined) => joined,
+                        Err(e) => break InnerOutcome::Fatal(MinerError::WorkerJoin(format!("{e}"))),
+                    };
+                    if generation != current_generation {
+                        debug!(
+                            generation,
+                            current_generation,
+                            "dropping stale candidate ingestion result"
+                        );
+                        continue;
+                    }
+                    let candidate_inputs = match result {
+                        Ok(candidate_inputs) => candidate_inputs,
+                        Err(e) => {
+                            warn!(error = %e, "could not derive Nockchain candidate inputs; skipping");
+                            continue;
+                        }
+                    };
+                    latest_candidate = Some(candidate_inputs);
+                    candidate_gateway_generation = Some(current_generation);
+                    spawn_pearl_gateway_work(
+                        &mut gateway_workers,
+                        current_generation,
+                        PearlGatewayWorkKind::Candidate,
                         &cfg,
                         candidate_inputs,
                     );
@@ -678,6 +711,16 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                         Ok(joined) => joined,
                         Err(e) => break InnerOutcome::Fatal(MinerError::WorkerJoin(format!("{e}"))),
                     };
+                    if kind == PearlGatewayWorkKind::Refresh
+                        && refresh_gateway_generation == Some(generation)
+                    {
+                        refresh_gateway_generation = None;
+                    }
+                    if kind == PearlGatewayWorkKind::Candidate
+                        && candidate_gateway_generation == Some(generation)
+                    {
+                        candidate_gateway_generation = None;
+                    }
                     if generation != current_generation {
                         debug!(
                             generation,
@@ -855,6 +898,9 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
         };
 
         // ── cleanup before reconnect or exit ──
+        if let Err(e) = abort_and_drain_candidate_workers(&mut candidate_workers).await {
+            return Err(e);
+        }
         if let Err(e) = abort_and_drain_pearl_gateway_workers(&mut gateway_workers).await {
             return Err(e);
         }
@@ -1241,6 +1287,24 @@ pub async fn run_canonical(
                 _ = shutdown.cancelled() => return Ok(()),
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {}
             }
+        }
+    }
+
+    Ok(())
+}
+
+type CandidateWorkerJoin =
+    Result<(u64, Result<NockchainCandidateInputs, String>), tokio::task::JoinError>;
+
+async fn abort_and_drain_candidate_workers(
+    workers: &mut JoinSet<(u64, Result<NockchainCandidateInputs, String>)>,
+) -> Result<(), MinerError> {
+    workers.abort_all();
+    while let Some(joined) = workers.join_next().await {
+        match joined {
+            Ok(_) => {}
+            Err(e) if e.is_cancelled() => {}
+            Err(e) => return Err(MinerError::WorkerJoin(format!("{e}"))),
         }
     }
     Ok(())
@@ -1884,6 +1948,7 @@ fn decode_chain_target_bignum(target: &NounSlab) -> Result<DifficultyTarget, Str
         }
 
         list = limb_cell.tail().noun();
+
         limb_index += 1;
     }
 
@@ -1901,6 +1966,14 @@ fn noun_is_zero_atom(
             .map_err(|_| "target bignum list terminator does not fit in u64".to_string()),
         Err(_) => Ok(false),
     }
+}
+
+fn spawn_candidate_ingestion(
+    workers: &mut JoinSet<(u64, Result<NockchainCandidateInputs, String>)>,
+    generation: u64,
+    candidate: MiningCandidate,
+) {
+    workers.spawn_blocking(move || (generation, derive_nockchain_candidate_inputs(&candidate)));
 }
 
 /// Resolve Pearl Gateway work for a candidate generation off the async loop.
