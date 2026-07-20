@@ -579,6 +579,7 @@ impl CryptographicPermutation<[Goldilocks; Tip5Perm::WIDTH]> for Tip5Perm {}
 
 #[cfg(target_arch = "aarch64")]
 mod packed_perm {
+    use p3_field::PackedValue;
     use p3_goldilocks::PackedGoldilocksNeon;
 
     use super::*;
@@ -605,6 +606,7 @@ mod packed_perm {
 
 #[cfg(all(target_arch = "x86_64", target_feature = "avx512f"))]
 mod packed_perm {
+    use p3_field::PackedValue;
     use p3_goldilocks::PackedGoldilocksAVX512;
 
     use super::*;
@@ -635,6 +637,7 @@ mod packed_perm {
     not(target_feature = "avx512f")
 ))]
 mod packed_perm {
+    use p3_field::PackedValue;
     use p3_goldilocks::PackedGoldilocksAVX2;
 
     use super::*;
