@@ -21,7 +21,7 @@ use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::integers::QuotientMap;
-use p3_field::{Field, PackedValue, PrimeField64};
+use p3_field::{Field, PrimeField64};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
 use p3_goldilocks::Goldilocks;
 use p3_merkle_tree::MerkleTreeMmcs;
@@ -41,41 +41,23 @@ pub type Val = Goldilocks;
 
 /// Configuration knobs for the Plonky3 STARK over the matmul AIR.
 ///
-/// Security model: **unconditional / provable** FRI soundness, anchored
-/// on the Johnson-radius proximity-gap bound *proven* by Ben-Sasson,
-/// Carmon, Habock, Kopparty, Saraf, *"On Proximity Gaps for Reed–
-/// Solomon Codes"* (`IACR ePrint 2025/2055`, Nov 2025, Theorem 1.5 + §1.3.2).
-/// Under that bound each query gives roughly `log_blowup` bits of
-/// **unconditional** soundness at the Johnson radius (the prior
-/// `log_blowup / 2` was the strictly-classical unique-decoding bound;
-/// the paper closes that gap). Proximity testing stays at γ < J(δ)−η
-/// (Johnson radius, never beyond — the paper's §1.4/§6/§8 negative
-/// results confirm beyond-Johnson constructively attackable for some
-/// codes via the CYCLE-SUM attack at the list-decoding radius).
+/// Security model: **unconditional / provable** FRI soundness. Under the
+/// Johnson-radius proximity-gap bound proven by Ben-Sasson, Carmon, Habock,
+/// Kopparty, Saraf, *"On Proximity Gaps for Reed-Solomon Codes"* (`IACR
+/// ePrint 2025/2055`, Nov 2025, Theorem 1.5 + §1.3.2), each query gives
+/// roughly `log_blowup` bits of soundness at the Johnson radius.
+/// The implementation deliberately does not rely on Plonky3's
+/// `CapacityBound::log_eta` heuristic, because that heuristic targets the
+/// region between the Johnson radius and the list-decoding radius where
+/// the paper gives no positive theorem for generic codes. The CYCLE-SUM
+/// construction in Theorem 1.17 shows constructive attacks at the
+/// list-decoding radius.
 ///
-/// **2026-05-21 paper-anchored bits-target relaxation (maintainer):**
-/// the prior 80-bit floor was reanchored after reading IACR ePrint
-/// 2025/2055 §§ 1.4, 6, 8 carefully. The paper provides two end-points
-/// for our parameters:
-///
-///   | End-point | Formula | Bits at lb=4, n≤2^22 | Status |
-///   |---|---|---:|---|
-///   | Known **insecure** at γ ≥ LDR (Thm 1.17 CYCLE-SUM) | `log₂(n) + O(1)` | ~22 | constructive attack |
-///   | Known **secure** at γ < J(δ)−η (Thm 1.5) | `lb·nq + 2*pow` | 60+ | proven, paper |
-///
-/// The Plonky3 `CapacityBound::log_eta` heuristic claims `~2·lb`
-/// bits/query at γ ≈ 1−ρ, but that sits in the no-mans-land between
-/// Johnson (proven) and LDR (attacked) where the paper provides
-/// neither a positive theorem nor a constructive attack against
-/// generic codes. The heuristic is therefore **not** adopted as our
-/// soundness model.
-///
-/// **Anchored-between policy (2026-05-21):** bits target placed in
-/// the (22, 80) interval, **proven via Theorem 1.5** at the chosen
-/// `(lb, nq)`. Maintainer-targeted **60-bit floor**; `lb=4 nq=15
-/// pow=0+0` ⇒ `bits = 4·15 = 60` Johnson, proven. 38 bits above the
-/// known-insecure floor; 20 bits below the prior conservative ceiling —
-/// "reasonable and optimistic."
+/// **Production policy:** the maintained floor is 60 Johnson bits. For the
+/// deployed `PROD` profile, `lb=4 nq=15 pow=0+0`, so
+/// `bits = lb * nq + 2 * pow = 60`. The bound is above the known-insecure
+/// `log₂(n) + O(1)` list-decoding-radius region for the admitted trace sizes
+/// and is the value recorded in the release-assurance ledger.
 ///
 /// **Time-bounded threat model (rationale):** the 2.5-minute block cadence is
 /// an economic exposure window for public-chain attempts, not a cryptographic
@@ -103,6 +85,166 @@ pub struct CircuitConfig {
 }
 
 pub const PROD_JOHNSON_FLOOR_BITS: u32 = 60;
+
+pub const PLONKY3_SOUNDNESS_REV: &str = "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1";
+pub const FRI_SOUNDNESS_MODEL: &str = "IACR ePrint 2025/2055 Theorem 1.5 Johnson-radius bound";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FriSoundnessProfile {
+    pub log_blowup: u32,
+    pub log_final_poly_len: u32,
+    pub max_log_arity: u32,
+    pub num_queries: u32,
+    pub commit_pow_bits: u32,
+    pub query_pow_bits: u32,
+    pub cap_height: u32,
+    pub constraint_degree: u32,
+    pub log_trace_height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FriSoundnessError {
+    ZeroField(&'static str),
+    DegreeExceedsBlowup {
+        constraint_degree: u32,
+        log_blowup: u32,
+    },
+    TraceTooShort {
+        log_trace_height: u32,
+        log_final_poly_len: u32,
+        log_blowup: u32,
+    },
+    FoldArityTooLarge {
+        max_log_arity: u32,
+        remaining_log_domain: u32,
+    },
+    CapHeightTooLarge {
+        cap_height: u32,
+        log_commitment_height: u32,
+    },
+    JohnsonFloor {
+        bits: u32,
+        floor: u32,
+    },
+}
+
+impl FriSoundnessProfile {
+    pub const fn from_circuit_config(
+        config: CircuitConfig,
+        constraint_degree: u32,
+        trace_len: usize,
+    ) -> Self {
+        Self {
+            log_blowup: config.log_blowup,
+            log_final_poly_len: 0,
+            max_log_arity: 1,
+            num_queries: config.num_queries,
+            commit_pow_bits: config.pow_bits,
+            query_pow_bits: config.pow_bits,
+            cap_height: 0,
+            constraint_degree,
+            log_trace_height: trace_len.next_power_of_two().trailing_zeros(),
+        }
+    }
+
+    pub const fn johnson_bits(self) -> u32 {
+        self.log_blowup * self.num_queries + self.commit_pow_bits + self.query_pow_bits
+    }
+
+    pub const fn validate(self, floor_bits: u32) -> Result<(), FriSoundnessError> {
+        if self.log_blowup == 0 {
+            return Err(FriSoundnessError::ZeroField("log_blowup"));
+        }
+        if self.max_log_arity == 0 {
+            return Err(FriSoundnessError::ZeroField("max_log_arity"));
+        }
+        if self.num_queries == 0 {
+            return Err(FriSoundnessError::ZeroField("num_queries"));
+        }
+        if self.constraint_degree == 0 {
+            return Err(FriSoundnessError::ZeroField("constraint_degree"));
+        }
+        if self.log_trace_height == 0 {
+            return Err(FriSoundnessError::ZeroField("log_trace_height"));
+        }
+        if self.constraint_degree > (1u32 << self.log_blowup) {
+            return Err(FriSoundnessError::DegreeExceedsBlowup {
+                constraint_degree: self.constraint_degree,
+                log_blowup: self.log_blowup,
+            });
+        }
+        if self.log_trace_height <= self.log_final_poly_len + self.log_blowup {
+            return Err(FriSoundnessError::TraceTooShort {
+                log_trace_height: self.log_trace_height,
+                log_final_poly_len: self.log_final_poly_len,
+                log_blowup: self.log_blowup,
+            });
+        }
+        let log_commitment_height = self.log_trace_height + self.log_blowup;
+        if self.cap_height > log_commitment_height {
+            return Err(FriSoundnessError::CapHeightTooLarge {
+                cap_height: self.cap_height,
+                log_commitment_height,
+            });
+        }
+        let remaining_log_domain = log_commitment_height - self.log_final_poly_len;
+        if self.max_log_arity > remaining_log_domain {
+            return Err(FriSoundnessError::FoldArityTooLarge {
+                max_log_arity: self.max_log_arity,
+                remaining_log_domain,
+            });
+        }
+        let bits = self.johnson_bits();
+        if bits < floor_bits {
+            return Err(FriSoundnessError::JohnsonFloor {
+                bits,
+                floor: floor_bits,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FriProfileSearch {
+    pub log_blowup: core::ops::RangeInclusive<u32>,
+    pub log_final_poly_len: core::ops::RangeInclusive<u32>,
+    pub max_log_arity: core::ops::RangeInclusive<u32>,
+    pub num_queries: core::ops::RangeInclusive<u32>,
+    pub cap_height: core::ops::RangeInclusive<u32>,
+    pub constraint_degree: u32,
+    pub log_trace_height: u32,
+    pub floor_bits: u32,
+}
+
+pub fn admissible_fri_profiles(search: FriProfileSearch) -> Vec<FriSoundnessProfile> {
+    let mut out = Vec::new();
+    for log_blowup in search.log_blowup {
+        for log_final_poly_len in search.log_final_poly_len.clone() {
+            for max_log_arity in search.max_log_arity.clone() {
+                for num_queries in search.num_queries.clone() {
+                    for cap_height in search.cap_height.clone() {
+                        let profile = FriSoundnessProfile {
+                            log_blowup,
+                            log_final_poly_len,
+                            max_log_arity,
+                            num_queries,
+                            commit_pow_bits: 0,
+                            query_pow_bits: 0,
+                            cap_height,
+                            constraint_degree: search.constraint_degree,
+                            log_trace_height: search.log_trace_height,
+                        };
+                        if profile.validate(search.floor_bits).is_ok() {
+                            out.push(profile);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
 
 impl CircuitConfig {
     /// Johnson-radius FRI soundness bits for this profile under the
@@ -732,12 +874,8 @@ mod tests {
 
     #[test]
     fn circuit_config_constants_are_well_formed() {
-        // **2026-05-21 anchored-between policy:** PROD targets the
-        // ≥60-bit Johnson floor (maintainer-set, anchored between
-        // the known-insecure CYCLE-SUM ceiling at γ≥LDR (~22 bits at
-        // n≤2^22, IACR ePrint 2025/2055 Thm 1.17) and the prior
-        // conservative 80-bit ceiling). PROD `lb=4 nq=15 pow=0` ⇒
-        // 4·15 = 60 pure-query bits unconditional Johnson (Theorem 1.5).
+        // PROD is the deployed 60-bit Johnson profile:
+        // lb=4 nq=15 pow=0+0, so 4 * 15 = 60 under Theorem 1.5.
         let prod = CircuitConfig::PROD;
         assert_eq!(prod.log_blowup, 4);
         assert_eq!(prod.num_queries, 15);
@@ -755,14 +893,11 @@ mod tests {
         assert_eq!(test.pow_bits, 0);
     }
 
-    /// Each `PROD_LBn` profile must meet the ≥60-bit anchored
-    /// Johnson-radius floor (paper Theorem 1.5, maintainer 2026-05-21).
+    /// Each `PROD_LBn` profile must meet the deployed ≥60-bit Johnson-radius
+    /// floor (paper Theorem 1.5, maintainer policy).
     #[test]
     fn prod_sweep_profiles_meet_anchored_johnson_floor() {
-        // **2026-05-21 anchored-between policy:** PROD `lb=4 nq=15
-        // pow=0` ⇒ 4·15 = 60 pure-query bits. The PROD_LBn sweep variants
-        // retain the 90+ bits per `lb·nq` alone — measurement comparators for
-        // the M-S5b proof-size studies, not production-deployed.
+        // Sweep variants are measurement comparators for proof-size studies.
         for (name, cfg) in [
             ("PROD", CircuitConfig::PROD),
             ("PROD_LB2", CircuitConfig::PROD_LB2),
@@ -783,6 +918,88 @@ mod tests {
                 PROD_JOHNSON_FLOOR_BITS
             );
         }
+    }
+
+    #[test]
+    fn fri_soundness_calculator_accepts_prod_and_rejects_underbounds() {
+        assert_eq!(
+            PLONKY3_SOUNDNESS_REV,
+            "83ec3062e42a0b556798d22fa0ed0ee09c81c5e1"
+        );
+        assert_eq!(
+            FRI_SOUNDNESS_MODEL,
+            "IACR ePrint 2025/2055 Theorem 1.5 Johnson-radius bound"
+        );
+
+        let prod = FriSoundnessProfile::from_circuit_config(
+            CircuitConfig::PROD,
+            3,
+            crate::composite_layout::MIN_STARK_LEN,
+        );
+        assert_eq!(prod.johnson_bits(), PROD_JOHNSON_FLOOR_BITS);
+        assert_eq!(prod.validate(PROD_JOHNSON_FLOOR_BITS), Ok(()));
+
+        let bad_degree = FriSoundnessProfile {
+            log_blowup: 1,
+            ..prod
+        };
+        assert_eq!(
+            bad_degree.validate(PROD_JOHNSON_FLOOR_BITS),
+            Err(FriSoundnessError::DegreeExceedsBlowup {
+                constraint_degree: 3,
+                log_blowup: 1
+            })
+        );
+
+        let short_trace = FriSoundnessProfile {
+            log_final_poly_len: 2,
+            log_trace_height: 5,
+            ..prod
+        };
+        assert_eq!(
+            short_trace.validate(PROD_JOHNSON_FLOOR_BITS),
+            Err(FriSoundnessError::TraceTooShort {
+                log_trace_height: 5,
+                log_final_poly_len: 2,
+                log_blowup: 4
+            })
+        );
+
+        let low_queries = FriSoundnessProfile {
+            num_queries: 14,
+            ..prod
+        };
+        assert_eq!(
+            low_queries.validate(PROD_JOHNSON_FLOOR_BITS),
+            Err(FriSoundnessError::JohnsonFloor {
+                bits: 56,
+                floor: PROD_JOHNSON_FLOOR_BITS
+            })
+        );
+    }
+
+    #[test]
+    fn fri_soundness_search_generates_only_admissible_candidates() {
+        let candidates = admissible_fri_profiles(FriProfileSearch {
+            log_blowup: 1..=4,
+            log_final_poly_len: 0..=2,
+            max_log_arity: 1..=3,
+            num_queries: 1..=30,
+            cap_height: 0..=4,
+            constraint_degree: 3,
+            log_trace_height: 13,
+            floor_bits: PROD_JOHNSON_FLOOR_BITS,
+        });
+        assert!(candidates
+            .iter()
+            .all(|profile| profile.validate(PROD_JOHNSON_FLOOR_BITS).is_ok()));
+        assert!(candidates.iter().any(|profile| {
+            profile.log_blowup == 2
+                && profile.num_queries == 30
+                && profile.log_final_poly_len == 0
+                && profile.max_log_arity == 1
+        }));
+        assert!(!candidates.iter().any(|profile| profile.log_blowup == 1));
     }
 
     #[test]

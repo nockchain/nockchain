@@ -193,11 +193,7 @@ impl Tip5Config {
         if output_count != self.rate() && output_count != self.width() {
             return Err(CircuitBuilderError::NonPrimitiveOpArity {
                 op: "Tip5Perm",
-                expected: format!(
-                    "{} or {} outputs for Tip5 (d=1)",
-                    self.rate(),
-                    self.width()
-                ),
+                expected: format!("{} or {} outputs for Tip5 (d=1)", self.rate(), self.width()),
                 got: output_count,
             });
         }
@@ -219,8 +215,7 @@ impl Tip5Config {
         }
 
         let width_ext = self.width_ext();
-        let mut widx =
-            ctx.lower_expr_slots(&input_exprs[..width_ext], "Tip5Perm", "input limb")?;
+        let mut widx = ctx.lower_expr_slots(&input_exprs[..width_ext], "Tip5Perm", "input limb")?;
 
         let [mmcs_sum] = ctx
             .lower_expr_slots(

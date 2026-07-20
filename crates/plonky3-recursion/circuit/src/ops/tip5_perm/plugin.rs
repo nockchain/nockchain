@@ -66,11 +66,7 @@ impl<F: Field> NpoCircuitPlugin<F> for Tip5CircuitPlugin<F> {
             })?;
 
         let config = self.tip5_config;
-        config.validate_io_counts(
-            data.input_exprs.len(),
-            data.output_exprs.len(),
-            merkle_path,
-        )?;
+        config.validate_io_counts(data.input_exprs.len(), data.output_exprs.len(), merkle_path)?;
 
         let inputs_widx = config.lower_inputs(&data.input_exprs, ctx, merkle_path)?;
         let outputs_widx = ctx.lower_expr_slots(&data.output_exprs, "Tip5Perm", "output")?;

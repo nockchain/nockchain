@@ -1942,13 +1942,21 @@ mod jet_tests {
                 Ok(seeds) => {
                     let actual = setup_seed_keys(&seeds);
                     if actual == expected {
-                        return seeds;
+                        match crate::table_digest::verify_verifier_setup_seed_table_digest(&seeds) {
+                            Ok(_) => return seeds,
+                            Err(e) => eprintln!(
+                                "stable setup seed cache digest does not match production ({e}); \
+                                 regenerating {}",
+                                path.display(),
+                            ),
+                        }
+                    } else {
+                        eprintln!(
+                            "stable setup seed cache shape keys do not match production; \
+                             cache={actual:?} production={expected:?}; regenerating {}",
+                            path.display(),
+                        );
                     }
-                    eprintln!(
-                        "stable setup seed cache shape keys do not match production; \
-                         cache={actual:?} production={expected:?}; regenerating {}",
-                        path.display(),
-                    );
                 }
                 Err(e) => {
                     eprintln!(

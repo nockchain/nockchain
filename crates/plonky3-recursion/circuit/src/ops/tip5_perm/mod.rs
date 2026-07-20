@@ -19,8 +19,8 @@ pub mod state;
 pub mod trace;
 
 pub use call::{Tip5PermCall, Tip5PermCallMmcs};
-pub use config::{Tip5Config, Tip5FieldId};
 pub(crate) use config::Tip5PermExec;
+pub use config::{Tip5Config, Tip5FieldId};
 pub(crate) use plugin::Tip5CircuitPlugin;
 pub use state::Tip5PermPrivateData;
 pub use trace::{Tip5CircuitRow, Tip5Goldilocks, Tip5Params, Tip5Trace, generate_tip5_trace};

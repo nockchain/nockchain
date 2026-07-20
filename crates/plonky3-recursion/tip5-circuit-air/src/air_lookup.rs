@@ -216,7 +216,11 @@ where
         let bus = p3_lookup::bus::LookupBus::new("tip5_l");
         for t in 0..NS {
             for k in 0..NBYTES {
-                bus.lookup_key(builder, [var(b_col(t, k)), var(c_col(t, k))], is_round.clone());
+                bus.lookup_key(
+                    builder,
+                    [var(b_col(t, k)), var(c_col(t, k))],
+                    is_round.clone(),
+                );
             }
         }
         bus.table_entry(

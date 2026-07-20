@@ -2651,6 +2651,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Layer-0 low-blowup proof size diagnostic — expensive; run with --ignored"]
+    fn composite_pinned_logup_lb2_nq30_l0_size_breakdown() {
+        measure_pinned_logup_l0_size_breakdown("PURE_QUERY_LB2_NQ30", CircuitConfig::PROD_LB2_NQ30);
+    }
+
+    #[test]
     #[ignore = "Layer-0 pure-query reduced-query proof size diagnostic — expensive; run with --ignored"]
     fn composite_pinned_logup_lb6_nq10_l0_size_breakdown() {
         measure_pinned_logup_l0_size_breakdown(

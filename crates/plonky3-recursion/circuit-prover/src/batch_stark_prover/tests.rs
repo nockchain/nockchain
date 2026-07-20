@@ -1741,6 +1741,84 @@ fn test_goldilocks_tip5_path_pruned_compact_rejects_tampered_merkle_path() {
         .expect_err("tampered pruned Merkle path must fail upstream verification");
 }
 
+fn assert_tip5_compact_fri_rejects(
+    prover: &BatchStarkProver<GoldilocksTipsConfig>,
+    compact: GoldilocksTip5PathPrunedCompactBatchStarkProof,
+    circuit_prover_data: &CircuitProverData<GoldilocksTipsConfig>,
+    expected: &str,
+) {
+    let err = prover
+        .verify_goldilocks_tip5_path_pruned_preprocessed_compact(compact, circuit_prover_data)
+        .expect_err("malformed compact FRI proof must reject");
+    assert!(
+        format!("{err:?}").contains(expected),
+        "expected error containing {expected:?}, got {err:?}"
+    );
+}
+
+#[test]
+fn test_goldilocks_tip5_path_pruned_compact_rejects_malformed_fri_shape_fields() {
+    let (prover, proof, circuit_prover_data, fri_shape) =
+        prove_goldilocks_tip5_ext2_public_plus_const(None);
+    let compact = prover
+        .compact_goldilocks_tip5_path_pruned_preprocessed(proof, &circuit_prover_data, fri_shape)
+        .expect("path-prune compact Goldilocks/Tip5 proof");
+    let compact_bytes = postcard::to_allocvec(&compact).expect("serialize compact proof");
+
+    let mut bad_final_poly: GoldilocksTip5PathPrunedCompactBatchStarkProof =
+        postcard::from_bytes(&compact_bytes).expect("deserialize compact proof");
+    bad_final_poly.proof.proof.opening_proof.final_poly.pop();
+    assert_tip5_compact_fri_rejects(
+        &prover,
+        bad_final_poly,
+        &circuit_prover_data,
+        "final polynomial length mismatch",
+    );
+
+    let mut bad_query_count: GoldilocksTip5PathPrunedCompactBatchStarkProof =
+        postcard::from_bytes(&compact_bytes).expect("deserialize compact proof");
+    bad_query_count.proof.proof.opening_proof.query_proofs.pop();
+    assert_tip5_compact_fri_rejects(
+        &prover,
+        bad_query_count,
+        &circuit_prover_data,
+        "query count mismatch",
+    );
+
+    let mut bad_commit_pow_count: GoldilocksTip5PathPrunedCompactBatchStarkProof =
+        postcard::from_bytes(&compact_bytes).expect("deserialize compact proof");
+    bad_commit_pow_count
+        .proof
+        .proof
+        .opening_proof
+        .commit_pow_witnesses
+        .pop();
+    assert_tip5_compact_fri_rejects(
+        &prover,
+        bad_commit_pow_count,
+        &circuit_prover_data,
+        "commit PoW witness count mismatch",
+    );
+
+    let mut bad_log_arity: GoldilocksTip5PathPrunedCompactBatchStarkProof =
+        postcard::from_bytes(&compact_bytes).expect("deserialize compact proof");
+    let first_opening = bad_log_arity
+        .proof
+        .proof
+        .opening_proof
+        .query_proofs
+        .first_mut()
+        .and_then(|query| query.commit_phase_openings.first_mut())
+        .expect("fixture has a commit-phase FRI opening");
+    first_opening.log_arity = (bad_log_arity.fri_shape.max_log_arity + 1) as u8;
+    assert_tip5_compact_fri_rejects(
+        &prover,
+        bad_log_arity,
+        &circuit_prover_data,
+        "invalid log arity",
+    );
+}
+
 // --- Proof-metadata validation after deserialization ---------------------------
 //
 // `#[derive(Deserialize)]` bypasses the constructors that enforce structural

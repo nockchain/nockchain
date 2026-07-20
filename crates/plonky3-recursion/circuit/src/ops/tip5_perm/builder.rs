@@ -119,10 +119,7 @@ impl<F: Field> CircuitBuilder<F> {
             output_labels.push(expose.then_some("tip5_perm_out"));
         }
         for _ in rate_ext..width_ext {
-            output_labels.push(
-                call.return_all_outputs
-                    .then_some("tip5_perm_out_capacity"),
-            );
+            output_labels.push(call.return_all_outputs.then_some("tip5_perm_out_capacity"));
         }
 
         let (op_id, _call_expr_id, outputs) = self.push_non_primitive_op_with_outputs(

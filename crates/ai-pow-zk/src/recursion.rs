@@ -47,7 +47,9 @@ use p3_tip5_circuit_air::Tip5Perm as RecTip5Perm;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::circuit::{Challenge, Tip5Compress, Tip5Sponge};
+use crate::circuit::{
+    Challenge, FriSoundnessProfile, Tip5Compress, Tip5Sponge, PROD_JOHNSON_FLOOR_BITS,
+};
 use crate::{AiPowStarkConfig, CompositeFullAirWithLookupsPinned, Val};
 
 /// Outer circuit-prover proof produced after recursively verifying Layer 0.
@@ -385,6 +387,154 @@ pub const COMPACT_BATCH_L2_JOHNSON_BITS: usize =
     COMPACT_BATCH_L2_LOG_BLOWUP * COMPACT_BATCH_L2_NUM_QUERIES;
 pub const COMPACT_BATCH_RECURSIVE_LAYER_COUNT: usize = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CompactRecursionProfile {
+    l1_log_blowup: usize,
+    l1_num_queries: usize,
+    l1_cap_height: usize,
+    l1_log_final_poly_len: usize,
+    l1_alu_lanes: usize,
+    l1_horner_pack_k: usize,
+    l2_log_blowup: usize,
+    l2_num_queries: usize,
+    l2_cap_height: usize,
+    l2_log_final_poly_len: usize,
+    l2_max_log_arity: usize,
+    l2_alu_lanes: usize,
+    l2_horner_pack_k: usize,
+    l2_recompose_lanes: usize,
+    recursive_layer_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactRecursionProfileError {
+    ZeroField(&'static str),
+    BadHornerPack {
+        layer: &'static str,
+        value: usize,
+    },
+    BadL1JohnsonBits {
+        bits: usize,
+    },
+    BadL2JohnsonBits {
+        bits: usize,
+    },
+    BadRecursiveLayerCount {
+        value: usize,
+    },
+    Soundness {
+        layer: &'static str,
+        error: crate::circuit::FriSoundnessError,
+    },
+}
+
+const COMPACT_BATCH_PROFILE: CompactRecursionProfile = CompactRecursionProfile {
+    l1_log_blowup: COMPACT_BATCH_L1_LOG_BLOWUP,
+    l1_num_queries: COMPACT_BATCH_L1_NUM_QUERIES,
+    l1_cap_height: COMPACT_BATCH_L1_CAP_HEIGHT,
+    l1_log_final_poly_len: COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN,
+    l1_alu_lanes: COMPACT_BATCH_L1_ALU_LANES,
+    l1_horner_pack_k: COMPACT_BATCH_L1_HORNER_PACK_K,
+    l2_log_blowup: COMPACT_BATCH_L2_LOG_BLOWUP,
+    l2_num_queries: COMPACT_BATCH_L2_NUM_QUERIES,
+    l2_cap_height: COMPACT_BATCH_L2_CAP_HEIGHT,
+    l2_log_final_poly_len: COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN,
+    l2_max_log_arity: COMPACT_BATCH_L2_MAX_LOG_ARITY,
+    l2_alu_lanes: COMPACT_BATCH_L2_ALU_LANES,
+    l2_horner_pack_k: COMPACT_BATCH_L2_HORNER_PACK_K,
+    l2_recompose_lanes: COMPACT_BATCH_L2_RECOMPOSE_LANES,
+    recursive_layer_count: COMPACT_BATCH_RECURSIVE_LAYER_COUNT,
+};
+
+impl CompactRecursionProfile {
+    fn l1_soundness_profile(self) -> FriSoundnessProfile {
+        FriSoundnessProfile {
+            log_blowup: self.l1_log_blowup as u32,
+            log_final_poly_len: self.l1_log_final_poly_len as u32,
+            max_log_arity: 1,
+            num_queries: self.l1_num_queries as u32,
+            commit_pow_bits:
+                p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS
+                    as u32,
+            query_pow_bits:
+                p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_QUERY_POW_BITS
+                    as u32,
+            cap_height: self.l1_cap_height as u32,
+            constraint_degree: 3,
+            log_trace_height: (self.l1_log_final_poly_len + self.l1_log_blowup + 1) as u32,
+        }
+    }
+
+    fn l2_soundness_profile(self) -> FriSoundnessProfile {
+        FriSoundnessProfile {
+            log_blowup: self.l2_log_blowup as u32,
+            log_final_poly_len: self.l2_log_final_poly_len as u32,
+            max_log_arity: self.l2_max_log_arity as u32,
+            num_queries: self.l2_num_queries as u32,
+            commit_pow_bits:
+                p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS
+                    as u32,
+            query_pow_bits:
+                p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_QUERY_POW_BITS
+                    as u32,
+            cap_height: self.l2_cap_height as u32,
+            constraint_degree: 3,
+            log_trace_height: (self.l2_log_final_poly_len + self.l2_log_blowup + 1) as u32,
+        }
+    }
+
+    fn validate(self) -> Result<(), CompactRecursionProfileError> {
+        for (name, value) in [
+            ("l1_log_blowup", self.l1_log_blowup),
+            ("l1_num_queries", self.l1_num_queries),
+            ("l1_cap_height", self.l1_cap_height),
+            ("l1_alu_lanes", self.l1_alu_lanes),
+            ("l2_log_blowup", self.l2_log_blowup),
+            ("l2_num_queries", self.l2_num_queries),
+            ("l2_cap_height", self.l2_cap_height),
+            ("l2_max_log_arity", self.l2_max_log_arity),
+            ("l2_alu_lanes", self.l2_alu_lanes),
+            ("l2_recompose_lanes", self.l2_recompose_lanes),
+        ] {
+            if value == 0 {
+                return Err(CompactRecursionProfileError::ZeroField(name));
+            }
+        }
+        if self.l1_horner_pack_k < 2 {
+            return Err(CompactRecursionProfileError::BadHornerPack {
+                layer: "l1",
+                value: self.l1_horner_pack_k,
+            });
+        }
+        if self.l2_horner_pack_k < 2 {
+            return Err(CompactRecursionProfileError::BadHornerPack {
+                layer: "l2",
+                value: self.l2_horner_pack_k,
+            });
+        }
+        let l1_bits = self.l1_log_blowup * self.l1_num_queries;
+        if l1_bits < 60 {
+            return Err(CompactRecursionProfileError::BadL1JohnsonBits { bits: l1_bits });
+        }
+        let l2_bits = self.l2_log_blowup * self.l2_num_queries;
+        if l2_bits < 60 {
+            return Err(CompactRecursionProfileError::BadL2JohnsonBits { bits: l2_bits });
+        }
+        if self.recursive_layer_count != 3 {
+            return Err(CompactRecursionProfileError::BadRecursiveLayerCount {
+                value: self.recursive_layer_count,
+            });
+        }
+        self.l1_soundness_profile()
+            .validate(PROD_JOHNSON_FLOOR_BITS)
+            .map_err(|error| CompactRecursionProfileError::Soundness { layer: "l1", error })?;
+        self.l2_soundness_profile()
+            .validate(PROD_JOHNSON_FLOOR_BITS)
+            .map_err(|error| CompactRecursionProfileError::Soundness { layer: "l2", error })?;
+        Ok(())
+    }
+}
+
 fn production_l1_table_packing(public_binding_lanes: usize) -> p3_circuit_prover::TablePacking {
     p3_circuit_prover::TablePacking::new(DIGEST_ELEMS, 8)
         .with_public_binding_lanes(public_binding_lanes)
@@ -396,44 +546,47 @@ fn production_l1_stark_config() -> p3_circuit_prover::config::GoldilocksTipsConf
 }
 
 fn compact_batch_l1_table_packing(public_binding_lanes: usize) -> p3_circuit_prover::TablePacking {
-    p3_circuit_prover::TablePacking::new(DIGEST_ELEMS, COMPACT_BATCH_L1_ALU_LANES)
+    let profile = COMPACT_BATCH_PROFILE;
+    p3_circuit_prover::TablePacking::new(DIGEST_ELEMS, profile.l1_alu_lanes)
         .with_public_binding_lanes(public_binding_lanes)
-        .with_horner_pack_k(COMPACT_BATCH_L1_HORNER_PACK_K)
+        .with_fri_params(profile.l1_log_final_poly_len, profile.l1_log_blowup)
+        .with_horner_pack_k(profile.l1_horner_pack_k)
 }
 
 fn compact_batch_l2_table_packing(public_binding_lanes: usize) -> p3_circuit_prover::TablePacking {
-    p3_circuit_prover::TablePacking::new(public_binding_lanes, COMPACT_BATCH_L2_ALU_LANES)
+    let profile = COMPACT_BATCH_PROFILE;
+    p3_circuit_prover::TablePacking::new(public_binding_lanes, profile.l2_alu_lanes)
         .with_public_binding_lanes(public_binding_lanes)
-        .with_fri_params(
-            COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN, COMPACT_BATCH_L2_LOG_BLOWUP,
-        )
-        .with_horner_pack_k(COMPACT_BATCH_L2_HORNER_PACK_K)
-        .with_npo_lanes(NpoTypeId::recompose(), COMPACT_BATCH_L2_RECOMPOSE_LANES)
+        .with_fri_params(profile.l2_log_final_poly_len, profile.l2_log_blowup)
+        .with_horner_pack_k(profile.l2_horner_pack_k)
+        .with_npo_lanes(NpoTypeId::recompose(), profile.l2_recompose_lanes)
         .with_npo_lanes(
             NpoTypeId::recompose_with_coeff_lookups(),
-            COMPACT_BATCH_L2_RECOMPOSE_LANES,
+            profile.l2_recompose_lanes,
         )
 }
 
 fn compact_batch_l1_stark_config() -> p3_circuit_prover::config::GoldilocksTipsConfig {
+    let profile = COMPACT_BATCH_PROFILE;
     p3_circuit_prover::config::goldilocks_tip5_pure_query_60bit_with_shape_and_cap(
-        COMPACT_BATCH_L1_LOG_BLOWUP, COMPACT_BATCH_L1_NUM_QUERIES, COMPACT_BATCH_L1_CAP_HEIGHT,
+        profile.l1_log_blowup, profile.l1_num_queries, profile.l1_cap_height,
     )
 }
 
 fn compact_batch_l2_stark_config() -> p3_circuit_prover::config::GoldilocksBlake3Config {
+    let profile = COMPACT_BATCH_PROFILE;
     p3_circuit_prover::config::goldilocks_blake3_with_fri_shape(
-        COMPACT_BATCH_L2_LOG_BLOWUP, COMPACT_BATCH_L2_NUM_QUERIES,
-        COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN, COMPACT_BATCH_L2_MAX_LOG_ARITY,
-        COMPACT_BATCH_L2_CAP_HEIGHT,
+        profile.l2_log_blowup, profile.l2_num_queries, profile.l2_log_final_poly_len,
+        profile.l2_max_log_arity, profile.l2_cap_height,
     )
 }
 
 fn compact_batch_l1_fri_verifier_params() -> FriVerifierParams {
+    let profile = COMPACT_BATCH_PROFILE;
     FriVerifierParams::with_mmcs(
-        COMPACT_BATCH_L1_LOG_BLOWUP,
-        COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN,
-        COMPACT_BATCH_L1_NUM_QUERIES,
+        profile.l1_log_blowup,
+        profile.l1_log_final_poly_len,
+        profile.l1_num_queries,
         p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS,
         p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_QUERY_POW_BITS,
         Tip5Config::GOLDILOCKS_W16,
@@ -441,16 +594,17 @@ fn compact_batch_l1_fri_verifier_params() -> FriVerifierParams {
 }
 
 fn compact_batch_l2_fri_shape() -> p3_circuit_prover::GoldilocksBlake3FriShape {
+    let profile = COMPACT_BATCH_PROFILE;
     p3_circuit_prover::GoldilocksBlake3FriShape {
-        log_blowup: COMPACT_BATCH_L2_LOG_BLOWUP,
-        log_final_poly_len: COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN,
-        max_log_arity: COMPACT_BATCH_L2_MAX_LOG_ARITY,
-        num_queries: COMPACT_BATCH_L2_NUM_QUERIES,
+        log_blowup: profile.l2_log_blowup,
+        log_final_poly_len: profile.l2_log_final_poly_len,
+        max_log_arity: profile.l2_max_log_arity,
+        num_queries: profile.l2_num_queries,
         commit_pow_bits:
             p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_COMMIT_POW_BITS,
         query_pow_bits:
             p3_circuit_prover::config::GOLDILOCKS_TIP5_RECURSIVE_PURE_QUERY_QUERY_POW_BITS,
-        cap_height: COMPACT_BATCH_L2_CAP_HEIGHT,
+        cap_height: profile.l2_cap_height,
     }
 }
 
@@ -465,14 +619,19 @@ fn append_len_prefixed_bytes_as_fields(out: &mut Vec<Val>, bytes: &[u8]) {
     }
 }
 
+fn compact_batch_route_params_bytes_for_profile(
+    profile: CompactRecursionProfile,
+) -> Result<Vec<u8>, postcard::Error> {
+    debug_assert!(
+        profile.validate().is_ok(),
+        "compact recursion profile must validate before digesting"
+    );
+    postcard::to_allocvec(&profile)
+}
+
+#[cfg(test)]
 fn compact_batch_route_params_bytes() -> Result<Vec<u8>, postcard::Error> {
-    postcard::to_allocvec(&(
-        COMPACT_BATCH_L1_LOG_BLOWUP, COMPACT_BATCH_L1_NUM_QUERIES, COMPACT_BATCH_L1_CAP_HEIGHT,
-        COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN, COMPACT_BATCH_L1_ALU_LANES,
-        COMPACT_BATCH_L1_HORNER_PACK_K, COMPACT_BATCH_L2_LOG_BLOWUP, COMPACT_BATCH_L2_NUM_QUERIES,
-        COMPACT_BATCH_L2_CAP_HEIGHT, COMPACT_BATCH_L2_LOG_FINAL_POLY_LEN,
-        COMPACT_BATCH_L2_MAX_LOG_ARITY, COMPACT_BATCH_L2_ALU_LANES, COMPACT_BATCH_L2_HORNER_PACK_K,
-    ))
+    compact_batch_route_params_bytes_for_profile(COMPACT_BATCH_PROFILE)
 }
 
 fn compact_batch_verifier_key_digest_from_serialized_parts(
@@ -498,16 +657,26 @@ fn compact_batch_verifier_key_digest_from_serialized_parts(
         .expect("digest slice width is fixed")
 }
 
-fn compact_batch_verifier_key_digest_from_parts(
+fn compact_batch_verifier_key_digest_from_parts_with_profile(
+    profile: CompactRecursionProfile,
     metadata: &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
     fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape,
 ) -> Result<AiPowCompactBatchVerifierKeyDigest, postcard::Error> {
-    let route_params = compact_batch_route_params_bytes()?;
+    let route_params = compact_batch_route_params_bytes_for_profile(profile)?;
     let metadata = postcard::to_allocvec(metadata)?;
     let fri_shape = postcard::to_allocvec(&fri_shape)?;
     Ok(compact_batch_verifier_key_digest_from_serialized_parts(
         &route_params, &metadata, &fri_shape,
     ))
+}
+
+fn compact_batch_verifier_key_digest_from_parts(
+    metadata: &p3_circuit_prover::GoldilocksBlake3BatchStarkProofMetadata,
+    fri_shape: p3_circuit_prover::GoldilocksBlake3FriShape,
+) -> Result<AiPowCompactBatchVerifierKeyDigest, postcard::Error> {
+    compact_batch_verifier_key_digest_from_parts_with_profile(
+        COMPACT_BATCH_PROFILE, metadata, fri_shape,
+    )
 }
 
 fn statement_public_digest(public_values: &[Val]) -> Vec<Val> {
@@ -2742,6 +2911,49 @@ mod tests {
     }
 
     #[test]
+    fn compact_recursion_profile_validator_rejects_unsafe_shapes() {
+        assert_eq!(COMPACT_BATCH_PROFILE.validate(), Ok(()));
+
+        let mut bad = COMPACT_BATCH_PROFILE;
+        bad.l1_num_queries = 19;
+        assert_eq!(
+            bad.validate(),
+            Err(CompactRecursionProfileError::BadL1JohnsonBits {
+                bits: bad.l1_log_blowup * bad.l1_num_queries
+            })
+        );
+
+        let mut bad = COMPACT_BATCH_PROFILE;
+        bad.l2_recompose_lanes = 0;
+        assert_eq!(
+            bad.validate(),
+            Err(CompactRecursionProfileError::ZeroField(
+                "l2_recompose_lanes"
+            ))
+        );
+
+        let mut bad = COMPACT_BATCH_PROFILE;
+        bad.recursive_layer_count = 2;
+        assert_eq!(
+            bad.validate(),
+            Err(CompactRecursionProfileError::BadRecursiveLayerCount { value: 2 })
+        );
+
+        let mut bad = COMPACT_BATCH_PROFILE;
+        bad.l2_max_log_arity = 99;
+        assert_eq!(
+            bad.validate(),
+            Err(CompactRecursionProfileError::Soundness {
+                layer: "l2",
+                error: crate::circuit::FriSoundnessError::FoldArityTooLarge {
+                    max_log_arity: 99,
+                    remaining_log_domain: 11
+                }
+            })
+        );
+    }
+
+    #[test]
     fn compact_batch_verifier_key_digest_binds_metadata_and_fri_shape() {
         let metadata = sample_compact_blake3_metadata(DIGEST_ELEMS);
         let fri_shape = compact_batch_l2_fri_shape();
@@ -2811,6 +3023,17 @@ mod tests {
         assert_ne!(
             base, changed_route_digest,
             "verifier-key digest must bind compact route constants"
+        );
+
+        let mut changed_profile = COMPACT_BATCH_PROFILE;
+        changed_profile.l2_recompose_lanes += 1;
+        let changed_recompose_digest = compact_batch_verifier_key_digest_from_parts_with_profile(
+            changed_profile, &metadata, fri_shape,
+        )
+        .expect("digest changed L2 recompose lanes");
+        assert_ne!(
+            base, changed_recompose_digest,
+            "verifier-key digest must bind L2 recompose table lanes"
         );
 
         let mut changed_rows = sample_compact_blake3_metadata(DIGEST_ELEMS);
@@ -2903,11 +3126,11 @@ mod tests {
         assert_eq!(
             verifier_digest.map(|v| v.as_canonical_u64()),
             [
-                17883367793332197318,
-                7881178106775974951,
-                8180291831027492031,
-                4891427350557653848,
-                8414763441743673108,
+                3592247190706181617,
+                11134781504761958265,
+                16172600315865872743,
+                18065625398191690898,
+                7414033568904211323,
             ],
             "compact verifier-key digest checkpoint binds route parameters, sample metadata, and FRI shape"
         );
@@ -2956,6 +3179,12 @@ mod tests {
         assert!(
             l1_params.permutation_config.is_some(),
             "compact L1 FRI params must enable recursive MMCS verification"
+        );
+        let l1_packing = compact_batch_l1_table_packing(DIGEST_ELEMS);
+        assert_eq!(
+            l1_packing.min_trace_height(),
+            1usize << (COMPACT_BATCH_L1_LOG_FINAL_POLY_LEN + COMPACT_BATCH_L1_LOG_BLOWUP + 1),
+            "compact L1 table packing must enforce the candidate FRI minimum height"
         );
 
         let l2_shape = compact_batch_l2_fri_shape();

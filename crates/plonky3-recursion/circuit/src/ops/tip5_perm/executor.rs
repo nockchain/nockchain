@@ -288,12 +288,13 @@ impl Tip5PermExecutor {
             }
         }
 
-        let (mmcs_bit_ctl, mmcs_bit_index) =
-            if self.merkle_path && let Some([wid]) = inputs.get(width + 1).map(Vec::as_slice) {
-                (true, wid.0)
-            } else {
-                (false, 0)
-            };
+        let (mmcs_bit_ctl, mmcs_bit_index) = if self.merkle_path
+            && let Some([wid]) = inputs.get(width + 1).map(Vec::as_slice)
+        {
+            (true, wid.0)
+        } else {
+            (false, 0)
+        };
 
         Tip5CircuitRow {
             new_start: self.new_start,
@@ -601,8 +602,9 @@ impl Tip5PermExecutor {
                         .register_non_primitive_preprocessed_no_read(&self.op_type, &[F::ZERO]);
                     Ok(())
                 }
-                [_] => preprocessed
-                    .register_non_primitive_witness_reads(&self.op_type, mmcs_bit_slot),
+                [_] => {
+                    preprocessed.register_non_primitive_witness_reads(&self.op_type, mmcs_bit_slot)
+                }
                 many => Err(CircuitError::NonPrimitiveOpLayoutMismatch {
                     op: self.op_type.clone(),
                     expected: "0 or 1 witness for mmcs_bit".into(),
@@ -610,10 +612,8 @@ impl Tip5PermExecutor {
                 }),
             }?;
         } else {
-            preprocessed.register_non_primitive_preprocessed_no_read(
-                &self.op_type,
-                &[F::ZERO, F::ZERO],
-            );
+            preprocessed
+                .register_non_primitive_preprocessed_no_read(&self.op_type, &[F::ZERO, F::ZERO]);
         }
         Ok(())
     }
