@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 16:52:16 -0400
+Subject: [PATCH 12/17] nockchain: verify primitive public binding constraints
+
+Recursive batch-STARK verification now reconstructs the primitive Public AIR with proof.public_binding_lanes. The verifier already allocates and packs the external public values; the AIR must include the same first-row binding constraints the prover used or the folded quotient check is evaluated against a different constraint system.
+
+diff --git a/recursion/src/verifier/batch_stark.rs b/recursion/src/verifier/batch_stark.rs
+index 0ee416bf3f4aa186a93297001f377cebb818ce05..4f41d4249bbe93285def95360e9afc7afd002964 100644
+--- a/recursion/src/verifier/batch_stark.rs
++++ b/recursion/src/verifier/batch_stark.rs
+@@ -277,10 +277,10 @@ where
+         CircuitTablesAir::Const(ConstAir::<Val<SC>, TRACE_D>::new(
+             rows[PrimitiveTable::Const],
+         )),
+-        CircuitTablesAir::Public(PublicAir::<Val<SC>, TRACE_D>::new(
+-            rows[PrimitiveTable::Public],
+-            public_lanes,
+-        )),
++        CircuitTablesAir::Public(
++            PublicAir::<Val<SC>, TRACE_D>::new(rows[PrimitiveTable::Public], public_lanes)
++                .with_public_binding_lanes(proof.public_binding_lanes),
++        ),
+         CircuitTablesAir::Alu(alu_air),
+     ];
+ 
+-- 
+2.50.1 (Apple Git-155)
+

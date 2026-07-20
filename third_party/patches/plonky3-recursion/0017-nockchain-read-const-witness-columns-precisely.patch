@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 18:36:56 -0400
+Subject: [PATCH 17/17] nockchain: read const witness columns precisely
+
+The public-table duplicate suppression compares public output indices against const creator indices. Const preprocessing has already been expanded to [multiplicity, index] pairs at that point, so only the index column is a creator. This prevents public rows from being disabled when a const read-count happens to equal their witness index.
+
+diff --git a/circuit-prover/src/common.rs b/circuit-prover/src/common.rs
+index 93e83f6a70a402f3df12e0bb51b75fcbb3174d52..b2a49c9cec56395002136d2be512ba2e86666a1c 100644
+--- a/circuit-prover/src/common.rs
++++ b/circuit-prover/src/common.rs
+@@ -323,11 +323,14 @@ where
+             }
+             PrimitiveOpType::Public => {
+                 // Public preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
+-                // Convert to [ext_mult, out_idx] pairs using ext_reads. A public input can
+-                // share a witness slot with Const(0) or another public input through
+-                // `connect`; only the first non-Const public row creates the bus entry.
++                // Const is already in [ext_mult, out_idx] form because primitive tables
++                // are lowered in enum order. Only the out_idx column names creator
++                // witnesses; multiplicities can numerically collide with public indices.
+                 let const_idx = PrimitiveOpType::Const as usize;
+-                let const_outputs = base_prep[const_idx].iter().copied().collect::<HashSet<_>>();
++                let const_outputs = base_prep[const_idx]
++                    .chunks_exact(2)
++                    .map(|chunk| chunk[1])
++                    .collect::<HashSet<_>>();
+                 let mut seen_public_outputs = HashSet::new();
+                 let mut prep_2col: Vec<Val<SC>> = Vec::with_capacity(base_prep[idx].len() * 2);
+                 for &out_idx in &base_prep[idx] {
+-- 
+2.50.1 (Apple Git-155)
+

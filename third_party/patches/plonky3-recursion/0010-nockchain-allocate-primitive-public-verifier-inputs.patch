@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 16:21:10 -0400
+Subject: [PATCH 10/17] nockchain: allocate primitive public verifier inputs
+
+Recursive batch-STARK verification now allocates public input targets for the primitive Public table using proof.public_binding_lanes * proof.ext_degree. The packer already supplies those values; without the allocation, recursive verification rejected valid circuit proofs with a public binding lane statement.
+
+diff --git a/recursion/src/verifier/batch_stark.rs b/recursion/src/verifier/batch_stark.rs
+index 4417437a3803cf7fe9afa0c4bb185bbfca34eb8d..0ee416bf3f4aa186a93297001f377cebb818ce05 100644
+--- a/recursion/src/verifier/batch_stark.rs
++++ b/recursion/src/verifier/batch_stark.rs
+@@ -311,6 +311,14 @@ where
+     }
+ 
+     let mut air_public_counts = vec![0usize; NUM_PRIMITIVE_TABLES];
++    air_public_counts[PrimitiveTable::Public as usize] = proof
++        .public_binding_lanes
++        .checked_mul(proof.ext_degree)
++        .ok_or_else(|| {
++            VerificationError::InvalidProofShape(
++                "primitive public binding count overflows usize".to_string(),
++            )
++        })?;
+     for entry in &proof.non_primitives {
+         air_public_counts.push(entry.public_values.len());
+     }
+-- 
+2.50.1 (Apple Git-155)
+

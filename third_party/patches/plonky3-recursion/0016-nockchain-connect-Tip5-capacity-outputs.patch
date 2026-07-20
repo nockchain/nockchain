@@ -1,0 +1,316 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 17:59:03 -0400
+Subject: [PATCH 16/17] nockchain: connect Tip5 capacity outputs
+
+Tip5 sponge state chaining can feed capacity limbs into later permutation inputs. The circuit AIR and preprocessor now carry WitnessChecks output columns for all 16 state limbs, while inactive/unreturned outputs remain zero-multiplicity. This prevents returned capacity witnesses from being read without a producer on the witness bus.
+
+diff --git a/circuit-prover/src/batch_stark_prover/tip5.rs b/circuit-prover/src/batch_stark_prover/tip5.rs
+index 024416e52b68084c1e29b498afb1d18ee1ab1f66..3ffc8273dac92b2bd011c7d19327117d21d4b8ac 100644
+--- a/circuit-prover/src/batch_stark_prover/tip5.rs
++++ b/circuit-prover/src/batch_stark_prover/tip5.rs
+@@ -42,9 +42,10 @@ use p3_field::{Algebra, ExtensionField, PrimeCharacteristicRing, PrimeField64};
+ use p3_goldilocks::Goldilocks;
+ use p3_matrix::Matrix;
+ use p3_tip5_circuit_air::{
+-    NUM_ROUNDS, TABLE_ROWS, TIP5_CIRCUIT_PREP_WIDTH, TIP5_CTL_PREP_COLS, TIP5_RATE, TIP5_WIDTH,
+-    Tip5CircuitAir, Tip5CircuitRow, build_tip5_circuit_main_with_mmcs_bits,
+-    build_tip5_circuit_preprocessed, generate_tip5_circuit_main, tip5_inputs_from_rows,
++    NUM_ROUNDS, TABLE_ROWS, TIP5_CIRCUIT_PREP_WIDTH, TIP5_CTL_PREP_COLS, TIP5_OUTPUT_CTL,
++    TIP5_WIDTH, Tip5CircuitAir, Tip5CircuitRow,
++    build_tip5_circuit_main_with_mmcs_bits, build_tip5_circuit_preprocessed,
++    generate_tip5_circuit_main, tip5_inputs_from_rows,
+ };
+ use p3_uni_stark::{SymbolicExpression, SymbolicExpressionExt};
+ use p3_util::log2_ceil_usize;
+@@ -136,9 +137,9 @@ where
+ }
+ 
+ /// Per-op preprocessed CTL row width registered by the Tip5 NPO
+-/// executor (`in_ctl[16] | in_idx[16] | out_idx[10] | out_ctl[10]
++/// executor (`in_ctl[16] | in_idx[16] | out_idx[16] | out_ctl[16]
+ /// | mmcs_bit_ctl | mmcs_bit_idx`).
+-const TIP5_OP_CTL_WIDTH: usize = TIP5_CTL_PREP_COLS; // 54
++const TIP5_OP_CTL_WIDTH: usize = TIP5_CTL_PREP_COLS; // 66
+ 
+ /// Table prover for the Tip5 NPO. Single Goldilocks D=1 config.
+ #[derive(Clone)]
+@@ -418,11 +419,11 @@ where
+         }
+         let num_ops = prep_base.len() / TIP5_OP_CTL_WIDTH;
+ 
+-        // CTL column offsets within one op's 54-col block.
++        // CTL column offsets within one op's 66-col block.
+         let in_ctl_off = 0;
+         let in_idx_off = in_ctl_off + TIP5_WIDTH;
+         let out_idx_off = in_idx_off + TIP5_WIDTH;
+-        let out_ctl_off = out_idx_off + TIP5_RATE;
++        let out_ctl_off = out_idx_off + TIP5_OUTPUT_CTL;
+ 
+         let dup_wids = preprocessed.dup_npo_outputs.get(op_type);
+ 
+@@ -430,7 +431,7 @@ where
+         let mut resolved = prep_base.clone();
+         for row in 0..num_ops {
+             let base = row * TIP5_OP_CTL_WIDTH;
+-            for j in 0..TIP5_RATE {
++            for j in 0..TIP5_OUTPUT_CTL {
+                 let ctl = resolved[base + out_ctl_off + j];
+                 if ctl != F::ZERO {
+                     let idx = resolved[base + out_idx_off + j];
+@@ -465,13 +466,13 @@ where
+                     // `out_ctl` here already carries the resolved
+                     // signed multiplicity; pass it through via the
+                     // index/flag channel below.
+-                    out_ctl: (0..TIP5_RATE).map(|_| false).collect(),
+-                    output_indices: (0..TIP5_RATE)
++                    out_ctl: (0..TIP5_OUTPUT_CTL).map(|_| false).collect(),
++                    output_indices: (0..TIP5_OUTPUT_CTL)
+                         .map(|i| F::as_canonical_u64(&resolved[base + out_idx_off + i]) as u32)
+                         .collect(),
+-                    mmcs_bit_ctl: resolved[base + out_ctl_off + TIP5_RATE] != F::ZERO,
++                    mmcs_bit_ctl: resolved[base + out_ctl_off + TIP5_OUTPUT_CTL] != F::ZERO,
+                     mmcs_bit_index: F::as_canonical_u64(
+-                        &resolved[base + out_ctl_off + TIP5_RATE + 1],
++                        &resolved[base + out_ctl_off + TIP5_OUTPUT_CTL + 1],
+                     ) as u32,
+                     mmcs_bit: false,
+                 }
+@@ -504,12 +505,12 @@ where
+         // booleans / zeros for them since we passed `out_ctl=false`).
+         let width = TIP5_CIRCUIT_PREP_WIDTH;
+         let l_w = width - TIP5_CTL_PREP_COLS;
+-        let ctl_out_ctl = TIP5_WIDTH + TIP5_WIDTH + TIP5_RATE;
++        let ctl_out_ctl = TIP5_WIDTH + TIP5_WIDTH + TIP5_OUTPUT_CTL;
+         for (row, op_row) in (0..num_ops).map(|r| (r, r)) {
+             let trace_row = TABLE_ROWS + row * NUM_ROUNDS + (NUM_ROUNDS - 1);
+             let dst = trace_row * width + l_w + ctl_out_ctl;
+             let src = op_row * TIP5_OP_CTL_WIDTH + out_ctl_off;
+-            for j in 0..TIP5_RATE {
++            for j in 0..TIP5_OUTPUT_CTL {
+                 full[dst + j] = resolved[src + j];
+             }
+         }
+diff --git a/circuit/src/ops/tip5_perm/executor.rs b/circuit/src/ops/tip5_perm/executor.rs
+index e16ff42a3a5a077374f70bdd4cf86aa41689ec8e..67b490d7f50a7543fd44c6448ba54ebb92a702eb 100644
+--- a/circuit/src/ops/tip5_perm/executor.rs
++++ b/circuit/src/ops/tip5_perm/executor.rs
+@@ -250,13 +250,13 @@ impl Tip5PermExecutor {
+     }
+ 
+     /// Construct the circuit trace row (D=1): one CTL flag + witness
+-    /// index per physical input slot (`WIDTH`=16) and per rate output
+-    /// slot (`RATE`=10). Mirrors `build_base_trace_row` — the
++    /// index per physical input slot (`WIDTH`=16) and per returned output
++    /// slot. Capacity outputs are part of the chained Tip5 state. The
+     /// single-row Tip5 AIR consumes the fully resolved `input_values`
+-    /// (post chain ⊕ sibling ⊕ swap) and the CTL flags only; merkle /
+-    /// mmcs_bit is recorded in a wrapper-owned main column so the AIR
+-    /// can bind direction-aware input CTL to the same witness bit that
+-    /// drove the Merkle swap.
++    /// (post chain ⊕ sibling ⊕ swap) and the CTL flags only; `mmcs_bit`
++    /// is recorded in a wrapper-owned main column so the AIR can bind
++    /// direction-aware input CTL to the same witness bit that drove the
++    /// Merkle swap.
+     fn build_trace_row<F: Field>(
+         &self,
+         inputs: &[Vec<WitnessId>],
+@@ -265,7 +265,7 @@ impl Tip5PermExecutor {
+         mmcs_bit: bool,
+     ) -> Tip5CircuitRow<F> {
+         let width = self.config.width();
+-        let rate = self.config.rate();
++        let output_ctl = width;
+         let mut in_ctl = vec![false; width];
+         let mut input_indices = vec![0u32; width];
+         for i in 0..width {
+@@ -277,9 +277,9 @@ impl Tip5PermExecutor {
+             }
+         }
+ 
+-        let mut out_ctl = vec![false; rate];
+-        let mut output_indices = vec![0u32; rate];
+-        for i in 0..rate {
++        let mut out_ctl = vec![false; output_ctl];
++        let mut output_indices = vec![0u32; output_ctl];
++        for i in 0..output_ctl {
+             if let Some(out_slot) = outputs.get(i)
+                 && let [wid] = out_slot.as_slice()
+             {
+@@ -525,19 +525,17 @@ impl Tip5PermExecutor {
+     }
+ 
+     /// Emit the per-op preprocessed CTL columns for the Tip5 circuit
+-    /// table: `in_ctl[16] | in_idx[16] | out_idx[10] | out_ctl[10]
++    /// table: `in_ctl[16] | in_idx[16] | out_idx[16] | out_ctl[16]
+     /// | mmcs_bit_ctl | mmcs_bit_idx`.
+     ///
+     /// Input slots that are CTL-exposed are registered as
+-    /// `WitnessChecks` **reads** (so the bus reader count / `ext_reads`
+-    /// is incremented, exactly like Poseidon1 input limbs); output
+-    /// slots are registered as **output indices** (creators whose
+-    /// `out_ctl` multiplicity the `Tip5Preprocessor` later resolves
+-    /// from `ext_reads`, exactly like Poseidon1 / Recompose). Only the
+-    /// first `width` (16) input slots and `rate` (10) output slots are
+-    /// registered as state CTL. The trailing `mmcs_bit` slot is also
+-    /// registered as a direction-bit read so the AIR can bind the
+-    /// direction-aware state selection to the circuit witness.
++    /// `WitnessChecks` readers. Output slots are registered as creators
++    /// whose `out_ctl` multiplicity is resolved from `ext_reads` by the
++    /// Tip5 preprocessor. Capacity outputs are included because Tip5
++    /// sponge chaining can feed them into later permutation inputs.
++    /// The trailing `mmcs_bit` slot is also registered as a direction-bit
++    /// read so the AIR can bind the direction-aware state selection to the
++    /// circuit witness.
+     fn preprocess_ctl<F: Field>(
+         &self,
+         inputs: &[Vec<WitnessId>],
+@@ -545,7 +543,7 @@ impl Tip5PermExecutor {
+         preprocessed: &mut dyn PreprocessedWriter<F>,
+     ) -> Result<(), CircuitError> {
+         let width = self.config.width();
+-        let rate = self.config.rate();
++        let output_ctl = width;
+ 
+         // in_ctl[16]
+         for inp in inputs.iter().take(width) {
+@@ -568,8 +566,8 @@ impl Tip5PermExecutor {
+                 });
+             }
+         }
+-        // out_idx[10] — outputs are creators on the WitnessChecks bus.
+-        for out in outputs.iter().take(rate) {
++        // out_idx[16] — returned outputs are creators on the WitnessChecks bus.
++        for out in outputs.iter().take(output_ctl) {
+             if out.is_empty() {
+                 preprocessed.register_non_primitive_preprocessed_no_read(&self.op_type, &[F::ZERO]);
+             } else if let [_] = out.as_slice() {
+@@ -582,8 +580,8 @@ impl Tip5PermExecutor {
+                 });
+             }
+         }
+-        // out_ctl[10] — raw flag; preprocessor rewrites to n_reads / -1.
+-        for out in outputs.iter().take(rate) {
++        // out_ctl[16] — raw flag; preprocessor rewrites to n_reads / -1.
++        for out in outputs.iter().take(output_ctl) {
+             preprocessed.register_non_primitive_preprocessed_no_read(
+                 &self.op_type,
+                 &[F::from_bool(Self::limb_ctl_enabled(out))],
+diff --git a/tip5-circuit-air/src/air_circuit.rs b/tip5-circuit-air/src/air_circuit.rs
+index b21fb5188e8a36bf42a686ee312bd50be552ce70..1cdce1477dd062b91b0a6cf2e6f3830da90353dd 100644
+--- a/tip5-circuit-air/src/air_circuit.rs
++++ b/tip5-circuit-air/src/air_circuit.rs
+@@ -28,7 +28,7 @@
+ //! Tip5 evaluation each, the rest inert padding. The matching preprocessed
+ //! trace carries the verifier-fixed L-table/round-selector columns
+ //! `[IS_TABLE, TIN, TOUT, IS_ROUND, ROUND[0..5]]` *and* the per-perm-row CTL
+-//! columns `[in_ctl[16], in_idx[16], out_idx[10], out_ctl[10],
++//! columns `[in_ctl[16], in_idx[16], out_idx[16], out_ctl[16],
+ //! mmcs_bit_ctl, mmcs_bit_idx]`.
+ 
+ use alloc::vec::Vec;
+@@ -46,25 +46,28 @@ use crate::air_lookup::{
+ use crate::generation_lookup::generate_lookup_trace;
+ use crate::tip5_spec::{NUM_ROUNDS, STATE_SIZE};
+ 
+-/// Sponge rate (squeezed/CTL-exposed output lanes) of recursive
+-/// Tip5: `PaddingFreeSponge<_,16,10,5>` / `DuplexChallenger<_,_,16,10>`.
++/// Sponge rate of recursive Tip5:
++/// `PaddingFreeSponge<_,16,10,5>` / `DuplexChallenger<_,_,16,10>`.
+ pub const TIP5_RATE: usize = 10;
+ /// Tip5 state width in base-field elements.
+ pub const TIP5_WIDTH: usize = STATE_SIZE; // 16
++/// Number of Tip5 output limbs connected to the witness bus.
++pub const TIP5_OUTPUT_CTL: usize = TIP5_WIDTH;
+ /// Tip5 Merkle digest width in base-field elements.
+ pub const TIP5_DIGEST: usize = 5;
+ 
+ /// Per-perm-row CTL preprocessed columns appended after the lookup AIR's
+ /// L-table/round-selector columns: `in_ctl[16] | in_idx[16] |
+-/// out_idx[10] | out_ctl[10] | mmcs_bit_ctl | mmcs_bit_idx`.
+-/// (Mirrors the Poseidon1 compact-D1 header/idx/ctl columns,
+-/// Tip5-shaped: no merkle/chaining selectors — Tip5 sponge chaining is
+-/// realised by the executor carrying the previous full state into
+-/// `IN`, not by per-limb preprocessed chain selectors.)
+-pub const TIP5_CTL_PREP_COLS: usize = TIP5_WIDTH + TIP5_WIDTH + TIP5_RATE + TIP5_RATE + 2; // 54
++/// out_idx[16] | out_ctl[16] | mmcs_bit_ctl | mmcs_bit_idx`.
++///
++/// Tip5 sponge chaining reuses capacity limbs. Those limbs must be
++/// WitnessChecks creators when they are returned to the circuit and later
++/// consumed by another permutation.
++pub const TIP5_CTL_PREP_COLS: usize =
++    TIP5_WIDTH + TIP5_WIDTH + TIP5_OUTPUT_CTL + TIP5_OUTPUT_CTL + 2; // 66
+ 
+ /// Total preprocessed width: lookup AIR columns + CTL columns.
+-pub const TIP5_CIRCUIT_PREP_WIDTH: usize = L_PREP_WIDTH + TIP5_CTL_PREP_COLS; // 9 + 54 = 63
++pub const TIP5_CIRCUIT_PREP_WIDTH: usize = L_PREP_WIDTH + TIP5_CTL_PREP_COLS; // 9 + 66 = 75
+ 
+ /// Extra main-trace columns appended after the validated lookup AIR's
+ /// columns. The lookup AIR ignores these; the wrapper AIR uses them
+@@ -76,8 +79,8 @@ pub const TIP5_CIRCUIT_EXTRA_MAIN_COLS: usize = 1;
+ const CTL_IN_CTL: usize = 0;
+ const CTL_IN_IDX: usize = CTL_IN_CTL + TIP5_WIDTH;
+ const CTL_OUT_IDX: usize = CTL_IN_IDX + TIP5_WIDTH;
+-const CTL_OUT_CTL: usize = CTL_OUT_IDX + TIP5_RATE;
+-const CTL_MMCS_BIT_CTL: usize = CTL_OUT_CTL + TIP5_RATE;
++const CTL_OUT_CTL: usize = CTL_OUT_IDX + TIP5_OUTPUT_CTL;
++const CTL_MMCS_BIT_CTL: usize = CTL_OUT_CTL + TIP5_OUTPUT_CTL;
+ const CTL_MMCS_BIT_IDX: usize = CTL_MMCS_BIT_CTL + 1;
+ /// Verifier-fixed permutation-row selector in the embedded lookup AIR
+ /// preprocessed columns. Mirrors `air_lookup::P_IS_ROUND`.
+@@ -200,15 +203,15 @@ pub fn build_tip5_circuit_preprocessed<F: Field>(
+     for (pi, row) in rows.iter().enumerate() {
+         debug_assert_eq!(row.in_ctl.len(), TIP5_WIDTH);
+         debug_assert_eq!(row.input_indices.len(), TIP5_WIDTH);
+-        debug_assert_eq!(row.out_ctl.len(), TIP5_RATE);
+-        debug_assert_eq!(row.output_indices.len(), TIP5_RATE);
++        debug_assert_eq!(row.out_ctl.len(), TIP5_OUTPUT_CTL);
++        debug_assert_eq!(row.output_indices.len(), TIP5_OUTPUT_CTL);
+         let trace_row = TABLE_ROWS + pi * NUM_ROUNDS + (NUM_ROUNDS - 1);
+         let base = trace_row * width + L_PREP_WIDTH;
+         for i in 0..TIP5_WIDTH {
+             prep[base + CTL_IN_CTL + i] = F::from_bool(row.in_ctl[i]);
+             prep[base + CTL_IN_IDX + i] = F::from_u32(row.input_indices[i] * idx_scale);
+         }
+-        for i in 0..TIP5_RATE {
++        for i in 0..TIP5_OUTPUT_CTL {
+             prep[base + CTL_OUT_IDX + i] = F::from_u32(row.output_indices[i] * idx_scale);
+             prep[base + CTL_OUT_CTL + i] = F::from_bool(row.out_ctl[i]);
+         }
+@@ -430,13 +433,13 @@ where
+             builder.push_interaction("WitnessChecks", input_idx_limb, Count::bounded(-mult, 1));
+         }
+ 
+-        // Rate output limb RECEIVES: `[idx, value, ZERO×(WITNESS_EXT_D
+-        // − 1)]`, multiplicity `out_ctl * kind` (the resolved
+-        // per-witness read count is baked into `out_ctl` by the
+-        // preprocessor; `kind` gates rows). Same D-padding as the
+-        // poseidon1 output-limb receives (`push(idx)`, `D` value
+-        // coords, `WITNESS_EXT_D − D` zeros; Tip5 perm `D == 1`).
+-        for i in 0..TIP5_RATE {
++        // Output limb RECEIVES: `[idx, value, ZERO×(WITNESS_EXT_D −
++        // 1)]`, multiplicity `out_ctl * kind` (the resolved per-witness
++        // read count is baked into `out_ctl` by the preprocessor).
++        // The first `TIP5_RATE` values are the sponge rate output; the
++        // remaining capacity outputs are connected when returned to the
++        // circuit because later sponge rows can consume them.
++        for i in 0..TIP5_OUTPUT_CTL {
+             let idx: AB::Expr = pre[cbase + CTL_OUT_IDX + i].into();
+             let out_ctl: AB::Expr = pre[cbase + CTL_OUT_CTL + i].into();
+             let value: AB::Expr = local[tip5_out_col(i)].into();
+diff --git a/tip5-circuit-air/src/lib.rs b/tip5-circuit-air/src/lib.rs
+index 6f175d6778fbbdcd876b253e90ddea701780cca0..f7b61f6f242a58baea9d72c900e5ce0d9fecf864 100644
+--- a/tip5-circuit-air/src/lib.rs
++++ b/tip5-circuit-air/src/lib.rs
+@@ -39,7 +39,7 @@ mod tip5_spec;
+ pub use air::{Tip5PermAir, tip5_perm_air_width};
+ pub use air_circuit::{
+     TIP5_CIRCUIT_EXTRA_MAIN_COLS, TIP5_CIRCUIT_PREP_WIDTH, TIP5_CTL_PREP_COLS, TIP5_DIGEST,
+-    TIP5_RATE, TIP5_WIDTH, Tip5CircuitAir, Tip5CircuitRow,
++    TIP5_OUTPUT_CTL, TIP5_RATE, TIP5_WIDTH, Tip5CircuitAir, Tip5CircuitRow,
+     build_tip5_circuit_main_with_mmcs_bits, build_tip5_circuit_preprocessed,
+     generate_tip5_circuit_main, tip5_inputs_from_rows,
+ };
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 14:29:30 -0400
+Subject: [PATCH 06/17] nockchain: use digest width in MMCS recursion
+
+The recursion circuit now wires Merkle-path roots, sibling injection, and exposed outputs using the configured MMCS digest width rather than the sponge rate. Tip5 uses rate 10 but digest 5, so recursive certificate verification must bind exactly the five root limbs that native Tip5 MMCS commits.
+
+diff --git a/circuit/src/ops/mmcs.rs b/circuit/src/ops/mmcs.rs
+index e69e2c78af22c349950aeb948b1828f819958a72..98a1cabd0ff29c2c50b6e65ae8bcf5cb0da37abd 100644
+--- a/circuit/src/ops/mmcs.rs
++++ b/circuit/src/ops/mmcs.rs
+@@ -87,6 +87,7 @@ impl<F: Field> CircuitBuilder<F> {
+     ) -> Result<Vec<NonPrimitiveOpId>, CircuitBuilderError> {
+         let permutation_config: PermConfig = permutation_config.into();
+         let width_ext = permutation_config.width_ext();
++        let digest_ext = permutation_config.digest_ext();
+         let rate_ext = permutation_config.rate_ext();
+         let mut op_ids = Vec::with_capacity(openings_expr.len());
+         let mut output = vec![None; width_ext];
+@@ -141,7 +142,7 @@ impl<F: Field> CircuitBuilder<F> {
+ 
+             let mut inputs = vec![None; width_ext];
+             if is_first {
+-                for (j, &d) in row_digest.iter().take(rate_ext).enumerate() {
++                for (j, &d) in row_digest.iter().take(digest_ext).enumerate() {
+                     inputs[j] = Some(d);
+                 }
+             }
+@@ -153,7 +154,7 @@ impl<F: Field> CircuitBuilder<F> {
+                     mmcs_bit: Some(*direction),
+                     mmcs_bit2: None,
+                     inputs,
+-                    out_ctl: vec![is_final; rate_ext],
++                    out_ctl: vec![is_final; digest_ext],
+                     return_all_outputs: false,
+                     mmcs_index_sum: None,
+                 },
+@@ -165,8 +166,8 @@ impl<F: Field> CircuitBuilder<F> {
+         if has_tail {
+             let tail = &openings_expr[directions_expr.len()];
+             let mut inputs = vec![None; width_ext];
+-            for (j, &t) in tail.iter().take(rate_ext).enumerate() {
+-                inputs[rate_ext + j] = Some(t);
++            for (j, &t) in tail.iter().take(digest_ext).enumerate() {
++                inputs[digest_ext + j] = Some(t);
+             }
+             let (_, tail_output) = self.add_perm(
+                 permutation_config,
+@@ -176,7 +177,7 @@ impl<F: Field> CircuitBuilder<F> {
+                     mmcs_bit: Some(zero),
+                     mmcs_bit2: None,
+                     inputs,
+-                    out_ctl: vec![true; rate_ext],
++                    out_ctl: vec![true; digest_ext],
+                     return_all_outputs: false,
+                     mmcs_index_sum: None,
+                 },
+@@ -186,7 +187,7 @@ impl<F: Field> CircuitBuilder<F> {
+ 
+         let output = output
+             .into_iter()
+-            .take(rate_ext)
++            .take(digest_ext)
+             .map(|x| {
+                 x.ok_or_else(|| CircuitBuilderError::MalformedNonPrimitiveOutputs {
+                     op_id: *op_ids.last().unwrap(),
+-- 
+2.50.1 (Apple Git-155)
+

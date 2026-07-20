@@ -1,0 +1,254 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 13:34:28 -0400
+Subject: [PATCH 02/17] nockchain: wire Tip5 recursion backend
+
+Teach the recursion challenger and FRI backend to use the Tip5 permutation configuration, including the Goldilocks Tip5 circuit challenger path and Tip5 table/preprocessor registration for D=2 verifier circuits.
+
+diff --git a/circuit-prover/src/batch_stark_prover/tip5.rs b/circuit-prover/src/batch_stark_prover/tip5.rs
+index 9cf2362889124205404ce545663177378aa9be1b..024416e52b68084c1e29b498afb1d18ee1ab1f66 100644
+--- a/circuit-prover/src/batch_stark_prover/tip5.rs
++++ b/circuit-prover/src/batch_stark_prover/tip5.rs
+@@ -37,7 +37,7 @@ use p3_batch_stark::{StarkGenericConfig, Val};
+ use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId, Tip5Config, Tip5Trace};
+ use p3_circuit::tables::Traces;
+ use p3_circuit::{CircuitError, PreprocessedColumns};
+-use p3_field::extension::BinomialExtensionField;
++use p3_field::extension::{BinomialExtensionField, BinomiallyExtendable};
+ use p3_field::{Algebra, ExtensionField, PrimeCharacteristicRing, PrimeField64};
+ use p3_goldilocks::Goldilocks;
+ use p3_matrix::Matrix;
+@@ -520,23 +520,22 @@ where
+     Ok(out)
+ }
+ 
+-impl NpoPreprocessor<Goldilocks> for Tip5Preprocessor {
++impl<F> NpoPreprocessor<F> for Tip5Preprocessor
++where
++    F: StarkField + PrimeField64 + BinomiallyExtendable<2>,
++{
+     fn preprocess(
+         &self,
+         _circuit: &dyn core::any::Any,
+         preprocessed: &mut dyn core::any::Any,
+-    ) -> Result<NonPrimitivePreprocessedMap<Goldilocks>, CircuitError> {
+-        if let Some(prep) = preprocessed.downcast_mut::<PreprocessedColumns<Goldilocks, 1>>() {
+-            return tip5_preprocess_for_prover::<Goldilocks, Goldilocks, 1>(prep);
++    ) -> Result<NonPrimitivePreprocessedMap<F>, CircuitError> {
++        if let Some(prep) = preprocessed.downcast_mut::<PreprocessedColumns<F, 1>>() {
++            return tip5_preprocess_for_prover::<F, F, 1>(prep);
+         }
+-        if let Some(prep) = preprocessed
+-            .downcast_mut::<PreprocessedColumns<BinomialExtensionField<Goldilocks, 2>, 2>>()
++        if let Some(prep) =
++            preprocessed.downcast_mut::<PreprocessedColumns<BinomialExtensionField<F, 2>, 2>>()
+         {
+-            return tip5_preprocess_for_prover::<
+-                Goldilocks,
+-                BinomialExtensionField<Goldilocks, 2>,
+-                2,
+-            >(prep);
++            return tip5_preprocess_for_prover::<F, BinomialExtensionField<F, 2>, 2>(prep);
+         }
+         Ok(NonPrimitivePreprocessedMap::new())
+     }
+diff --git a/recursion/src/backend/fri.rs b/recursion/src/backend/fri.rs
+index 125b034474d66d8969af28425852b33c4dbca31a..f5d06ea4dc47c62f911c7d1254373590e9bb182a 100644
+--- a/recursion/src/backend/fri.rs
++++ b/recursion/src/backend/fri.rs
+@@ -10,15 +10,15 @@ use p3_circuit_prover::batch_stark_prover::{
+     poseidon1_air_builders, poseidon1_air_builders_d5, poseidon1_preprocessor,
+     poseidon1_table_provers_d5, poseidon2_air_builders, poseidon2_air_builders_d5,
+     poseidon2_air_builders_for_configs, poseidon2_preprocessor, poseidon2_table_provers_d5,
+-    recompose_air_builders, recompose_preprocessor,
++    recompose_air_builders, recompose_preprocessor, tip5_air_builders, tip5_preprocessor,
+ };
+ use p3_circuit_prover::common::{NpoAirBuilder, NpoPreprocessor};
+ use p3_circuit_prover::config::StarkField;
+ use p3_circuit_prover::field_params::ExtractBinomialW;
+ use p3_circuit_prover::{
+     ConstraintProfile, Poseidon1Preprocessor, Poseidon1Prover, Poseidon1ProverD2,
+-    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, RecomposePreprocessor, TableProver,
+-    recompose_table_provers,
++    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, RecomposePreprocessor,
++    TableProver, Tip5Prover, recompose_table_provers,
+ };
+ use p3_commit::Pcs;
+ use p3_field::extension::BinomiallyExtendable;
+@@ -560,7 +560,9 @@ where
+ 
+     fn non_primitive_preprocessors(&self) -> Vec<Box<dyn NpoPreprocessor<Val<SC>>>> {
+         let cl = self.0.challenger_perm_config.extension_degree() != 2;
+-        let perm_prep = if self.0.challenger_perm_config.as_poseidon1().is_some() {
++        let perm_prep = if self.0.challenger_perm_config.as_tip5().is_some() {
++            tip5_preprocessor::<Val<SC>>()
++        } else if self.0.challenger_perm_config.as_poseidon1().is_some() {
+             poseidon1_preprocessor::<Val<SC>>()
+         } else {
+             poseidon2_preprocessor::<Val<SC>>()
+@@ -574,12 +576,17 @@ where
+             let mut provers: Vec<Box<dyn TableProver<SC>>> = match (
+                 self.0.challenger_perm_config.as_poseidon1(),
+                 self.0.challenger_perm_config.as_poseidon2(),
++                self.0.challenger_perm_config.as_tip5(),
+             ) {
+-                (Some(c), _) => vec![Box::new(Poseidon1ProverD2::new(
++                (Some(c), _, _) => vec![Box::new(Poseidon1ProverD2::new(
+                     *c,
+                     ConstraintProfile::Standard,
+                 ))],
+-                (_, Some(c)) => vec![Box::new(Poseidon2ProverD2::new(
++                (_, Some(c), _) => vec![Box::new(Poseidon2ProverD2::new(
++                    *c,
++                    ConstraintProfile::Standard,
++                ))],
++                (_, _, Some(c)) => vec![Box::new(Tip5Prover::new(
+                     *c,
+                     ConstraintProfile::Standard,
+                 ))],
+@@ -600,7 +607,9 @@ where
+ 
+     fn non_primitive_air_builders(&self) -> Vec<Box<dyn NpoAirBuilder<SC, 2>>> {
+         let cl = self.0.challenger_perm_config.extension_degree() != 2;
+-        let mut builders = if self.0.challenger_perm_config.as_poseidon1().is_some() {
++        let mut builders = if self.0.challenger_perm_config.as_tip5().is_some() {
++            tip5_air_builders::<SC, 2>()
++        } else if self.0.challenger_perm_config.as_poseidon1().is_some() {
+             poseidon1_air_builders::<SC, 2>()
+         } else if self
+             .0
+diff --git a/recursion/src/challenger/circuit.rs b/recursion/src/challenger/circuit.rs
+index afa9fead1d7fbb806ef578937c78d89d9a3dc843..365401ad48add27b8cf7e91f4d717392ca77c9d6 100644
+--- a/recursion/src/challenger/circuit.rs
++++ b/recursion/src/challenger/circuit.rs
+@@ -13,7 +13,7 @@
+ use alloc::vec;
+ use alloc::vec::Vec;
+ 
+-use p3_circuit::ops::{Poseidon1Config, Poseidon2Config};
++use p3_circuit::ops::{Poseidon1Config, Poseidon2Config, Tip5Config};
+ use p3_circuit::{CircuitBuilder, CircuitBuilderError};
+ use p3_field::{ExtensionField, PrimeField64};
+ 
+@@ -105,6 +105,7 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+ 
+         let p2_config = self.config.as_poseidon2().copied();
+         let p1_config = self.config.as_poseidon1().copied();
++        let t5_config = self.config.as_tip5().copied();
+ 
+         // 1. Overwrite state[0..n] with inputs (NOT XOR, matches native)
+         for (i, val) in self.input_buffer.drain(..).enumerate() {
+@@ -114,8 +115,8 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+         // The compact-D1 (base) path feeds capacity as `None` and binds the length tag inside the
+         // AIR via `absorb_len`; the extension-field path feeds the full state, so it must apply the
+         // tag to the tracked capacity element here.
+-        let is_base =
+-            p2_config.map_or_else(|| p1_config.is_some_and(|c| c.d() == 1), |c| c.d() == 1);
++        let base_air_binds_absorb_len = t5_config.is_none()
++            && p2_config.map_or_else(|| p1_config.is_some_and(|c| c.d() == 1), |c| c.d() == 1);
+ 
+         // 2. Prefix-free padding (matches native `DuplexChallenger` 0.6): on an absorb
+         // (`num_absorbed > 0`) zero the rate slots the inputs did not overwrite and bind the
+@@ -126,7 +127,7 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+             for slot in self.state.iter_mut().take(RATE).skip(num_absorbed) {
+                 *slot = zero;
+             }
+-            if !is_base {
++            if !base_air_binds_absorb_len {
+                 let length_tag = circuit.define_const(EF::from_u8(num_absorbed as u8));
+                 self.state[RATE] = circuit.add(self.state[RATE], length_tag);
+             }
+@@ -146,6 +147,8 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+             } else {
+                 self.duplexing_ext_p1::<BF, EF>(circuit, cfg);
+             }
++        } else if let Some(cfg) = t5_config {
++            self.duplexing_base_tip5(circuit, cfg);
+         } else {
+             panic!("unsupported challenger permutation");
+         }
+@@ -244,6 +247,25 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+         self.state = outputs.to_vec();
+     }
+ 
++    /// Tip5 D=1 duplexing.
++    fn duplexing_base_tip5<EF>(
++        &mut self,
++        circuit: &mut CircuitBuilder<EF>,
++        tip5_config: Tip5Config,
++    ) where
++        EF: p3_field::Field,
++    {
++        let new_start = !self.duplexed_once;
++        let inputs: [Option<Target>; 16] = core::array::from_fn(|i| Some(self.state[i]));
++        self.duplexed_once = true;
++
++        let outputs = circuit
++            .add_tip5_perm_for_challenger_base(tip5_config, new_start, inputs)
++            .expect("tip5 base permutation should succeed");
++
++        self.state = outputs.to_vec();
++    }
++
+     /// Poseidon1 D>=2 duplexing.
+     fn duplexing_ext_p1<BF, EF>(
+         &mut self,
+@@ -328,6 +350,13 @@ impl CircuitChallenger<8, 4, Poseidon1Config> {
+     }
+ }
+ 
++impl CircuitChallenger<16, 10, Tip5Config> {
++    /// Create a Tip5 challenger with the recursive Goldilocks base configuration.
++    pub const fn new_goldilocks_tip5_base() -> Self {
++        Self::new(Tip5Config::GOLDILOCKS_W16)
++    }
++}
++
+ impl<BF, EF, const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
+     RecursiveChallenger<BF, EF> for CircuitChallenger<WIDTH, RATE, C>
+ where
+diff --git a/recursion/src/challenger_perm.rs b/recursion/src/challenger_perm.rs
+index db08089d984658056567591665cea18942d1e98c..bf01a10b74bc5569749bd9cf3f163b65851d1279 100644
+--- a/recursion/src/challenger_perm.rs
++++ b/recursion/src/challenger_perm.rs
+@@ -3,7 +3,7 @@
+ //! Allows the verifier and circuit challenger to be parameterised by a permutation
+ //! config without naming a specific hash (e.g. Poseidon2).
+ 
+-use p3_circuit::ops::{Poseidon1Config, Poseidon2Config};
++use p3_circuit::ops::{Poseidon1Config, Poseidon2Config, Tip5Config};
+ 
+ /// Config for the permutation used by the in-circuit challenger.
+ ///
+@@ -26,6 +26,11 @@ pub trait ChallengerPermConfig: Send + Sync {
+     fn as_poseidon1(&self) -> Option<&Poseidon1Config> {
+         None
+     }
++
++    /// Tip5 config if this is a Tip5 permutation; `None` otherwise.
++    fn as_tip5(&self) -> Option<&Tip5Config> {
++        None
++    }
+ }
+ 
+ impl ChallengerPermConfig for Poseidon2Config {
+@@ -48,6 +53,16 @@ impl ChallengerPermConfig for Poseidon1Config {
+     }
+ }
+ 
++impl ChallengerPermConfig for Tip5Config {
++    fn extension_degree(&self) -> usize {
++        Self::d(*self)
++    }
++
++    fn as_tip5(&self) -> Option<&Tip5Config> {
++        Some(self)
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use p3_circuit::ops::{Poseidon1Config, Poseidon2Config};
+-- 
+2.50.1 (Apple Git-155)
+

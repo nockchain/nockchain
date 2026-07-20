@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 17:43:18 -0400
+Subject: [PATCH 15/17] nockchain: suppress duplicate public bus creators
+
+Public input rows can share a witness with Const(0) or with another public row after connect-based aliasing. The Public AIR now assigns WitnessChecks multiplicity only to the first non-Const public creator for a witness, leaving duplicate public rows available for public binding without double-sending the same witness on the bus.
+
+diff --git a/circuit-prover/src/common.rs b/circuit-prover/src/common.rs
+index 9a22f1909429a168527e6a091a00406568a76ebf..93e83f6a70a402f3df12e0bb51b75fcbb3174d52 100644
+--- a/circuit-prover/src/common.rs
++++ b/circuit-prover/src/common.rs
+@@ -2,7 +2,7 @@ use alloc::boxed::Box;
+ use alloc::vec::Vec;
+ use core::any::Any;
+ 
+-use hashbrown::HashMap;
++use hashbrown::{HashMap, HashSet};
+ use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId, PrimitiveOpType};
+ use p3_circuit::{Circuit, CircuitError};
+ use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
+@@ -323,12 +323,23 @@ where
+             }
+             PrimitiveOpType::Public => {
+                 // Public preprocessed per op from circuit.rs: 1 value (D-scaled out_idx).
+-                // Convert to [ext_mult, out_idx] pairs using ext_reads.
++                // Convert to [ext_mult, out_idx] pairs using ext_reads. A public input can
++                // share a witness slot with Const(0) or another public input through
++                // `connect`; only the first non-Const public row creates the bus entry.
++                let const_idx = PrimitiveOpType::Const as usize;
++                let const_outputs = base_prep[const_idx].iter().copied().collect::<HashSet<_>>();
++                let mut seen_public_outputs = HashSet::new();
+                 let mut prep_2col: Vec<Val<SC>> = Vec::with_capacity(base_prep[idx].len() * 2);
+                 for &out_idx in &base_prep[idx] {
++                    let is_creator =
++                        !const_outputs.contains(&out_idx) && seen_public_outputs.insert(out_idx);
+                     let out_wid =
+                         (<Val<SC> as PrimeField64>::as_canonical_u64(&out_idx) as usize) / D;
+-                    let n_reads = preprocessed.ext_reads.get(out_wid).copied().unwrap_or(0);
++                    let n_reads = if is_creator {
++                        preprocessed.ext_reads.get(out_wid).copied().unwrap_or(0)
++                    } else {
++                        0
++                    };
+                     prep_2col.push(<Val<SC>>::from_u32(n_reads));
+                     prep_2col.push(out_idx);
+                 }
+-- 
+2.50.1 (Apple Git-155)
+

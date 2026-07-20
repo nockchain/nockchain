@@ -1,0 +1,725 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: tacryt-socryp <1377557+tacryt-socryp@users.noreply.github.com>
+Date: Mon, 20 Jul 2026 13:59:33 -0400
+Subject: [PATCH 04/17] nockchain: restore compact metadata API
+
+Restore the Nockchain compact proof metadata types and public-binding lane plumbing on the Plonky3 0.6.2 recursion fork.
+
+diff --git a/circuit-prover/src/air/public_air.rs b/circuit-prover/src/air/public_air.rs
+index 1eb6a1f7495bab0e0260e00541f0b88d5c28d9f7..566c933d87b521abaf8bdb7b71ab03707ee020e9 100644
+--- a/circuit-prover/src/air/public_air.rs
++++ b/circuit-prover/src/air/public_air.rs
+@@ -49,6 +49,8 @@ pub struct WitnessSendAir<F, const D: usize = 1> {
+     pub preprocessed: Vec<F>,
+     /// Minimum trace height (for FRI compatibility with higher log_final_poly_len).
+     pub min_height: usize,
++    /// Number of leading lanes in the first row that are exposed as STARK public values.
++    pub public_binding_lanes: usize,
+     _phantom: PhantomData<F>,
+ }
+ 
+@@ -69,6 +71,7 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
+             lanes,
+             preprocessed: Vec::new(),
+             min_height: 1,
++            public_binding_lanes: 0,
+             _phantom: PhantomData,
+         }
+     }
+@@ -87,6 +90,7 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
+             lanes,
+             preprocessed,
+             min_height: 1,
++            public_binding_lanes: 0,
+             _phantom: PhantomData,
+         }
+     }
+@@ -100,6 +104,16 @@ impl<F: Field, const D: usize> WitnessSendAir<F, D> {
+         self
+     }
+ 
++    /// Bind leading first-row lanes to STARK public values.
++    pub const fn with_public_binding_lanes(mut self, lanes: usize) -> Self {
++        assert!(
++            lanes <= self.lanes,
++            "public binding lanes cannot exceed packed public lanes"
++        );
++        self.public_binding_lanes = lanes;
++        self
++    }
++
+     /// Number of base-field columns occupied by a single lane.
+     /// Each lane stores D coordinates for the value.
+     pub const fn lane_width() -> usize {
+@@ -179,6 +193,10 @@ impl<F: Field, const D: usize> BaseAir<F> for WitnessSendAir<F, D> {
+         self.lanes * Self::preprocessed_lane_width()
+     }
+ 
++    fn num_public_values(&self) -> usize {
++        self.public_binding_lanes * D
++    }
++
+     fn preprocessed_trace(&self) -> Option<RowMajorMatrix<F>> {
+         let width = self.lanes * Self::preprocessed_lane_width();
+         let mut mat = RowMajorMatrix::from_flat_padded(self.preprocessed.to_vec(), width, F::ZERO);
+@@ -225,6 +243,14 @@ where
+             }
+ 
+             builder.push_interaction("WitnessChecks", fields, Count::bounded(multiplicity, 1));
++
++            if lane < self.public_binding_lanes {
++                for j in 0..D {
++                    let expected = builder.public_values()[lane * D + j];
++                    let mut first_row = builder.when_first_row();
++                    first_row.assert_eq(main_local[main_off + j], expected);
++                }
++            }
+         }
+     }
+ }
+diff --git a/circuit-prover/src/batch_stark_prover.rs b/circuit-prover/src/batch_stark_prover.rs
+index 6fc28ebd79ae1083ea460e2a87dab89b5e94626f..32650c596fd4ad8640828d036ace4eb131d17f8b 100644
+--- a/circuit-prover/src/batch_stark_prover.rs
++++ b/circuit-prover/src/batch_stark_prover.rs
+@@ -15,7 +15,9 @@ use p3_air::symbolic::AirLayout;
+ use p3_air::{Air, BaseAir};
+ use p3_batch_stark::common::{GlobalPreprocessed, PreprocessedInstanceMeta};
+ use p3_batch_stark::symbolic::get_log_num_quotient_chunks;
+-use p3_batch_stark::{BatchProof, CommonData, ProverData, StarkGenericConfig, StarkInstance, Val};
++use p3_batch_stark::{
++    BatchProof, CommonData, ProverData, ProverOnlyData, StarkGenericConfig, StarkInstance, Val,
++};
+ use p3_circuit::ops::{
+     NonPrimitivePreprocessedMap, NpoTypeId, Poseidon1Config, Poseidon2Config, PrimitiveOpType,
+     Tip5Config,
+@@ -24,6 +26,7 @@ use p3_circuit::tables::Traces;
+ use p3_circuit::{CircuitError, PreprocessedColumns};
+ use p3_commit::Pcs;
+ use p3_field::extension::{BinomialExtensionField, BinomiallyExtendable};
++use p3_goldilocks::Goldilocks;
+ use p3_field::{
+     Algebra, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, PrimeField,
+     PrimeField64,
+@@ -34,6 +37,7 @@ use p3_lookup::logup::LogUpGadget;
+ use p3_lookup::symbolic::InteractionSymbolicBuilder;
+ use p3_matrix::Matrix;
+ use p3_matrix::dense::RowMajorMatrix;
++use p3_merkle_tree::PrunedMerklePaths;
+ use p3_poseidon_circuit_cols::{
+     PoseidonPrepInputLimb, poseidon_d1_compact_preprocessed_header_cols,
+     poseidon_preprocessed_row_width, poseidon_preprocessed_row_width_for_air,
+@@ -54,6 +58,10 @@ use crate::config::StarkField;
+ use crate::constraint_profile::ConstraintProfile;
+ use crate::field_params::ExtractBinomialW;
+ 
++use crate::config::{
++    GoldilocksBlake3Config, GoldilocksBlake3ValMmcs, GoldilocksTipsConfig,
++    goldilocks_blake3_val_mmcs,
++};
+ mod dynamic_air;
+ mod packing;
+ mod poseidon1;
+@@ -277,7 +285,7 @@ const fn default_npo_lanes() -> usize {
+     1
+ }
+ 
+-#[derive(Serialize, Deserialize)]
++#[derive(Clone, Serialize, Deserialize)]
+ #[serde(bound = "")]
+ pub struct NonPrimitiveTableEntry<SC>
+ where
+@@ -337,6 +345,91 @@ where
+     }
+ }
+ 
++/// The PCS prover data for committed preprocessed traces.
++type PreprocessedPcsProverData<SC> = <<SC as StarkGenericConfig>::Pcs as Pcs<
++    <SC as StarkGenericConfig>::Challenge,
++    <SC as StarkGenericConfig>::Challenger,
++>>::ProverData;
++
++mod serde_npo_map {
++    use alloc::vec::Vec;
++
++    use serde::{Deserialize, Deserializer, Serialize, Serializer};
++
++    use super::{NonPrimitivePreprocessedMap, NpoTypeId};
++
++    pub(super) fn serialize<S, F>(
++        value: &NonPrimitivePreprocessedMap<F>,
++        serializer: S,
++    ) -> Result<S::Ok, S::Error>
++    where
++        S: Serializer,
++        F: Serialize,
++    {
++        let pairs: Vec<(&NpoTypeId, &Vec<F>)> = value.iter().collect();
++        pairs.serialize(serializer)
++    }
++
++    pub(super) fn deserialize<'de, D, F>(
++        deserializer: D,
++    ) -> Result<NonPrimitivePreprocessedMap<F>, D::Error>
++    where
++        D: Deserializer<'de>,
++        F: Deserialize<'de>,
++    {
++        let pairs: Vec<(NpoTypeId, Vec<F>)> = Vec::deserialize(deserializer)?;
++        Ok(pairs.into_iter().collect())
++    }
++}
++
++mod serde_verifier_prover_data {
++    use alloc::vec::Vec;
++
++    use serde::{Deserialize, Deserializer, Serialize, Serializer};
++
++    use super::{
++        CommonData, PreprocessedPcsProverData, ProverData, ProverOnlyData, SerializedStarkCommon,
++        StarkGenericConfig,
++    };
++
++    pub(super) fn serialize<S, SC>(value: &ProverData<SC>, serializer: S) -> Result<S::Ok, S::Error>
++    where
++        S: Serializer,
++        SC: StarkGenericConfig,
++        PreprocessedPcsProverData<SC>: Serialize,
++    {
++        let common = SerializedStarkCommon::from_common(&value.common);
++        let preprocessed: &Option<PreprocessedPcsProverData<SC>> =
++            &value.prover_only.preprocessed_prover_data;
++        (common, preprocessed).serialize(serializer)
++    }
++
++    pub(super) fn deserialize<'de, D, SC>(deserializer: D) -> Result<ProverData<SC>, D::Error>
++    where
++        D: Deserializer<'de>,
++        SC: StarkGenericConfig,
++        PreprocessedPcsProverData<SC>: Deserialize<'de>,
++    {
++        let (parsed, preprocessed): (
++            Option<SerializedStarkCommon<SC>>,
++            Option<PreprocessedPcsProverData<SC>>,
++        ) = Deserialize::deserialize(deserializer)?;
++        let common = parsed
++            .map(SerializedStarkCommon::into_common)
++            .unwrap_or_else(|| CommonData::new(None, Vec::new()));
++        Ok(ProverData {
++            common,
++            prover_only: ProverOnlyData {
++                preprocessed_prover_data: preprocessed,
++            },
++        })
++    }
++}
++
++fn empty_alu_schedule_cache<F>() -> AluScheduleCache<F> {
++    RefCell::new(None)
++}
++
+ /// Combined data for circuit proving, including STARK prover data and preprocessed columns.
+ ///
+ /// This struct bundles the upstream [`ProverData`] with circuit-specific preprocessed data,
+@@ -361,15 +454,23 @@ type AluScheduleCache<F> = RefCell<
+     )>,
+ >;
+ 
++#[derive(Serialize, Deserialize)]
++#[serde(bound(
++    serialize = "Val<SC>: serde::Serialize, PreprocessedPcsProverData<SC>: serde::Serialize",
++    deserialize = "Val<SC>: serde::Deserialize<'de>, PreprocessedPcsProverData<SC>: serde::Deserialize<'de>"
++))]
+ pub struct CircuitProverData<SC: StarkGenericConfig> {
+     /// STARK prover data from p3_batch_stark.
++    #[serde(with = "serde_verifier_prover_data")]
+     pub prover_data: ProverData<SC>,
+     /// Preprocessed columns for primitive operations (Const, Public, ALU).
+     pub primitive_columns: Vec<Vec<Val<SC>>>,
+     /// Preprocessed columns for non-primitive operations.
++    #[serde(with = "serde_npo_map")]
+     pub non_primitive_columns: NonPrimitivePreprocessedMap<Val<SC>>,
+     /// Both are a pure function of `primitive_columns[Alu]` and the cache key (not of `D`), so
+     /// they are computed once and reused across every proof for this circuit shape.
++    #[serde(skip, default = "empty_alu_schedule_cache")]
+     alu_schedule_cache: AluScheduleCache<Val<SC>>,
+ }
+ 
+@@ -392,6 +493,15 @@ impl<SC: StarkGenericConfig> CircuitProverData<SC> {
+     pub const fn common_data(&self) -> &CommonData<SC> {
+         &self.prover_data.common
+     }
++
++    /// Drop the raw preprocessed columns while keeping verifier-side common data.
++    #[must_use]
++    pub fn into_verifier_only(mut self) -> Self {
++        self.primitive_columns = Vec::new();
++        self.non_primitive_columns = NonPrimitivePreprocessedMap::default();
++        self.alu_schedule_cache = RefCell::new(None);
++        self
++    }
+ }
+ 
+ /// Convenience macro for deriving all degree-specific helpers from a single base
+@@ -628,6 +738,38 @@ fn clone_common_data<SC: StarkGenericConfig>(common: &CommonData<SC>) -> CommonD
+     )
+ }
+ 
++fn flatten_public_binding_values<SC, EF, const D: usize>(
++    traces: &Traces<EF>,
++    public_binding_lanes: usize,
++) -> Result<Vec<Val<SC>>, BatchStarkProverError>
++where
++    SC: StarkGenericConfig,
++    EF: Field + BasedVectorSpace<Val<SC>>,
++{
++    if public_binding_lanes == 0 {
++        return Ok(Vec::new());
++    }
++    if public_binding_lanes > traces.public_trace.values.len() {
++        return Err(BatchStarkProverError::Verify(format!(
++            "public binding lanes ({public_binding_lanes}) exceed public trace values ({})",
++            traces.public_trace.values.len()
++        )));
++    }
++
++    let mut out = Vec::with_capacity(public_binding_lanes * D);
++    for value in traces.public_trace.values.iter().take(public_binding_lanes) {
++        let coeffs = value.as_basis_coefficients_slice();
++        if coeffs.len() != D {
++            return Err(BatchStarkProverError::Verify(format!(
++                "public binding extension degree mismatch: expected {D}, got {}",
++                coeffs.len()
++            )));
++        }
++        out.extend_from_slice(coeffs);
++    }
++    Ok(out)
++}
++
+ /// Custom (de)serialization for [`BatchStarkProof::stark_common`]. Persists only the
+ /// preprocessed binding (commitment + per-instance metadata): the part the verifier
+ /// needs to bind the proof to the [`CommonData`] it was generated against. `lookups`
+@@ -692,6 +834,271 @@ where
+     pub stark_common: CommonData<SC>,
+ }
+ 
++#[derive(Serialize, Deserialize)]
++#[serde(bound = "")]
++pub struct GoldilocksTip5BatchStarkProofMetadata {
++    pub table_packing: TablePacking,
++    pub public_binding_lanes: usize,
++    pub rows: RowCounts,
++    pub alu_variant: AirVariant,
++    pub ext_degree: usize,
++    pub w_binomial: Option<Goldilocks>,
++    pub alu_quintic_trinomial: bool,
++    pub non_primitives: Vec<NonPrimitiveTableEntry<GoldilocksTipsConfig>>,
++    #[serde(with = "serde_stark_common")]
++    pub stark_common: CommonData<GoldilocksTipsConfig>,
++}
++
++impl GoldilocksTip5BatchStarkProofMetadata {
++    pub fn from_proof(proof: &BatchStarkProof<GoldilocksTipsConfig>) -> Self {
++        Self {
++            table_packing: proof.table_packing.clone(),
++            public_binding_lanes: proof.public_binding_lanes,
++            rows: proof.rows,
++            alu_variant: proof.alu_variant,
++            ext_degree: proof.ext_degree,
++            w_binomial: proof.w_binomial,
++            alu_quintic_trinomial: proof.alu_quintic_trinomial,
++            non_primitives: proof.non_primitives.clone(),
++            stark_common: clone_common_data(&proof.stark_common),
++        }
++    }
++
++    pub fn validate(&self) -> Result<(), ProofMetadataError> {
++        match self.ext_degree {
++            1 | 2 | 4 | 5 | 6 | 8 => {}
++            d => return Err(ProofMetadataError::UnsupportedExtDegree(d)),
++        }
++        self.rows.validate()?;
++        self.table_packing.validate()?;
++        if self.public_binding_lanes != self.table_packing.public_binding_lanes() {
++            return Err(ProofMetadataError::PublicBindingMismatch {
++                proof_lanes: self.public_binding_lanes,
++                packing_lanes: self.table_packing.public_binding_lanes(),
++            });
++        }
++        for entry in &self.non_primitives {
++            entry.validate()?;
++        }
++        Ok(())
++    }
++
++    pub fn into_proof_with_body(
++        &self,
++        proof: BatchProof<GoldilocksTipsConfig>,
++    ) -> BatchStarkProof<GoldilocksTipsConfig> {
++        BatchStarkProof {
++            proof,
++            table_packing: self.table_packing.clone(),
++            public_binding_lanes: self.public_binding_lanes,
++            rows: self.rows,
++            alu_variant: self.alu_variant,
++            ext_degree: self.ext_degree,
++            w_binomial: self.w_binomial,
++            alu_quintic_trinomial: self.alu_quintic_trinomial,
++            non_primitives: self.non_primitives.clone(),
++            stark_common: clone_common_data(&self.stark_common),
++        }
++    }
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(bound = "")]
++pub struct GoldilocksBlake3BatchStarkProofMetadata {
++    pub table_packing: TablePacking,
++    pub public_binding_lanes: usize,
++    pub rows: RowCounts,
++    pub alu_variant: AirVariant,
++    pub ext_degree: usize,
++    pub w_binomial: Option<Goldilocks>,
++    pub alu_quintic_trinomial: bool,
++    pub non_primitives: Vec<NonPrimitiveTableEntry<GoldilocksBlake3Config>>,
++    #[serde(with = "serde_stark_common")]
++    pub stark_common: CommonData<GoldilocksBlake3Config>,
++}
++
++impl GoldilocksBlake3BatchStarkProofMetadata {
++    pub fn from_proof(proof: &BatchStarkProof<GoldilocksBlake3Config>) -> Self {
++        Self {
++            table_packing: proof.table_packing.clone(),
++            public_binding_lanes: proof.public_binding_lanes,
++            rows: proof.rows,
++            alu_variant: proof.alu_variant,
++            ext_degree: proof.ext_degree,
++            w_binomial: proof.w_binomial,
++            alu_quintic_trinomial: proof.alu_quintic_trinomial,
++            non_primitives: proof.non_primitives.clone(),
++            stark_common: clone_common_data(&proof.stark_common),
++        }
++    }
++
++    pub fn validate(&self) -> Result<(), ProofMetadataError> {
++        match self.ext_degree {
++            1 | 2 | 4 | 5 | 6 | 8 => {}
++            d => return Err(ProofMetadataError::UnsupportedExtDegree(d)),
++        }
++        self.rows.validate()?;
++        self.table_packing.validate()?;
++        if self.public_binding_lanes != self.table_packing.public_binding_lanes() {
++            return Err(ProofMetadataError::PublicBindingMismatch {
++                proof_lanes: self.public_binding_lanes,
++                packing_lanes: self.table_packing.public_binding_lanes(),
++            });
++        }
++        for entry in &self.non_primitives {
++            entry.validate()?;
++        }
++        Ok(())
++    }
++
++    pub fn into_proof_with_body(
++        &self,
++        proof: BatchProof<GoldilocksBlake3Config>,
++    ) -> BatchStarkProof<GoldilocksBlake3Config> {
++        BatchStarkProof {
++            proof,
++            table_packing: self.table_packing.clone(),
++            public_binding_lanes: self.public_binding_lanes,
++            rows: self.rows,
++            alu_variant: self.alu_variant,
++            ext_degree: self.ext_degree,
++            w_binomial: self.w_binomial,
++            alu_quintic_trinomial: self.alu_quintic_trinomial,
++            non_primitives: self.non_primitives.clone(),
++            stark_common: clone_common_data(&self.stark_common),
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
++pub struct GoldilocksBlake3FriShape {
++    pub log_blowup: usize,
++    pub log_final_poly_len: usize,
++    pub max_log_arity: usize,
++    pub num_queries: usize,
++    pub commit_pow_bits: usize,
++    pub query_pow_bits: usize,
++    pub cap_height: usize,
++}
++
++impl GoldilocksBlake3FriShape {
++    pub const fn johnson_bits(self) -> usize {
++        self.log_blowup * self.num_queries + self.query_pow_bits
++    }
++
++    fn validate(self) -> Result<(), BatchStarkProverError> {
++        if self.log_blowup == 0 {
++            return Err(BatchStarkProverError::Verify(String::from(
++                "Goldilocks/BLAKE3 FRI shape must have non-zero log_blowup",
++            )));
++        }
++        if self.max_log_arity == 0 {
++            return Err(BatchStarkProverError::Verify(String::from(
++                "Goldilocks/BLAKE3 FRI shape must have non-zero max_log_arity",
++            )));
++        }
++        if self.num_queries == 0 {
++            return Err(BatchStarkProverError::Verify(String::from(
++                "Goldilocks/BLAKE3 FRI shape must have at least one query",
++            )));
++        }
++        Ok(())
++    }
++}
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++pub struct GoldilocksBlake3PrunedMerklePaths {
++    pub full_path_len: usize,
++    pub paths: PrunedMerklePaths<u8, 32>,
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(bound = "")]
++pub struct GoldilocksBlake3PathPrunedCompactBatchStarkProof {
++    pub proof: BatchStarkProof<GoldilocksBlake3Config>,
++    pub fri_shape: GoldilocksBlake3FriShape,
++    pub input_batch_paths: Vec<GoldilocksBlake3PrunedMerklePaths>,
++    pub commit_phase_paths: Vec<GoldilocksBlake3PrunedMerklePaths>,
++}
++
++impl GoldilocksBlake3PathPrunedCompactBatchStarkProof {
++    pub fn into_body(self) -> GoldilocksBlake3PathPrunedCompactBatchStarkProofBody {
++        GoldilocksBlake3PathPrunedCompactBatchStarkProofBody {
++            proof: self.proof.proof,
++            fri_shape: self.fri_shape,
++            input_batch_paths: self.input_batch_paths,
++            commit_phase_paths: self.commit_phase_paths,
++        }
++    }
++}
++
++#[derive(Serialize, Deserialize)]
++#[serde(bound = "")]
++pub struct GoldilocksBlake3PathPrunedCompactBatchStarkProofBody {
++    pub proof: BatchProof<GoldilocksBlake3Config>,
++    pub fri_shape: GoldilocksBlake3FriShape,
++    pub input_batch_paths: Vec<GoldilocksBlake3PrunedMerklePaths>,
++    pub commit_phase_paths: Vec<GoldilocksBlake3PrunedMerklePaths>,
++}
++
++impl GoldilocksBlake3PathPrunedCompactBatchStarkProofBody {
++    pub fn into_wrapped(
++        self,
++        metadata: &GoldilocksBlake3BatchStarkProofMetadata,
++    ) -> GoldilocksBlake3PathPrunedCompactBatchStarkProof {
++        GoldilocksBlake3PathPrunedCompactBatchStarkProof {
++            proof: metadata.into_proof_with_body(self.proof),
++            fri_shape: self.fri_shape,
++            input_batch_paths: self.input_batch_paths,
++            commit_phase_paths: self.commit_phase_paths,
++        }
++    }
++}
++
++pub struct GoldilocksBlake3PathPrunedCompactVerifierContext<'a> {
++    pub metadata: &'a GoldilocksBlake3BatchStarkProofMetadata,
++    pub canonical_setup: &'a CircuitProverData<GoldilocksBlake3Config>,
++    pub fri_shape: GoldilocksBlake3FriShape,
++    pub public_values: &'a [Goldilocks],
++}
++
++impl<'a> GoldilocksBlake3PathPrunedCompactVerifierContext<'a> {
++    pub const fn new(
++        metadata: &'a GoldilocksBlake3BatchStarkProofMetadata,
++        canonical_setup: &'a CircuitProverData<GoldilocksBlake3Config>,
++        fri_shape: GoldilocksBlake3FriShape,
++        public_values: &'a [Goldilocks],
++    ) -> Self {
++        Self {
++            metadata,
++            canonical_setup,
++            fri_shape,
++            public_values,
++        }
++    }
++
++    fn validate(&self) -> Result<(), BatchStarkProverError> {
++        self.metadata.validate()?;
++        self.fri_shape.validate()?;
++        if !common_preprocessed_binding_eq(
++            &self.metadata.stark_common,
++            &self.canonical_setup.prover_data.common,
++        ) {
++            return Err(BatchStarkProverError::Verify(String::from(
++                "Goldilocks/BLAKE3 compact verifier context metadata/setup binding mismatch",
++            )));
++        }
++        let expected_public_values = self.metadata.public_binding_lanes * self.metadata.ext_degree;
++        if self.public_values.len() != expected_public_values {
++            return Err(BatchStarkProverError::Verify(format!(
++                "Goldilocks/BLAKE3 compact verifier context public values length mismatch: expected {expected_public_values}, got {}",
++                self.public_values.len()
++            )));
++        }
++        Ok(())
++    }
++}
++
+ impl<SC> core::fmt::Debug for BatchStarkProof<SC>
+ where
+     SC: StarkGenericConfig,
+@@ -731,6 +1138,12 @@ where
+         }
+         self.rows.validate()?;
+         self.table_packing.validate()?;
++        if self.public_binding_lanes != self.table_packing.public_binding_lanes() {
++            return Err(ProofMetadataError::PublicBindingMismatch {
++                proof_lanes: self.public_binding_lanes,
++                packing_lanes: self.table_packing.public_binding_lanes(),
++            });
++        }
+         for entry in &self.non_primitives {
+             entry.validate()?;
+         }
+@@ -780,6 +1193,20 @@ pub enum ProofMetadataError {
+     #[error("horner_packed_steps must be at least 2 (got {0})")]
+     BadHornerPackedSteps(usize),
+ 
++    /// The public-binding lane prefix does not fit in one packed Public table row.
++    #[error("public binding lanes {binding_lanes} exceed packed public lanes {public_lanes}")]
++    PublicBindingExceedsLanes {
++        binding_lanes: usize,
++        public_lanes: usize,
++    },
++
++    /// Duplicated public-binding metadata disagrees with the packing value.
++    #[error("public binding lanes mismatch: proof has {proof_lanes}, packing has {packing_lanes}")]
++    PublicBindingMismatch {
++        proof_lanes: usize,
++        packing_lanes: usize,
++    },
++
+     /// `ext_degree` is not one of the supported values.
+     #[error("unsupported extension degree {0} (supported: 1,2,4,5,6,8)")]
+     UnsupportedExtDegree(usize),
+@@ -1476,12 +1903,15 @@ where
+         let public_prep = primitive[PrimitiveOpType::Public as usize].clone();
+         let public_air =
+             PublicAir::<Val<SC>, D>::new_with_preprocessed(public_rows, public_lanes, public_prep)
++                .with_public_binding_lanes(packing.public_binding_lanes())
+                 .with_min_height(min_height);
+         let public_matrix: RowMajorMatrix<Val<SC>> = PublicAir::<Val<SC>, D>::trace_to_matrix(
+             &traces.public_trace,
+             public_lanes,
+             min_height,
+         );
++        let public_binding_values =
++            flatten_public_binding_values::<SC, EF, D>(traces, packing.public_binding_lanes())?;
+ 
+         // ALU — preprocessed is already in 10-col format (with multiplicities) from
+         // get_airs_and_degrees_with_prep. When the trace is empty, a dummy row is included.
+@@ -1682,7 +2112,7 @@ where
+ 
+         air_storage.push(CircuitTableAir::Public(public_air));
+         trace_storage.push(public_matrix);
+-        public_storage.push(Vec::new());
++        public_storage.push(public_binding_values);
+ 
+         air_storage.push(CircuitTableAir::Alu(alu_air));
+         trace_storage.push(alu_matrix);
+@@ -1858,6 +2288,7 @@ where
+         );
+         let public_air = CircuitTableAir::Public(
+             PublicAir::<Val<SC>, D>::new(proof.rows[PrimitiveTable::Public], public_lanes)
++                .with_public_binding_lanes(proof.public_binding_lanes)
+                 .with_min_height(min_height),
+         );
+         let horner_k = packing.horner_packed_steps();
+diff --git a/circuit-prover/src/batch_stark_prover/packing.rs b/circuit-prover/src/batch_stark_prover/packing.rs
+index 1837aafd8e44bc15c1fb6d738624ba1fd18118ea..f8b7e0ab081e1891a462f89e5abdd4459bc3d05c 100644
+--- a/circuit-prover/src/batch_stark_prover/packing.rs
++++ b/circuit-prover/src/batch_stark_prover/packing.rs
+@@ -24,6 +24,9 @@ pub struct TablePacking {
+     /// Must be at least 2. Default 2 matches the previous double-step Horner layout.
+     #[serde(default = "default_horner_pack_k")]
+     horner_packed_steps: usize,
++    /// Number of leading public-input lanes in the first Public table row exposed as STARK public values.
++    #[serde(default)]
++    public_binding_lanes: usize,
+ }
+ 
+ const fn default_horner_pack_k() -> usize {
+@@ -41,6 +44,7 @@ impl TablePacking {
+             npo_lanes: Vec::new(),
+             min_trace_height: 1,
+             horner_packed_steps: 2,
++            public_binding_lanes: 0,
+         }
+     }
+ 
+@@ -63,10 +67,10 @@ impl TablePacking {
+         self
+     }
+ 
+-    /// Override public-input lanes only.
++    /// Expose leading public-input lanes as STARK public values.
+     #[must_use]
+-    pub fn with_public_binding_lanes(mut self, public_lanes: usize) -> Self {
+-        self.public_lanes = public_lanes.max(1);
++    pub fn with_public_binding_lanes(mut self, lanes: usize) -> Self {
++        self.public_binding_lanes = lanes;
+         self
+     }
+ 
+@@ -117,9 +121,9 @@ impl TablePacking {
+         self.public_lanes
+     }
+ 
+-    /// Return the public-input lane count used by caller-bound public values.
++    /// Return the number of leading public lanes bound to STARK public values.
+     pub const fn public_binding_lanes(&self) -> usize {
+-        self.public_lanes
++        self.public_binding_lanes
+     }
+ 
+     /// Return the number of ALU operations packed per AIR row.
+@@ -161,6 +165,12 @@ impl TablePacking {
+                 return Err(ProofMetadataError::ZeroNpoLanes(op_type.clone()));
+             }
+         }
++        if self.public_binding_lanes > self.public_lanes {
++            return Err(ProofMetadataError::PublicBindingExceedsLanes {
++                binding_lanes: self.public_binding_lanes,
++                public_lanes: self.public_lanes,
++            });
++        }
+         if self.min_trace_height == 0 || !self.min_trace_height.is_power_of_two() {
+             return Err(ProofMetadataError::BadMinTraceHeight(self.min_trace_height));
+         }
+diff --git a/recursion/src/types/proof.rs b/recursion/src/types/proof.rs
+index 359feeab0d1acc5a748fec553583d1b117965b97..05428d7ec323d7bb8a6f0f8781d4a58298bbebfe 100644
+--- a/recursion/src/types/proof.rs
++++ b/recursion/src/types/proof.rs
+@@ -155,6 +155,16 @@ pub struct CommonDataTargets<SC: StarkGenericConfig, Comm> {
+     pub lookups: Vec<Vec<Lookup<Val<SC>>>>,
+ }
+ 
++impl<SC: StarkGenericConfig, Comm> CommonDataTargets<SC, Comm> {
++    /// Return the global preprocessed commitment target, when the proof binds one.
++    pub const fn preprocessed_commitment(&self) -> Option<&Comm> {
++        match &self.preprocessed {
++            Some(preprocessed) => Some(&preprocessed.commitment),
++            None => None,
++        }
++    }
++}
++
+ impl<SC: StarkGenericConfig, Comm> Recursive<SC::Challenge> for CommonDataTargets<SC, Comm>
+ where
+     Comm: Recursive<
+-- 
+2.50.1 (Apple Git-155)
+
