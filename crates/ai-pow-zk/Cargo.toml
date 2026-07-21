@@ -70,10 +70,10 @@ nockchain-math = { workspace = true }
 # branch, so Cargo resolution is reproducible even as the fork branch advances.
 # Off by default — the default `ai-pow-zk` build pulls none of these;
 # `--features recursion` enables them.
-p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "a82732eec8228e8459fdc5be4b8ff5dcadbd75e3", optional = true }
-p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "a82732eec8228e8459fdc5be4b8ff5dcadbd75e3", optional = true }
-p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "a82732eec8228e8459fdc5be4b8ff5dcadbd75e3", optional = true }
-p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "a82732eec8228e8459fdc5be4b8ff5dcadbd75e3", optional = true }
+p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "4ed00d41012e79269f53e73a908e8d0510b7349e", optional = true }
+p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "4ed00d41012e79269f53e73a908e8d0510b7349e", optional = true }
+p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "4ed00d41012e79269f53e73a908e8d0510b7349e", optional = true }
+p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "4ed00d41012e79269f53e73a908e8d0510b7349e", optional = true }
 postcard = { version = "1.1.3", features = ["alloc"], optional = true }
 
 [features]

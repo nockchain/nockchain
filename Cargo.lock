@@ -7623,7 +7623,7 @@ dependencies = [
 [[package]]
 name = "p3-circuit"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
@@ -7652,7 +7652,7 @@ dependencies = [
 [[package]]
 name = "p3-circuit-prover"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "hashbrown 0.17.1",
  "p3-air",
@@ -7912,7 +7912,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon-circuit-cols"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 
 [[package]]
 name = "p3-poseidon1"
@@ -7943,7 +7943,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon1-circuit-air"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "itertools 0.15.0",
  "p3-air",
@@ -7994,7 +7994,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon2-circuit-air"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "itertools 0.15.0",
  "p3-air",
@@ -8019,7 +8019,7 @@ dependencies = [
 [[package]]
 name = "p3-recursion"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools 0.15.0",
@@ -8089,7 +8089,7 @@ dependencies = [
 [[package]]
 name = "p3-tip5-circuit-air"
 version = "0.1.0"
-source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=a82732eec8228e8459fdc5be4b8ff5dcadbd75e3#a82732eec8228e8459fdc5be4b8ff5dcadbd75e3"
+source = "git+https://github.com/nockchain/Plonky3-recursion.git?rev=4ed00d41012e79269f53e73a908e8d0510b7349e#4ed00d41012e79269f53e73a908e8d0510b7349e"
 dependencies = [
  "p3-air",
  "p3-field",
