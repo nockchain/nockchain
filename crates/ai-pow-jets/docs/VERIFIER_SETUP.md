@@ -14,9 +14,10 @@ A digest mismatch aborts startup. A node must not continue with a locally derive
 
 ## Verification path
 
-The jet recomputes the certificate's required trace height from the block-bound statement and resolves exactly that bucket. A cache miss reads and deserializes the prebuilt file, verifies both the file checksum and verifier-key digest, and inserts the context into a bounded LRU.
-
-Untrusted blocks cannot trigger setup generation. Page-in cost is bounded by one existing context file; circuit construction remains a boot-time operation.
+The jet resolves the certificate's required trace-height bucket after setup-free
+statement checks. A cache miss reads and deserializes the prebuilt file, verifies
+both the file checksum and verifier-key digest, and inserts the context into the
+resident table.
 
 ## Failure classes
 
@@ -29,9 +30,10 @@ This distinction is consensus-critical. Local disk corruption must never become 
 
 ## Resource invariant
 
-All production buckets are committed and present, while only a configured number are resident. Eviction changes latency and RSS, not verifier behavior or accepted proofs. Each returned context is reference-counted so concurrent eviction cannot invalidate an in-flight verification.
-
-The default cache should cover the production bucket set where operator memory permits. Lowering it trades RSS for attacker-influenceable page-in latency; it does not reduce the setup table or accepted parameter envelope.
+All production buckets are committed and present. The default cap retains all 13
+shape keys across seven trace heights after first use. Operators can lower the cap
+to trade RSS for synchronous page-ins; that setting is unsuitable for adversarial
+validators unless the operator accepts the latency risk.
 
 ## Cryptographic dependency
 

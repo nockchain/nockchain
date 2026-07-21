@@ -466,19 +466,13 @@ pub fn load_verifier_setup_table(
 /// memory at once). See [`verifier_cache_cap`].
 pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 
-/// Default resident-context LRU cap. The verifier shape key is attacker-controlled
-/// and a cache miss performs a synchronous context page-in before the certificate
-/// can be rejected. The production default retains every supported shape, so remote
-/// inputs cannot create an unbounded evict/reload loop on the consensus thread.
-///
-/// An operator may lower the cap via `--ai-pow-verifier-cache-cap` or
-/// [`AI_POW_VERIFIER_CACHE_CAP_ENV`] to trade memory for page-ins, but doing so
-/// explicitly re-enables cache-thrash exposure and is unsuitable for an adversarial
-/// validator.
+/// Default resident-context LRU cap. The production default retains every supported
+/// setup shape, so remote inputs cannot create an evict/reload loop on the consensus
+/// thread unless an operator deliberately lowers the cap.
 pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 13;
 
-/// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped
-/// to `>= 1`), else the DoS-safe all-bucket default.
+/// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
+/// `>= 1`), else the DoS-safe all-shape default.
 pub fn verifier_cache_cap() -> usize {
     std::env::var(AI_POW_VERIFIER_CACHE_CAP_ENV)
         .ok()
@@ -509,9 +503,8 @@ fn load_and_validate_seeds(
 /// [`crate::table_digest::AI_POW_V0_VERIFIER_SETUP_TABLE_DIGEST`], or the node refuses
 /// to run. It builds every bucket's context to disk AT THE OUTSET (first boot;
 /// reused after) and injects them disk-paged (see
-/// [`crate::init_ai_pow_verifier_setup_disk`] / [`verifier_cache_cap`]), so a verify
-/// never rebuilds — at most a ~0.6 s page-in from disk — and standing RSS is a bounded
-/// working set.
+/// [`crate::init_ai_pow_verifier_setup_disk`]), so a verify never rebuilds — at most
+/// a ~0.6 s page-in from disk — and standing RSS is a bounded working set.
 ///
 /// - **Cache present and valid:** load seeds + validate digest + build/reuse contexts.
 /// - **Cache present but corrupt / format-incompatible / digest-mismatched:** DELETE
@@ -591,8 +584,8 @@ pub fn install_or_build_verifier_setup(
         )
     })?;
     tracing::info!(
-        "AI-PoW verifier-setup installed (disk-paged): {n} bucket(s); contexts paged from disk, up \
-         to {cap} resident at once.",
+        "AI-PoW verifier-setup installed (disk-paged): {n} bucket(s); contexts paged from disk, \
+         up to {cap} resident at once.",
     );
     Ok(n)
 }

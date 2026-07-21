@@ -217,8 +217,8 @@ struct DiskPagedSetup {
     /// On-disk buckets, keyed by verifier setup shape. Empty for an eager-injected
     /// table (tests): those contexts are pinned in `resident` and never paged.
     disk: HashMap<VerifierSetupShapeKey, DiskBucket>,
-    /// Max contexts paged into memory at once — the working-set bound on RSS. For an
-    /// eager table it is `>= len` so nothing evicts.
+    /// Max contexts paged into memory at once. Production disk-paged setup keeps the
+    /// full committed table resident after first use.
     cap: usize,
     resident: Mutex<Lru<Arc<AiPowVerifierSetup>>>,
 }
@@ -394,8 +394,7 @@ pub fn init_ai_pow_verifier_setup(setups: Vec<AiPowVerifierSetup>) -> Result<(),
 /// DISK-PAGED injection — inject the per-bucket ON-DISK contexts (built at boot),
 /// once. Each bucket's context is paged into memory on demand by
 /// [`ai_pow_verifier_setup_for`] and held in a bounded LRU of `cap` contexts, so
-/// standing RSS is bounded to ~`cap` contexts instead of all buckets at once — and a
-/// verify never rebuilds, only reads a prebuilt context from disk.
+/// standing RSS can be tuned without changing the committed setup table.
 ///
 /// The caller (the boot installer) is responsible for having BUILT each context,
 /// validated it against the committed consensus digest, and serialized it to
@@ -758,9 +757,10 @@ mod tests {
     fn production_verifier_setup_buckets_cover_the_capped_band() {
         let buckets = crate::setup::production_verifier_setup_buckets();
         assert!(!buckets.is_empty(), "must return at least one bucket");
-        assert!(
-            crate::setup::AI_POW_VERIFIER_CACHE_CAP_DEFAULT >= buckets.len(),
-            "the production default must retain every attacker-selectable bucket",
+        assert_eq!(
+            crate::setup::AI_POW_VERIFIER_CACHE_CAP_DEFAULT,
+            buckets.len(),
+            "the production default must retain all 13 attacker-selectable shape keys",
         );
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let mut keys: Vec<VerifierSetupShapeKey> = Vec::new();
@@ -1152,7 +1152,7 @@ mod jet_tests {
         .expect("build MoE artifact noun")
         .jam();
 
-        // Build the context, serialize it to a temp dir, and inject it DISK-PAGED —
+        // Inject the setup DISK-PAGED (production path): serializes the context, but leaves
         // nothing heavy resident yet.
         let tmp = tempfile::TempDir::new().unwrap();
         let setup_built =
@@ -1304,7 +1304,6 @@ mod jet_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let ctx_path =
             crate::setup::verifier_context_file_path(tmp.path(), setup_key, &committed_digest);
-        std::fs::create_dir_all(ctx_path.parent().unwrap()).unwrap();
         let bytes = bincode::serde::encode_to_vec(&setup, bincode::config::standard())
             .expect("serialize divergent setup");
         std::fs::write(&ctx_path, &bytes).unwrap();
@@ -1362,9 +1361,12 @@ mod jet_tests {
             crate::setup::verifier_context_file_path(&dir, key, &s.verifier_key_digest_bytes)
                 .exists()
         });
+        let expected_cap = 2usize;
         drop(seeds);
-
-        std::env::set_var(crate::setup::AI_POW_VERIFIER_CACHE_CAP_ENV, "2");
+        std::env::set_var(
+            crate::setup::AI_POW_VERIFIER_CACHE_CAP_ENV,
+            expected_cap.to_string(),
+        );
         let base = rss_mb();
         // Production boot: build every production context to disk (first run) or reuse
         // them (later runs) + inject disk-paged.
@@ -1390,8 +1392,8 @@ mod jet_tests {
         }
         let after_paging = rss_mb();
         eprintln!(
-            "after paging all contexts (cap=2): RSS {after_paging} MB — bounded to ~2 resident \
-             contexts",
+            "after paging all contexts (cap={expected_cap}): RSS {after_paging} MB — bounded to \
+             ~{expected_cap} resident contexts",
         );
         assert!(
             after_paging < 6000,

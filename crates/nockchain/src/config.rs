@@ -382,10 +382,11 @@ pub struct NockchainCli {
     #[arg(
         long = "ai-pow-verifier-cache-cap",
         help = "Max resident AI-PoW verifier contexts (LRU). The production default \
-                retains all 7 supported trace-height buckets (2^13..2^19), preventing \
-                attacker-controlled evict/reload thrash at ~5.6–8.6 GiB RSS. Lowering \
-                the cap trades memory for synchronous page-ins and is unsafe for an \
-                adversarial validator. Overrides AI_POW_VERIFIER_CACHE_CAP."
+                retains all 13 supported shape keys across seven trace heights, preventing \
+                attacker-controlled evict/reload thrash at the measured setup-table RSS. \
+                Lowering the cap reduces RSS by allowing verifier contexts to page in and \
+                out, but reintroduces synchronous page-in churn under adversarial traffic. \
+                Overrides AI_POW_VERIFIER_CACHE_CAP."
     )]
     pub ai_pow_verifier_cache_cap: Option<usize>,
 }
@@ -546,6 +547,16 @@ mod tests {
         assert_eq!(cli.fakenet_ai_asert.anchor_height, Some(20));
         assert_eq!(cli.fakenet_ai_asert.anchor_target_bex, Some(50));
         assert!(cli.validate().is_ok());
+    }
+
+    #[test]
+    fn ai_pow_verifier_cache_cap_flag_sets_resident_context_cap() {
+        let cli = NockchainCli::try_parse_from_with_default_stack_size(
+            ["nockchain", "--ai-pow-verifier-cache-cap", "2"],
+            NockStackSize::Large,
+        )
+        .unwrap();
+        assert_eq!(cli.ai_pow_verifier_cache_cap, Some(2));
     }
 
     #[test]

@@ -285,9 +285,8 @@ consensus digest either way. A node with no valid setup cannot validate `%ai-pow
 blocks, so any failure is fatal — the node shuts down rather than run blind.
 
 The setup is disk-paged: each bucket's context is read + checksum-verified on
-first use and held in an LRU (`--ai-pow-verifier-cache-cap`, env
-`AI_POW_VERIFIER_CACHE_CAP`). The production default retains all seven supported
-buckets once loaded, bounding remote-triggered page-ins to one per bucket.
+first use and held in an LRU. The production default retains 13 shape keys across
+seven trace heights, bounding remote-triggered page-ins to one per key.
 
 ### Miner and candidate emission
 
@@ -392,10 +391,11 @@ does not constitute a claim on total supply.
 
 ### Configuration
 
-No mandatory configuration changes for mainnet. The
-`--ai-pow-verifier-cache-cap` default is 7, retaining every supported setup
-bucket after first use. Operators may lower it to reduce RSS only on trusted
-networks; doing so reintroduces attacker-controlled synchronous page-in thrash.
+No mandatory configuration changes for mainnet. By default, validating nodes retain
+the full 13-key verifier setup table across seven trace heights after first use.
+Operators may lower `--ai-pow-verifier-cache-cap` to reduce RSS by paging verifier
+contexts in and out; doing so trades memory for synchronous page-in latency under
+adversarial traffic.
 Fakenet operators may override the activation height and per-puzzle ASERT params
 with `--fakenet-ai-pow-activation-height`, `--fakenet-ai-asert-*`, and
 `--fakenet-zk-asert-*` (all `requires = "fakenet"`). The AI ASERT phase and AI
@@ -483,12 +483,11 @@ structurally valid across the boundary.
   fresh noised matmul; there is no separate nonce that lets a miner skip
   inference. Matrices are miner-chosen (arbitrary model, Pearl parity) but bound
   in-circuit to the committed `H_A`/`H_B` (dense) or routing/jackpot (MoE).
-- **Cache-thrash DoS (closed by default).** `trace_height` is an
-  attacker-controlled cert field and a cache miss triggers a synchronous disk
-  page-in before proof rejection. The default LRU cap is the full seven-bucket
-  accept band, so each bucket pages in at most once and an attacker cannot force
-  eviction/reload cycles. Lowering `--ai-pow-verifier-cache-cap` is an explicit
-  memory-for-liveness tradeoff unsuitable for adversarial validators.
+- **Cache-thrash DoS.** `trace_height` is an attacker-controlled cert field and a
+  cache miss triggers a synchronous disk page-in before proof rejection. The default
+  LRU cap covers all 13 committed shape keys across seven trace heights, so each
+  key pages in at most once. Lower caps are an operator-selected
+  memory-for-latency tradeoff.
 - **Time-warp.** `check-timestamp` enforces BIP113 median-of-11 + max-future.
   Both puzzles read the same global median, so timestamp manipulation cannot
   create cross-puzzle difficulty asymmetry.
@@ -506,10 +505,9 @@ structurally valid across the boundary.
   (~15 minutes, logged: "Generating the AI-PoW verifier-setup table…"). Do not
   kill a node that appears "hung" during this step; subsequent boots load the
   cache in seconds. Ship the cache to skip it.
-- **Verifier-setup RSS.** The DoS-safe default retains all seven contexts after
-  first use, requiring ~5.6–8.6 GB. jemalloc is required (not optional).
-  Lowering the cache cap reduces RSS but permits attacker-controlled synchronous
-  page-in thrash and is appropriate only on trusted networks.
+- **Verifier-setup RSS.** The DoS-safe default retains all 13 contexts after first
+  use, requiring the measured setup-table RSS budget. Lower caps reduce RSS by
+  paging contexts in and out. jemalloc is required (not optional).
 - **Dual mining.** Two miner processes can attach: `zk-pow-mine` and
   `ai-pow-mine` (the latter with a self-contained `--canonical` CPU mode). Each
   receives its own candidate effect (`%mine-zk` / `%mine-ai`) and submits its own
