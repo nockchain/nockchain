@@ -12,12 +12,9 @@
 ::      - ZK difficulty regime: the ZK ASERT re-anchor switches EXACTLY at
 ::                              activation, so pre-activation targets use the
 ::                              unchanged Aletheia (regime-1) computation,
-::      - heaviness:            pre-activation work uses the ZK normalizer,
-::      - coinbase:             pre-activation blocks pay the protocol fund, and
-::                              an AI-fund coinbase is rejected by height,
-::      - version recording:    pre-activation block versions are height-derived,
-::                              never stored in block-versions,
-::      - full chain:           a chain built entirely below activation accepts.
+:::      - version recording:    pre-activation block versions are height-derived,
+:::                              never stored in block-versions,
+:::      - full chain:           a chain built entirely below activation accepts.
 ::    bc-pre-ai activates AI at height 8 with the ZK re-anchor phase at 8 and
 ::    anchor at 7, so heights 5..7 are post-asert (fund slots + ASERT targets)
 ::    yet strictly pre-AI-activation — the exact window a real mainnet node
@@ -26,7 +23,6 @@
 /=  dcon  /apps/dumbnet/lib/consensus
 /=  txe   /common/tx-engine
 /=  *  /apps/dumbnet/lib/types
-/=  *  /common/zoon
 /=  *  /common/zeke
 /=  *  /common/test
 ::
@@ -58,22 +54,6 @@
 ::    regime-1 ASERT uses the hardcoded anchor, not the derived-state cache).
 ++  der  ^-  derived-state  *derived-state
 ::
-::  +first-miner-pkh: the single miner pubkey hash the helpers seed blocks with.
-++  first-miner-pkh
-  ^-  hash:t
-  (hash:schnorr-pubkey:t default-a-pt-1:helpers)
-::
-::  +with-coinbase-and-rehash: replace a v1 page's coinbase and recompute its
-::    digest (mirrors the fund-split integration helper).
-++  with-coinbase-and-rehash
-  |=  [pag=page:t cb=(z-map hash:t coins:t)]
-  ^-  page:t
-  =/  with-cb=page:t
-    ?^  -.pag  pag
-    pag(coinbase cb)
-  =/  d  (compute-digest:page:t with-cb)
-  ?^  -.with-cb  with-cb(digest d)
-  with-cb(digest d)
 --
 ::
 |%
@@ -175,48 +155,6 @@
     ::  the two normalizers genuinely differ, so the equality above is meaningful
     (expect-eq !>(%.n) !>(=(zk-work ai-work)))
   ==
-::
-::  ---- (c) coinbase: pre-activation blocks pay the protocol fund ----
-::
-::  +test-pre-ai-coinbase-accepts-protocol-fund: a post-asert pre-activation ZK
-::    block whose 20% slot pays +protocol-fund-address validates. The is-ai
-::    dispatch in +check-fund-split is derived from the block's ZK proof version
-::    (=> %.n), so the protocol fund is required by HEIGHT, with no AI fund in the
-::    pre-activation world.
-++  test-pre-ai-coinbase-accepts-protocol-fund
-  =/  con  (initial-consensus-state-custom:h bc-pre-ai)
-  =^  par=page:t  con  (add-n-pages:h 5 con default-retain:h)
-  =/  base    (make-empty-page:h par)
-  =/  emi     (emission-calc:coinbase:t 6)
-  =/  fund    (div emi 5)
-  =/  ok-cb=(z-map hash:t coins:t)
-    %-  ~(gas z-by *(z-map hash:t coins:t))
-    :~  [first-miner-pkh (sub emi fund)]
-        [protocol-fund-address:t fund]
-    ==
-  =/  pag  (with-coinbase-and-rehash base ok-cb)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc-pre-ai) pag)
-  (expect-eq !>(%.y) !>(?=(%.y -.r)))
-::
-::  +test-pre-ai-coinbase-rejects-ai-fund: the same pre-activation block paying
-::    the AI-Compute-Network fund (+ai-fund-address) instead of the protocol fund
-::    is REJECTED (%improper-fund-split). Before activation no block may route its
-::    fund share to the AI fund — an upgraded node rejects it exactly as an
-::    un-upgraded node (which knows only the protocol fund) does.
-++  test-pre-ai-coinbase-rejects-ai-fund
-  =/  con  (initial-consensus-state-custom:h bc-pre-ai)
-  =^  par=page:t  con  (add-n-pages:h 5 con default-retain:h)
-  =/  base    (make-empty-page:h par)
-  =/  emi     (emission-calc:coinbase:t 6)
-  =/  fund    (div emi 5)
-  =/  bad-cb=(z-map hash:t coins:t)
-    %-  ~(gas z-by *(z-map hash:t coins:t))
-    :~  [first-miner-pkh (sub emi fund)]
-        [ai-fund-address:t fund]
-    ==
-  =/  pag  (with-coinbase-and-rehash base bad-cb)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der bc-pre-ai) pag)
-  (expect-eq !>(%improper-fund-split) !>(?:(?=(%.y -.r) %accepted p.r)))
 ::
 ::  ---- (G6) version recording: pre-activation versions are height-derived ----
 ::

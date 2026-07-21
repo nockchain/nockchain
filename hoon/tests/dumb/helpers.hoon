@@ -736,7 +736,7 @@
       pag(coinbase new-coinbase)
     =/  new-coinbase
       %-  new-with-fund-share:v1:coinbase-split:t
-      [protocol-fund-address:t pag-emission pag-fees default-keys-1-share-v1]
+      [pag-emission pag-fees default-keys-1-share-v1]
     pag(coinbase new-coinbase)
   =/  new-digest  (compute-digest:page:t pag)
   =.  pag

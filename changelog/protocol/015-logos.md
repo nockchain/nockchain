@@ -60,16 +60,10 @@ Logos activates AI-PoW at height 114,300 (`ai-pow-activation-height`) as an
    (`zk-asert-post-ai`), leaving Aletheia's 150 s single-puzzle regime unchanged
    before activation.
 
-4. **AI blocks route part of their new issuance to the AI Compute Network
-   registrant.** Aletheia's 80/20 split of each block's newly issued coinbase
-   reward is retained, but the recipient of the 20% share is
-   *puzzle-specific*: a `%pow` (ZK) block still pays the protocol fund, while an
-   `%ai-pow` block pays 20% of its newly issued reward to **National Compute
-   Co**, the registrant of the AI Compute Network, at v1 pubkey-hash
-   `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
-   This is not 20% of total or circulating supply, previously issued NOCK,
-   transaction fees, or rewards issued by `%pow` blocks. Its share of aggregate
-   new issuance varies with the realized fraction of AI blocks.
+4. **Single protocol-fund recipient.** Every post-activation block, whether
+   `%pow` or `%ai-pow`, pays 20% of its newly issued coinbase reward to the
+   existing protocol fund (`protocol-fund-address`). AI-PoW changes the puzzle
+   and per-puzzle retargeting, not the coinbase recipient.
 
 This upgrade does **not** change the ZK-PoW puzzle, the emissions schedule, the
 80/20 split *ratio*, transaction formats, or any pre-activation behaviour. It
@@ -116,10 +110,9 @@ to its own ideal block time.
 The per-puzzle ideal block times target an expected **~60% of blocks** for AI
 and **~40%** for ZK — AI at a 250 s ideal, ZK at a 375 s ideal. This biases
 expected block-reward opportunity toward AI miners while the market develops.
-Separately, the coinbase rule routes 20% of each AI block's newly issued reward
-to the AI Compute Network registrant's address. Neither rule grants a fixed
-percentage of total supply or chain-wide issuance: actual aggregate routing
-depends on the realized AI block share and the issuance schedule.
+The weighting changes expected miner opportunity only: both puzzle types retain
+Aletheia's protocol-fund recipient for the 20% new-issuance share. It grants no
+fixed percentage of total supply or chain-wide issuance.
 
 The weighting is expressed purely through the two ideal block times and falls out
 of the arithmetic: at ideals `t_ai`, `t_zk`, each puzzle produces blocks at rate
@@ -312,57 +305,33 @@ Pearl proof-of-work (one PoW ⇒ one Nockchain block). MoE (grouped-GEMM /
 sparse-matmul) models are supported via the compact MoE path, which binds the
 routing commitment.
 
-### Coinbase new-issuance recipient (puzzle-specific)
+### Coinbase new-issuance recipient
 
 Aletheia's coinbase rule stands: every post-activation block pays
 `floor(emission / 5)` (20%) of that block's **newly issued coinbase reward** to
-a consensus-known address and the remainder to the miner, both as
-standard-timelocked coinbase outputs, validated by
+the existing protocol fund (`protocol-fund-address`) and the remainder to the
+miner, both as standard-timelocked coinbase outputs, validated by
 `+check-fund-split:consensus`. The percentage applies only to new issuance in
 that block. It does not transfer or encumber total supply, circulating supply,
-previously issued NOCK, or transaction fees. Logos changes only **which**
-address receives the new-issuance share, dispatching on the block's proven
-puzzle type:
+previously issued NOCK, or transaction fees.
 
-- A `%pow` (ZK) block pays 20% of its new issuance to the existing protocol
-  fund (`protocol-fund-address`), exactly as under Aletheia.
-- An `%ai-pow` block pays 20% of its new issuance to the v1 pubkey-hash of
-  **National Compute Co**, the AI Compute Network's registrant
-  (`ai-fund-address`):
-  `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
-  `ai-fund-address` is that pubkey-hash itself — the value `nockchain-wallet
-  list-master-addresses` prints for the key — decoded from base58 and pinned as a
-  consensus constant. It is used directly as the coinbase-split key, exactly as
-  `protocol-fund-address` is; the coinbase note wraps it as a single-key `[%pkh m=1 …]`
-  lock, so National Compute Co controls the output with an ordinary signature.
+The rule is independent of puzzle type: `%pow` and `%ai-pow` coinbases both use
+the same protocol-fund key. `+check-fund-split:consensus` validates that single
+slot and rejects any block that redirects the required share to a different key.
 
-National Compute Co is the named registrant of the AI Compute Network and
-controls the recipient address above. The registrant payout follows the broader
-Compute Networks incentive model: a portion of a market's newly issued block
-reward goes to its registrant, aligning the registrant with development and
-adoption of that useful-work market. Consensus assigns the output but does not
-earmark, restrict, or verify how the recipient uses it after the standard
-coinbase timelock matures.
-
-The public [Compute Networks](https://docs.nockchain.org/usdnock-asset/compute-networks#two-markets)
-and [Economics](https://docs.nockchain.org/usdnock-asset/compute-networks#economics)
-sections describe the registrant model and its incentive rationale.
-[Tokenomics — Issuance Schedule](https://docs.nockchain.org/usdnock-asset/overview#issuance-schedule)
+The public [Tokenomics — Issuance Schedule](https://docs.nockchain.org/usdnock-asset/overview#issuance-schedule)
 distinguishes newly issued rewards from existing supply, while
 [Coinbase Distribution](https://docs.nockchain.org/usdnock-asset/overview#coinbase-distribution)
 documents Aletheia's baseline split. Those pages provide public background;
 this specification and consensus code define the Logos rule.
 
-`+check-fund-split` takes the block's page so it can read the puzzle-type; it then
-requires the coinbase to carry exactly one fund slot whose key equals the
-puzzle-appropriate address and whose coins equal `floor(emission / 5)`. The
-miner-side (`+build-ai-candidate` / `+new:coinbase`) pays the AI registrant
-address on `%ai-pow` candidates. A miner who directs that share to any other
-address — including the protocol fund — produces a block that fails
-`check-fund-split`. Together, the targeting rules aim for an expected ~60% AI
-block share and assign 20% of each AI block's new issuance to the registrant
-address. The realized aggregate payout varies with AI's actual block share and
-does not constitute a claim on total supply.
+`+check-fund-split` validates the single protocol-fund slot: the key must equal
+`protocol-fund-address`, and its coins must equal `floor(emission / 5)`. The
+miner-side (`+build-ai-candidate` / `+new:coinbase`) uses the same coinbase
+builder for ZK and AI candidates. A miner who directs that share to any other
+address produces a block that fails `check-fund-split`. The targeting rules aim
+for an expected ~60% AI block share; all post-activation fund outputs still use
+the protocol-fund recipient.
 
 ## Activation
 

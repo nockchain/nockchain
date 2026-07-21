@@ -46,7 +46,7 @@
   =/  miner-shares  default-keys-1-share-v1:h
   =/  emission-atoms=coins:t  (mul 2.048 atoms-per-nock:emission)
   =/  cb=coinbase-split:v1:t
-    (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t emission-atoms 0 miner-shares)
+    (new-with-fund-share:v1:coinbase-split:t emission-atoms 0 miner-shares)
   =/  expected-fund=coins:t  (div emission-atoms 5)
   =/  expected-miner=coins:t  (sub emission-atoms expected-fund)
   =/  fund-entry=(unit coins:t)
@@ -72,7 +72,7 @@
   =/  miner-shares  default-keys-1-share-v1:h
   =/  emission-atoms=coins:t  134.217.728  :: 2,048 * 2^16
   =/  cb=coinbase-split:v1:t
-    (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t emission-atoms 0 miner-shares)
+    (new-with-fund-share:v1:coinbase-split:t emission-atoms 0 miner-shares)
   =/  fund-entry=(unit coins:t)
     (~(get z-by cb) protocol-fund-address:t)
   =/  miner-pkh=hash:t
@@ -94,7 +94,7 @@
   =/  fee-atoms=coins:t       12.345
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [protocol-fund-address:t emission-atoms fee-atoms miner-shares]
+    [emission-atoms fee-atoms miner-shares]
   =/  fund-entry=(unit coins:t)
     (~(get z-by cb) protocol-fund-address:t)
   =/  miner-pkh=hash:t
@@ -125,7 +125,7 @@
   =/  emission-atoms=coins:t  125.000.000
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [protocol-fund-address:t emission-atoms 0 miner-shares]
+    [emission-atoms 0 miner-shares]
   =/  fund-entry   (~(get z-by cb) protocol-fund-address:t)
   =/  miner-a-entry  (~(get z-by cb) miner-a-pkh)
   =/  miner-b-entry  (~(get z-by cb) miner-b-pkh)
@@ -156,7 +156,7 @@
   =/  fee-atoms=coins:t        1.000.000
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [protocol-fund-address:t emission-atoms fee-atoms miner-shares]
+    [emission-atoms fee-atoms miner-shares]
   =/  fund-entry     (~(get z-by cb) protocol-fund-address:t)
   =/  miner-a-entry  (~(get z-by cb) miner-a-pkh)
   =/  miner-b-entry  (~(get z-by cb) miner-b-pkh)
@@ -178,7 +178,7 @@
   =/  bad-shares=shares:t
     (~(put z-by *shares:t) protocol-fund-address:t 1)
   %+  expect-fail
-    |.  (new-with-fund-share:v1:coinbase-split:t protocol-fund-address:t 134.217.728 0 bad-shares)
+    |.  (new-with-fund-share:v1:coinbase-split:t 134.217.728 0 bad-shares)
   ~
 ::
 ::  +test-split-post-activation-residual-to-first-key: pin the
@@ -202,7 +202,7 @@
   =/  emission-atoms=coins:t  11
   =/  cb=coinbase-split:v1:t
     %-  new-with-fund-share:v1:coinbase-split:t
-    [protocol-fund-address:t emission-atoms 0 miner-shares]
+    [emission-atoms 0 miner-shares]
   ::  z-by sorts keys by hash atom; first-pkh receives the residual.
   =/  ordered-keys=(list hash:t)
     ~(tap z-in ~(key z-by miner-shares))

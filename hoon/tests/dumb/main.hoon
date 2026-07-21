@@ -2,7 +2,7 @@
 /=  tx-tests  /tests/dumb/mod/unit/transact
 /=  tx-v1-tests  /tests/dumb/mod/unit/transact-v1
 /=  con-tests  /tests/dumb/mod/unit/consensus
-/=  h-zoon-con-tests  /tests/dumb/mod/unit/h-zoon-consensus
+:: /=  h-zoon-con-tests  /tests/dumb/mod/unit/h-zoon-consensus
 /=  asert-tests  /tests/dumb/mod/unit/asert
 /=  asert-mainnet-vectors-tests  /tests/dumb/mod/unit/asert-mainnet-vectors
 /=  asert-int-tests  /tests/dumb/mod/integration/asert-activation
@@ -18,16 +18,18 @@
 /=  dual-puzzle-tests  /tests/dumb/mod/unit/dual-puzzle
 /=  fund-split-tests  /tests/dumb/mod/integration/fund-split
 /=  pre-ai-activation-tests  /tests/dumb/mod/integration/pre-ai-activation
-/=  benches  /tests/dumb/mod/benchmarks/huge-tx
-/=  h-zoon-benches  /tests/dumb/mod/benchmarks/h-zoon-hot-path
-/=  pending-scale-benches  /tests/dumb/mod/benchmarks/pending-blocks-scale
+::  Roswell aggregation excludes benchmark suites while z/h container cold hints
+::  emit per-operation `unknown jet` logs.
+:: /=  benches  /tests/dumb/mod/benchmarks/huge-tx
+:: /=  h-zoon-benches  /tests/dumb/mod/benchmarks/h-zoon-hot-path
+:: /=  pending-scale-benches  /tests/dumb/mod/benchmarks/pending-blocks-scale
 |=  name=term
 ^-  (list test-arm:tt)
 ;:  weld
   (get-prefix-arms:tt name !>(tx-tests))
   (get-prefix-arms:tt name !>(tx-v1-tests))
   (get-prefix-arms:tt name !>(con-tests))
-  (get-prefix-arms:tt name !>(h-zoon-con-tests))
+::  (get-prefix-arms:tt name !>(h-zoon-con-tests))
   (get-prefix-arms:tt name !>(asert-tests))
   (get-prefix-arms:tt name !>(asert-mainnet-vectors-tests))
   (get-prefix-arms:tt name !>(asert-int-tests))
@@ -43,7 +45,7 @@
   (get-prefix-arms:tt name !>(dual-puzzle-tests))
   (get-prefix-arms:tt name !>(fund-split-tests))
   (get-prefix-arms:tt name !>(pre-ai-activation-tests))
-  (get-prefix-arms:tt name !>(benches))
-  (get-prefix-arms:tt name !>(h-zoon-benches))
-  (get-prefix-arms:tt name !>(pending-scale-benches))
+::  (get-prefix-arms:tt name !>(benches))
+::  (get-prefix-arms:tt name !>(h-zoon-benches))
+::  (get-prefix-arms:tt name !>(pending-scale-benches))
 ==

@@ -146,14 +146,6 @@
 ++  protocol-fund-address
   ^-  hash
   (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
-::  $ai-fund-address: lock-script hash that receives the 20% fund share of every
-::  post-activation %ai-pow (AI-PoW) coinbase, in place of +protocol-fund-address. This is
-::  the AI Compute Network fund — the v1 pubkey-hash of National Compute Co, the
-::  AI Compute Network's registrant (015-logos). %pow (ZK) coinbases keep paying
-::  +protocol-fund-address; +check-fund-split dispatches on the block's puzzle type.
-++  ai-fund-address
-  ^-  hash
-  (from-b58:hash '2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j')
 ::
 ::  $fund-note-firstname: the on-chain first-name (-.name) shared by every
 ::  protocol-fund coinbase note. +make-name:coinbase wraps the coinbase-split
@@ -257,7 +249,7 @@
     =/  cb=coinbase-split
       ?:  (pre-asert-activation height asert-phase)
         (new:coinbase-split emission shares)
-      (new-with-fund-share:coinbase-split protocol-fund-address emission 0 shares)
+      (new-with-fund-share:coinbase-split emission 0 shares)
     %*  .  *form
       height            height
       parent            par-digest
@@ -894,7 +886,7 @@
     ==
   ::
   ::  +new-with-fund-share: post-asert-activation 80/20 coinbase-split builder.
-  ::    Splits a block's coinbase between a protocol fund and the miner-side
+  ::    Splits a block's coinbase between the protocol fund and the miner-side
   ::    recipients:
   ::      fund        = floor(emission / 5)               :: 20% of subsidy
   ::      miner-pool  = (emission - fund) + fees          :: 80% + all fees
@@ -903,22 +895,17 @@
   ::    accrue to the first share key in z-map order, preserving the
   ::    legacy single-miner behaviour and supporting up-to-2 partner
   ::    splits). The fund is added as one additional output keyed by
-  ::    `fund-addr`: callers pass +protocol-fund-address for a %pow (ZK) block and
-  ::    +ai-fund-address for an %ai-pow block. The fund recipient is the ONLY
-  ::    difference between the two puzzle types' coinbases and is exactly what
-  ::    +check-fund-split dispatches on, so both are built here from the start
-  ::    with their proper recipient rather than one being rewritten into the
-  ::    other.
-  ::    `shares` must NOT include `fund-addr`.
+  ::    +protocol-fund-address.
+  ::    `shares` must NOT include +protocol-fund-address.
   ::    Fees are computed from the subsidy alone — folding fees into the
   ::    fund slot would be rejected by +check-fund-split.
   ++  new-with-fund-share
-    |=  [fund-addr=^hash emission=coins fees=coins =shares]
+    |=  [emission=coins fees=coins =shares]
     ^-  form
-    ?<  (~(has z-by shares) fund-addr)
+    ?<  (~(has z-by shares) protocol-fund-address)
     =/  fund-coins=coins   (div emission 5)
     =/  miner-pool=coins   (add fees (sub emission fund-coins))
-    (~(put z-by (new miner-pool shares)) fund-addr fund-coins)
+    (~(put z-by (new miner-pool shares)) protocol-fund-address fund-coins)
   ::
   ++  hashable
     |=  =form

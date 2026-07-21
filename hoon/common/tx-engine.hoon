@@ -87,10 +87,6 @@
 ::  $protocol-fund-address: lock-script hash receiving the 20% protocol-fund
 ::  share of every post-asert-activation coinbase. See tx-engine-1.hoon.
 ++  protocol-fund-address  protocol-fund-address:v1
-::  $ai-fund-address: lock-script hash receiving the 20% fund share of every
-::  post-activation %ai-pow coinbase, in place of +protocol-fund-address. See
-::  tx-engine-1.hoon; +check-fund-split dispatches on the block's puzzle type.
-++  ai-fund-address  ai-fund-address:v1
 ::  $fund-note-firstname: on-chain first-name of every protocol-fund coinbase
 ::  note; +check:check-context routes it to the multisig recovery. See
 ::  tx-engine-1.hoon.
