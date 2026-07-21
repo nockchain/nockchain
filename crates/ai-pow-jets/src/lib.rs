@@ -911,6 +911,34 @@ mod jet_tests {
         );
     }
 
+    /// Target atoms below `2^256` parse exactly; larger atoms saturate to the
+    /// largest 256-bit target, which is equivalent for a 256-bit jackpot hash.
+    #[test]
+    fn target_atom_to_32_saturates_only_oversized_targets() {
+        use nockvm::noun::{IndirectAtom, D};
+
+        fn indirect_target(bytes: &[u8]) -> [u8; 32] {
+            let mut slab: NounSlab = NounSlab::new();
+            let atom = <IndirectAtom as nockapp::IndirectAtomExt>::from_bytes(&mut slab, bytes);
+            target_atom_to_32_saturating(atom.as_noun(), &slab.noun_space()).expect("target atom")
+        }
+
+        let slab: NounSlab = NounSlab::new();
+        let small = target_atom_to_32_saturating(D(0x0102), &slab.noun_space()).expect("atom");
+        assert_eq!(&small[..2], &[0x02, 0x01]);
+        assert!(small[2..].iter().all(|&b| b == 0));
+
+        let mut exact = [0u8; 32];
+        exact[0] = 0x34;
+        exact[31] = 0x80;
+        assert_eq!(indirect_target(&exact), exact);
+        assert_eq!(indirect_target(&[0xff; 32]), [0xff; 32]);
+
+        let mut over = [0u8; 33];
+        over[32] = 1;
+        assert_eq!(indirect_target(&over), [0xff; 32]);
+    }
+
     /// KAT (real proving, ~25s): a real MoE `%ai-pow` block artifact verifies
     /// through the jet CORE; a wrong commitment and an unmet difficulty are
     /// rejected (`Ok(false)`, not a jet error). Validates the artifact decode-from-
