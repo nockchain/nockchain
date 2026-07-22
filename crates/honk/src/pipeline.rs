@@ -809,10 +809,22 @@ fn hoon_path_for_any(path: &Path, deps_dir: &Path) -> Vec<String> {
         .canonicalize()
         .unwrap_or_else(|_| deps_dir.to_path_buf());
 
-    canonical_path
-        .strip_prefix(&canonical_deps)
-        .map(hoon_path_for_absolute)
-        .unwrap_or_else(|_| hoon_path_for_absolute(canonical_path.as_path()))
+    if let Ok(rel) = canonical_path.strip_prefix(&canonical_deps) {
+        return hoon_path_for_absolute(rel);
+    }
+
+    // Entry files outside the deps root: prefer a cwd-relative spot so the
+    // artifact does not bake in the build machine's absolute paths (same
+    // canonicalization dbug_path applies to error display).
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(canonical_cwd) = cwd.canonicalize() {
+            if let Ok(rel) = canonical_path.strip_prefix(&canonical_cwd) {
+                return hoon_path_for_absolute(rel);
+            }
+        }
+    }
+
+    hoon_path_for_absolute(canonical_path.as_path())
 }
 
 fn hoon_path_for_absolute(path: &Path) -> Vec<String> {

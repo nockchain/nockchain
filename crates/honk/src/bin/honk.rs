@@ -811,6 +811,15 @@ fn build_entry_wer(path: &Path, deps_dir: &Path, absolute_entry_wer: bool) -> Ve
     }
     let lexical_path = lexical_absolute_path(path).unwrap_or_else(|_| path.to_path_buf());
     let wer_path = path.canonicalize().unwrap_or(lexical_path);
+    // Prefer a cwd-relative wer: a raw absolute path bakes the build
+    // machine's directory layout into the artifact, so two builds of the
+    // same tree from different checkouts can never be byte-identical.
+    if let Ok(cwd) = std::env::current_dir() {
+        let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+        if let Ok(rel) = wer_path.strip_prefix(&canonical_cwd) {
+            return path_components_for_dbug(rel);
+        }
+    }
     path_components_for_dbug(&wer_path)
 }
 
@@ -4127,6 +4136,17 @@ fn entry_path_for_hoon(entry: &Path, deps_dir: &Path) -> Result<String> {
     if matching_hoon_root_marker(entry, deps_dir).is_some() {
         if let Some(components) = hoon_relative_components(entry) {
             return Ok(format!("/{}", components.join("/")));
+        }
+    }
+
+    // Same reproducibility concern as build_entry_wer: an absolute target
+    // key makes the dir-hash (and so the artifact) depend on where the
+    // repo happens to be checked out.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Ok(canonical_cwd) = cwd.canonicalize() {
+            if let Ok(stripped) = entry_canonical.strip_prefix(&canonical_cwd) {
+                return Ok(hoon_path_from_relative(stripped));
+            }
         }
     }
 
