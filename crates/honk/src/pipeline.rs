@@ -423,11 +423,8 @@ fn parse_leading_imports(source: &str) -> Result<Vec<ScopedImport>> {
         let trimmed = line.trim_start();
 
         if trimmed.is_empty() || trimmed.starts_with("::") {
-            if imports.is_empty() {
-                index += 1;
-                continue;
-            }
-            break;
+            index += 1;
+            continue;
         }
         if !trimmed.starts_with('/') {
             break;
@@ -1047,6 +1044,35 @@ mod tests {
                 mark: None,
                 suffix: "softed-constraints".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn comments_do_not_terminate_leading_import_block() {
+        let source = "/=  demo-mod  /common/demo-mod\n\
+::  comments between imports are non-semantic\n\
+/=  *  /common/demo-lib\n\
+|%\n\
+--\n";
+        let imports = parse_leading_imports(source).expect("imports parse");
+
+        assert_eq!(
+            imports,
+            vec![
+                ScopedImport {
+                    kind: ImportKind::Raw,
+                    face: Some("demo-mod".to_string()),
+                    mark: None,
+                    suffix: "/common/demo-mod".to_string(),
+                },
+                ScopedImport {
+                    kind: ImportKind::Raw,
+                    face: None,
+                    mark: None,
+                    suffix: "/common/demo-lib".to_string(),
+                },
+            ],
+            "a comment cannot hide the imports that follow it",
         );
     }
 
