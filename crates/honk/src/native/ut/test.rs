@@ -2865,3 +2865,22 @@ fn limb_axis_above_direct_max_does_not_panic() {
     let n = hoon_to_noun(&mut slab, &Hoon::Wing(vec![Limb::Axis(big)]));
     assert!(n.is_cell(), "limb axis node should be a cell");
 }
+
+// Bug 1 from the downstream honk report: `|%  --` (an empty battery) is
+// valid Hoon; hoonc compiles it to [[1 0] 0 1].
+#[test]
+fn empty_core_battery_mints() {
+    let mut slab = NounSlab::new();
+    let noun_ty = ty_noun(&mut slab);
+    let mut ut = Ut::new(&mut slab);
+    let (_ty, formula) = ut
+        .mint_noun(noun_ty, noun_ty, &Hoon::BarCen(None, HashMap::new()))
+        .expect("empty |% core should mint");
+    let battery = T(&mut slab, &[D(1), D(0)]);
+    let payload = T(&mut slab, &[D(0), D(1)]);
+    let expected = T(&mut slab, &[battery, payload]);
+    assert!(
+        noun_eq(formula, expected, &slab.noun_space()).expect("noun_eq"),
+        "empty core should compile to [[1 0] 0 1]"
+    );
+}
