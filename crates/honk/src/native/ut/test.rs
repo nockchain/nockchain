@@ -2846,3 +2846,22 @@ fn wet_gate_function_sample_mint_deterministic() {
         "wet-gate mint must be deterministic run-to-run (fresh Context per compile)"
     );
 }
+
+// Bug 2 from the downstream honk report: hoon_to_noun builds axis nodes with
+// the panicking direct-atom constructor D(), so any axis > DIRECT_MAX aborts
+// the compile instead of allocating an indirect atom.
+#[test]
+fn hoon_to_noun_axis_above_direct_max_does_not_panic() {
+    let mut slab = NounSlab::new();
+    let big = nockvm::noun::DIRECT_MAX + 1; // 2^63
+    let n = hoon_to_noun(&mut slab, &Hoon::Axis(big));
+    assert!(n.is_cell(), "axis node should be the cell [0 axis]");
+}
+
+#[test]
+fn limb_axis_above_direct_max_does_not_panic() {
+    let mut slab = NounSlab::new();
+    let big = nockvm::noun::DIRECT_MAX + 1; // 2^63
+    let n = hoon_to_noun(&mut slab, &Hoon::Wing(vec![Limb::Axis(big)]));
+    assert!(n.is_cell(), "limb axis node should be a cell");
+}

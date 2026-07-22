@@ -11780,7 +11780,12 @@ pub fn hoon_to_noun(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
             T(slab, &[p, q])
         }
         ZapZap => T(slab, &[D(tas!(b"zpzp")), D(0)]),
-        Axis(a) => T(slab, &[D(0), D(*a)]),
+        Axis(a) => {
+            // Compiler-synthesized axes (e.g. lowering ^~ bakes) can exceed
+            // DIRECT_MAX; D() panics on those.
+            let a_noun = Atom::new(slab, *a).as_noun();
+            T(slab, &[D(0), a_noun])
+        }
         Base(bt) => {
             let bt_noun = basetype_to_noun(slab, bt);
             T(slab, &[D(tas!(b"base")), bt_noun])
@@ -13061,7 +13066,11 @@ fn limb_to_noun(slab: &mut NounSlab, limb: &Limb) -> Noun {
     match limb {
         Limb::Term(s) => term_to_noun(slab, s),
 
-        Limb::Axis(n) => T(slab, &[D(0), D(*n)]),
+        Limb::Axis(n) => {
+            // Same DIRECT_MAX hazard as Hoon::Axis in hoon_to_noun.
+            let n_noun = Atom::new(slab, *n).as_noun();
+            T(slab, &[D(0), n_noun])
+        }
 
         Limb::Parent(n, opt) => {
             let opt_noun = match opt {
