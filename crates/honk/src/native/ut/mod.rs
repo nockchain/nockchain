@@ -6,13 +6,13 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use hatch::ast::hoon::{
-    Alas, BaseType, Beer, Block, Chum, Coil, Cord, FaceType, Garb, Gate, Hoon, Knot, Limb, Mane,
-    Manx, Marl, Mart, Marx, Nock, NockHint, Note, NounExpr, ParsedAtom, Path, Pint,
-    Poly as AstPoly, SemiNounExpr, Skin, Spec, Spot, Stencil, TermOrPair, TermOrTune, Tome, Tuna,
-    TunaTail, Tune, Type, Tyre, Vair as AstVair, WingType, Woof, ZpwtArg,
+    Alas, Axis as AstAxis, BaseType, Beer, Block, Chum, Coil, Cord, FaceType, Garb, Gate, Hoon,
+    Knot, Limb, Mane, Manx, Marl, Mart, Marx, Nock, NockHint, Note, NounExpr, ParsedAtom, Path,
+    Pint, Poly as AstPoly, SemiNounExpr, Skin, Spec, Spot, Stencil, TermOrPair, TermOrTune, Tome,
+    Tuna, TunaTail, Tune, Type, Tyre, Vair as AstVair, WingType, Woof, ZpwtArg,
 };
 use hatch::utils::{
-    chum_to_nounexpr, example, factory, grip, hoon_to_noun, noun_to_hoon, open, peg, reek,
+    chum_to_nounexpr, example, factory, grip, hoon_to_noun, noun_to_hoon, open, reek,
     string_to_atom,
 };
 use nockapp::noun::slab::NounSlab;
@@ -313,6 +313,13 @@ impl Sig64 {
     #[inline]
     fn write_u128(&mut self, value: u128) {
         self.write_bytes(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_axis(&mut self, axis: &AstAxis) {
+        let bytes = axis.as_biguint().to_bytes_le();
+        self.write_u64(bytes.len() as u64);
+        self.write_bytes(&bytes);
     }
 
     #[inline]
@@ -955,7 +962,7 @@ impl Sig64 {
             }
             Stencil::Lazy { fragment, resolve } => {
                 self.write_byte(0x03);
-                self.write_u64(*fragment);
+                self.write_axis(fragment);
                 let (a, b) = resolve;
                 self.write_spec(a)?;
                 self.write_spec(b)?;
@@ -1114,12 +1121,12 @@ impl Sig64 {
             }
             Nock::SelectArm(axis, nock) => {
                 self.write_byte(0x0a);
-                self.write_u64(*axis);
+                self.write_axis(axis);
                 self.write_nock(nock)?;
             }
             Nock::Edit((axis, nock), rest) => {
                 self.write_byte(0x0b);
-                self.write_u64(*axis);
+                self.write_axis(axis);
                 self.write_nock(nock)?;
                 self.write_nock(rest)?;
             }
@@ -1135,7 +1142,7 @@ impl Sig64 {
             }
             Nock::AxisSelect(axis) => {
                 self.write_byte(0x0e);
-                self.write_u64(*axis);
+                self.write_axis(axis);
             }
         }
         Some(())
@@ -1165,7 +1172,7 @@ impl Sig64 {
             Hoon::ZapZap => self.write_byte(0x02),
             Hoon::Axis(axis) => {
                 self.write_byte(0x03);
-                self.write_u64(*axis);
+                self.write_axis(axis);
             }
             Hoon::Base(bt) => {
                 self.write_byte(0x04);
@@ -2640,8 +2647,10 @@ impl<'a> Ut<'a> {
                 Limb::Axis(axis) => {
                     hash ^= 0x02;
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-                    hash ^= *axis;
-                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    for byte in axis.as_biguint().to_bytes_le() {
+                        hash ^= u64::from(byte);
+                        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                    }
                 }
                 Limb::Parent(axis, name) => {
                     hash ^= 0x03;
@@ -2820,7 +2829,7 @@ impl<'a> Ut<'a> {
     fn lower_tisdot(wing: &WingType, p: &Hoon, q: &Hoon) -> Hoon {
         Hoon::TisGar(
             Box::new(Hoon::CenCab(
-                vec![Limb::Axis(1)],
+                vec![Limb::Axis((1u64).into())],
                 vec![(wing.clone(), p.clone())],
             )),
             Box::new(q.clone()),
@@ -2832,14 +2841,18 @@ impl<'a> Ut<'a> {
         //   [%cnsg p q r] => [%cntr p q (compiled r with axe walk starting at 6)]
         // where each item gets wing [[%| 0 ~] [%& axe] ~], with recursive axe progression.
         let mut compiled = Vec::with_capacity(hoons.len());
-        let mut axe = 6u64;
+        let mut axe = BigUint::from(6u32);
         for (idx, hoon) in hoons.iter().enumerate() {
             let is_last = idx + 1 == hoons.len();
-            let wing_axe = if is_last { axe } else { peg_axis(axe, 2)? };
-            let target_wing = vec![Limb::Parent(0, None), Limb::Axis(wing_axe)];
+            let wing_axe = if is_last {
+                axe.clone()
+            } else {
+                peg_axis_big(axe.clone(), 2)?
+            };
+            let target_wing = vec![Limb::Parent(0, None), Limb::Axis(wing_axe.into())];
             compiled.push((target_wing, hoon.clone()));
             if !is_last {
-                axe = peg_axis(axe, 3)?;
+                axe = peg_axis_big(axe, 3)?;
             }
         }
         Ok(Hoon::CenTar(wing.clone(), Box::new(p.clone()), compiled))
@@ -2855,13 +2868,16 @@ impl<'a> Ut<'a> {
         }
 
         let mut extended_wing = wing.clone();
-        extended_wing.push(Limb::Axis(2));
+        extended_wing.push(Limb::Axis((2u64).into()));
         let wrapped_pairs = pairs
             .iter()
             .map(|(pair_wing, pair_hoon)| {
                 (
                     pair_wing.clone(),
-                    Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(pair_hoon.clone())),
+                    Hoon::TisGar(
+                        Box::new(Hoon::Axis((3u64).into())),
+                        Box::new(pair_hoon.clone()),
+                    ),
                 )
             })
             .collect::<Vec<_>>();
@@ -2968,7 +2984,7 @@ impl<'a> Ut<'a> {
             None => Hoon::BarDot(Box::new(Hoon::CenCol(
                 Box::new(Hoon::Limb("cain".to_string())),
                 vec![Hoon::ZapGar(Box::new(Hoon::TisGar(
-                    Box::new(Hoon::Axis(3)),
+                    Box::new(Hoon::Axis((3u64).into())),
                     Box::new(p.clone()),
                 )))],
             ))),
@@ -3011,10 +3027,13 @@ impl<'a> Ut<'a> {
                 [] => Hoon::Eror("open-mccl-empty".to_string()),
                 // hoon-138 `%mccl` open lowering terminal case:
                 //   [* ~]  [%tsgr [%$ 3] i.yex]
-                [h] => Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())),
+                [h] => Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(h.clone())),
                 [h, t @ ..] => Hoon::CenCol(
-                    Box::new(Hoon::Axis(2)),
-                    vec![Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())), loop_yex(t)],
+                    Box::new(Hoon::Axis((2u64).into())),
+                    vec![
+                        Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(h.clone())),
+                        loop_yex(t),
+                    ],
                 ),
             }
         }
@@ -3035,7 +3054,10 @@ impl<'a> Ut<'a> {
 
     fn lower_siggal(term_or_pair: &TermOrPair, q: &Hoon) -> Hoon {
         Hoon::TisGal(
-            Box::new(Hoon::SigGar(term_or_pair.clone(), Box::new(Hoon::Axis(1)))),
+            Box::new(Hoon::SigGar(
+                term_or_pair.clone(),
+                Box::new(Hoon::Axis((1u64).into())),
+            )),
             Box::new(q.clone()),
         )
     }
@@ -3043,7 +3065,7 @@ impl<'a> Ut<'a> {
     fn lower_sigfas(chum: &Chum, q: &Hoon) -> Hoon {
         Hoon::SigCen(
             chum.clone(),
-            Box::new(Hoon::Axis(7)),
+            Box::new(Hoon::Axis((7u64).into())),
             Vec::new(),
             Box::new(q.clone()),
         )
@@ -3094,7 +3116,7 @@ impl<'a> Ut<'a> {
                     Box::new(item.clone()),
                 )),
             );
-            let wing_parent_axis6 = vec![Limb::Parent(0, None), Limb::Axis(6)];
+            let wing_parent_axis6 = vec![Limb::Parent(0, None), Limb::Axis((6u64).into())];
             let c_bind = Hoon::KetTis(
                 Skin::Term("c".to_string()),
                 Box::new(Hoon::TisGal(
@@ -3126,7 +3148,7 @@ impl<'a> Ut<'a> {
         Hoon::TisGar(
             Box::new(Hoon::KetTis(
                 Skin::Term("v".to_string()),
-                Box::new(Hoon::Axis(1)),
+                Box::new(Hoon::Axis((1u64).into())),
             )),
             Box::new(acc),
         )
@@ -3671,7 +3693,7 @@ impl<'a> Ut<'a> {
     /// is keyed on interned `Rc` pointer identity; (axis, vet, fan) carried
     /// VERBATIM from the old key. VALUE is the NOCK FORMULA (noun) — formula stays
     /// a noun, no `live_to_noun` of the deepening type for the key.
-    fn fish_boundary_lookup(&mut self, sut: &NRc<NTy>, axis: u64) -> Result<Option<Noun>> {
+    fn fish_boundary_lookup(&mut self, sut: &NRc<NTy>, axis: &BigUint) -> Result<Option<Noun>> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         Ok(native_fish_cache_lookup(
@@ -3679,7 +3701,7 @@ impl<'a> Ut<'a> {
         ))
     }
 
-    fn fish_boundary_store(&mut self, sut: &NRc<NTy>, axis: u64, result: Noun) -> Result<()> {
+    fn fish_boundary_store(&mut self, sut: &NRc<NTy>, axis: &BigUint, result: Noun) -> Result<()> {
         let semantic = self.semantic_context_key();
         let fan = self.fan_context_key_scoped(sut)?;
         native_fish_cache_store(&mut self.cx, sut, axis, semantic.vet_key, fan, result);
@@ -3977,9 +3999,9 @@ impl<'a> Ut<'a> {
                 }
             },
             Hoon::Axis(axis) => {
-                let ty = self.peek(sut.clone(), Way::Free, *axis)?;
+                let ty = self.peek(sut.clone(), Way::Free, axis.as_biguint().clone())?;
                 let ty = self.nice(sut, gol, ty)?;
-                let formula = slot_formula_axis(self.slab, *axis);
+                let formula = slot_formula_axis_big(self.slab, axis.as_biguint().clone());
                 Ok((ty, formula))
             }
             Hoon::BarCen(prefix, tomes) => {
@@ -3999,14 +4021,19 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
-    pub fn slot_axis(noun: Noun, mut axis: u64, space: &NounSpace) -> Option<Noun> {
-        if axis == 0 {
+    pub fn slot_axis<A: Into<BigUint>>(noun: Noun, axis: A, space: &NounSpace) -> Option<Noun> {
+        let mut axis = axis.into();
+        if axis == BigUint::from(0u8) {
             return None;
         }
         let mut node = noun;
         let mut steps = Vec::new();
-        while axis > 1 {
-            steps.push((axis & 1) as u8);
+        while axis > BigUint::from(1u8) {
+            steps.push(if (&axis & BigUint::from(1u8)) == BigUint::from(0u8) {
+                0
+            } else {
+                1
+            });
             axis >>= 1;
         }
         while let Some(step) = steps.pop() {
@@ -4346,7 +4373,7 @@ impl<'a> Ut<'a> {
                 },
                 Hoon::Axis(axis) => {
                     // peek is native (C2); thread the native subject directly.
-                    self.peek(sut, Way::Free, *axis)
+                    self.peek(sut, Way::Free, axis.as_biguint().clone())
                 }
                 Hoon::BarCen(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Dry),
                 Hoon::BarPat(prefix, tomes) => self.play_core(sut, prefix, tomes, Poly::Wet),
@@ -4661,12 +4688,12 @@ impl<'a> Ut<'a> {
             // Match hoon-138 `%fits`: when `find` returns a leg, fish directly at that axis
             // rather than composing through `%7`.
             Port::Palo(palo) if matches!(palo.opal, Opal::Leg(_)) => {
-                let axis = tend(&palo.vein)?;
+                let axis = tend_big(&palo.vein)?;
                 self.type_test_formula_on_axis(ref_type.clone(), axis)?
             }
             _ => {
                 let (_ty, base_formula) = self.fine(&port)?;
-                let test = self.type_test_formula_on_axis(ref_type.clone(), 1)?;
+                let test = self.type_test_formula_on_axis(ref_type.clone(), 1u64)?;
                 // hoon-138 emits an explicit `%7` in this branch.
                 T(self.slab, &[D(7), base_formula, test])
             }
@@ -4761,8 +4788,8 @@ impl<'a> Ut<'a> {
         let cell_ty = ty_cell(self.slab, cell_head, cell_tail);
         let known_cell = self.nest_noun(cell_ty, ty)?;
 
-        let head_ty = self.peek_noun(ty, Way::Free, 2)?;
-        let tail_ty = self.peek_noun(ty, Way::Free, 3)?;
+        let head_ty = self.peek_noun(ty, Way::Free, 2u64)?;
+        let tail_ty = self.peek_noun(ty, Way::Free, 3u64)?;
         let head_match = self.skin_match_static(head_ty, head)?;
         let tail_match = self.skin_match_static(tail_ty, tail)?;
 
@@ -4843,25 +4870,31 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn type_test_formula_on_axis(&mut self, typ: NRc<NTy>, axis: u64) -> Result<Noun> {
+    fn type_test_formula_on_axis<A: Into<BigUint>>(
+        &mut self,
+        typ: NRc<NTy>,
+        axis: A,
+    ) -> Result<Noun> {
         // ATOMIC FLIP (consumer C7): fish reads the native type enum. The RETURN
         // is a NOCK FORMULA (noun), not a type. C-final.4: the fish boundary cache
         // is native-re-keyed on the interned `Rc` pointer of `typ`, so the
         // deepening subject is no longer lowered to a noun here. Deepening children
         // stay native; leaf-carried parts (atom value, coil via repo) lowered.
-        if let Some(cached) = self.fish_boundary_lookup(&typ, axis)? {
+        let axis = axis.into();
+        if let Some(cached) = self.fish_boundary_lookup(&typ, &axis)? {
             return Ok(cached);
         }
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
-        let result = self.type_test_formula_on_axis_inner(typ.clone(), axis, &mut seen_holds)?;
-        self.fish_boundary_store(&typ, axis, result)?;
+        let result =
+            self.type_test_formula_on_axis_inner(typ.clone(), axis.clone(), &mut seen_holds)?;
+        self.fish_boundary_store(&typ, &axis, result)?;
         Ok(result)
     }
 
     fn type_test_formula_on_axis_inner(
         &mut self,
         typ: NRc<NTy>,
-        axis: u64,
+        axis: BigUint,
         seen_holds: &mut Vec<NRc<NTy>>,
     ) -> Result<Noun> {
         match &*typ {
@@ -4872,7 +4905,7 @@ impl<'a> Ut<'a> {
                 // and decode via the existing noun helper.
                 let typ_noun = live_to_noun(&mut self.cx, &typ, self.slab);
                 let (_aura, value) = type_atom_parts(typ_noun, &self.slab.noun_space())?;
-                let slot = slot_formula_axis(self.slab, axis);
+                let slot = slot_formula_axis_big(self.slab, axis);
                 if let Some(value) = value {
                     let const_value = T(self.slab, &[D(1), value]);
                     Ok(T(self.slab, &[D(5), const_value, slot]))
@@ -4885,12 +4918,15 @@ impl<'a> Ut<'a> {
             NTy::Cell(head, tail) => {
                 let head = head.clone();
                 let tail = tail.clone();
-                let slot = slot_formula_axis(self.slab, axis);
+                let slot = slot_formula_axis_big(self.slab, axis.clone());
                 let is_cell = T(self.slab, &[D(3), slot]);
-                let head_formula =
-                    self.type_test_formula_on_axis_inner(head, peg_axis(axis, 2)?, seen_holds)?;
+                let head_formula = self.type_test_formula_on_axis_inner(
+                    head,
+                    peg_axis_big(axis.clone(), 2)?,
+                    seen_holds,
+                )?;
                 let tail_formula =
-                    self.type_test_formula_on_axis_inner(tail, peg_axis(axis, 3)?, seen_holds)?;
+                    self.type_test_formula_on_axis_inner(tail, peg_axis_big(axis, 3)?, seen_holds)?;
                 let both = flan_formula(self.slab, head_formula, tail_formula)?;
                 flan_formula(self.slab, is_cell, both)
             }
@@ -4922,17 +4958,17 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn skin_test_formula(&mut self, sut: Noun, axis: u64, skin: &Skin) -> Result<Noun> {
-        let ref_type = self.peek_noun(sut, Way::Free, axis)?;
+    fn skin_test_formula(&mut self, sut: Noun, axis: BigUint, skin: &Skin) -> Result<Noun> {
+        let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
         if let Some(matches) = self.skin_match_static(ref_type, skin)? {
             return Ok(const_bool_formula(self.slab, matches));
         }
 
-        let slot = slot_formula_axis(self.slab, axis);
+        let slot = slot_formula_axis_big(self.slab, axis.clone());
         match skin {
             Skin::Base(BaseType::Flag) => {
                 let atom_skin = Skin::Base(BaseType::Atom("$".to_string()));
-                let atom_test = self.skin_test_formula(sut, axis, &atom_skin)?;
+                let atom_test = self.skin_test_formula(sut, axis.clone(), &atom_skin)?;
                 let zero = T(self.slab, &[D(1), D(0)]);
                 let one = T(self.slab, &[D(1), D(1)]);
                 let eq_zero = T(self.slab, &[D(5), slot, zero]);
@@ -4948,8 +4984,8 @@ impl<'a> Ut<'a> {
             }
             Skin::Cell(head, tail) => {
                 let is_cell = T(self.slab, &[D(3), slot]);
-                let head_axis = peg_axis(axis, 2)?;
-                let tail_axis = peg_axis(axis, 3)?;
+                let head_axis = peg_axis_big(axis.clone(), 2)?;
+                let tail_axis = peg_axis_big(axis, 3)?;
                 let head_test = self.skin_test_formula(sut, head_axis, head)?;
                 let tail_test = self.skin_test_formula(sut, tail_axis, tail)?;
                 let both = and_formula(self.slab, head_test, tail_test)?;
@@ -4961,11 +4997,11 @@ impl<'a> Ut<'a> {
             Skin::Name(_, inner) => self.skin_test_formula(sut, axis, inner),
             Skin::Over(wing, inner) => {
                 let rel_axis = self.resolve_wing_axis_noun(sut, wing)?;
-                let axis = peg_axis(axis, rel_axis)?;
+                let axis = peg_axis_big_pair(axis, &rel_axis)?;
                 self.skin_test_formula(sut, axis, inner)
             }
             Skin::Spec(spec, inner) => {
-                let ref_type = self.peek_noun(sut, Way::Free, axis)?;
+                let ref_type = self.peek_noun(sut, Way::Free, axis.clone())?;
                 let example = self.spec_example_cached(spec);
                 let hit = self.play_noun(sut, example.as_ref())?;
                 if !self.nest_noun(hit, ref_type)? {
@@ -4993,13 +5029,14 @@ impl<'a> Ut<'a> {
     fn type_test_formula_on_axis_fork(
         &mut self,
         options: &[NRc<NTy>],
-        axis: u64,
+        axis: BigUint,
         seen_holds: &mut Vec<NRc<NTy>>,
     ) -> Result<Noun> {
         let Some((head, tail)) = options.split_first() else {
             return Ok(const_bool_formula(self.slab, false));
         };
-        let head_formula = self.type_test_formula_on_axis_inner(head.clone(), axis, seen_holds)?;
+        let head_formula =
+            self.type_test_formula_on_axis_inner(head.clone(), axis.clone(), seen_holds)?;
         let tail_formula = self.type_test_formula_on_axis_fork(tail, axis, seen_holds)?;
         flor_formula(self.slab, head_formula, tail_formula)
     }
@@ -5147,8 +5184,8 @@ impl<'a> Ut<'a> {
         T(self.slab, &[D(SEMI_TAG_HALF), left, right])
     }
 
-    fn semi_mask_lazy(&mut self, fragment: u64, resolve: Noun) -> Noun {
-        let frag = noun_u64(self.slab, fragment);
+    fn semi_mask_lazy(&mut self, fragment: BigUint, resolve: Noun) -> Noun {
+        let frag = noun_biguint(self.slab, fragment);
         T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve])
     }
 
@@ -5198,7 +5235,7 @@ impl<'a> Ut<'a> {
 
     fn semi_lazy_root(&mut self, resolver_id: u64) -> Noun {
         let resolve = noun_u64(self.slab, resolver_id);
-        let mask = self.semi_mask_lazy(1, resolve);
+        let mask = self.semi_mask_lazy(BigUint::from(1u32), resolve);
         self.semi_make(mask, D(0))
     }
 
@@ -5246,7 +5283,7 @@ impl<'a> Ut<'a> {
         resolver_id: u64,
         core_type: NRc<NTy>,
         poly: Poly,
-        arms_by_axis: HashMap<u64, LazyResolverArmEntry>,
+        arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
     ) {
         // Lazy resolvers live for the whole compile and are resolved on demand
         // (re-minting an arm against `core_type`), including CROSS-ARM: another
@@ -5268,7 +5305,7 @@ impl<'a> Ut<'a> {
     fn lazy_resolver_resolve_axis(
         &mut self,
         resolver_id: u64,
-        fragment: u64,
+        fragment: &BigUint,
     ) -> Result<Option<Noun>> {
         // hoon-138 `++laze`: the resolver answers exact arm axes only
         // (`(~(get by tal) axe)`); any other fragment — including 1, the
@@ -5276,11 +5313,11 @@ impl<'a> Ut<'a> {
         // Completed cores never reach here: `mint_core` stores a
         // materialized `[[%full ~] battery]` semi in the result type.
         if let Some(ctx) = self.lazy_resolvers.get(&resolver_id) {
-            if let Some(cached) = ctx.cached_formula_by_axis.get(&fragment) {
+            if let Some(cached) = ctx.cached_formula_by_axis.get(fragment) {
                 return Ok(Some(*cached));
             }
-            if ctx.arms_by_axis.contains_key(&fragment) {
-                return self.lazy_resolver_compile_arm(resolver_id, fragment);
+            if ctx.arms_by_axis.contains_key(fragment) {
+                return self.lazy_resolver_compile_arm(resolver_id, fragment.clone());
             }
         }
         Ok(None)
@@ -5289,7 +5326,7 @@ impl<'a> Ut<'a> {
     fn lazy_resolver_compile_arm(
         &mut self,
         resolver_id: u64,
-        fragment: u64,
+        fragment: BigUint,
     ) -> Result<Option<Noun>> {
         let Some((core_type, poly, arm_entry)) = ({
             let Some(ctx) = self.lazy_resolvers.get_mut(&resolver_id) else {
@@ -5298,7 +5335,7 @@ impl<'a> Ut<'a> {
             if let Some(cached) = ctx.cached_formula_by_axis.get(&fragment) {
                 return Ok(Some(*cached));
             }
-            if !ctx.in_progress_axes.insert(fragment) {
+            if !ctx.in_progress_axes.insert(fragment.clone()) {
                 return Ok(None);
             }
             Some((
@@ -5419,7 +5456,7 @@ impl<'a> Ut<'a> {
         Ok((tail.head().noun(), tail.tail().noun()))
     }
 
-    fn semi_mask_lazy_parts(&mut self, mask: Noun) -> Result<(u64, Noun)> {
+    fn semi_mask_lazy_parts(&mut self, mask: Noun) -> Result<(BigUint, Noun)> {
         let space = self.slab.noun_space();
         let cell = mask
             .in_space(&space)
@@ -5433,9 +5470,7 @@ impl<'a> Ut<'a> {
             .head()
             .as_atom()
             .map_err(|err| CompilerError::Decode(format!("semi lazy fragment not atom: {err}")))?;
-        let fragment = fragment
-            .as_u64()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy fragment decode: {err}")))?;
+        let fragment = noun_axis_atom_to_big(fragment);
         Ok((fragment, tail.tail().noun()))
     }
 
@@ -5499,7 +5534,7 @@ impl<'a> Ut<'a> {
                 let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
                 // hoon-138 `++complete`: "fragment 1 is the whole thing;
                 // blocked; we can't get fragment 1 while compiling it."
-                if fragment == 1 {
+                if fragment == BigUint::from(1u32) {
                     return Ok(self.semi_full_blocked());
                 }
                 let resolver_id = {
@@ -5513,7 +5548,7 @@ impl<'a> Ut<'a> {
                         Err(_) => return Ok(self.semi_full_blocked()),
                     }
                 };
-                match self.lazy_resolver_resolve_axis(resolver_id, fragment)? {
+                match self.lazy_resolver_resolve_axis(resolver_id, &fragment)? {
                     Some(value) => Ok(self.semi_full_complete(value)),
                     None => Ok(self.semi_full_blocked()),
                 }
@@ -5550,7 +5585,7 @@ impl<'a> Ut<'a> {
         match self.semi_mask_tag(mask)? {
             SemiTag::Lazy => {
                 let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis(fragment, axe)?;
+                let next_fragment = peg_axis_big_pair(fragment, &BigUint::from(axe))?;
                 let next_mask = self.semi_mask_lazy(next_fragment, resolve);
                 Ok(Some(self.semi_make(next_mask, data)))
             }
@@ -5610,18 +5645,9 @@ impl<'a> Ut<'a> {
         match self.semi_mask_tag(mask)? {
             SemiTag::Lazy => {
                 let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis_big_pair(BigUint::from(fragment), axe)?;
-                if let Ok(next_fragment) = u64::try_from(&next_fragment) {
-                    let next_mask = self.semi_mask_lazy(next_fragment, resolve);
-                    Ok(Some(self.semi_make(next_mask, data)))
-                } else {
-                    // Canonical `++laze` maps only declared battery axes.  A
-                    // virtual fragment outside the native axis range cannot be
-                    // resolved by the native arm map, so preserve the partial
-                    // interpreter contract by treating it as blocked rather
-                    // than as a malformed formula.
-                    Ok(Some(self.semi_full_blocked()))
-                }
+                let next_fragment = peg_axis_big_pair(fragment, axe)?;
+                let next_mask = self.semi_mask_lazy(next_fragment, resolve);
+                Ok(Some(self.semi_make(next_mask, data)))
             }
             SemiTag::Full => {
                 let blocks = self.semi_mask_full_blocks(mask)?;
@@ -6549,52 +6575,52 @@ impl<'a> Ut<'a> {
         self.epla(sut, wing, &[])
     }
 
-    fn axis_contains(container: u64, contained: u64) -> bool {
-        let container_bits = 64 - container.leading_zeros();
-        let contained_bits = 64 - contained.leading_zeros();
+    fn axis_contains(container: &BigUint, contained: &BigUint) -> bool {
+        let container_bits = container.bits();
+        let contained_bits = contained.bits();
         if contained_bits < container_bits {
             return false;
         }
         let shift = contained_bits - container_bits;
-        (contained >> shift) == container
+        (contained >> usize::try_from(shift).expect("axis bit length exceeds usize")) == *container
     }
 
-    fn axis_parent(axis: u64) -> u64 {
+    fn axis_parent(axis: &BigUint) -> BigUint {
         axis >> 1
     }
 
-    fn axis_sibling(axis: u64) -> u64 {
-        if axis & 1 == 0 {
-            axis + 1
+    fn axis_sibling(axis: &BigUint) -> BigUint {
+        if axis & BigUint::from(1u32) == BigUint::from(0u32) {
+            axis + BigUint::from(1u32)
         } else {
-            axis - 1
+            axis - BigUint::from(1u32)
         }
     }
 
     fn hike_insert(
         &mut self,
-        axe: u64,
+        axe: BigUint,
         fol: Noun,
-        rel: &mut std::collections::BTreeMap<u64, Noun>,
+        rel: &mut std::collections::BTreeMap<BigUint, Noun>,
     ) -> Result<()> {
-        let mut probe = axe;
-        while probe != 1 {
+        let mut probe = axe.clone();
+        while probe != BigUint::from(1u32) {
             if rel.contains_key(&probe) {
                 return Ok(());
             }
-            probe = Self::axis_parent(probe);
+            probe = Self::axis_parent(&probe);
         }
 
-        let existing: Vec<u64> = rel.keys().copied().collect();
+        let existing: Vec<BigUint> = rel.keys().cloned().collect();
         for key in existing {
-            if Self::axis_contains(axe, key) {
+            if Self::axis_contains(&axe, &key) {
                 rel.remove(&key);
             }
         }
 
-        let sib = Self::axis_sibling(axe);
+        let sib = Self::axis_sibling(&axe);
         if let Some(sib_fol) = rel.remove(&sib) {
-            let parent = Self::axis_parent(sib);
+            let parent = Self::axis_parent(&sib);
             let merged = if sib > axe {
                 cons(self.slab, fol, sib_fol)?
             } else {
@@ -6607,23 +6633,23 @@ impl<'a> Ut<'a> {
         Ok(())
     }
 
-    fn hike_formula(&mut self, root_axis: BigUint, edits: &[(u64, Noun)]) -> Result<Noun> {
-        let mut rel: std::collections::BTreeMap<u64, Noun> = std::collections::BTreeMap::new();
+    fn hike_formula(&mut self, root_axis: BigUint, edits: &[(BigUint, Noun)]) -> Result<Noun> {
+        let mut rel: std::collections::BTreeMap<BigUint, Noun> = std::collections::BTreeMap::new();
         for (axis, formula) in edits {
-            self.hike_insert(*axis, *formula, &mut rel)?;
+            self.hike_insert(axis.clone(), *formula, &mut rel)?;
         }
         let mut out = slot_formula_axis_big(self.slab, root_axis);
         // hoon-138 `++hike` sorts with `gth` (descending) and recurses from head to tail:
         //   [%10 [hi ...] [%10 [lo ...] [%0 a]]]
         // To build the same tree iteratively, apply edits in ascending order so larger axes
         // wrap later and become outer nodes.
-        let keys: Vec<u64> = rel.keys().copied().collect();
+        let keys: Vec<BigUint> = rel.keys().cloned().collect();
         for axis in keys {
             let edit_formula = rel
                 .get(&axis)
                 .copied()
                 .ok_or_else(|| CompilerError::Noun("missing hike edit".to_string()))?;
-            let axis_noun = noun_u64(self.slab, axis);
+            let axis_noun = noun_biguint(self.slab, axis);
             let patch_cell = T(self.slab, &[axis_noun, edit_formula]);
             let edit_cell = T(self.slab, &[patch_cell, out]);
             out = T(self.slab, &[D(10), edit_cell]);
@@ -6636,7 +6662,7 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         wing: &WingType,
         mur: NRc<NTy>,
-    ) -> Result<(u64, NRc<NTy>)> {
+    ) -> Result<(BigUint, NRc<NTy>)> {
         let port = self.find(sut.clone(), Way::Rite, wing)?;
         match port {
             Port::Palo(palo) => {
@@ -6653,13 +6679,13 @@ impl<'a> Ut<'a> {
         wing: &WingType,
         mur: NRc<NTy>,
         arms: &[(NRc<NTy>, Noun)],
-    ) -> Result<(u64, Vec<(NRc<NTy>, Noun)>)> {
-        let mut axis_match: Option<u64> = None;
+    ) -> Result<(BigUint, Vec<(NRc<NTy>, Noun)>)> {
+        let mut axis_match: Option<BigUint> = None;
         let mut out = Vec::with_capacity(arms.len());
         for (typ, foot) in arms {
             let (axis, new_typ) = self.cnts_tack(typ.clone(), wing, mur.clone())?;
-            if let Some(existing) = axis_match {
-                if existing != axis {
+            if let Some(existing) = &axis_match {
+                if existing != &axis {
                     return Err(CompilerError::Noun("mate".to_string()));
                 }
             } else {
@@ -6673,7 +6699,12 @@ impl<'a> Ut<'a> {
 
     // HOON138:arm=ut:tack lines=10848-10853 map=direct status=partial reviewed=2026-03-06
     // HOON138_NOTE:native primary implementation for canonical `++tack`; full parity review is still in progress
-    fn tack(&mut self, sut: NRc<NTy>, hyp: &WingType, mur: NRc<NTy>) -> Result<(u64, NRc<NTy>)> {
+    fn tack(
+        &mut self,
+        sut: NRc<NTy>,
+        hyp: &WingType,
+        mur: NRc<NTy>,
+    ) -> Result<(BigUint, NRc<NTy>)> {
         self.cnts_tack(sut, hyp, mur)
     }
 
@@ -6684,7 +6715,7 @@ impl<'a> Ut<'a> {
         hyp: &WingType,
         mur: NRc<NTy>,
         men: &[(NRc<NTy>, Noun)],
-    ) -> Result<(u64, Vec<(NRc<NTy>, Noun)>)> {
+    ) -> Result<(BigUint, Vec<(NRc<NTy>, Noun)>)> {
         self.cnts_toss(hyp, mur, men)
     }
 
@@ -6849,14 +6880,14 @@ impl<'a> Ut<'a> {
         // This keeps the compiled noun aligned with canonical dynock fixtures.
         let target_type = Hoon::TisGar(
             Box::new(Hoon::ZapGar(Box::new(Hoon::KetTar(Box::new(spec.clone()))))),
-            Box::new(Hoon::Axis(2)),
+            Box::new(Hoon::Axis((2u64).into())),
         );
-        let actual_type = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis(2)));
+        let actual_type = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis((2u64).into())));
         let cond = Hoon::CenCol(
             Box::new(Hoon::Limb("levi".to_string())),
             vec![target_type, actual_type],
         );
-        let yes = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis(3)));
+        let yes = Hoon::TisGar(Box::new(q.clone()), Box::new(Hoon::Axis((3u64).into())));
         let expanded = Hoon::WutCol(Box::new(cond), Box::new(yes), Box::new(Hoon::ZapZap));
         let goal = cons_noun(&mut self.cx);
         let (_val_ty, val_formula) = self.mint(sut, goal, &expanded)?;
@@ -7037,7 +7068,7 @@ impl<'a> Ut<'a> {
             }
         };
         let base_axis = tend_big(&palo.vein)?;
-        let mut edits: Vec<(u64, Noun)> = Vec::with_capacity(pairs.len());
+        let mut edits: Vec<(BigUint, Noun)> = Vec::with_capacity(pairs.len());
         match palo.opal {
             Opal::Leg(mut base_leg) => {
                 for (_idx, (sub_wing, expr)) in pairs.iter().enumerate() {
@@ -7073,7 +7104,7 @@ impl<'a> Ut<'a> {
                 edits.reverse();
 
                 let hike = self.hike_formula(base_axis, &edits)?;
-                let arm_axis_noun = noun_u64(self.slab, arm_axis);
+                let arm_axis_noun = noun_biguint(self.slab, arm_axis);
                 let formula = T(self.slab, &[D(9), arm_axis_noun, hike]);
                 // fire is native (C-final): arm cores are already `NRc<NTy>`.
                 let arm_ty = self.fire(&hag)?;
@@ -7218,7 +7249,7 @@ impl<'a> Ut<'a> {
         let Some(sig) = Sig64::spec_signature_spot_sensitive(spec) else {
             return Arc::new(factory(
                 spec.clone(),
-                1,
+                1u64.into(),
                 Vec::new(),
                 HashMap::new(),
                 Vec::new(),
@@ -7236,7 +7267,7 @@ impl<'a> Ut<'a> {
 
         let expanded = Arc::new(factory(
             spec.clone(),
-            1,
+            1u64.into(),
             Vec::new(),
             HashMap::new(),
             Vec::new(),
@@ -7386,7 +7417,11 @@ impl<'a> Ut<'a> {
         // dropping the cross-arm formula cache and the in-progress guard.
         if !self.lazy_resolvers.contains_key(&resolver_id) {
             let mut lazy_arms = HashMap::new();
-            self.collect_lazy_resolver_arms_from_tomes_map(tomes_map, 1, &mut lazy_arms)?;
+            self.collect_lazy_resolver_arms_from_tomes_map(
+                tomes_map,
+                BigUint::from(1u32),
+                &mut lazy_arms,
+            )?;
             self.lazy_resolver_register_context(
                 resolver_id,
                 core_native_lazy.clone(),
@@ -7663,8 +7698,8 @@ impl<'a> Ut<'a> {
     fn collect_lazy_resolver_arms_from_arms_map(
         &mut self,
         arms_map: Noun,
-        axis: u64,
-        out: &mut HashMap<u64, LazyResolverArmEntry>,
+        axis: BigUint,
+        out: &mut HashMap<BigUint, LazyResolverArmEntry>,
     ) -> Result<()> {
         let space = self.slab.noun_space();
         let Some((node, left, right)) = map_node(arms_map, &self.slab.noun_space())? else {
@@ -7680,9 +7715,9 @@ impl<'a> Ut<'a> {
         let left_empty = noun_is_zero(left);
         let right_empty = noun_is_zero(right);
         let arm_axis = if left_empty && right_empty {
-            axis
+            axis.clone()
         } else {
-            peg_axis(axis, 2)?
+            peg_axis_big(axis.clone(), 2)?
         };
         if out
             .insert(
@@ -7701,14 +7736,18 @@ impl<'a> Ut<'a> {
         match (left_empty, right_empty) {
             (true, true) => Ok(()),
             (true, false) => {
-                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis_big(axis, 3)?, out)
             }
             (false, true) => {
-                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis_big(axis, 3)?, out)
             }
             (false, false) => {
-                self.collect_lazy_resolver_arms_from_arms_map(left, peg_axis(axis, 6)?, out)?;
-                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis(axis, 7)?, out)
+                self.collect_lazy_resolver_arms_from_arms_map(
+                    left,
+                    peg_axis_big(axis.clone(), 6)?,
+                    out,
+                )?;
+                self.collect_lazy_resolver_arms_from_arms_map(right, peg_axis_big(axis, 7)?, out)
             }
         }
     }
@@ -7716,8 +7755,8 @@ impl<'a> Ut<'a> {
     fn collect_lazy_resolver_arms_from_tomes_map(
         &mut self,
         tomes_map: Noun,
-        axis: u64,
-        out: &mut HashMap<u64, LazyResolverArmEntry>,
+        axis: BigUint,
+        out: &mut HashMap<BigUint, LazyResolverArmEntry>,
     ) -> Result<()> {
         let space = self.slab.noun_space();
         let Some((node, left, right)) = map_node(tomes_map, &self.slab.noun_space())? else {
@@ -7736,22 +7775,26 @@ impl<'a> Ut<'a> {
         let left_empty = noun_is_zero(left);
         let right_empty = noun_is_zero(right);
         let chapter_axis = if left_empty && right_empty {
-            axis
+            axis.clone()
         } else {
-            peg_axis(axis, 2)?
+            peg_axis_big(axis.clone(), 2)?
         };
         self.collect_lazy_resolver_arms_from_arms_map(arms_map, chapter_axis, out)?;
         match (left_empty, right_empty) {
             (true, true) => Ok(()),
             (true, false) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis_big(axis, 3)?, out)
             }
             (false, true) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis(axis, 3)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis_big(axis, 3)?, out)
             }
             (false, false) => {
-                self.collect_lazy_resolver_arms_from_tomes_map(left, peg_axis(axis, 6)?, out)?;
-                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis(axis, 7)?, out)
+                self.collect_lazy_resolver_arms_from_tomes_map(
+                    left,
+                    peg_axis_big(axis.clone(), 6)?,
+                    out,
+                )?;
+                self.collect_lazy_resolver_arms_from_tomes_map(right, peg_axis_big(axis, 7)?, out)
             }
         }
     }
@@ -8864,15 +8907,15 @@ impl<'a> Ut<'a> {
             ),
             Vair::Iron => {
                 // Bootstrap `+nest` compares `%iron` in this orientation.
-                let sut_peek = self.peek(ref_ctx, Way::Rite, 2)?;
-                let ref_peek = self.peek(sut_ctx, Way::Rite, 2)?;
+                let sut_peek = self.peek(ref_ctx, Way::Rite, 2u64)?;
+                let ref_peek = self.peek(sut_ctx, Way::Rite, 2u64)?;
                 self.nest_inner(
                     sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
             }
             Vair::Zinc => {
-                let sut_peek = self.peek(sut_ctx, Way::Read, 2)?;
-                let ref_peek = self.peek(ref_ctx, Way::Read, 2)?;
+                let sut_peek = self.peek(sut_ctx, Way::Read, 2u64)?;
+                let ref_peek = self.peek(ref_ctx, Way::Read, 2u64)?;
                 self.nest_inner(
                     sut_peek, ref_peek, depth, seen_sut_holds, seen_ref_holds, gil, memo,
                 )
@@ -9279,35 +9322,31 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         vein: &[Option<BigUint>],
         duz: &F,
-    ) -> Result<(u64, NRc<NTy>)>
+    ) -> Result<(BigUint, NRc<NTy>)>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
-        let axis = tend(vein)?;
-        let vit: Vec<Option<u64>> = vein
-            .iter()
-            .rev()
-            .map(|step| step.as_ref().map(axis_big_to_u64).transpose())
-            .collect::<Result<_>>()?;
+        let axis = tend_big(vein)?;
+        let vit: Vec<Option<BigUint>> = vein.iter().rev().cloned().collect();
         let ty = self.take_inner(sut, &vit, duz)?;
         Ok((axis, ty))
     }
 
-    fn take_inner<F>(&mut self, sut: NRc<NTy>, vit: &[Option<u64>], duz: &F) -> Result<NRc<NTy>>
+    fn take_inner<F>(&mut self, sut: NRc<NTy>, vit: &[Option<BigUint>], duz: &F) -> Result<NRc<NTy>>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
         let Some((head, tail)) = vit.split_first() else {
             return duz(self, sut);
         };
-        self.take_inner_head_tail(sut, *head, tail, duz)
+        self.take_inner_head_tail(sut, head.clone(), tail, duz)
     }
 
     fn take_inner_head_tail<F>(
         &mut self,
         sut: NRc<NTy>,
-        head: Option<u64>,
-        tail: &[Option<u64>],
+        head: Option<BigUint>,
+        tail: &[Option<BigUint>],
         duz: &F,
     ) -> Result<NRc<NTy>>
     where
@@ -9352,18 +9391,18 @@ impl<'a> Ut<'a> {
     fn take_axis<F>(
         &mut self,
         sut: NRc<NTy>,
-        step: u64,
-        tail: &[Option<u64>],
+        step: BigUint,
+        tail: &[Option<BigUint>],
         duz: &F,
         vil: &mut HashSet<u64>,
     ) -> Result<NRc<NTy>>
     where
         F: Fn(&mut Self, NRc<NTy>) -> Result<NRc<NTy>>,
     {
-        if step == 1 {
+        if step == BigUint::from(1u32) {
             return self.take_inner(sut, tail, duz);
         }
-        let (cap, mas) = axis_cap_mas(step)?;
+        let (cap, mas) = axis_big_cap_mas(&step)?;
         match &*sut {
             NTy::Noun => {
                 let noun = cons_noun(&mut self.cx);
@@ -9411,7 +9450,7 @@ impl<'a> Ut<'a> {
                 let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt_ty = self.take_axis(option, step, tail, duz, vil)?;
+                    let opt_ty = self.take_axis(option, step.clone(), tail, duz, vil)?;
                     out.push(opt_ty);
                 }
                 self.cons_fork(out)
@@ -10780,42 +10819,42 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn peek(&mut self, sut: NRc<NTy>, way: Way, axis: u64) -> Result<NRc<NTy>> {
+    fn peek<A: Into<BigUint>>(&mut self, sut: NRc<NTy>, way: Way, axis: A) -> Result<NRc<NTy>> {
         // ATOMIC FLIP (consumer C2): peek reads the native enum directly. The
         // seen-hold dedup, the core coil, and the fork set stay noun-keyed in
         // Phase 1 (lowered via to_noun); repo is native (C1).
         fn seen_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
             hold: Noun,
-            axis: u64,
+            axis: &BigUint,
         ) -> Result<bool> {
-            let axis_noun = noun_u64(ut.slab, axis);
+            let axis_noun = noun_biguint(ut.slab, axis.clone());
             let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
             if let Some(bucket) = seen.get(&mug) {
                 for (prior, prior_axis) in bucket {
-                    if *prior_axis == axis && noun_eq(*prior, hold, &ut.slab.noun_space())? {
+                    if prior_axis == axis && noun_eq(*prior, hold, &ut.slab.noun_space())? {
                         return Ok(true);
                     }
                 }
             }
-            seen.entry(mug).or_default().push((hold, axis));
+            seen.entry(mug).or_default().push((hold, axis.clone()));
             Ok(false)
         }
 
         fn unsee_hold(
             ut: &mut Ut<'_>,
-            seen: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            seen: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
             hold: Noun,
-            axis: u64,
+            axis: &BigUint,
         ) -> Result<()> {
-            let axis_noun = noun_u64(ut.slab, axis);
+            let axis_noun = noun_biguint(ut.slab, axis.clone());
             let mug = ut.noun_mug_cached(hold) ^ slab_mug(axis_noun, &ut.slab.noun_space());
             if let Some(bucket) = seen.get_mut(&mug) {
                 let space = ut.slab.noun_space();
                 let mut idx = 0;
                 while idx < bucket.len() {
-                    if bucket[idx].1 == axis && noun_eq(bucket[idx].0, hold, &space)? {
+                    if &bucket[idx].1 == axis && noun_eq(bucket[idx].0, hold, &space)? {
                         bucket.swap_remove(idx);
                         break;
                     }
@@ -10832,10 +10871,10 @@ impl<'a> Ut<'a> {
             ut: &mut Ut<'_>,
             sut: NRc<NTy>,
             way: Way,
-            axis: u64,
-            seen_holds: &mut HashMap<u32, Vec<(Noun, u64)>>,
+            axis: BigUint,
+            seen_holds: &mut HashMap<u32, Vec<(Noun, BigUint)>>,
         ) -> Result<NRc<NTy>> {
-            if axis == 1 {
+            if axis == BigUint::from(1u32) {
                 return Ok(sut);
             }
             match &*sut {
@@ -10843,12 +10882,12 @@ impl<'a> Ut<'a> {
                 NTy::Void => Ok(cons_void(&mut ut.cx)),
                 NTy::Atom { .. } => Ok(cons_void(&mut ut.cx)),
                 NTy::Cell(head, tail) => {
-                    let (cap, mas) = axis_cap_mas(axis)?;
+                    let (cap, mas) = axis_big_cap_mas(&axis)?;
                     let child = if cap == 2 { head.clone() } else { tail.clone() };
                     go(ut, child, way, mas, seen_holds)
                 }
                 NTy::Core { payload, garb, .. } => {
-                    let (cap, mas) = axis_cap_mas(axis)?;
+                    let (cap, mas) = axis_big_cap_mas(&axis)?;
                     if cap != 3 {
                         return Ok(cons_noun(&mut ut.cx));
                     }
@@ -10857,7 +10896,11 @@ impl<'a> Ut<'a> {
                     // subject) is not needed here.
                     let vair = garb.vair;
                     let (sam, con) = peel(way, vair);
-                    let tow = if mas == 1 { 1 } else { axis_cap_mas(mas)?.0 };
+                    let tow = if mas == BigUint::from(1u32) {
+                        1
+                    } else {
+                        axis_big_cap_mas(&mas)?.0
+                    };
                     if (sam && con) || (sam && tow == 2) || (con && tow == 3) {
                         return go(ut, payload, way, mas, seen_holds);
                     }
@@ -10865,12 +10908,12 @@ impl<'a> Ut<'a> {
                         return Err(CompilerError::Noun("payload-block".to_string()));
                     }
                     let sam_type = if sam {
-                        go(ut, payload.clone(), way, 2, seen_holds)?
+                        go(ut, payload.clone(), way, BigUint::from(2u32), seen_holds)?
                     } else {
                         cons_noun(&mut ut.cx)
                     };
                     let con_type = if con {
-                        go(ut, payload.clone(), way, 3, seen_holds)?
+                        go(ut, payload.clone(), way, BigUint::from(3u32), seen_holds)?
                     } else {
                         cons_noun(&mut ut.cx)
                     };
@@ -10887,12 +10930,12 @@ impl<'a> Ut<'a> {
                 }
                 NTy::Hold { .. } => {
                     let hold_noun = live_to_noun(&mut ut.cx, &sut, ut.slab);
-                    if seen_hold(ut, seen_holds, hold_noun, axis)? {
+                    if seen_hold(ut, seen_holds, hold_noun, &axis)? {
                         return Ok(cons_void(&mut ut.cx));
                     }
                     let expanded = ut.repo(sut.clone())?;
-                    let result = go(ut, expanded, way, axis, seen_holds);
-                    unsee_hold(ut, seen_holds, hold_noun, axis)?;
+                    let result = go(ut, expanded, way, axis.clone(), seen_holds);
+                    unsee_hold(ut, seen_holds, hold_noun, &axis)?;
                     result
                 }
                 NTy::Fork { set } => {
@@ -10901,7 +10944,7 @@ impl<'a> Ut<'a> {
                     let mut peeks = Vec::with_capacity(options.len());
                     for option in options {
                         let opt = native_of(&mut ut.cx, option, &ut.slab.noun_space())?;
-                        peeks.push(go(ut, opt, way, axis, seen_holds)?);
+                        peeks.push(go(ut, opt, way, axis.clone(), seen_holds)?);
                     }
                     let mut peek_nouns = Vec::with_capacity(peeks.len());
                     for p in &peeks {
@@ -10913,13 +10956,13 @@ impl<'a> Ut<'a> {
             }
         }
 
-        let mut seen_holds: HashMap<u32, Vec<(Noun, u64)>> = HashMap::new();
-        go(self, sut, way, axis, &mut seen_holds)
+        let mut seen_holds: HashMap<u32, Vec<(Noun, BigUint)>> = HashMap::new();
+        go(self, sut, way, axis.into(), &mut seen_holds)
     }
 
     /// Noun-bridged `peek` for not-yet-flipped callers (C2): lift sut, run native
     /// peek, lower the result. Drops as callers flip.
-    fn peek_noun(&mut self, sut: Noun, way: Way, axis: u64) -> Result<Noun> {
+    fn peek_noun<A: Into<BigUint>>(&mut self, sut: Noun, way: Way, axis: A) -> Result<Noun> {
         let native = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         let r = self.peek(native, way, axis)?;
         Ok(live_to_noun(&mut self.cx, &r, self.slab))
@@ -11029,7 +11072,7 @@ impl<'a> Ut<'a> {
                 Vair::Gold,
                 prefix.as_deref(),
                 Poly::Dry,
-                &Hoon::Axis(1),
+                &Hoon::Axis((1u64).into()),
                 tomes,
             ),
             // %brpt (|@ wet core)
@@ -11040,7 +11083,7 @@ impl<'a> Ut<'a> {
                 Vair::Gold,
                 prefix.as_deref(),
                 Poly::Wet,
-                &Hoon::Axis(1),
+                &Hoon::Axis((1u64).into()),
                 tomes,
             ),
 
@@ -11266,8 +11309,8 @@ impl<'a> Ut<'a> {
                 let syx_q = self.cove(dox_formula)?;
 
                 // Generate fish (runtime type test) from both
-                let pov_p = self.type_test_formula_on_axis(waz_p, syx_p)?;
-                let pov_q = self.type_test_formula_on_axis(waz_q, syx_q)?;
+                let pov_p = self.type_test_formula_on_axis(waz_p, syx_p.clone())?;
+                let pov_q = self.type_test_formula_on_axis(waz_q, syx_q.clone())?;
 
                 // Assert axes AND fish nock are identical (pov_* are FORMULAS).
                 if syx_p != syx_q || !noun_eq(pov_p, pov_q, &self.slab.noun_space())? {
@@ -11375,7 +11418,7 @@ impl<'a> Ut<'a> {
             // TisLus (=+) lowers to TisGar => handled above
             Hoon::TisLus(p, q) => {
                 let lowered = Hoon::TisGar(
-                    Box::new(Hoon::Pair(p.clone(), Box::new(Hoon::Axis(1)))),
+                    Box::new(Hoon::Pair(p.clone(), Box::new(Hoon::Axis((1u64).into())))),
                     q.clone(),
                 );
                 self.mull(sut, gol, dox, &lowered)
@@ -11383,7 +11426,7 @@ impl<'a> Ut<'a> {
             // TisHep (=-) is TisLus with args reversed
             Hoon::TisHep(p, q) => {
                 let lowered = Hoon::TisGar(
-                    Box::new(Hoon::Pair(q.clone(), Box::new(Hoon::Axis(1)))),
+                    Box::new(Hoon::Pair(q.clone(), Box::new(Hoon::Axis((1u64).into())))),
                     p.clone(),
                 );
                 self.mull(sut, gol, dox, &lowered)
@@ -11438,7 +11481,7 @@ impl<'a> Ut<'a> {
     }
 
     /// cove: extract axis from a [0 N] nock formula (matches hoon-138 ++cove)
-    fn cove(&self, mut formula: Noun) -> Result<u64> {
+    fn cove(&self, mut formula: Noun) -> Result<BigUint> {
         // hoon-138 `++cove` extracts an axis from `[0 axis]`, skipping `%11` hints.
         let space = self.slab.noun_space();
         loop {
@@ -11452,12 +11495,11 @@ impl<'a> Ut<'a> {
                 .map_err(|_| CompilerError::Noun("cove: head not direct".to_string()))?;
             match head_val.data() {
                 0 => {
-                    return cell
+                    let atom = cell
                         .tail()
                         .as_atom()
-                        .map_err(|_| CompilerError::Noun("cove: tail not atom".to_string()))?
-                        .as_u64()
-                        .map_err(|_| CompilerError::Noun("cove: axis too large".to_string()))
+                        .map_err(|_| CompilerError::Noun("cove: tail not atom".to_string()))?;
+                    return Ok(noun_axis_atom_to_big(atom));
                 }
                 11 => {
                     let tail = cell.tail().as_cell().map_err(|_| {
@@ -11487,7 +11529,7 @@ impl<'a> Ut<'a> {
         ruf: &Hoon,
         tomes: &HashMap<String, Tome>,
     ) -> Result<(NRc<NTy>, NRc<NTy>)> {
-        // Mull the payload (ruf, typically Hoon::Axis(1))
+        // Mull the payload (ruf, typically Hoon::Axis((1u64).into()))
         let noun_gol = cons_noun(&mut self.cx);
         let dan = self.mull(sut.clone(), noun_gol, dox, ruf)?;
         // Construct both core types and validate arms
@@ -12466,7 +12508,7 @@ fn find_face_axis_skip(
     name: &str,
     skip: u64,
     space: &NounSpace,
-) -> Result<Option<u64>> {
+) -> Result<Option<BigUint>> {
     let (found, _skip) = find_face_axis_skip_inner(noun, name, skip, space)?;
     Ok(found)
 }
@@ -12477,14 +12519,14 @@ fn find_face_axis_skip_inner(
     name: &str,
     skip: u64,
     space: &NounSpace,
-) -> Result<(Option<u64>, u64)> {
+) -> Result<(Option<BigUint>, u64)> {
     let tag = type_tag(noun, space)?;
     match tag.as_str() {
         "face" => {
             let mut remaining = skip;
             if type_face_name_if_atom(noun, space)?.as_deref() == Some(name) {
                 if remaining == 0 {
-                    return Ok((Some(1), remaining));
+                    return Ok((Some(BigUint::from(1u32)), remaining));
                 }
                 remaining = remaining.saturating_sub(1);
             }
@@ -12495,11 +12537,17 @@ fn find_face_axis_skip_inner(
             let (head, tail) = type_cell_parts(noun, space)?;
             let (found_head, remaining) = find_face_axis_skip_inner(head, name, skip, space)?;
             if let Some(axis) = found_head {
-                return Ok((Some(peg_axis(2, axis)?), remaining));
+                return Ok((
+                    Some(peg_axis_big_pair(BigUint::from(2u32), &axis)?),
+                    remaining,
+                ));
             }
             let (found_tail, remaining) = find_face_axis_skip_inner(tail, name, remaining, space)?;
             if let Some(axis) = found_tail {
-                return Ok((Some(peg_axis(3, axis)?), remaining));
+                return Ok((
+                    Some(peg_axis_big_pair(BigUint::from(3u32), &axis)?),
+                    remaining,
+                ));
             }
             Ok((None, remaining))
         }
@@ -12516,24 +12564,24 @@ fn find_face_axis_skip_inner(
             let (_garb, context, _rest) = coil_parts(coil, space)?;
             let (found, rem) = find_face_axis_skip_inner(payload, name, skip, space)?;
             if let Some(axis) = found {
-                return Ok((Some(peg_axis(3, axis)?), rem));
+                return Ok((Some(peg_axis_big_pair(BigUint::from(3u32), &axis)?), rem));
             }
             let (found, rem) = find_face_axis_skip_inner(context, name, rem, space)?;
             if let Some(axis) = found {
-                return Ok((Some(peg_axis(7, axis)?), rem));
+                return Ok((Some(peg_axis_big_pair(BigUint::from(7u32), &axis)?), rem));
             }
             Ok((None, rem))
         }
         "fork" => {
             let options = type_fork_options(noun, space)?;
             let mut remaining = skip;
-            let mut found_axis: Option<u64> = None;
+            let mut found_axis: Option<BigUint> = None;
             for option in options {
                 let (found, rem) = find_face_axis_skip_inner(option, name, remaining, space)?;
                 remaining = rem;
                 if let Some(axis) = found {
-                    if let Some(existing) = found_axis {
-                        if existing != axis {
+                    if let Some(existing) = &found_axis {
+                        if existing != &axis {
                             return Ok((None, remaining));
                         }
                     } else {
@@ -12619,10 +12667,6 @@ fn peel(way: Way, met: Vair) -> (bool, bool) {
     }
 }
 
-fn peg_axis(a: u64, b: u64) -> Result<u64> {
-    peg(a, b).map_err(|err| CompilerError::Decode(format!("peg axis: {err}")))
-}
-
 fn peg_axis_big_pair(mut a: BigUint, b: &BigUint) -> Result<BigUint> {
     if b == &BigUint::from(0u32) {
         return Err(CompilerError::Decode(
@@ -12643,21 +12687,6 @@ fn peg_axis_big_pair(mut a: BigUint, b: &BigUint) -> Result<BigUint> {
 #[track_caller]
 fn peg_axis_big(a: BigUint, b: u64) -> Result<BigUint> {
     peg_axis_big_pair(a, &BigUint::from(b))
-}
-
-fn axis_big_to_u64(axis: &BigUint) -> Result<u64> {
-    let location = std::panic::Location::caller();
-    u64::try_from(axis).map_err(|_| {
-        CompilerError::Decode(format!(
-            "axis exceeds u64 at {}:{}: {axis}",
-            location.file(),
-            location.line()
-        ))
-    })
-}
-
-fn tend(vein: &[Option<BigUint>]) -> Result<u64> {
-    axis_big_to_u64(&tend_big(vein)?)
 }
 
 fn tend_big(vein: &[Option<BigUint>]) -> Result<BigUint> {
@@ -13304,7 +13333,7 @@ fn spec_example(spec: &Spec) -> Hoon {
     let bug = Vec::new();
     let nut = None;
     let def = None;
-    example(spec, 1, &hay, &cox, &bug, &nut, &def)
+    example(spec, 1u64.into(), &hay, &cox, &bug, &nut, &def)
 }
 
 fn term_or_tune_to_noun(slab: &mut NounSlab, tot: &TermOrTune) -> Result<Noun> {
@@ -13447,7 +13476,7 @@ fn wing_to_noun(slab: &mut NounSlab, wing: &WingType) -> Result<Noun> {
 fn limb_to_noun(slab: &mut NounSlab, limb: &Limb) -> Result<Noun> {
     match limb {
         Limb::Term(name) => Ok(term_to_noun(slab, name)),
-        Limb::Axis(axis) => Ok(slot_formula_axis(slab, *axis)),
+        Limb::Axis(axis) => Ok(slot_formula_axis_big(slab, axis.as_biguint().clone())),
         Limb::Parent(skip, opt) => {
             let opt_noun = match opt {
                 None => D(0),
@@ -13543,7 +13572,7 @@ fn stencil_to_noun(slab: &mut NounSlab, stencil: &Stencil) -> Result<Noun> {
         }
         Stencil::Lazy { fragment, resolve } => {
             let gate_noun = gate_to_noun(slab, resolve)?;
-            let fragment_noun = noun_u64(slab, *fragment);
+            let fragment_noun = noun_biguint(slab, fragment.as_biguint().clone());
             Ok(tagged2(slab, "lazy", fragment_noun, gate_noun))
         }
     }
@@ -13909,13 +13938,13 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         }
         SelectArm(axis, core) => {
             let core_noun = nock_to_noun(slab, core);
-            let axis_noun = noun_u64(slab, *axis);
+            let axis_noun = noun_biguint(slab, axis.as_biguint().clone());
             T(slab, &[D(10), axis_noun, core_noun])
         }
         Edit((axis, new), core) => {
             let new_noun = nock_to_noun(slab, new);
             let core_noun = nock_to_noun(slab, core);
-            let axis_noun = noun_u64(slab, *axis);
+            let axis_noun = noun_biguint(slab, axis.as_biguint().clone());
             let axis_cell = T(slab, &[axis_noun, new_noun]);
             T(slab, &[D(11), axis_cell, core_noun])
         }
@@ -13929,7 +13958,7 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
             let path_noun = nock_to_noun(slab, path);
             T(slab, &[D(13), core_noun, path_noun])
         }
-        AxisSelect(axis) => noun_u64(slab, *axis),
+        AxisSelect(axis) => noun_biguint(slab, axis.as_biguint().clone()),
     }
 }
 

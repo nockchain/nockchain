@@ -2,10 +2,6 @@ use nockvm::noun::{AtomHandle, NounSpace};
 
 use super::*;
 
-fn axis_from_u64(axis: u64) -> BigUint {
-    BigUint::from(axis)
-}
-
 fn prepend_vein(lon: &[Option<BigUint>], step: Option<BigUint>) -> Vec<Option<BigUint>> {
     let mut vein = Vec::with_capacity(lon.len() + 1);
     vein.push(step);
@@ -76,11 +72,11 @@ impl<'a> Ut<'a> {
         sut: NRc<NTy>,
         way: Way,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, u64)> {
+    ) -> Result<(NRc<NTy>, BigUint)> {
         let port = self.find(sut, way, wing)?;
         match port {
             Port::Palo(palo) => match palo.opal {
-                Opal::Leg(typ) => Ok((typ, tend(&palo.vein)?)),
+                Opal::Leg(typ) => Ok((typ, tend_big(&palo.vein)?)),
                 Opal::Arm { .. } => Err(CompilerError::Noun("fend-fragment".to_string())),
             },
             Port::Synthetic { .. } => Err(CompilerError::Noun("fend-fragment".to_string())),
@@ -93,7 +89,7 @@ impl<'a> Ut<'a> {
         sut: Noun,
         way: Way,
         wing: &WingType,
-    ) -> Result<(NRc<NTy>, u64)> {
+    ) -> Result<(NRc<NTy>, BigUint)> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.fend(sut_n, way, wing)
     }
@@ -156,8 +152,8 @@ impl<'a> Ut<'a> {
                 let lon = palo.vein;
                 match head {
                     Limb::Axis(step) => {
-                        let typ = self.peek(current_sut, way, *step)?;
-                        let vein = prepend_vein(&lon, Some(axis_from_u64(*step)));
+                        let typ = self.peek(current_sut, way, step.as_biguint().clone())?;
+                        let vein = prepend_vein(&lon, Some(step.as_biguint().clone()));
                         Ok(Pony::Palo(Palo {
                             vein,
                             opal: Opal::Leg(typ),
@@ -540,7 +536,7 @@ impl<'a> Ut<'a> {
                     let mut rem = skip;
                     if let Some((arm_axis, hoon)) = ut.loot(cog, tomes)? {
                         if rem == 0 {
-                            let axis = peg_axis(2, arm_axis)?;
+                            let axis = peg_axis_big_pair(BigUint::from(2u32), &arm_axis)?;
                             let foot = foot_from_poly(ut.slab, poly, hoon);
                             let mut vein = Vec::with_capacity(lon.len() + 1);
                             vein.push(Some(axe.clone()));
@@ -571,7 +567,7 @@ impl<'a> Ut<'a> {
                             seen,
                         )
                     } else {
-                        let peeked = ut.peek(payload, way, 2)?;
+                        let peeked = ut.peek(payload, way, 2u64)?;
                         go(
                             ut,
                             peeked,
@@ -600,16 +596,16 @@ impl<'a> Ut<'a> {
         )
     }
 
-    pub(super) fn resolve_wing_axis(&mut self, sut: NRc<NTy>, wing: &WingType) -> Result<u64> {
+    pub(super) fn resolve_wing_axis(&mut self, sut: NRc<NTy>, wing: &WingType) -> Result<BigUint> {
         if wing.is_empty() {
-            return Ok(1);
+            return Ok(BigUint::from(1u32));
         }
         let (_typ, axis) = self.fend(sut, Way::Read, wing)?;
         Ok(axis)
     }
 
     /// Noun-bridged `resolve_wing_axis` for still-noun callers.
-    pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<u64> {
+    pub(super) fn resolve_wing_axis_noun(&mut self, sut: Noun, wing: &WingType) -> Result<BigUint> {
         let sut_n = native_of(&mut self.cx, sut, &self.slab.noun_space())?;
         self.resolve_wing_axis(sut_n, wing)
     }
@@ -728,9 +724,9 @@ impl<'a> Ut<'a> {
         }
     }
 
-    pub(super) fn look(&mut self, cog: Noun, dab: Noun) -> Result<Option<(u64, Noun)>> {
+    pub(super) fn look(&mut self, cog: Noun, dab: Noun) -> Result<Option<(BigUint, Noun)>> {
         let mut current = dab;
-        let mut axe = 1u64;
+        let mut axe = BigUint::from(1u32);
         let found = loop {
             let space = self.slab.noun_space();
             let Some((node, left, right)) = map_node(current, &space)? else {
@@ -747,9 +743,9 @@ impl<'a> Ut<'a> {
             let right_empty = noun_is_zero(right);
             if noun_eq(cog, node_key, &space)? {
                 let axis = if left_empty && right_empty {
-                    axe
+                    axe.clone()
                 } else {
-                    peg_axis(axe, 2)?
+                    peg_axis_big(axe.clone(), 2)?
                 };
                 break Some((axis, node_val));
             }
@@ -760,22 +756,22 @@ impl<'a> Ut<'a> {
                     if go_left {
                         break None;
                     }
-                    axe = peg_axis(axe, 3)?;
+                    axe = peg_axis_big(axe, 3)?;
                     current = right;
                 }
                 (false, true) => {
                     if !go_left {
                         break None;
                     }
-                    axe = peg_axis(axe, 3)?;
+                    axe = peg_axis_big(axe, 3)?;
                     current = left;
                 }
                 (false, false) => {
                     if go_left {
-                        axe = peg_axis(axe, 6)?;
+                        axe = peg_axis_big(axe, 6)?;
                         current = left;
                     } else {
-                        axe = peg_axis(axe, 7)?;
+                        axe = peg_axis_big(axe, 7)?;
                         current = right;
                     }
                 }
@@ -784,9 +780,9 @@ impl<'a> Ut<'a> {
         Ok(found)
     }
 
-    pub(super) fn loot(&mut self, cog: Noun, dom: Noun) -> Result<Option<(u64, Noun)>> {
-        let mut stack: Vec<(Noun, u64)> = vec![(dom, 1u64)];
-        let mut found: Option<(u64, Noun)> = None;
+    pub(super) fn loot(&mut self, cog: Noun, dom: Noun) -> Result<Option<(BigUint, Noun)>> {
+        let mut stack: Vec<(Noun, BigUint)> = vec![(dom, BigUint::from(1u32))];
+        let mut found: Option<(BigUint, Noun)> = None;
         while let Some((current, axe)) = stack.pop() {
             let space = self.slab.noun_space();
             let Some((node, left, right)) = map_node(current, &space)? else {
@@ -805,20 +801,20 @@ impl<'a> Ut<'a> {
             let right_empty = noun_is_zero(right);
             if let Some((arm_axis, hoon)) = self.look(cog, arms_map)? {
                 let axis = if left_empty && right_empty {
-                    peg_axis(axe, arm_axis)?
+                    peg_axis_big_pair(axe.clone(), &arm_axis)?
                 } else {
-                    peg_axis(peg_axis(axe, 2)?, arm_axis)?
+                    peg_axis_big_pair(peg_axis_big(axe.clone(), 2)?, &arm_axis)?
                 };
                 found = Some((axis, hoon));
                 break;
             }
             match (left_empty, right_empty) {
                 (true, true) => {}
-                (true, false) => stack.push((right, peg_axis(axe, 3)?)),
-                (false, true) => stack.push((left, peg_axis(axe, 3)?)),
+                (true, false) => stack.push((right, peg_axis_big(axe, 3)?)),
+                (false, true) => stack.push((left, peg_axis_big(axe, 3)?)),
                 (false, false) => {
-                    stack.push((right, peg_axis(axe, 7)?));
-                    stack.push((left, peg_axis(axe, 6)?));
+                    stack.push((right, peg_axis_big(axe.clone(), 7)?));
+                    stack.push((left, peg_axis_big(axe, 6)?));
                 }
             }
         }

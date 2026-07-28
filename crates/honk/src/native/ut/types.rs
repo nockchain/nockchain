@@ -152,7 +152,6 @@ pub type RestBoundaryKey = (u32, u32, u8, u64);
 pub type NestBoundaryRawKey = (u64, u64, u64);
 pub type NestBoundaryKey = (u32, u32, u8, u64);
 pub type TypeBinaryBoundaryKey = (u32, u32, u8, u64);
-pub type FishBoundaryKey = (u32, u64, u8, u64);
 pub type CoolMemoKey = (u32, u32, u8, u64, u64);
 pub type ChipMemoKey = (u32, u8, u8, u8, u8, u64, u64, u64, u64);
 pub type WingAxisMemoKey = (u32, u64, u64);
@@ -179,7 +178,6 @@ pub struct BoundaryMemoSet {
     pub mull: BucketMemo<MullBoundaryKey, MullCacheEntry>,
     pub redo: BucketMemo<RedoBoundaryKey, UnaryTypeBoundaryEntry>,
     pub rest: BucketMemo<RestBoundaryKey, RestCacheEntry>,
-    pub fish: BucketMemo<FishBoundaryKey, FishCacheEntry>,
     pub nest_raw: RawMemoMap<NestBoundaryRawKey, bool>,
     pub nest: BucketMemo<NestBoundaryKey, NestCacheEntry>,
     pub crop: BucketMemo<TypeBinaryBoundaryKey, UnaryTypeBoundaryEntry>,
@@ -194,7 +192,6 @@ impl Default for BoundaryMemoSet {
             mull: Default::default(),
             redo: Default::default(),
             rest: Default::default(),
-            fish: Default::default(),
             nest_raw: Default::default(),
             nest: Default::default(),
             crop: Default::default(),
@@ -214,7 +211,6 @@ impl BoundaryMemoSet {
         self.mull.clear();
         self.redo.clear();
         self.rest.clear();
-        self.fish.clear();
         self.nest_raw.clear();
         self.nest.clear();
         self.crop.clear();
@@ -916,7 +912,7 @@ pub struct Palo {
 pub enum Opal {
     Leg(NRc<NTy>),
     Arm {
-        axis: u64,
+        axis: BigUint,
         arms: Vec<(NRc<NTy>, Noun)>,
     },
 }
@@ -975,13 +971,6 @@ pub struct RestCacheEntry {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FishCacheEntry {
-    pub sut: Noun,
-    pub axis: u64,
-    pub result: Noun,
-}
-
-#[derive(Clone, Copy, Debug)]
 pub struct NestCacheEntry {
     pub sut: Noun,
     pub ref_: Noun,
@@ -1019,9 +1008,9 @@ pub struct LazyResolverContext {
     // pushed during the same core's arm builds.
     pub core_type: NRc<NTy>,
     pub poly: Poly,
-    pub arms_by_axis: HashMap<u64, LazyResolverArmEntry>,
-    pub cached_formula_by_axis: HashMap<u64, Noun>,
-    pub in_progress_axes: HashSet<u64>,
+    pub arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
+    pub cached_formula_by_axis: HashMap<BigUint, Noun>,
+    pub in_progress_axes: HashSet<BigUint>,
 }
 
 #[derive(Clone, Debug)]

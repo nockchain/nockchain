@@ -294,8 +294,8 @@ impl<'a> Ut<'a> {
                 let (reduced_ref, next_state) =
                     self.redo_sint(sut.clone(), reference, true, state)?;
                 let descend_state = next_state.for_cell_descent();
-                let ref_head = self.peek(reduced_ref.clone(), Way::Free, 2)?;
-                let ref_tail = self.peek(reduced_ref, Way::Free, 3)?;
+                let ref_head = self.peek(reduced_ref.clone(), Way::Free, 2u64)?;
+                let ref_tail = self.peek(reduced_ref, Way::Free, 3u64)?;
                 let new_head = self.redo_dext(sut_head, ref_head, descend_state.clone())?;
                 let new_tail = self.redo_dext(sut_tail, ref_tail, descend_state)?;
                 let rebuilt = cons_cell(&mut self.cx, new_head, new_tail);

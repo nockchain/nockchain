@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use nockvm::noun::{Noun, NounSpace};
+use num_bigint::BigUint;
 
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::atom_to_string;
@@ -8,7 +9,7 @@ use crate::types::TypeNoun;
 
 #[derive(Clone, Debug, Default)]
 pub struct ArmMap {
-    by_name: HashMap<String, u64>,
+    by_name: HashMap<String, BigUint>,
 }
 
 impl ArmMap {
@@ -18,23 +19,23 @@ impl ArmMap {
         }
     }
 
-    pub fn with_pairs(pairs: impl IntoIterator<Item = (String, u64)>) -> Self {
+    pub fn with_pairs<A: Into<BigUint>>(pairs: impl IntoIterator<Item = (String, A)>) -> Self {
         let mut map = HashMap::new();
         for (name, axis) in pairs {
-            map.insert(name, axis);
+            map.insert(name, axis.into());
         }
         Self { by_name: map }
     }
 
-    pub fn insert(&mut self, name: String, axis: u64) {
-        self.by_name.insert(name, axis);
+    pub fn insert<A: Into<BigUint>>(&mut self, name: String, axis: A) {
+        self.by_name.insert(name, axis.into());
     }
 
-    pub fn axis_for(&self, name: &str) -> Option<u64> {
-        self.by_name.get(name).copied()
+    pub fn axis_for(&self, name: &str) -> Option<BigUint> {
+        self.by_name.get(name).cloned()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &u64)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &BigUint)> {
         self.by_name.iter()
     }
 
@@ -49,7 +50,7 @@ pub fn arm_map_from_type(ty: &TypeNoun, space: &NounSpace) -> Result<ArmMap> {
     };
     let tomes = coil_tomes(coil, space)?;
     let mut map = ArmMap::new();
-    collect_tomes(tomes, 2, &mut map, space)?;
+    collect_tomes(tomes, BigUint::from(2u32), &mut map, space)?;
     Ok(map)
 }
 
@@ -89,9 +90,7 @@ pub fn arm_map_from_noun_list(noun: Noun, space: &NounSpace) -> Result<ArmMap> {
             .map_err(|err| CompilerError::Decode(format!("arm-map axis not atom: {err}")))?;
         let name = atom_to_string(name_atom)
             .map_err(|err| CompilerError::Decode(format!("arm-map name decode failed: {err}")))?;
-        let axis = axis_atom
-            .as_u64()
-            .map_err(|err| CompilerError::Decode(format!("arm-map axis decode failed: {err}")))?;
+        let axis = BigUint::from_bytes_le(axis_atom.as_ne_bytes());
         map.insert(name, axis);
         cursor = tail;
     }
@@ -163,16 +162,16 @@ fn coil_tomes(coil: Noun, space: &NounSpace) -> Result<Noun> {
     Ok(rest.tail().noun())
 }
 
-fn collect_tomes(dom: Noun, axe: u64, map: &mut ArmMap, space: &NounSpace) -> Result<()> {
+fn collect_tomes(dom: Noun, axe: BigUint, map: &mut ArmMap, space: &NounSpace) -> Result<()> {
     let Some((node, left, right)) = map_node(dom, space)? else {
         return Ok(());
     };
     let left_empty = left.is_atom();
     let right_empty = right.is_atom();
     let base = if left_empty && right_empty {
-        axe
+        axe.clone()
     } else {
-        peg_axis(axe, 2)?
+        peg_axis(&axe, &BigUint::from(2u32))?
     };
 
     let node_cell = node
@@ -184,32 +183,38 @@ fn collect_tomes(dom: Noun, axe: u64, map: &mut ArmMap, space: &NounSpace) -> Re
         .as_cell()
         .map_err(|err| CompilerError::Decode(format!("tome value not cell: {err}")))?;
     let arms_map = tome_cell.tail().noun();
-    collect_arms(arms_map, 1, base, map, space)?;
+    collect_arms(arms_map, BigUint::from(1u32), base.clone(), map, space)?;
 
     if left_empty && right_empty {
         return Ok(());
     }
     if left_empty {
-        collect_tomes(right, peg_axis(axe, 3)?, map, space)?;
+        collect_tomes(right, peg_axis(&axe, &BigUint::from(3u32))?, map, space)?;
     } else if right_empty {
-        collect_tomes(left, peg_axis(axe, 3)?, map, space)?;
+        collect_tomes(left, peg_axis(&axe, &BigUint::from(3u32))?, map, space)?;
     } else {
-        collect_tomes(left, peg_axis(axe, 6)?, map, space)?;
-        collect_tomes(right, peg_axis(axe, 7)?, map, space)?;
+        collect_tomes(left, peg_axis(&axe, &BigUint::from(6u32))?, map, space)?;
+        collect_tomes(right, peg_axis(&axe, &BigUint::from(7u32))?, map, space)?;
     }
     Ok(())
 }
 
-fn collect_arms(dab: Noun, axe: u64, base: u64, map: &mut ArmMap, space: &NounSpace) -> Result<()> {
+fn collect_arms(
+    dab: Noun,
+    axe: BigUint,
+    base: BigUint,
+    map: &mut ArmMap,
+    space: &NounSpace,
+) -> Result<()> {
     let Some((node, left, right)) = map_node(dab, space)? else {
         return Ok(());
     };
     let left_empty = left.is_atom();
     let right_empty = right.is_atom();
     let arm_axis = if left_empty && right_empty {
-        axe
+        axe.clone()
     } else {
-        peg_axis(axe, 2)?
+        peg_axis(&axe, &BigUint::from(2u32))?
     };
 
     let node_cell = node
@@ -217,19 +222,43 @@ fn collect_arms(dab: Noun, axe: u64, base: u64, map: &mut ArmMap, space: &NounSp
         .as_cell()
         .map_err(|err| CompilerError::Decode(format!("arm entry not cell: {err}")))?;
     let name = term_from_noun(node_cell.head().noun(), space)?;
-    let axis = peg_axis(base, arm_axis)?;
+    let axis = peg_axis(&base, &arm_axis)?;
     map.insert(name, axis);
 
     if left_empty && right_empty {
         return Ok(());
     }
     if left_empty {
-        collect_arms(right, peg_axis(axe, 3)?, base, map, space)?;
+        collect_arms(
+            right,
+            peg_axis(&axe, &BigUint::from(3u32))?,
+            base,
+            map,
+            space,
+        )?;
     } else if right_empty {
-        collect_arms(left, peg_axis(axe, 3)?, base, map, space)?;
+        collect_arms(
+            left,
+            peg_axis(&axe, &BigUint::from(3u32))?,
+            base,
+            map,
+            space,
+        )?;
     } else {
-        collect_arms(left, peg_axis(axe, 6)?, base, map, space)?;
-        collect_arms(right, peg_axis(axe, 7)?, base, map, space)?;
+        collect_arms(
+            left,
+            peg_axis(&axe, &BigUint::from(6u32))?,
+            base.clone(),
+            map,
+            space,
+        )?;
+        collect_arms(
+            right,
+            peg_axis(&axe, &BigUint::from(7u32))?,
+            base,
+            map,
+            space,
+        )?;
     }
     Ok(())
 }
@@ -261,20 +290,12 @@ fn term_from_noun(noun: Noun, space: &NounSpace) -> Result<String> {
         .map_err(|err| CompilerError::Decode(format!("arm name decode failed: {err}")))
 }
 
-fn peg_axis(a: u64, b: u64) -> Result<u64> {
-    if a == 0 || b == 0 {
+fn peg_axis(a: &BigUint, b: &BigUint) -> Result<BigUint> {
+    if a == &BigUint::from(0u32) || b == &BigUint::from(0u32) {
         return Err(CompilerError::Decode("axis must be non-zero".to_string()));
     }
-    let b_bits = 64 - b.leading_zeros();
-    let shift = (b_bits - 1) as u32;
-    let mask = if shift == 0 {
-        0u128
-    } else {
-        (1u128 << shift) - 1
-    };
-    let out = ((b as u128) & mask) | ((a as u128) << shift);
-    if out > u64::MAX as u128 {
-        return Err(CompilerError::Decode("axis overflow".to_string()));
-    }
-    Ok(out as u64)
+    let shift = usize::try_from(b.bits() - 1)
+        .map_err(|_| CompilerError::Decode("axis shift exceeds usize".to_string()))?;
+    let base = BigUint::from(1u32) << shift;
+    Ok((a << shift) + (b - base))
 }
