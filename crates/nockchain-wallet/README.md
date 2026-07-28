@@ -5,6 +5,56 @@ Owner: Nockchain Maintainers
 Last Reviewed: 2026-04-01
 Canonical/Legacy: Canonical (Tier 1 scoped authority for wallet CLI behavior and operational usage; protocol authority remains in [`PROTOCOL.md`](../../PROTOCOL.md))
 
+`nockchain-wallet` manages local keys and watch-only identifiers, synchronizes
+notes through Nockchain gRPC, plans and signs transactions, and submits them to a
+node. It is a client of consensus, not a consensus implementation.
+
+## Place in the system
+
+```text
+local key store + user request + synchronized notes
+                         |
+                 nockchain-wallet
+              plan -> encode -> sign
+                         |
+                  public/private gRPC
+                         |
+                node and Hoon validation
+```
+
+`wallet-tx-builder` performs deterministic note selection, fee estimation, lock
+resolution, and value allocation. `nockchain-types` provides the Rust mirrors of
+transaction nouns. The wallet owns local signing and files; the node owns
+admission, mempool state, chain inclusion, and finality.
+
+## Maintained invariants and security properties
+
+- Private keys and seed phrases remain local unless the user explicitly exports
+  them. Watch-only state never acquires signing authority.
+- Addresses, public keys, and payee hashes are decoded as explicit versions;
+  visually similar strings do not bypass key-type checks.
+- Transaction planning conserves value, uses checked arithmetic, and represents
+  gifts, bridge amounts, fees, and refund separately.
+- Fee and timelock decisions use synchronized chain context. A stale view may
+  produce a transaction the node rejects, never authority to spend a different
+  note.
+- The wallet signs the exact canonical transaction noun it displays and saves.
+  Changing recipients, fees, note data, locks, or witnesses changes the signed
+  digest.
+- Manual legacy-v0 and v1 flows retain their distinct ownership and refund
+  rules; mixed-version inputs are rejected where the kernel cannot validate
+  them as one transaction.
+- gRPC acknowledgement is not confirmation. Pending transactions may be
+  replaced or rejected, and clients must wait for canonical-chain inclusion.
+- Imported key material, exported key files, saved transactions, and local
+  wallet state are sensitive operator data and require filesystem protection
+  and backups.
+
+Cryptographic safety relies on the Cheetah/Schnorr implementation, secure
+entropy for key generation, deterministic derivation, canonical noun hashing,
+and `nockchain-types` matching Hoon transaction molds. The node rechecks every
+signature, lock, fee, and conservation rule.
+
 ## Canonical Scope
 
 This document is Tier 1 canonical for:
@@ -27,7 +77,7 @@ This document is NOT canonical for:
 When wallet CLI behavior or flags change, update this doc in the same change.
 
 Minimum validation:
-- `make -C open docs-check`
+- `make docs-check`
 - `cargo check -p nockchain-wallet`
 
 ## Setup
@@ -335,7 +385,7 @@ Notes:
 - The command may create multiple transactions, not just one: it creates up to one migration tx per active local v0 signer under the active master
 - Inspect the migration summary before submitting anything. It tells you which signer each tx belongs to, how many notes were selected, the fee, the expected migrated amount, where the tx was saved, and how to submit it
 - Watch-only imports are not enough; the wallet must hold the matching v0 signing key
-- If you are using the bridge helper scripts, `open/crates/bridge/scripts/wallet.sh --new` imports both the default v1 fakenet key and the legacy v0 fakenet key
+- Import the matching v0 signing key before migrating legacy v0 notes.
 
 ### Manual V0 Fan-In With `create-tx`
 

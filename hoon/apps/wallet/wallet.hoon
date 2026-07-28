@@ -599,12 +599,12 @@
     =/  first-name-b58=@t  (to-b58:hash:transact first-name)
     =.  keys.state  (watch-first-name:put:v first-name `lock.p.res)
     ::  The on-chain protocol-fund coinbase notes do NOT carry this canonical
-    ::  multisig first-name: +make-name:coinbase wraps fund-address as a single
+    ::  multisig first-name: +make-name:coinbase wraps protocol-fund-address as a single
     ::  %pkh, so every fund note shares +fund-note-firstname instead. When the
-    ::  watched multisig IS the protocol fund (its lock-root == fund-address),
+    ::  watched multisig IS the protocol fund (its lock-root == protocol-fund-address),
     ::  also watch that wrapped first-name so the fund notes are actually
     ::  discovered; +pull:locks resolves them back to this multisig for signing.
-    =/  is-fund=?  =(fund-address:transact (hash:lock:transact lock.p.res))
+    =/  is-fund=?  =(protocol-fund-address:transact (hash:lock:transact lock.p.res))
     =/  fund-note-name-b58=@t  (to-b58:hash:transact fund-note-firstname:transact)
     =?  keys.state  is-fund
       (watch-first-name:put:v fund-note-firstname:transact `lock.p.res)

@@ -1,11 +1,11 @@
 /=  *  /common/tx-engine
 /=  zo  /common/zoon
 ::  Computes the on-chain *first-name* of the protocol-fund coinbase notes
-::  (014-aletheia). Each post-activation coinbase puts +fund-address into the
+::  (014-aletheia). Each post-activation coinbase puts +protocol-fund-address into the
 ::  coinbase-split map; +make-name:coinbase then wraps that split key as a
 ::  single %pkh primitive plus the coinbase timelock and takes the nname:
 ::
-::    note-lock      = ~[[%pkh m=1 {fund-address}] coinbase-tim-lp]
+::    note-lock      = ~[[%pkh m=1 {protocol-fund-address}] coinbase-tim-lp]
 ::    note-lock-root = (hash:lock note-lock)
 ::    first-name     = (first:nname note-lock-root)
 ::
@@ -26,7 +26,7 @@
       (from-b58:hash '9LK7wEcQsmRpEot4qFaV9bwjSE9ZD6tB1kWbgNsFkDa2LEpvBV9WGY3')
   ==
 =/  participant-set=(z-set:zo hash)  (z-silt:zo pkhs)
-::  3-of-4 multisig lock-root == the value pinned in +fund-address.
+::  3-of-4 multisig lock-root == the value pinned in +protocol-fund-address.
 =/  fund-addr=hash  (hash:lock [%pkh [m=3 participant-set]]~)
 ::  Reconstruct the coinbase note lock exactly as +make-name:coinbase does.
 ::  coinbase-timelock-min is 100 on mainnet (default blockchain-constants).
@@ -36,7 +36,7 @@
 =/  note-lock=lock  ~[pkh-prim tim-prim]
 =/  note-lock-root=hash  (hash:lock note-lock)
 =/  fund-note-firstname=hash  (first:nname note-lock-root)
-~&  fund-address+(to-b58:hash fund-addr)
+~&  protocol-fund-address+(to-b58:hash fund-addr)
 ~&  note-lock-root+(to-b58:hash note-lock-root)
 ~&  fund-note-firstname+(to-b58:hash fund-note-firstname)
 fund-note-firstname

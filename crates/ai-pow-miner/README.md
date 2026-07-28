@@ -1,0 +1,55 @@
+# `ai-pow-miner`
+
+`ai-pow-miner` is the external miner for Nockchain's `%ai-pow` puzzle. It searches Pearl-compatible dense and grouped-GEMM ticket attempts, creates a compact recursive certificate only after a target hit, and submits the canonical block artifact to a node.
+
+The `ai-pow-mine` binary is enabled by the `node` feature. The default library build keeps the ticket loop available without the NockApp and gRPC dependency tree.
+
+## Place in the system
+
+```text
+nockchain kernel --%mine-ai effect--> ai-pow-mine
+       ^                                  |
+       |                                  +-- Pearl-style work attempt
+       |                                  +-- Nockchain target check
+       |                                  +-- compact certificate on hit
+       +-------- %ai-pow poke ------------+
+                         \
+                          +-- optional Pearl Gateway submission
+```
+
+`nockchain-mining-common` supplies the private gRPC client and candidate decoding. `ai-pow` owns the work statement and Pearl compatibility. `ai-pow-zk` proves it. `ai-pow-jets` and the Hoon kernel independently verify every submitted block.
+
+## Modes
+
+- **Node-connected mining:** watches `%mine-ai` effects and submits `%ai-pow` commands through the private NockApp gRPC service.
+- **Canonical CPU mode:** constructs valid Nockchain certificates without a Pearl Gateway; intended for fakenet and integration verification rather than competitive throughput.
+- **Pearl merge mining:** evaluates one Pearl-compatible work instance and may submit the same hit to Pearl and Nockchain when their independent targets are met.
+
+## Maintained invariants
+
+- A candidate supplies the block commitment, AI target, and puzzle variant. The miner never chooses consensus target or fork-choice weight.
+- Every extranonce is upstream of `kappa`, matrix commitments, noise, noised matrices, tile state, and jackpot. A new mining attempt rebuilds nonce-bound state; a nonce-only hash loop is forbidden.
+- A recursive certificate is generated only after the ticket's jackpot satisfies the Nockchain target. The node repeats the target and proof checks.
+- The certificate and opaque nonce envelope commit to the same Pearl transcript and Nockchain block commitment.
+- Pearl auxiliary inclusion contains exactly one Nockchain commitment, preventing one Pearl proof from authorizing multiple Nockchain blocks.
+- Dense and MoE artifacts use explicit, canonical variants. Routing, expert-local dimensions, opened schedules, and matrix commitments remain proof-bound.
+- Candidate replacement cancels stale work. A proof for an old commitment cannot validate against a new block.
+- Hoon sees only the versioned `%ai-pow` artifact and opaque `[len data]` nonce. Pearl gateway metadata never becomes a consensus-kernel concept.
+
+## Trust boundaries
+
+The miner is untrusted from consensus's perspective. Successful local verification is an optimization and diagnostic; only the node's Hoon rules plus mandatory Rust verify jet admit a block. Private gRPC gives kernel-level poke access and should be bound to a trusted local interface.
+
+Merge mining shares a mineable work unit, not a proof system or chain target. Pearl and Nockchain retain independent acceptance, targets, block commitments, and submission paths.
+
+## Soundness dependencies
+
+The miner relies on `ai-pow` for Pearl byte compatibility and attempt binding, and on `ai-pow-zk` for certificate construction. Its security-sensitive obligations are canonical serialization, exact statement construction, fresh per-attempt work, and refusal to substitute prover-controlled setup or public parameters. Cryptographic acceptance properties are documented in [`../ai-pow-zk/docs/SECURITY.md`](../ai-pow-zk/docs/SECURITY.md).
+
+## Validation
+
+```sh
+cargo test -p ai-pow-miner
+cargo test -p ai-pow-miner --all-features
+cargo run --release -p ai-pow-miner --features node --bin ai-pow-mine -- --help
+```

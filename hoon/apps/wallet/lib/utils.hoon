@@ -199,11 +199,11 @@
     ::  Protocol-fund coinbase notes (014-aletheia) wrap an unsatisfiable %pkh
     ::  lock; their spend-condition cannot be recovered from the first-name by
     ::  the normal path below, because the real 3-of-4 multisig hashes to
-    ::  fund-address whose first-name (3SnB...) differs from the note's wrapped
+    ::  protocol-fund-address whose first-name (3SnB...) differs from the note's wrapped
     ::  first-name (+fund-note-firstname). Resolve them directly to the multisig
     ::  so the wallet builds an LMP revealing it and signs with the participant
     ::  keys; the kernel's +check-multisig-lock binds that revealed
-    ::  spend-condition back to fund-address. See tx-engine-1.
+    ::  spend-condition back to protocol-fund-address. See tx-engine-1.
     ?:  =(-.nn fund-note-firstname:t)
       (some fund-multisig-lock:t)
     ?~  lok=(pull-inner [nd nn pkh])

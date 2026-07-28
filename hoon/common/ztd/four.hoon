@@ -24,7 +24,9 @@
 +$  proof-objects  (list proof-data)
 ::
 ::  Keep %2 first so the bunt/default remains backward-compatible.
-+$  proof-version  ?(%2 %3 %1 %0)
+::  %0 through %3 are ZK proof-stream versions; %4 identifies the structured
+::  AI artifact and is never valid as a proof-stream payload.
++$  proof-version  ?(%2 %4 %3 %1 %0)
 +$  proof
   $%  $:  version=%2
           objects=proof-objects
@@ -49,6 +51,7 @@
           hashes=(list noun-digest:tip5)
           read-index=@
       ==
+    ::
   ==
 ::
 ::  Array payloads carry a logical length and a backing atom.  Fiat-Shamir

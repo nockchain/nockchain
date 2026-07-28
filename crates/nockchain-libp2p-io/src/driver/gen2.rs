@@ -224,11 +224,6 @@ pub(super) async fn handle_outbound_request_failure_with_dispatcher(
         .await
         .remove_outbound_request(request_id);
     driver_state.lock().await.record_request_failure(peer);
-    // A request to this peer died, so any elders slot it holds is dead too:
-    // release it rather than make recovery wait out the TTL. Freeing it on an
-    // unrelated failure only costs the rate limit one slot, and a peer cannot
-    // manufacture failures against itself without dropping the connection.
-    driver_state.lock().await.clear_elders_inflight(&peer);
     if peer_exclusions.record_peer_request_failure(peer) {
         metrics.request_peer_cooldowns_created.increment();
     }

@@ -404,21 +404,24 @@ mod tests {
     }
 
     // KAT: protocol-fund coinbase notes (014-aletheia) do NOT take their
-    // first-name directly from the 3-of-4 multisig lock-root (the fund-address).
-    // +make-name:coinbase wraps that lock-root in a single `[%pkh m=1
-    // {fund-address}]` primitive plus the coinbase relative timelock, then takes
-    // the nname/first of the wrapped lock-root. This pins the Rust derivation
-    // (FirstName::from_lock_root(coinbase_pkh(fund_address, 100).hash())) against
-    // the +fund-address and +fund-note-firstname constants in
-    // hoon/common/tx-engine-1.hoon, the values the on-chain notes actually carry.
+    // first-name directly from the 3-of-4 multisig lock-root (the
+    // protocol-fund-address). +make-name:coinbase wraps that lock-root in a single
+    // `[%pkh m=1 {protocol-fund-address}]` primitive plus the coinbase relative
+    // timelock, then takes the nname/first of the wrapped lock-root. This pins the
+    // Rust derivation (FirstName::from_lock_root(coinbase_pkh(fund_address,
+    // 100).hash())) against the +protocol-fund-address and +fund-note-firstname
+    // constants in hoon/common/tx-engine-1.hoon, the values the on-chain notes
+    // actually carry.
     #[test]
     fn fund_note_firstname_derives_through_coinbase_pkh_wrapping() {
-        const FUND_ADDRESS_B58: &str = "9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up";
+        const PROTOCOL_FUND_ADDRESS_B58: &str =
+            "9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up";
         const FUND_NOTE_FIRSTNAME_B58: &str =
             "8TvVfU7sbFoY8qV53ffUdBag7Kcqw8LXjsnYgY71nQ1biWE6giRYzkn";
         const COINBASE_TIMELOCK_MIN: u64 = 100;
 
-        let fund_address = Hash::from_base58(FUND_ADDRESS_B58).expect("fund address");
+        let fund_address =
+            Hash::from_base58(PROTOCOL_FUND_ADDRESS_B58).expect("protocol fund address");
         let wrapped = SpendCondition::coinbase_pkh(fund_address, COINBASE_TIMELOCK_MIN);
         let note_lock_root = wrapped.hash().expect("note lock root");
         let fund_note_firstname = FirstName::from_lock_root(&note_lock_root)

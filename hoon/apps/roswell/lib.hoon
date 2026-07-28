@@ -33,6 +33,7 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
     ==
   (prove:prv in)
 ::
@@ -47,6 +48,7 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
     ==
   (snapshot:prv in)
 ::
@@ -61,6 +63,7 @@
       %1  [%1 header nonce len]
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
     ==
   (snapshot:prv in)
 ::
@@ -74,6 +77,7 @@
       %1  [%1 -:puzzle +:puzzle len]
       %2  [%2 -:puzzle +:puzzle len]
       %3  [%3 -:puzzle +:puzzle len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
     ==
   (make-proof-stream-window:prv in range)
 ::
@@ -97,6 +101,7 @@
       %1  [%1 header nonce len]
       %2  [%2 header nonce len]
       %3  [%3 header nonce len]
+      %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
     ==
   =/  res  (prove:prv in)
   ?>  ?=(%& -.res)
