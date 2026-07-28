@@ -3190,7 +3190,8 @@ fn swet_trap_payload_gun(trap: Noun, space: &NounSpace) -> Result<(Noun, Noun)> 
 }
 
 fn axis_formula(slab: &mut NounSlab<NockJammer>, axis: u64) -> Noun {
-    T(slab, &[D(0), D(axis)])
+    let axis = Atom::new(slab, axis).as_noun();
+    T(slab, &[D(0), axis])
 }
 
 fn constant_formula(slab: &mut NounSlab<NockJammer>, noun: Noun) -> Noun {
@@ -4108,7 +4109,10 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::{build_entry_wer, entry_path_for_hoon};
+    use nockapp::noun::slab::NounSlab;
+    use nockvm::noun::{NounAllocator, DIRECT_MAX};
+
+    use crate::{axis_formula, build_entry_wer, entry_path_for_hoon};
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -4126,6 +4130,25 @@ mod tests {
         std::os::unix::fs::symlink(original, link).expect("symlink");
         #[cfg(windows)]
         std::os::windows::fs::symlink_file(original, link).expect("symlink");
+    }
+
+    #[test]
+    fn axis_formula_allocates_atoms_above_the_direct_limit() {
+        let mut slab = NounSlab::new();
+        let axis = DIRECT_MAX + 1;
+        let formula = axis_formula(&mut slab, axis);
+        let space = slab.noun_space();
+        let formula = formula
+            .in_space(&space)
+            .as_cell()
+            .expect("slot formula must be a cell");
+        let encoded_axis = formula
+            .tail()
+            .as_atom()
+            .expect("slot formula axis must be an atom");
+
+        assert!(encoded_axis.is_indirect());
+        assert_eq!(encoded_axis.as_u64().expect("axis must fit u64"), axis);
     }
 
     #[test]

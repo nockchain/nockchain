@@ -41,12 +41,31 @@ impl Axis {
         }
     }
 
-    /// The small-axis value, mirroring the noun path's `as_u64()` (big axes
-    /// return `None`, so they skip the `peg` optimization — byte-exact).
-    fn small(&self) -> Option<u64> {
+    fn to_biguint(&self) -> BigUint {
         match self {
-            Axis::Small(v) => Some(*v),
-            Axis::Big(_) => None,
+            Axis::Small(v) => BigUint::from(*v),
+            Axis::Big(v) => v.as_ref().clone(),
+        }
+    }
+
+    fn from_biguint(value: BigUint) -> Self {
+        match u64::try_from(&value) {
+            Ok(value) => Axis::Small(value),
+            Err(_) => Axis::Big(Rc::new(value)),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        match self {
+            Axis::Small(value) => *value == 0,
+            Axis::Big(value) => value.bits() == 0,
+        }
+    }
+
+    fn is_one(&self) -> bool {
+        match self {
+            Axis::Small(value) => *value == 1,
+            Axis::Big(value) => value.as_ref() == &BigUint::from(1u8),
         }
     }
 }
@@ -167,20 +186,20 @@ fn rc(f: Formula) -> Rc<Formula> {
     Rc::new(f)
 }
 
-/// `[0 a]` with the small-axis value, mirroring `axis_formula_value`.
-fn slot_small(f: &Formula) -> Option<u64> {
+/// The axis from `[0 a]`, preserving arbitrary-size atoms.
+fn slot_axis(f: &Formula) -> Option<&Axis> {
     match f {
-        Formula::Slot(a) => a.small(),
+        Formula::Slot(a) => Some(a),
         _ => None,
     }
 }
 
 fn is_slot_one(f: &Formula) -> bool {
-    matches!(slot_small(f), Some(1))
+    slot_axis(f).is_some_and(Axis::is_one)
 }
 
 fn is_slot_zero(f: &Formula) -> bool {
-    matches!(slot_small(f), Some(0))
+    slot_axis(f).is_some_and(Axis::is_zero)
 }
 
 /// The constant of `[1 c]`, as a small value where possible (for the bool checks).
@@ -204,21 +223,21 @@ pub fn cons(head: Formula, tail: Formula) -> Formula {
 /// `++comb` composition, matching the noun check order exactly.
 pub fn comb(mal: Formula, buz: Formula) -> Formula {
     // Check 1: mal = [0 a], a >= 1
-    if let Some(a) = slot_small(&mal) {
-        if a >= 1 {
+    if let Some(a) = slot_axis(&mal) {
+        if !a.is_zero() {
             // 1a: buz = [0 b], b >= 1 → [0 peg(a,b)]
-            if let Some(b) = slot_small(&buz) {
-                if b >= 1 {
-                    return Formula::Slot(Axis::Small(peg(a, b)));
+            if let Some(b) = slot_axis(&buz) {
+                if !b.is_zero() {
+                    return Formula::Slot(peg(a, b));
                 }
             }
             // 1b: buz = [2 [0 x] [0 y]] → [2 [0 peg(a,x)] [0 peg(a,y)]]
             if let Formula::Eval(p, q) = &buz {
-                if let (Some(x), Some(y)) = (slot_small(p), slot_small(q)) {
-                    if x >= 1 && y >= 1 {
+                if let (Some(x), Some(y)) = (slot_axis(p), slot_axis(q)) {
+                    if !x.is_zero() && !y.is_zero() {
                         return Formula::Eval(
-                            rc(Formula::Slot(Axis::Small(peg(a, x)))),
-                            rc(Formula::Slot(Axis::Small(peg(a, y)))),
+                            rc(Formula::Slot(peg(a, x))),
+                            rc(Formula::Slot(peg(a, y))),
                         );
                     }
                 }
@@ -262,13 +281,13 @@ pub fn cond(pex: Formula, yom: Formula, woq: Formula) -> Formula {
     Formula::Cond(rc(pex), rc(yom), rc(woq))
 }
 
-/// `++peg`: axis composition. Copied verbatim from `crate::native::formula`.
-fn peg(a: u64, b: u64) -> u64 {
-    if a == 1 {
-        return b;
-    }
-    let b_path_width = 63 - b.leading_zeros() as u64;
-    (a << b_path_width) + (b - (1u64 << b_path_width))
+/// `++peg`: arbitrary-precision axis composition.
+fn peg(a: &Axis, b: &Axis) -> Axis {
+    let a = a.to_biguint();
+    let b = b.to_biguint();
+    let b_path_width = b.bits() - 1;
+    let b_prefix = BigUint::from(1u8) << b_path_width;
+    Axis::from_biguint((a << b_path_width) + (b - b_prefix))
 }
 
 // ---- from_noun: parse a Nock formula noun into the native IR ----------------
@@ -524,11 +543,27 @@ mod tests {
             Formula::Quote(Leaf::Direct(1)),
             Formula::Quote(Leaf::Direct(2)),
         );
-        // big axis skips peg (a is big → check 1 not taken)
+        // big axes participate in peg just like direct axes
         check_comb(
             Formula::Slot(Axis::Big(Rc::new(BigUint::from(1u8) << 70u32))),
             Formula::Slot(Axis::Small(3)),
         );
+    }
+
+    #[test]
+    fn comb_composes_arbitrary_precision_axes_exactly() {
+        let a = (BigUint::from(1u8) << 80u32) + BigUint::from(5u8);
+        let b = (BigUint::from(1u8) << 70u32) + BigUint::from(3u8);
+        let expected = (&a << 70u32) + (&b - (BigUint::from(1u8) << 70u32));
+
+        let composed = comb(
+            Formula::Slot(Axis::Big(Rc::new(a))),
+            Formula::Slot(Axis::Big(Rc::new(b))),
+        );
+        let Formula::Slot(axis) = composed else {
+            panic!("two slot formulas must compose to one slot formula");
+        };
+        assert_eq!(axis.to_biguint(), expected);
     }
 
     #[test]

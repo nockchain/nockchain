@@ -11779,7 +11779,10 @@ pub fn hoon_to_noun(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
             T(slab, &[p, q])
         }
         ZapZap => T(slab, &[D(tas!(b"zpzp")), D(0)]),
-        Axis(a) => T(slab, &[D(0), D(*a)]),
+        Axis(a) => {
+            let axis = Atom::new(slab, *a).as_noun();
+            T(slab, &[D(0), axis])
+        }
         Base(bt) => {
             let bt_noun = basetype_to_noun(slab, bt);
             T(slab, &[D(tas!(b"base")), bt_noun])
@@ -13060,7 +13063,10 @@ fn limb_to_noun(slab: &mut NounSlab, limb: &Limb) -> Noun {
     match limb {
         Limb::Term(s) => term_to_noun(slab, s),
 
-        Limb::Axis(n) => T(slab, &[D(0), D(*n)]),
+        Limb::Axis(n) => {
+            let axis = Atom::new(slab, *n).as_noun();
+            T(slab, &[D(0), axis])
+        }
 
         Limb::Parent(n, opt) => {
             let opt_noun = match opt {
@@ -13234,7 +13240,8 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         Edit((axis, new), core) => {
             let new_noun = nock_to_noun(slab, new);
             let core_noun = nock_to_noun(slab, core);
-            let axis_cell = T(slab, &[D(*axis), new_noun]);
+            let axis = Atom::new(slab, *axis).as_noun();
+            let axis_cell = T(slab, &[axis, new_noun]);
             T(slab, &[D(11u64), axis_cell, core_noun])
         }
         Hint(hint, n) => {
@@ -13254,14 +13261,15 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         }
         SelectArm(axis, core) => {
             let core = nock_to_noun(slab, core);
-            T(slab, &[D(10u64), D(*axis), core])
+            let axis = Atom::new(slab, *axis).as_noun();
+            T(slab, &[D(10u64), axis, core])
         }
         GrabData(core, path) => {
             let core = nock_to_noun(slab, core);
             let path = nock_to_noun(slab, path);
             T(slab, &[D(13u64), core, path])
         }
-        AxisSelect(axis) => D(*axis),
+        AxisSelect(axis) => Atom::new(slab, *axis).as_noun(),
     }
 }
 
@@ -15223,13 +15231,13 @@ mod tests {
     use nockchain_math::noun_ext::NounMathExt;
     use nockchain_math::zoon::common::{gor_tip, DefaultTipHasher};
     use nockvm::ext::noun_equality;
-    use nockvm::noun::{Noun, NounAllocator, D, T};
+    use nockvm::noun::{Noun, NounAllocator, D, DIRECT_MAX, T};
 
     use super::{
-        chumsky_spot_to_hoon_spot, flay, gor_mug, limb_to_noun, map_to_noun, mor_mug, open,
-        rent_co, slab_mug, string_to_atom, term_to_noun, Limb, LineMap,
+        chumsky_spot_to_hoon_spot, flay, gor_mug, hoon_to_noun, limb_to_noun, map_to_noun, mor_mug,
+        nock_to_noun, open, rent_co, slab_mug, string_to_atom, term_to_noun, Limb, LineMap,
     };
-    use crate::ast::hoon::{BaseType, Coin, Hoon, Note, ParsedAtom, Skin, Spec};
+    use crate::ast::hoon::{BaseType, Coin, Hoon, Nock, Note, ParsedAtom, Skin, Spec};
 
     fn noun_is_zero(noun: Noun) -> bool {
         unsafe { noun.raw_equals(&D(0)) }
@@ -16742,6 +16750,49 @@ mod tests {
             slab_noun_equality(&slab, &parent_with_term, &expected_parent_with_term),
             "parent limb with term did not encode as [1 axis [0 term]]"
         );
+    }
+
+    #[test]
+    fn axis_encoders_allocate_atoms_above_the_direct_limit() {
+        let mut slab = NounSlab::new();
+        let axis = DIRECT_MAX + 1;
+        let gene = hoon_to_noun(&mut slab, &Hoon::Axis(axis));
+        let limb = limb_to_noun(&mut slab, &Limb::Axis(axis));
+        let nock = nock_to_noun(&mut slab, &Nock::AxisSelect(axis));
+        let space = slab.noun_space();
+
+        for encoded in [gene, limb] {
+            let cell = encoded
+                .in_space(&space)
+                .as_cell()
+                .expect("axis encoding must be a cell");
+            assert_eq!(
+                cell.head()
+                    .as_atom()
+                    .expect("axis tag must be an atom")
+                    .as_u64()
+                    .expect("axis tag must fit u64"),
+                0
+            );
+            let encoded_axis = cell.tail().as_atom().expect("encoded axis must be an atom");
+            assert!(
+                encoded_axis.is_indirect(),
+                "an axis above DIRECT_MAX must use an indirect atom"
+            );
+            assert_eq!(
+                encoded_axis
+                    .as_u64()
+                    .expect("the regression axis still fits u64"),
+                axis
+            );
+        }
+
+        let nock_axis = nock
+            .in_space(&space)
+            .as_atom()
+            .expect("Nock axis must be an atom");
+        assert!(nock_axis.is_indirect());
+        assert_eq!(nock_axis.as_u64().expect("Nock axis must fit u64"), axis);
     }
 
     #[test]
