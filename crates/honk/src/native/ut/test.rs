@@ -2846,3 +2846,21 @@ fn wet_gate_function_sample_mint_deterministic() {
         "wet-gate mint must be deterministic run-to-run (fresh Context per compile)"
     );
 }
+
+// `|%  --` (an empty battery) is valid Hoon; hoonc compiles it to [[1 0] 0 1].
+#[test]
+fn empty_core_battery_mints() {
+    let mut slab = NounSlab::new();
+    let noun_ty = ty_noun(&mut slab);
+    let mut ut = Ut::new(&mut slab);
+    let (_ty, formula) = ut
+        .mint_noun(noun_ty, noun_ty, &Hoon::BarCen(None, HashMap::new()))
+        .expect("empty |% core should mint");
+    let battery = T(&mut slab, &[D(1), D(0)]);
+    let payload = T(&mut slab, &[D(0), D(1)]);
+    let expected = T(&mut slab, &[battery, payload]);
+    assert!(
+        noun_eq(formula, expected, &slab.noun_space()).expect("noun_eq"),
+        "empty core should compile to [[1 0] 0 1]"
+    );
+}

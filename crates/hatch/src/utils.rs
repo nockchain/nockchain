@@ -4652,9 +4652,10 @@ pub fn chapters<'src>(
             .collect::<Vec<_>>(),
     );
 
+    // Zero chapters is legal: `|%  --` is a valid empty core (hoon.hoon's
+    // wisp accepts an empty battery, and every battery rune shares it).
     chapter
         .repeated()
-        .at_least(1)
         .collect::<Vec<_>>()
         .then_ignore(just("--"))
         .map(
@@ -15290,6 +15291,28 @@ mod tests {
             matches!(spec.as_ref(), Spec::Gist(_, _)),
             "postfix doc should decorate the named sample spec"
         );
+    }
+
+    #[test]
+    fn empty_core_battery_parses() {
+        let src = "|%\n--\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(
+            vec!["test".into(), "empty-core.hoon".into()],
+            false,
+            linemap,
+        )
+        .parse(src)
+        .into_result()
+        .expect("|%  -- is a valid empty core");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::BarCen(None, tomes)] = items.as_slice() else {
+            panic!("expected one |% expression");
+        };
+        assert!(tomes.is_empty(), "empty battery should have no tomes");
     }
 
     #[test]
