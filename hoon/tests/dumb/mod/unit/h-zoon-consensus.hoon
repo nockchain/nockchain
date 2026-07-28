@@ -15,6 +15,9 @@
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
 ::
+::  +der: pre-activation derived-state (read-only extra arg for consensus/miner doors)
+++  der  ^-  derived-state  *derived-state
+::
 ++  consensus-h-apt
   |=  con=consensus-state
   ^-  ?
@@ -99,21 +102,23 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  c9=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  upgraded=consensus-state  c.current
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =/  upgraded-block=local-page:t  (~(got h-by blocks.c9) bid)
+  =/  upgraded-block=local-page:t  (~(got h-by blocks.upgraded) bid)
   =/  original-block=local-page:t  (~(got h-by blocks.con8) bid)
   %+  expect-eq
-    !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%10 -.k9)
-          (consensus-h-apt c9)
-          =((hz-molt blocks.c9) (hz-molt blocks.con8))
-          =((hz-milt balance.c9) (hz-milt balance.con8))
-          =((hz-milt txs.c9) (hz-milt txs.con8))
-          =((hz-molt min-timestamps.c9) (hz-molt min-timestamps.con8))
-          =((hz-molt targets.c9) (hz-molt targets.con8))
-          =(*(map @tas (h-map block-id:t @)) asert-anchor-min-timestamps.c9)
+    !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
+  !>  :*  =(%11 -.current)
+          (consensus-h-apt upgraded)
+          =((hz-molt blocks.upgraded) (hz-molt blocks.con8))
+          =((hz-milt balance.upgraded) (hz-milt balance.con8))
+          =((hz-milt txs.upgraded) (hz-milt txs.con8))
+          =((hz-molt min-timestamps.upgraded) (hz-molt min-timestamps.con8))
+          =((hz-molt targets.upgraded) (hz-molt targets.con8))
+          =(*(map @tas (h-map block-id:t @)) asert-anchor-min-timestamps.upgraded)
+          =(*(h-map block-id:t proof-version:sp) block-versions.upgraded)
+          =(*(h-map block-id:t puzzle-asert-state:dk) puzzle-asert-states.d.current)
           =(upgraded-block original-block)
       ==
 ::
@@ -125,11 +130,11 @@
   =/  needed-id=tx-id:t  ~(id get:raw-tx:t raw-needed)
   =/  pending-page=page:t  (make-page-with-coinbase-spend:v0:h cb-b cb-a)
   =/  pending-id=block-id:t  ~(digest get:page:t pending-page)
-  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pending-page)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw-needed)
+  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pending-page)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw-needed)
   =/  raw-extra=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-1:h cb-b)
   =/  extra-id=tx-id:t  ~(id get:raw-tx:t raw-extra)
-  =^  extra-ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw-extra)
+  =^  extra-ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw-extra)
   =/  legacy-c=consensus-state-8
     %*  .  *consensus-state-8
       blocks-needed-by  (hz-jult blocks-needed-by.con)
@@ -151,11 +156,11 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  up=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  up=consensus-state  c.current
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%10 -.k9)
+  !>  :*  =(%11 -.current)
           =(~[needed-id] missing)
           =(~[pending-id] ready)
           =(~ extra-ready)
@@ -181,11 +186,11 @@
   =/  pag-b=page:t  (with-msg (make-page-with-coinbase-spend:v0:h cb-page cb-page) 'UPGRADE-FANOUT')
   =/  bid-a=block-id:t  ~(digest get:page:t pag-a)
   =/  bid-b=block-id:t  ~(digest get:page:t pag-b)
-  =^  missing-a=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag-a)
-  =^  missing-b=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag-b)
+  =^  missing-a=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag-a)
+  =^  missing-b=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag-b)
   =/  raw-extra=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-3:h cb-page)
   =/  extra-id=tx-id:t  ~(id get:raw-tx:t raw-extra)
-  =^  extra-ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw-extra)
+  =^  extra-ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw-extra)
   =/  legacy-c=consensus-state-8
     %*  .  *consensus-state-8
       blocks-needed-by  (hz-jult blocks-needed-by.con)
@@ -207,8 +212,8 @@
     %*  .  *kernel-state-8
       c  legacy-c
     ==
-  =/  k9=kernel-state  (load:inner:dumb k8)
-  =/  up=consensus-state  c.k9
+  =/  current=kernel-state  (load:inner:dumb k8)
+  =/  up=consensus-state  c.current
   =/  upgraded-ok=?
     ?&  =(~[needed-id] missing-a)
         =(~[needed-id] missing-b)
@@ -222,7 +227,7 @@
         ?!((~(has h-in excluded-txs.up) needed-id))
         (consensus-h-apt up)
     ==
-  =.  up  (~(reject-pending-block dcon up constants) bid-a)
+  =.  up  (~(reject-pending-block dcon up der constants) bid-a)
   =/  after-one-reject-ok=?
     ?&  ?!((~(has h-by pending-blocks.up) bid-a))
         (~(has h-by pending-blocks.up) bid-b)
@@ -234,7 +239,7 @@
     ==
   %+  expect-eq
     !>([%.y %.y %.y])
-  !>  [=(%10 -.k9) upgraded-ok after-one-reject-ok]
+  !>  [=(%11 -.current) upgraded-ok after-one-reject-ok]
 ::
 ++  test-consensus-add-raw-tx-h-index-flow
   =/  con=consensus-state  initial-consensus-state:h
@@ -242,7 +247,7 @@
   =/  raw=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h cb-page)
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  names=(z-set nname:t)  ~(input-names get:raw-tx:t raw)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   =/  spent-ok=?
     %-  ~(all z-in names)
     |=  nam=nname:t
@@ -268,8 +273,8 @@
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  pag=page:t  (make-page-with-coinbase-spend:v0:h cb-page cb-page)
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =/  header-ok=?  -:(~(validate-page-without-txs dcon con constants) pag ~(timestamp get:page:t pag))
-  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag)
+  =/  header-ok=?  -:(~(validate-page-without-txs dcon con der constants) pag ~(timestamp get:page:t pag))
+  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag)
   =/  pending-ok=?
     ?&  =(~[tid] missing)
         (~(has h-by pending-blocks.con) bid)
@@ -277,7 +282,7 @@
         ?!((~(has h-in excluded-txs.con) tid))
         (consensus-h-apt con)
     ==
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   =/  raw-ok=?
     ?&  =(~[bid] ready)
         (~(has h-by raw-txs.con) tid)
@@ -285,12 +290,12 @@
         ?!((~(has h-in excluded-txs.con) tid))
         (consensus-h-apt con)
     ==
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con constants) pag)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der constants) pag)
   =/  txs-ok=?  ?=(%.y -.r)
   ?.  ?=(%.y -.r)
     ~&  h-zoon-pending-validate-failed++.r  !!
   =/  acc=tx-acc:t  +.r
-  =.  con  (~(accept-page dcon con constants) pag acc *@da)
+  =.  con  (~(accept-page dcon con der constants) pag acc *@da)
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.n %.y])
   !>  :*  header-ok
@@ -309,18 +314,18 @@
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  pag=page:t  (make-page-with-coinbase-spend:v0:h cb-page cb-page)
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   =/  raw-only-ok=?  ?&  =(~ ready)  (~(has h-in excluded-txs.con) tid)  ==
-  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag)
+  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag)
   =/  no-pending-ok=?
     ?&  =(~ missing)
         ?!((~(has h-by pending-blocks.con) bid))
         (~(has h-in excluded-txs.con) tid)
     ==
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con constants) pag)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der constants) pag)
   ?.  ?=(%.y -.r)
     ~&  h-zoon-raw-first-validate-failed++.r  !!
-  =.  con  (~(accept-page dcon con constants) pag +.r *@da)
+  =.  con  (~(accept-page dcon con der constants) pag +.r *@da)
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.n %.y])
   !>  :*  raw-only-ok
@@ -341,9 +346,9 @@
   =/  pag-b=page:t  (with-msg (make-page-with-coinbase-spend:v0:h cb-page cb-page) 'ALT-PENDING')
   =/  bid-a=block-id:t  ~(digest get:page:t pag-a)
   =/  bid-b=block-id:t  ~(digest get:page:t pag-b)
-  =^  missing-a=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag-a)
-  =^  missing-b=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag-b)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  missing-a=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag-a)
+  =^  missing-b=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag-b)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   =/  ready-set=(z-set block-id:t)  (z-silt ready)
   =/  both-pending-ok=?
     ?&  =(~[tid] missing-a)
@@ -354,7 +359,7 @@
         (~(has h-ju blocks-needed-by.con) tid bid-b)
         ?!((~(has h-in excluded-txs.con) tid))
     ==
-  =.  con  (~(reject-pending-block dcon con constants) bid-a)
+  =.  con  (~(reject-pending-block dcon con der constants) bid-a)
   =/  one-rejected-ok=?
     ?&  ?!((~(has h-by pending-blocks.con) bid-a))
         (~(has h-by pending-blocks.con) bid-b)
@@ -363,7 +368,7 @@
         ?!((~(has h-in excluded-txs.con) tid))
         (consensus-h-apt con)
     ==
-  =.  con  (~(reject-pending-block dcon con constants) bid-b)
+  =.  con  (~(reject-pending-block dcon con der constants) bid-b)
   %+  expect-eq
     !>([%.y %.y %.n %.n %.y %.y])
   !>  :*  both-pending-ok
@@ -381,9 +386,9 @@
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  pag=page:t  (make-page-with-coinbase-spend:v0:h cb-page cb-page)
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con constants) pag)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
-  =.  con  (~(reject-pending-block dcon con constants) bid)
+  =^  missing=(list tx-id:t)  con  (~(add-pending-block dcon con der constants) pag)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
+  =.  con  (~(reject-pending-block dcon con der constants) bid)
   %+  expect-eq
     !>([%.y %.y %.y %.n %.n %.y %.y])
   !>  :*  =(~[tid] missing)
@@ -401,7 +406,7 @@
   =/  raw=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h cb-page)
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  names=(z-set nname:t)  ~(input-names get:raw-tx:t raw)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   =/  before-ok=?
     ?&  =(~ ready)
         (~(has h-by raw-txs.con) tid)
@@ -410,7 +415,7 @@
         |=  nam=nname:t
         (~(has h-ju spent-by.con) nam tid)
     ==
-  =.  con  (~(drop-tx dcon con constants) tid)
+  =.  con  (~(drop-tx dcon con der constants) tid)
   =/  spent-cleared=?
     %-  ~(all z-in names)
     |=  nam=nname:t
@@ -431,10 +436,10 @@
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  broken=consensus-state
     con(raw-txs (~(put h-by raw-txs.con) tid [raw 0]))
-  =/  repaired=consensus-state  ~(check-and-repair dcon broken constants)
+  =/  repaired=consensus-state  ~(check-and-repair dcon broken der constants)
   %+  expect-eq
     !>([`%txs-fell-through-cracks %.y %.y %.y])
-  !>  :*  ~(apt dcon broken constants)
+  !>  :*  ~(apt dcon broken der constants)
           (~(has h-by raw-txs.repaired) tid)
           (~(has h-in excluded-txs.repaired) tid)
           (consensus-h-apt repaired)
@@ -447,12 +452,12 @@
   =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
   =/  pag=page:t  (make-page-with-coinbase-spend:v0:h cb-page cb-page)
   =/  bid=block-id:t  ~(digest get:page:t pag)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   ?>  =(~ ready)
-  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con constants) pag)
+  =/  r=(reason tx-acc:t)  (~(validate-page-with-txs dcon con der constants) pag)
   ?.  ?=(%.y -.r)
     ~&  h-zoon-scry-validate-failed++.r  !!
-  =.  con  (~(accept-page dcon con constants) pag +.r *@da)
+  =.  con  (~(accept-page dcon con der constants) pag +.r *@da)
   =/  bid-b58=@t  (to-b58:hash:t bid)
   =/  k=kernel-state
     %*  .  *kernel-state
@@ -542,9 +547,9 @@
   =/  con=consensus-state  initial-consensus-state:h
   =^  pag=page:t  con  (add-n-pages:h 1 con default-retain:h)
   =/  seeded=mining-state  initial-mining-state:h
-  =.  seeded  (~(heard-new-block dmin seeded constants) con *@da)
+  =.  seeded  (~(heard-new-block dmin seeded der constants) con *@da)
   =/  raw=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h pag)
-  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con constants) raw)
+  =^  ready=(list block-id:t)  con  (~(add-raw-tx dcon con der constants) raw)
   ?>  =(~ ready)
   =/  no-key=mining-state
     %*  .  seeded
@@ -554,7 +559,7 @@
   ?>  ?&  ?=(^ -.candidate-block.no-key)
           (~(has h-in excluded-txs.con) ~(id get:raw-tx:t raw))
       ==
-  =/  after=mining-state  (~(add-txs-to-candidate dmin no-key constants) con)
+  =/  after=mining-state  (~(add-txs-to-candidate dmin no-key der constants) con)
   %+  expect-eq
     !>([%.y %.y %.y])
   !>  :*  =(no-key after)
@@ -723,7 +728,7 @@
     =/  raw=raw-tx:t  (make-raw-tx-from-coinbase:v0:h p:default-keys-2:h cb)
     =/  tid=tx-id:t  ~(id get:raw-tx:t raw)
     ?:  (~(has h-by raw-txs.con.ws) tid)  ws
-    =^  ready=(list block-id:t)  con.ws  (~(add-raw-tx dcon con.ws constants) raw)
+    =^  ready=(list block-id:t)  con.ws  (~(add-raw-tx dcon con.ws der constants) raw)
     ws(con con.ws, raw-ids [tid raw-ids.ws], tick +(tick.ws))
   ::
       %2
@@ -738,9 +743,9 @@
     =/  bid=block-id:t  ~(digest get:page:t pag)
     ?:  (~(has h-by pending-blocks.con.ws) bid)  ws
     ?:  (~(has h-by blocks.con.ws) bid)  ws
-    =/  ok=?  -:(~(validate-page-without-txs dcon con.ws constants) pag ~(timestamp get:page:t pag))
+    =/  ok=?  -:(~(validate-page-without-txs dcon con.ws der constants) pag ~(timestamp get:page:t pag))
     ?.  ok  ws
-    =^  missing=(list tx-id:t)  con.ws  (~(add-pending-block dcon con.ws constants) pag)
+    =^  missing=(list tx-id:t)  con.ws  (~(add-pending-block dcon con.ws der constants) pag)
     ws(con con.ws, pending [bid pending.ws], tick +(tick.ws))
   ::
       %3
@@ -750,7 +755,7 @@
       ::  drift between our shadow pending list and consensus; drop the
       ::  stale id from the shadow and keep walking.
       ws(pending (filter-block-ids pending.ws bid))
-    =.  con.ws  (~(reject-pending-block dcon con.ws constants) bid)
+    =.  con.ws  (~(reject-pending-block dcon con.ws der constants) bid)
     ws(con con.ws, pending (filter-block-ids pending.ws bid), tick +(tick.ws))
   ::
       %4
@@ -761,11 +766,11 @@
     ::  drop-tx pre-condition (consensus.hoon:857): tx must not be needed
     ::  by any pending block. otherwise the assertion crashes.
     ?:  (~(has h-by blocks-needed-by.con.ws) tid)  ws
-    =.  con.ws  (~(drop-tx dcon con.ws constants) tid)
+    =.  con.ws  (~(drop-tx dcon con.ws der constants) tid)
     ws(con con.ws, raw-ids (filter-tx-ids raw-ids.ws tid), tick +(tick.ws))
   ::
       %5
-    =.  con.ws  ~(check-and-repair dcon con.ws constants)
+    =.  con.ws  ~(check-and-repair dcon con.ws der constants)
     ws(con con.ws, tick +(tick.ws))
   ==
 ::

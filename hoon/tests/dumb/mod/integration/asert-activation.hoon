@@ -1,17 +1,18 @@
 ::  tests/dumb/mod/integration/asert-activation.hoon
 ::
 ::    activation-boundary integration tests for aserti3-2d.
-::    builds a chain with a low asert-phase, runs it across the boundary,
+::    builds a chain with a low phase.zk-asert, runs it across the boundary,
 ::    and cross-checks consensus's +compute-target-asert against a direct
 ::    call into lib/asert for the same inputs. phase 2 of 014-aletheia
 ::    pins the anchor's median-of-11 as a hardcoded
-::    `asert-anchor-min-timestamp` field on blockchain-constants, so the
+::    `anchor-min-timestamp.zk-asert` field on blockchain-constants, so the
 ::    test bc must encode the value the test chain would produce at the
 ::    anchor — median of 5 timestamps at 600s spacing from the genesis
 ::    timestamp (= `time-in-secs *@da`), i.e. T0 + 1.200.
 /=  helpers  /tests/dumb/helpers
 /=  asert  /apps/dumbnet/lib/asert
 /=  dcon  /apps/dumbnet/lib/consensus
+/=  dt  /apps/dumbnet/lib/types
 /=  txe  /common/tx-engine
 /=  *  /common/h-zoon
 /=  *  /common/zeke
@@ -19,26 +20,28 @@
 ::
 =>
 |%
-::  bc-asert: constants with a very low asert-phase so we can reach it in
-::    tests. asert-anchor-min-timestamp pins the median-of-11 the test
+::  bc-asert: constants with a very low phase.zk-asert so we can reach it in
+::    tests. anchor-min-timestamp.zk-asert pins the median-of-11 the test
 ::    chain produces at anchor-height=4 with 600s/block spacing starting
 ::    at default-genesis-timestamp = *@da.
 ++  bc-asert
   %*  .  default-bc:helpers
     blocks-per-epoch            1.000.000     :: avoid epoch boundary inside test
-    v1-phase                    5             :: must be <= asert-phase
-    asert-phase                 5
-    asert-anchor-height         4
-    asert-anchor-target-atom    ^~((div max-tip5-atom:tip5 (bex 14)))
-    asert-ideal-block-time      150
-    asert-half-life             43.200
-    asert-anchor-min-timestamp  (add (time-in-secs:page:txe *@da) 1.200)
+    v1-phase                    5             :: must be <= phase.zk-asert
+    phase.zk-asert                 5
+    anchor-height.zk-asert         4
+    anchor-target-atom.zk-asert    ^~((div max-tip5-atom:tip5 (bex 14)))
+    ideal-block-time.zk-asert      150
+    half-life.zk-asert             43.200
+    anchor-min-timestamp.zk-asert  (add (time-in-secs:page:txe *@da) 1.200)
   ==
 --
 ::
 |%
 ++  h  ~(. helpers bc-asert)
 ++  t  ~(. txe bc-asert)
+::  +der: pre-activation derived-state (read-only extra arg for consensus door)
+++  der  ^-  derived-state:dt  *derived-state:dt
 ::
 ::  +test-asert-wrapper-matches-library: after building 4 blocks (reaching
 ::    the anchor at height 4), calling the consensus wrapper
@@ -53,18 +56,18 @@
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
   =/  parent-digest  ~(digest get:page:t par)
   =/  parent-min-ts  (~(got h-by min-timestamps.con) parent-digest)
-  =/  anchor-min-ts  asert-anchor-min-timestamp.bc
+  =/  anchor-min-ts  anchor-min-timestamp.zk-asert.bc
   =/  got-bn
-    (~(compute-target-asert dcon con bc) %zk 5 parent-digest)
+    (~(compute-target-asert dcon con der bc) %zk 5 parent-digest)
   =/  expected-atom
     %-  compute-target:asert
-    :*  asert-anchor-target-atom.bc
+    :*  anchor-target-atom.zk-asert.bc
         anchor-min-ts
-        asert-anchor-height.bc
+        anchor-height.zk-asert.bc
         parent-min-ts
         5
-        asert-ideal-block-time.bc
-        asert-half-life.bc
+        ideal-block-time.zk-asert.bc
+        half-life.zk-asert.bc
         max-target-atom.bc
     ==
   (expect-eq !>(expected-atom) !>((merge:bignum got-bn)))
@@ -80,18 +83,18 @@
   =^  par=page:t  con  (add-n-pages:h 5 con default-retain:h)
   =/  parent-digest  ~(digest get:page:t par)
   =/  parent-min-ts  (~(got h-by min-timestamps.con) parent-digest)
-  =/  anchor-min-ts  asert-anchor-min-timestamp.bc
+  =/  anchor-min-ts  anchor-min-timestamp.zk-asert.bc
   =/  got-bn
-    (~(compute-target-asert dcon con bc) %zk 6 parent-digest)
+    (~(compute-target-asert dcon con der bc) %zk 6 parent-digest)
   =/  expected-atom
     %-  compute-target:asert
-    :*  asert-anchor-target-atom.bc
+    :*  anchor-target-atom.zk-asert.bc
         anchor-min-ts
-        asert-anchor-height.bc
+        anchor-height.zk-asert.bc
         parent-min-ts
         6
-        asert-ideal-block-time.bc
-        asert-half-life.bc
+        ideal-block-time.zk-asert.bc
+        half-life.zk-asert.bc
         max-target-atom.bc
     ==
   (expect-eq !>(expected-atom) !>((merge:bignum got-bn)))
@@ -105,16 +108,16 @@
   =/  parent-min-ts  (~(got h-by min-timestamps.con) parent-digest)
   =.  con  con(blocks *(h-map block-id:t local-page:t))
   =/  got-bn
-    (~(compute-target-asert dcon con bc) %zk 6 parent-digest)
+    (~(compute-target-asert dcon con der bc) %zk 6 parent-digest)
   =/  expected-atom
     %-  compute-target:asert
-    :*  asert-anchor-target-atom.bc
-        asert-anchor-min-timestamp.bc
-        asert-anchor-height.bc
+    :*  anchor-target-atom.zk-asert.bc
+        anchor-min-timestamp.zk-asert.bc
+        anchor-height.zk-asert.bc
         parent-min-ts
         6
-        asert-ideal-block-time.bc
-        asert-half-life.bc
+        ideal-block-time.zk-asert.bc
+        half-life.zk-asert.bc
         max-target-atom.bc
     ==
   (expect-eq !>(expected-atom) !>((merge:bignum got-bn)))
@@ -129,7 +132,7 @@
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
   =/  anchor-digest  ~(digest get:page:t par)
   =/  observed       (~(got h-by min-timestamps.con) anchor-digest)
-  (expect-eq !>(observed) !>(asert-anchor-min-timestamp.bc))
+  (expect-eq !>(observed) !>(anchor-min-timestamp.zk-asert.bc))
 ::
 ::  +test-asert-wrapper-activation-identity: production-semantic pin for
 ::    the activation boundary. child-height = anchor-height + 1 with the
@@ -144,8 +147,8 @@
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
   =/  parent-digest  ~(digest get:page:t par)
   =/  got-bn
-    (~(compute-target-asert dcon con bc) %zk 5 parent-digest)
-  (expect-eq !>(asert-anchor-target-atom.bc) !>((merge:bignum got-bn)))
+    (~(compute-target-asert dcon con der bc) %zk 5 parent-digest)
+  (expect-eq !>(anchor-target-atom.zk-asert.bc) !>((merge:bignum got-bn)))
 ::
 :::
 ::  The %zk schedule starts at the canonical anchor and changes at 112.500.
@@ -155,15 +158,15 @@
   =/  con  (initial-consensus-state-custom:h bc)
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
   =/  before=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con bc) %zk 112.499)
+    (~(active-asert-anchor dcon con der bc) %zk 112.499)
   =/  active=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con bc) %zk 112.500)
+    (~(active-asert-anchor dcon con der bc) %zk 112.500)
   =/  wrong-type=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con bc) %other 112.500)
+    (~(active-asert-anchor dcon con der bc) %other 112.500)
   =/  expected-original=asert-anchor:dcon
-    [asert-phase.bc asert-anchor-target-atom.bc `asert-anchor-min-timestamp.bc]
+    [phase.zk-asert.bc anchor-target-atom.zk-asert.bc `anchor-min-timestamp.zk-asert.bc]
   =/  expected-reanchor=asert-anchor:dcon
-    [112.500 (div max-target-atom.bc (mul 3.000.000 asert-ideal-block-time.bc)) ~]
+    [112.500 (div max-target-atom.bc (mul 3.000.000 ideal-block-time.zk-asert.bc)) ~]
   =/  anchor=page:t
     ?^  -.par
       par(height 112.499)
@@ -177,12 +180,12 @@
     raw-child(height 112.500)
   =/  child-id=block-id:t  ~(digest get:page:t child)
   =/  recovered-target
-    (~(compute-target-asert dcon con bc) %zk 112.500 anchor-id)
-  =.  con  (~(update-asert-anchor-min-timestamps dcon con bc) %zk child)
+    (~(compute-target-asert dcon con der bc) %zk 112.500 anchor-id)
+  =.  con  (~(update-asert-anchor-min-timestamps dcon con der bc) %zk child)
   =/  got-bn
-    (~(compute-target-asert dcon con bc) %zk 112.500 anchor-id)
+    (~(compute-target-asert dcon con der bc) %zk 112.500 anchor-id)
   =/  expected-target
-    (div max-target-atom.bc (mul 3.000.000 asert-ideal-block-time.bc))
+    (div max-target-atom.bc (mul 3.000.000 ideal-block-time.zk-asert.bc))
   %+  expect-eq
     !>  :*  %.y
               %.y
@@ -196,6 +199,6 @@
             =(wrong-type ~)
             (merge:bignum recovered-target)
             (merge:bignum got-bn)
-            (~(get-asert-anchor-min-timestamp dcon con bc) %zk 112.499 child-id)
+            (~(get-asert-anchor-min-timestamp dcon con der bc) %zk 112.499 child-id)
         ==
 --

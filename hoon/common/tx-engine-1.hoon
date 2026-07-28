@@ -17,12 +17,122 @@
 ++  bn  bignum
 ++  page-msg  page-msg:v0
 ++  proof  proof:v0
++$  ai-blake  @uxblake  ::  32-byte BLAKE3 digest, little-endian atom bytes
++$  ai-pow-nonce  [len=@ud data=@uxaipownonce]  ::  Rust-owned AI-PoW nonce bytes
++$  ai-ext2   @uxfelt  ::  Goldilocks degree-2 scalar: low 8 bytes c0, high 8 bytes c1
++$  ai-ext2s  @uxfelts ::  Packed sequence of ai-ext2 scalars, 16 bytes per scalar
++$  ai-ext2-vec
+  $:  len=@ud
+      data=ai-ext2s
+  ==
++$  ai-pow-commitments
+  $:  h-a-chunk=ai-blake
+      h-b-chunk=ai-blake
+  ==
++$  ai-pow-public-inputs
+  $:  cumsum=[c0=@sd c1=@sd c2=@sd c3=@sd]
+      jackpot=[j0=@ud j1=@ud j2=@ud j3=@ud j4=@ud j5=@ud j6=@ud j7=@ud j8=@ud j9=@ud j10=@ud j11=@ud j12=@ud j13=@ud j14=@ud j15=@ud]
+      hash-a=ai-blake
+      hash-b=ai-blake
+      job-key=ai-blake
+      commitment-hash=ai-blake
+      hash-jackpot=ai-blake
+  ==
++$  ai-proof-node
+  $%  [%n ~]
+      [%b value=?]
+      [%u value=@ud]
+      [%i data=@]
+      [%ext2 value=ai-ext2]
+      [%ext2s len=@ud data=ai-ext2s]
+      [%bytes len=@ud data=@]
+      [%u64s len=@ud data=@]
+      [%i64s len=@ud data=@]
+      [%seq items=*]
+      [%map entries=*]
+      [%none ~]
+      [%some value=*]
+  ==
++$  ai-proof-bytes-envelope  [%bytes len=@ud data=@]
++$  ai-recursive-certificate  ai-proof-node
++$  ai-pow-certificate
+  $:  version=@ud
+      params=[m=@ud k=@ud n=@ud noise-rank=@ud tile=@ud difficulty-bits=@ud]
+      found-idx=@ud
+      trace-height=@ud
+      commitments=ai-pow-commitments
+      public-inputs=ai-pow-public-inputs
+      certificate=ai-recursive-certificate
+  ==
++$  ai-pow-certificate-envelope
+  $:  version=@ud
+      params=[m=@ud k=@ud n=@ud noise-rank=@ud tile=@ud difficulty-bits=@ud]
+      found-idx=@ud
+      trace-height=@ud
+      commitments=*
+      public-inputs=*
+      certificate=*
+  ==
++$  ai-pow-artifact-envelope
+  $:  nonce=ai-pow-nonce
+      certificate=ai-pow-certificate-envelope
+  ==
++$  ai-pow-artifact
+  $:  nonce=ai-pow-nonce
+      certificate=ai-pow-certificate
+  ==
++$  pow-artifact
+  *
+::
+::  AI-PoW artifact resource limits mirrored from the Rust consensus decoder.
+::  Hoon only performs cheap top-level shape and declared-byte checks before it
+::  jams or hashes the artifact; the mandatory verifier jet owns full decoding.
+++  ai-pow-max-atom-bytes  1.048.576
+++  ai-pow-max-artifact-jam-bytes  4.194.304
+++  ai-pow-max-artifact-jam-size  ^~((mul 8 ai-pow-max-artifact-jam-bytes))
+++  ai-pow-max-compact-certificate-bytes  150.000
+::
+++  ai-pow-compact-certificate-ok
+  |=  node=*
+  ^-  ?
+  =/  bytes=(unit ai-proof-bytes-envelope)  ((soft ai-proof-bytes-envelope) node)
+  ?~  bytes
+    %.n
+  ?&  (lte (met 3 data.u.bytes) len.u.bytes)
+      (lth len.u.bytes ai-pow-max-compact-certificate-bytes)
+  ==
+::
+++  ai-pow-artifact-resource-ok
+  |=  pow=*
+  ^-  ?
+  ?.  ?=([%ai-pow *] pow)
+    %.n
+  =/  art=(unit ai-pow-artifact-envelope)  ((soft ai-pow-artifact-envelope) +.pow)
+  ?~  art
+    %.n
+  =/  nonce=ai-pow-nonce  nonce.u.art
+  =/  cert=ai-pow-certificate-envelope  certificate.u.art
+  ?&  (gth len.nonce 0)
+      (lte (met 3 data.nonce) len.nonce)
+      (lte len.nonce ai-pow-max-atom-bytes)
+      (ai-pow-compact-certificate-ok certificate.cert)
+  ==
+::
+++  ai-pow-artifact-size
+  |=  pow=*
+  ^-  size
+  ?.  (ai-pow-artifact-resource-ok pow)
+    ai-pow-max-artifact-jam-size
+  =/  actual=size  (compute-size-jam pow)
+  ?:  (lte actual ai-pow-max-artifact-jam-size)
+    actual
+  ai-pow-max-artifact-jam-size
 ++  reason
   |$  object
   (each object term)
 ::
-::  $fund-address: lock-script hash that receives the 20% protocol-fund
-::  share of every post-activation coinbase (014-aletheia, asert-phase
+::  $protocol-fund-address: lock-script hash that receives the 20% protocol-fund
+::  share of every post-activation coinbase (014-aletheia, zk-asert-phase
 ::  onward). The lock-root of a 3-of-4 multisig over the four pkhs in
 ::  /asert-protocol-lock-fund.txt at the repo root; spending the fund
 ::  therefore requires three of four signatures.
@@ -31,18 +141,18 @@
 ::  here as a base58 literal. Re-run that script after any change to
 ::  the participant set, the threshold, or the lock-script structure
 ::  to regenerate the value below. The pin is enforced by
-::  test-fund-address-is-3-of-4-multisig in
+::  test-protocol-fund-address-is-3-of-4-multisig in
 ::  /tests/dumb/mod/unit/coinbase-split.
-++  fund-address
+++  protocol-fund-address
   ^-  hash
   (from-b58:hash '9EhcJiGhAPcWLYrR9DL4ZPjU2Z9XT6FT2ZFkEEwmSQv7ES2TMC7p6Up')
 ::
 ::  $fund-note-firstname: the on-chain first-name (-.name) shared by every
 ::  protocol-fund coinbase note. +make-name:coinbase wraps the coinbase-split
-::  key (here +fund-address, itself a 3-of-4 multisig lock-root) as a single
+::  key (here +protocol-fund-address, itself a 3-of-4 multisig lock-root) as a single
 ::  %pkh primitive plus the coinbase timelock, then takes the nname:
 ::
-::    note-lock      = ~[[%pkh m=1 {fund-address}] coinbase-tim-lp]
+::    note-lock      = ~[[%pkh m=1 {protocol-fund-address}] coinbase-tim-lp]
 ::    note-lock-root = (hash:lock note-lock)
 ::    first-name     = (first:nname note-lock-root)
 ::
@@ -57,13 +167,13 @@
   (from-b58:hash '8TvVfU7sbFoY8qV53ffUdBag7Kcqw8LXjsnYgY71nQ1biWE6giRYzkn')
 ::
 ::  $fund-multisig-lock: the real 3-of-4 multisig spend-condition that
-::  +fund-address is the lock-root of -- i.e. the preimage a fund spend must
-::  reveal so +check-multisig-lock's bind ((hash:lock sc) == fund-address)
+::  +protocol-fund-address is the lock-root of -- i.e. the preimage a fund spend must
+::  reveal so +check-multisig-lock's bind ((hash:lock sc) == protocol-fund-address)
 ::  passes. Listed here as the single source of truth for the four
 ::  participant pkhs so the wallet can construct the spend (it cannot recover
-::  the participant set from the +fund-address hash alone). Invariant:
-::  (hash:lock fund-multisig-lock) == fund-address, pinned by
-::  test-fund-multisig-lock-binds-fund-address in coinbase-split.
+::  the participant set from the +protocol-fund-address hash alone). Invariant:
+::  (hash:lock fund-multisig-lock) == protocol-fund-address, pinned by
+::  test-fund-multisig-lock-binds-protocol-fund-address in coinbase-split.
 ++  fund-multisig-lock
   ^-  spend-condition
   =/  pkhs=(list hash)
@@ -75,10 +185,10 @@
   [%pkh [m=3 (z-silt pkhs)]]~
 ::
 ::  +post-asert-activation: 014-aletheia activation predicate, 2-arg form.
-::    Returns %.y when `height` is at or past the asert-phase boundary.
+::    Returns %.y when `height` is at or past the puzzle's asert-phase boundary.
 ::    The 1-arg wrappers in /common/tx-engine close over the kernel's
 ::    blockchain-constants; this 2-arg form is for callers (like
-::    +new-candidate below) that already have asert-phase as a separate
+::    +new-candidate below) that already have the asert-phase as a separate
 ::    parameter rather than via blockchain-constants. SINGLE source of
 ::    truth for the boundary semantics — see
 ::    014-aletheia-emissions-audit.md finding #3.
@@ -99,9 +209,10 @@
   =<  form
   |%
   +$  form
+    $+  page
     $:  version=%1
         digest=block-id
-        pow=$+(pow (unit proof))
+        pow=$+(pow (unit pow-artifact))
         parent=block-id
         tx-ids=(z-set tx-id)
         coinbase=coinbase-split
@@ -113,8 +224,20 @@
         msg=page-msg
     ==
   ::
+  ::  `block-work` is the caller-supplied heaviness this block contributes.
+  ::  It is NOT derived from `target-bn` here: from AI activation on, every
+  ::  block contributes the same amount whichever puzzle produced it, so only a
+  ::  caller holding the activation height can compute it. Deriving it here
+  ::  would build candidates whose stored accumulated-work disagrees with what
+  ::  +block-compute-work checks at validation.
   ++  new-candidate
-    |=  [par=$^(page:v0 form) now=@da target-bn=bignum:bn =shares asert-phase=@]
+    |=  $:  par=$^(page:v0 form)
+            now=@da
+            target-bn=bignum:bn
+            =shares
+            asert-phase=@
+            block-work=bignum:bn
+        ==
     ^-  form
     ::  extract common fields from either v0 or v1 parent
     =/  [par-accumulated-work=bignum:bn par-digest=hash par-epoch-counter=@ par-height=@]
@@ -123,8 +246,7 @@
       [accumulated-work.par digest.par epoch-counter.par height.par]
     =/  accumulated-work
       %-  chunk:bn
-      %+  add
-        (merge:bn (compute-work:page:v0 target-bn))
+      %+  add  (merge:bn block-work)
       (merge:bn par-accumulated-work)
     =/  epoch-counter=@
       ?:  =(+(par-epoch-counter) blocks-per-epoch:v0)  0
@@ -152,7 +274,7 @@
   ++  to-local-page
     |=  pag=form
     ^-  local-page
-    pag(pow (bind pow.pag |=(p=proof (jam p))))
+    pag(pow (bind pow.pag |=(p=pow-artifact (jam p))))
   ::
   ++  hashable-block-commitment
     |=  =form
@@ -180,7 +302,14 @@
     |=  pag=form
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
-        [leaf+~ hash+(hash-proof:v0 u.pow.pag)]
+        ?:  ?=([%ai-pow *] u.pow.pag)
+          ?:  (ai-pow-artifact-resource-ok u.pow.pag)
+            [leaf+%ai-pow hash+(hash-belts-list:tip5 (rip 5 (jam u.pow.pag)))]
+          [leaf+%ai-pow leaf+0]
+        =/  prf=(unit form:proof)  ((soft form:proof) u.pow.pag)
+        ?~  prf
+          [leaf+~ leaf+0]
+        [leaf+~ hash+(hash-proof:v0 u.prf)]
     (hashable-block-commitment pag)
   ::
   ++  block-commitment
@@ -203,25 +332,18 @@
   ++  compute-size-without-txs
     |=  pag=form
     ^-  size
-    ::  size the jam of the page WITHOUT the digest or the powork: both are
-    ::  variable-length but bounded, so they are accounted for by the
-    ::  +max-size constants below instead of being jammed here.
-    ::
-    ::  the v1 $page prepends a `version` head that v0 does not have, so the
-    ::  layout is [version digest pow parent ...]. that shifts every field by
-    ::  one axis versus v0's [digest pow parent ...]. v0 jams `+>.pag`
-    ::  (axis 7 = [parent ...]), which on a v1 page is [pow parent ...] --
-    ::  i.e. it wrongly folds the proof into the jam. because a candidate
-    ::  block carries `pow=~` while a mined block carries the full proof, the
-    ::  miner's +candidate-block-below-max-size guard (run on the candidate)
-    ::  then disagreed with consensus +check-size (run on the mined page),
-    ::  letting a miner produce a block it immediately self-rejected as
-    ::  %block-too-large -- wedging the chain. `+>+.pag` (axis 15 =
-    ::  [parent ...]) excludes version, digest, AND pow, matching v0's intent
-    ::  and making the two size checks agree.
+    ::  Size the jam of the page WITHOUT the digest or the powork body.
+    ::  Non-AI proof bodies reserve the legacy fixed bound; AI artifacts are
+    ::  charged by their actual jam size after cheap top-level resource checks.
+    =/  pow-size=size
+      ?~  pow.pag
+        max-size:proof:v0
+      ?:  ?=([%ai-pow *] u.pow.pag)
+        (ai-pow-artifact-size u.pow.pag)
+      max-size:proof:v0
     ;:  add
         max-size:block-id:v0
-        max-size:proof:v0
+        pow-size
         (compute-size-jam `*`+>+.pag)
     ==
   --
@@ -249,7 +371,7 @@
   ++  to-page
     |=  lp=form
     ^-  page
-    lp(pow (biff pow.lp |=(j=@ ((soft proof) (cue j)))))
+    lp(pow (biff pow.lp |=(j=@ ((soft pow-artifact) (cue j)))))
   ::
   ++  to-page-no-pow
     |=  lp=form
@@ -258,10 +380,115 @@
   --
 ++  timelock-range  timelock-range:v0
 ++  size  size:v0
+::  aserti3-2d difficulty adjustment parameters — one named type per
+::  puzzle. Same field shape; each carries its own default-bunt so the
+::  parent blockchain-constants picks them up automatically via the
+::  `=name` shorthand on field declarations.
+::    .phase: activation height. at or after, target is computed
+::       per-block via aserti3-2d instead of epoch retarget.
+::    .anchor-height / .anchor-target-atom: the fixed (height, target)
+::       used as the aserti3-2d reference. The anchor block's
+::       median-of-11 timestamp is not a constant here: it's derived at
+::       compute-target time by walking .blocks back from the
+::       parent-digest of the SAME puzzle type to the puzzle's anchor
+::       and reading .min-timestamps.
+::    .ideal-block-time: post-activation interblock time target (sec).
+::    .half-life: real-time seconds of drift to halve or double.
+::    rbits is hardcoded to 16 in lib/asert.hoon.
+::
+::  ZK puzzle ASERT, pre-AI-activation regime. 150s ideal ⇒ 2.5 min
+::  average per ZK block. This is the current (single-puzzle) mainnet
+::  cadence and stays in force for blocks in [65500, ai-pow-activation).
+::  anchor-target = 2^291; half-life = 12 hours.
++$  zk-asert
+  $+  zk-asert
+  $~  :*  phase=65.500
+          anchor-height=65.499
+          anchor-target-atom=^~((bex 291))
+          ideal-block-time=150
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Phase-2 of 014-aletheia: hardcoded median-of-11 at the
+          ::  canonical mainnet anchor block (height 65,499). Replaces
+          ::  the phase-1 runtime walk through .blocks/.min-timestamps.
+          anchor-min-timestamp=9.223.372.093.639.027.842
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
+::  ZK puzzle ASERT, post-AI-activation regime. A 375s target interval gives
+::  ZK roughly 40% of blocks when paired with AI's 250s target interval. The
+::  computation re-anchors at height (ai-pow-activation-height - 1) with
+::  anchor-target = 2^291.
++$  zk-asert-post-ai
+  $+  zk-asert-post-ai
+  $~  :*  phase=114.300
+          anchor-height=114.299
+          anchor-target-atom=^~((bex 291))
+          ::  375s ideal ⇒ ZK wins ~40% of blocks (paired with AI's 250s)
+          ideal-block-time=375
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Derived from the activation parent's median timestamp and stored
+          ::  in each branch-local puzzle ASERT state.
+          anchor-min-timestamp=0
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
+::  AI puzzle ASERT (matmul). Single regime — active from
+::  ai-pow-activation-height onward. By default phase = anchor-height =
+::  ai-pow-activation-height (the first block where AI mining can land
+::  becomes the AI puzzle's anchor); ASERT is well-defined from the
+::  second AI block onward.
++$  ai-asert
+  $+  ai-asert
+  $~  :*  phase=114.300
+          anchor-height=114.300
+          ::  Sets the AI puzzle's LAUNCH BLOCK INTERVAL, and only that: every
+          ::  post-activation block contributes the same heaviness whichever
+          ::  puzzle produced it, so the anchor carries no fork-choice weight.
+          ::
+          ::  An %ai-pow target prices one MAC-equivalent of matmul, so
+          ::    expected-MAC-equivalents-per-block == 2^256 / anchor
+          ::  and the launch cadence is that over the network's real MAC rate.
+          ::  bex 193 is 2^63 MAC-equivalents per block: ~3.7e16 MAC/s at the
+          ::  250s ideal, about a hundred consumer GPUs at the 200-400 TeraMAC/s
+          ::  a 4090/5090 does in Pearl pools.
+          ::
+          ::  Erring HARD is the safe direction. Too hard costs a slow AI ramp
+          ::  that ASERT heals at one doubling per half-life of ELAPSED time.
+          ::  Too easy mints blocks at the wrong rate, and ASERT only heals that
+          ::  at ideal/half-life doublings per ACCEPTED AI block (~173 blocks
+          ::  each).
+          anchor-target-atom=^~((bex 193))
+          ::  250s ideal ⇒ AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40)
+          ::  to bootstrap the AI Compute Network; paired ZK ideal is 375s.
+          ideal-block-time=250
+          half-life=^~((mul 12 ^~((mul 60 60))))
+          ::  Derived from the first accepted AI block's median timestamp and
+          ::  stored in each branch-local puzzle ASERT state.
+          anchor-min-timestamp=0
+      ==
+  $:  phase=@
+      anchor-height=@
+      anchor-target-atom=@
+      ideal-block-time=@
+      half-life=@
+      anchor-min-timestamp=@
+  ==
+::
 +$  blockchain-constants
   $+  blockchain-constants
-  $~  :*
-          ::  activation heights
+  $~  :*  ::  activation heights
           v1-phase=39.000
           bythos-phase=54.000
           ::  note data field constraints
@@ -273,35 +500,19 @@
           ::  divisor for input fees (inputs cost 1/divisor of outputs)
           input-fee-divisor=4
           *blockchain-constants:v0
-          ::  aserti3-2d difficulty adjustment.
-          ::    .asert-phase: activation height. at or after, target is
-          ::       computed per-block via aserti3-2d instead of epoch retarget.
-          ::    .asert-anchor-height / -target-atom: the fixed anchor (height,
-          ::       target-atom) used as the aserti3-2d reference. anchor-target
-          ::       is 2^291: at constant hashrate H, expected blocks/sec is
-          ::       H*target/max, so to cut block time 600s → 150s (4x more
-          ::       blocks per sec) we increase target by ~4x, which reduces
-          ::       per-block difficulty (max/target) by the same factor.
-          ::       2^291 is the closest power of 2 to 4 * pre-activation
-          ::       mainnet target (~2^291.38); it yields ~3.2x faster blocks
-          ::       (expected ~187s) under the same hashrate, slightly
-          ::       conservative vs the ideal 150s.
-          ::    .asert-anchor-min-timestamp: median-of-11 timestamp at the
-          ::       anchor block (height 65,499). pinned at phase-2 cutover
-          ::       to the value observed when the canonical mainnet block at
-          ::       asert-anchor-height was finalized. replaces phase-1's
-          ::       runtime parent-walk through .blocks / .min-timestamps.
-          ::    .asert-ideal-block-time: post-asert-activation block time in seconds.
-          ::    .asert-half-life: real-time seconds of drift to halve or double.
-          ::    rbits is hardcoded to 16 in lib/asert.hoon (the polynomial
-          ::       coefficients are tied to that precision and cannot be varied
-          ::       per-constants without a hard fork of the polynomial itself).
-          asert-phase=65.500
-          asert-anchor-height=65.499
-          asert-anchor-target-atom=^~((bex 291))
-          asert-ideal-block-time=150
-          asert-half-life=^~((mul 12 ^~((mul 60 60))))
-          asert-anchor-min-timestamp=9.223.372.093.639.027.842
+          ::  ZK ASERT regime 1 (pre-AI-activation, 150s ideal).
+          ::  Defaults (including phase-2 hardcoded anchor-min-timestamp)
+          ::  come from `+$ zk-asert`'s own $~ clause.
+          *zk-asert
+          ::  ZK ASERT regime 2 (post-AI-activation, 375s ideal).
+          ::  Active at and after ai-pow-activation-height.
+          *zk-asert-post-ai
+          ::  AI PoW activation threshold. At/after this height, %ai-pow
+          ::  blocks are verified via the recursive-certificate jet
+          ::  (%ai-pow-verify) and admitted like %pow blocks.
+          ai-pow-activation-height=114.300
+          ::  AI ASERT defaults come from `+$ ai-asert`'s own $~ clause.
+          *ai-asert
       ==
   $:  v1-phase=@
       bythos-phase=@
@@ -309,12 +520,13 @@
       base-fee=@
       input-fee-divisor=@
       blockchain-constants:v0
-      asert-phase=@
-      asert-anchor-height=@
-      asert-anchor-target-atom=@
-      asert-ideal-block-time=@
-      asert-half-life=@
-      asert-anchor-min-timestamp=@
+      =zk-asert
+      =zk-asert-post-ai
+      ::  AI PoW puzzle (cf hoon/apps/dumbnet/lib/types.hoon::pow-variant
+      ::  for the wire side). At/after this height, %ai-pow blocks are
+      ::  verified via the recursive-certificate jet.
+      ai-pow-activation-height=@
+      =ai-asert
   ==
 :: $nname
 ++  nname
@@ -698,26 +910,26 @@
     ==
   ::
   ::  +new-with-fund-share: post-asert-activation 80/20 coinbase-split builder.
-  ::    Splits a block's coinbase between the protocol fund and the
-  ::    miner-side recipients:
+  ::    Splits a block's coinbase between the protocol fund and the miner-side
+  ::    recipients:
   ::      fund        = floor(emission / 5)               :: 20% of subsidy
   ::      miner-pool  = (emission - fund) + fees          :: 80% + all fees
   ::    The miner-pool is distributed across `shares` via the same
   ::    proportional-allocation arm as ++new (per-block atom remainders
   ::    accrue to the first share key in z-map order, preserving the
   ::    legacy single-miner behaviour and supporting up-to-2 partner
-  ::    splits). The fund is added as one additional output.
-  ::    `shares` must NOT include `fund-address`.
+  ::    splits). The fund is added as one additional output keyed by
+  ::    +protocol-fund-address.
+  ::    `shares` must NOT include +protocol-fund-address.
   ::    Fees are computed from the subsidy alone — folding fees into the
   ::    fund slot would be rejected by +check-fund-split.
   ++  new-with-fund-share
     |=  [emission=coins fees=coins =shares]
     ^-  form
-    ?<  (~(has z-by shares) fund-address)
+    ?<  (~(has z-by shares) protocol-fund-address)
     =/  fund-coins=coins   (div emission 5)
     =/  miner-pool=coins   (add fees (sub emission fund-coins))
-    =/  miner-split=form   (new miner-pool shares)
-    (~(put z-by miner-split) fund-address fund-coins)
+    (~(put z-by (new miner-pool shares)) protocol-fund-address fund-coins)
   ::
   ++  hashable
     |=  =form
@@ -2009,14 +2221,14 @@
     |=  [=form lock=hash]
     ^-  ?
     ::  Protocol-fund notes (014-aletheia) committed an unsatisfiable lock:
-    ::  +make-name:coinbase wrapped +fund-address (itself the lock-root of a
+    ::  +make-name:coinbase wrapped +protocol-fund-address (itself the lock-root of a
     ::  3-of-4 multisig) as a single %pkh value, so the literal on-chain lock
     ::  demands a signature from a key whose hash equals a *lock-root* -- which
     ::  no one holds. Every such note shares one first-name (+fund-note-
     ::  firstname); recover spendability by routing it to the true multisig
     ::  check. See /scripts/generate-fund-note-name.hoon.
     ?:  =(lock fund-note-firstname)
-      (check-multisig-lock fund-address form)
+      (check-multisig-lock protocol-fund-address form)
     =/  bythos-ok=?
       ?:  ?=([%full * * *] lmp.witness.form)
         (gte now.form bythos-phase.form)
@@ -2054,7 +2266,7 @@
   ::  (the m-of-n %pkh) to be satisfied by the witness over the spend's
   ::  sig-hash. The merkle proof is deliberately bypassed. Generic over
   ::  `target` so the spend mechanism is testable with non-production keys;
-  ::  production passes +fund-address.
+  ::  production passes +protocol-fund-address.
   ++  check-multisig-lock
     |=  [target=hash =form]
     ^-  ?

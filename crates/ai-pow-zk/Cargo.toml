@@ -1,0 +1,128 @@
+[package]
+name = "ai-pow-zk"
+# Experimental: the public API surface, AIR layout, and proof byte format
+# are all subject to change while the circuit is being designed.
+version = "0.1.0-experimental"
+edition.workspace = true
+description = "EXPERIMENTAL — Plonky3 SNARK circuit for the ai-pow tiling matmul puzzle."
+publish = false
+
+[dependencies]
+# Intentionally **not** a dep of `ai-pow`. The proving crate
+# (`ai-pow`) is the consumer; making `ai-pow-zk` depend back on it would
+# introduce a cycle. The caller in `ai-pow` constructs `ZkParams` and
+# `Witness` from its own types and passes them across the boundary.
+thiserror = { workspace = true }
+hashbrown = "0.15"
+# `ZkProof` is the on-the-wire serialization of `p3_uni_stark::Proof`.
+# Plonky3 proofs already derive serde, so we just need a serializer.
+# Bincode 2 (`features = ["serde"]`) gives a compact binary blob; the
+# wire format stays internal to this crate.
+bincode = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+# `blake3` is used by the M10.1c BLAKE3 chip's KAT tests as the
+# canonical reference (cross-checks our Pearl-port scalar BLAKE3
+# against `blake3::Hasher::new_keyed`). Compile-time only —
+# nothing in the proving path needs an out-of-circuit BLAKE3 now
+# that the composite AIR proves the keyed-hash relation directly.
+blake3 = { workspace = true }
+
+# Plonky3. Pin all direct crates to the same upstream v0.6.2 commit so the
+# recursion fork and the production Layer-0 LogUp prover share one exact
+# dependency graph.
+#
+# Stack choice (see 2026-05-13_DESIGN.md for rationale):
+#   * Goldilocks base field (2^64 − 2^32 + 1) — Plonky3-native, matches
+#     Pearl's choice, friendly for 32-bit ops the BLAKE3 sub-AIR needs.
+#   * BinomialExtensionField<Goldilocks, 2> for FRI challenges (degree 2).
+#   * Tip5 sponge as the FRI compression hash — ZK-friendly, faster than
+#     Poseidon2 on Goldilocks per recent benchmarks.
+#   * `p3-blake3-air` for the BLAKE3 keyed-hash sub-AIR — our protocol
+#     uses BLAKE3 keyed hashes everywhere (kappa, s_a, s_b, pow_key,
+#     matrix commits, jackpot hash); the sub-AIR proves the keyed-hash
+#     transitions inside the circuit so we don't have to re-prove BLAKE3
+#     by hand.
+p3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-batch-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-blake3-air = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-challenger = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-commit = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-dft = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-field = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-fri = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-goldilocks = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-lookup = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-matrix = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-merkle-tree = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-symmetric = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+p3-uni-stark = { git = "https://github.com/Plonky3/Plonky3.git", rev = "11cc5849a1b57a2f520d6edc608b9e516517d841" }
+
+# Tip5 sponge — Plonky3 upstream does NOT ship a `p3-tip5` crate.
+# Nockchain has its own in-repo Tip5 implementation in
+# `crates/nockchain-math/src/tip5/` (16-element state, rate 10,
+# capacity 6, digest 5). Recursive proving uses the 5-round
+# `permute_5round` variant; Nockchain's canonical non-recursive
+# `permute` remains the separate 7-round path.
+nockchain-math = { workspace = true }
+
+# §recursion integration (2026-05-22) — opt-in wiring of the composite
+# proof into Nockchain's pinned Plonky3-recursion fork. Pin the commit, not the
+# branch, so Cargo resolution is reproducible even as the fork branch advances.
+# Off by default — the default `ai-pow-zk` build pulls none of these;
+# `--features recursion` enables them.
+p3-recursion = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "74dd34164af1728fc95f858547e065aa8b9e8563", optional = true }
+p3-circuit = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "74dd34164af1728fc95f858547e065aa8b9e8563", optional = true }
+p3-circuit-prover = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "74dd34164af1728fc95f858547e065aa8b9e8563", optional = true }
+p3-tip5-circuit-air = { git = "https://github.com/nockchain/Plonky3-recursion.git", rev = "74dd34164af1728fc95f858547e065aa8b9e8563", optional = true }
+postcard = { version = "1.1.3", features = ["alloc"], optional = true }
+
+[features]
+# Rayon-parallel prover (Plonky3 README §"Benchmarks"/"CPU
+# features"). Forwards to the p3 `parallel` features (DFT +
+# uni/batch STARK → `p3-maybe-rayon/parallel`). Data-parallel with
+# deterministic, index-ordered reduction ⇒ proofs are
+# **bit-identical** to a serial build — byte-equivalence /
+# soundness / the Fiat-Shamir transcript are unaffected, so
+# enabling it by **default** does NOT change consensus behaviour
+# (only the number of threads). Empirically ≈9× on prover-bound
+# tests. Disable with `--no-default-features` for an apples-to-
+# apples serial comparison if ever needed.
+#
+# The other big lever is a rustc flag (cannot be a Cargo feature):
+#   RUSTFLAGS="-Ctarget-cpu=native"            # AVX/NEON hot paths
+#   RUSTFLAGS="-Ctarget-cpu=native -C debug-assertions=on"  # +per-row check
+# Plonky3's field/Tip5/DFT paths need AVX/NEON, which rustc does
+# not emit by default.
+default = ["parallel"]
+# Exposes unpinned/no-LogUp Layer-0 helpers for local experiments and legacy
+# regression tests. This feature must not be enabled by consensus/block-wire
+# consumers; the canonical production proof is the recursive certificate plus
+# verifier-derived statement precheck.
+dev-unsafe = []
+# Compiles the standalone checkpoint recursive-certificate VERIFIER
+# (`recursion::verify_recursive_certificate`) for cross-crate regression/benchmark
+# tests. It is NOT a production path — consensus uses the compact verifier — so it
+# is excluded from release builds. Enable only in `[dev-dependencies]`.
+test-support = []
+parallel = [
+    "p3-dft/parallel",
+    "p3-uni-stark/parallel",
+    "p3-batch-stark/parallel",
+]
+# §recursion integration — opt-in. Pulls the pinned Plonky3-recursion
+# fork so the composite proof can be recursively verified
+# (`crate::recursion`). See the dep block above.
+recursion = [
+    "dep:p3-recursion",
+    "dep:p3-circuit",
+    "dep:p3-circuit-prover",
+    "dep:p3-tip5-circuit-air",
+    "dep:postcard",
+]
+
+[dev-dependencies]
+proptest = { workspace = true }
+postcard = { version = "1.1.3", features = ["alloc"] }
+
+[lints]
+workspace = true

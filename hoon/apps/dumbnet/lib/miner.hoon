@@ -3,12 +3,13 @@
 /=  dumb-transact  /common/tx-engine
 /=  dumb-consensus  /apps/dumbnet/lib/consensus
 /=  asert  /apps/dumbnet/lib/asert
+/=  dcon  /apps/dumbnet/lib/consensus
 /=  *  /common/h-zoon
 ::
 :: everything to do with mining and mining state
 ::
 ~%  %dumb-miner  ..ut  ~
-|_  [m=mining-state:dk =blockchain-constants:dumb-transact]
+|_  [m=mining-state:dk d=derived-state:dk =blockchain-constants:dumb-transact]
 +*  t  ~(. dumb-transact blockchain-constants)
 +|  %admin
 ::  +set-mining: set .mining
@@ -34,15 +35,17 @@
     ~|('invalid shares' !!)
   m(shares s)
 ::
-::  Mining requires at least one configured recipient across both reward eras.
+::  Mining requires a recipient in either reward era.
 ++  no-keys-set  ?&(=(*shares:v0:t v0-shares.m) =(*shares:t shares.m))
 ::
 +|  %candidate-block
 ++  set-pow
   ~/  %set-pow
-  |=  prf=proof:sp
+  |=  prf=pow-artifact:t
   ^-  mining-state:dk
-  ?^  -.candidate-block.m  m(pow.candidate-block (some prf))
+  ?^  -.candidate-block.m
+    =/  old-prf=proof:sp  (need ((soft proof:sp) prf))
+    m(pow.candidate-block (some old-prf))
   m(pow.candidate-block (some prf))
 ::
 ++  set-digest
@@ -72,7 +75,7 @@
     ::  one of those transactions has spent an input on the heaviest chain it
     ::  cannot enter our candidate; reject it with the cheap balance-membership
     ::  test instead of repeatedly running the full transaction accumulator.
-    ?.  (~(inputs-in-heaviest-balance dumb-consensus c blockchain-constants) raw)
+    ?.  (~(inputs-in-heaviest-balance dumb-consensus c d blockchain-constants) raw)
       txs
     (~(put h-by txs) [tx-id raw])
   ::
@@ -299,9 +302,17 @@
   =/  parent=page:t  (to-page:local-page:t parent-local)
   ::  determine the target the candidate (child of .parent) must have.
   =/  candidate-height=@  +(~(height get:page:t parent))
+  ::  The shared candidate is ZK-targeted. The kernel derives and emits the
+  ::  corresponding AI-targeted variant after AI activation. Before ASERT,
+  ::  target selection falls through to the epoch-stored target.
   =/  candidate-target=bignum:bignum:t
     ?:  (post-asert-activation:t candidate-height)
-      (~(compute-target-asert dumb-consensus c blockchain-constants) %zk candidate-height u.heaviest-block.c)
+      ::  ZK target selection uses the 150s pre-AI regime or the branch-local
+      ::  375s post-AI regime according to candidate height.
+      ::
+      ::  The immediate parent's branch-local state carries the latest ZK head
+      ::  and count, so long AI-only gaps remain O(1) and cannot influence ZK.
+      (~(compute-target-zk-asert dcon c d blockchain-constants) candidate-height u.heaviest-block.c)
     (~(got h-by targets.c) u.heaviest-block.c)
   =.  candidate-block.m
     ?^  -.parent
@@ -310,9 +321,9 @@
       ::    otherwise use v1 new-candidate with v1 shares
       ?:  (lth +(height.parent) v1-phase.blockchain-constants)
         (new-candidate:v0:page:t parent now candidate-target v0-shares.m)
-      (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+      (new-candidate:page:t parent now candidate-target shares.m phase.zk-asert.blockchain-constants)
     ::  v1 parent - use v1 new-candidate with v1 shares
-    (new-candidate:page:t parent now candidate-target shares.m asert-phase.blockchain-constants)
+    (new-candidate:page:t parent now candidate-target shares.m phase.zk-asert.blockchain-constants)
   =.  candidate-acc.m
     %+  new:tx-acc:t
       (~(get h-by balance.c) u.heaviest-block.c)

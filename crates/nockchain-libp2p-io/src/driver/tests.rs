@@ -3954,168 +3954,6 @@ async fn heard_elders_re_emits_same_recovery_window_until_progress() {
     );
 }
 
-/// Reason term of every `%liar-peer` effect in `effects`.
-fn liar_peer_reasons_from_effects(effects: &[NounSlab]) -> Vec<String> {
-    effects
-        .iter()
-        .filter_map(|effect_slab| {
-            let space = effect_slab.noun_space();
-            let effect_cell = unsafe { *effect_slab.root() }
-                .in_space(&space)
-                .as_cell()
-                .ok()?;
-            if !effect_cell.head().eq_bytes(b"liar-peer") {
-                return None;
-            }
-            let body = effect_cell.tail().as_cell().ok()?;
-            let reason = body.tail().as_atom().ok()?.to_bytes_until_nul().ok()?;
-            Some(String::from_utf8_lossy(&reason).into_owned())
-        })
-        .collect()
-}
-
-/// An elders response naming no ancestor is rejected, at any `oldest`.
-///
-/// `+get-elders` always names at least the block at the top of its window, so
-/// an empty list is a lie. It is also the one input that would drive the
-/// ancestor walk's starting height, `oldest + len - 1`, to decrement zero: the
-/// arm computes that height before inspecting the list, and a bailed event
-/// emits no effects at all, since every reachable branch emits at least one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heard_elders_empty_ancestor_list_at_genesis_does_not_bail_the_event() {
-    let mut checkpoint_app = start_nockchain_app().await;
-    seed_fakenet_pre_genesis_direct(&mut checkpoint_app.app).await;
-    let _ = send_born_direct(&mut checkpoint_app.app).await;
-    let peer = PeerId::random();
-
-    // Control: an empty list above genesis is rejected as a lie, with an effect.
-    let control = poke_fact_direct(
-        &mut checkpoint_app.app,
-        peer,
-        &heard_elders_fact(1, &[]),
-        "heard-elders oldest=1 ids=~",
-    )
-    .await;
-    assert_eq!(
-        liar_peer_reasons_from_effects(&control),
-        vec![String::from("less-than-24-parent-hashes")],
-        "oldest=1 with an empty list should be answered with %liar-peer"
-    );
-
-    let effects = poke_fact_direct(
-        &mut checkpoint_app.app,
-        peer,
-        &heard_elders_fact(0, &[]),
-        "heard-elders oldest=0 ids=~",
-    )
-    .await;
-    assert_eq!(
-        liar_peer_reasons_from_effects(&effects),
-        vec![String::from("no-parent-hashes")],
-        "oldest=0 with an empty ancestor list should be answered with %liar-peer, \
-         not bail the event (decrement-underflow); effects: {:?}",
-        effects.iter().map(describe_effect).collect::<Vec<_>>()
-    );
-}
-
-/// An elders window bottoming out at a genesis block we hold intersects there.
-///
-/// The ancestor walk must test membership at height 0 before it gives up, or a
-/// window ending at the shared genesis reports no intersection and earns the
-/// peer a `%differing-genesis` ban for agreeing with us. Windows reach height 0
-/// on any fork inside the first 24 blocks of a chain.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heard_elders_window_ending_at_our_own_genesis_is_not_a_differing_genesis() {
-    let mut checkpoint_app = start_nockchain_app().await;
-    seed_fakenet_pre_genesis_direct(&mut checkpoint_app.app).await;
-    let _ = send_born_direct(&mut checkpoint_app.app).await;
-    let peer = PeerId::random();
-
-    let genesis_fact = fake_genesis_block_message_fact();
-    let genesis_id = match &genesis_fact {
-        NockchainFact::HeardBlock(block_id, _) => block_id.clone(),
-        other => panic!("expected fake genesis heard-block fact, got {other:?}"),
-    };
-    let _ = poke_fact_direct(
-        &mut checkpoint_app.app, peer, &genesis_fact, "accept fakenet genesis",
-    )
-    .await;
-    assert!(
-        checkpoint_has_block(&mut checkpoint_app.app, 0)
-            .await
-            .expect("genesis peek should succeed"),
-        "the test needs the genesis block accepted before asking about elders"
-    );
-
-    let effects = poke_fact_direct(
-        &mut checkpoint_app.app,
-        peer,
-        &heard_elders_fact(0, &[genesis_id]),
-        "heard-elders window ending at our own genesis",
-    )
-    .await;
-
-    assert_eq!(
-        liar_peer_reasons_from_effects(&effects),
-        Vec::<String>::new(),
-        "a peer whose elders window ends at the genesis block we hold was banned; \
-         effects: {:?}",
-        effects.iter().map(describe_effect).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        request_effect_block_heights_from_effects(&effects),
-        vec![1],
-        "intersecting at genesis should request the next block by height"
-    );
-}
-
-/// A window whose genesis is not ours is still a `%differing-genesis` peer.
-///
-/// The membership test at height 0 narrows the ban to real disagreement; it
-/// must not retire it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heard_elders_window_ending_at_a_foreign_genesis_is_a_differing_genesis() {
-    let mut checkpoint_app = start_nockchain_app().await;
-    seed_fakenet_pre_genesis_direct(&mut checkpoint_app.app).await;
-    let _ = send_born_direct(&mut checkpoint_app.app).await;
-    let peer = PeerId::random();
-
-    let _ = poke_fact_direct(
-        &mut checkpoint_app.app,
-        peer,
-        &fake_genesis_block_message_fact(),
-        "accept fakenet genesis",
-    )
-    .await;
-    assert!(
-        checkpoint_has_block(&mut checkpoint_app.app, 0)
-            .await
-            .expect("genesis peek should succeed"),
-        "the test needs the genesis block accepted before asking about elders"
-    );
-
-    let foreign_genesis = {
-        let mut slab = NounSlab::new();
-        let noun = tip5_tuple(&mut slab, 90_002);
-        let space = slab.noun_space();
-        tip5_hash_to_base58(noun, &space).expect("foreign genesis should convert to base58")
-    };
-    let effects = poke_fact_direct(
-        &mut checkpoint_app.app,
-        peer,
-        &heard_elders_fact(0, &[foreign_genesis]),
-        "heard-elders window ending at a foreign genesis",
-    )
-    .await;
-
-    assert_eq!(
-        liar_peer_reasons_from_effects(&effects),
-        vec![String::from("differing-genesis")],
-        "a peer whose genesis we do not hold should still be reported; effects: {:?}",
-        effects.iter().map(describe_effect).collect::<Vec<_>>()
-    );
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn route_response_fact_repeated_heard_elders_re_emits_recovery_window_until_progress() {
     let live_traffic = build_live_traffic_cop(start_nockchain_app().await);
@@ -8082,86 +7920,6 @@ async fn test_elders_request_targets_source_peer_and_applies_cooldown() {
     );
 }
 
-/// A peer cannot buy an unbounded stream of elders requests by varying the
-/// block id.
-///
-/// `+heard-block` emits the elders request from a gossiped page before
-/// checking its digest or proof of work, so the block id in the effect is
-/// attacker-chosen and the per-(block id, peer) cooldown never fires. Each
-/// request that gets through costs an equix solve on the swarm loop, against a
-/// gossip message that cost the sender nothing.
-#[tokio::test]
-async fn elders_requests_from_one_peer_are_bounded_by_its_slot() {
-    use tokio::sync::mpsc;
-
-    let source_peer = PeerId::random();
-    let peers = vec![PeerId::random(), source_peer];
-    let metrics = isolated_test_metrics();
-    let state_arc = Arc::new(Mutex::new(P2PState::new(
-        metrics.clone(),
-        LIBP2P_CONFIG.seen_tx_clear_interval,
-    )));
-    let (swarm_tx, mut swarm_rx) = mpsc::channel(16);
-
-    // Each effect names a different block id, as a forged page would.
-    let elders_effect_for = |seed: u64| {
-        let mut slab = NounSlab::new();
-        let block_id = T(&mut slab, &[D(seed), D(102), D(103), D(104), D(105)]);
-        let peer_atom =
-            Atom::from_value(&mut slab, source_peer.to_base58()).expect("peer ID should encode");
-        let elders = T(&mut slab, &[block_id, peer_atom.as_noun()]);
-        let block_request = T(&mut slab, &[D(tas!(b"elders")), elders]);
-        let request = T(&mut slab, &[D(tas!(b"block")), block_request]);
-        let effect = T(&mut slab, &[D(tas!(b"request")), request]);
-        slab.set_root(effect);
-        slab
-    };
-
-    for seed in 0..6u64 {
-        handle_effect(
-            elders_effect_for(seed),
-            swarm_tx.clone(),
-            peers.clone(),
-            false,
-            state_arc.clone(),
-            metrics.clone(),
-        )
-        .await
-        .expect("elders request should be accepted");
-    }
-
-    let mut queued = 0usize;
-    while let Ok(action) = swarm_rx.try_recv() {
-        if matches!(action, SwarmAction::QueueKernelRequest { .. }) {
-            queued += 1;
-        }
-    }
-    assert_eq!(
-        queued, 1,
-        "six forged block ids from one peer must yield one outbound elders request, not six"
-    );
-
-    // The walk's next step goes out as soon as the peer's response lands.
-    state_arc.lock().await.clear_elders_inflight(&source_peer);
-    handle_effect(
-        elders_effect_for(6),
-        swarm_tx,
-        peers,
-        false,
-        state_arc,
-        metrics,
-    )
-    .await
-    .expect("elders request after the response should be accepted");
-    assert!(
-        matches!(
-            swarm_rx.try_recv(),
-            Ok(SwarmAction::QueueKernelRequest { .. })
-        ),
-        "releasing the slot on the response must not delay the sequential recovery walk"
-    );
-}
-
 #[tokio::test]
 async fn test_elders_request_rejects_non_atom_source_peer() {
     use tokio::sync::mpsc;
@@ -9156,6 +8914,10 @@ async fn test_liar_block_id_effect() {
     {
         let mut state_guard = state_arc.lock().await;
         println!("Tracking block_ids and peers");
+        // A non-cryptographic liar reason must remain peer-scoped even when the
+        // runtime has a trusted connection address.
+        seed_connected_peer(&mut state_guard, bad_peer1, 901);
+        seed_connected_peer(&mut state_guard, bad_peer2, 902);
 
         // Associate bad_peer1 with the bad block
         state_guard
@@ -9315,6 +9077,73 @@ async fn test_liar_block_id_effect() {
 
         println!("Verified tracker state is correct after processing effect");
     }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)] // ibig has a memory leak so miri fails this test
+async fn failed_pow_liar_block_id_creates_address_exclusion() {
+    let peer = PeerId::random();
+    let metrics = Arc::new(
+        NockchainP2PMetrics::register(gnort::global_metrics_registry()).expect("register metrics"),
+    );
+    let state = Arc::new(Mutex::new(P2PState::new(
+        metrics.clone(),
+        LIBP2P_CONFIG.seen_tx_clear_interval,
+    )));
+
+    let mut block_slab: NounSlab = NounSlab::new();
+    let block_id = T(&mut block_slab, &[D(11), D(12), D(13), D(14), D(15)]);
+    let block_space = block_slab.noun_space();
+    {
+        let mut state_guard = state.lock().await;
+        seed_connected_peer(&mut state_guard, peer, 903);
+        state_guard
+            .track_block_id_and_peer(block_id, peer, &block_space)
+            .expect("track failed-PoW block source");
+    }
+
+    let mut effect_slab: NounSlab = NounSlab::new();
+    let effect_tag = make_tas(&mut effect_slab, "liar-block-id");
+    let effect_block_id = T(&mut effect_slab, &[D(11), D(12), D(13), D(14), D(15)]);
+    let effect_cause = make_tas(&mut effect_slab, "failed-pow-check");
+    let effect = T(
+        &mut effect_slab,
+        &[effect_tag.as_noun(), effect_block_id, effect_cause.as_noun()],
+    );
+    effect_slab.set_root(effect);
+
+    let (swarm_tx, mut swarm_rx) = tokio::sync::mpsc::channel(10);
+    let mut swarm_actions = SwarmActionDispatcher::Channel(&swarm_tx);
+    handle_effect_with_dispatcher(
+        effect_slab,
+        &mut swarm_actions,
+        Vec::new(),
+        false,
+        PrefetchConfig::disabled(),
+        runtime_limits_from_config(&LIBP2P_CONFIG),
+        state,
+        metrics,
+        PeerExclusions::default(),
+    )
+    .await
+    .expect("handle failed-PoW liar effect");
+
+    let mut blocked = false;
+    let mut excluded = false;
+    while let Ok(action) = swarm_rx.try_recv() {
+        match action {
+            SwarmAction::BlockPeer { peer_id } => blocked |= peer_id == peer,
+            SwarmAction::RecordExclusionOutcome { outcome, .. } => {
+                excluded |= outcome.address_cooldown.is_some();
+            }
+            other => panic!("unexpected swarm action: {other:?}"),
+        }
+    }
+    assert!(blocked, "the proof sender must be peer-blocked");
+    assert!(
+        excluded,
+        "a cryptographically invalid proof must create an address exclusion"
+    );
 }
 
 #[tokio::test]

@@ -1,8 +1,8 @@
 /=  *  /common/tx-engine
 /=  zo  /common/zoon
-::  Computes the +fund-address constant for 014-aletheia: the lock-root
+::  Computes the +protocol-fund-address constant for 014-aletheia: the lock-root
 ::  of a 3-of-4 multisig over the four pkhs in /asert-protocol-lock-fund.txt.
-::  The result is a literal hash to be pasted into +fund-address in
+::  The result is a literal hash to be pasted into +protocol-fund-address in
 ::  /common/tx-engine-1.hoon, alongside a link back to this script.
 ::  Spending the protocol fund post-activation requires three of four
 ::  signatures from the participants below.
@@ -12,7 +12,7 @@
 ::      <path-to-this-script> <path-to-hoon-search-root>
 ::
 ::  The trace prints both the 5-tuple atom representation and the
-::  base58 encoding of the resulting fund-address.
+::  base58 encoding of the resulting protocol-fund-address.
 =/  pkhs=(list hash)
   :~  (from-b58:hash '7pGXggKU1AWk3d3wqX2kpKUatTqT68Cv8SQfGzGRQvJvYnQBvagSSjT')
       (from-b58:hash '8Mc1U7kdujhPoEwog1BfNsFDtRp8St8UQCHk84iaLdhP4cX9a2CT1MU')
@@ -25,9 +25,9 @@
 ::  enumerate the four 3-pkh combinations as separate spend-conditions.
 =/  multi-lock=lock
   [%pkh [m=3 participant-set]]~
-=/  fund-address=hash  (hash:lock multi-lock)
-=/  fund-address-b58=@t  (to-b58:hash fund-address)
-~&  fund-address+fund-address
-~&  fund-address-b58+fund-address-b58
-~&  fund-address-back-to-hash+(from-b58:hash fund-address-b58)
-fund-address
+=/  protocol-fund-address=hash  (hash:lock multi-lock)
+=/  protocol-fund-address-b58=@t  (to-b58:hash protocol-fund-address)
+~&  protocol-fund-address+protocol-fund-address
+~&  protocol-fund-address-b58+protocol-fund-address-b58
+~&  protocol-fund-address-back-to-hash+(from-b58:hash protocol-fund-address-b58)
+protocol-fund-address

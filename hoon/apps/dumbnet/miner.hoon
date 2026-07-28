@@ -6,6 +6,9 @@
 =<  ((moat |) inner)  :: wrapped kernel
 =>
   |%
+  ::  Outer envelope of a successful mine: `[%command %pow %dumb-zkpow ...]`.
+  ::  The `%dumb-zkpow` tag selects this variant of the consensus-kernel's
+  ::  `pow-variant` tagged union (see hoon/apps/dumbnet/lib/types.hoon).
   +$  mine-success
     $:  %command
         %pow

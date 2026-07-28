@@ -231,10 +231,16 @@
 ++  format-page
   |=  [title=@t page=page:t]
   ^-  tape
-  =/  pow=(unit proof:t)  ~(pow get:page:t page)
+  ::  page.pow is a generic persisted noun (`pow-artifact`, `*`) so page
+  ::  consumers don't force the recursive AI proof mold. Recover the version
+  ::  discriminator the same way consensus does (+pow-artifact-to-proof-version):
+  ::  an `[%ai-pow ...]` artifact is v3; otherwise soft-cast to a `proof` and
+  ::  read its version tag.
+  =/  pow  ~(pow get:page:t page)
   =/  proof-version=(unit @ud)
     ?~  pow  ~
-    `-.u.pow
+    ?:  ?=([%ai-pow *] u.pow)  `3
+    `version:(need ((soft proof:t) u.pow))
   =/  height=@ud  ~(height get:page:t page)
   =/  digest=block-id:t  ~(digest get:page:t page)
   =/  parent=block-id:t  ~(parent get:page:t page)

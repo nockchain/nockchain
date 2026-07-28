@@ -1184,6 +1184,9 @@ async fn record_local_peer_abuse_with_dispatcher(
     let resolved_address = match (address, connection_id) {
         (Some(address), _) => Some(address),
         (None, Some(connection_id)) => driver_state.lock().await.connection_address(connection_id),
+        (None, None) if severity == LocalPeerAbuseSeverity::Strong => {
+            driver_state.lock().await.peer_first_address(&peer_id)
+        }
         (None, None) => None,
     };
 
@@ -1285,7 +1288,6 @@ async fn handle_effect_with_dispatcher(
             let mut requested_block_height = None;
             let mut raw_tx_reopen_id = None;
             let mut elders_cooldown_key = None;
-            let mut elders_target_peer = None;
             let mut request_desc: String;
 
             let target_peers = {
@@ -1319,7 +1321,6 @@ async fn handle_effect_with_dispatcher(
                                 ) {
                                     elders_cooldown_key =
                                         Some(format!("{block_id}:{}", peer_id.to_base58()));
-                                    elders_target_peer = Some(peer_id);
                                 }
                                 vec![peer_id]
                             }
@@ -1369,25 +1370,17 @@ async fn handle_effect_with_dispatcher(
             };
 
             if let Some(cooldown_key) = elders_cooldown_key.as_deref() {
-                let Some(elders_peer) = elders_target_peer else {
-                    debug!(cooldown_key, "Dropping elders request with no target peer");
-                    return Ok(());
-                };
                 let mut state_guard = driver_state.lock().await;
                 if !state_guard.should_send_elders_request(
-                    elders_peer,
                     cooldown_key,
                     std::time::Instant::now(),
                     crate::p2p_state::ELDERS_REQUEST_COOLDOWN,
-                    crate::p2p_state::ELDERS_INFLIGHT_TTL,
                 ) {
                     drop(state_guard);
                     debug!(
                         cooldown_key,
-                        peer = %elders_peer,
-                        "Suppressing elders request: duplicate, or the peer's slot is in use"
+                        "Suppressing duplicate elders request inside cooldown window"
                     );
-                    metrics.elders_requests_suppressed.increment();
                     return Ok(());
                 }
             }
@@ -1695,7 +1688,7 @@ async fn handle_effect_with_dispatcher(
             .await?;
         }
         EffectType::LiarBlockId => {
-            let block_id_str = {
+            let (block_id_str, failed_pow_check) = {
                 let space = noun_slab.noun_space();
                 let effect_cell = unsafe { *noun_slab.root() }.in_space(&space).as_cell()?;
                 let liar_block_cell = effect_cell.tail().as_cell().map_err(|_| {
@@ -1704,7 +1697,10 @@ async fn handle_effect_with_dispatcher(
                     ))
                 })?;
                 let block_id = liar_block_cell.head().noun();
-                tip5_hash_to_base58_stack(&mut noun_slab, block_id, &space)?
+                (
+                    tip5_hash_to_base58_stack(&mut noun_slab, block_id, &space)?,
+                    liar_block_cell.tail().eq_bytes(b"failed-pow-check"),
+                )
             };
 
             // Narrow the driver_state guard to just the state mutation.
@@ -1727,9 +1723,23 @@ async fn handle_effect_with_dispatcher(
                         "Invalidated deferred buffer entry on liar-block-id"
                     );
                 }
-                state_guard.process_bad_block_id_str(&block_id_str)
+                let peers = state_guard.process_bad_block_id_str(&block_id_str);
+                if failed_pow_check {
+                    state_guard.record_rejected_pow_block(&block_id_str);
+                }
+                peers
             };
 
+            // A failed proof is objective cryptographic misbehavior. Apply the
+            // address/IP escalation path so peer-ID rotation cannot buy another
+            // expensive verification from the same endpoint. Other liar causes
+            // remain peer-scoped because honest protocol-version skew can produce
+            // them around an upgrade boundary.
+            let severity = if failed_pow_check {
+                LocalPeerAbuseSeverity::Strong
+            } else {
+                LocalPeerAbuseSeverity::Weak
+            };
             // Ban each peer that sent this block
             for peer_id in peers_to_ban {
                 record_local_peer_abuse_with_dispatcher(
@@ -1741,7 +1751,7 @@ async fn handle_effect_with_dispatcher(
                     None,
                     None,
                     LocalPeerAbuseKind::LiarBlockId,
-                    LocalPeerAbuseSeverity::Weak,
+                    severity,
                     true,
                 )
                 .await?;

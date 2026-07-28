@@ -1,0 +1,46 @@
+[package]
+name = "ai-pow"
+version = "0.1.0"
+edition.workspace = true
+description = "Pearl-style INT8 matrix-multiplication proof-of-useful-work puzzle for Nockchain."
+publish = false
+
+[dependencies]
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+rayon = { workspace = true, optional = true }
+# Optional Plonky3 STARK/recursion integration. Disabled by default so the
+# core mining path stays lean; enable `zk` for recursive AI-PoW certificate
+# construction. The plain `MatmulProof` remains a prover-internal diagnostic,
+# not the canonical block artifact.
+ai-pow-zk = { path = "../ai-pow-zk", optional = true }
+bincode = { workspace = true, features = ["serde"], optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }
+# Difficulty-representation KATs check the 256-bit algebra (Θ = T·F, expected
+# work = 2^256/T) against arbitrary-precision arithmetic rather than against a
+# second hand-rolled copy of the same limb code.
+num-bigint = { workspace = true }
+ai-pow = { path = ".", features = ["diagnostics"] }
+ai-pow-zk = { path = "../ai-pow-zk", features = ["dev-unsafe", "test-support"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-tracy = { workspace = true }
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+# Compiles the plain-proof verifier for tests and local diagnostic tools.
+# Block acceptance never uses it; see ai_pow::verifier's module docs.
+diagnostics = []
+zk = ["dep:ai-pow-zk", "dep:bincode", "ai-pow-zk/recursion"]
+
+[[bench]]
+name = "bench"
+harness = false
+
+[lints]
+workspace = true

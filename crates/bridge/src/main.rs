@@ -583,8 +583,7 @@ fn resolve_effective_blockchain_constants(
         }
         Some(kernel_blockchain_constants) => {
             validate_blockchain_constants_match(
-                &kernel_blockchain_constants,
-                &connected_blockchain_constants,
+                &kernel_blockchain_constants, &connected_blockchain_constants,
             )?;
             Ok((
                 kernel_blockchain_constants,
@@ -790,8 +789,7 @@ async fn main() -> Result<(), BridgeError> {
         bootstrap_blockchain_constants(config_toml.grpc_address()).await?;
     let existing_kernel_blockchain_constants = peek_kernel_blockchain_constants(&mut app).await?;
     let (effective_blockchain_constants, boot_action) = resolve_effective_blockchain_constants(
-        existing_kernel_blockchain_constants,
-        connected_blockchain_constants,
+        existing_kernel_blockchain_constants, connected_blockchain_constants,
         cli.migrate_blockchain_constants,
     )?;
     match boot_action {
@@ -804,11 +802,13 @@ async fn main() -> Result<(), BridgeError> {
         }
         KernelBlockchainConstantsBootAction::MigrateKernel => {
             set_kernel_blockchain_constants(&mut app, &effective_blockchain_constants).await?;
-            let persisted = peek_kernel_blockchain_constants(&mut app).await?.ok_or_else(|| {
-                BridgeError::Runtime(
-                    "bridge kernel did not persist migrated blockchain constants".to_owned(),
-                )
-            })?;
+            let persisted = peek_kernel_blockchain_constants(&mut app)
+                .await?
+                .ok_or_else(|| {
+                    BridgeError::Runtime(
+                        "bridge kernel did not persist migrated blockchain constants".to_owned(),
+                    )
+                })?;
             if persisted != effective_blockchain_constants {
                 return Err(BridgeError::Runtime(
                     "bridge kernel did not persist migrated blockchain constants".to_owned(),

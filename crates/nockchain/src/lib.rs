@@ -232,6 +232,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
     welcome();
 
     cli.validate()?;
+    let effective_fakenet_ai_activation_height = cli.effective_fakenet_ai_activation_height()?;
+    let fakenet_ai_asert_override = cli.fakenet_ai_asert.clone().into_config()?;
 
     let nockapp_cli = cli.nockapp_cli.clone();
 
@@ -431,11 +433,75 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
+        let ai_asert_override = fakenet_ai_asert_override;
+        if let Some(ai_activation) = effective_fakenet_ai_activation_height {
+            // AI admission, the AI ASERT anchor, and the post-AI ZK regime share
+            // one activation boundary. ZK anchors at phase - 1; AI anchors at
+            // phase. Their target and timing parameters remain puzzle-specific.
+            fakenet_constants = fakenet_constants.with_ai_pow_activation_height(ai_activation);
+            let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
+            zk_post.phase = ai_activation;
+            zk_post.anchor_height = ai_activation - 1;
+            fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
+            let mut ai_asert = fakenet_constants.ai_asert.clone();
+            ai_asert.phase = ai_activation;
+            ai_asert.anchor_height = ai_activation;
+            fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
+        }
         if let Some(asert) = cli.fakenet_asert.into_config()? {
-            fakenet_constants = fakenet_constants
-                .with_asert_phase(asert.phase)
-                .with_asert_anchor_height(asert.anchor_height)
-                .with_asert_anchor_target_bex(asert.anchor_target_bex);
+            // ZK-puzzle ASERT overrides (--fakenet-asert-* / --fakenet-zk-asert-*).
+            let mut zk_asert = fakenet_constants.zk_asert.clone();
+            zk_asert.phase = asert.phase;
+            zk_asert.anchor_height = asert.anchor_height;
+            zk_asert.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                zk_asert.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                zk_asert.half_life = half_life;
+            }
+            fakenet_constants = fakenet_constants.with_zk_asert(zk_asert);
+
+            // Fakenet ergonomics: the ZK flags also drive the post-AI-activation
+            // regime (zk_asert_post_ai), which is the regime actually in force once
+            // AI is active from a low height. Copy the same anchor target / ideal /
+            // half-life so there is ONE ZK difficulty knob across the regime switch,
+            // and pin anchor_min_timestamp to a non-zero sentinel so the regime-2
+            // target reads its hardcoded anchor instead of the (empty) cache — which
+            // otherwise crashes the first ZK candidate a dual-miner run builds. With
+            // a large half-life the sentinel timestamp is absorbed, giving a stable
+            // (~constant) normalized fakenet difficulty; the phase/anchor-height stay
+            // as --fakenet-ai-pow-activation-height set them.
+            let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
+            zk_post.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                zk_post.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                zk_post.half_life = half_life;
+            }
+            if zk_post.anchor_min_timestamp == 0 {
+                zk_post.anchor_min_timestamp = 1;
+            }
+            fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
+        }
+        if let Some(asert) = ai_asert_override {
+            // The effective activation logic guarantees this phase matches AI
+            // admission and the post-AI ZK regime.
+            let mut ai_asert = fakenet_constants.ai_asert.clone();
+            ai_asert.phase = asert.phase;
+            ai_asert.anchor_height = asert.anchor_height;
+            ai_asert.anchor_target_atom =
+                ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
+            if let Some(ideal) = asert.ideal_block_time {
+                ai_asert.ideal_block_time = ideal;
+            }
+            if let Some(half_life) = asert.half_life {
+                ai_asert.half_life = half_life;
+            }
+            fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
         }
         if let Some(interval_secs) = cli.fakenet_update_candidate_interval_secs {
             fakenet_constants =

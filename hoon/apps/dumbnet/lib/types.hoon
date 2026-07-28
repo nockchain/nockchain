@@ -19,7 +19,26 @@
       kernel-state-8
       kernel-state-9
       kernel-state-10
+      kernel-state-11
   ==
+::
+::  ASERT anchor state stored with a puzzle's branch-local lineage.
++$  cached-asert-anchor  [min-ts=@ target-atom=@]
+::
+::  Branch-local per-puzzle ASERT state. Every post-activation block stores one
+::  entry derived only from its parent entry and its own verified puzzle type.
+::  Counts are post-activation blocks of each puzzle. Heads point to the latest
+::  block of each puzzle on this ancestry. Anchors are branch-local so block
+::  arrival order and side chains cannot affect target computation.
++$  puzzle-asert-state
+  $:  zk-count=@
+      ai-count=@
+      zk-head=(unit block-id:dt)
+      ai-head=(unit block-id:dt)
+      zk-anchor=cached-asert-anchor
+      ai-anchor=(unit cached-asert-anchor)
+  ==
+::
 ::
 +$  kernel-state-0
   $:  %0
@@ -178,7 +197,18 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-10
+::  kernel-state-11 records all AI-PoW consensus metadata atomically.
++$  kernel-state-11
+  $:  %11
+      c=consensus-state-11
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-11
+      constants=blockchain-constants:v1:dt
+  ==
+:::
++$  kernel-state  kernel-state-11
 ::
 +$  consensus-state-0
   $+  consensus-state-0
@@ -412,7 +442,44 @@
   ==
 
 ::
-+$  consensus-state  consensus-state-10
+::
+::  consensus-state-11 records proof versions for blocks whose puzzle type is
+::  not derivable from height alone.
++$  consensus-state-11
+  $+  consensus-state-11
+  ::
+  ::  indexes and not-fully-validated state
+  $:
+    $:
+    :: keys in raw-txs must be in EXACTLY ONE OF blocks-needed-by or excluded-txs
+        blocks-needed-by=(h-jug tx-id:dt block-id:dt) :: dependencies
+        excluded-txs=(h-set tx-id:dt) :: transactions unneeded by any block
+    ::
+    ::  every tx-id in spent-by must be in raw-txs and vice-versa
+        spent-by=(h-jug nname:dt tx-id:dt)
+    ::
+        pending-blocks=(h-map block-id:dt [=page:dt heard-at=@])  :: pending blocks
+    ==
+  ::
+  ::  core consensus state
+    $:  balance=(h-mip block-id:dt nname:dt nnote:dt)
+        txs=(h-mip block-id:dt tx-id:dt tx:dt) ::  fully validated transactions
+      ::
+        raw-txs=(h-map tx-id:dt [=raw-tx:dt heard-at=@]) :: raw transactions
+      ::
+        blocks=(h-map block-id:dt local-page:dt)
+        heaviest-block=(unit block-id:dt)
+        min-timestamps=(h-map block-id:dt @)
+        asert-anchor-min-timestamps=(map @tas (h-map block-id:dt @))
+        epoch-start=(h-map block-id:dt block-id:dt)
+        targets=(h-map block-id:dt bignum:bignum:dt)
+        btc-data=(unit (unit btc-hash:dt))
+        =genesis-seal:dt
+        block-versions=(h-map block-id:dt proof-version:sp)
+    ==
+  ==
+:::
++$  consensus-state  consensus-state-11
 ::
 ::  you will not have lost any chain state if you lost pending state, you'd just have to
 ::  request data again from peers and reset your mining state
@@ -497,7 +564,16 @@
 ::
 +$  derived-state-9  $+(derived-state-9 derived-state-8)
 ::
-+$  derived-state  derived-state-9
+::  Current derived state. `puzzle-asert-states` is complete for every accepted
+::  post-activation block and follows forks independently.
++$  derived-state-11
+  $+  derived-state-11
+  $:  highest-block-height=(unit page-number:dt)
+      heaviest-chain=(z-map page-number:dt block-id:dt)
+      puzzle-asert-states=(h-map block-id:dt puzzle-asert-state)
+  ==
+::
++$  derived-state  derived-state-11
 ::
 +$  mining-state-0
   $+  mining-state-0
@@ -572,14 +648,35 @@
     %.y
   (canonical-pow-polynomials proof)
 :::
++$  ai-blake  ai-blake:dt
++$  ai-pow-nonce  ai-pow-nonce:dt
++$  ai-ext2  ai-ext2:dt
++$  ai-ext2s  ai-ext2s:dt
++$  ai-ext2-vec  ai-ext2-vec:dt
++$  ai-pow-commitments  ai-pow-commitments:dt
++$  ai-pow-public-inputs  ai-pow-public-inputs:dt
++$  ai-proof-node  ai-proof-node:dt
++$  ai-recursive-certificate  ai-recursive-certificate:dt
++$  ai-pow-certificate  ai-pow-certificate:dt
++$  ai-pow-artifact  ai-pow-artifact:dt
+::
+::  Tagged union of proof-of-work variants. The miner pokes the consensus
+::  kernel with `[%command %pow pv=pow-variant]`; the consensus kernel
+::  dispatches on `-.pv` so additional puzzle types (e.g. %ai-pow) can be
+::  added without changing the outer `%command` shape.
 +$  pow-variant
   $+  pow-variant
-  $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]
+  $%  [%dumb-zkpow prf=proof:sp dig=tip5-hash-atom:zeke bc=noun-digest:tip5:zeke nonce=noun-digest:tip5:zeke]  ::  the existing puzzle-nock STARK PoW
+      ::  AI matmul PoW wire shape. Carries a Rust-owned nonce plus the
+      ::  recursive certificate only; raw Layer-0 proofs and the plain
+      ::  MatmulProof are not persisted in blocks. This arm is verified via
+      ::  the recursive-certificate jet (%ai-pow-verify).
+      [%ai-pow nonce=ai-pow-nonce cert=ai-pow-certificate]
   ==
 ::
 +$  command
   $+  command
-  $%  [%pow pv=pow-variant]  :: check a ZK proof of work and issue its block
+  $%  [%pow pv=pow-variant]  ::  check if a proof of work is good for the next block, issue a block if so
       [%set-mining-key v0=@t v1=@t]  ::  set $lock for coinbase in mined blocks
       [%set-mining-key-advanced v0=(list [share=@ m=@ keys=(list @t)]) v1=(list [share=@ phk=@t])]  :: multisig and/or split coinbases
       [%enable-mining p=?]  ::  switch for generating candidate blocks for mining
@@ -630,7 +727,11 @@
       [%request p=request]  :: request specific tx or block
       [%track p=track]  :: runtime tracking of blocks for %liar-block-id effect
       [%seen p=seen]    ::  seen so don't reprocess
+      ::  Mining candidate emissions. `%mine-zk` is emitted when the
+      ::  candidate block changes. `%mine-ai` is emitted for the AI puzzle
+      ::  once at/after the AI-PoW activation height.
       [%mine-zk mine-start]
+      [%mine-ai mine-start]
       lie
       span-effect
       [%exit code=@]
@@ -640,6 +741,9 @@
   $%  [%0 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%1 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
       [%2 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
+      ::  %3: AI PoW mining. Emitted post-activation as the [%mine-ai ...]
+      ::  candidate for the ai-pow-miner.
+      [%3 block-commitment=noun-digest:tip5:zeke target=bignum:bignum:dt pow-len=@]
   ==
 ::
 +$  seen

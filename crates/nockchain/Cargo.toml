@@ -7,8 +7,10 @@ edition.workspace = true
 
 [features]
 bazel_build = []
-jemalloc = ["tikv-jemallocator"]
-tracing-heap = ["tikv-jemallocator", "tracy-client"]
+# jemalloc is now REQUIRED (see main.rs) — this feature is a no-op kept for
+# backward compatibility with existing `--features jemalloc` build commands.
+jemalloc = []
+tracing-heap = ["tracy-client"]
 
 [dependencies]
 
@@ -43,12 +45,13 @@ num_cpus = { workspace = true }
 rand = { workspace = true }
 tempfile = { workspace = true }
 termcolor.workspace = true
-tikv-jemallocator = { workspace = true, optional = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 tracy-client = { workspace = true, optional = true }
 
 zkvm-jetpack.workspace = true
+ai-pow-jets.workspace = true
 
 [build-dependencies]
 vergen = { workspace = true, features = [
@@ -66,6 +69,9 @@ kernels-open-miner = { workspace = true }
 libc.workspace = true
 memmap2.workspace = true
 nockchain-math.workspace = true
+nockchain-mining-common.workspace = true
+ai-pow = { path = "../ai-pow", features = ["zk"] }
+ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
 
 [lints]
 workspace = true

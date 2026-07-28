@@ -18,9 +18,9 @@ superseded_by = ""
 
 ASERT per-block difficulty adjustment, block-time reduction from 600s to
 150s, and a unified emissions curve with a smooth-decay 9.5-year body and
-a 64-NOCK floor sustained for ~68 years to a 2³² hard cap, with every
-post-activation reward split 80/20 between the miner and a time-locked
-protocol fund.
+a 64-NOCK floor sustained for ~68 years to a 2³² hard cap. Each
+post-activation block's newly issued coinbase reward is split 80/20 between
+the miner and a time-locked protocol fund.
 
 ## Summary
 
@@ -43,10 +43,11 @@ height 65,500:
    activation, reward decays through nine smaller steps (alternating
    25% / 33% drops, no halvings) over 9.5 years, then settles at a
    64-NOCK floor for ~68 years until the cap is met exactly. Every
-   post-activation reward is split 80% miner / 20% protocol fund;
-   both outputs are coinbase outputs subject to the existing standard
-   coinbase timelock — no separate unlock schedule is layered on the
-   fund's share.
+   post-activation block's newly issued reward is split 80% miner / 20%
+   protocol fund; both outputs are coinbase outputs subject to the existing
+   standard coinbase timelock — no separate unlock schedule is layered on the
+   fund's share. The percentages apply only to that block's new issuance, not
+   total or circulating supply, previously issued NOCK, or transaction fees.
 
 The block-time change *is* the immediate halving the new emissions
 curve calls for at activation: 16,380 NOCK per 600s pre-activation
@@ -134,11 +135,12 @@ the legacy halving schedule beyond the eon-0/1/2 head.
 
 The 80/20 miner/fund split falls out of the same activation:
 pre-activation the chain has no fund and a single-output coinbase.
-Post-activation it pays a second output to a well-known fund hash,
-subject to the same standard coinbase timelock as the miner's share.
-Bundling means the consensus rule "a v1 coinbase has either one
-output (pre-activation) or two (post-activation)" can be stated
-against a single height boundary.
+Post-activation it pays 20% of each block's newly issued reward to a second
+output at a well-known fund hash, subject to the same standard coinbase
+timelock as the miner's share. Bundling means the consensus rule "a v1
+coinbase has either one output (pre-activation) or two
+(post-activation)" can be stated against a single height boundary. It does
+not route any percentage of existing supply or transaction fees.
 
 ## Technical Specification
 
@@ -502,12 +504,13 @@ reward (the schedule table values are all multiples of 5).
 as `%improper-fund-split`, since `+check-fund-split` keys on
 `emission` alone — see "Review fixes" below.
 
-The 80/20 split applies uniformly to every reward value from the
-2,048 NOCK activation reward through the 64-NOCK tail floor. The
-underlying emission curve is unchanged by the distribution layer:
-total NOCK issued per block, per era, and across the full schedule
-is identical to the values in the schedule table above. Only the
-set of recipients differs.
+The 80/20 split applies uniformly to each newly issued reward from the
+2,048 NOCK activation reward through the 64-NOCK tail floor. These are
+percentages of per-block coinbase issuance, not percentages of total supply,
+circulating supply, or previously issued NOCK. The underlying emission curve
+is unchanged by the distribution layer: total NOCK issued per block, per era,
+and across the full schedule is identical to the values in the schedule table
+above. Only the set of recipients differs.
 
 The split is gated by a single phase boundary:
 

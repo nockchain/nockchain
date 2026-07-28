@@ -31,14 +31,13 @@
 //!
 //! Blocks `1..start` are replayed as warmup to position the target; the
 //! `start..=end` window is what you care about in the profile (its wall time is
-//! reported separately). `--skip-pow` flips the `check-pow` flag in the replayed
-//! constants so the STARK verifier is bypassed -- useful for isolating
-//! transaction/hashing cost from PoW cost.
+//! reported separately). PoW verification is unconditional in the replay path.
 
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use ai_pow_jets::produce_ai_pow_hot_state;
 use clap::Parser;
 use kernels_open_dumb::KERNEL as NOCKCHAIN_KERNEL;
 use libp2p::PeerId;
@@ -80,11 +79,6 @@ struct Args {
     /// Last height to replay/measure (inclusive).
     #[arg(long, default_value_t = 2000)]
     end: u64,
-    /// Flip the `check-pow` flag off in the replayed constants to bypass the
-    /// STARK verifier (isolates tx/hash cost from PoW cost). Only applies when
-    /// the target boots fresh (ignored with `--target-state-jam`).
-    #[arg(long, default_value_t = false)]
-    skip_pow: bool,
     /// Boot the target from this previously-exported state jam instead of a
     /// fresh genesis, skipping the warmup replay. Pair with a prior
     /// `--export-state-jam` run to profile a late range without replaying the
@@ -159,11 +153,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (constants, genesis) = if from_jam {
             (None, None)
         } else {
-            let mut constants = peek_constants(&mut source).await?;
-            if args.skip_pow {
-                info!("bench: --skip-pow set; disabling check-pow flag in replayed constants");
-                constants.check_pow_flag = false;
-            }
+            let constants = peek_constants(&mut source).await?;
             let genesis = extract_block(&mut source, 0)
                 .await?
                 .ok_or("source node has no genesis block (height 0); cannot initialize target")?;
@@ -398,7 +388,11 @@ async fn boot_source(args: &Args) -> Result<NockApp<Chaff>, Box<dyn Error>> {
     // Keep the tempdir alive for the duration of the boot by leaking it; the OS
     // reclaims it on exit. (Source is read-only and short-lived.)
     std::mem::forget(scratch);
-    let hot_state = produce_prover_hot_state();
+    // Post-activation state ranges exercise the ai-pow verifier jet; without
+    // its hot state the bench crashes on the fail-closed `!!` stub.
+    let mut hot = produce_prover_hot_state();
+    hot.extend(produce_ai_pow_hot_state());
+    let hot_state = hot;
     boot::setup::<Chaff>(
         NOCKCHAIN_KERNEL,
         cli,
@@ -418,7 +412,9 @@ async fn boot_target(args: &Args, data_dir: PathBuf) -> Result<NockApp<Chaff>, B
         data_dir: Some(data_dir),
         ..base_cli(args.target_stack_size)
     };
-    let hot_state = produce_prover_hot_state();
+    let mut hot = produce_prover_hot_state();
+    hot.extend(produce_ai_pow_hot_state());
+    let hot_state = hot;
     boot::setup::<Chaff>(
         NOCKCHAIN_KERNEL,
         cli,

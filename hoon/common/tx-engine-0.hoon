@@ -62,7 +62,7 @@
           min-past-blocks=11
           ::TODO determine appropriate genesis target
           genesis-target-atom=^~((div max-tip5-atom:tip5 (bex 14)))
-          ::TODO determine a real max-target-atom. BTC uses 32 leading zeroes
+          ::  Full five-belt TIP5 target domain used by the ZK puzzle.
           max-target-atom=max-tip5-atom:tip5
           ::  whether or not to check the pow of blocks
           check-pow-flag=&
@@ -103,8 +103,24 @@
 ++  quarter-ted  ^~((div target-epoch-duration 4))
 ::  4x epoch duration - used in target adjustment calculation
 ++  quadruple-ted  ^~((mul target-epoch-duration 4))
-++  genesis-target  ^~((chunk:bignum genesis-target-atom))  ::TODO set this
+++  genesis-target  ^~((chunk:bignum genesis-target-atom))
 ++  max-target  ^~((chunk:bn max-target-atom))
+::  Largest target the AI ASERT may emit.
+::
+::  An %ai-pow target prices ONE MAC-equivalent of matmul work, not one attempt:
+::  the verifier compares the 256-bit jackpot against target * h*w*dot, where
+::  the tile shape contributes at most (bex 24) (h*w <= 256, dot <= (bex 16)).
+::  That product is computed in 256 bits and is fail-closed, so a target above
+::  (bex 232) is not "easy" -- it is UNMINABLE: every block carrying it is
+::  rejected, and since the AI ASERT only advances on an accepted AI block, the
+::  puzzle would never retarget back down.
+::
+::  So the ceiling is the largest target whose scaled threshold still fits:
+::  (dec (bex 256)) / (bex 24). Mirrors ai_pow::difficulty::
+::  AI_POW_MAX_CONSENSUS_TARGET; +test-max-ai-target-atom-keeps-every-shape-
+::  representable pins the property rather than the literal.
+++  max-ai-target-atom  ^~((dec (bex 232)))
+
 +|  %simple-tx-engine-types
 +$  block-commitment  hash
 +$  tx-id  hash
@@ -739,7 +755,6 @@
     =/  target-atom=@  (merge:bn target-bn)
     =/  raw=@  (div max-target-atom +(target-atom))
     (chunk:bn ?:(=(0 raw) 1 raw))
-  ::
   ++  to-page-summary
     |=  pag=form
     ^-  page-summary

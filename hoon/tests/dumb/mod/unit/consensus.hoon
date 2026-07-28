@@ -12,11 +12,15 @@
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
 ::
+::  +der: pre-activation derived-state (read-only extra door arg); arms that
+::  need the real derived-state shadow this with a local `=/  der`.
+++  der  ^-  derived-state  *derived-state
+::
 ++  test-garbage-collect-after-genesis
   =/  con=consensus-state  initial-consensus-state:h
-  =.  con  (~(garbage-collect dcon con constants) default-retain:h)
+  =.  con  (~(garbage-collect dcon con der constants) default-retain:h)
   =/  balance=(h-map nname:t nnote:t)
-    ~(get-cur-balance dcon con constants)
+    ~(get-cur-balance dcon con der constants)
   ;:  weld
     %+  expect-eq
       !>  default-genesis-id:h
@@ -33,7 +37,7 @@
   ::  get ancestors of page 2, should only return 3 blocks including genesis
   =/  der=derived-state  (update:dder con genesis-test-page)
   =/  genesis-ancestors=(unit [page-number:t (list block-id:t)])
-    %+  ~(get-elders dcon con constants)
+    %+  ~(get-elders dcon con der constants)
       der
     ~(digest get:page:t genesis-test-page)
   ?~  genesis-ancestors
@@ -58,7 +62,7 @@
   ::  get ancestors of last page
   ~&  >  "getting ancestors of last page: {<~(digest get:page:t last-page)>}"
   =/  ancestors=(unit [page-number:t (list block-id:t)])
-    %+  ~(get-elders dcon con constants)
+    %+  ~(get-elders dcon con der constants)
       der
     ~(digest get:page:t last-page)
   ?~  ancestors
