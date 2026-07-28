@@ -373,30 +373,39 @@
   next-target-bn
 ::
 :::
-+$  asert-anchor  [activation-height=@ target=@ min-timestamp=(unit @)]
++$  asert-anchor  [activation-height=@ target=@ min-timestamp=(unit @) ideal-block-time=@ half-life=@ maximum-target=@]
 :::
-::  Rows are [first child height, target, fixed anchor timestamp or ~].
-::  The predecessor is the anchor; add future rows newest first.
+::  Rows bind a first child height, target, optional fixed timestamp, ASERT
+::  timing, and target ceiling. The predecessor is the anchor.
 ++  asert-target-for-rate
-  |=  proofs-per-second=@
+  |=  [proofs-per-second=@ ideal-block-time=@]
   ^-  @
-  (div max-target-atom:t (mul proofs-per-second ideal-block-time.zk-asert.blockchain-constants))
+  (div max-target-atom:t (mul proofs-per-second ideal-block-time))
 :::
-++  first-dynamic-asert-anchor-height  112.500
+++  asert-anchor-min-timestamp
+  |=  min-timestamp=@
+  ^-  (unit @)
+  ?:  =(0 min-timestamp)  ~
+  `min-timestamp
 :::
-++  asert-anchor-schedule
+++  zk-asert-anchor-schedule
   ^-  (list asert-anchor)
-  ::  Zoe preserves the established ASERT baseline through its hardened ZK
-  ::  proof boundary.  Logos later establishes independent branch-local
-  ::  targets when AI-PoW becomes admissible.
-  :~  [proof-version-3-start (asert-target-for-rate 3.000.000) ~]
-      [112.500 (asert-target-for-rate 3.000.000) ~]
-      [phase.zk-asert.blockchain-constants anchor-target-atom.zk-asert.blockchain-constants `anchor-min-timestamp.zk-asert.blockchain-constants]
+  :~  [proof-version-3-start (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert-post-ai.blockchain-constants) ~ ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+      [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+      [112.500 (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
+      [phase.zk-asert.blockchain-constants anchor-target-atom.zk-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert.blockchain-constants) ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
+  ==
+:::
+++  ai-asert-anchor-schedule
+  ^-  (list asert-anchor)
+  :~  [phase.ai-asert.blockchain-constants anchor-target-atom.ai-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.ai-asert.blockchain-constants) ideal-block-time.ai-asert.blockchain-constants half-life.ai-asert.blockchain-constants max-ai-target-atom:t]
   ==
 :::
 ++  asert-anchor-schedules
   ^-  (map @tas (list asert-anchor))
-  (~(put by *(map @tas (list asert-anchor))) %zk asert-anchor-schedule)
+  =/  schedules  *(map @tas (list asert-anchor))
+  =.  schedules  (~(put by schedules) %zk zk-asert-anchor-schedule)
+  (~(put by schedules) %ai ai-asert-anchor-schedule)
 :::
 ++  active-asert-anchor
   |=  [puzzle-type=@tas child-height=@]
@@ -434,20 +443,8 @@
   |=  [[puzzle-type=@tas timestamp-map=(h-map block-id:t @)] updated=_timestamps]
   (~(put by updated) puzzle-type (~(del h-by timestamp-map) block-id))
 :::
-::  +compute-target-asert: aserti3-2d target for a post-asert-activation block
-:::
-::    .puzzle-type selects one independently anchored puzzle schedule.
-::    .child-height is the height the block is (or will be) at;
-::    .parent-digest identifies its parent so we can read the parent's
-::    median-of-11 from .min-timestamps (written during parent acceptance).
-::    callers must guarantee .child-height >= .asert-phase, which implies
-::    the min-timestamps lookup succeeds and the height >= anchor invariant
-::    holds. used both to validate an accepted page and to compute the
-::    target for a candidate block still being constructed.
-::
-::  Return the branch-local post-activation puzzle state for a candidate's
-::  immediate parent. At the activation boundary the parent is pre-activation,
-::  so synthesize the zero-count state from that exact branch.
+::  Puzzle schedules define every ASERT pin. The retained branch state supplies
+::  only the per-puzzle virtual height and latest median timestamp.
 ++  post-ai-parent-state
   |=  parent-digest=block-id:t
   ^-  puzzle-asert-state:dk
@@ -463,42 +460,32 @@
       ai-count=0
       zk-head=~
       ai-head=~
-      zk-anchor=[min-ts=(~(got h-by min-timestamps.c) parent-digest) target-atom=anchor-target-atom.zk-asert-post-ai.blockchain-constants]
-      ai-anchor=~
   ==
 :::
-::  ZK ASERT uses the scheduled Aletheia anchors before Logos. At Logos
-::  activation it re-anchors on the branch's activation parent and advances
-::  only with accepted ZK blocks.
 ++  compute-target-zk-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
-  =/  is-post-ai-regime=?
-    (gte child-height phase.zk-asert-post-ai.blockchain-constants)
-  ?.  is-post-ai-regime
+  ?.  (gte child-height phase.zk-asert-post-ai.blockchain-constants)
     (compute-target-asert %zk child-height parent-digest)
-  =/  params  zk-asert-post-ai.blockchain-constants
   =/  state  (post-ai-parent-state parent-digest)
-  =/  current-min-ts=@
-    ?~  zk-head.state  min-ts.zk-anchor.state
-    (~(got h-by min-timestamps.c) u.zk-head.state)
-  %-  chunk:bignum:t
-  %-  compute-target:asert
-  :*  target-atom.zk-anchor.state
-      min-ts.zk-anchor.state
-      0
-      current-min-ts
-      +(zk-count.state)
-      ideal-block-time.params
-      half-life.params
-      max-target-atom:t
-  ==
+  =/  current-min-ts=(unit @)
+    ?~  zk-head.state  ~
+    `(~(got h-by min-timestamps.c) u.zk-head.state)
+  (compute-target-asert-on-lineage %zk child-height +(zk-count.state) 0 current-min-ts parent-digest)
+:::
 ++  compute-target-asert
   ~/  %compute-target-asert
   |=  [puzzle-type=@tas child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
-  =/  parent-min-ts=@
-    (~(got h-by min-timestamps.c) parent-digest)
+  =/  anchor=(unit asert-anchor)
+    (active-asert-anchor puzzle-type child-height)
+  ?~  anchor
+    ~|  %missing-asert-anchor  !!
+  (compute-target-asert-on-lineage puzzle-type child-height child-height (dec activation-height.u.anchor) `(~(got h-by min-timestamps.c) parent-digest) parent-digest)
+:::
+++  compute-target-asert-on-lineage
+  |=  [puzzle-type=@tas child-height=@ virtual-height=@ anchor-virtual-height=@ latest-min-ts=(unit @) parent-digest=block-id:t]
+  ^-  bignum:bignum:t
   =/  anchor=(unit asert-anchor)
     (active-asert-anchor puzzle-type child-height)
   ?~  anchor
@@ -507,55 +494,30 @@
   =/  anchor-min-ts=@
     ?^  min-timestamp.u.anchor
       u.min-timestamp.u.anchor
-    ?:  =(child-height +(anchor-height))
-      (~(got h-by min-timestamps.c) parent-digest)
     (get-asert-anchor-min-timestamp puzzle-type anchor-height parent-digest)
+  =/  current-min-ts=@
+    ?^  latest-min-ts  u.latest-min-ts
+    anchor-min-ts
   %-  chunk:bignum:t
   %-  compute-target:asert
   :*  target.u.anchor
       anchor-min-ts
-      anchor-height
-      parent-min-ts
-      child-height
-      ideal-block-time.zk-asert.blockchain-constants
-      half-life.zk-asert.blockchain-constants
-      max-target-atom:t
+      anchor-virtual-height
+      current-min-ts
+      virtual-height
+      ideal-block-time.u.anchor
+      half-life.u.anchor
+      maximum-target.u.anchor
   ==
 :::
-::  AI ASERT uses only the AI lineage on the candidate parent's branch. With a
-::  hardcoded test anchor, the first AI block is index 1. In production the first
-::  AI block establishes the dynamic anchor and later AI blocks use the number of
-::  already-accepted AI blocks as their virtual height.
 ++  compute-target-ai-asert
   |=  [child-height=@ parent-digest=block-id:t]
   ^-  bignum:bignum:t
-  =/  params  ai-asert.blockchain-constants
-  ?<  =(0 anchor-target-atom.params)
   =/  state  (post-ai-parent-state parent-digest)
-  =/  hardcoded-anchor=?  !=(0 anchor-min-timestamp.params)
-  =/  anchor=(unit cached-asert-anchor:dk)
-    ?:  hardcoded-anchor
-      `[min-ts=anchor-min-timestamp.params target-atom=anchor-target-atom.params]
-    ai-anchor.state
-  ?~  anchor
-    (chunk:bignum:t (min anchor-target-atom.params max-ai-target-atom:t))
-  =/  current-min-ts=@
-    ?~  ai-head.state  min-ts.u.anchor
-    (~(got h-by min-timestamps.c) u.ai-head.state)
-  =/  blocks-since-anchor=@
-    ?:  hardcoded-anchor  +(ai-count.state)
-    ai-count.state
-  %-  chunk:bignum:t
-  %-  compute-target:asert
-  :*  target-atom.u.anchor
-      min-ts.u.anchor
-      0
-      current-min-ts
-      blocks-since-anchor
-      ideal-block-time.params
-      half-life.params
-      max-ai-target-atom:t
-  ==
+  =/  current-min-ts=(unit @)
+    ?~  ai-head.state  ~
+    `(~(got h-by min-timestamps.c) u.ai-head.state)
+  (compute-target-asert-on-lineage %ai child-height +(ai-count.state) 0 current-min-ts parent-digest)
 :::
 ::  Dynamic anchors are retained in an independent block map per puzzle type.
 ++  update-asert-anchor-min-timestamps
@@ -739,6 +701,7 @@
     (~(got h-by epoch-start.c) ~(parent get:page:t pag))
   =.  min-timestamps.c  (update-min-timestamps now pag)
   =.  c  (update-asert-anchor-min-timestamps %zk pag)
+  =.  c  (update-asert-anchor-min-timestamps %ai pag)
   ::
   =.  targets.c
     ?:  (post-asert-activation:t ~(height get:page:t pag))

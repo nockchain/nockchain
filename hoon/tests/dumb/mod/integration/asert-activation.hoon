@@ -34,6 +34,12 @@
     ideal-block-time.zk-asert      150
     half-life.zk-asert             43.200
     anchor-min-timestamp.zk-asert  (add (time-in-secs:page:txe *@da) 1.200)
+    phase.zk-asert-post-ai               8
+    anchor-height.zk-asert-post-ai       7
+    anchor-target-atom.zk-asert-post-ai  ^~((div max-tip5-atom:tip5 (mul 3.000.000 150)))
+    ideal-block-time.zk-asert-post-ai    150
+    half-life.zk-asert-post-ai           43.200
+    anchor-min-timestamp.zk-asert-post-ai  0
   ==
 --
 ::
@@ -150,44 +156,32 @@
     (~(compute-target-asert dcon con der bc) %zk 5 parent-digest)
   (expect-eq !>(anchor-target-atom.zk-asert.bc) !>((merge:bignum got-bn)))
 ::
-:::
-::  The %zk schedule starts at the canonical anchor and changes at 112.500.
-::  The first child can read its parent timestamp directly, but every later
-::  lookup must use the accepted branch's O(1) timestamp cache.  Missing cache
-::  state fails closed instead of walking retained ancestry.
-++  test-asert-reanchor-requires-cached-timestamp
+::  The test schedule starts at the canonical anchor and changes at height 8.
+::  At re-pin, the anchor timestamp remains available before its cache exists.
+++  test-asert-reanchor-rate-and-timestamp-capture
   =/  bc  bc-asert
   =/  con  (initial-consensus-state-custom:h bc)
-  =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
+  =^  par=page:t  con  (add-n-pages:h 7 con default-retain:h)
+  =/  anchor-id=block-id:t  ~(digest get:page:t par)
   =/  before=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con der bc) %zk 112.499)
+    (~(active-asert-anchor dcon con der bc) %zk 7)
   =/  active=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con der bc) %zk 112.500)
+    (~(active-asert-anchor dcon con der bc) %zk 8)
   =/  wrong-type=(unit asert-anchor:dcon)
-    (~(active-asert-anchor dcon con der bc) %other 112.500)
+    (~(active-asert-anchor dcon con der bc) %other 8)
   =/  expected-original=asert-anchor:dcon
-    [phase.zk-asert.bc anchor-target-atom.zk-asert.bc `anchor-min-timestamp.zk-asert.bc]
+    [phase.zk-asert.bc anchor-target-atom.zk-asert.bc `anchor-min-timestamp.zk-asert.bc ideal-block-time.zk-asert.bc half-life.zk-asert.bc max-target-atom:txe]
   =/  expected-reanchor=asert-anchor:dcon
-    [112.500 (div max-target-atom.bc (mul 3.000.000 ideal-block-time.zk-asert.bc)) ~]
-  =/  anchor=page:t
-    ?^  -.par
-      par(height 112.499)
-    par(height 112.499)
-  =/  anchor-id=block-id:t  ~(digest get:page:t anchor)
+    [phase.zk-asert-post-ai.bc anchor-target-atom.zk-asert-post-ai.bc ~ ideal-block-time.zk-asert-post-ai.bc half-life.zk-asert-post-ai.bc max-target-atom:txe]
   =/  anchor-min-ts=@  (~(got h-by min-timestamps.con) anchor-id)
-  =/  raw-child=page:t  (make-empty-page:h par)
-  =/  child=page:t
-    ?^  -.raw-child
-      raw-child(height 112.500)
-    raw-child(height 112.500)
+  =/  child=page:t  (make-empty-page:h par)
   =/  child-id=block-id:t  ~(digest get:page:t child)
   =/  recovered-target
-    (~(compute-target-asert dcon con der bc) %zk 112.500 anchor-id)
+    (~(compute-target-asert dcon con der bc) %zk 8 anchor-id)
   =.  con  (~(update-asert-anchor-min-timestamps dcon con der bc) %zk child)
   =/  got-bn
-    (~(compute-target-asert dcon con der bc) %zk 112.500 anchor-id)
-  =/  expected-target
-    (div max-target-atom.bc (mul 3.000.000 ideal-block-time.zk-asert.bc))
+    (~(compute-target-asert dcon con der bc) %zk 8 anchor-id)
+  =/  expected-target  anchor-target-atom.zk-asert-post-ai.bc
   %+  expect-eq
     !>  :*  %.y
               %.y
@@ -201,6 +195,20 @@
             =(wrong-type ~)
             (merge:bignum recovered-target)
             (merge:bignum got-bn)
-            (~(get-asert-anchor-min-timestamp dcon con der bc) %zk 112.499 child-id)
+            (~(get-asert-anchor-min-timestamp dcon con der bc) %zk 7 child-id)
         ==
+::  Both Logos re-pins are scheduled anchors. Their timestamps are recovered
+::  from the validated branch, not from puzzle-local ad hoc state.
+++  test-dual-puzzle-repins-share-asert-schedule
+  =/  bc  *blockchain-constants:txe
+  =/  con  (initial-consensus-state-custom:h bc)
+  =/  zk=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con der bc) %zk phase.zk-asert-post-ai.bc)
+  =/  ai=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con der bc) %ai phase.ai-asert.bc)
+  =/  expected-zk=asert-anchor:dcon
+    [phase.zk-asert-post-ai.bc anchor-target-atom.zk-asert-post-ai.bc ~ ideal-block-time.zk-asert-post-ai.bc half-life.zk-asert-post-ai.bc max-target-atom:txe]
+  =/  expected-ai=asert-anchor:dcon
+    [phase.ai-asert.bc anchor-target-atom.ai-asert.bc ~ ideal-block-time.ai-asert.bc half-life.ai-asert.bc max-ai-target-atom:txe]
+  (expect-eq !>([`expected-zk `expected-ai]) !>([zk ai]))
 --

@@ -435,9 +435,9 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         }
         let ai_asert_override = fakenet_ai_asert_override;
         if let Some(ai_activation) = effective_fakenet_ai_activation_height {
-            // AI admission, the AI ASERT anchor, and the post-AI ZK regime share
-            // one activation boundary. ZK anchors at phase - 1; AI anchors at
-            // phase. Their target and timing parameters remain puzzle-specific.
+            // AI admission, the AI ASERT pin, and the post-AI ZK regime share
+            // one activation boundary. Both puzzle pins use the preceding block
+            // so their schedule cache is available at activation.
             fakenet_constants = fakenet_constants.with_ai_pow_activation_height(ai_activation);
             let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
             zk_post.phase = ai_activation;
@@ -445,7 +445,7 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
             let mut ai_asert = fakenet_constants.ai_asert.clone();
             ai_asert.phase = ai_activation;
-            ai_asert.anchor_height = ai_activation;
+            ai_asert.anchor_height = ai_activation - 1;
             fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
         }
         if let Some(asert) = cli.fakenet_asert.into_config()? {

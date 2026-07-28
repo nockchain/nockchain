@@ -20,7 +20,7 @@
 |%
 ++  t  ~(. txe bc-ai-pow-provable:helpers)
 ++  hd  ~(. helpers bc-dual-puzzle:helpers)
-++  hc  ~(. helpers bc-ai-anchor-test:helpers)
+++  hc  ~(. helpers bc-dual-repin-cache:helpers)
 ++  hp  ~(. helpers bc-dual-post:helpers)
 ++  ht  ~(. helpers bc-tandem:helpers)
 ::
@@ -287,24 +287,16 @@
   !>  :-  (merge:bignum ~(target get:page:t ai-cand))
       (merge:bignum ~(accumulated-work get:page:t ai-cand))
 ::
-::  The first AI block on a branch becomes that branch's AI ASERT anchor
-::  immediately; no later global-height crossing is involved.
-++  test-ai-anchor-populates
+::  The AI pin is cached through every accepted branch, including a ZK block.
+::  A first AI block therefore recovers its timestamp without becoming an
+::  ad-hoc anchor.
+++  test-ai-repin-cache-populates-on-zk
   ^-  tang
-  =/  built  (build-typed-chain:hc ~[%zk %ai])
-  =/  state  (~(got h-by puzzle-asert-states.der.built) ~(digest get:page:t tip.built))
-  %+  expect-eq  !>(%.y)
-  !>(?=(^ ai-anchor.state))
-::
-::  A ZK block above the configured AI anchor height must not populate the AI
-::  anchor. The AI ASERT starts from the first AI block, not from whichever
-::  puzzle first crosses a global height.
-++  test-ai-anchor-ignores-zk-crossing
-  ^-  tang
-  =/  built  (build-typed-chain:hc ~[%zk %zk %zk])
-  =/  state  (~(got h-by puzzle-asert-states.der.built) ~(digest get:page:t tip.built))
-  %+  expect-eq  !>(%.n)
-  !>(?=(^ ai-anchor.state))
+  =/  built  (build-typed-chain:hc ~[%zk])
+  =/  tip-id=block-id:t  ~(digest get:page:t tip.built)
+  =/  ai-timestamps=(h-map block-id:t @)
+    (need (~(get by asert-anchor-min-timestamps.con.built) %ai))
+  (expect-eq !>(%.y) !>((~(has h-by ai-timestamps) tip-id)))
 ::
 ::  A puzzle lineage remains available after an arbitrarily long run of the
 ::  other puzzle. A fixed global-hop cap would make AI target selection fall

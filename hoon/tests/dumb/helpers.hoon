@@ -41,6 +41,8 @@
     ::  accumulated-work validation rejects. +load asserts the ordering.
     phase.zk-asert-post-ai  2.000.000
     phase.ai-asert          2.000.000
+    anchor-height.zk-asert-post-ai  1.999.999
+    anchor-height.ai-asert          1.999.999
   ==
 ::
 ++  bc-v1-phase
@@ -105,6 +107,8 @@
     ::  accumulated-work validation rejects. +load asserts the ordering.
     phase.zk-asert-post-ai  2.000.000
     phase.ai-asert          2.000.000
+    anchor-height.zk-asert-post-ai  1.999.999
+    anchor-height.ai-asert          1.999.999
   ==
 ++  bc-max-block-size-medium-v1
   %*  .  default-bc
@@ -147,31 +151,27 @@
   %*  .  bc-pending-provable
     ai-pow-activation-height  0
   ==
-::  Dual-puzzle test config: AI-PoW active from height 1 (so genesis stays
-::  pre-activation — +accept-block only reads a block's pow to record its version
-::  post-activation, and genesis carries pow=~), plus a hardcoded (non-degenerate)
-::  AI ASERT anchor at height 0 so +compute-target-ai-asert actually retargets
-::  rather than returning the anchor target. Used to check that AI difficulty
-::  tracks the AI SUBCHAIN cadence: interleaved ZK blocks must not shift it.
+::  Dual-puzzle test config: both Logos schedules activate at height 1 and
+::  pin to genesis. Interleaved blocks must not change either puzzle's virtual
+::  ASERT height.
 ++  bc-dual-puzzle
   %*  .  bc-pending-provable
     v1-phase                       1
     ai-pow-activation-height       1
+    phase.zk-asert-post-ai           1
+    anchor-height.zk-asert-post-ai   0
+    phase.ai-asert                   1
     anchor-height.ai-asert         0
     ::  anchor timestamp at the genesis second (chain builds from
     ::  time-in-secs(*@da)); a tiny value here would make the ASERT exponent huge
     ::  and saturate the target to max, hiding the subchain-count behaviour.
     anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
   ==
-::  Like bc-dual-puzzle but with the AI anchor at height 2 and NO hardcoded
-::  anchor timestamp, so +compute-target-ai-asert must read the anchor from the
-::  derived-state cache — exercising +populate-ai-asert-anchor as the chain
-::  crosses height 2.
-++  bc-ai-anchor-test
-  %*  .  bc-pending-provable
-    v1-phase                  1
-    ai-pow-activation-height  1
-    anchor-height.ai-asert    2
+::  Like bc-dual-puzzle, but both pins recover their timestamp from the
+::  puzzle-keyed cache rather than a constant.
+++  bc-dual-repin-cache
+  %*  .  bc-dual-puzzle
+    anchor-min-timestamp.ai-asert  0
   ==
 ::  Tandem-retargeting config: BOTH puzzles' ASERT active + in their SUBCHAIN
 ::  regime at low heights, with hardcoded anchors so neither degenerates. Unlike
@@ -225,6 +225,7 @@
     ::  defaults would put the equal-weight regime 114.300 blocks above any test
     ::  chain. Mainnet has all four at 114.300 for the same reason.
     phase.zk-asert-post-ai         2
+    anchor-height.zk-asert-post-ai   1
     phase.ai-asert                 2
     phase.zk-asert                 2
     anchor-height.zk-asert         1
@@ -233,7 +234,7 @@
     half-life.zk-asert             43.200
     anchor-min-timestamp.zk-asert  (add (time-in-secs:page:txe *@da) 1.200)
     ai-pow-activation-height       1
-    anchor-height.ai-asert         0
+    anchor-height.ai-asert         1
     anchor-min-timestamp.ai-asert  (time-in-secs:page:txe *@da)
   ==
 ::  provable variant of +bc-max-block-size-medium-v0: same ~10 KB block-size

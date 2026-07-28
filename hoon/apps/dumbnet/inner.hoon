@@ -65,6 +65,12 @@
     ::  which every block weighs the same -- would not describe either.
     ~|  %zk-asert-re-pin-and-ai-asert-must-be-simultaneous
     ?>  =(phase.zk-asert-post-ai.constants.k phase.ai-asert.constants.k)
+    ::  Each schedule pin anchors at the preceding accepted block. This lets
+    ::  every puzzle recover its anchor timestamp through the shared cache.
+    ~|  %zk-asert-post-ai-anchor-must-precede-phase
+    ?>  =(+(anchor-height.zk-asert-post-ai.constants.k) phase.zk-asert-post-ai.constants.k)
+    ~|  %ai-asert-anchor-must-precede-phase
+    ?>  =(+(anchor-height.ai-asert.constants.k) phase.ai-asert.constants.k)
     ::  The original Aletheia ZK pin predates the dual puzzle.
     ~|  %zk-asert-phase-must-precede-the-dual-puzzle-phase
     ?>  (lte phase.zk-asert.constants.k dual-puzzle-phase:page:t)

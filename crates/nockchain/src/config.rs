@@ -51,12 +51,9 @@ const FAKENET_ASERT_MAX_BEX: u64 = 512;
 /// [`AsertPuzzle::max_anchor_target_bex`].
 const AI_ASERT_MAX_BEX: u64 = 232;
 
-/// Which puzzle a fakenet ASERT override targets. Selects the anchor-height
-/// invariant, which differs by puzzle (see `AsertParams::{zk_default, ai_default}`
-/// in nockchain-types): the ZK puzzle anchors at the last pre-activation block
-/// (`anchor_height + 1 == phase`, standard aserti3-2d), while the AI puzzle anchors
-/// AT the activation block itself (`anchor_height == phase`) so the first AI block
-/// above it opens the AI subchain that `+count-same-type-since-anchor` measures.
+/// Which puzzle a fakenet ASERT override targets. Every puzzle pins to the
+/// final pre-activation block (`anchor_height + 1 == phase`), allowing the
+/// shared schedule to recover its timestamp before the puzzle's first block.
 #[derive(Clone, Copy)]
 enum AsertPuzzle {
     Zk,
@@ -77,8 +74,7 @@ impl AsertPuzzle {
     /// can satisfy this phase (e.g. ZK with `phase == 0`).
     fn expected_anchor_height(self, phase: u64) -> (Option<u64>, &'static str) {
         match self {
-            AsertPuzzle::Zk => (phase.checked_sub(1), " minus 1"),
-            AsertPuzzle::Ai => (Some(phase), ""),
+            AsertPuzzle::Zk | AsertPuzzle::Ai => (phase.checked_sub(1), " minus 1"),
         }
     }
 
@@ -237,7 +233,7 @@ pub struct FakenetAiAsertArgs {
     #[arg(
         id = "fakenet_ai_asert_anchor_height",
         long = "fakenet-ai-asert-anchor-height",
-        help = "AI ASERT anchor height on fakenet. Must equal phase (the AI puzzle anchors at its activation block). Requires --fakenet.",
+        help = "AI ASERT anchor height on fakenet. Must equal phase - 1. Requires --fakenet.",
         requires = "fakenet"
     )]
     pub anchor_height: Option<u64>,
@@ -564,7 +560,7 @@ mod tests {
             [
                 "nockchain", "--fakenet", "--fakenet-asert-phase", "10",
                 "--fakenet-asert-anchor-height", "9", "--fakenet-asert-anchor-target-bex", "40",
-                "--fakenet-ai-asert-phase", "20", "--fakenet-ai-asert-anchor-height", "20",
+                "--fakenet-ai-asert-phase", "20", "--fakenet-ai-asert-anchor-height", "19",
                 "--fakenet-ai-asert-anchor-target-bex", "50",
             ],
             NockStackSize::Large,
@@ -573,7 +569,7 @@ mod tests {
         assert_eq!(cli.fakenet_asert.anchor_height, Some(9));
         assert_eq!(cli.fakenet_asert.anchor_target_bex, Some(40));
         assert_eq!(cli.fakenet_ai_asert.phase, Some(20));
-        assert_eq!(cli.fakenet_ai_asert.anchor_height, Some(20));
+        assert_eq!(cli.fakenet_ai_asert.anchor_height, Some(19));
         assert_eq!(cli.fakenet_ai_asert.anchor_target_bex, Some(50));
         assert!(cli.validate().is_ok());
     }
@@ -724,14 +720,13 @@ mod tests {
         assert!(err.contains("must be <="));
     }
 
-    // The AI puzzle anchors AT its activation block, so the AI trio requires
-    // anchor-height == phase (unlike ZK's anchor-height == phase - 1). See
-    // `AsertParams::ai_default` / `+populate-ai-asert-anchor`.
+    // The AI pin uses the same predecessor convention as the ZK re-pin, so
+    // its shared schedule is available before the first AI block.
     #[test]
     fn validate_ai_asert_phase_sets_activation_when_flag_is_omitted() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(4));
         assert!(cli.validate().is_ok());
         assert_eq!(
             cli.effective_fakenet_ai_activation_height().unwrap(),
@@ -744,7 +739,7 @@ mod tests {
         let mut cli = base_cli();
         cli.fakenet = true;
         cli.fakenet_ai_pow_activation_height = Some(11);
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(4));
         let err = cli
             .validate()
             .expect_err("expected AI activation/ASERT boundary mismatch");
@@ -752,13 +747,11 @@ mod tests {
         assert!(err.contains("ai-asert-phase"));
     }
 
-    // The AI anchor convention is genuinely different from ZK: anchor == phase - 1
-    // (the ZK value) must be REJECTED for AI, or the AI subchain count is off by one.
     #[test]
-    fn validate_rejects_ai_asert_anchor_at_zk_convention() {
+    fn validate_rejects_ai_asert_anchor_at_phase() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(4));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(4));
         let err = cli
             .validate()
             .expect_err("expected AI anchor invariant error");
@@ -780,7 +773,7 @@ mod tests {
     fn validate_rejects_ai_asert_bex_above_cap() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(513));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(513));
         let err = cli.validate().expect_err("expected AI bex cap error");
         assert!(err.contains("ai-asert"));
         assert!(err.contains("must be <="));
@@ -795,7 +788,7 @@ mod tests {
     fn validate_rejects_ai_asert_bex_above_the_minable_domain() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(AI_ASERT_MAX_BEX + 1));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(AI_ASERT_MAX_BEX + 1));
         let err = cli
             .validate()
             .expect_err("expected AI minable-domain cap error");
@@ -808,7 +801,7 @@ mod tests {
     fn validate_accepts_ai_asert_bex_at_the_minable_domain_edge() {
         let mut cli = base_cli();
         cli.fakenet = true;
-        cli.fakenet_ai_asert = ai_asert(Some(10), Some(10), Some(AI_ASERT_MAX_BEX));
+        cli.fakenet_ai_asert = ai_asert(Some(10), Some(9), Some(AI_ASERT_MAX_BEX));
         cli.validate()
             .expect("the maximum minable AI anchor exponent must be accepted");
     }
@@ -833,7 +826,7 @@ mod tests {
         zk.ideal_block_time = Some(30);
         zk.half_life = Some(60);
         cli.fakenet_asert = zk;
-        let mut ai = ai_asert(Some(10), Some(10), Some(4));
+        let mut ai = ai_asert(Some(10), Some(9), Some(4));
         ai.ideal_block_time = Some(30);
         ai.half_life = Some(60);
         cli.fakenet_ai_asert = ai;
