@@ -284,7 +284,7 @@ pub fn function(
     fun: Spec,
     arg: Spec,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -293,12 +293,28 @@ pub fn function(
 ) -> Hoon {
     Hoon::TisGar(
         Box::new(Hoon::Pair(
-            Box::new(example(&fun.clone(), dom, hay, cox, &vec![], &None, &None)),
-            Box::new(example(&arg.clone(), dom, hay, cox, &vec![], &None, &None)),
+            Box::new(example(
+                &fun.clone(),
+                dom.clone(),
+                hay,
+                cox,
+                &vec![],
+                &None,
+                &None,
+            )),
+            Box::new(example(
+                &arg.clone(),
+                dom.clone(),
+                hay,
+                cox,
+                &vec![],
+                &None,
+                &None,
+            )),
         )),
         Box::new(Hoon::KetBar(Box::new(Hoon::BarCol(
-            Box::new(Hoon::Axis(2)),
-            Box::new(Hoon::Axis(15)),
+            Box::new(Hoon::Axis((2u64).into())),
+            Box::new(Hoon::Axis((15u64).into())),
         )))),
     )
 }
@@ -308,7 +324,7 @@ pub fn interface(
     payload: Spec,
     arms: HashMap<String, Spec>,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -317,11 +333,16 @@ pub fn interface(
 ) -> Hoon {
     let map: HashMap<String, Hoon> = arms
         .into_iter()
-        .map(|(term, spec)| (term, example(&spec, dom, hay, cox, &vec![], &None, &None)))
+        .map(|(term, spec)| {
+            (
+                term,
+                example(&spec, dom.clone(), hay, cox, &vec![], &None, &None),
+            )
+        })
         .collect();
     let brcn = Hoon::BarCen(None, HashMap::from([("$".to_string(), (None, map))]));
 
-    let example_res = example(&payload, dom, hay, cox, &vec![], &None, &None);
+    let example_res = example(&payload, dom.clone(), hay, cox, &vec![], &None, &None);
     let tsgr = Hoon::TisGar(Box::new(example_res), Box::new(brcn));
     match variance {
         Vair::Gold => tsgr,
@@ -334,7 +355,7 @@ pub fn interface(
 // TODO: accept args by ref?
 pub fn spore(
     spec: Spec,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -349,9 +370,17 @@ pub fn spore(
     //   |-  ...
     let subject = match def {
         Some(d) => d,
-        None => spore_recursion(spec, dom, hay.clone(), cox, bug.clone(), nut.clone(), None),
+        None => spore_recursion(
+            spec,
+            dom.clone(),
+            hay.clone(),
+            cox,
+            bug.clone(),
+            nut.clone(),
+            None,
+        ),
     };
-    let ketlus_tail = decorate(home(subject, hay, dom), bug, nut);
+    let ketlus_tail = decorate(home(subject, hay, dom.clone()), bug, nut);
     Hoon::KetLus(
         Box::new(Hoon::Bust(BaseType::NounExpr)),
         Box::new(ketlus_tail),
@@ -360,7 +389,7 @@ pub fn spore(
 
 pub fn spore_recursion(
     spec: Spec,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -378,57 +407,65 @@ pub fn spore_recursion(
             let mut new_cox = cox;
             new_cox.extend(map);
             new_cox.insert("$".to_string(), *s.clone());
-            spore_recursion(*s, dom, hay, new_cox, bug, nut, def)
+            spore_recursion(*s, dom.clone(), hay, new_cox, bug, nut, def)
         }
         Spec::Dbug(spot, spec) => {
-            let tail = spore_recursion(*spec, dom, hay, cox, bug, nut, def);
+            let tail = spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def);
             Hoon::Dbug(spot, Box::new(tail))
         }
-        Spec::Gist(_, spec) => spore_recursion(*spec, dom, hay, cox, bug, nut, def),
+        Spec::Gist(_, spec) => spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def),
         Spec::Leaf(term, atom) => Hoon::Rock(term, NounExpr::ParsedAtom(atom)),
         Spec::Loop(term) => {
             let spec = cox.get(&term).expect("Spec-Loop: Name not found");
-            spore_recursion(spec.clone(), dom, hay, cox, bug, nut, def)
+            spore_recursion(spec.clone(), dom.clone(), hay, cox, bug, nut, def)
         }
         Spec::Like(wing, wings) => {
             let p = unreel(wing, wings);
-            spore_recursion(Spec::BucMic(p), dom, hay, cox, bug, nut, def)
+            spore_recursion(Spec::BucMic(p), dom.clone(), hay, cox, bug, nut, def)
         }
-        Spec::Made(_, q) => spore_recursion(*q, dom, hay, cox, bug, nut, def),
+        Spec::Made(_, q) => spore_recursion(*q, dom.clone(), hay, cox, bug, nut, def),
         Spec::Make(hoon, specs) => {
             let p = unfold(hoon, specs);
-            spore_recursion(Spec::BucMic(p), dom, hay, cox, bug, nut, def)
+            spore_recursion(Spec::BucMic(p), dom.clone(), hay, cox, bug, nut, def)
         }
-        Spec::Name(term, spec) => spore_recursion(*spec, dom, hay, cox, bug, nut, def),
-        Spec::Over(wing, spec) => spore_recursion(*spec, dom, wing, cox, bug, nut, def),
-        Spec::BucBar(spec, hoon) => spore_recursion(*spec, dom, hay, cox, bug, nut, def),
+        Spec::Name(term, spec) => spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def),
+        Spec::Over(wing, spec) => spore_recursion(*spec, dom.clone(), wing, cox, bug, nut, def),
+        Spec::BucBar(spec, hoon) => spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def),
         Spec::BucCab(_) => Hoon::Rock("n".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(0))),
         Spec::BucCol(spec, specs) => {
-            spore_buccol_recursion(*spec, specs, dom, hay, cox, bug, nut, def)
+            spore_buccol_recursion(*spec, specs, dom.clone(), hay, cox, bug, nut, def)
         }
         Spec::BucCen(spec, specs) => {
-            spore_buccen_recursion(*spec, specs, dom, hay, cox, bug, nut, def)
+            spore_buccen_recursion(*spec, specs, dom.clone(), hay, cox, bug, nut, def)
         }
         Spec::BucHep(spec, specs) => {
             Hoon::Rock("n".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(0)))
         }
-        Spec::BucGal(p_spec, q_spec) => spore_recursion(*q_spec, dom, hay, cox, bug, nut, def),
-        Spec::BucGar(p_spec, q_spec) => spore_recursion(*q_spec, dom, hay, cox, bug, nut, def),
-        Spec::BucKet(p_spec, q_spec) => spore_recursion(*q_spec, dom, hay, cox, bug, nut, def),
+        Spec::BucGal(p_spec, q_spec) => {
+            spore_recursion(*q_spec, dom.clone(), hay, cox, bug, nut, def)
+        }
+        Spec::BucGar(p_spec, q_spec) => {
+            spore_recursion(*q_spec, dom.clone(), hay, cox, bug, nut, def)
+        }
+        Spec::BucKet(p_spec, q_spec) => {
+            spore_recursion(*q_spec, dom.clone(), hay, cox, bug, nut, def)
+        }
         Spec::BucLus(stud, spec) => {
-            let tail = spore_recursion(*spec, dom, hay, cox, bug, nut, def);
+            let tail = spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def);
             Hoon::Note(Note::Know(stud), Box::new(tail))
         }
-        Spec::BucMic(hoon) => Hoon::TisGal(Box::new(Hoon::Axis(6)), Box::new(hoon)),
-        Spec::BucPam(spec, hoon) => spore_recursion(*spec, dom, hay, cox, bug, nut, def),
+        Spec::BucMic(hoon) => Hoon::TisGal(Box::new(Hoon::Axis((6u64).into())), Box::new(hoon)),
+        Spec::BucPam(spec, hoon) => spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def),
         Spec::BucSig(hoon, spec) => Hoon::KetHep(spec, Box::new(hoon)),
         Spec::BucTis(skin, spec) => {
-            let tail = spore_recursion(*spec, dom, hay, cox, bug, nut, def);
+            let tail = spore_recursion(*spec, dom.clone(), hay, cox, bug, nut, def);
             Hoon::KetTis(skin, Box::new(tail))
         }
-        Spec::BucPat(p_spec, q_spec) => spore_recursion(*p_spec, dom, hay, cox, bug, nut, def),
+        Spec::BucPat(p_spec, q_spec) => {
+            spore_recursion(*p_spec, dom.clone(), hay, cox, bug, nut, def)
+        }
         Spec::BucWut(spec, specs) => {
-            spore_bucwut_recursion(*spec, specs, dom, hay, cox, bug, nut, def)
+            spore_bucwut_recursion(*spec, specs, dom.clone(), hay, cox, bug, nut, def)
         }
         Spec::BucDot(..) | Spec::BucFas(..) | Spec::BucTic(..) | Spec::BucZap(..) => {
             Hoon::Rock("n".to_string(), NounExpr::ParsedAtom(ParsedAtom::Small(0)))
@@ -439,7 +476,7 @@ pub fn spore_recursion(
 pub fn spore_buccol_recursion(
     spec: Spec,
     list_spec: Vec<Spec>,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -447,7 +484,7 @@ pub fn spore_buccol_recursion(
     def: Option<Hoon>,
 ) -> Hoon {
     if list_spec.is_empty() {
-        spore_recursion(spec, dom, hay, cox, bug, nut, def)
+        spore_recursion(spec, dom.clone(), hay, cox, bug, nut, def)
     } else {
         let head = spore_recursion(
             spec,
@@ -464,7 +501,7 @@ pub fn spore_buccol_recursion(
                 .expect("non-empty spec list checked above")
                 .clone(),
             list_spec[1..].to_vec(),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -478,7 +515,7 @@ pub fn spore_buccol_recursion(
 pub fn spore_bucwut_recursion(
     spec: Spec,
     list_spec: Vec<Spec>,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -486,7 +523,7 @@ pub fn spore_bucwut_recursion(
     def: Option<Hoon>,
 ) -> Hoon {
     if list_spec.is_empty() {
-        spore_recursion(spec, dom, hay, cox, bug, nut, def)
+        spore_recursion(spec, dom.clone(), hay, cox, bug, nut, def)
     } else {
         spore_bucwut_recursion(
             list_spec
@@ -494,7 +531,7 @@ pub fn spore_bucwut_recursion(
                 .expect("non-empty spec list checked above")
                 .clone(),
             list_spec[1..].to_vec(),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -507,7 +544,7 @@ pub fn spore_bucwut_recursion(
 pub fn spore_buccen_recursion(
     spec: Spec,
     list_spec: Vec<Spec>,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -515,7 +552,7 @@ pub fn spore_buccen_recursion(
     def: Option<Hoon>,
 ) -> Hoon {
     if list_spec.is_empty() {
-        spore_recursion(spec, dom, hay, cox, bug, nut, def)
+        spore_recursion(spec, dom.clone(), hay, cox, bug, nut, def)
     } else {
         spore_buccen_recursion(
             list_spec
@@ -523,7 +560,7 @@ pub fn spore_buccen_recursion(
                 .expect("non-empty spec list checked above")
                 .clone(),
             list_spec[1..].to_vec(),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -535,7 +572,7 @@ pub fn spore_buccen_recursion(
 
 pub fn example(
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -547,11 +584,11 @@ pub fn example(
         Spec::Dbug(spot, inner) => {
             let mut bug = bug.clone();
             bug.insert(0, spot.clone());
-            example(&inner, dom, hay, cox, &bug, nut, def)
+            example(&inner, dom.clone(), hay, cox, &bug, nut, def)
         }
         Spec::Gist(help, inner) => example(
             &inner,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -573,7 +610,7 @@ pub fn example(
             // rather than bare `bloq` (which evaluates to the whole gate).
             example(
                 &Spec::BucMic(unreel(wing.clone(), list.clone())),
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -590,7 +627,7 @@ pub fn example(
                 .collect();
             example(
                 &inner,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -600,7 +637,7 @@ pub fn example(
         }
         Spec::Make(head, tail) => example(
             &Spec::BucMic(unfold(head.clone(), tail.clone())),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -612,9 +649,9 @@ pub fn example(
             //   [%name *]  example(mod q.mod, nut `made/[p.mod ~])
             // `%name` records metadata only; it does not wrap the produced value in `%ktts`.
             let nut = Some(Note::Made(term.to_string(), None));
-            example(&inner, dom, hay, cox, bug, &nut, def)
+            example(&inner, dom.clone(), hay, cox, bug, &nut, def)
         }
-        Spec::Over(wing, inner) => example(&inner, dom, wing, cox, bug, nut, def),
+        Spec::Over(wing, inner) => example(&inner, dom.clone(), wing, cox, bug, nut, def),
         Spec::BucCab(p) => decorate(
             home(p.clone(), hay.clone(), dom.clone()),
             bug.clone(),
@@ -630,7 +667,7 @@ pub fn example(
             let mut iter = items.into_iter().rev();
             let mut result = example(
                 iter.next().expect("BucCol has at least one item"),
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 &vec![],
@@ -638,7 +675,7 @@ pub fn example(
                 &None,
             );
             for item in iter {
-                let left = example(item, dom, hay, cox, &vec![], &None, &None);
+                let left = example(item, dom.clone(), hay, cox, &vec![], &None, &None);
                 result = Hoon::Pair(Box::new(left), Box::new(result));
             }
 
@@ -649,7 +686,7 @@ pub fn example(
                 *p.clone(),
                 *q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 &vec![],
@@ -670,13 +707,21 @@ pub fn example(
             )
         }
         Spec::BucSig(inner, list) => Hoon::KetLus(
-            Box::new(example(&list, dom, hay, cox, bug, nut, def)),
+            Box::new(example(&list, dom.clone(), hay, cox, bug, nut, def)),
             Box::new(home(inner.clone(), hay.clone(), dom.clone())),
         ),
         Spec::BucLus(stud, inner) => decorate(
             Hoon::Note(
                 Note::Know(stud.clone()),
-                Box::new(example(&inner.clone(), dom, hay, cox, bug, nut, def)),
+                Box::new(example(
+                    &inner.clone(),
+                    dom.clone(),
+                    hay,
+                    cox,
+                    bug,
+                    nut,
+                    def,
+                )),
             ),
             bug.clone(),
             nut.clone(),
@@ -693,7 +738,13 @@ pub fn example(
                 Hoon::KetTis(
                     skin.clone(),
                     Box::new(example(
-                        inner, dom, hay, cox, &clear_bug, &clear_nut, &clear_def,
+                        inner,
+                        dom.clone(),
+                        hay,
+                        cox,
+                        &clear_bug,
+                        &clear_nut,
+                        &clear_def,
                     )),
                 ),
                 bug.clone(),
@@ -705,7 +756,7 @@ pub fn example(
             *inner.clone(),
             map.clone(),
             mod_,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -717,7 +768,7 @@ pub fn example(
             *inner.clone(),
             map.clone(),
             mod_,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -729,7 +780,7 @@ pub fn example(
             *inner.clone(),
             map.clone(),
             mod_,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -741,7 +792,7 @@ pub fn example(
             *inner.clone(),
             map.clone(),
             mod_,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -758,8 +809,8 @@ pub fn example(
                 nut.clone(),
                 def.clone(),
             );
-            let dom = peg(dom, 3).expect("example +peg failed");
-            let relative_result = relative(2, mod_, dom, hay, cox, bug, nut, def);
+            let dom = peg(dom.clone(), 3).expect("example +peg failed");
+            let relative_result = relative(2u64.into(), mod_, dom.clone(), hay, cox, bug, nut, def);
             Hoon::TisLus(Box::new(spore_result), Box::new(relative_result))
         }
     }
@@ -771,14 +822,25 @@ fn vair_case(
     payload: Spec,
     arms: HashMap<String, Spec>,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
     nut: &Option<Note>,
     def: &Option<Hoon>,
 ) -> Hoon {
-    let hoon = interface(vair, payload, arms, mod_, dom, hay, cox, bug, nut, def);
+    let hoon = interface(
+        vair,
+        payload,
+        arms,
+        mod_,
+        dom.clone(),
+        hay,
+        cox,
+        bug,
+        nut,
+        def,
+    );
     decorate(
         home(hoon, hay.clone(), dom.clone()),
         bug.clone(),
@@ -788,9 +850,9 @@ fn vair_case(
 
 pub fn basic(
     bas: BaseType,
-    axe: u64,
+    axe: Axis,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -805,14 +867,18 @@ pub fn basic(
                     "ta".to_string(),
                     NounExpr::ParsedAtom(term_to_atom(a)),
                 )),
-                Box::new(Hoon::Axis(axe)),
+                Box::new(Hoon::Axis(axe.clone())),
             );
 
-            let example_res = Box::new(example(mod_, dom, hay, cox, bug, nut, def));
+            let example_res = Box::new(example(mod_, dom.clone(), hay, cox, bug, nut, def));
 
-            let wtpt_limb = Limb::Axis(axe);
+            let wtpt_limb = Limb::Axis(axe.clone());
             let wtpt_wing: Vec<Limb> = vec![wtpt_limb];
-            let wtpt = Hoon::WutPat(wtpt_wing, Box::new(Hoon::Axis(axe)), Box::new(Hoon::ZapZap));
+            let wtpt = Hoon::WutPat(
+                wtpt_wing,
+                Box::new(Hoon::Axis(axe.clone())),
+                Box::new(Hoon::ZapZap),
+            );
 
             let zppt_limb = Limb::Parent(0, Some("ruth".to_string()));
             let zppt_wing: Vec<Limb> = vec![zppt_limb];
@@ -822,13 +888,13 @@ pub fn basic(
             Hoon::KetLus(example_res, Box::new(zppt))
         }
         BaseType::Cell => {
-            let example_res = Box::new(example(mod_, dom, hay, cox, bug, nut, def));
-            let wing = Limb::Axis(axe);
+            let example_res = Box::new(example(mod_, dom.clone(), hay, cox, bug, nut, def));
+            let wing = Limb::Axis(axe.clone());
             let wing: Vec<Limb> = vec![wing];
             let mut p = wing.clone();
-            p.insert(0, Limb::Axis(2));
+            p.insert(0, Limb::Axis((2u64).into()));
             let mut q = wing.clone();
-            q.insert(0, Limb::Axis(3));
+            q.insert(0, Limb::Axis((3u64).into()));
             let pair = Hoon::Pair(Box::new(Hoon::Wing(p)), Box::new(Hoon::Wing(q)));
 
             Hoon::KetLus(example_res, Box::new(pair))
@@ -843,7 +909,7 @@ pub fn basic(
                     "$".to_string(),
                     NounExpr::ParsedAtom(ParsedAtom::Small(0)),
                 )),
-                Box::new(Hoon::Axis(axe)),
+                Box::new(Hoon::Axis(axe.clone())),
             ));
             let wtgr = Box::new(Hoon::WutGar(
                 Box::new(Hoon::DotTis(
@@ -851,7 +917,7 @@ pub fn basic(
                         "$".to_string(),
                         NounExpr::ParsedAtom(ParsedAtom::Small(1)),
                     )),
-                    Box::new(Hoon::Axis(axe)),
+                    Box::new(Hoon::Axis(axe.clone())),
                 )),
                 Box::new(Hoon::Rock(
                     "f".to_string(),
@@ -867,11 +933,11 @@ pub fn basic(
             ));
             let dtts = Box::new(Hoon::DotTis(
                 Box::new(Hoon::Bust(BaseType::NounExpr)),
-                Box::new(Hoon::Axis(axe)),
+                Box::new(Hoon::Axis(axe.clone())),
             ));
             Hoon::WutGar(dtts, rock)
         }
-        BaseType::NounExpr => Hoon::Axis(axe),
+        BaseType::NounExpr => Hoon::Axis(axe.clone()),
         BaseType::Void => Hoon::ZapZap,
     }
 }
@@ -879,9 +945,9 @@ pub fn basic(
 pub fn switch(
     one: Spec,
     mut rep: Vec<Spec>,
-    axe: u64,
+    axe: Axis,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -889,7 +955,16 @@ pub fn switch(
     def: &Option<Hoon>,
 ) -> Hoon {
     if rep.is_empty() {
-        return relative(axe, &one, dom, hay, cox, &vec![], &None, &None);
+        return relative(
+            axe.clone(),
+            &one,
+            dom.clone(),
+            hay,
+            cox,
+            &vec![],
+            &None,
+            &None,
+        );
     }
 
     let mut iter = rep.into_iter();
@@ -899,9 +974,9 @@ pub fn switch(
     let fin = switch(
         i_rep.clone(),
         t_rep,
-        axe,
+        axe.clone(),
         mod_,
-        dom,
+        dom.clone(),
         hay,
         cox,
         bug,
@@ -909,14 +984,26 @@ pub fn switch(
         def,
     );
 
-    let example_res = example(&one.clone(), dom, hay, cox, &vec![], &None, &None);
+    let example_res = example(&one.clone(), dom.clone(), hay, cox, &vec![], &None, &None);
 
     let fits = Hoon::Fits(
-        Box::new(Hoon::TisGal(Box::new(Hoon::Axis(2)), Box::new(example_res))),
-        vec![Limb::Axis(peg(axe, 2).expect("+switch, peg failed!"))],
+        Box::new(Hoon::TisGal(
+            Box::new(Hoon::Axis((2u64).into())),
+            Box::new(example_res),
+        )),
+        vec![Limb::Axis(peg(axe.clone(), 2).expect("+switch, peg failed!"))],
     );
 
-    let relative_result = relative(axe, &one, dom, hay, cox, &vec![], &None, &None);
+    let relative_result = relative(
+        axe.clone(),
+        &one,
+        dom.clone(),
+        hay,
+        cox,
+        &vec![],
+        &None,
+        &None,
+    );
 
     Hoon::WutCol(Box::new(fits), Box::new(relative_result), Box::new(fin))
 }
@@ -924,9 +1011,9 @@ pub fn switch(
 pub fn choice_(
     one: Spec,
     mut rep: Vec<Spec>,
-    axe: u64,
+    axe: Axis,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -934,24 +1021,42 @@ pub fn choice_(
     def: &Option<Hoon>,
 ) -> Hoon {
     if rep.is_empty() {
-        return relative(axe, &one, dom, hay, cox, &vec![], &None, &None);
+        return relative(
+            axe.clone(),
+            &one,
+            dom.clone(),
+            hay,
+            cox,
+            &vec![],
+            &None,
+            &None,
+        );
     }
 
     let mut iter = rep.into_iter();
     let i_rep = iter.next().expect("non-empty choice rep checked above");
     let t_rep: Vec<Spec> = iter.collect();
 
-    let example_res = example(&one.clone(), dom, hay, cox, &vec![], &None, &None);
+    let example_res = example(&one.clone(), dom.clone(), hay, cox, &vec![], &None, &None);
 
-    let fits = Hoon::Fits(Box::new(example_res), vec![Limb::Axis(axe)]);
+    let fits = Hoon::Fits(Box::new(example_res), vec![Limb::Axis(axe.clone())]);
 
-    let relative_result = relative(axe, &one.clone(), dom, hay, cox, &vec![], &None, &None);
+    let relative_result = relative(
+        axe.clone(),
+        &one.clone(),
+        dom.clone(),
+        hay,
+        cox,
+        &vec![],
+        &None,
+        &None,
+    );
     let tail = choice_(
         i_rep.clone(),
         t_rep,
-        axe,
+        axe.clone(),
         mod_,
-        dom,
+        dom.clone(),
         hay,
         cox,
         bug,
@@ -963,9 +1068,9 @@ pub fn choice_(
 }
 
 pub fn relative(
-    axe: u64,
+    axe: Axis,
     mod_: &Spec,
-    dom: u64,
+    dom: Axis,
     hay: &WingType,
     cox: &HashMap<String, Spec>,
     bug: &Vec<Spot>,
@@ -974,19 +1079,29 @@ pub fn relative(
 ) -> Hoon {
     match &mod_ {
         Spec::Base(p) => decorate(
-            basic(p.clone(), axe, mod_, dom, hay, cox, &vec![], &None, &None),
+            basic(
+                p.clone(),
+                axe.clone(),
+                mod_,
+                dom.clone(),
+                hay,
+                cox,
+                &vec![],
+                &None,
+                &None,
+            ),
             bug.clone(),
             nut.clone(),
         ),
         Spec::Dbug(p, q) => {
             let mut bug = bug.clone();
             bug.insert(0, p.clone());
-            relative(axe, &*q, dom, hay, cox, &bug, nut, def)
+            relative(axe.clone(), &*q, dom.clone(), hay, cox, &bug, nut, def)
         }
         Spec::Gist(p, q) => relative(
-            axe,
+            axe.clone(),
             &*q,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -996,7 +1111,7 @@ pub fn relative(
         Spec::Leaf(p, q) => decorate(
             Hoon::WutGar(
                 Box::new(Hoon::DotTis(
-                    Box::new(Hoon::Axis(axe)),
+                    Box::new(Hoon::Axis(axe.clone())),
                     Box::new(Hoon::Rock("$".to_string(), NounExpr::ParsedAtom(q.clone()))),
                 )),
                 Box::new(Hoon::Rock(p.clone(), NounExpr::ParsedAtom(q.clone()))),
@@ -1005,9 +1120,9 @@ pub fn relative(
             nut.clone(),
         ),
         Spec::Make(p, q) => relative(
-            axe,
+            axe.clone(),
             &Spec::BucMic(unfold(p.clone(), q.clone())),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -1015,9 +1130,9 @@ pub fn relative(
             def,
         ),
         Spec::Like(p, q) => relative(
-            axe,
+            axe.clone(),
             &Spec::BucMic(unreel(p.clone(), q.clone())),
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -1025,7 +1140,10 @@ pub fn relative(
             def,
         ),
         Spec::Loop(p) => decorate(
-            Hoon::CenHep(Box::new(Hoon::Limb(p.clone())), Box::new(Hoon::Axis(axe))),
+            Hoon::CenHep(
+                Box::new(Hoon::Limb(p.clone())),
+                Box::new(Hoon::Axis(axe.clone())),
+            ),
             bug.clone(),
             nut.clone(),
         ),
@@ -1034,7 +1152,7 @@ pub fn relative(
             //   [%name *]  relative(mod q.mod, nut `made/[p.mod ~])
             // This is metadata-only and must not add a `%ktts` face wrapper.
             let nut = Some(Note::Made(p.clone(), None));
-            relative(axe, &*q, dom, hay, cox, bug, &nut, def)
+            relative(axe.clone(), &*q, dom.clone(), hay, cox, bug, &nut, def)
         }
         Spec::Made((term, list), q) => {
             let pieces = list
@@ -1042,58 +1160,85 @@ pub fn relative(
                 .map(|s| vec![Limb::Term(s.to_string())])
                 .collect();
             let nut = Some(Note::Made(term.clone(), Some(pieces)));
-            relative(axe, &*q, dom, hay, cox, bug, &nut, def)
+            relative(axe.clone(), &*q, dom.clone(), hay, cox, bug, &nut, def)
         }
-        Spec::Over(p, q) => relative(axe, &*q, dom, p, cox, bug, nut, def),
+        Spec::Over(p, q) => relative(axe.clone(), &*q, dom.clone(), p, cox, bug, nut, def),
         Spec::BucBuc(p, q) => {
-            let new_dom = peg(3, dom).expect("+relative-bucbuc-peg-failed");
+            let new_dom = peg(3, dom.clone()).expect("+relative-bucbuc-peg-failed");
             let map: HashMap<String, Hoon> = q
                 .into_iter()
                 .map(|(term, spec)| {
                     (
                         term.clone(),
-                        relative(axe, spec, new_dom, hay, cox, bug, nut, def),
+                        relative(axe.clone(), spec, new_dom.clone(), hay, cox, bug, nut, def),
                     )
                 })
                 .collect();
             Hoon::BarKet(
-                Box::new(relative(axe, &*p, new_dom, hay, cox, bug, nut, def)),
+                Box::new(relative(axe.clone(), &*p, new_dom, hay, cox, bug, nut, def)),
                 HashMap::from([("$".to_string(), (None, map))]),
             )
         }
         Spec::BucPam(p, q) => Hoon::TisLus(
-            Box::new(relative(axe, &*p, dom, hay, cox, bug, nut, def)),
+            Box::new(relative(
+                axe.clone(),
+                &*p,
+                dom.clone(),
+                hay,
+                cox,
+                bug,
+                nut,
+                def,
+            )),
             Box::new(Hoon::TisLus(
-                Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(q.clone()))),
+                Box::new(Hoon::TisGar(
+                    Box::new(Hoon::Axis((3u64).into())),
+                    Box::new(q.clone()),
+                )),
                 Box::new(Hoon::TisLus(
                     Box::new(Hoon::CenHep(
-                        Box::new(Hoon::Axis(2)),
-                        Box::new(Hoon::Axis(6)),
+                        Box::new(Hoon::Axis((2u64).into())),
+                        Box::new(Hoon::Axis((6u64).into())),
                     )),
                     Box::new(Hoon::WutGar(
                         Box::new(Hoon::WutBar(vec![
-                            Hoon::DotTis(Box::new(Hoon::Axis(14)), Box::new(Hoon::Axis(2))),
                             Hoon::DotTis(
-                                Box::new(Hoon::Axis(2)),
+                                Box::new(Hoon::Axis((14u64).into())),
+                                Box::new(Hoon::Axis((2u64).into())),
+                            ),
+                            Hoon::DotTis(
+                                Box::new(Hoon::Axis((2u64).into())),
                                 Box::new(Hoon::CenHep(
-                                    Box::new(Hoon::Axis(6)),
-                                    Box::new(Hoon::Axis(2)),
+                                    Box::new(Hoon::Axis((6u64).into())),
+                                    Box::new(Hoon::Axis((2u64).into())),
                                 )),
                             ),
                         ])),
-                        Box::new(Hoon::Axis(2)),
+                        Box::new(Hoon::Axis((2u64).into())),
                     )),
                 )),
             )),
         ),
         Spec::BucBar(p, q) => Hoon::TisLus(
-            Box::new(relative(axe, &*p, dom, hay, cox, bug, nut, def)),
+            Box::new(relative(
+                axe.clone(),
+                &*p,
+                dom.clone(),
+                hay,
+                cox,
+                bug,
+                nut,
+                def,
+            )),
             Box::new(Hoon::WutGar(
                 Box::new(Hoon::CenHep(
-                    Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(q.clone()))),
-                    Box::new(Hoon::Axis(2)),
+                    Box::new(Hoon::TisGar(
+                        Box::new(Hoon::Axis((3u64).into())),
+                        Box::new(q.clone()),
+                    )),
+                    Box::new(Hoon::Axis((2u64).into())),
                 )),
-                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::Axis((2u64).into())),
             )),
         ),
         Spec::BucCab(p) => decorate(
@@ -1105,9 +1250,9 @@ pub fn relative(
             switch(
                 *p.clone(),
                 t.clone(),
-                axe,
+                axe.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1137,16 +1282,25 @@ pub fn relative(
             if q.is_empty() {
                 // Single element: relative:clear, then decorate with current bug
                 decorate(
-                    relative(axe, &*p, dom, hay, cox, &vec![], &None, &None),
+                    relative(
+                        axe.clone(),
+                        &*p,
+                        dom.clone(),
+                        hay,
+                        cox,
+                        &vec![],
+                        &None,
+                        &None,
+                    ),
                     bug.clone(),
                     nut.clone(),
                 )
             } else {
                 // Head: relative:clear
                 let head = relative(
-                    peg(axe, 2).expect("+relative-buccol-peg-failed"),
+                    peg(axe.clone(), 2).expect("+relative-buccol-peg-failed"),
                     &*p,
-                    dom,
+                    dom.clone(),
                     hay,
                     cox,
                     &vec![],
@@ -1157,9 +1311,9 @@ pub fn relative(
                 // preserving bug/nut/def (matching hoon-138's `%=  relative`)
                 let remaining = Spec::BucCol(Box::new(q[0].clone()), q[1..].to_vec());
                 let tail = relative(
-                    peg(axe, 3).expect("+relative-buccol-peg-failed"),
+                    peg(axe.clone(), 3).expect("+relative-buccol-peg-failed"),
                     &remaining,
-                    dom,
+                    dom.clone(),
                     hay,
                     cox,
                     bug,
@@ -1174,23 +1328,41 @@ pub fn relative(
             }
         }
         Spec::BucGal(p, q) => Hoon::TisLus(
-            Box::new(relative(axe, &*q, dom, hay, cox, &vec![], &None, &None)),
+            Box::new(relative(
+                axe.clone(),
+                &*q,
+                dom.clone(),
+                hay,
+                cox,
+                &vec![],
+                &None,
+                &None,
+            )),
             Box::new(Hoon::WutGal(
                 Box::new(Hoon::WutTis(
-                    Box::new(Spec::Over(vec![Limb::Axis(3)], p.clone())),
-                    vec![Limb::Axis(4)],
+                    Box::new(Spec::Over(vec![Limb::Axis((3u64).into())], p.clone())),
+                    vec![Limb::Axis((4u64).into())],
                 )),
-                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::Axis((2u64).into())),
             )),
         ),
         Spec::BucGar(p, q) => Hoon::TisLus(
-            Box::new(relative(axe, &*q, dom, hay, cox, &vec![], &None, &None)),
+            Box::new(relative(
+                axe.clone(),
+                &*q,
+                dom.clone(),
+                hay,
+                cox,
+                &vec![],
+                &None,
+                &None,
+            )),
             Box::new(Hoon::WutGar(
                 Box::new(Hoon::WutTis(
-                    Box::new(Spec::Over(vec![Limb::Axis(3)], p.clone())),
-                    vec![Limb::Axis(4)],
+                    Box::new(Spec::Over(vec![Limb::Axis((3u64).into())], p.clone())),
+                    vec![Limb::Axis((4u64).into())],
                 )),
-                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::Axis((2u64).into())),
             )),
         ),
         Spec::BucHep(p, q) => {
@@ -1198,7 +1370,7 @@ pub fn relative(
                 *p.clone(),
                 *q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 &vec![],
@@ -1217,10 +1389,28 @@ pub fn relative(
         Spec::BucKet(p, q) => decorate(
             Hoon::WutCol(
                 Box::new(Hoon::DotWut(Box::new(Hoon::Axis(
-                    peg(axe, 2).expect("bucket-peg-failed"),
+                    peg(axe.clone(), 2).expect("bucket-peg-failed"),
                 )))),
-                Box::new(relative(axe, &*p, dom, hay, cox, &vec![], &None, &None)),
-                Box::new(relative(axe, &*q, dom, hay, cox, &vec![], &None, &None)),
+                Box::new(relative(
+                    axe.clone(),
+                    &*p,
+                    dom.clone(),
+                    hay,
+                    cox,
+                    &vec![],
+                    &None,
+                    &None,
+                )),
+                Box::new(relative(
+                    axe.clone(),
+                    &*q,
+                    dom.clone(),
+                    hay,
+                    cox,
+                    &vec![],
+                    &None,
+                    &None,
+                )),
             ),
             bug.clone(),
             nut.clone(),
@@ -1228,15 +1418,15 @@ pub fn relative(
         Spec::BucMic(p) => decorate(
             Hoon::CenCol(
                 Box::new(home(p.clone(), hay.clone(), dom.clone())),
-                vec![Hoon::Axis(axe)],
+                vec![Hoon::Axis(axe.clone())],
             ),
             bug.clone(),
             nut.clone(),
         ),
         Spec::BucSig(p, q) => relative(
-            axe,
+            axe.clone(),
             &*q,
-            dom,
+            dom.clone(),
             hay,
             cox,
             bug,
@@ -1247,9 +1437,9 @@ pub fn relative(
             choice_(
                 *p.clone(),
                 t.clone(),
-                axe,
+                axe.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1261,20 +1451,56 @@ pub fn relative(
         ),
         Spec::BucTis(p, q) => Hoon::KetTis(
             p.clone(),
-            Box::new(relative(axe, &*q, dom, hay, cox, bug, nut, def)),
+            Box::new(relative(
+                axe.clone(),
+                &*q,
+                dom.clone(),
+                hay,
+                cox,
+                bug,
+                nut,
+                def,
+            )),
         ),
         Spec::BucPat(p, q) => decorate(
             Hoon::WutCol(
-                Box::new(Hoon::DotWut(Box::new(Hoon::Axis(axe)))),
-                Box::new(relative(axe, &*q, dom, hay, cox, &vec![], &None, &None)),
-                Box::new(relative(axe, &*p, dom, hay, cox, &vec![], &None, &None)),
+                Box::new(Hoon::DotWut(Box::new(Hoon::Axis(axe.clone())))),
+                Box::new(relative(
+                    axe.clone(),
+                    &*q,
+                    dom.clone(),
+                    hay,
+                    cox,
+                    &vec![],
+                    &None,
+                    &None,
+                )),
+                Box::new(relative(
+                    axe.clone(),
+                    &*p,
+                    dom.clone(),
+                    hay,
+                    cox,
+                    &vec![],
+                    &None,
+                    &None,
+                )),
             ),
             bug.clone(),
             nut.clone(),
         ),
         Spec::BucLus(p, q) => Hoon::Note(
             Note::Know(p.clone()),
-            Box::new(relative(axe, &*q, dom, hay, cox, bug, nut, def)),
+            Box::new(relative(
+                axe.clone(),
+                &*q,
+                dom.clone(),
+                hay,
+                cox,
+                bug,
+                nut,
+                def,
+            )),
         ),
         Spec::BucDot(p, q) => {
             let x = interface(
@@ -1282,7 +1508,7 @@ pub fn relative(
                 *p.clone(),
                 q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1299,7 +1525,7 @@ pub fn relative(
                 *p.clone(),
                 q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1316,7 +1542,7 @@ pub fn relative(
                 *p.clone(),
                 q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1333,7 +1559,7 @@ pub fn relative(
                 *p.clone(),
                 q.clone(),
                 mod_,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1346,8 +1572,8 @@ pub fn relative(
     }
 }
 
-pub fn home(gen: Hoon, mut hay: WingType, dom: u64) -> Hoon {
-    let wing = if dom == 1 {
+pub fn home(gen: Hoon, mut hay: WingType, dom: Axis) -> Hoon {
+    let wing = if dom.is_one() {
         hay
     } else {
         hay.push(Limb::Axis(dom));
@@ -1385,7 +1611,7 @@ pub fn unfold(fun: Hoon, arg: Vec<Spec>) -> Hoon {
 
 pub fn factory(
     mod_: Spec,
-    dom: u64,
+    dom: Axis,
     hay: WingType,
     cox: HashMap<String, Spec>,
     bug: Vec<Spot>,
@@ -1396,14 +1622,14 @@ pub fn factory(
         Spec::Dbug(spot, spec) => {
             let mut bug = bug.clone();
             bug.insert(0, spot);
-            factory(*spec, dom, hay, cox, bug, nut, def)
+            factory(*spec, dom.clone(), hay, cox, bug, nut, def)
         }
         Spec::BucSig(hoon, spec) => {
             let spec_clone = spec.clone();
             let spec_clone2 = spec.clone();
             factory(
                 *spec_clone,
-                dom,
+                dom.clone(),
                 hay,
                 cox,
                 bug,
@@ -1416,12 +1642,14 @@ pub fn factory(
             // is an indirection (`%bcmc`, `%like`, `%loop`, `%make`):
             //   ?:  &(=(~ def) ?=(?(%bcmc %like %loop %make) -.mod))
             //     (decorate (home ...))
-            (None, Spec::BucMic(h)) => decorate(home(h, hay, dom), bug, nut),
+            (None, Spec::BucMic(h)) => decorate(home(h, hay, dom.clone()), bug, nut),
             (None, Spec::Like(wing, vec_wing)) => {
-                decorate(home(unreel(wing, vec_wing), hay, dom), bug, nut)
+                decorate(home(unreel(wing, vec_wing), hay, dom.clone()), bug, nut)
             }
-            (None, Spec::Loop(term)) => decorate(home(Hoon::Limb(term), hay, dom), bug, nut),
-            (None, Spec::Make(h, s)) => decorate(home(unfold(h, s), hay, dom), bug, nut),
+            (None, Spec::Loop(term)) => {
+                decorate(home(Hoon::Limb(term), hay, dom.clone()), bug, nut)
+            }
+            (None, Spec::Make(h, s)) => decorate(home(unfold(h, s), hay, dom.clone()), bug, nut),
             _ => {
                 let spore_res = spore(
                     mod_.clone(),
@@ -1435,15 +1663,24 @@ pub fn factory(
 
                 let ketsig = Box::new(Hoon::KetSig(Box::new(spore_res)));
 
-                let descent_axis = peg(7, dom).expect("factory-peg-failed");
+                let descent_axis = peg(7, dom.clone()).expect("factory-peg-failed");
                 let tislus = Hoon::TisLus(
                     Box::new(Hoon::DotTis(
-                        Box::new(Hoon::Axis(14)),
-                        Box::new(Hoon::Axis(2)),
+                        Box::new(Hoon::Axis((14u64).into())),
+                        Box::new(Hoon::Axis((2u64).into())),
                     )),
-                    Box::new(Hoon::Axis(6)),
+                    Box::new(Hoon::Axis((6u64).into())),
                 );
-                let relative_res = relative(6, &mod_, descent_axis, &hay, &cox, &bug, &nut, &def);
+                let relative_res = relative(
+                    6u64.into(),
+                    &mod_,
+                    descent_axis,
+                    &hay,
+                    &cox,
+                    &bug,
+                    &nut,
+                    &def,
+                );
                 let tail = Hoon::TisLus(Box::new(relative_res), Box::new(tislus));
 
                 Hoon::BarCol(ketsig, Box::new(tail))
@@ -1457,7 +1694,7 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::Axis(a) => Hoon::CenTis(vec![Limb::Axis(a)], Vec::new()),
         Hoon::Base(b) => factory(
             Spec::Base(b),
-            1,
+            (1u64).into(),
             Vec::new(),
             HashMap::new(),
             Vec::new(),
@@ -1466,18 +1703,29 @@ pub fn open(gen: Hoon) -> Hoon {
         ),
         Hoon::Bust(b) => example(
             &Spec::Base(b),
-            1,
+            (1u64).into(),
             &WingType::default(),
             &HashMap::new(),
             &Vec::new(),
             &None,
             &None,
         ),
-        Hoon::KetCol(spec) => factory(*spec, 1, Vec::new(), HashMap::new(), Vec::new(), None, None),
+        Hoon::KetCol(spec) => factory(
+            *spec,
+            (1u64).into(),
+            Vec::new(),
+            HashMap::new(),
+            Vec::new(),
+            None,
+            None,
+        ),
         Hoon::Dbug(_, q) => *q,
         Hoon::Eror(s) => panic!("{}", s),
         Hoon::Knit(woofs) => {
-            let ktts = Hoon::KetTis(Skin::Term("v".to_string()), Box::new(Hoon::Axis(1)));
+            let ktts = Hoon::KetTis(
+                Skin::Term("v".to_string()),
+                Box::new(Hoon::Axis((1u64).into())),
+            );
 
             fn knit_loop(woofs: Vec<Woof>) -> Hoon {
                 if woofs.is_empty() {
@@ -1510,7 +1758,7 @@ pub fn open(gen: Hoon) -> Hoon {
                                 Box::new(Hoon::Limb("b".to_string())),
                                 Box::new(Hoon::Pair(
                                     Box::new(Hoon::TisGal(
-                                        Box::new(Hoon::Axis(2)),
+                                        Box::new(Hoon::Axis((2u64).into())),
                                         Box::new(Hoon::Limb("a".to_string())),
                                     )),
                                     Box::new(Hoon::CenTis(
@@ -1518,7 +1766,7 @@ pub fn open(gen: Hoon) -> Hoon {
                                         vec![(
                                             vec![Limb::Term("a".to_string())],
                                             Hoon::TisGal(
-                                                Box::new(Hoon::Axis(3)),
+                                                Box::new(Hoon::Axis((3u64).into())),
                                                 Box::new(Hoon::Limb("a".to_string())),
                                             ),
                                         )],
@@ -1559,7 +1807,7 @@ pub fn open(gen: Hoon) -> Hoon {
         }
         Hoon::Leaf(term, atom) => factory(
             Spec::Leaf(term, atom),
-            1,
+            (1u64).into(),
             Vec::new(),
             HashMap::new(),
             Vec::new(),
@@ -1753,7 +2001,7 @@ pub fn open(gen: Hoon) -> Hoon {
         },
         Hoon::KetTar(spec) => Hoon::KetSig(Box::new(example(
             &spec,
-            1,
+            (1u64).into(),
             &Vec::new(),
             &HashMap::new(),
             &Vec::new(),
@@ -1777,16 +2025,16 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::CenCol(p, hoons) => Hoon::CenSig(vec![Limb::Term("$".to_string())], p, hoons),
 
         Hoon::CenSig(wing, p, hoons) => {
-            fn compile_r_gen_rec(r_gen: &[Hoon], axe: u64) -> Vec<(Vec<Limb>, Hoon)> {
+            fn compile_r_gen_rec(r_gen: &[Hoon], axe: Axis) -> Vec<(Vec<Limb>, Hoon)> {
                 match r_gen.split_first() {
                     None => vec![],
                     Some((hoon, rest)) => {
                         let (wing_axe, next_axe) = if rest.is_empty() {
-                            (axe, 0)
+                            (axe.clone(), 0u64.into())
                         } else {
                             (
-                                peg(axe, 2).expect("+open: peg failed"),
-                                peg(axe, 3).expect("+open: peg failed"),
+                                peg(axe.clone(), 2).expect("+open: peg failed"),
+                                peg(axe.clone(), 3).expect("+open: peg failed"),
                             )
                         };
 
@@ -1800,7 +2048,7 @@ pub fn open(gen: Hoon) -> Hoon {
                     }
                 }
             }
-            let list = compile_r_gen_rec(&hoons, 6);
+            let list = compile_r_gen_rec(&hoons, 6u64.into());
             Hoon::CenTar(wing, p, list)
         }
 
@@ -1808,10 +2056,15 @@ pub fn open(gen: Hoon) -> Hoon {
             if pairs.is_empty() {
                 return Hoon::TisGar(p, Box::new(Hoon::Wing(wing)));
             }
-            wing.extend(vec![Limb::Axis(2)]);
+            wing.extend(vec![Limb::Axis((2u64).into())]);
             let wrapped = pairs
                 .into_iter()
-                .map(|(p, q)| (p, Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(q))))
+                .map(|(p, q)| {
+                    (
+                        p,
+                        Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(q)),
+                    )
+                })
                 .collect();
             Hoon::TisLus(p, Box::new(Hoon::CenTis(wing, wrapped)))
         }
@@ -1821,7 +2074,7 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::KetHep(spec, q) => {
             let example_res = example(
                 &spec,
-                1,
+                (1u64).into(),
                 &Vec::new(),
                 &HashMap::new(),
                 &Vec::new(),
@@ -1840,7 +2093,10 @@ pub fn open(gen: Hoon) -> Hoon {
                     Some(s) => Hoon::Rock("tas".to_string(), NounExpr::ParsedAtom(s)),
                     None => Hoon::BarDot(Box::new(Hoon::CenCol(
                         Box::new(Hoon::Limb("cain".to_string())),
-                        vec![Hoon::ZapGar(Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), p)))],
+                        vec![Hoon::ZapGar(Box::new(Hoon::TisGar(
+                            Box::new(Hoon::Axis((3u64).into())),
+                            p,
+                        )))],
                     ))),
                 }
             };
@@ -1877,10 +2133,13 @@ pub fn open(gen: Hoon) -> Hoon {
             Hoon::SigGal(TermOrPair::Pair("fast".to_string(), Box::new(clls)), q)
         }
 
-        Hoon::SigFas(chum, q) => Hoon::SigCen(chum, Box::new(Hoon::Axis(7)), vec![], q),
+        Hoon::SigFas(chum, q) => Hoon::SigCen(chum, Box::new(Hoon::Axis((7u64).into())), vec![], q),
 
         Hoon::SigGal(term_or_pair, q) => Hoon::TisGal(
-            Box::new(Hoon::SigGar(term_or_pair, Box::new(Hoon::Axis(1)))),
+            Box::new(Hoon::SigGar(
+                term_or_pair,
+                Box::new(Hoon::Axis((1u64).into())),
+            )),
             q,
         ),
 
@@ -1936,12 +2195,12 @@ pub fn open(gen: Hoon) -> Hoon {
             );
             let sgpm = Hoon::SigPam(
                 a,
-                Box::new(Hoon::Axis(5)),
-                Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), r.clone())),
+                Box::new(Hoon::Axis((5u64).into())),
+                Box::new(Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), r.clone())),
             );
             let wtsg = Hoon::WutSig(
-                vec![Limb::Axis(2)],
-                Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), r)),
+                vec![Limb::Axis((2u64).into())],
+                Box::new(Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), r)),
                 Box::new(sgpm),
             );
             Hoon::TisLus(Box::new(wtdt), Box::new(wtsg))
@@ -1970,20 +2229,23 @@ pub fn open(gen: Hoon) -> Hoon {
                             let tsbr = Box::new(Hoon::TisBar(
                                 Box::new(Spec::Base(BaseType::Cell)),
                                 Box::new(Hoon::BarPat(None, {
-                                    let sug = vec![Limb::Axis(12)];
+                                    let sug = vec![Limb::Axis((12u64).into())];
                                     let wtsg = Hoon::WutSig(
                                         sug.clone(),
                                         Box::new(Hoon::CenTis(
                                             sug.clone(),
-                                            vec![(vec![Limb::Axis(1)], Hoon::Axis(13))],
+                                            vec![(
+                                                vec![Limb::Axis((1u64).into())],
+                                                Hoon::Axis((13u64).into()),
+                                            )],
                                         )),
                                         Box::new(Hoon::CenTis(
                                             sug.clone(),
                                             vec![(
-                                                vec![Limb::Axis(3)],
+                                                vec![Limb::Axis((3u64).into())],
                                                 Hoon::CenTis(
                                                     vec![Limb::Term("$".to_string())],
-                                                    vec![(sug, Hoon::Axis(25))],
+                                                    vec![(sug, Hoon::Axis((25u64).into()))],
                                                 ),
                                             )],
                                         )),
@@ -2025,11 +2287,16 @@ pub fn open(gen: Hoon) -> Hoon {
                         [] => panic!("empty yex"),
                         // hoon-138 `%mccl` open lowering terminal case:
                         //   [* ~]  [%tsgr [%$ 3] i.yex]
-                        [h] => Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())),
+                        [h] => {
+                            Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(h.clone()))
+                        }
                         [h, t @ ..] => Hoon::CenCol(
-                            Box::new(Hoon::Axis(2)),
+                            Box::new(Hoon::Axis((2u64).into())),
                             vec![
-                                Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(h.clone())),
+                                Hoon::TisGar(
+                                    Box::new(Hoon::Axis((3u64).into())),
+                                    Box::new(h.clone()),
+                                ),
                                 loop_yex(t),
                             ],
                         ),
@@ -2054,7 +2321,10 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::MicGal(spec, q, r, s) => {
             let ktcl_p = Hoon::KetCol(spec.clone());
             let cnhp = Hoon::CenHep(q, Box::new(ktcl_p));
-            let brts = Hoon::BarTis(spec, Box::new(Hoon::TisGar(Box::new(Hoon::Axis(3)), s)));
+            let brts = Hoon::BarTis(
+                spec,
+                Box::new(Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), s)),
+            );
             Hoon::CenLus(Box::new(cnhp), r, Box::new(brts))
         }
 
@@ -2088,7 +2358,7 @@ pub fn open(gen: Hoon) -> Hoon {
                             )),
                         );
 
-                        let wing_c = vec![Limb::Parent(0, None), Limb::Axis(6)];
+                        let wing_c = vec![Limb::Parent(0, None), Limb::Axis((6u64).into())];
                         let c_expr = Hoon::TisGal(
                             Box::new(Hoon::Wing(wing_c)),
                             Box::new(Hoon::Limb("b".to_string())),
@@ -2096,7 +2366,10 @@ pub fn open(gen: Hoon) -> Hoon {
                         let c_bind = Hoon::KetTis(
                             Skin::Term("c".to_string()),
                             Box::new(Hoon::TisGal(
-                                Box::new(Hoon::Wing(vec![Limb::Parent(0, None), Limb::Axis(6)])),
+                                Box::new(Hoon::Wing(vec![
+                                    Limb::Parent(0, None),
+                                    Limb::Axis((6u64).into()),
+                                ])),
                                 Box::new(Hoon::Limb("b".to_string())),
                             )),
                         );
@@ -2107,7 +2380,7 @@ pub fn open(gen: Hoon) -> Hoon {
                             Box::new(Hoon::Limb("b".to_string())),
                             vec![Hoon::Limb("c".to_string())],
                         );
-                        let cnts_wing = vec![Limb::Parent(0, None), Limb::Axis(6)];
+                        let cnts_wing = vec![Limb::Parent(0, None), Limb::Axis((6u64).into())];
                         let cnts = Hoon::CenTis(
                             vec![Limb::Term("a".to_string())],
                             vec![(cnts_wing, Hoon::Limb("c".to_string()))],
@@ -2134,7 +2407,7 @@ pub fn open(gen: Hoon) -> Hoon {
             Hoon::TisGar(
                 Box::new(Hoon::KetTis(
                     Skin::Term("v".to_string()),
-                    Box::new(Hoon::Axis(1)),
+                    Box::new(Hoon::Axis((1u64).into())),
                 )),
                 Box::new(tail),
             )
@@ -2143,7 +2416,7 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::MicMic(spec, q) => Hoon::CenHep(
             Box::new(factory(
                 *spec,
-                1,
+                (1u64).into(),
                 Vec::new(),
                 HashMap::new(),
                 Vec::new(),
@@ -2168,7 +2441,7 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::TisCol(pairs, q) => {
             // hoon-138 `%tscl` open lowering:
             //   [%tsgr [%cncb [[%& 1] ~] p.gen] q.gen]
-            let wing = vec![Limb::Axis(1)];
+            let wing = vec![Limb::Axis((1u64).into())];
             Hoon::TisGar(Box::new(Hoon::CenCab(wing, pairs)), q)
         }
 
@@ -2177,7 +2450,10 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::TisMic(skin, p, q) => Hoon::TisFas(skin, q, p),
 
         Hoon::TisDot(wing, p, q) => Hoon::TisGar(
-            Box::new(Hoon::CenCab(vec![Limb::Axis(1)], vec![(wing, *p)])),
+            Box::new(Hoon::CenCab(
+                vec![Limb::Axis((1u64).into())],
+                vec![(wing, *p)],
+            )),
             q,
         ),
 
@@ -2192,7 +2468,10 @@ pub fn open(gen: Hoon) -> Hoon {
 
         Hoon::TisKet(skin, wing, p, q) => {
             let wuy = weld(wing.clone(), vec![Limb::Term("v".to_string())]);
-            let v_bind = Hoon::KetTis(Skin::Term("v".to_string()), Box::new(Hoon::Axis(1)));
+            let v_bind = Hoon::KetTis(
+                Skin::Term("v".to_string()),
+                Box::new(Hoon::Axis((1u64).into())),
+            );
             let a_bind = Hoon::KetTis(
                 Skin::Term("a".to_string()),
                 Box::new(Hoon::TisGar(
@@ -2203,7 +2482,7 @@ pub fn open(gen: Hoon) -> Hoon {
             let tsdt = Box::new(Hoon::TisDot(
                 wuy.clone(),
                 Box::new(Hoon::TisGal(
-                    Box::new(Hoon::Axis(3)),
+                    Box::new(Hoon::Axis((3u64).into())),
                     Box::new(Hoon::Limb("a".to_string())),
                 )),
                 Box::new(Hoon::TisGar(
@@ -2211,7 +2490,7 @@ pub fn open(gen: Hoon) -> Hoon {
                         Box::new(Hoon::KetTis(
                             Skin::Over(vec![Limb::Term("v".to_string())], Box::new(skin)),
                             Box::new(Hoon::TisGal(
-                                Box::new(Hoon::Axis(2)),
+                                Box::new(Hoon::Axis((2u64).into())),
                                 Box::new(Hoon::Limb("a".to_string())),
                             )),
                         )),
@@ -2226,10 +2505,13 @@ pub fn open(gen: Hoon) -> Hoon {
             )
         }
 
-        Hoon::TisLus(p, q) => Hoon::TisGar(Box::new(Hoon::Pair(p, Box::new(Hoon::Axis(1)))), q),
+        Hoon::TisLus(p, q) => Hoon::TisGar(
+            Box::new(Hoon::Pair(p, Box::new(Hoon::Axis((1u64).into())))),
+            q,
+        ),
 
         Hoon::TisSig(hoons) => match hoons.as_slice() {
-            [] => Hoon::Axis(1),
+            [] => Hoon::Axis((1u64).into()),
             [h] => h.clone(),
             [h, tail @ ..] => {
                 let rest = open(Hoon::TisSig(tail.to_vec()));
@@ -2365,7 +2647,7 @@ pub fn open(gen: Hoon) -> Hoon {
         Hoon::WutTis(spec, q) => {
             let example_res = example(
                 &spec,
-                1,
+                (1u64).into(),
                 &Vec::new(),
                 &HashMap::new(),
                 &Vec::new(),
@@ -2571,8 +2853,8 @@ pub fn grip(skin: Skin, gen: Hoon, rel: WingType) -> Hoon {
             let haf = half(gen.clone());
             match haf {
                 None => {
-                    let car_gen = Hoon::Axis(4);
-                    let cdr_gen = Hoon::Axis(5);
+                    let car_gen = Hoon::Axis((4u64).into());
+                    let cdr_gen = Hoon::Axis((5u64).into());
                     let pair = Hoon::Pair(
                         Box::new(grip(*car_skin, car_gen, rel.clone())),
                         Box::new(grip(*cdr_skin, cdr_gen, rel.clone())),
@@ -2774,7 +3056,7 @@ pub fn decorate(gen: Hoon, bug: Vec<Spot>, nut: Option<Note>) -> Hoon {
 
 pub fn blue(tik: Tiki, gen: Hoon) -> Hoon {
     match tik {
-        Tiki::Hoon((None, h)) => Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(gen)),
+        Tiki::Hoon((None, h)) => Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(gen)),
         _ => gen,
     }
 }
@@ -2782,14 +3064,14 @@ pub fn blue(tik: Tiki, gen: Hoon) -> Hoon {
 pub fn teal(tik: Tiki, mod_: Spec) -> Spec {
     match tik {
         Tiki::Wing((_, _)) => mod_,
-        Tiki::Hoon((_, _)) => Spec::Over(vec![Limb::Axis(3)], Box::new(mod_)),
+        Tiki::Hoon((_, _)) => Spec::Over(vec![Limb::Axis((3u64).into())], Box::new(mod_)),
     }
 }
 
 pub fn tele(tik: Tiki, syn: Skin) -> Skin {
     match tik {
         Tiki::Wing((_, _)) => syn,
-        Tiki::Hoon((_, _)) => Skin::Over(vec![Limb::Axis(3)], Box::new(syn)),
+        Tiki::Hoon((_, _)) => Skin::Over(vec![Limb::Axis((3u64).into())], Box::new(syn)),
     }
 }
 
@@ -2815,7 +3097,7 @@ pub fn puce(tik: Tiki) -> WingType {
             None => q,
             Some(u) => vec![Limb::Term(u)],
         },
-        Tiki::Hoon((_, _)) => vec![Limb::Axis(2)],
+        Tiki::Hoon((_, _)) => vec![Limb::Axis((2u64).into())],
     }
 }
 
@@ -2885,30 +3167,34 @@ pub fn wtts(tik: Tiki, mod_: Spec) -> Hoon {
     )
 }
 
-pub fn right_child(n: u64) -> u64 {
-    if n == 0 {
-        1
-    } else {
-        (2 * right_child(n - 1)) + 1
-    }
+pub fn right_child(n: u64) -> Axis {
+    ((BigUint::one() << usize::try_from(n).expect("axis depth exceeds usize")) * 2u8
+        - BigUint::one())
+    .into()
 }
 
-pub fn left_child(n: u64) -> u64 {
-    if n == 0 {
-        0
-    } else {
-        2 * (left_child(n - 1) + 1)
-    }
+pub fn left_child(n: u64) -> Axis {
+    ((BigUint::one() << usize::try_from(n).expect("axis depth exceeds usize")) * 2u8
+        - BigUint::from(2u8))
+    .into()
 }
 
-pub fn peg(a: u64, b: u64) -> Result<u64, &'static str> {
-    if a == 0 || b == 0 {
+pub fn peg<A, B>(a: A, b: B) -> Result<Axis, &'static str>
+where
+    A: Into<Axis>,
+    B: Into<Axis>,
+{
+    let a = a.into();
+    let b = b.into();
+    if a.is_zero() || b.is_zero() {
         return Err("peg: a and b must be non-zero");
     }
 
-    let k = b.ilog2();
-    let offset = b & ((1u64 << k) - 1);
-    Ok((a << k) + offset)
+    let k = b.bit_len() - 1;
+    let k = usize::try_from(k).map_err(|_| "peg: axis shift exceeds usize")?;
+    let base = BigUint::one() << k;
+    let offset = b.as_biguint() - &base;
+    Ok(((a.into_biguint() << k) + offset).into())
 }
 
 // non-control ASCII (32-255, excluding 127/DEL)
@@ -3005,8 +3291,8 @@ pub fn winglist<'src>() -> impl Parser<'src, &'src str, WingType, Err<'src>> {
             just('+')
                 .ignore_then(digits())
                 .map(|s| {
-                    let num = s.parse::<u64>().expect("axis digits should parse as u64");
-                    Limb::Axis(num)
+                    let num = BigUint::from_str(&s).expect("axis digits should parse as an atom");
+                    Limb::Axis(num.into())
                 });
 
     let pam_number =   //  &10
@@ -3025,13 +3311,13 @@ pub fn winglist<'src>() -> impl Parser<'src, &'src str, WingType, Err<'src>> {
                 });
 
     let dot =  //  .
-            just('.').to(Limb::Axis(1));
+            just('.').to(Limb::Axis((1u64).into()));
 
     let lus =  //  +
-        just('+').to(Limb::Axis(3));
+        just('+').to(Limb::Axis((3u64).into()));
 
     let hep =  //  -
-        just('-').to(Limb::Axis(2));
+        just('-').to(Limb::Axis((2u64).into()));
 
     let sign = any().filter(|c: &char| *c == '+' || *c == '-');
     let angle = any().filter(|c: &char| *c == '<' || *c == '>');
@@ -3055,12 +3341,16 @@ pub fn winglist<'src>() -> impl Parser<'src, &'src str, WingType, Err<'src>> {
                 out
             })
             .map(|s: String| {
-                let mut axis = 1;
+                let mut axis = Axis::from(1u64);
                 for c in s.chars() {
                     match c {
-                        '+' | '>' => axis = peg(axis, 3).expect("lark axis calculation failed"),
-                        '-' | '<' => axis = peg(axis, 2).expect("lark axis calculation failed"),
-                        _ => axis = 1,
+                        '+' | '>' => {
+                            axis = peg(&axis, 3u64).expect("lark axis calculation failed")
+                        }
+                        '-' | '<' => {
+                            axis = peg(&axis, 2u64).expect("lark axis calculation failed")
+                        }
+                        _ => axis = Axis::from(1u64),
                     }
                 }
                 Limb::Axis(axis)
@@ -4987,9 +5277,8 @@ pub fn concatanate<'src>(
 pub fn wing<'src>() -> impl Parser<'src, &'src str, Hoon, Err<'src>> {
     winglist()
         .map(|list: WingType| match list.first() {
-            Some(Limb::Axis(0)) | Some(Limb::Term(_)) | Some(Limb::Parent(_, _)) => {
-                Hoon::Wing(list)
-            }
+            Some(Limb::Axis(axis)) if axis.is_zero() => Hoon::Wing(list),
+            Some(Limb::Term(_)) | Some(Limb::Parent(_, _)) => Hoon::Wing(list),
             _ => Hoon::CenTis(list, vec![]),
         })
         .labelled("Wing")
@@ -11780,7 +12069,7 @@ pub fn hoon_to_noun(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
         }
         ZapZap => T(slab, &[D(tas!(b"zpzp")), D(0)]),
         Axis(a) => {
-            let axis = Atom::new(slab, *a).as_noun();
+            let axis = axis_to_noun(slab, a);
             T(slab, &[D(0), axis])
         }
         Base(bt) => {
@@ -12629,6 +12918,10 @@ fn atom_to_noun(slab: &mut NounSlab, atom: &ParsedAtom) -> Noun {
     }
 }
 
+fn axis_to_noun(slab: &mut NounSlab, axis: &Axis) -> Noun {
+    atom_to_noun(slab, &ParsedAtom::from_biguint(axis.as_biguint().clone()))
+}
+
 fn biguint_to_ubig(b: &BigUint) -> UBig {
     UBig::from_le_bytes(&b.to_bytes_le())
 }
@@ -12804,7 +13097,8 @@ fn stencil_to_noun(slab: &mut NounSlab, st: &Stencil) -> Noun {
         }
         Stencil::Lazy { fragment, resolve } => {
             let gate_noun = gate_to_noun(slab, resolve);
-            T(slab, &[D(tas!(b"lazy")), D(*fragment), gate_noun])
+            let fragment_noun = axis_to_noun(slab, fragment);
+            T(slab, &[D(tas!(b"lazy")), fragment_noun, gate_noun])
         }
     }
 }
@@ -13064,7 +13358,7 @@ fn limb_to_noun(slab: &mut NounSlab, limb: &Limb) -> Noun {
         Limb::Term(s) => term_to_noun(slab, s),
 
         Limb::Axis(n) => {
-            let axis = Atom::new(slab, *n).as_noun();
+            let axis = axis_to_noun(slab, n);
             T(slab, &[D(0), axis])
         }
 
@@ -13240,7 +13534,7 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         Edit((axis, new), core) => {
             let new_noun = nock_to_noun(slab, new);
             let core_noun = nock_to_noun(slab, core);
-            let axis = Atom::new(slab, *axis).as_noun();
+            let axis = axis_to_noun(slab, axis);
             let axis_cell = T(slab, &[axis, new_noun]);
             T(slab, &[D(11u64), axis_cell, core_noun])
         }
@@ -13261,7 +13555,7 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
         }
         SelectArm(axis, core) => {
             let core = nock_to_noun(slab, core);
-            let axis = Atom::new(slab, *axis).as_noun();
+            let axis = axis_to_noun(slab, axis);
             T(slab, &[D(10u64), axis, core])
         }
         GrabData(core, path) => {
@@ -13269,7 +13563,7 @@ fn nock_to_noun(slab: &mut NounSlab, nock: &Nock) -> Noun {
             let path = nock_to_noun(slab, path);
             T(slab, &[D(13u64), core, path])
         }
-        AxisSelect(axis) => Atom::new(slab, *axis).as_noun(),
+        AxisSelect(axis) => axis_to_noun(slab, axis),
     }
 }
 
@@ -13502,6 +13796,10 @@ fn noun_to_parsed_atom(noun: NounHandle<'_>) -> Result<ParsedAtom, String> {
     }
 }
 
+fn noun_to_axis(noun: NounHandle<'_>) -> Result<Axis, String> {
+    Ok(noun_to_parsed_atom(noun)?.to_biguint().into())
+}
+
 fn noun_to_noun_expr(noun: NounHandle<'_>) -> Result<NounExpr, String> {
     match noun.as_cell() {
         Ok(cell) => {
@@ -13690,7 +13988,7 @@ fn noun_to_limb(noun: NounHandle<'_>) -> Result<Limb, String> {
     let head_val = noun_to_direct(cell.head())?;
     if head_val == 0 {
         // [0 axis] → Axis limb
-        let axis = noun_to_direct(cell.tail())?;
+        let axis = noun_to_axis(cell.tail())?;
         Ok(Limb::Axis(axis))
     } else if head_val == 1 {
         // [1 n opt] → Parent limb
@@ -14203,12 +14501,8 @@ fn noun_to_marl(noun: NounHandle<'_>) -> Result<Marl, String> {
 }
 
 fn noun_to_nock(noun: NounHandle<'_>) -> Result<Nock, String> {
-    if let Ok(atom) = noun.as_atom() {
-        let val = if let Ok(d) = atom.as_direct() {
-            d.data()
-        } else {
-            return Err("nock: large atom".into());
-        };
+    if noun.as_atom().is_ok() {
+        let val = noun_to_axis(noun)?;
         return Ok(Nock::AxisSelect(val));
     }
     let cell = noun.as_cell().map_err(|_| "nock")?;
@@ -14265,7 +14559,7 @@ fn noun_to_nock(noun: NounHandle<'_>) -> Result<Nock, String> {
         10 => {
             let r = rest.as_cell().map_err(|_| "nock 10")?;
             Ok(Nock::SelectArm(
-                noun_to_direct(r.head())?,
+                noun_to_axis(r.head())?,
                 Box::new(noun_to_nock(r.tail())?),
             ))
         }
@@ -14274,7 +14568,7 @@ fn noun_to_nock(noun: NounHandle<'_>) -> Result<Nock, String> {
             let hint = r.head().as_cell().map_err(|_| "nock 11 hint")?;
             Ok(Nock::Edit(
                 (
-                    noun_to_direct(hint.head())?,
+                    noun_to_axis(hint.head())?,
                     Box::new(noun_to_nock(hint.tail())?),
                 ),
                 Box::new(noun_to_nock(r.tail())?),
@@ -14381,7 +14675,7 @@ pub fn noun_to_hoon(noun: NounHandle<'_>) -> Result<Hoon, String> {
 
     // Axis: [0 n]
     if tag == 0 {
-        let n = noun_to_direct(tail)?;
+        let n = noun_to_axis(tail)?;
         return Ok(Hoon::Axis(n));
     }
 
@@ -15235,9 +15529,10 @@ mod tests {
 
     use super::{
         chumsky_spot_to_hoon_spot, flay, gor_mug, hoon_to_noun, limb_to_noun, map_to_noun, mor_mug,
-        nock_to_noun, open, rent_co, slab_mug, string_to_atom, term_to_noun, Limb, LineMap,
+        nock_to_noun, open, peg, rent_co, slab_mug, string_to_atom, term_to_noun, winglist, Limb,
+        LineMap,
     };
-    use crate::ast::hoon::{BaseType, Coin, Hoon, Nock, Note, ParsedAtom, Skin, Spec};
+    use crate::ast::hoon::{Axis, BaseType, Coin, Hoon, Nock, Note, ParsedAtom, Skin, Spec};
 
     fn noun_is_zero(noun: Noun) -> bool {
         unsafe { noun.raw_equals(&D(0)) }
@@ -16680,21 +16975,24 @@ mod tests {
 
     #[test]
     fn open_tiscol_lowers_to_axis_one_cncb() {
-        let pairs = vec![(vec![Limb::Term("foo".to_string())], Hoon::Axis(2))];
-        let gen = Hoon::TisCol(pairs.clone(), Box::new(Hoon::Axis(3)));
+        let pairs = vec![(
+            vec![Limb::Term("foo".to_string())],
+            Hoon::Axis((2u64).into()),
+        )];
+        let gen = Hoon::TisCol(pairs.clone(), Box::new(Hoon::Axis((3u64).into())));
         let got = open(gen);
         let expected = Hoon::TisGar(
-            Box::new(Hoon::CenCab(vec![Limb::Axis(1)], pairs)),
-            Box::new(Hoon::Axis(3)),
+            Box::new(Hoon::CenCab(vec![Limb::Axis((1u64).into())], pairs)),
+            Box::new(Hoon::Axis((3u64).into())),
         );
         assert_eq!(got, expected);
     }
 
     #[test]
     fn open_miccol_terminal_lowers_to_tisgar() {
-        let p = Hoon::Axis(10);
-        let a = Hoon::Axis(20);
-        let b = Hoon::Axis(30);
+        let p = Hoon::Axis((10u64).into());
+        let a = Hoon::Axis((20u64).into());
+        let b = Hoon::Axis((30u64).into());
         let got = open(Hoon::MicCol(
             Box::new(p.clone()),
             vec![a.clone(), b.clone()],
@@ -16702,10 +17000,10 @@ mod tests {
         let expected = Hoon::TisLus(
             Box::new(p),
             Box::new(Hoon::CenCol(
-                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::Axis((2u64).into())),
                 vec![
-                    Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(a)),
-                    Hoon::TisGar(Box::new(Hoon::Axis(3)), Box::new(b)),
+                    Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(a)),
+                    Hoon::TisGar(Box::new(Hoon::Axis((3u64).into())), Box::new(b)),
                 ],
             )),
         );
@@ -16728,7 +17026,7 @@ mod tests {
     fn limb_to_noun_encodes_axis_and_parent_tags() {
         let mut slab = NounSlab::new();
 
-        let axis = limb_to_noun(&mut slab, &Limb::Axis(1));
+        let axis = limb_to_noun(&mut slab, &Limb::Axis((1u64).into()));
         let expected_axis = T(&mut slab, &[D(0), D(1)]);
         assert!(
             slab_noun_equality(&slab, &axis, &expected_axis),
@@ -16756,9 +17054,9 @@ mod tests {
     fn axis_encoders_allocate_atoms_above_the_direct_limit() {
         let mut slab = NounSlab::new();
         let axis = DIRECT_MAX + 1;
-        let gene = hoon_to_noun(&mut slab, &Hoon::Axis(axis));
-        let limb = limb_to_noun(&mut slab, &Limb::Axis(axis));
-        let nock = nock_to_noun(&mut slab, &Nock::AxisSelect(axis));
+        let gene = hoon_to_noun(&mut slab, &Hoon::Axis(axis.into()));
+        let limb = limb_to_noun(&mut slab, &Limb::Axis(axis.into()));
+        let nock = nock_to_noun(&mut slab, &Nock::AxisSelect(axis.into()));
         let space = slab.noun_space();
 
         for encoded in [gene, limb] {
@@ -16793,6 +17091,27 @@ mod tests {
             .expect("Nock axis must be an atom");
         assert!(nock_axis.is_indirect());
         assert_eq!(nock_axis.as_u64().expect("Nock axis must fit u64"), axis);
+    }
+
+    #[test]
+    fn peg_preserves_axes_above_u64() {
+        let input = Axis::from(16_140_901_064_495_857_663u64);
+        let result = peg(&input, 2u64).expect("arbitrary-precision peg");
+        assert_eq!(result.to_string(), "32281802128991715326");
+        assert!(
+            result.to_u64().is_none(),
+            "the regression axis must exceed u64"
+        );
+    }
+
+    #[test]
+    fn wing_parser_accepts_indirect_axis_atoms() {
+        let source = "+32281802128991715326";
+        let parsed = winglist().parse(source).into_result().expect("wide wing");
+        let [Limb::Axis(axis)] = parsed.as_slice() else {
+            panic!("expected one axis limb");
+        };
+        assert_eq!(axis.to_string(), "32281802128991715326");
     }
 
     #[test]

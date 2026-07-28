@@ -2566,8 +2566,8 @@ fn should_reset_eval_memo(_path: &Path) -> bool {
 fn shot_gene() -> Hoon {
     Hoon::CenSig(
         vec![Limb::Term("$".to_string())],
-        Box::new(Hoon::Axis(2)),
-        vec![Hoon::Axis(3)],
+        Box::new(Hoon::Axis((2u64).into())),
+        vec![Hoon::Axis((3u64).into())],
     )
 }
 

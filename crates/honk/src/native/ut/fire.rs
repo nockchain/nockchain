@@ -21,7 +21,7 @@ impl<'a> Ut<'a> {
                     // fire is native: the arm cores are already `NRc<NTy>`.
                     let ty = self.fire(arms)?;
                     let slot = slot_formula_axis_big(self.slab, axe);
-                    let arm_axis_noun = noun_u64(self.slab, *axis);
+                    let arm_axis_noun = noun_biguint(self.slab, axis.clone());
                     let formula = T(self.slab, &[D(9), arm_axis_noun, slot]);
                     Ok((ty, formula))
                 }
@@ -35,7 +35,7 @@ impl<'a> Ut<'a> {
 
     fn fire_is_wet_axis_one(&mut self, hoon: Noun) -> bool {
         self.hoon_ast_lookup(hoon)
-            .map(|ast| matches!(ast.as_ref(), Hoon::Axis(1)))
+            .map(|ast| matches!(ast.as_ref(), Hoon::Axis(axis) if axis.is_one()))
             .unwrap_or(false)
     }
 

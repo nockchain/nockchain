@@ -6,6 +6,7 @@ use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, S
 use nockapp::noun::slab::NounSlab;
 use nockvm::ext::AtomExt;
 use nockvm::noun::{Atom, Noun, NounAllocator, D, T};
+use num_bigint::BigUint;
 
 use super::{
     cell_type, coil_from_parts, coil_parts, find_face_axis_skip, hoon_to_noun,
@@ -155,7 +156,7 @@ fn struct_noun_pair_set_signature_is_order_independent() {
 #[test]
 fn type_tag_kind_matches_core_type_tags_without_string_dispatch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let cell_head = ty_noun(&mut slab);
     let cell_tail = ty_noun(&mut slab);
     let cell = ty_cell(&mut slab, cell_head, cell_tail);
@@ -276,7 +277,7 @@ fn nest_pair_set_is_structural_via_interner() {
 fn nest_cell_branch_resets_hold_seen_guards() {
     let mut slab = NounSlab::new();
     let hold_inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, hold_inner, hoon_noun);
 
     // List-like tail shape: [@ hold(@)] against [@ @].
@@ -316,7 +317,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
 fn nest_hold_seen_guard_still_applies_outside_cell() {
     let mut slab = NounSlab::new();
     let hold_inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, hold_inner, hoon_noun);
     let ref_ = ty_atom(&mut slab, "ud", None);
 
@@ -379,7 +380,7 @@ fn core_with_payload_face_and_same_named_arm(slab: &mut NounSlab, name: &str) ->
     let garb_poly = term_to_noun(slab, "dry");
     let garb_vair = term_to_noun(slab, "gold");
     let garb = T(slab, &[garb_name, garb_poly, garb_vair]);
-    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let arm_key = term_to_noun(slab, name);
     let arms = map_to_noun(slab, vec![(arm_key, arm_hoon)]).expect("arms map");
     let tome = T(slab, &[D(0), arms]);
@@ -410,7 +411,7 @@ fn core_with_named_arm_and_vair(slab: &mut NounSlab, name: &str, vair: &str) -> 
     let garb_poly = term_to_noun(slab, "dry");
     let garb_vair = term_to_noun(slab, vair);
     let garb = T(slab, &[garb_name, garb_poly, garb_vair]);
-    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let arm_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let arm_key = term_to_noun(slab, name);
     let arms = map_to_noun(slab, vec![(arm_key, arm_hoon)]).expect("arms map");
     let tome = T(slab, &[D(0), arms]);
@@ -452,7 +453,7 @@ fn algebra_type_corpus(slab: &mut NounSlab) -> Vec<(&'static str, Noun)> {
     let face_atom = ty_face(slab, "face", atom);
     let hint_cell = ty_hint(slab, noun, D(0), cell_atom_noun);
     let fork_atom_cell = ty_fork(slab, vec![atom, cell_zero_one]);
-    let axis_one_hoon = hoon_to_noun(slab, &Hoon::Axis(1));
+    let axis_one_hoon = hoon_to_noun(slab, &Hoon::Axis((1u64).into()));
     let hold_atom = ty_hold(slab, atom, axis_one_hoon);
 
     vec![
@@ -625,13 +626,13 @@ fn type_algebra_peek_distributes_over_forks() {
     let fork = ty_fork(&mut slab, vec![left, right]);
     let mut ut = Ut::new(&mut slab);
 
-    let head = ut.peek_noun(fork, Way::Free, 2).expect("peek fork head");
+    let head = ut.peek_noun(fork, Way::Free, 2u64).expect("peek fork head");
     let expected_head = ut
         .fork_from_options(vec![left_head, right_head])
         .expect("expected head fork");
     assert!(noun_eq(head, expected_head, &ut.slab.noun_space()).expect("head noun_eq"));
 
-    let tail = ut.peek_noun(fork, Way::Free, 3).expect("peek fork tail");
+    let tail = ut.peek_noun(fork, Way::Free, 3u64).expect("peek fork tail");
     let expected_tail = ut
         .fork_from_options(vec![left_tail, right_tail])
         .expect("expected tail fork");
@@ -654,12 +655,12 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let redo_out = ty_face(&mut slab, "b", redo_out_inner);
     let inner_redo_out_inner = ty_noun(&mut slab);
     let _inner_redo_out = ty_face(&mut slab, "c", inner_redo_out_inner);
-    let mint_gen = hoon_to_noun(&mut slab, &Hoon::Axis(11));
-    let mull_gen = hoon_to_noun(&mut slab, &Hoon::Axis(12));
+    let mint_gen = hoon_to_noun(&mut slab, &Hoon::Axis((11u64).into()));
+    let mull_gen = hoon_to_noun(&mut slab, &Hoon::Axis((12u64).into()));
     let rest_inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let rest_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let rest_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let rest_cache_inner = ty_atom(&mut slab, "@", Some(D(8)));
-    let rest_cache_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let rest_cache_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
     let rest_legs = [(rest_cache_inner, rest_cache_hoon)];
     let rest_sut = ty_hold(&mut slab, rest_cache_inner, rest_cache_hoon);
 
@@ -842,7 +843,7 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let gol = ty_hold(&mut slab, inner, hoon);
     let ty = ty_atom(&mut slab, "@", Some(D(9)));
     let formula = T(&mut slab, &[D(1), D(123)]);
@@ -886,7 +887,7 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let gol = ty_hold(&mut slab, inner, hoon);
     let tomes_map = D(0);
     let prefix = None::<String>;
@@ -926,10 +927,10 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
 fn active_rest_fan_context_partitions_rest_boundary() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let cached = ty_atom(&mut slab, "@", Some(D(42)));
     let outer_inner = ty_atom(&mut slab, "@", Some(D(7)));
-    let outer_hoon = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let outer_hoon = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
     let rest_sut = ty_hold(&mut slab, inner, hoon);
 
     let mut ut = Ut::new(&mut slab);
@@ -1036,9 +1037,9 @@ fn active_rest_fan_context_partitions_rest_boundary() {
 fn active_rest_fan_context_is_order_insensitive_for_same_leg_set() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "node");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(2));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((2u64).into()));
 
     let mut ut = Ut::new(&mut slab);
     let key_ab = ut
@@ -1062,9 +1063,9 @@ fn active_rest_fan_context_is_order_insensitive_for_same_leg_set() {
 fn active_rest_fan_context_is_structural_for_equivalent_leg_pairs() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
 
     assert!(noun_eq(inner_a, inner_b, &slab.noun_space()).expect("inner noun_eq"));
     assert!(noun_eq(hoon_a, hoon_b, &slab.noun_space()).expect("hoon noun_eq"));
@@ -1116,7 +1117,7 @@ fn repo_noncanonical_cell_errors_with_repo_fltt() {
 fn repo_hold_matches_rest_singleton_leg() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let legs = [(inner, hoon_noun)];
 
@@ -1140,7 +1141,7 @@ fn repo_hold_matches_rest_singleton_leg() {
 fn rest_allows_duplicate_legs_in_one_call() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let single = [(inner, hoon_noun)];
     let duplicate = [(inner, hoon_noun), (inner, hoon_noun)];
 
@@ -1168,7 +1169,7 @@ fn rest_allows_duplicate_legs_in_one_call() {
 fn hold_repo_fan_leg_id_shortcuts_exact_hold_raw() {
     let mut slab = NounSlab::new();
     let inner = core_with_context_face_only(&mut slab, "tree");
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let hold_raw = unsafe { hold.as_raw() };
     let mut ut = Ut::new(&mut slab);
@@ -1191,10 +1192,10 @@ fn hold_repo_fan_leg_id_shortcuts_exact_hold_raw() {
 fn hold_repo_fan_leg_id_shortcuts_structurally_equal_hold() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
     assert!(!unsafe { hold_a.raw_equals(&hold_b) });
@@ -1217,10 +1218,10 @@ fn hold_repo_fan_leg_id_shortcuts_structurally_equal_hold() {
 fn gain_atom_skin_hold_guard_is_structural() {
     let mut slab = NounSlab::new();
     let inner_a = ty_atom(&mut slab, "@", None);
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = ty_atom(&mut slab, "@", None);
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     let sut_noun = ty_noun(&mut slab);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
@@ -1248,10 +1249,10 @@ fn gain_atom_skin_hold_guard_is_structural() {
 fn lose_leaf_skin_hold_guard_is_structural() {
     let mut slab = NounSlab::new();
     let inner_a = ty_atom(&mut slab, "@", None);
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_a = ty_hold(&mut slab, inner_a, hoon_a);
     let inner_b = ty_atom(&mut slab, "@", None);
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold_b = ty_hold(&mut slab, inner_b, hoon_b);
     let sut_noun = ty_noun(&mut slab);
     assert!(noun_eq(hold_a, hold_b, &slab.noun_space()).expect("hold noun_eq"));
@@ -1277,9 +1278,9 @@ fn lose_leaf_skin_hold_guard_is_structural() {
 fn ty_hold_cached_constructs_structurally_equal_hold_nouns() {
     let mut slab = NounSlab::new();
     let inner_a = core_with_context_face_only(&mut slab, "tree");
-    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_a = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner_b = core_with_context_face_only(&mut slab, "tree");
-    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_b = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let mut ut = Ut::new(&mut slab);
 
     let hold_a = ut
@@ -1299,7 +1300,7 @@ fn ty_hold_cached_constructs_structurally_equal_hold_nouns() {
 fn take_none_fork_branches_do_not_share_hold_seen_guard() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let left = ty_face(&mut slab, "left", hold);
     let right = ty_face(&mut slab, "right", hold);
@@ -1388,7 +1389,7 @@ fn strict_ktsg_blow_collapses_done_to_constant_formula() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))))
         .expect("^+ mint should succeed");
     let expected = T(&mut slab, &[D(1), D(41)]);
     assert!(
@@ -1589,7 +1590,7 @@ fn mint_wthx_leaf_exact_match_collapses_to_constant_formula() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Leaf("@".to_string(), ParsedAtom::Small(7)),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1606,7 +1607,7 @@ fn mint_wthx_null_exact_nonzero_remains_dynamic_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_atom(&mut slab, "$", Some(D(7)));
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Null), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Null), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1625,7 +1626,7 @@ fn mint_wthx_flag_exact_nonflag_remains_dynamic_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_atom(&mut slab, "$", Some(D(2)));
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1648,7 +1649,7 @@ fn mint_wthx_flag_on_noun_includes_atom_guard_formula() {
     let mut slab = NounSlab::new();
     let sut = ty_noun(&mut slab);
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Flag), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1677,7 +1678,7 @@ fn mint_wthx_base_cell_on_core_collapses_to_constant_formula() {
     let mut slab = NounSlab::new();
     let sut = core_with_context_face_only(&mut slab, "ctx");
     let gol = ty_noun(&mut slab);
-    let gen = Hoon::WutHax(Skin::Base(BaseType::Cell), vec![Limb::Axis(1)]);
+    let gen = Hoon::WutHax(Skin::Base(BaseType::Cell), vec![Limb::Axis((1u64).into())]);
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut.mint_noun(sut, gol, &gen).expect("?# mint");
@@ -1695,7 +1696,7 @@ fn mint_wthx_base_atom_on_core_collapses_to_constant_formula() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Base(BaseType::Atom("$".to_string())),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1717,7 +1718,7 @@ fn mint_wthx_cell_skin_on_core_collapses_to_constant_formula() {
             Box::new(Skin::Base(BaseType::NounExpr)),
             Box::new(Skin::Base(BaseType::NounExpr)),
         ),
-        vec![Limb::Axis(1)],
+        vec![Limb::Axis((1u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
 
@@ -1734,7 +1735,7 @@ fn miss_noun_with_hold_that_expands_to_void_uses_nest() {
     let mut slab = NounSlab::new();
     let noun = ty_noun(&mut slab);
     let void = ty_void(&mut slab);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let hold = ty_hold(&mut slab, void, hoon_noun);
     let mut ut = Ut::new(&mut slab);
 
@@ -1756,7 +1757,7 @@ fn strict_ktsg_blow_preserves_formula_when_apex_waits() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))))
         .expect("^+ mint should succeed");
     let expected = T(&mut slab, &[D(0), D(1)]);
     assert!(
@@ -1773,7 +1774,7 @@ fn strict_ktsg_blow_core_branch_uses_coil_semi() {
     let mut ut = Ut::new(&mut slab);
 
     let (_ty, formula) = ut
-        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis(2))))
+        .mint_noun(sut, gol, &Hoon::KetSig(Box::new(Hoon::Axis((2u64).into()))))
         .expect("^+ mint on core should succeed");
     let expected = T(&mut slab, &[D(1), D(42)]);
     assert!(
@@ -1793,7 +1794,11 @@ fn strict_ktsg_blow_fork_inputs_remain_blocked() {
     let mut ut = Ut::new(&mut slab);
 
     let (_fork_ty, fork_formula) = ut
-        .mint_noun(fork, gol, &Hoon::KetSig(Box::new(Hoon::Axis(1))))
+        .mint_noun(
+            fork,
+            gol,
+            &Hoon::KetSig(Box::new(Hoon::Axis((1u64).into()))),
+        )
         .expect("^+ mint on fork should succeed");
     assert!(
         noun_eq(fork_formula, slot_one, &slab.noun_space()).expect("noun_eq should not fail"),
@@ -1913,7 +1918,7 @@ fn strict_find_does_not_treat_dollar_prefixed_axis_as_subject_alias() {
     let head = ty_noun(&mut slab);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let mut ut = Ut::new(&mut slab);
 
     assert!(
@@ -1967,7 +1972,7 @@ fn strict_play_wing_dollar_prefixed_axis_is_not_subject_alias_projection() {
     let head = ty_face(&mut slab, "head", head_inner);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let mut ut = Ut::new(&mut slab);
     let sut = crate::native::ir::intern::native_of(&mut ut.cx, sut, &ut.slab.noun_space())
         .expect("native sut");
@@ -1985,7 +1990,7 @@ fn strict_mint_wing_dollar_prefixed_axis_is_not_subject_alias_projection() {
     let head = ty_face(&mut slab, "head", head_inner);
     let tail = ty_noun(&mut slab);
     let sut = cell_type(&mut slab, head, tail).expect("cell type");
-    let wing = vec![Limb::Term("$".to_string()), Limb::Axis(2)];
+    let wing = vec![Limb::Term("$".to_string()), Limb::Axis((2u64).into())];
     let gol = ty_noun(&mut slab);
     let mut ut = Ut::new(&mut slab);
 
@@ -2235,7 +2240,7 @@ fn mull_endo_mismatch_returns_noun_error() {
     let palo_arm = Palo {
         vein: Vec::new(),
         opal: Opal::Arm {
-            axis: 1,
+            axis: BigUint::from(1u32),
             arms: Vec::new(),
         },
     };
@@ -2343,7 +2348,7 @@ fn redo_cell_projects_free_over_fork_reference() {
 #[test]
 fn miss_strips_matching_faces_before_hold_comparison() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let left_head = ty_noun(&mut slab);
     let left_tail = ty_noun(&mut slab);
     let left_inner = ty_cell(&mut slab, left_head, left_tail);
@@ -2385,7 +2390,7 @@ fn redo_fork_prunes_faced_atom_and_keeps_matching_cell_face() {
 #[test]
 fn redo_fork_prunes_held_atom_and_keeps_matching_held_cell_face() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload_head = ty_noun(&mut slab);
     let payload_tail = ty_noun(&mut slab);
     let payload = ty_cell(&mut slab, payload_head, payload_tail);
@@ -2413,7 +2418,7 @@ fn redo_sint_reference_hold_respects_hod_flag() {
     let payload = ty_atom(&mut slab, "ud", None);
     let held_payload = ty_atom(&mut slab, "ud", None);
     let held = ty_face(&mut slab, "a", held_payload);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let reference = ty_hold(&mut slab, held, hoon_noun);
     let mut ut = Ut::new(&mut slab);
 
@@ -2449,7 +2454,7 @@ fn redo_sint_reference_hold_respects_hod_flag() {
 fn redo_subject_hold_restores_unchanged_hold() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload = ty_hold(&mut slab, inner, hoon_noun);
 
     let hinted_subject = ty_noun(&mut slab);
@@ -2469,7 +2474,7 @@ fn redo_subject_hold_restores_unchanged_hold() {
 fn redo_subject_hold_stops_at_active_fan_loop() {
     let mut slab = NounSlab::new();
     let inner = ty_atom(&mut slab, "ud", None);
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let payload = ty_hold(&mut slab, inner, hoon_noun);
     let reference_inner = ty_atom(&mut slab, "ud", None);
     let reference = ty_face(&mut slab, "a", reference_inner);
@@ -2521,7 +2526,7 @@ fn fork_from_options_preserves_hinted_member_when_flattening_nested_fork() {
 #[test]
 fn fuse_hold_seen_is_scoped_to_branch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner = ty_noun(&mut slab);
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let sut = ty_fork(&mut slab, vec![hold, hold]);
@@ -2537,7 +2542,7 @@ fn fuse_hold_seen_is_scoped_to_branch() {
 #[test]
 fn crop_hold_seen_is_scoped_to_branch() {
     let mut slab = NounSlab::new();
-    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis(1));
+    let hoon_noun = hoon_to_noun(&mut slab, &Hoon::Axis((1u64).into()));
     let inner = ty_noun(&mut slab);
     let hold = ty_hold(&mut slab, inner, hoon_noun);
     let sut = ty_fork(&mut slab, vec![hold, hold]);
@@ -2560,7 +2565,7 @@ fn mull_wthx_does_not_call_skin_match_static() {
     let gol = ty_noun(&mut slab);
     let gen = Hoon::WutHax(
         Skin::Base(BaseType::Atom("ud".to_string())),
-        vec![Limb::Axis(2)],
+        vec![Limb::Axis((2u64).into())],
     );
     let mut ut = Ut::new(&mut slab);
     ut.skin_match_static_calls = 0;
@@ -2770,7 +2775,7 @@ fn core_mint_deterministic() {
 // (mod.rs:2548) for the FIRST (non-last) argument of a multi-arg cen-sig
 // (`~(arm core a b ...)`): `wing_axe = peg(6,2) = 12`. `fond` (find.rs) resolves
 // `Axis(12)` first via `peek`, then applies the nameless `Parent(0,None)` via
-// `fond_name`. When `peek(sut, Rite, 12)` returns `NTy::Void`, the nameless-parent
+// `fond_name`. When `peek(sut, Rite, 12u64)` returns `NTy::Void`, the nameless-parent
 // walk returns `Pony::Void` and `find` errors.
 //
 // This source mints in <1ms (no prelude / no 153s dumb compile) and currently

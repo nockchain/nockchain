@@ -24,6 +24,7 @@ use std::rc::Rc;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
+use num_bigint::BigUint;
 
 use super::leaf::Leaf;
 use super::ty::{tas, Garb, Type};
@@ -219,7 +220,7 @@ pub struct Context {
     mull_cache: HashMap<(usize, usize, usize, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
     fuse_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // FUSE_CACHE
     crop_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(usize, u64, u8, u64), Noun>,       // FISH_CACHE
+    fish_cache: HashMap<(usize, BigUint, u8, u64), Noun>,   // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
     native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
@@ -594,12 +595,13 @@ pub fn crop_cache_store(
 pub fn fish_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
-    axis: u64,
+    axis: &BigUint,
     vet: u8,
     fan: u64,
 ) -> Option<Noun> {
-    let key = (Rc::as_ptr(sut) as usize, axis, vet, fan);
-    cx.fish_cache.get(&key).copied()
+    cx.fish_cache
+        .get(&(Rc::as_ptr(sut) as usize, axis.clone(), vet, fan))
+        .copied()
 }
 
 /// Store a native `fish` result (formula `Noun`) by interned (sut) pointer +
@@ -607,12 +609,12 @@ pub fn fish_cache_lookup(
 pub fn fish_cache_store(
     cx: &mut Context,
     sut: &Rc<Type>,
-    axis: u64,
+    axis: &BigUint,
     vet: u8,
     fan: u64,
     result: Noun,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, axis, vet, fan);
+    let key = (Rc::as_ptr(sut) as usize, axis.clone(), vet, fan);
     cx.fish_cache.insert(key, result);
 }
 
