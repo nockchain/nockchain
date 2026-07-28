@@ -22,21 +22,14 @@
       kernel-state-11
   ==
 ::
-::  ASERT anchor state stored with a puzzle's branch-local lineage.
-+$  cached-asert-anchor  [min-ts=@ target-atom=@]
-::
-::  Branch-local per-puzzle ASERT state. Every post-activation block stores one
-::  entry derived only from its parent entry and its own verified puzzle type.
-::  Counts are post-activation blocks of each puzzle. Heads point to the latest
-::  block of each puzzle on this ancestry. Anchors are branch-local so block
-::  arrival order and side chains cannot affect target computation.
+::  Branch-local per-puzzle ASERT state. Counts provide each puzzle's virtual
+::  height and heads provide its latest median timestamp. Anchor target and
+::  timestamp come from the shared puzzle-keyed re-pin schedule.
 +$  puzzle-asert-state
   $:  zk-count=@
       ai-count=@
       zk-head=(unit block-id:dt)
       ai-head=(unit block-id:dt)
-      zk-anchor=cached-asert-anchor
-      ai-anchor=(unit cached-asert-anchor)
   ==
 ::
 ::

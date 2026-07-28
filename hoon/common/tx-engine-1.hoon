@@ -432,8 +432,8 @@
           ::  375s ideal ⇒ ZK wins ~40% of blocks (paired with AI's 250s)
           ideal-block-time=375
           half-life=^~((mul 12 ^~((mul 60 60))))
-          ::  Derived from the activation parent's median timestamp and stored
-          ::  in each branch-local puzzle ASERT state.
+          ::  Recovered from the activation predecessor's validated branch
+          ::  through the shared puzzle-keyed ASERT anchor cache.
           anchor-min-timestamp=0
       ==
   $:  phase=@
@@ -444,15 +444,13 @@
       anchor-min-timestamp=@
   ==
 ::
-::  AI puzzle ASERT (matmul). Single regime — active from
-::  ai-pow-activation-height onward. By default phase = anchor-height =
-::  ai-pow-activation-height (the first block where AI mining can land
-::  becomes the AI puzzle's anchor); ASERT is well-defined from the
-::  second AI block onward.
+::  AI puzzle ASERT (matmul). Its schedule pins at the predecessor of the
+::  activation-height block, like every other ASERT re-pin. The first accepted
+::  AI block therefore uses virtual height 1 against that shared branch anchor.
 +$  ai-asert
   $+  ai-asert
   $~  :*  phase=114.300
-          anchor-height=114.300
+          anchor-height=114.299
           ::  Sets the AI puzzle's LAUNCH BLOCK INTERVAL, and only that: every
           ::  post-activation block contributes the same heaviness whichever
           ::  puzzle produced it, so the anchor carries no fork-choice weight.
@@ -474,8 +472,8 @@
           ::  to bootstrap the AI Compute Network; paired ZK ideal is 375s.
           ideal-block-time=250
           half-life=^~((mul 12 ^~((mul 60 60))))
-          ::  Derived from the first accepted AI block's median timestamp and
-          ::  stored in each branch-local puzzle ASERT state.
+          ::  Recovered from the activation predecessor's median timestamp
+          ::  through the puzzle-keyed ASERT anchor cache.
           anchor-min-timestamp=0
       ==
   $:  phase=@

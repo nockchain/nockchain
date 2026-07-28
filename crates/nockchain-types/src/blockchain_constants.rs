@@ -106,16 +106,16 @@ impl AsertParams {
             // 375s ideal => ZK wins ~40% of blocks (paired with AI's 250s).
             ideal_block_time: 375,
             half_life: 12 * 60 * 60,
-            // Derived from the activation parent's median timestamp in each
-            // branch-local puzzle ASERT state.
+            // Recovered from the activation predecessor's validated branch
+            // through the shared puzzle-keyed ASERT anchor cache.
             anchor_min_timestamp: 0,
         }
     }
 
     /// Defaults for the AI puzzle ASERT, matching `+$ ai-asert`'s `$~`
-    /// clause in tx-engine-1.hoon. By default phase = anchor-height =
-    /// ai-pow-activation-height so the first AI block becomes the AI puzzle's
-    /// anchor.
+    /// clause in tx-engine-1.hoon. Its anchor is the final pre-activation
+    /// block, so the shared puzzle-keyed re-pin schedule can recover the
+    /// branch timestamp before the first AI block arrives.
     ///
     /// The anchor sets the AI puzzle's LAUNCH BLOCK INTERVAL and only that:
     /// every post-activation block contributes the same heaviness whichever
@@ -137,14 +137,14 @@ impl AsertParams {
     pub fn ai_default() -> Self {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
-            anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
+            anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT - 1,
             anchor_target_atom: UBig::from(1u64) << 193,
             // 250s ideal => AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40),
             // bootstrapping the AI Compute Network.
             ideal_block_time: 250,
             half_life: 12 * 60 * 60,
-            // Derived from the first accepted AI block's median timestamp in
-            // each branch-local puzzle ASERT state.
+            // Recovered from the activation predecessor's validated branch
+            // through the shared puzzle-keyed ASERT anchor cache.
             anchor_min_timestamp: 0,
         }
     }

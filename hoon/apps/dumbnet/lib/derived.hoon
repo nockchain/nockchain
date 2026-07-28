@@ -81,17 +81,12 @@
         ai-count=0
         zk-head=~
         ai-head=~
-        zk-anchor=[min-ts=(~(got h-by min-timestamps.c) parent-bid) target-atom=anchor-target-atom.zk-asert-post-ai.blockchain-constants]
-        ai-anchor=~
     ==
   =/  bid=block-id:t  ~(digest get:page:t pag)
   =/  pow  (need ~(pow get:page:t pag))
   =/  next=puzzle-asert-state:dk
     ?:  ?=([%ai-pow *] pow)
-      =/  anchor=(unit cached-asert-anchor:dk)
-        ?^  ai-anchor.base  ai-anchor.base
-        `[min-ts=(~(got h-by min-timestamps.c) bid) target-atom=anchor-target-atom.ai-asert.blockchain-constants]
-      base(ai-count +(ai-count.base), ai-head `bid, ai-anchor anchor)
+      base(ai-count +(ai-count.base), ai-head `bid)
     base(zk-count +(zk-count.base), zk-head `bid)
   d(puzzle-asert-states (~(put h-by puzzle-asert-states.d) bid next))
 ++  update-highest
