@@ -422,8 +422,8 @@
   $(anchors t.anchors)
 :::
 ::  Dynamic ASERT re-pins resolve only through the O(1), puzzle-keyed branch
-::  cache populated during block acceptance.  A missing entry is incomplete
-::  consensus state, not permission to walk the retained ancestry.
+::  cache populated during block acceptance. A missing entry is incomplete
+::  consensus state, not permission to scan ancestors.
 ++  get-asert-anchor-min-timestamp
   |=  [puzzle-type=@tas anchor-height=@ block-id=block-id:t]
   ^-  @
