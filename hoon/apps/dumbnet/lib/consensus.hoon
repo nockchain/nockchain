@@ -364,32 +364,19 @@
     `anchor
   $(anchors t.anchors)
 :::
+::  Dynamic ASERT re-pins must resolve through the O(1) per-puzzle branch cache.
+::  A missing entry is incomplete consensus state, not permission to scan ancestors.
 ++  get-asert-anchor-min-timestamp
   |=  [puzzle-type=@tas anchor-height=@ block-id=block-id:t]
   ^-  @
   =/  timestamps=(unit (h-map block-id:t @))
     (~(get by asert-anchor-min-timestamps.c) puzzle-type)
   ?~  timestamps
-    (find-asert-anchor-min-timestamp anchor-height block-id)
+    ~|  %missing-asert-anchor-timestamp-cache  !!
   =/  timestamp=(unit @)  (~(get h-by u.timestamps) block-id)
   ?~  timestamp
-    (find-asert-anchor-min-timestamp anchor-height block-id)
+    ~|  %missing-asert-anchor-timestamp-cache  !!
   u.timestamp
-:::
-::  The anchor timestamp remains derivable from a validated branch.
-++  find-asert-anchor-min-timestamp
-  |=  [anchor-height=@ block-id=block-id:t]
-  ^-  @
-  =/  local=(unit local-page:t)  (~(get h-by blocks.c) block-id)
-  ?~  local
-    ~|  %missing-asert-anchor-block  !!
-  =/  pag=page:t  (to-page:local-page:t u.local)
-  =/  height=@  ~(height get:page:t pag)
-  ?:  =(height anchor-height)
-    (~(got h-by min-timestamps.c) block-id)
-  ?.  (gth height anchor-height)
-    ~|  %asert-anchor-after-tip  !!
-  $(block-id ~(parent get:page:t pag))
 :::
 ++  delete-asert-anchor-min-timestamps
   |=  [block-id=block-id:t timestamps=(map @tas (h-map block-id:t @))]
