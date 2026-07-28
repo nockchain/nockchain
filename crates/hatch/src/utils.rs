@@ -15316,6 +15316,35 @@ mod tests {
     }
 
     #[test]
+    fn wide_tisfas_binds_the_value_not_the_body() {
+        //  `=/(a 1 a)` binds `a` to 1 and returns `a`.  The wide parser used to
+        //  swap the two hoons, so the face was bound to the *body* — evaluated in
+        //  the outer subject, where it does not exist yet — and every wing into
+        //  the bound face failed to resolve at mint.
+        let src = "=/(a 1 a)\n";
+        let linemap = Arc::new(LineMap::new_with_docs(src, true));
+        let parsed = crate::native_parser(vec!["test".into(), "tisfas.hoon".into()], false, linemap)
+            .parse(src)
+            .into_result()
+            .expect("wide =/ should parse");
+
+        let Hoon::TisSig(items) = parsed else {
+            panic!("expected top-level TisSig");
+        };
+        let [Hoon::TisFas(_, value, body)] = items.as_slice() else {
+            panic!("expected one =/ expression");
+        };
+        assert!(
+            matches!(value.as_ref(), Hoon::Sand(_, _)),
+            "wide =/ must bind the FIRST hoon (the value); got {value:?}"
+        );
+        assert!(
+            matches!(body.as_ref(), Hoon::Wing(_)),
+            "wide =/ body must be the SECOND hoon; got {body:?}"
+        );
+    }
+
+    #[test]
     fn parser_attaches_tisfas_postfix_doc_to_value_hoon() {
         let src = "=/  nblocks  (div len 4)  ::  intentionally off-by-one\n0\n";
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
