@@ -558,6 +558,30 @@ fn main() {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    let batch_entries = cli
+        .batch_manifest
+        .as_ref()
+        .map(|manifest| parse_batch_manifest(manifest))
+        .transpose()?;
+    if let Some(entries) = batch_entries.as_deref() {
+        let mut requires_reference = false;
+        for entry in entries {
+            requires_reference |=
+                entry_uses_unpinned_softed_constraints(&entry.entry, &cli.directory)?;
+        }
+        if requires_reference {
+            for entry in entries {
+                compile_entry_with_hoonc(&entry.entry, &cli.directory, &entry.output, entry.mode)
+                    .await?;
+            }
+            return Ok(());
+        }
+    } else if let (Some(entry), Some(output)) = (cli.entry.as_deref(), cli.output.as_deref()) {
+        if entry_uses_unpinned_softed_constraints(entry, &cli.directory)? {
+            return compile_entry_with_hoonc(entry, &cli.directory, output, cli.mode).await;
+        }
+    }
+
     let prelude_source = fs::read_to_string(&cli.prelude)?;
     // hoonc compiles DEPENDENCY files (the prelude) with debug OFF: no `%spot`
     // anywhere in the prelude's formula, coil seminouns, or stored arm ASTs (only
@@ -599,14 +623,13 @@ async fn run(cli: Cli) -> Result<()> {
         return dump_native_wrapper_assets(&mut builder, out_dir);
     }
 
-    if let Some(manifest) = &cli.batch_manifest {
-        let entries = parse_batch_manifest(manifest)?;
+    if let Some(entries) = batch_entries.as_deref() {
         return compile_batch_with_shared_prelude(
             &cli,
             &prelude_expr,
             &prelude_source,
             subject_type_jam.as_deref(),
-            &entries,
+            entries,
         )
         .await;
     }
@@ -2804,9 +2827,10 @@ fn evaluate_honc_isolated(
 // Compiling the canonical softed-constraints.hoon is needlessly expensive: it
 // cues two large constraint jams and `soft`s them even though the result is
 // already known. Substitute the cued jam pair only for the exact source + jam
-// content against which the shortcut was proven. A fork or changed input must
-// fall through to normal compilation so the shortcut can never hide its
-// changes. Pins are blake3 hex of the corresponding files.
+// content against which the shortcut was proven. A build using changed content
+// is delegated to hoonc before native compilation begins: /dat nodes require
+// eager evaluation, and emitting an unevaluated native trap would silently
+// change /# import semantics. Pins are blake3 hex of the corresponding files.
 const SOFTED_CONSTRAINTS_SOURCE_B3: &str =
     "4fe81e9738b06b217b6fe13810dc23f650cc4b95d80d7671ac2392e6cb7e3c80";
 const CONSTRAINTS_0_1_JAM_B3: &str =
@@ -2823,6 +2847,11 @@ fn native_value_override(
         if softed_constraints_pins_match(path, directory)? {
             return Ok(Some(softed_constraints_value(context, directory)?));
         }
+        return Err(std::io::Error::other(format!(
+            "unpinned {} reached native compilation instead of the hoonc fallback",
+            path.display()
+        ))
+        .into());
     }
     Ok(None)
 }
@@ -2840,12 +2869,69 @@ fn softed_constraints_pins_match(path: &Path, directory: &Path) -> Result<bool> 
         ),
     ];
     for (file, expected) in checks {
-        let actual = blake3::hash(&fs::read(&file)?).to_hex();
+        let bytes = match fs::read(&file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let actual = blake3::hash(&bytes).to_hex();
         if actual.as_str() != expected {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+fn entry_uses_unpinned_softed_constraints(entry: &Path, directory: &Path) -> Result<bool> {
+    let mut pending = vec![entry.to_path_buf()];
+    let mut seen = HashSet::new();
+    while let Some(path) = pending.pop() {
+        let canonical = path.canonicalize()?;
+        if !seen.insert(canonical) {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
+            return Ok(!softed_constraints_pins_match(&path, directory)?);
+        }
+        for import in pipeline::resolve_native_imports(&path, directory, ScopeMode::Standard)? {
+            if import.kind == NativeImportKind::Hoon {
+                pending.push(import.path);
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn compile_entry_with_hoonc(
+    entry: &Path,
+    directory: &Path,
+    output: &Path,
+    mode: CompileMode,
+) -> Result<()> {
+    info!(
+        entry = %entry.display(),
+        "delegating build with unpinned softed constraints to hoonc"
+    );
+    let mut request = pipeline::CompileRequest::new(entry.to_path_buf(), directory.to_path_buf());
+    request.out_dir = Some(output.to_path_buf());
+    request.arbitrary = mode == CompileMode::Arbitrary;
+    request.dynock = mode == CompileMode::Dynock;
+    request.dynock_typed = mode == CompileMode::DynockTyped;
+    // Keep hoonc's state reusable across delegated batch entries. Forcing a
+    // fresh state here makes the first entry succeed and every later entry
+    // fail because the shared state directory is no longer empty. An absent
+    // state still initializes normally, while hoonc's dependency hashes make
+    // reuse safe for a changed source tree.
+    request.new = false;
+    let jam = pipeline::build_jam(request).await?;
+    if let Some(parent) = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output, jam)?;
+    Ok(())
 }
 
 fn softed_constraints_value(context: &mut Context, directory: &Path) -> Result<Noun> {
@@ -4098,7 +4184,8 @@ mod tests {
     use nockvm::noun::{NounAllocator, DIRECT_MAX};
 
     use crate::{
-        axis_formula, build_entry_wer, entry_path_for_hoon, softed_constraints_pins_match,
+        axis_formula, build_entry_wer, entry_path_for_hoon, entry_uses_unpinned_softed_constraints,
+        softed_constraints_pins_match,
     };
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
@@ -4139,7 +4226,7 @@ mod tests {
     }
 
     #[test]
-    fn forked_softed_constraints_bypasses_the_pinned_override() {
+    fn forked_softed_constraints_misses_the_pinned_fast_path() {
         let temp_dir = temp_test_dir("forked-softed-constraints");
         let jams_dir = temp_dir.join("jams");
         fs::create_dir_all(&jams_dir).expect("jams dir");
@@ -4150,7 +4237,32 @@ mod tests {
 
         assert!(
             !softed_constraints_pins_match(&source, &temp_dir).expect("pin comparison"),
-            "changed content must compile normally instead of using the pinned result"
+            "changed content must not use the pinned result"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
+    }
+
+    #[test]
+    fn entry_with_forked_softed_constraints_requires_reference_compilation() {
+        let temp_dir = temp_test_dir("forked-softed-constraints-entry");
+        fs::create_dir_all(temp_dir.join("common")).expect("common dir");
+        fs::create_dir_all(temp_dir.join("dat")).expect("dat dir");
+        fs::create_dir_all(temp_dir.join("jams")).expect("jams dir");
+        let entry = temp_dir.join("common/entry.hoon");
+        fs::write(&entry, "/#  softed-constraints\n0\n").expect("entry");
+        fs::write(
+            temp_dir.join("dat/softed-constraints.hoon"),
+            ":: forked source\n0\n",
+        )
+        .expect("forked source");
+        fs::write(temp_dir.join("jams/constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(temp_dir.join("jams/constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            entry_uses_unpinned_softed_constraints(&entry, &temp_dir)
+                .expect("dependency inspection"),
+            "an entry importing changed softed constraints must use hoonc"
         );
 
         fs::remove_dir_all(temp_dir).expect("cleanup");
