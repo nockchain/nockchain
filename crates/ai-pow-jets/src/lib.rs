@@ -714,15 +714,12 @@ mod tests {
         );
     }
 
-    /// Corrupt-cache recovery (cheap, no proving): a present-but-unreadable cache is
-    /// DELETED and — because this test provides no buckets to regenerate from — the
-    /// installer then returns `Err` (fatal). Asserts BOTH that the corrupt file was
-    /// removed (the "delete and regenerate" behavior) and that no table was injected.
-    /// Exercises the delete-on-corrupt branch without the ~5-minute generation. A
-    /// bincode-undecodable cache stands in for both a truncated/corrupt file and a
-    /// format-incompatible cache from an older version.
+    /// Corrupt-cache recovery (cheap, no proving): a present-but-unreadable cache
+    /// remains available for diagnosis until a complete replacement can be written.
+    /// With no bucket shapes available, the installer fails without injecting a
+    /// table or deleting the cache.
     #[test]
-    fn corrupt_cache_is_deleted_then_fatal_without_buckets() {
+    fn corrupt_cache_is_retained_when_regeneration_is_unavailable() {
         assert!(
             !crate::ai_pow_verifier_setup_initialized(),
             "precondition: no setup installed in this test process",
@@ -731,19 +728,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = crate::setup::verifier_setup_seed_cache_path(&dir);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, b"this is not a valid bincode seed table").unwrap();
+        std::fs::write(&path, b"this is not a valid verifier-setup cache").unwrap();
         assert!(path.exists(), "precondition: corrupt cache present");
 
-        // No buckets ⇒ after deleting the corrupt cache there is nothing to
-        // regenerate from ⇒ fatal. The corrupt file must still have been removed.
         let result = crate::setup::install_or_build_verifier_setup(&dir, &[]);
         assert!(
             result.is_err(),
             "corrupt cache + no buckets to regenerate must be fatal",
         );
         assert!(
-            !path.exists(),
-            "the corrupt/incompatible cache file must be deleted during recovery",
+            path.exists(),
+            "the corrupt cache remains available until regeneration succeeds",
         );
         assert!(
             !crate::ai_pow_verifier_setup_initialized(),
@@ -829,7 +824,10 @@ mod jet_tests {
     use nockvm::noun::NounAllocator;
 
     use super::*;
-    use crate::setup::{prove_canonical_moe_block, CanonicalBlock, CANONICAL_SETUP_COMMIT};
+    use crate::setup::{
+        build_verifier_setup_seed, prove_canonical_moe_block, CanonicalBlock,
+        CANONICAL_SETUP_COMMIT,
+    };
 
     /// Cue a jammed artifact into a fresh slab and return `(slab, root)`.
     fn cue_artifact(jammed: nockapp::Bytes) -> NounSlab {
@@ -1793,6 +1791,16 @@ mod jet_tests {
             "cache file must be written under the data dir"
         );
 
+        let cached_bytes = std::fs::read(&path).expect("read checksummed cache");
+        let mut corrupt_bytes = cached_bytes.clone();
+        *corrupt_bytes.last_mut().expect("nonempty cache") ^= 0x01;
+        std::fs::write(&path, corrupt_bytes).expect("corrupt cache");
+        assert!(
+            crate::setup::load_verifier_setup_seeds(&path).is_err(),
+            "the envelope must reject a changed payload before seed decoding",
+        );
+        std::fs::write(&path, cached_bytes).expect("restore checksummed cache");
+
         // Load + rebuild (no proving) — the fast subsequent-boot path.
         let table = crate::setup::load_verifier_setup_table(&path).expect("load + rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -1801,6 +1809,25 @@ mod jet_tests {
             table[0].trace_height, expected_h,
             "generated+rebuilt bucket lands at the matrix-free predicted height",
         );
+    }
+
+    /// KAT (two real proofs, ~80s): canonical setup generation has a deterministic
+    /// serialized seed, not merely a deterministic verifier-key digest.
+    #[test]
+    #[ignore = "two real MoE compact proofs (~80s); opt-in"]
+    fn verifier_setup_seed_bytes_are_deterministic() {
+        let buckets = crate::setup::production_verifier_setup_buckets();
+        let shape = *buckets.first().expect("at least one production bucket");
+        let first = build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
+            .expect("first canonical seed");
+        let second = build_verifier_setup_seed(&shape.params, shape.hw, shape.e, shape.top_k)
+            .expect("second canonical seed");
+
+        let first_bytes = bincode::serde::encode_to_vec(&first, bincode::config::standard())
+            .expect("serialize first canonical seed");
+        let second_bytes = bincode::serde::encode_to_vec(&second, bincode::config::standard())
+            .expect("serialize second canonical seed");
+        assert_eq!(first_bytes, second_bytes, "canonical setup seed bytes");
     }
 
     /// Diagnostic: print every production bucket shape (cheap, no proving).
