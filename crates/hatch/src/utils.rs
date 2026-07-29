@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp;
 use std::collections::{HashMap, *};
 use std::fs::File;
@@ -12058,7 +12058,84 @@ fn atom_to_tas_string(atom: &DirectAtom) -> String {
     }
 }
 
+thread_local! {
+    // Owned, scoped state only: no borrowed slab/AST pointers escape the call.
+    // Recursive Hoon materialization reaches this cache through the existing
+    // public `hoon_to_noun` calls, including paths nested under Spec/Tome/etc.
+    static HOON_NOUN_MATERIALIZATION_CACHE: RefCell<HoonNounMaterializationState> =
+        RefCell::new(HoonNounMaterializationState::default());
+}
+
+#[derive(Default)]
+struct HoonNounMaterializationState {
+    active: bool,
+    nodes: HashMap<usize, Noun>,
+}
+
+struct HoonNounMaterializationGuard;
+
+impl Drop for HoonNounMaterializationGuard {
+    fn drop(&mut self) {
+        HOON_NOUN_MATERIALIZATION_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.active = false;
+            cache.nodes.clear();
+        });
+    }
+}
+
+/// Materialize a native Hoon tree and return every descendant's noun by stable
+/// AST address. The scoped cache owns all of its state, clears on unwind, and
+/// never stores a borrowed AST or slab reference.
+pub fn hoon_to_noun_with_cache(
+    slab: &mut NounSlab,
+    hoon: &Hoon,
+    mut record: impl FnMut(usize, Noun),
+) -> Noun {
+    HOON_NOUN_MATERIALIZATION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        assert!(
+            !cache.active,
+            "nested hoon_to_noun_with_cache materialization"
+        );
+        debug_assert!(cache.nodes.is_empty());
+        cache.active = true;
+    });
+
+    let _guard = HoonNounMaterializationGuard;
+    let noun = hoon_to_noun(slab, hoon);
+    HOON_NOUN_MATERIALIZATION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        for (ptr, noun) in cache.nodes.drain() {
+            record(ptr, noun);
+        }
+        cache.active = false;
+    });
+    noun
+}
+
 pub fn hoon_to_noun(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
+    let ptr = hoon as *const Hoon as usize;
+    if let Some(noun) = HOON_NOUN_MATERIALIZATION_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache
+            .active
+            .then(|| cache.nodes.get(&ptr).copied())
+            .flatten()
+    }) {
+        return noun;
+    }
+    let noun = hoon_to_noun_uncached(slab, hoon);
+    HOON_NOUN_MATERIALIZATION_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.active {
+            cache.nodes.insert(ptr, noun);
+        }
+    });
+    noun
+}
+
+fn hoon_to_noun_uncached(slab: &mut NounSlab, hoon: &Hoon) -> Noun {
     use Hoon::*;
 
     match hoon {
@@ -15518,6 +15595,7 @@ fn collect_inputs_inner(path: &PathBuf, out: &mut Vec<PathBuf>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     use chumsky::Parser;
@@ -15528,9 +15606,9 @@ mod tests {
     use nockvm::noun::{Noun, NounAllocator, D, DIRECT_MAX, T};
 
     use super::{
-        chumsky_spot_to_hoon_spot, flay, gor_mug, hoon_to_noun, limb_to_noun, map_to_noun, mor_mug,
-        nock_to_noun, open, peg, rent_co, slab_mug, string_to_atom, term_to_noun, winglist, Limb,
-        LineMap,
+        chumsky_spot_to_hoon_spot, flay, gor_mug, hoon_to_noun, hoon_to_noun_with_cache,
+        limb_to_noun, map_to_noun, mor_mug, nock_to_noun, open, peg, rent_co, slab_mug,
+        string_to_atom, term_to_noun, winglist, Limb, LineMap,
     };
     use crate::ast::hoon::{Axis, BaseType, Coin, Hoon, Nock, Note, ParsedAtom, Skin, Spec};
 
@@ -15540,6 +15618,32 @@ mod tests {
     fn slab_noun_equality<J>(slab: &NounSlab<J>, left: &Noun, right: &Noun) -> bool {
         let space = slab.noun_space();
         noun_equality(left.in_space(&space), right.in_space(&space))
+    }
+
+    #[test]
+    fn cached_hoon_materialization_records_each_native_node_with_exact_output() {
+        // Exercise both direct Hoon children and a Hoon nested inside Spec:
+        // helper serializers must participate in the same materialization.
+        let hoon = Hoon::KetHep(
+            Box::new(Spec::BucMic(Hoon::Pair(
+                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::ZapZap),
+            ))),
+            Box::new(Hoon::Pair(Box::new(Hoon::Axis(7)), Box::new(Hoon::ZapZap))),
+        );
+        let mut cached_slab = NounSlab::new();
+        let mut nodes = HashMap::new();
+        let cached = hoon_to_noun_with_cache(&mut cached_slab, &hoon, |ptr, noun| {
+            nodes.insert(ptr, noun);
+        });
+        assert_eq!(nodes.len(), 7);
+        assert!(nodes.contains_key(&(&hoon as *const Hoon as usize)));
+
+        let mut direct_slab = NounSlab::new();
+        let direct = hoon_to_noun(&mut direct_slab, &hoon);
+        cached_slab.set_root(cached);
+        direct_slab.set_root(direct);
+        assert_eq!(cached_slab.jam(), direct_slab.jam());
     }
 
     #[test]

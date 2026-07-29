@@ -12,8 +12,8 @@ use hatch::ast::hoon::{
     Tuna, TunaTail, Tune, Type, Tyre, Vair as AstVair, WingType, Woof, ZpwtArg,
 };
 use hatch::utils::{
-    chum_to_nounexpr, example, factory, grip, hoon_to_noun, noun_to_hoon, open, reek,
-    string_to_atom,
+    chum_to_nounexpr, example, factory, grip, hoon_to_noun, hoon_to_noun_with_cache, noun_to_hoon,
+    open, reek, string_to_atom,
 };
 use nockapp::noun::slab::NounSlab;
 use nockapp::noun::NounAllocatorExt;
@@ -186,6 +186,17 @@ pub struct Ut<'a> {
     pub decoded_hold_hoon_cache_raw: HashMap<u64, Arc<Hoon>>,
     pub decoded_hold_hoon_cache_order: VecDeque<u64>,
     pub decoded_hold_hoon_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
+    // A top-level mint/play call borrows its input for the whole recursive
+    // compiler scope. Descendant addresses are stable only inside that scope;
+    // generated lowering temporaries are deliberately never registered.
+    hoon_ast_scope_depth: usize,
+    hoon_ast_stable_ptrs: FastHashSet<usize>,
+    // Spot-sensitive structural identity, computed compositionally for every
+    // node during the root's single registration traversal.
+    hoon_ast_signature_by_ptr: FastHashMap<usize, u64>,
+    // Slab-bound noun representation for each stable native node. A Ut owns one
+    // slab for one compile, so these nouns remain valid for the cache lifetime.
+    hoon_ast_noun_by_ptr: FastHashMap<usize, Noun>,
     pub hoon_ast_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
     pub hoon_ast_ptr_cache_order: VecDeque<usize>,
     pub hold_memo: HoldMemoSet,
@@ -274,6 +285,10 @@ pub struct Ut<'a> {
 pub struct Sig64 {
     state: u64,
     include_dbug_spot: bool,
+    // A Hoon child contributes its completed structural digest to its parent.
+    // Besides avoiding quadratic subtree rescans, this records the digest for
+    // every native AST node reached through Spec/Tome/etc. in one traversal.
+    hoon_signatures: FastHashMap<usize, u64>,
 }
 
 impl Sig64 {
@@ -286,6 +301,7 @@ impl Sig64 {
         Self {
             state: Self::OFFSET,
             include_dbug_spot,
+            hoon_signatures: Default::default(),
         }
     }
 
@@ -351,7 +367,19 @@ impl Sig64 {
     fn hoon_signature_spot_sensitive(hoon: &Hoon) -> Option<u64> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
-        Some(sig.finish())
+        sig.hoon_signatures
+            .get(&(hoon as *const Hoon as usize))
+            .copied()
+    }
+
+    fn hoon_signatures_spot_sensitive(hoon: &Hoon) -> Option<(u64, FastHashMap<usize, u64>)> {
+        let mut sig = Self::new_with_dbug_spots(true);
+        sig.write_hoon(hoon)?;
+        let root = sig
+            .hoon_signatures
+            .get(&(hoon as *const Hoon as usize))
+            .copied()?;
+        Some((root, sig.hoon_signatures))
     }
 
     fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
@@ -1164,6 +1192,18 @@ impl Sig64 {
     }
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
+        let ptr = hoon as *const Hoon as usize;
+        if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
+            self.write_byte(0xff);
+            self.write_u64(signature);
+            return Some(());
+        }
+
+        // Hash this node independently, then feed its digest into the enclosing
+        // Hoon/helper node. This makes the signature compositional: registering
+        // a root computes each descendant exactly once rather than hashing the
+        // same suffix again at every recursive mint/play/mull boundary.
+        let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
         match hoon {
             Hoon::Pair(a, b) => {
                 self.write_byte(0x01);
@@ -1855,6 +1895,11 @@ impl Sig64 {
                 self.write_hoon(q)?;
             }
         }
+        let signature = self.state;
+        self.hoon_signatures.insert(ptr, signature);
+        self.state = parent_state;
+        self.write_byte(0xff);
+        self.write_u64(signature);
         Some(())
     }
 }
@@ -1895,6 +1940,10 @@ impl<'a> Ut<'a> {
             decoded_hold_hoon_cache_raw: HashMap::new(),
             decoded_hold_hoon_cache_order: VecDeque::new(),
             decoded_hold_hoon_ptr_cache: HashMap::new(),
+            hoon_ast_scope_depth: 0,
+            hoon_ast_stable_ptrs: Default::default(),
+            hoon_ast_signature_by_ptr: Default::default(),
+            hoon_ast_noun_by_ptr: Default::default(),
             hoon_ast_ptr_cache: HashMap::new(),
             hoon_ast_ptr_cache_order: VecDeque::new(),
             hold_memo: Default::default(),
@@ -2695,9 +2744,51 @@ impl<'a> Ut<'a> {
         hash
     }
 
-    fn mint_cache_signature(gen: &Hoon) -> Option<u64> {
+    fn enter_hoon_ast_scope(&mut self, gen: &Hoon) -> bool {
+        let outermost = self.hoon_ast_scope_depth == 0;
+        if outermost {
+            debug_assert!(self.hoon_ast_stable_ptrs.is_empty());
+            debug_assert!(self.hoon_ast_signature_by_ptr.is_empty());
+            debug_assert!(self.hoon_ast_noun_by_ptr.is_empty());
+            if let Some((_root_signature, signatures)) = Sig64::hoon_signatures_spot_sensitive(gen)
+            {
+                for (ptr, signature) in signatures {
+                    self.hoon_ast_stable_ptrs.insert(ptr);
+                    self.hoon_ast_signature_by_ptr.insert(ptr, signature);
+                }
+            } else {
+                self.hoon_ast_stable_ptrs
+                    .insert(Self::hoon_ast_ptr_key(gen));
+            }
+        }
+        self.hoon_ast_scope_depth += 1;
+        outermost
+    }
+
+    fn leave_hoon_ast_scope(&mut self, outermost: bool) {
+        self.hoon_ast_scope_depth -= 1;
+        if outermost {
+            debug_assert_eq!(self.hoon_ast_scope_depth, 0);
+            // The borrowed root may die or its address may be reused after the
+            // public call. Structural boundary caches keep their copied u64
+            // signatures, while all raw-address sidecar state ends here.
+            self.hoon_ast_stable_ptrs.clear();
+            self.hoon_ast_signature_by_ptr.clear();
+            self.hoon_ast_noun_by_ptr.clear();
+        }
+    }
+
+    fn mint_cache_signature(&mut self, gen: &Hoon) -> Option<u64> {
         // `mint` returns formula nouns with `%spot` hints, so cache keys must include debug spots.
-        Sig64::hoon_signature_spot_sensitive(gen)
+        let ptr = Self::hoon_ast_ptr_key(gen);
+        if let Some(signature) = self.hoon_ast_signature_by_ptr.get(&ptr) {
+            return Some(*signature);
+        }
+        let signature = Sig64::hoon_signature_spot_sensitive(gen)?;
+        if self.hoon_ast_stable_ptrs.contains(&ptr) {
+            self.hoon_ast_signature_by_ptr.insert(ptr, signature);
+        }
+        Some(signature)
     }
 
     fn strip_dbug_wrapper_noun(mut hoon_noun: Noun, space: &NounSpace) -> Noun {
@@ -3473,14 +3564,13 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen: Noun,
+        gen_sig: u64,
     ) -> Result<Option<(NRc<NTy>, NRc<NTy>)>> {
         let context = self.cache_context_key();
         // mull is dual-perspective (sut + dox). The active fan can be consulted
         // from EITHER perspective's %hold descent, so scope on the union of both
         // legsets (legset(sut) ∪ legset(dox)) to stay byte-safe.
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
-        let gen_sig = self.noun_mug_cached(gen) as u64;
         Ok(native_mull_cache_lookup(
             &self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key,
@@ -3493,13 +3583,12 @@ impl<'a> Ut<'a> {
         sut: &NRc<NTy>,
         gol: &NRc<NTy>,
         dox: &NRc<NTy>,
-        gen: Noun,
+        gen_sig: u64,
         p_ty: NRc<NTy>,
         q_ty: NRc<NTy>,
     ) -> Result<()> {
         let context = self.cache_context_key();
         let fan = self.fan_context_key_scoped_pair(sut, dox)?;
-        let gen_sig = self.noun_mug_cached(gen) as u64;
         native_mull_cache_store(
             &mut self.cx, sut, gol, dox, context.semantic.vet_key, gen_sig, fan,
             context.memo.arm_epoch_key, context.memo.placeholder_context_key, p_ty, q_ty,
@@ -3773,10 +3862,13 @@ impl<'a> Ut<'a> {
     }
 
     pub fn mint(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
-        match self.mint_inner(sut, gol, gen) {
+        let outermost = self.enter_hoon_ast_scope(gen);
+        let result = match self.mint_inner(sut, gol, gen) {
             Ok(value) => Ok(value),
             Err(err) => Err(self.decorate_error(err)),
-        }
+        };
+        self.leave_hoon_ast_scope(outermost);
+        result
     }
 
     /// Noun-bridged `mint` for not-yet-flipped callers (C-final.1a): lift sut/gol
@@ -3798,7 +3890,7 @@ impl<'a> Ut<'a> {
         // native-re-keyed on the interned (sut, gol) `Rc` pointers, so we no
         // longer lower sut/gol just to compute the cache key. C-final.2: play now
         // takes a native subject too, so mint no longer lowers sut for play.
-        let cache_sig = Self::mint_cache_signature(gen);
+        let cache_sig = self.mint_cache_signature(gen);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
                 return Ok(cached);
@@ -4115,12 +4207,15 @@ impl<'a> Ut<'a> {
     }
 
     pub fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+        let outermost = self.enter_hoon_ast_scope(gen);
         // Canonical ++play runs with vet disabled for the entire evaluation
         // scope; restore it afterward (safe save/restore — see with_vet_off).
         // ATOMIC FLIP (C-final.2): play TAKES native sut and RETURNS native
         // Rc<Type>. No compile path lowers the deepening subject to a noun for
         // play anymore — the subject threads natively (the O(N^2)->O(N) win).
-        self.with_vet_off(|ut| ut.play_inner(sut, gen))
+        let result = self.with_vet_off(|ut| ut.play_inner(sut, gen));
+        self.leave_hoon_ast_scope(outermost);
+        result
     }
 
     /// Noun-input/noun-output bridge for external callers that still hold a noun
@@ -6861,7 +6956,7 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, Noun)> {
         let ty = self.play(sut.clone(), p)?;
         let ty = self.nice(sut, gol, ty)?;
-        let q_noun = hoon_to_noun(self.slab, q);
+        let q_noun = self.hoon_noun_for_node(q);
         let formula = T(self.slab, &[D(1), q_noun]);
         Ok((ty, formula))
     }
@@ -7194,7 +7289,7 @@ impl<'a> Ut<'a> {
             return;
         }
 
-        let hoon_noun = hoon_to_noun(self.slab, gen);
+        let hoon_noun = self.hoon_noun_for_node(gen);
         let hoon_raw = unsafe { hoon_noun.as_raw() };
         let hoon_mug = self.noun_mug_cached(hoon_noun);
         let ast = Arc::new(gen.clone());
@@ -7312,7 +7407,7 @@ impl<'a> Ut<'a> {
     }
 
     fn open_cached(&mut self, gen: &Hoon) -> Option<Arc<Hoon>> {
-        let Some(sig) = Self::mint_cache_signature(gen) else {
+        let Some(sig) = self.mint_cache_signature(gen) else {
             let opened = open(gen.clone());
             return (&opened != gen).then(|| Arc::new(opened));
         };
@@ -8310,16 +8405,22 @@ impl<'a> Ut<'a> {
     }
 
     fn hoon_noun_for_node(&mut self, gen: &Hoon) -> Noun {
+        let ptr = Self::hoon_ast_ptr_key(gen);
         if self.exact_hoon_ast_lookup_enabled {
-            if let Some((_raw, noun)) = self
-                .decoded_hold_hoon_ptr_cache
-                .get(&Self::hoon_ast_ptr_key(gen))
-                .copied()
-            {
+            if let Some((_raw, noun)) = self.decoded_hold_hoon_ptr_cache.get(&ptr).copied() {
                 return noun;
             }
         }
-        hoon_to_noun(self.slab, gen)
+        if !self.hoon_ast_stable_ptrs.contains(&ptr) {
+            return hoon_to_noun(self.slab, gen);
+        }
+        if let Some(noun) = self.hoon_ast_noun_by_ptr.get(&ptr).copied() {
+            return noun;
+        }
+        let noun_cache = &mut self.hoon_ast_noun_by_ptr;
+        hoon_to_noun_with_cache(self.slab, gen, |ptr, noun| {
+            noun_cache.insert(ptr, noun);
+        })
     }
 
     fn prune_recursive_holds(&mut self, typ: Noun, hoon_noun: Noun) -> Result<Noun> {
@@ -11050,9 +11151,16 @@ impl<'a> Ut<'a> {
         // ATOMIC FLIP (consumer C7): mull reads/returns the native enum.
         // C-final.1b: the mull boundary cache is native-re-keyed on the interned
         // (sut, gol, dox) `Rc` pointers, so sut/gol/dox are no longer lowered to
-        // nouns to build the cache key. gen stays a noun (mug-keyed AST node).
-        let gen_noun = self.hoon_noun_for_node(gen);
-        if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_noun)? {
+        // nouns to build the cache key. The retained native AST supplies the
+        // same spot-sensitive structural identity without noun materialization.
+        let gen_sig = match self.mint_cache_signature(gen) {
+            Some(signature) => signature,
+            None => {
+                let gen_noun = self.hoon_noun_for_node(gen);
+                self.noun_mug_cached(gen_noun) as u64
+            }
+        };
+        if let Some(cached) = self.mull_cache_lookup(&sut, &gol, &dox, gen_sig)? {
             return Ok(cached);
         }
         // hoon-138 pre-check: mull-none if sut is void
@@ -11068,7 +11176,7 @@ impl<'a> Ut<'a> {
             &sut,
             &gol,
             &dox,
-            gen_noun,
+            gen_sig,
             result.0.clone(),
             result.1.clone(),
         )?;
