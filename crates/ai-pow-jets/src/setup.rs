@@ -9,6 +9,8 @@
 //! separately by the program-commitment fold — not by the setup — so one
 //! setup serves all blocks of the shape (dense and MoE alike).
 
+use std::io::Write;
+
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
     derive_pearl_work_commitments, pearl_bitcoin_double_sha256_raw, PearlAuxInclusionProof,
@@ -421,35 +423,163 @@ pub fn rebuild_verifier_setup_from_seed(
     })
 }
 
-/// The sane cache path inside the nockapp data dir for the boot verifier-setup
-/// seed table. Kept under an `ai-pow/` subdirectory so we do not litter the data
-/// dir with loose files — it sits alongside the other per-node persistence.
+/// The local seed-cache encoding. The consensus fingerprint is checked separately
+/// after decoding; this version protects the cache's non-consensus bincode framing.
+const VERIFIER_SETUP_SEED_CACHE_MAGIC: &[u8; 8] = b"NCVPSEED";
+/// Bump this when the seed-table bincode encoding or configuration changes.
+const VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION: u32 = 1;
+const VERIFIER_SETUP_SEED_CACHE_HEADER_LEN: usize = VERIFIER_SETUP_SEED_CACHE_MAGIC.len()
+    + std::mem::size_of::<u32>()
+    + std::mem::size_of::<u64>()
+    + 32;
+
+/// The cache path is versioned so a changed seed serialization never destroys an
+/// older cache before a replacement has been generated successfully.
 pub fn verifier_setup_seed_cache_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join("ai-pow").join("verifier-setup-seeds.bin")
+    data_dir.join("ai-pow").join(format!(
+        "verifier-setup-seeds-v{VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION}.bin"
+    ))
 }
 
-/// Serialize a seed table to `path` (creating parent dirs as needed). The cached
-/// artifact is small — the seeds (KB-MB/bucket), NOT the rebuilt ~866 MB contexts.
+fn write_seed_cache_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<(), SetupError> {
+    let parent = path.parent().ok_or_else(|| {
+        SetupError(format!(
+            "verifier-setup cache has no parent: {}",
+            path.display()
+        ))
+    })?;
+    std::fs::create_dir_all(parent).map_err(err("create verifier-setup cache dir"))?;
+
+    let file_name = path.file_name().ok_or_else(|| {
+        SetupError(format!(
+            "verifier-setup cache has no file name: {}",
+            path.display()
+        ))
+    })?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(err("read verifier-setup cache clock"))?
+        .as_nanos();
+    let mut temp_name = file_name.to_os_string();
+    temp_name.push(format!(".{}.{}.tmp", std::process::id(), nonce));
+    let temp_path = parent.join(temp_name);
+
+    let result = (|| -> Result<(), SetupError> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(err("create temporary verifier-setup cache"))?;
+        file.write_all(bytes)
+            .map_err(err("write temporary verifier-setup cache"))?;
+        file.sync_all()
+            .map_err(err("sync temporary verifier-setup cache"))?;
+        std::fs::rename(&temp_path, path).map_err(err("replace verifier-setup cache"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+/// Serialize a seed table to `path` with a versioned, checksummed envelope. The
+/// cached artifact is small — the seeds (KB-MB/bucket), NOT the rebuilt ~866 MB
+/// contexts.
 pub fn save_verifier_setup_seeds(
     path: &std::path::Path,
     seeds: &[AiPowCompactVerifierSetupSeed],
 ) -> Result<(), SetupError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(err("create verifier-setup cache dir"))?;
-    }
-    let bytes = bincode::serde::encode_to_vec(seeds, bincode::config::standard())
+    let payload = bincode::serde::encode_to_vec(seeds, bincode::config::standard())
         .map_err(err("serialize verifier-setup seeds"))?;
-    std::fs::write(path, bytes).map_err(err("write verifier-setup cache"))?;
-    Ok(())
+    let payload_len = u64::try_from(payload.len())
+        .map_err(|_| SetupError("verifier-setup cache payload exceeds u64".to_string()))?;
+    let checksum = blake3::hash(&payload);
+    let mut bytes = Vec::with_capacity(VERIFIER_SETUP_SEED_CACHE_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(VERIFIER_SETUP_SEED_CACHE_MAGIC);
+    bytes.extend_from_slice(&VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&payload_len.to_le_bytes());
+    bytes.extend_from_slice(checksum.as_bytes());
+    bytes.extend_from_slice(&payload);
+    write_seed_cache_atomically(path, &bytes)
 }
 
-/// Load a seed table from `path` — the inverse of [`save_verifier_setup_seeds`].
+/// Load a versioned seed table from `path` — the inverse of
+/// [`save_verifier_setup_seeds`].
 pub fn load_verifier_setup_seeds(
     path: &std::path::Path,
 ) -> Result<Vec<AiPowCompactVerifierSetupSeed>, SetupError> {
     let bytes = std::fs::read(path).map_err(err("read verifier-setup cache"))?;
-    let (seeds, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+    if bytes.len() < VERIFIER_SETUP_SEED_CACHE_HEADER_LEN {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} is shorter than its header",
+            path.display()
+        )));
+    }
+
+    let mut offset = 0usize;
+    let magic = &bytes[offset..offset + VERIFIER_SETUP_SEED_CACHE_MAGIC.len()];
+    if magic != VERIFIER_SETUP_SEED_CACHE_MAGIC {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} has an unsupported format marker",
+            path.display()
+        )));
+    }
+    offset += VERIFIER_SETUP_SEED_CACHE_MAGIC.len();
+
+    let version = u32::from_le_bytes(
+        bytes[offset..offset + std::mem::size_of::<u32>()]
+            .try_into()
+            .expect("cache header length checked"),
+    );
+    offset += std::mem::size_of::<u32>();
+    if version != VERIFIER_SETUP_SEED_CACHE_FORMAT_VERSION {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} has unsupported format version {version}",
+            path.display()
+        )));
+    }
+
+    let payload_len = usize::try_from(u64::from_le_bytes(
+        bytes[offset..offset + std::mem::size_of::<u64>()]
+            .try_into()
+            .expect("cache header length checked"),
+    ))
+    .map_err(|_| {
+        SetupError("verifier-setup cache payload length does not fit usize".to_string())
+    })?;
+    offset += std::mem::size_of::<u64>();
+
+    let expected_checksum: [u8; 32] = bytes[offset..offset + 32]
+        .try_into()
+        .expect("cache header length checked");
+    offset += 32;
+
+    let payload_end = offset.checked_add(payload_len).ok_or_else(|| {
+        SetupError("verifier-setup cache payload length overflows usize".to_string())
+    })?;
+    if payload_end != bytes.len() {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} has an invalid payload length",
+            path.display()
+        )));
+    }
+    let payload = &bytes[offset..payload_end];
+    if *blake3::hash(payload).as_bytes() != expected_checksum {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} failed its payload checksum",
+            path.display()
+        )));
+    }
+
+    let (seeds, consumed) = bincode::serde::decode_from_slice(payload, bincode::config::standard())
         .map_err(err("deserialize verifier-setup seeds"))?;
+    if consumed != payload.len() {
+        return Err(SetupError(format!(
+            "verifier-setup cache at {} has trailing seed bytes",
+            path.display()
+        )));
+    }
     Ok(seeds)
 }
 
@@ -486,10 +616,9 @@ pub fn verifier_cache_cap() -> usize {
 }
 
 /// Load the cached SEEDS and validate them against the committed **v0** consensus
-/// digest WITHOUT rebuilding (lazy boot). Any failure — a missing/unreadable file, a
-/// corrupt or format-incompatible cache (bincode decode error), or a mismatch against
-/// the pinned consensus constant — is returned as `Err`. The boot installer treats a
-/// present-but-invalid cache as corrupt and regenerates from scratch.
+/// digest WITHOUT rebuilding (lazy boot). The cache envelope rejects corruption and
+/// serialization mismatches before bincode decoding; the consensus digest then
+/// rejects a decoded table with divergent verifier keys.
 fn load_and_validate_seeds(
     path: &std::path::Path,
 ) -> Result<Vec<AiPowCompactVerifierSetupSeed>, SetupError> {
@@ -511,12 +640,11 @@ fn load_and_validate_seeds(
 /// a ~0.6 s page-in from disk — and standing RSS is a bounded working set.
 ///
 /// - **Cache present and valid:** load seeds + validate digest + build/reuse contexts.
-/// - **Cache present but corrupt / format-incompatible / digest-mismatched:** DELETE
-///   it and regenerate from scratch, rather than run against an unusable/divergent
-///   cache.
-/// - **Cache absent (or just deleted):** GENERATE it (one real compact proof per
-///   `buckets` entry — a one-time ~15-minute boot delay), cache it, then load +
-///   validate + inject.
+/// - **Cache present but corrupt / format-incompatible / digest-mismatched:** retain
+///   it until a complete replacement is atomically written, rather than deleting
+///   the only diagnostic artifact before regeneration.
+/// - **Cache absent:** GENERATE it (one real compact proof per `buckets` entry — a
+///   one-time ~15-minute boot delay), cache it, then load + validate + inject.
 ///
 /// Returns the number of buckets installed. **Any failure is `Err` and is FATAL** —
 /// the caller must shut the node down. A digest mismatch on a FRESHLY-GENERATED cache
@@ -537,12 +665,10 @@ pub fn install_or_build_verifier_setup(
             Ok(s) => seeds = Some(s),
             Err(e) => {
                 tracing::warn!(
-                    "AI-PoW verifier-setup cache at {} is unusable ({e}); deleting and \
-                     regenerating from scratch",
+                    "AI-PoW verifier-setup cache at {} is unusable ({e}); \
+                     regenerating an atomic replacement",
                     path.display(),
                 );
-                std::fs::remove_file(&path)
-                    .map_err(err("delete corrupt/incompatible verifier-setup cache"))?;
             }
         }
     }

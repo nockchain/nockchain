@@ -62,20 +62,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    let mut nockchain =
-        nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
-            .await?;
-
-    // Install the AI-PoW compact verifier-setup table from the data dir BEFORE
-    // processing any block. If the cache is present + valid this is fast (load seeds
-    // + rebuild; no proving); if it is absent (or corrupt) the node GENERATES the
-    // table once (a one-time ~15-minute boot delay; it logs this), caches it, and
-    // injects it — validating it against the committed v0 consensus digest either
-    // way. A node with no valid verifier setup cannot validate %ai-pow blocks, so any
-    // failure is FATAL: we propagate the error and shut down rather than run blind.
+    // The installer may prove every production setup bucket. It must complete before
+    // `init_with_kernel` starts I/O drivers, so an unready node cannot accept or dial
+    // network traffic while its consensus verifier is unavailable.
     let buckets = ai_pow_jets::setup::production_verifier_setup_buckets();
     ai_pow_jets::setup::install_or_build_verifier_setup(&data_dir, &buckets)?;
 
+    let mut nockchain =
+        nockchain::init_with_kernel::<Chaff>(cli, KERNEL, prover_hot_state.as_slice(), api_config)
+            .await?;
     nockchain.run().await?;
     Ok(())
 }
