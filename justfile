@@ -79,6 +79,12 @@ build-kernel-assets-honk: build-honk honk-dumb-jam honk-wal-jam honk-miner-jam h
 build-honk:
     cargo build --release -p honk
 
+# Build honk with whole-dependency-graph Rust PGO. The instrumented compiler is
+# trained on Wallet and Dumbnet, then the optimized binary is written to
+# target/honk-pgo/honk after a byte-exact Dumbnet verification compile.
+build-honk-pgo:
+    scripts/build-honk-pgo.sh
+
 honk-dumb-jam:
     mkdir -p assets
     time target/release/honk --new --output assets/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
