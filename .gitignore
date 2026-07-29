@@ -58,3 +58,4 @@ pearl
 # proptest regression seeds (auto-generated during test runs)
 **/proptest-regressions/
 .fakenet-ai-pow-data/
+nock_fake/
