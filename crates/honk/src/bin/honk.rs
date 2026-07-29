@@ -2801,12 +2801,12 @@ fn evaluate_honc_isolated(
     }
 }
 
-// honk cannot natively compile softed-constraints.hoon (it cues two large
-// constraint jams and `soft`s them), so it substitutes the cued jam pair
-// directly. That shortcut is valid ONLY for the exact source + jam content it
-// was proven against; key it on content hashes rather than the bare filename,
-// and hard-error on drift so a source/jam change cannot silently ship a stale
-// substitution. Pins are blake3 hex of the corresponding files.
+// Compiling the canonical softed-constraints.hoon is needlessly expensive: it
+// cues two large constraint jams and `soft`s them even though the result is
+// already known. Substitute the cued jam pair only for the exact source + jam
+// content against which the shortcut was proven. A fork or changed input must
+// fall through to normal compilation so the shortcut can never hide its
+// changes. Pins are blake3 hex of the corresponding files.
 const SOFTED_CONSTRAINTS_SOURCE_B3: &str =
     "4fe81e9738b06b217b6fe13810dc23f650cc4b95d80d7671ac2392e6cb7e3c80";
 const CONSTRAINTS_0_1_JAM_B3: &str =
@@ -2820,47 +2820,32 @@ fn native_value_override(
     directory: &Path,
 ) -> Result<Option<Noun>> {
     if path.file_name().and_then(|name| name.to_str()) == Some("softed-constraints.hoon") {
-        validate_softed_constraints_pins(path, directory)?;
-        return Ok(Some(softed_constraints_value(context, directory)?));
+        if softed_constraints_pins_match(path, directory)? {
+            return Ok(Some(softed_constraints_value(context, directory)?));
+        }
     }
     Ok(None)
 }
 
-fn validate_softed_constraints_pins(path: &Path, directory: &Path) -> Result<()> {
+fn softed_constraints_pins_match(path: &Path, directory: &Path) -> Result<bool> {
     let checks = [
-        (
-            path.to_path_buf(),
-            SOFTED_CONSTRAINTS_SOURCE_B3,
-            "softed-constraints.hoon source",
-        ),
+        (path.to_path_buf(), SOFTED_CONSTRAINTS_SOURCE_B3),
         (
             directory.join("jams/constraints-0-1.jam"),
             CONSTRAINTS_0_1_JAM_B3,
-            "jams/constraints-0-1.jam",
         ),
         (
             directory.join("jams/constraints-2.jam"),
             CONSTRAINTS_2_JAM_B3,
-            "jams/constraints-2.jam",
         ),
     ];
-    let mut stale = Vec::new();
-    for (file, expected, label) in checks {
+    for (file, expected) in checks {
         let actual = blake3::hash(&fs::read(&file)?).to_hex();
         if actual.as_str() != expected {
-            stale.push(format!("{label}: actual {actual}, pinned {expected}"));
+            return Ok(false);
         }
     }
-    if !stale.is_empty() {
-        return Err(format!(
-            "softed-constraints native shortcut is stale ({}). honk substitutes a fixed cued \
-             jam pair for this exact content; re-validate byte parity and update the pins in \
-             honk.rs.",
-            stale.join("; "),
-        )
-        .into());
-    }
-    Ok(())
+    Ok(true)
 }
 
 fn softed_constraints_value(context: &mut Context, directory: &Path) -> Result<Noun> {
@@ -4112,7 +4097,9 @@ mod tests {
     use nockapp::noun::slab::NounSlab;
     use nockvm::noun::{NounAllocator, DIRECT_MAX};
 
-    use crate::{axis_formula, build_entry_wer, entry_path_for_hoon};
+    use crate::{
+        axis_formula, build_entry_wer, entry_path_for_hoon, softed_constraints_pins_match,
+    };
 
     fn temp_test_dir(name: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -4149,6 +4136,24 @@ mod tests {
 
         assert!(encoded_axis.is_indirect());
         assert_eq!(encoded_axis.as_u64().expect("axis must fit u64"), axis);
+    }
+
+    #[test]
+    fn forked_softed_constraints_bypasses_the_pinned_override() {
+        let temp_dir = temp_test_dir("forked-softed-constraints");
+        let jams_dir = temp_dir.join("jams");
+        fs::create_dir_all(&jams_dir).expect("jams dir");
+        let source = temp_dir.join("softed-constraints.hoon");
+        fs::write(&source, ":: forked source").expect("source");
+        fs::write(jams_dir.join("constraints-0-1.jam"), b"forked 0-1").expect("0-1 jam");
+        fs::write(jams_dir.join("constraints-2.jam"), b"forked 2").expect("2 jam");
+
+        assert!(
+            !softed_constraints_pins_match(&source, &temp_dir).expect("pin comparison"),
+            "changed content must compile normally instead of using the pinned result"
+        );
+
+        fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 
     #[test]
