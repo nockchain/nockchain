@@ -13,7 +13,7 @@ use super::{
     is_const_bool_formula, map_to_noun, native_of, noun_eq, term_to_noun, ty_atom, ty_cell,
     ty_core, ty_face, ty_face_tool, ty_fork, ty_hint, ty_hold, ty_noun, ty_void, type_core_parts,
     type_face_name_if_atom, type_face_tool, type_fork_options, type_tag, CompilerError, Limb, NTy,
-    NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, StructNounPairSet,
+    NestPairSet, NestSeenSet, NestTypeInterner, Opal, Palo, Poly, Port, Sig64, StructNounPairSet,
     StructNounSet, Ut, Way,
 };
 use crate::native::ut::wet::RedoState;
@@ -666,6 +666,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
 
     let mut ut = Ut::new(&mut slab);
     ut.set_vet(false);
+    let mull_gen_sig = ut.noun_mug_cached(mull_gen) as u64;
     // The mull cache is native-keyed (C8/C-final); native_of the noun sut/gol/ref
     // for the mull_cache_store/lookup calls (the other caches stay noun-keyed).
     let space = ut.slab.noun_space();
@@ -679,7 +680,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
     let rest_legs_noun = ut.rest_legs_noun(&rest_legs);
     ut.mint_boundary_store_exact(sut, gol, mint_gen, ty, formula)
         .expect("mint boundary store");
-    ut.mull_cache_store(&sut_n, &gol_n, &ref_n, mull_gen, ty_n, inner_ty_n)
+    ut.mull_cache_store(&sut_n, &gol_n, &ref_n, mull_gen_sig, ty_n, inner_ty_n)
         .expect("mull boundary store");
     ut.redo_boundary_store(sut, redo_ref, redo_out)
         .expect("redo boundary store");
@@ -692,7 +693,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         .expect("mint boundary lookup")
         .is_some());
     assert!(ut
-        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
         .expect("mull boundary lookup")
         .is_some());
     assert!(ut
@@ -743,7 +744,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
             // native mull_cache_lookup is scope-keyed; sut is a %core (no holds)
             // so the active leg is unreachable -> scoped key 0 -> HIT when scoped.
             assert_eq!(
-                ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+                ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
                     .expect("inner mull boundary lookup")
                     .is_some(),
                 scoped
@@ -783,7 +784,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         .expect("post mint boundary lookup")
         .is_some());
     assert!(ut
-        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+        .mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
         .expect("post mull boundary lookup")
         .is_some());
     assert!(ut
@@ -811,7 +812,7 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
             .expect("repeat inner mint boundary lookup")
             .is_none());
         assert_eq!(
-            ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen)
+            ut.mull_cache_lookup(&sut_n, &gol_n, &ref_n, mull_gen_sig)
                 .expect("repeat inner mull boundary lookup")
                 .is_some(),
             scoped
@@ -836,6 +837,45 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
         Ok(())
     })
     .expect("rest leg should succeed");
+}
+
+#[test]
+fn hoon_ast_identity_is_scoped_to_the_borrowed_root_lifetime() {
+    let root = Hoon::Pair(
+        Box::new(Hoon::Axis(2)),
+        Box::new(Hoon::Pair(Box::new(Hoon::Axis(6)), Box::new(Hoon::ZapZap))),
+    );
+    let child = match &root {
+        Hoon::Pair(child, _) => child.as_ref(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        Sig64::hoon_signature_spot_sensitive(&root),
+        Sig64::hoon_signature_spot_sensitive(&root.clone()),
+        "structurally equal ASTs must retain one cache identity"
+    );
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+
+    let outermost = ut.enter_hoon_ast_scope(&root);
+    assert!(outermost);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_ast_signature_by_ptr.len(), 5);
+    assert!(ut
+        .hoon_ast_signature_by_ptr
+        .contains_key(&Ut::hoon_ast_ptr_key(child)));
+
+    let nested = ut.enter_hoon_ast_scope(child);
+    assert!(!nested);
+    ut.leave_hoon_ast_scope(nested);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_ast_signature_by_ptr.len(), 5);
+
+    ut.leave_hoon_ast_scope(outermost);
+    assert_eq!(ut.hoon_ast_scope_depth, 0);
+    assert!(ut.hoon_ast_stable_ptrs.is_empty());
+    assert!(ut.hoon_ast_signature_by_ptr.is_empty());
+    assert!(ut.hoon_ast_noun_by_ptr.is_empty());
 }
 
 #[test]
