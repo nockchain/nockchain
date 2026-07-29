@@ -18,6 +18,7 @@
 /=  dual-puzzle-tests  /tests/dumb/mod/unit/dual-puzzle
 /=  fund-split-tests  /tests/dumb/mod/integration/fund-split
 /=  pre-ai-activation-tests  /tests/dumb/mod/integration/pre-ai-activation
+/=  state-10-to-11-tests  /tests/dumb/mod/unit/state-10-to-11
 /=  time-banked-fork-tests  /tests/dumb/mod/integration/time-banked-fork
 ::  Roswell aggregation excludes benchmark suites while z/h container cold hints
 ::  emit per-operation `unknown jet` logs.
@@ -46,6 +47,7 @@
   (get-prefix-arms:tt name !>(dual-puzzle-tests))
   (get-prefix-arms:tt name !>(fund-split-tests))
   (get-prefix-arms:tt name !>(pre-ai-activation-tests))
+  (get-prefix-arms:tt name !>(state-10-to-11-tests))
   (get-prefix-arms:tt name !>(time-banked-fork-tests))
 ::  (get-prefix-arms:tt name !>(benches))
 ::  (get-prefix-arms:tt name !>(h-zoon-benches))
