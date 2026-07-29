@@ -121,6 +121,15 @@ Build the native compiler binary:
 cargo build --release -p honk --bin honk
 ```
 
+Build a profile-guided optimized compiler:
+
+```bash
+just build-honk-pgo
+target/honk-pgo/honk --help
+```
+
+This recipe uses vanilla Rust PGO across honk's complete target dependency graph. It builds an instrumented compiler, trains it on the Wallet and Dumbnet kernels, merges the resulting profiles with the `llvm-profdata` from the active Rust toolchain, builds the optimized compiler, and checks that its Dumbnet JAM is byte-identical to the instrumented compiler's output. The final binary, merged profile, and source/toolchain identity are written under `target/honk-pgo/`. Install the matching LLVM tools first with `rustup component add llvm-tools-preview` if the active toolchain does not already include them.
+
 Compile one entry in arbitrary mode:
 
 ```bash
