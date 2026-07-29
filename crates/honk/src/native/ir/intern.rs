@@ -9,12 +9,13 @@
 //! Interning is BOTTOM-UP: children are interned first, so a node's hash/eq use
 //! the children's canonical `Rc` IDENTITY (`Rc::ptr_eq`) plus its own leaf
 //! content — O(1) per node (no deep recursion in the compare), O(total) overall.
+//! Fork members are canonical child pointers too; their exact Hoon treap remains
+//! separately attached as the serialization witness and fork-node key.
 //!
 //! NOTE: this operates on the Phase-1 boundary `Type` (native skeleton + carried
 //! leaves). It already dedups the native skeleton — crucially the recursive
-//! payload/cell/inner/subject chains where subject-deepening lives. Phase 2
-//! nativizes the carried leaves (coil/treap/gene) so the deduplication reaches
-//! inside cores/forks too; the table mechanism here is unchanged by that.
+//! payload/cell/inner/subject/fork chains where subject-deepening lives. Later
+//! phases nativize the remaining coil/gene leaves; the table is unchanged.
 #![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
@@ -105,6 +106,8 @@ fn intern_type_noun(
     } else if tag.eq_bytes(b"fork") {
         Type::Fork {
             set: Leaf::from_noun_raw(tail, space),
+            options: Default::default(),
+            options_seen: Default::default(),
         }
     } else if tag.eq_bytes(b"hold") {
         let (subject, gene) = pair(tail, space)?;
@@ -709,7 +712,7 @@ fn live_to_noun_node(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) ->
             let p = live_to_noun(&mut *cx, payload, dst);
             T(dst, &[D(tas("hint")), h, p])
         }
-        Type::Fork { set } => {
+        Type::Fork { set, .. } => {
             let s = live_leaf_to_noun(&mut *cx, set, dst);
             T(dst, &[D(tas("fork")), s])
         }
@@ -891,7 +894,28 @@ impl TypeTable {
                 head: head.clone(),
                 payload: self.intern(payload),
             },
-            Type::Fork { set } => Type::Fork { set: set.clone() },
+            Type::Fork {
+                set,
+                options,
+                options_seen,
+            } => Type::Fork {
+                set: set.clone(),
+                options: {
+                    let native_options: std::cell::OnceCell<Vec<Rc<Type>>> = Default::default();
+                    if let Some(options) = options.get() {
+                        native_options
+                            .set(
+                                options
+                                    .iter()
+                                    .map(|option| self.intern(option))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .expect("fresh fork options cell");
+                    }
+                    native_options
+                },
+                options_seen: std::cell::Cell::new(options_seen.get()),
+            },
             Type::Hold { subject, gene } => Type::Hold {
                 subject: self.intern(subject),
                 gene: gene.clone(),
@@ -926,7 +950,10 @@ impl TypeTable {
 }
 
 /// Shallow structural hash: variant + children by canonical `Rc` pointer + leaf
-/// content. Valid only when children are already interned (bottom-up).
+/// content. Valid only when children are already interned (bottom-up). A fork's
+/// adaptive `options`/`options_seen` state is deliberately excluded: both are
+/// pure caches of the exact `set` witness, and interior mutation must never
+/// change a key after insertion into `TypeTable`.
 fn node_hash(t: &Type) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
@@ -960,7 +987,7 @@ fn node_hash(t: &Type) -> u64 {
             head.hash(&mut h);
             p(payload, &mut h);
         }
-        Type::Fork { set } => set.hash(&mut h),
+        Type::Fork { set, .. } => set.hash(&mut h),
         Type::Hold { subject, gene } => {
             p(subject, &mut h);
             gene.hash(&mut h);
@@ -969,7 +996,9 @@ fn node_hash(t: &Type) -> u64 {
     h.finish()
 }
 
-/// Shallow structural equality (children by canonical `Rc` identity).
+/// Shallow structural equality (children by canonical `Rc` identity). As with
+/// `node_hash`, fork equality is defined by the exact set witness rather than its
+/// lazily populated native-edge cache.
 fn node_eq(a: &Type, b: &Type) -> bool {
     use Type::*;
     match (a, b) {
@@ -1010,7 +1039,7 @@ fn node_eq(a: &Type, b: &Type) -> bool {
                 payload: p2,
             },
         ) => h1 == h2 && Rc::ptr_eq(p1, p2),
-        (Fork { set: s1 }, Fork { set: s2 }) => s1 == s2,
+        (Fork { set: s1, .. }, Fork { set: s2, .. }) => s1 == s2,
         (
             Hold {
                 subject: s1,
@@ -1079,6 +1108,42 @@ mod tests {
             tab.interned_calls,
             (1u64 << (depth + 1)) - 1,
             "the full duplicated tree was walked"
+        );
+    }
+
+    #[test]
+    fn fork_edge_materialization_does_not_change_intern_identity() {
+        let empty_edges = std::cell::OnceCell::new();
+        let fork = Type::Fork {
+            set: Leaf::Direct(123),
+            options: empty_edges,
+            options_seen: Default::default(),
+        };
+        let mut tab = TypeTable::new();
+        let canonical = tab.intern(&fork);
+        let hash_before = node_hash(&canonical);
+
+        let Type::Fork { options, .. } = &*canonical else {
+            unreachable!()
+        };
+        options
+            .set(vec![tab.intern(&atom())])
+            .expect("first fork-edge materialization");
+        assert_eq!(
+            hash_before,
+            node_hash(&canonical),
+            "interior edge caching must not mutate the interner key"
+        );
+
+        let duplicate = Type::Fork {
+            set: Leaf::Direct(123),
+            options: std::cell::OnceCell::new(),
+            options_seen: Default::default(),
+        };
+        let reinterned = tab.intern(&duplicate);
+        assert!(
+            Rc::ptr_eq(&canonical, &reinterned),
+            "the exact set witness remains fork identity after edge caching"
         );
     }
 }

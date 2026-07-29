@@ -8,13 +8,11 @@
 //! BOUNDARY vs TARGET: this form makes the type SKELETON native — recursive type
 //! children (`Cell` head/tail, `Core` payload, `Face` inner, `Hold` subject,
 //! `Hint` payload) are `Rc<Type>` — while carrying the complex / leaf
-//! sub-structures faithfully as provenanced [`Leaf`]s: the `%atom` aura+bits, the
-//! `%face` tool, the `%hint` `[inner note]` head, the `%hold` gene (AST), the
-//! `%core` coil (garb+context+battery seminoun), and the `%fork` mug-ordered
-//! treap. Phase 2 nativizes those carried parts (aura→symbol, coil→native Coil +
-//! lazy battery, treap→canonical set, gene→native AST) so they hash-cons — that
-//! is where the memory win lands. The carried leaves are exactly the Phase-2
-//! nativization targets (see `core.rs`/`intern.rs` for the target shapes).
+//! sub-structures faithfully as provenanced [`Leaf`]s: the `%atom` aura+bits,
+//! `%face` tool, `%hint` `[inner note]` head, `%hold` gene (AST), and `%core`
+//! battery seminoun. Reused `%fork` members materialize as native DAG children;
+//! its original mug-ordered treap remains the typed-Dynock serialization witness.
+//! Remaining carried leaves are later nativization targets.
 //!
 //! Normalization (RT-06: `ty_face(void)→void`, `ty_core(void)→void`,
 //! `ty_hint(void|noun)→…`) happens at CONSTRUCTION, so real type nouns are
@@ -23,10 +21,12 @@
 //! one.
 #![allow(dead_code)]
 
+use std::cell::{Cell, OnceCell};
 use std::rc::Rc;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
+use smallvec::SmallVec;
 
 use super::leaf::Leaf;
 use crate::errors::{CompilerError, Result};
@@ -196,10 +196,15 @@ pub enum Type {
         head: Leaf,
         payload: Rc<Type>,
     },
-    /// `[%fork set]` — the mug-ordered treap carried (Phase-2 nativizes to a
-    /// canonical set + treap re-emission, RT-07).
+    /// `[%fork set]` — adaptively retained native option children for type algebra
+    /// plus the original mug-ordered treap as an exact typed-Dynock serialization
+    /// witness (RT-07). One-shot forks avoid retaining a child vector; a repeated
+    /// traversal promotes the children into the native DAG. The witness is never
+    /// rebuilt at the output boundary, so output bytes cannot change.
     Fork {
         set: Leaf,
+        options: OnceCell<Vec<Rc<Type>>>,
+        options_seen: Cell<bool>,
     },
     /// `[%hold sut gen]` — sut native; gene (AST) carried.
     Hold {
@@ -260,7 +265,7 @@ impl Type {
                 let p = payload.to_noun(dst);
                 T(dst, &[D(tas("hint")), h, p])
             }
-            Type::Fork { set } => {
+            Type::Fork { set, .. } => {
                 let s = set.to_noun(dst);
                 T(dst, &[D(tas("fork")), s])
             }
@@ -332,8 +337,19 @@ impl Type {
                 payload: rc(Type::from_noun(payload, space)?),
             }
         } else if tag.eq_bytes(b"fork") {
+            let mut options = Vec::new();
+            visit_fork_set_members(tail, space, |option| {
+                options.push(rc(Type::from_noun(option, space)?));
+                Ok(())
+            })?;
+            let native_options = OnceCell::new();
+            native_options
+                .set(options)
+                .expect("fresh fork options cell");
             Type::Fork {
                 set: Leaf::from_noun(tail, space),
+                options: native_options,
+                options_seen: Cell::new(true),
             }
         } else if tag.eq_bytes(b"hold") {
             let (subject, gene) = pair(tail)?;
@@ -347,6 +363,53 @@ impl Type {
             ));
         })
     }
+}
+
+/// Decode the members of a Hoon `%set` treap in the same deterministic order as
+/// the compiler's historical `fork_set_options` helper. The exact tree remains
+/// separately retained in `Type::Fork`, so this walk is only for native DAG
+/// edges and never controls serialization.
+pub(crate) fn visit_fork_set_members(
+    noun: Noun,
+    space: &NounSpace,
+    mut visit: impl FnMut(Noun) -> Result<()>,
+) -> Result<()> {
+    let mut stack: SmallVec<[Noun; 8]> = SmallVec::new();
+    let mut current = noun;
+    let mut visited_nodes: usize = 0;
+    loop {
+        while !unsafe { current.raw_equals(&D(0)) } {
+            visited_nodes = visited_nodes.saturating_add(1);
+            if visited_nodes > 1_000_000 {
+                return Err(CompilerError::Decode(
+                    "fork set decode exceeded node budget".to_string(),
+                ));
+            }
+            let cell = current
+                .in_space(space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("fork set node not cell: {err}")))?;
+            let branches = cell.tail().as_cell().map_err(|err| {
+                CompilerError::Decode(format!("fork set node missing branches: {err}"))
+            })?;
+            stack.push(current);
+            current = branches.tail().noun();
+        }
+
+        let Some(node) = stack.pop() else {
+            break;
+        };
+        let cell = node
+            .in_space(space)
+            .as_cell()
+            .map_err(|err| CompilerError::Decode(format!("fork set node not cell: {err}")))?;
+        visit(cell.head().noun())?;
+        let branches = cell.tail().as_cell().map_err(|err| {
+            CompilerError::Decode(format!("fork set node missing branches: {err}"))
+        })?;
+        current = branches.head().noun();
+    }
+    Ok(())
 }
 
 fn rc(t: Type) -> Rc<Type> {
@@ -436,6 +499,14 @@ mod tests {
             let space = s.noun_space();
             let t = Type::from_noun(orig, &space)
                 .unwrap_or_else(|e| panic!("type from_noun[{i}]: {e:?}"));
+            if i == builders.len() - 1 {
+                let Type::Fork { options, .. } = &t else {
+                    panic!("fork case did not decode to Type::Fork");
+                };
+                let options = options.get().expect("oracle fork options populated");
+                assert_eq!(options.len(), 1);
+                assert!(matches!(&*options[0], Type::Atom { .. }));
+            }
             let mut a: NounSlab = NounSlab::new();
             a.copy_into(orig, &space);
             let ja = a.jam().to_vec();

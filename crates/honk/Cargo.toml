@@ -19,6 +19,7 @@ hoonc = { path = "../hoonc" }
 nockapp = { path = "../nockapp" }
 nockvm = { path = "../nockvm/rust/nockvm", features = ["sham_hints"] }
 num-bigint = { version = "0.4.6", features = ["serde"] }
+smallvec = { workspace = true }
 stacker = "0.1"
 thiserror = { workspace = true }
 tokio = { workspace = true }

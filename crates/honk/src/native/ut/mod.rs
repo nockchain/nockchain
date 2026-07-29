@@ -28,6 +28,7 @@ use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{get_mug, set_mug};
 use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
+use smallvec::SmallVec;
 
 use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata, Result};
 use crate::native::formula::{comb, cond, cons};
@@ -2405,9 +2406,7 @@ impl<'a> Ut<'a> {
                 return self.reachable_legs(&payload);
             }
             NTy::Fork { .. } => {
-                // The fork's options are not Rc children; decode (memoized per
-                // fork ptr inside fork_options_native via native_of's mug memo)
-                // and union the option legsets.
+                // Fork options are native DAG children; union their legsets.
                 let options = self.fork_options_native(t)?;
                 let mut acc: Vec<u64> = Vec::new();
                 for opt in options {
@@ -8477,17 +8476,52 @@ impl<'a> Ut<'a> {
         self.nest(sut_n, ref_n)
     }
 
-    /// Decode a native `%fork` set into its native option types (C8): the fork set
-    /// is a carried leaf, so lower it and re-lift the options. Forks are small.
-    fn fork_options_native(&mut self, fork: &NRc<NTy>) -> Result<Vec<NRc<NTy>>> {
-        let fork_noun = live_to_noun(&mut self.cx, fork, self.slab);
+    /// Return the native children of a `%fork`. A one-shot traversal stays
+    /// transient; the second promotes the vector into the native DAG so every
+    /// later consumer is a direct slice walk. The exact Hoon set treap remains
+    /// attached as the byte-exact serialization witness.
+    fn fork_options_native<'fork>(
+        &mut self,
+        fork: &'fork NRc<NTy>,
+    ) -> Result<NativeForkOptions<'fork>> {
+        let set = match &**fork {
+            NTy::Fork { set, options, .. } => {
+                if let Some(options) = options.get() {
+                    return Ok(NativeForkOptions::Cached(options));
+                }
+                set.clone()
+            }
+            _ => {
+                return Err(CompilerError::Decode(
+                    "native fork options requested for non-fork type".to_string(),
+                ))
+            }
+        };
+
+        let set_noun = live_leaf_to_noun(&mut self.cx, &set, self.slab);
         let space = self.slab.noun_space();
-        let opts = type_fork_options(fork_noun, &space)?;
-        let mut out = Vec::with_capacity(opts.len());
-        for opt in opts {
-            out.push(native_of(&mut self.cx, opt, &space)?);
+        let mut native_members: SmallVec<[NRc<NTy>; 4]> = SmallVec::new();
+        visit_fork_set_members(set_noun, &space, |member| {
+            native_members.push(native_of(&mut self.cx, member, &space)?);
+            Ok(())
+        })?;
+        let NTy::Fork {
+            options,
+            options_seen,
+            ..
+        } = &**fork
+        else {
+            unreachable!()
+        };
+        if !options_seen.replace(true) {
+            return Ok(NativeForkOptions::Transient(native_members));
         }
-        Ok(out)
+        let _ = options.set(native_members.into_vec());
+        Ok(NativeForkOptions::Cached(
+            options
+                .get()
+                .expect("fork options populated after repeated traversal"),
+        ))
     }
 
     /// Native `core_dox` (C8): build the doppelganger context-core from a carried
@@ -8744,7 +8778,8 @@ impl<'a> Ut<'a> {
                 self.nest_inner(sut, inner, depth, seen_sut_holds, seen_ref_holds, gil, memo)
             }
             NTy::Fork { .. } => {
-                for option in self.fork_options_native(&ref_)? {
+                let options = self.fork_options_native(&ref_)?;
+                for option in options {
                     if !self.nest_inner(
                         sut.clone(),
                         option,
@@ -9161,13 +9196,11 @@ impl<'a> Ut<'a> {
                 let inner = self.wrap_type(inner, vair)?;
                 Ok(cons_face(&mut self.cx, tool, inner))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&typ)?;
                 let mut wrapped = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let w = self.wrap_type(opt, vair)?;
+                    let w = self.wrap_type(option, vair)?;
                     wrapped.push(w);
                 }
                 self.cons_fork(wrapped)
@@ -10333,11 +10366,10 @@ impl<'a> Ut<'a> {
                 let cell = cons_cell(&mut self.cx, head, tail);
                 self.miss_sint(cell, ref_, seen, memo)
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                for option in fork_set_options(set_noun, &self.slab.noun_space())? {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    if !self.miss_dext(opt, ref_.clone(), seen, memo)? {
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
+                for option in options {
+                    if !self.miss_dext(option, ref_.clone(), seen, memo)? {
                         return Ok(false);
                     }
                 }
@@ -10472,13 +10504,11 @@ impl<'a> Ut<'a> {
                 let fused = self.fuse_inner(inner, ref_, seen)?;
                 Ok(cons_face(&mut self.cx, tool, fused))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let f = self.fuse_inner(opt, ref_.clone(), seen)?;
+                    let f = self.fuse_inner(option, ref_.clone(), seen)?;
                     out.push(f);
                 }
                 self.cons_fork(out)
@@ -10593,13 +10623,11 @@ impl<'a> Ut<'a> {
                 let cropped = self.crop_inner(inner, ref_, seen)?;
                 Ok(cons_face(&mut self.cx, tool, cropped))
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&sut)?;
                 let mut out = Vec::with_capacity(options.len());
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    let c = self.crop_inner(opt, ref_.clone(), seen)?;
+                    let c = self.crop_inner(option, ref_.clone(), seen)?;
                     out.push(c);
                 }
                 self.cons_fork(out)
@@ -10642,13 +10670,11 @@ impl<'a> Ut<'a> {
                 let inner = self.repo(ref_.clone())?;
                 self.crop_inner(sut, inner, seen)
             }
-            NTy::Fork { set } => {
-                let set_noun = live_leaf_to_noun(&mut self.cx, set, self.slab);
-                let options = fork_set_options(set_noun, &self.slab.noun_space())?;
+            NTy::Fork { .. } => {
+                let options = self.fork_options_native(&ref_)?;
                 let mut acc = sut;
                 for option in options {
-                    let opt = native_of(&mut self.cx, option, &self.slab.noun_space())?;
-                    acc = self.crop_inner(acc, opt, seen)?;
+                    acc = self.crop_inner(acc, option, seen)?;
                 }
                 Ok(acc)
             }
@@ -10801,11 +10827,17 @@ impl<'a> Ut<'a> {
     /// come free from `fork_from_options`; the single result is content-keyed via
     /// `native_of_cached` so a structurally-equal fork reuses one interned `Rc`.
     fn cons_fork(&mut self, options: Vec<NRc<NTy>>) -> Result<NRc<NTy>> {
-        // Memo on the canonical option-pointer SET (sorted+deduped): a fork is
-        // mug-ordered and set-valued, so the interned option pointers fully
-        // determine the result. Skips the mug-treap rebuild + decode/jam for the
-        // forks that recur throughout the recursive-type elaboration. Byte-exact:
-        // a hit returns the same interned `Rc` the rebuild would.
+        // Native forms of the exact Hoon empty/singleton collapse avoid building,
+        // mugging, and decoding a treap for the overwhelmingly cheap cases.
+        match options.as_slice() {
+            [] => return Ok(cons_void(&mut self.cx)),
+            [only] if matches!(&**only, NTy::Void) => {
+                return Ok(cons_void(&mut self.cx));
+            }
+            [only] => return Ok(only.clone()),
+            _ => {}
+        }
+
         let mut noun_opts = Vec::with_capacity(options.len());
         for opt in &options {
             noun_opts.push(live_to_noun(&mut self.cx, opt, self.slab));
@@ -10960,20 +10992,13 @@ impl<'a> Ut<'a> {
                     unsee_hold(ut, seen_holds, hold_noun, &axis)?;
                     result
                 }
-                NTy::Fork { set } => {
-                    let set_noun = live_leaf_to_noun(&mut ut.cx, set, ut.slab);
-                    let options = fork_set_options(set_noun, &ut.slab.noun_space())?;
+                NTy::Fork { .. } => {
+                    let options = ut.fork_options_native(&sut)?;
                     let mut peeks = Vec::with_capacity(options.len());
                     for option in options {
-                        let opt = native_of(&mut ut.cx, option, &ut.slab.noun_space())?;
-                        peeks.push(go(ut, opt, way, axis.clone(), seen_holds)?);
+                        peeks.push(go(ut, option, way, axis.clone(), seen_holds)?);
                     }
-                    let mut peek_nouns = Vec::with_capacity(peeks.len());
-                    for p in &peeks {
-                        peek_nouns.push(live_to_noun(&mut ut.cx, p, ut.slab));
-                    }
-                    let fork_noun = ut.fork_from_options(peek_nouns)?;
-                    native_of(&mut ut.cx, fork_noun, &ut.slab.noun_space())
+                    ut.cons_fork(peeks)
                 }
             }
         }
@@ -12889,6 +12914,60 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 // ---------------------------------------------------------------------------
 use std::rc::Rc as NRc;
 
+enum NativeForkOptions<'a> {
+    Cached(&'a [NRc<NTy>]),
+    Transient(SmallVec<[NRc<NTy>; 4]>),
+}
+
+impl std::ops::Deref for NativeForkOptions<'_> {
+    type Target = [NRc<NTy>];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Cached(options) => options,
+            Self::Transient(options) => options,
+        }
+    }
+}
+
+enum NativeForkOptionIter<'a> {
+    Cached(std::slice::Iter<'a, NRc<NTy>>),
+    Transient(smallvec::IntoIter<[NRc<NTy>; 4]>),
+}
+
+impl Iterator for NativeForkOptionIter<'_> {
+    type Item = NRc<NTy>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Cached(options) => options.next().cloned(),
+            Self::Transient(options) => options.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = match self {
+            Self::Cached(options) => options.len(),
+            Self::Transient(options) => options.len(),
+        };
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for NativeForkOptionIter<'_> {}
+
+impl<'a> IntoIterator for NativeForkOptions<'a> {
+    type Item = NRc<NTy>;
+    type IntoIter = NativeForkOptionIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Self::Cached(options) => NativeForkOptionIter::Cached(options.iter()),
+            Self::Transient(options) => NativeForkOptionIter::Transient(options.into_iter()),
+        }
+    }
+}
+
 use crate::native::ir::intern::{
     cons_cell, cons_core, cons_face, cons_hint, cons_noun, cons_void,
     core_mint_cache_lookup as native_core_mint_cache_lookup,
@@ -12903,7 +12982,7 @@ use crate::native::ir::intern::{
     Context,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
-use crate::native::ir::ty::{garb_native, Garb as NGarb, Type as NTy};
+use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
 
 #[allow(dead_code)]
 fn ty_noun_n(cx: &mut Context, slab: &mut NounSlab) -> (Noun, NRc<NTy>) {
@@ -13239,6 +13318,51 @@ mod native_ctor_tests {
         assert_native_eq(n, &t, &ut.slab.noun_space());
         assert!(matches!(&*t, NTy::Void), "empty fork must collapse to Void");
         Ok(())
+    }
+
+    #[test]
+    fn cons_fork_native_collapses_and_multi_member_parity() {
+        let mut slab: NounSlab = NounSlab::new();
+        let mut ut = Ut::new(&mut slab);
+        let left_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(0)));
+        let right_n = ty_atom_n(&mut ut.cx, ut.slab, "f", Some(D(1)));
+
+        let empty = ut.cons_fork(Vec::new()).unwrap();
+        assert!(matches!(&*empty, NTy::Void));
+        let singleton = ut.cons_fork(vec![left_n.1.clone()]).unwrap();
+        assert!(NRc::ptr_eq(&singleton, &left_n.1));
+
+        let fork = ut
+            .cons_fork(vec![left_n.1.clone(), right_n.1.clone()])
+            .unwrap();
+        let NTy::Fork { options, .. } = &*fork else {
+            panic!("two distinct members must produce a fork");
+        };
+        assert!(
+            options.get().is_none(),
+            "native fork edges must remain lazy until first traversal"
+        );
+        let transient = ut.fork_options_native(&fork).unwrap();
+        assert_eq!(transient.len(), 2);
+        let NTy::Fork { options, .. } = &*fork else {
+            unreachable!()
+        };
+        assert!(
+            options.get().is_none(),
+            "a one-shot fork must not retain its child vector"
+        );
+        drop(transient);
+        let materialized = ut.fork_options_native(&fork).unwrap();
+        assert!(std::ptr::eq::<[NRc<NTy>]>(
+            options.get().expect("fork edges populated").as_slice(),
+            &*materialized
+        ));
+        let historical = ut.fork_from_options(vec![left_n.0, right_n.0]).unwrap();
+        let emitted = live_to_noun(&mut ut.cx, &fork, ut.slab);
+        assert!(noun_eq(historical, emitted, &ut.slab.noun_space()).unwrap());
+
+        let singleton_fork = ut.cons_fork(vec![fork.clone()]).unwrap();
+        assert!(NRc::ptr_eq(&singleton_fork, &fork));
     }
 
     // STEP 1 unit: reachable_legs of a Hold-over-Cell DAG returns exactly the

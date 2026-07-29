@@ -4579,6 +4579,7 @@ dependencies = [
  "nockapp",
  "nockvm",
  "num-bigint",
+ "smallvec",
  "stacker",
  "thiserror 2.0.18",
  "tokio",
