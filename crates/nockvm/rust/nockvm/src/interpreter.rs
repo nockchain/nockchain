@@ -864,7 +864,10 @@ pub fn interpret(context: &mut Context, mut subject: Noun, formula: Noun) -> Res
                                 let dispatch = context.jet_dispatch;
                                 if let Some((jet, _path, test)) = context
                                     .warm
-                                    .find_jet(&mut context.stack, &mut res, &mut formula, dispatch)
+                                    .find_jet_with_space(
+                                        &mut context.stack, &mut res, &mut formula, &space,
+                                        dispatch,
+                                    )
                                     .next()
                                 {
                                     match jet(context, res) {

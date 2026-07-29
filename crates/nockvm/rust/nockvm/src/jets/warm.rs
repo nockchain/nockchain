@@ -686,26 +686,38 @@ impl Warm {
         dispatch: JetDispatchMode,
     ) -> JetLookupResult {
         let space = stack.fast_noun_space();
+        self.find_jet_with_space(stack, s, f, &space, dispatch)
+    }
+
+    #[inline(always)]
+    pub(crate) fn find_jet_with_space(
+        &mut self,
+        stack: &mut NockStack,
+        s: &mut Noun,
+        f: &mut Noun,
+        space: &NounSpace,
+        dispatch: JetDispatchMode,
+    ) -> JetLookupResult {
         if let Some(warm_it) = self.0.lookup(stack, f) {
             if let Some((path, _batteries, jet, test)) =
-                match_warm_entries(stack, warm_it, *s, &space, dispatch)
+                match_warm_entries(stack, warm_it, *s, space, dispatch)
             {
                 return jet_result(jet, path, test);
             }
         }
 
         if dispatch == JetDispatchMode::HintBlind {
-            let (normalized_formula, normalized) = normalize_transparent_hints(stack, *f, &space);
+            let (normalized_formula, normalized) = normalize_transparent_hints(stack, *f, space);
             if normalized && !raw_noun_eq(*f, normalized_formula) {
                 let mut formula = normalized_formula;
                 if let Some(warm_it) = self.0.lookup(stack, &mut formula) {
                     if let Some((path, batteries, jet, test)) =
-                        match_warm_entries(stack, warm_it, *s, &space, dispatch)
+                        match_warm_entries(stack, warm_it, *s, space, dispatch)
                     {
                         self.maybe_insert_alias(
                             stack,
                             f,
-                            &space,
+                            space,
                             WarmRegistration {
                                 path,
                                 batteries,
