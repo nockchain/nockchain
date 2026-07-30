@@ -24,10 +24,8 @@
 use std::cell::{Cell, OnceCell};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::num::NonZeroUsize;
 use std::ops::Deref;
-use std::rc::Rc as SharedRc;
+use std::ptr::NonNull;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
@@ -62,132 +60,53 @@ impl<T> TypeSlot<T> {
     }
 }
 
-/// Context-owned native type handle.
+/// Context-owned native type handle. Every handle points into a `TypeTable`
+/// slot, so cloning is an unconditional word copy and dropping is a no-op.
 ///
-/// The hot compiler path uses the tagged arena form: cloning it is a single
-/// word copy and dropping it is a no-op. The cold boundary decoder still needs
-/// to construct temporary recursive `Type` trees before a `Context` exists, so
-/// the untagged form owns a conventional `Rc<T>`. Interning converts every such
-/// temporary into the arena form before it enters type algebra.
-///
-/// The arena tag is stored in the low pointer bit. `TypeSlot<T>` is explicitly
-/// aligned to keep that bit available.
+/// This type is crate-private because its lifetime is bounded by the owning
+/// compiler `Context`; no arena handle may escape through Honk's public API.
 #[repr(transparent)]
 pub struct TypeRef<T> {
-    tagged: NonZeroUsize,
-    marker: PhantomData<T>,
+    slot: NonNull<TypeSlot<T>>,
 }
 
 impl<T> TypeRef<T> {
-    const ARENA_TAG: usize = 1;
-
-    /// Construct a cold, independently-owned recursive value. Canonical hot
-    /// values are created with `from_arena_slot` by the type interner.
-    pub fn new(value: T) -> Self {
-        let ptr = SharedRc::into_raw(SharedRc::new(value)) as usize;
-        debug_assert_ne!(ptr, 0);
-        debug_assert_eq!(ptr & Self::ARENA_TAG, 0);
-        Self {
-            tagged: NonZeroUsize::new(ptr).expect("Rc pointers are non-null"),
-            marker: PhantomData,
-        }
-    }
-
     pub(super) fn from_arena_slot(slot: &TypeSlot<T>) -> Self {
-        let ptr = slot as *const TypeSlot<T> as usize;
-        debug_assert_ne!(ptr, 0);
-        debug_assert_eq!(ptr & Self::ARENA_TAG, 0);
         Self {
-            tagged: NonZeroUsize::new(ptr | Self::ARENA_TAG)
-                .expect("tagged arena pointers are non-null"),
-            marker: PhantomData,
+            slot: NonNull::from(slot),
         }
     }
 
-    #[inline(always)]
-    fn is_arena(&self) -> bool {
-        self.tagged.get() & Self::ARENA_TAG != 0
-    }
-
-    #[inline(always)]
-    fn arena_slot(&self) -> *const TypeSlot<T> {
-        (self.tagged.get() & !Self::ARENA_TAG) as *const TypeSlot<T>
-    }
-
-    #[inline(always)]
-    fn shared_ptr(&self) -> *const T {
-        self.tagged.get() as *const T
-    }
-
-    /// Stable canonical identity. Arena IDs occupy odd values; cold shared
-    /// pointers occupy even values, so the two domains cannot collide.
     #[inline(always)]
     pub fn identity(&self) -> usize {
-        if self.is_arena() {
-            // SAFETY: arena handles are only constructed from slots owned for
-            // the entire Context lifetime.
-            let id = unsafe { (*self.arena_slot()).id.0 };
-            ((id as usize) << 1) | 1
-        } else {
-            self.shared_ptr() as usize
-        }
-    }
-
-    #[inline(always)]
-    pub fn type_id(&self) -> Option<TypeId> {
-        if self.is_arena() {
-            // SAFETY: identical lifetime invariant to `identity`.
-            Some(unsafe { (*self.arena_slot()).id })
-        } else {
-            None
-        }
+        self.arena_id().0 as usize
     }
 
     #[inline(always)]
     pub fn arena_id(&self) -> TypeId {
-        self.type_id()
-            .expect("native type algebra only accepts context-interned types")
+        // SAFETY: handles only come from slots retained by their compiler
+        // Context for the entire type-algebra scope.
+        unsafe { self.slot.as_ref().id }
     }
 
     #[inline(always)]
     pub fn as_ptr(this: &Self) -> *const T {
-        if this.is_arena() {
-            // SAFETY: identical lifetime invariant to `identity`.
-            unsafe { &(*this.arena_slot()).value as *const T }
-        } else {
-            this.shared_ptr()
-        }
+        // SAFETY: identical lifetime invariant to `arena_id`.
+        unsafe { &this.slot.as_ref().value as *const T }
     }
 
     #[inline(always)]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        this.tagged == other.tagged
+        this.slot == other.slot
     }
 }
+
+impl<T> Copy for TypeRef<T> {}
 
 impl<T> Clone for TypeRef<T> {
     #[inline(always)]
     fn clone(&self) -> Self {
-        if !self.is_arena() {
-            // SAFETY: the untagged representation was produced by
-            // `Rc::into_raw`, and this creates exactly one additional owner.
-            unsafe { SharedRc::increment_strong_count(self.shared_ptr()) };
-        }
-        Self {
-            tagged: self.tagged,
-            marker: PhantomData,
-        }
-    }
-}
-
-impl<T> Drop for TypeRef<T> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        if !self.is_arena() {
-            // SAFETY: every shared clone increments exactly once and every
-            // shared handle decrements exactly once.
-            unsafe { SharedRc::decrement_strong_count(self.shared_ptr()) };
-        }
+        *self
     }
 }
 
@@ -196,8 +115,7 @@ impl<T> Deref for TypeRef<T> {
 
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
-        // SAFETY: shared pointers are kept alive by their Rc count; arena
-        // pointers are kept alive by the owning Context's TypeTable.
+        // SAFETY: the owning Context's TypeTable keeps this slot alive.
         unsafe { &*Self::as_ptr(self) }
     }
 }
@@ -476,15 +394,103 @@ impl Type {
             }
         }
     }
+}
 
-    pub fn from_noun(noun: Noun, space: &NounSpace) -> Result<Type> {
+/// Independently owned decoder form used only by the optional public
+/// round-trip oracle. Keeping it separate lets the live compiler's `TypeRef`
+/// remain an unconditional, branch-free arena handle.
+#[derive(Debug)]
+pub(super) enum BoundaryType {
+    Void,
+    Noun,
+    Atom {
+        aura: Leaf,
+        bits: Leaf,
+    },
+    Cell(Box<BoundaryType>, Box<BoundaryType>),
+    Core {
+        payload: Box<BoundaryType>,
+        garb: Garb,
+        context: Box<BoundaryType>,
+        rest: Leaf,
+    },
+    Face {
+        tool: Leaf,
+        inner: Box<BoundaryType>,
+    },
+    Hint {
+        head: Leaf,
+        payload: Box<BoundaryType>,
+    },
+    Fork {
+        set: Leaf,
+        options: Vec<BoundaryType>,
+    },
+    Hold {
+        subject: Box<BoundaryType>,
+        gene: Leaf,
+    },
+}
+
+impl BoundaryType {
+    pub(super) fn to_noun(&self, dst: &mut NounSlab) -> Noun {
+        match self {
+            BoundaryType::Void => D(tas("void")),
+            BoundaryType::Noun => D(tas("noun")),
+            BoundaryType::Atom { aura, bits } => {
+                let a = aura.to_noun(dst);
+                let b = bits.to_noun(dst);
+                T(dst, &[D(tas("atom")), a, b])
+            }
+            BoundaryType::Cell(h, t) => {
+                let hn = h.to_noun(dst);
+                let tn = t.to_noun(dst);
+                T(dst, &[D(tas("cell")), hn, tn])
+            }
+            BoundaryType::Core {
+                payload,
+                garb,
+                context,
+                rest,
+            } => {
+                let p = payload.to_noun(dst);
+                let g = garb.to_noun(dst);
+                let ctx = context.to_noun(dst);
+                let r = rest.to_noun(dst);
+                let tail = T(dst, &[ctx, r]);
+                let coil = T(dst, &[g, tail]);
+                T(dst, &[D(tas("core")), p, coil])
+            }
+            BoundaryType::Face { tool, inner } => {
+                let tl = tool.to_noun(dst);
+                let inn = inner.to_noun(dst);
+                T(dst, &[D(tas("face")), tl, inn])
+            }
+            BoundaryType::Hint { head, payload } => {
+                let h = head.to_noun(dst);
+                let p = payload.to_noun(dst);
+                T(dst, &[D(tas("hint")), h, p])
+            }
+            BoundaryType::Fork { set, .. } => {
+                let s = set.to_noun(dst);
+                T(dst, &[D(tas("fork")), s])
+            }
+            BoundaryType::Hold { subject, gene } => {
+                let s = subject.to_noun(dst);
+                let g = gene.to_noun(dst);
+                T(dst, &[D(tas("hold")), s, g])
+            }
+        }
+    }
+
+    pub(super) fn from_noun(noun: Noun, space: &NounSpace) -> Result<BoundaryType> {
         // %void / %noun are bare atom cords.
         if let Ok(atom) = noun.in_space(space).as_atom() {
             if atom.eq_bytes(b"void") {
-                return Ok(Type::Void);
+                return Ok(BoundaryType::Void);
             }
             if atom.eq_bytes(b"noun") {
-                return Ok(Type::Noun);
+                return Ok(BoundaryType::Noun);
             }
             return Err(CompilerError::Decode(
                 "native type IR: unknown atom type tag".into(),
@@ -503,58 +509,53 @@ impl Type {
         };
         Ok(if tag.eq_bytes(b"atom") {
             let (aura, bits) = pair(tail)?;
-            Type::Atom {
+            BoundaryType::Atom {
                 aura: Leaf::from_noun(aura, space),
                 bits: Leaf::from_noun(bits, space),
             }
         } else if tag.eq_bytes(b"cell") {
             let (h, t) = pair(tail)?;
-            Type::Cell(
-                rc(Type::from_noun(h, space)?),
-                rc(Type::from_noun(t, space)?),
+            BoundaryType::Cell(
+                Box::new(BoundaryType::from_noun(h, space)?),
+                Box::new(BoundaryType::from_noun(t, space)?),
             )
         } else if tag.eq_bytes(b"core") {
             let (payload, coil) = pair(tail)?;
             // coil = [garb [context rest]]
             let (garb, coil_tail) = pair(coil)?;
             let (context, rest) = pair(coil_tail)?;
-            Type::Core {
-                payload: rc(Type::from_noun(payload, space)?),
+            BoundaryType::Core {
+                payload: Box::new(BoundaryType::from_noun(payload, space)?),
                 garb: Garb::from_noun(garb, space)?,
-                context: rc(Type::from_noun(context, space)?),
+                context: Box::new(BoundaryType::from_noun(context, space)?),
                 rest: Leaf::from_noun(rest, space),
             }
         } else if tag.eq_bytes(b"face") {
             let (tool, inner) = pair(tail)?;
-            Type::Face {
+            BoundaryType::Face {
                 tool: Leaf::from_noun(tool, space),
-                inner: rc(Type::from_noun(inner, space)?),
+                inner: Box::new(BoundaryType::from_noun(inner, space)?),
             }
         } else if tag.eq_bytes(b"hint") {
             let (head, payload) = pair(tail)?;
-            Type::Hint {
+            BoundaryType::Hint {
                 head: Leaf::from_noun(head, space),
-                payload: rc(Type::from_noun(payload, space)?),
+                payload: Box::new(BoundaryType::from_noun(payload, space)?),
             }
         } else if tag.eq_bytes(b"fork") {
             let mut options = Vec::new();
             visit_fork_set_members(tail, space, |option| {
-                options.push(rc(Type::from_noun(option, space)?));
+                options.push(BoundaryType::from_noun(option, space)?);
                 Ok(())
             })?;
-            let native_options = OnceCell::new();
-            native_options
-                .set(options)
-                .expect("fresh fork options cell");
-            Type::Fork {
+            BoundaryType::Fork {
                 set: Leaf::from_noun(tail, space),
-                options: native_options,
-                options_seen: Cell::new(true),
+                options,
             }
         } else if tag.eq_bytes(b"hold") {
             let (subject, gene) = pair(tail)?;
-            Type::Hold {
-                subject: rc(Type::from_noun(subject, space)?),
+            BoundaryType::Hold {
+                subject: Box::new(BoundaryType::from_noun(subject, space)?),
                 gene: Leaf::from_noun(gene, space),
             }
         } else {
@@ -610,10 +611,6 @@ pub(crate) fn visit_fork_set_members(
         current = branches.head().noun();
     }
     Ok(())
-}
-
-fn rc(t: Type) -> Rc<Type> {
-    Rc::new(t)
 }
 
 #[cfg(test)]
@@ -697,15 +694,14 @@ mod tests {
             let mut s: NounSlab = NounSlab::new();
             let orig = b(&mut s);
             let space = s.noun_space();
-            let t = Type::from_noun(orig, &space)
+            let t = BoundaryType::from_noun(orig, &space)
                 .unwrap_or_else(|e| panic!("type from_noun[{i}]: {e:?}"));
             if i == builders.len() - 1 {
-                let Type::Fork { options, .. } = &t else {
-                    panic!("fork case did not decode to Type::Fork");
+                let BoundaryType::Fork { options, .. } = &t else {
+                    panic!("fork case did not decode to BoundaryType::Fork");
                 };
-                let options = options.get().expect("oracle fork options populated");
                 assert_eq!(options.len(), 1);
-                assert!(matches!(&*options[0], Type::Atom { .. }));
+                assert!(matches!(&options[0], BoundaryType::Atom { .. }));
             }
             let mut a: NounSlab = NounSlab::new();
             a.copy_into(orig, &space);
