@@ -77,6 +77,24 @@ fn struct_noun_set_remove_missing_returns_false() {
 }
 
 #[test]
+fn complete_seminouns_share_structural_value_identity() {
+    let mut slab = NounSlab::new();
+    let left = T(&mut slab, &[D(1), D(2), D(3)]);
+    let right = T(&mut slab, &[D(1), D(2), D(3)]);
+    assert!(!unsafe { left.raw_equals(&right) });
+
+    let mut ut = Ut::new(&mut slab);
+    let left_semi = ut.semi_full_complete(left);
+    let right_semi = ut.semi_full_complete(right);
+    assert_eq!(
+        ut.semi_complete_value_id(left_semi)
+            .expect("left value identity"),
+        ut.semi_complete_value_id(right_semi)
+            .expect("right value identity"),
+    );
+}
+
+#[test]
 fn struct_noun_pair_set_is_structural() {
     let mut slab = NounSlab::new();
     let sut_a = {

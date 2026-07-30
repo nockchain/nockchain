@@ -38,6 +38,7 @@ use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata,
 use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
+use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
     atom_to_string, noun_expr_to_noun, opt_from_noun, opt_to_noun, parsed_atom_to_noun, tag,
     term_to_noun, vec_to_list,
@@ -65,12 +66,6 @@ struct HoldRepoFanLegIdEntry {
 struct HoldRepoFanHoldIdEntry {
     hold: Noun,
     id: u64,
-}
-
-#[derive(Clone, Copy)]
-struct MuskMackCacheEntry {
-    core: Noun,
-    result: Option<Noun>,
 }
 
 /// Seminoun mask tags, decoded by direct atom comparison: the
@@ -114,8 +109,9 @@ struct MuskRuntime {
     // copied batteries/context instead of copying the same core tree for every arm invocation.
     mack_core_cache_raw: FastHashMap<u64, Noun>,
     mack_core_cache_context: Option<u64>,
-    mack_cache_raw: FastHashMap<(u64, u64), Option<Noun>>,
-    mack_cache: BucketMemo<(u32, u64), MuskMackCacheEntry>,
+    // Complete seminoun data is canonicalized by `ValueArena`, so equivalent
+    // cores share one exact identity even when their slab addresses differ.
+    mack_cache_by_value: FastHashMap<(ValueId, u64), Option<Noun>>,
 }
 
 impl MuskRuntime {
@@ -125,8 +121,7 @@ impl MuskRuntime {
             cold_state: None,
             mack_core_cache_raw: Default::default(),
             mack_core_cache_context: None,
-            mack_cache_raw: Default::default(),
-            mack_cache: Default::default(),
+            mack_cache_by_value: Default::default(),
         }
     }
 
@@ -291,6 +286,10 @@ pub struct Ut<'a> {
     // `FormulaId`; noun materialization is retained only at explicit semantic
     // boundaries and at the final public output boundary.
     formula_arena: FormulaArena,
+    // Canonical structural identity of complete seminoun data. The side table
+    // below binds each constructed complete seminoun to its value ID.
+    value_arena: ValueArena,
+    semi_value_ids: FastHashMap<u64, ValueId>,
     // Owned per-compile native-IR state (intern table + decode/encode memos +
     // boundary caches) -- the single home for what used to be module thread-locals.
     // A disjoint field from `slab`, so the ir free fns can borrow `&mut self.cx`
@@ -2082,6 +2081,8 @@ impl<'a> Ut<'a> {
         Self {
             slab,
             formula_arena: FormulaArena::new(),
+            value_arena: ValueArena::new(),
+            semi_value_ids: Default::default(),
             cx: Context::new(),
             vet: true,
             dbug_locations: Vec::new(),
@@ -2396,7 +2397,6 @@ impl<'a> Ut<'a> {
         self.hold_repo_fan_context_id = 0;
         self.hold_repo_fan_subset_by_signature.clear();
         self.bran_semi_memo = Default::default();
-        self.musk.mack_cache_raw.clear();
     }
 
     const NEST_MUG_BUCKET_LIMIT: usize = 32;
@@ -5633,6 +5633,26 @@ impl<'a> Ut<'a> {
         T(self.slab, &[mask, data])
     }
 
+    #[inline]
+    fn value_import(&mut self, noun: Noun) -> ValueId {
+        let space = self.slab.noun_space();
+        self.value_arena
+            .import(noun, &space)
+            .expect("compiler-generated seminoun data must be a valid noun")
+    }
+
+    #[inline]
+    fn semi_register_value(&mut self, semi: Noun, value: ValueId) {
+        self.semi_value_ids.insert(unsafe { semi.as_raw() }, value);
+    }
+
+    fn semi_full_complete_with_id(&mut self, data: Noun, value: ValueId) -> Noun {
+        let mask = self.semi_mask_full_empty_interned();
+        let semi = self.semi_make(mask, data);
+        self.semi_register_value(semi, value);
+        semi
+    }
+
     /// The `[%full ~]` mask and the fully-blocked seminoun are by far the
     /// most constructed nouns on musk's evaluation path; intern one copy of
     /// each per Ut. Nouns are immutable, so sharing is sound, and the stable
@@ -5647,8 +5667,8 @@ impl<'a> Ut<'a> {
     }
 
     fn semi_full_complete(&mut self, data: Noun) -> Noun {
-        let mask = self.semi_mask_full_empty_interned();
-        self.semi_make(mask, data)
+        let value = self.value_import(data);
+        self.semi_full_complete_with_id(data, value)
     }
 
     fn semi_blocks_root_blocked(&mut self) -> Noun {
@@ -5934,8 +5954,13 @@ impl<'a> Ut<'a> {
             let tal_empty = noun_is_zero(tal_blocks);
             if hed_empty == tal_empty {
                 if hed_empty {
+                    let hed_value = self.semi_complete_value_id(hed)?;
+                    let tal_value = self.semi_complete_value_id(tal)?;
                     let data = T(self.slab, &[hed_data, tal_data]);
-                    return Ok(self.semi_full_complete(data));
+                    let value = self
+                        .value_arena
+                        .intern_cell_with_noun(data, hed_value, tal_value);
+                    return Ok(self.semi_full_complete_with_id(data, value));
                 }
                 let blocks = self.semi_blocks_union_coarse(hed_blocks, tal_blocks);
                 let mask = self.semi_mask_full(blocks);
@@ -6435,9 +6460,9 @@ impl<'a> Ut<'a> {
                 // hoon-138 op-9 macks only when the raw core semi is already
                 // canonical-complete (`[[%full ~] *]`); partial cores take the
                 // fragment/require path below, like `++araw`.
-                if let Some(core) = self.semi_full_complete_data(one)? {
+                if let Some((core, core_id)) = self.semi_full_complete_data(one)? {
                     if let Some(axis) = axis_small {
-                        let Some(value) = self.musk_mack_constant_core(core, axis)? else {
+                        let Some(value) = self.musk_mack_constant_core(core, core_id, axis)? else {
                             return self.musk_araw_arm_partial(one, axis, memo);
                         };
                         return Ok(Some(self.semi_full_complete(value)));
@@ -6548,50 +6573,59 @@ impl<'a> Ut<'a> {
         self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))
     }
 
-    fn semi_full_complete_data(&mut self, semi: Noun) -> Result<Option<Noun>> {
+    fn semi_complete_value_id(&mut self, semi: Noun) -> Result<ValueId> {
+        let raw = unsafe { semi.as_raw() };
+        if let Some(id) = self.semi_value_ids.get(&raw).copied() {
+            return Ok(id);
+        }
+        let (mask, data) = self.semi_parts(semi)?;
+        if self.semi_mask_tag(mask)? != SemiTag::Full {
+            return Err(CompilerError::Noun(
+                "value identity requested for non-full seminoun".into(),
+            ));
+        }
+        let blocks = self.semi_mask_full_blocks(mask)?;
+        if !noun_is_zero(blocks) {
+            return Err(CompilerError::Noun(
+                "value identity requested for blocked seminoun".into(),
+            ));
+        }
+        let id = self.value_import(data);
+        self.semi_value_ids.insert(raw, id);
+        Ok(id)
+    }
+
+    fn semi_full_complete_data(&mut self, semi: Noun) -> Result<Option<(Noun, ValueId)>> {
         let (mask, data) = self.semi_parts(semi)?;
         if self.semi_mask_tag(mask)? != SemiTag::Full {
             return Ok(None);
         }
         let blocks = self.semi_mask_full_blocks(mask)?;
         if noun_is_zero(blocks) {
-            Ok(Some(data))
+            let value = self.semi_complete_value_id(semi)?;
+            Ok(Some((data, value)))
         } else {
             Ok(None)
         }
     }
 
-    fn musk_mack_constant_core(&mut self, core: Noun, axis: u64) -> Result<Option<Noun>> {
+    fn musk_mack_constant_core(
+        &mut self,
+        core: Noun,
+        core_id: ValueId,
+        axis: u64,
+    ) -> Result<Option<Noun>> {
         if Self::slot_axis(core, axis, &self.slab.noun_space()).is_none() {
             return Ok(None);
         }
 
-        let raw_key = (unsafe { core.as_raw() }, axis);
-        if let Some(result) = self.musk.mack_cache_raw.get(&raw_key).copied() {
+        let key = (core_id, axis);
+        if let Some(result) = self.musk.mack_cache_by_value.get(&key).copied() {
             return Ok(result);
         }
 
-        let key = (self.noun_mug_cached(core), axis);
-        if let Some(entries) = self.musk.mack_cache.buckets.get(&key) {
-            let space = self.slab.noun_space();
-            for entry in entries.iter().rev() {
-                if unsafe { entry.core.raw_equals(&core) } || noun_eq(entry.core, core, &space)? {
-                    self.musk.mack_cache_raw.insert(raw_key, entry.result);
-                    return Ok(entry.result);
-                }
-            }
-        }
-
         let result = self.musk_interpret_mack(core, axis);
-        self.musk.mack_cache_raw.insert(raw_key, result);
-        let bucket = self
-            .musk
-            .mack_cache
-            .ensure_key(key, Self::MUSK_MACK_CACHE_KEY_LIMIT);
-        if bucket.len() >= Self::MUSK_MACK_CACHE_BUCKET_LIMIT {
-            bucket.pop_front();
-        }
-        bucket.push_back(MuskMackCacheEntry { core, result });
+        self.musk.mack_cache_by_value.insert(key, result);
         Ok(result)
     }
 
