@@ -37,6 +37,7 @@ bazel test //open/assets/native:kernel_parity_test
 Performance design notes:
 
 - [`ARENA-HOON-IR.md`](ARENA-HOON-IR.md) describes the scope-local `HoonId` graph, nested lowering arenas, lifetime invariants, and acceptance gates.
+- [`ARENA-FORMULA-IR.md`](ARENA-FORMULA-IR.md) describes the end-to-end `FormulaId` graph, explicit formula-as-data boundaries, exactness rules, and measured validation.
 
 Ignored tests do not validate parity in normal Cargo runs. If an ignored heavy
 parity test is the evidence for a change, run it explicitly with `--ignored` and
