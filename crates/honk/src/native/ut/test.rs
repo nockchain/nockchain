@@ -946,6 +946,7 @@ fn native_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let ty_n = native_of(&mut ut.cx, ty, &space).expect("native ty");
+    let formula = ut.formula_import(formula).expect("native formula");
 
     ut.mint_cache_store(&sut_n, &gol_n, gen_sig, ty_n, formula)
         .expect("store mint cache");
@@ -992,6 +993,7 @@ fn native_core_mint_cache_partitions_on_goal_reachable_rest_fan() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let core_type_n = native_of(&mut ut.cx, core_type, &space).expect("native core type");
+    let formula = ut.formula_import(formula).expect("native formula");
 
     ut.core_mint_cache_store(
         &sut_n, &gol_n, tomes_map, &prefix, poly, core_type_n, formula,
@@ -2304,9 +2306,10 @@ fn mull_cnts_mixed_ports_errors() {
     let sut_n = native_of(&mut ut.cx, sut, &space).expect("native sut");
     let gol_n = native_of(&mut ut.cx, gol, &space).expect("native gol");
     let dox_n = native_of(&mut ut.cx, dox, &space).expect("native dox");
+    let synth_formula = ut.formula_slot_u64(0);
     let lug_p = Port::Synthetic {
         typ: native_of(&mut ut.cx, synth_typ, &space).expect("native synth typ"),
-        formula: D(0),
+        formula: synth_formula,
     };
     let lug_q = Port::Palo(Palo {
         vein: Vec::new(),

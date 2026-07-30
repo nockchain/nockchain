@@ -8,6 +8,7 @@ use nockvm::noun::{NounAllocator, NounSpace};
 use num_bigint::BigUint;
 
 use crate::errors::Result;
+use crate::native::ir::formula_dag::FormulaId;
 use crate::native::ir::ty::{Type as NTy, TypeRef as NRc};
 use crate::native::ut::{noun_eq, Ut};
 
@@ -898,7 +899,7 @@ pub enum Vair {
 #[derive(Clone, Debug)]
 pub enum Port {
     Palo(Palo),
-    Synthetic { typ: NRc<NTy>, formula: Noun },
+    Synthetic { typ: NRc<NTy>, formula: FormulaId },
 }
 
 #[derive(Clone, Debug)]
@@ -921,7 +922,7 @@ pub enum Pony {
     Void,
     Palo(Palo),
     Unmatched(u64),
-    Synthetic { typ: NRc<NTy>, formula: Noun },
+    Synthetic { typ: NRc<NTy>, formula: FormulaId },
 }
 
 #[derive(Clone, Debug)]
@@ -1008,7 +1009,7 @@ pub struct LazyResolverContext {
     pub core_type: NRc<NTy>,
     pub poly: Poly,
     pub arms_by_axis: HashMap<BigUint, LazyResolverArmEntry>,
-    pub cached_formula_by_axis: HashMap<BigUint, Noun>,
+    pub cached_formula_by_axis: HashMap<BigUint, FormulaId>,
     pub in_progress_axes: HashSet<BigUint>,
 }
 

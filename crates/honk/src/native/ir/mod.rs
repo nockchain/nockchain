@@ -15,6 +15,7 @@
 
 pub mod core;
 pub mod formula;
+pub mod formula_dag;
 pub(crate) mod intern;
 pub mod leaf;
 pub(crate) mod ty;
