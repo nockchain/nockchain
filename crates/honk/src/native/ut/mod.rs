@@ -38,6 +38,7 @@ use crate::errors::{CompilerError, CompilerErrorLocation, CompilerErrorMetadata,
 use crate::native::formula::comb;
 use crate::native::hot::native_hot_state;
 use crate::native::ir::formula_dag::{FormulaArena, FormulaId};
+use crate::native::ir::semi_dag::{SemiArena, SemiId, SemiNode};
 use crate::native::ir::value_dag::{ValueArena, ValueId};
 use crate::native::noun::{
     atom_to_string, noun_expr_to_noun, opt_from_noun, opt_to_noun, parsed_atom_to_noun, tag,
@@ -68,27 +69,10 @@ struct HoldRepoFanHoldIdEntry {
     id: u64,
 }
 
-/// Seminoun mask tags, decoded by direct atom comparison: the
-/// `atom_to_string` route allocated a `String` per inspection on musk's
-/// hottest path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SemiTag {
-    Full,
-    Half,
-    Lazy,
-    Other,
-}
-
 const SEMI_TAG_FULL: u64 = 1_819_047_270; // %full
 const SEMI_TAG_HALF: u64 = 1_718_378_856; // %half
 const SEMI_TAG_LAZY: u64 = 2_038_063_468; // %lazy
 
-#[derive(Clone, Copy)]
-struct KtsgFoldCacheEntry {
-    bran: Noun,
-    formula: FormulaId,
-    result: Option<Noun>,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SemanticContextKey {
     vet_key: u8,
@@ -286,10 +270,10 @@ pub struct Ut<'a> {
     // `FormulaId`; noun materialization is retained only at explicit semantic
     // boundaries and at the final public output boundary.
     formula_arena: FormulaArena,
-    // Canonical structural identity of complete seminoun data. The side table
-    // below binds each constructed complete seminoun to its value ID.
+    // Canonical structural identities for complete values and abstract
+    // seminoun states used by Musk's native evaluator.
     value_arena: ValueArena,
-    semi_value_ids: FastHashMap<u64, ValueId>,
+    semi_arena: SemiArena,
     // Owned per-compile native-IR state (intern table + decode/encode memos +
     // boundary caches) -- the single home for what used to be module thread-locals.
     // A disjoint field from `slab`, so the ir free fns can borrow `&mut self.cx`
@@ -406,12 +390,11 @@ pub struct Ut<'a> {
     /// fork member hoonc resolves away). Clearing on any epoch change keeps
     /// within-arm reuse (the perf case) while never reusing across state.
     miss_memo_persist: Option<((u8, u64, u64, u64), FastHashMap<(u64, u64, u8), bool>)>,
-    // `^~` fold outcomes keyed by (bran, formula). Folding is a pure
-    // function of these two nouns: arm resolution through the persistent
+    // `^~` fold outcomes keyed by exact native (bran, formula) identity. Folding is a pure
+    // function of these two values: arm resolution through the persistent
     // lazy resolvers is time-invariant, so both successes and failures are
     // safe to reuse for the lifetime of the Ut.
-    ktsg_fold_cache: BucketMemo<(u32, FormulaId), KtsgFoldCacheEntry>,
-    semi_mask_full_empty: Option<Noun>,
+    ktsg_fold_cache: FastHashMap<(SemiId, FormulaId), Option<Noun>>,
     semi_root_blocked_set: Option<Noun>,
     semi_full_blocked_interned: Option<Noun>,
     // Cache for `hatch::utils::open()`. Keyed by `&Hoon` pointer, guarded by a structural
@@ -2082,7 +2065,7 @@ impl<'a> Ut<'a> {
             slab,
             formula_arena: FormulaArena::new(),
             value_arena: ValueArena::new(),
-            semi_value_ids: Default::default(),
+            semi_arena: SemiArena::new(),
             cx: Context::new(),
             vet: true,
             dbug_locations: Vec::new(),
@@ -2139,7 +2122,6 @@ impl<'a> Ut<'a> {
             musk: MuskRuntime::new(),
             miss_memo_persist: None,
             ktsg_fold_cache: Default::default(),
-            semi_mask_full_empty: None,
             semi_root_blocked_set: None,
             semi_full_blocked_interned: None,
             open_cache: HashMap::new(),
@@ -2411,8 +2393,6 @@ impl<'a> Ut<'a> {
     const CORE_MINT_CACHE_BUCKET_LIMIT: usize = 8;
     const MINT_CACHE_BUCKET_LIMIT: usize = 4;
     const MINT_CACHE_KEY_LIMIT: usize = 16_384;
-    const MUSK_MACK_CACHE_KEY_LIMIT: usize = 16_384;
-    const MUSK_MACK_CACHE_BUCKET_LIMIT: usize = 8;
     const MULL_CACHE_BUCKET_LIMIT: usize = 4;
     const MULL_CACHE_KEY_LIMIT: usize = 16_384;
     const REDO_CACHE_BUCKET_LIMIT: usize = 8;
@@ -5564,21 +5544,12 @@ impl<'a> Ut<'a> {
         // bran_canonical_semi is native (Phase-2 tail): thread the native subject
         // directly — no `live_to_noun` of the deepening subject.
         let bran = self.bran_canonical_semi(sut)?;
-        let fold_key = (self.noun_mug_cached(bran), formula);
-        if let Some(entries) = self.ktsg_fold_cache.get(&fold_key) {
-            let entries: Vec<KtsgFoldCacheEntry> = entries.iter().copied().collect();
-            for entry in entries.into_iter().rev() {
-                let space = self.slab.noun_space();
-                let hit = (unsafe { entry.bran.raw_equals(&bran) }
-                    || noun_eq(entry.bran, bran, &space)?)
-                    && entry.formula == formula;
-                if hit {
-                    return Ok(match entry.result {
-                        Some(noun) => (ty, self.formula_quote(noun)),
-                        None => (ty, formula),
-                    });
-                }
-            }
+        let fold_key = (bran, formula);
+        if let Some(cached) = self.ktsg_fold_cache.get(&fold_key).copied() {
+            return Ok(match cached {
+                Some(noun) => (ty, self.formula_quote(noun)),
+                None => (ty, formula),
+            });
         }
         let formula_noun = self.formula_materialize(formula);
         let jon = self.musk_apex_output(bran, formula_noun)?;
@@ -5586,51 +5557,11 @@ impl<'a> Ut<'a> {
             MuskOutput::Done(noun) => Some(noun),
             MuskOutput::Stop | MuskOutput::Wait => None,
         };
-        self.ktsg_fold_cache_store(fold_key, bran, formula, collapsed);
+        self.ktsg_fold_cache.insert(fold_key, collapsed);
         if let Some(noun) = collapsed {
             return Ok((ty, self.formula_quote(noun)));
         }
         Ok((ty, formula))
-    }
-
-    fn ktsg_fold_cache_store(
-        &mut self,
-        key: (u32, FormulaId),
-        bran: Noun,
-        formula: FormulaId,
-        result: Option<Noun>,
-    ) {
-        let bucket = self
-            .ktsg_fold_cache
-            .ensure_key(key, Self::MUSK_MACK_CACHE_KEY_LIMIT);
-        if bucket.len() >= Self::MUSK_MACK_CACHE_BUCKET_LIMIT {
-            bucket.pop_front();
-        }
-        bucket.push_back(KtsgFoldCacheEntry {
-            bran,
-            formula,
-            result,
-        });
-    }
-
-    fn semi_mask_full(&mut self, blocks: Noun) -> Noun {
-        if noun_is_zero(blocks) {
-            return self.semi_mask_full_empty_interned();
-        }
-        T(self.slab, &[D(SEMI_TAG_FULL), blocks])
-    }
-
-    fn semi_mask_half(&mut self, left: Noun, right: Noun) -> Noun {
-        T(self.slab, &[D(SEMI_TAG_HALF), left, right])
-    }
-
-    fn semi_mask_lazy(&mut self, fragment: BigUint, resolve: Noun) -> Noun {
-        let frag = noun_biguint(self.slab, fragment);
-        T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve])
-    }
-
-    fn semi_make(&mut self, mask: Noun, data: Noun) -> Noun {
-        T(self.slab, &[mask, data])
     }
 
     #[inline]
@@ -5642,33 +5573,19 @@ impl<'a> Ut<'a> {
     }
 
     #[inline]
-    fn semi_register_value(&mut self, semi: Noun, value: ValueId) {
-        self.semi_value_ids.insert(unsafe { semi.as_raw() }, value);
-    }
-
-    fn semi_full_complete_with_id(&mut self, data: Noun, value: ValueId) -> Noun {
-        let mask = self.semi_mask_full_empty_interned();
-        let semi = self.semi_make(mask, data);
-        self.semi_register_value(semi, value);
-        semi
-    }
-
-    /// The `[%full ~]` mask and the fully-blocked seminoun are by far the
-    /// most constructed nouns on musk's evaluation path; intern one copy of
-    /// each per Ut. Nouns are immutable, so sharing is sound, and the stable
-    /// identities improve raw-pointer memo hit rates.
-    fn semi_mask_full_empty_interned(&mut self) -> Noun {
-        if let Some(mask) = self.semi_mask_full_empty {
-            return mask;
-        }
-        let mask = T(self.slab, &[D(SEMI_TAG_FULL), D(0)]);
-        self.semi_mask_full_empty = Some(mask);
-        mask
-    }
-
-    fn semi_full_complete(&mut self, data: Noun) -> Noun {
+    fn semi_full_complete(&mut self, data: Noun) -> SemiId {
         let value = self.value_import(data);
-        self.semi_full_complete_with_id(data, value)
+        self.semi_arena.complete(value)
+    }
+
+    #[inline]
+    fn semi_full_complete_with_id(&mut self, value: ValueId) -> SemiId {
+        self.semi_arena.complete(value)
+    }
+
+    #[inline]
+    fn semi_full_blocked(&mut self) -> SemiId {
+        self.semi_arena.blocked()
     }
 
     fn semi_blocks_root_blocked(&mut self) -> Noun {
@@ -5680,23 +5597,29 @@ impl<'a> Ut<'a> {
         blocks
     }
 
-    fn semi_full_blocked(&mut self) -> Noun {
+    fn semi_noun_blocked_encoded(&mut self) -> Noun {
         // hoon-138 `*seminoun` and `++complete` use the singleton root
         // block set `[~ ~ ~]` for a fully blocked noun.
         if let Some(semi) = self.semi_full_blocked_interned {
             return semi;
         }
         let blocks = self.semi_blocks_root_blocked();
-        let mask = self.semi_mask_full(blocks);
+        let mask = T(self.slab, &[D(SEMI_TAG_FULL), blocks]);
         let semi = self.semi_make(mask, D(0));
         self.semi_full_blocked_interned = Some(semi);
         semi
     }
 
-    fn semi_lazy_root(&mut self, resolver_id: u64) -> Noun {
+    fn semi_noun_lazy_root(&mut self, resolver_id: u64) -> Noun {
         let resolve = noun_u64(self.slab, resolver_id);
-        let mask = self.semi_mask_lazy(BigUint::from(1u32), resolve);
+        let frag = noun_biguint(self.slab, BigUint::from(1u32));
+        let mask = T(self.slab, &[D(SEMI_TAG_LAZY), frag, resolve]);
         self.semi_make(mask, D(0))
+    }
+
+    #[inline]
+    fn semi_make(&mut self, mask: Noun, data: Noun) -> Noun {
+        T(self.slab, &[mask, data])
     }
 
     fn lazy_resolver_new_id(&mut self) -> u64 {
@@ -5867,152 +5790,122 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn semi_parts(&mut self, semi: Noun) -> Result<(Noun, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = semi
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("seminoun not cell: {err}")))?;
-        Ok((cell.head().noun(), cell.tail().noun()))
-    }
-
-    fn semi_mask_tag(&mut self, mask: Noun) -> Result<SemiTag> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi mask not cell: {err}")))?;
-        let atom = cell
-            .head()
-            .as_atom()
-            .map_err(|err| CompilerError::Decode(format!("semi mask tag not atom: {err}")))?;
-        Ok(match atom.as_u64() {
-            Ok(SEMI_TAG_FULL) => SemiTag::Full,
-            Ok(SEMI_TAG_HALF) => SemiTag::Half,
-            Ok(SEMI_TAG_LAZY) => SemiTag::Lazy,
-            _ => SemiTag::Other,
-        })
-    }
-
-    fn semi_mask_full_blocks(&mut self, mask: Noun) -> Result<Noun> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi full mask not cell: {err}")))?;
-        Ok(cell.tail().noun())
-    }
-
-    fn semi_mask_half_parts(&mut self, mask: Noun) -> Result<(Noun, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi half mask not cell: {err}")))?;
-        let tail = cell
-            .tail()
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi half mask tail not cell: {err}")))?;
-        Ok((tail.head().noun(), tail.tail().noun()))
-    }
-
-    fn semi_mask_lazy_parts(&mut self, mask: Noun) -> Result<(BigUint, Noun)> {
-        let space = self.slab.noun_space();
-        let cell = mask
-            .in_space(&space)
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy mask not cell: {err}")))?;
-        let tail = cell
-            .tail()
-            .as_cell()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy mask tail not cell: {err}")))?;
-        let fragment = tail
-            .head()
-            .as_atom()
-            .map_err(|err| CompilerError::Decode(format!("semi lazy fragment not atom: {err}")))?;
-        let fragment = noun_axis_atom_to_big(fragment);
-        Ok((fragment, tail.tail().noun()))
-    }
-
-    fn semi_blocks_union_coarse(&mut self, left: Noun, right: Noun) -> Noun {
-        if noun_is_zero(left) && noun_is_zero(right) {
-            D(0)
-        } else {
-            self.semi_blocks_root_blocked()
+    fn semi_import_noun(&mut self, semi: Noun) -> Result<SemiId> {
+        let raw = unsafe { semi.as_raw() };
+        if let Some(id) = self.semi_arena.raw_lookup(raw) {
+            return Ok(id);
         }
+        let (mask, data) = {
+            let space = self.slab.noun_space();
+            let cell = semi
+                .in_space(&space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("seminoun not cell: {err}")))?;
+            (cell.head().noun(), cell.tail().noun())
+        };
+        let id = self.semi_import_parts(mask, data)?;
+        self.semi_arena.raw_register(raw, id);
+        Ok(id)
     }
 
-    fn semi_combine(&mut self, hed: Noun, tal: Noun) -> Result<Noun> {
-        let (hed_mask, hed_data) = self.semi_parts(hed)?;
-        let (tal_mask, tal_data) = self.semi_parts(tal)?;
-        let hed_tag = self.semi_mask_tag(hed_mask)?;
-        let tal_tag = self.semi_mask_tag(tal_mask)?;
-        if hed_tag == SemiTag::Full && tal_tag == SemiTag::Full {
-            let hed_blocks = self.semi_mask_full_blocks(hed_mask)?;
-            let tal_blocks = self.semi_mask_full_blocks(tal_mask)?;
-            let hed_empty = noun_is_zero(hed_blocks);
-            let tal_empty = noun_is_zero(tal_blocks);
-            if hed_empty == tal_empty {
-                if hed_empty {
-                    let hed_value = self.semi_complete_value_id(hed)?;
-                    let tal_value = self.semi_complete_value_id(tal)?;
-                    let data = T(self.slab, &[hed_data, tal_data]);
-                    let value = self
-                        .value_arena
-                        .intern_cell_with_noun(data, hed_value, tal_value);
-                    return Ok(self.semi_full_complete_with_id(data, value));
+    fn semi_import_parts(&mut self, mask: Noun, data: Noun) -> Result<SemiId> {
+        let (tag, tail) = {
+            let space = self.slab.noun_space();
+            let mask_cell = mask
+                .in_space(&space)
+                .as_cell()
+                .map_err(|err| CompilerError::Decode(format!("semi mask not cell: {err}")))?;
+            let tag = mask_cell
+                .head()
+                .as_atom()
+                .ok()
+                .and_then(|atom| atom.as_u64().ok());
+            (tag, mask_cell.tail().noun())
+        };
+        match tag {
+            Some(SEMI_TAG_FULL) => {
+                if noun_is_zero(tail) {
+                    Ok(self.semi_full_complete(data))
+                } else {
+                    Ok(self.semi_full_blocked())
                 }
-                let blocks = self.semi_blocks_union_coarse(hed_blocks, tal_blocks);
-                let mask = self.semi_mask_full(blocks);
-                return Ok(self.semi_make(mask, D(0)));
             }
+            Some(SEMI_TAG_HALF) => {
+                let (left_mask, right_mask, head_data, tail_data) = {
+                    let space = self.slab.noun_space();
+                    let masks = tail.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi half mask tail not cell: {err}"))
+                    })?;
+                    let values = data.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi half data not cell: {err}"))
+                    })?;
+                    (
+                        masks.head().noun(),
+                        masks.tail().noun(),
+                        values.head().noun(),
+                        values.tail().noun(),
+                    )
+                };
+                let head = self.semi_import_parts(left_mask, head_data)?;
+                let tail = self.semi_import_parts(right_mask, tail_data)?;
+                self.semi_combine(head, tail)
+            }
+            Some(SEMI_TAG_LAZY) => {
+                let (fragment, resolver_id) = {
+                    let space = self.slab.noun_space();
+                    let parts = tail.in_space(&space).as_cell().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy mask tail not cell: {err}"))
+                    })?;
+                    let fragment = parts.head().as_atom().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy fragment not atom: {err}"))
+                    })?;
+                    let resolver = parts.tail().as_atom().map_err(|err| {
+                        CompilerError::Decode(format!("semi lazy resolver not atom: {err}"))
+                    })?;
+                    (
+                        noun_axis_atom_to_big(fragment),
+                        resolver.as_u64().map_err(|err| {
+                            CompilerError::Decode(format!("semi lazy resolver not u64: {err}"))
+                        })?,
+                    )
+                };
+                Ok(self.semi_arena.lazy(fragment, resolver_id))
+            }
+            _ => Ok(self.semi_full_blocked()),
         }
-        let mask = self.semi_mask_half(hed_mask, tal_mask);
-        let data = T(self.slab, &[hed_data, tal_data]);
-        Ok(self.semi_make(mask, data))
     }
 
-    fn semi_squash_mask(&mut self, mask: Noun) -> Result<Noun> {
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Full => self.semi_mask_full_blocks(mask),
-            SemiTag::Half => {
-                let (left, right) = self.semi_mask_half_parts(mask)?;
-                let left_blocks = self.semi_squash_mask(left)?;
-                let right_blocks = self.semi_squash_mask(right)?;
-                Ok(self.semi_blocks_union_coarse(left_blocks, right_blocks))
+    fn semi_combine(&mut self, head: SemiId, tail: SemiId) -> Result<SemiId> {
+        let head_node = self.semi_arena.node(head).clone();
+        let tail_node = self.semi_arena.node(tail).clone();
+        match (head_node, tail_node) {
+            (SemiNode::Complete(head_value), SemiNode::Complete(tail_value)) => {
+                let data = T(
+                    self.slab,
+                    &[self.value_arena.noun(head_value), self.value_arena.noun(tail_value)],
+                );
+                let value = self
+                    .value_arena
+                    .intern_cell_with_noun(data, head_value, tail_value);
+                Ok(self.semi_full_complete_with_id(value))
             }
-            SemiTag::Lazy => {
-                let lazy_bus = self.semi_make(mask, D(0));
-                let completed = self.semi_complete(lazy_bus)?;
-                let (next_mask, _next_data) = self.semi_parts(completed)?;
-                self.semi_squash_mask(next_mask)
-            }
-            _ => Ok(self.semi_blocks_root_blocked()),
+            (SemiNode::Blocked, SemiNode::Blocked) => Ok(self.semi_full_blocked()),
+            _ => Ok(self.semi_arena.half(head, tail)),
         }
     }
 
-    fn semi_complete(&mut self, bus: Noun) -> Result<Noun> {
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Full => Ok(bus),
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                // hoon-138 `++complete`: "fragment 1 is the whole thing;
-                // blocked; we can't get fragment 1 while compiling it."
+    fn semi_complete(&mut self, bus: SemiId) -> Result<SemiId> {
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(_) | SemiNode::Blocked => Ok(bus),
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                // hoon-138 `++complete`: fragment 1 is the whole in-progress
+                // battery and therefore cannot be resolved while compiling it.
                 if fragment == BigUint::from(1u32) {
                     return Ok(self.semi_full_blocked());
                 }
-                let resolver_id = {
-                    let space = self.slab.noun_space();
-                    match resolve
-                        .in_space(&space)
-                        .as_atom()
-                        .and_then(|atom| atom.as_u64())
-                    {
-                        Ok(id) => id,
-                        Err(_) => return Ok(self.semi_full_blocked()),
-                    }
-                };
                 match self.lazy_resolver_resolve_axis(resolver_id, &fragment)? {
                     Some(value) => {
                         let value = self.formula_materialize(value);
@@ -6021,244 +5914,179 @@ impl<'a> Ut<'a> {
                     None => Ok(self.semi_full_blocked()),
                 }
             }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (data_head, data_tail) = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(self.semi_full_blocked()),
-                    };
-                    (data_cell.head().noun(), data_cell.tail().noun())
-                };
-                let left = self.semi_make(left_mask, data_head);
-                let right = self.semi_make(right_mask, data_tail);
-                let left = self.semi_complete(left)?;
-                let right = self.semi_complete(right)?;
-                self.semi_combine(left, right)
+            SemiNode::Half { head, tail } => {
+                let head = self.semi_complete(head)?;
+                let tail = self.semi_complete(tail)?;
+                self.semi_combine(head, tail)
             }
-            _ => Ok(self.semi_full_blocked()),
         }
     }
 
-    fn semi_fragment(&mut self, axe: u64, bus: Noun) -> Result<Option<Noun>> {
-        if axe == 1 {
+    fn semi_fragment(&mut self, axis: u64, bus: SemiId) -> Result<Option<SemiId>> {
+        if axis == 1 {
             return Ok(Some(bus));
         }
-        if axe == 0 {
+        if axis == 0 {
             return Ok(None);
         }
-        let (now, lat) = axis_cap_mas(axe)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis_big_pair(fragment, &BigUint::from(axe))?;
-                let next_mask = self.semi_mask_lazy(next_fragment, resolve);
-                Ok(Some(self.semi_make(next_mask, data)))
-            }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(bus));
-                }
-                let next_data = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        data_cell.head().noun()
-                    } else {
-                        data_cell.tail().noun()
-                    }
+        let (cap, rest) = axis_cap_mas(axis)?;
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(value) => {
+                let Some((head, tail)) = self.value_arena.children(value) else {
+                    return Ok(None);
                 };
-                let next = self.semi_full_complete(next_data);
-                self.semi_fragment(lat, next)
+                let next = if cap == 2 { head } else { tail };
+                let next = self.semi_full_complete_with_id(next);
+                self.semi_fragment(rest, next)
             }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (next_mask, next_data) = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        (left_mask, data_cell.head().noun())
-                    } else {
-                        (right_mask, data_cell.tail().noun())
-                    }
-                };
-                let next = self.semi_make(next_mask, next_data);
-                self.semi_fragment(lat, next)
+            SemiNode::Blocked => Ok(Some(bus)),
+            SemiNode::Half { head, tail } => {
+                self.semi_fragment(rest, if cap == 2 { head } else { tail })
             }
-            _ => Ok(None),
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                let fragment = peg_axis_big_pair(fragment, &BigUint::from(axis))?;
+                Ok(Some(self.semi_arena.lazy(fragment, resolver_id)))
+            }
         }
     }
 
-    fn semi_fragment_big(&mut self, axe: &BigUint, bus: Noun) -> Result<Option<Noun>> {
-        if let Ok(small) = u64::try_from(axe) {
+    fn semi_fragment_big(&mut self, axis: &BigUint, bus: SemiId) -> Result<Option<SemiId>> {
+        if let Ok(small) = u64::try_from(axis) {
             return self.semi_fragment(small, bus);
         }
-        if axe == &BigUint::from(0u32) {
+        if axis == &BigUint::from(0u32) {
             return Ok(None);
         }
-        if axe == &BigUint::from(1u32) {
+        if axis == &BigUint::from(1u32) {
             return Ok(Some(bus));
         }
-        let (now, lat) = axis_big_cap_mas(axe)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Lazy => {
-                let (fragment, resolve) = self.semi_mask_lazy_parts(mask)?;
-                let next_fragment = peg_axis_big_pair(fragment, axe)?;
-                let next_mask = self.semi_mask_lazy(next_fragment, resolve);
-                Ok(Some(self.semi_make(next_mask, data)))
-            }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(bus));
-                }
-                let next_data = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        data_cell.head().noun()
-                    } else {
-                        data_cell.tail().noun()
-                    }
+        let (cap, rest) = axis_big_cap_mas(axis)?;
+        match self.semi_arena.node(bus).clone() {
+            SemiNode::Complete(value) => {
+                let Some((head, tail)) = self.value_arena.children(value) else {
+                    return Ok(None);
                 };
-                let next = self.semi_full_complete(next_data);
-                self.semi_fragment_big(&lat, next)
+                let next = if cap == 2 { head } else { tail };
+                let next = self.semi_full_complete_with_id(next);
+                self.semi_fragment_big(&rest, next)
             }
-            SemiTag::Half => {
-                let (left_mask, right_mask) = self.semi_mask_half_parts(mask)?;
-                let (next_mask, next_data) = {
-                    let space = self.slab.noun_space();
-                    let data_cell = match data.in_space(&space).as_cell() {
-                        Ok(cell) => cell,
-                        Err(_) => return Ok(None),
-                    };
-                    if now == 2 {
-                        (left_mask, data_cell.head().noun())
-                    } else {
-                        (right_mask, data_cell.tail().noun())
-                    }
-                };
-                let next = self.semi_make(next_mask, next_data);
-                self.semi_fragment_big(&lat, next)
+            SemiNode::Blocked => Ok(Some(bus)),
+            SemiNode::Half { head, tail } => {
+                self.semi_fragment_big(&rest, if cap == 2 { head } else { tail })
             }
-            _ => Ok(None),
+            SemiNode::Lazy {
+                fragment,
+                resolver_id,
+            } => {
+                let fragment = peg_axis_big_pair(fragment, axis)?;
+                Ok(Some(self.semi_arena.lazy(fragment, resolver_id)))
+            }
         }
     }
 
-    fn semi_mutate(&mut self, axe: u64, lit: Noun, big: Noun) -> Result<Option<Noun>> {
-        if axe == 0 {
+    fn semi_mutate(
+        &mut self,
+        axis: u64,
+        replacement: SemiId,
+        target: SemiId,
+    ) -> Result<Option<SemiId>> {
+        if axis == 0 {
             return Ok(None);
         }
-        if axe == 1 {
-            return Ok(Some(lit));
+        if axis == 1 {
+            return Ok(Some(replacement));
         }
-        if axe == 2 {
-            let Some(tal) = self.semi_fragment(3, big)? else {
+        if axis == 2 {
+            let Some(tail) = self.semi_fragment(3, target)? else {
                 return Ok(None);
             };
-            return self.semi_combine(lit, tal).map(Some);
+            return self.semi_combine(replacement, tail).map(Some);
         }
-        if axe == 3 {
-            let Some(hed) = self.semi_fragment(2, big)? else {
+        if axis == 3 {
+            let Some(head) = self.semi_fragment(2, target)? else {
                 return Ok(None);
             };
-            return self.semi_combine(hed, lit).map(Some);
+            return self.semi_combine(head, replacement).map(Some);
         }
-        let (cap, mor) = axis_cap_mas(axe)?;
-        let Some(hed) = self.semi_fragment(2, big)? else {
+        let (cap, rest) = axis_cap_mas(axis)?;
+        let Some(head) = self.semi_fragment(2, target)? else {
             return Ok(None);
         };
-        let Some(tal) = self.semi_fragment(3, big)? else {
+        let Some(tail) = self.semi_fragment(3, target)? else {
             return Ok(None);
         };
         if cap == 2 {
-            let Some(mutated) = self.semi_mutate(mor, lit, hed)? else {
+            let Some(mutated) = self.semi_mutate(rest, replacement, head)? else {
                 return Ok(None);
             };
-            return self.semi_combine(mutated, tal).map(Some);
+            return self.semi_combine(mutated, tail).map(Some);
         }
-        let Some(mutated) = self.semi_mutate(mor, lit, tal)? else {
+        let Some(mutated) = self.semi_mutate(rest, replacement, tail)? else {
             return Ok(None);
         };
-        self.semi_combine(hed, mutated).map(Some)
+        self.semi_combine(head, mutated).map(Some)
     }
 
-    fn semi_mutate_big(&mut self, axe: &BigUint, lit: Noun, big: Noun) -> Result<Option<Noun>> {
-        if let Ok(small) = u64::try_from(axe) {
-            return self.semi_mutate(small, lit, big);
+    fn semi_mutate_big(
+        &mut self,
+        axis: &BigUint,
+        replacement: SemiId,
+        target: SemiId,
+    ) -> Result<Option<SemiId>> {
+        if let Ok(small) = u64::try_from(axis) {
+            return self.semi_mutate(small, replacement, target);
         }
-        if axe == &BigUint::from(0u32) {
+        if axis == &BigUint::from(0u32) {
             return Ok(None);
         }
-        if axe == &BigUint::from(1u32) {
-            return Ok(Some(lit));
+        if axis == &BigUint::from(1u32) {
+            return Ok(Some(replacement));
         }
-        let (cap, mor) = axis_big_cap_mas(axe)?;
-        let Some(hed) = self.semi_fragment(2, big)? else {
+        let (cap, rest) = axis_big_cap_mas(axis)?;
+        let Some(head) = self.semi_fragment(2, target)? else {
             return Ok(None);
         };
-        let Some(tal) = self.semi_fragment(3, big)? else {
+        let Some(tail) = self.semi_fragment(3, target)? else {
             return Ok(None);
         };
         if cap == 2 {
-            let Some(mutated) = self.semi_mutate_big(&mor, lit, hed)? else {
+            let Some(mutated) = self.semi_mutate_big(&rest, replacement, head)? else {
                 return Ok(None);
             };
-            return self.semi_combine(mutated, tal).map(Some);
+            return self.semi_combine(mutated, tail).map(Some);
         }
-        let Some(mutated) = self.semi_mutate_big(&mor, lit, tal)? else {
+        let Some(mutated) = self.semi_mutate_big(&rest, replacement, tail)? else {
             return Ok(None);
         };
-        self.semi_combine(hed, mutated).map(Some)
+        self.semi_combine(head, mutated).map(Some)
     }
 
-    fn semi_require<F>(&mut self, noy: Option<Noun>, yen: F) -> Result<Option<Noun>>
+    fn semi_require<F>(&mut self, value: Option<SemiId>, then: F) -> Result<Option<SemiId>>
     where
-        F: FnOnce(&mut Self, Noun) -> Result<Option<Noun>>,
+        F: FnOnce(&mut Self, Noun) -> Result<Option<SemiId>>,
     {
-        let Some(noy) = noy else {
+        let Some(value) = value else {
             return Ok(None);
         };
-        let bus = self.semi_complete(noy)?;
-        let (mask, data) = self.semi_parts(bus)?;
-        match self.semi_mask_tag(mask)? {
-            SemiTag::Half => {
-                let blocks = self.semi_squash_mask(mask)?;
-                let wait_mask = self.semi_mask_full(blocks);
-                Ok(Some(self.semi_make(wait_mask, D(0))))
+        let complete = self.semi_complete(value)?;
+        match self.semi_arena.node(complete).clone() {
+            SemiNode::Complete(value) => then(self, self.value_arena.noun(value)),
+            SemiNode::Blocked | SemiNode::Half { .. } | SemiNode::Lazy { .. } => {
+                Ok(Some(self.semi_full_blocked()))
             }
-            SemiTag::Full => {
-                let blocks = self.semi_mask_full_blocks(mask)?;
-                if !noun_is_zero(blocks) {
-                    return Ok(Some(self.semi_make(mask, D(0))));
-                }
-                yen(self, data)
-            }
-            SemiTag::Lazy => Ok(Some(self.semi_full_blocked())),
-            _ => Ok(None),
         }
     }
 
     fn musk_araw(
         &mut self,
-        bus: Noun,
+        bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
-        let key = unsafe { (bus.as_raw(), fol.as_raw()) };
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
+        let key = (bus, unsafe { fol.as_raw() });
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
@@ -6271,10 +6099,10 @@ impl<'a> Ut<'a> {
 
     fn musk_araw_uncached(
         &mut self,
-        bus: Noun,
+        bus: SemiId,
         fol: Noun,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let space = self.slab.noun_space();
         let (head, tail) = {
             let fol_cell = match fol.in_space(&space).as_cell() {
@@ -6460,7 +6288,7 @@ impl<'a> Ut<'a> {
                 // hoon-138 op-9 macks only when the raw core semi is already
                 // canonical-complete (`[[%full ~] *]`); partial cores take the
                 // fragment/require path below, like `++araw`.
-                if let Some((core, core_id)) = self.semi_full_complete_data(one)? {
+                if let Some((core, core_id)) = self.semi_full_complete_data(one) {
                     if let Some(axis) = axis_small {
                         let Some(value) = self.musk_mack_constant_core(core, core_id, axis)? else {
                             return self.musk_araw_arm_partial(one, axis, memo);
@@ -6554,10 +6382,10 @@ impl<'a> Ut<'a> {
 
     fn musk_araw_arm_partial(
         &mut self,
-        one: Noun,
+        one: SemiId,
         axis: u64,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment(axis, one)?;
         let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))?;
         Ok(partial)
@@ -6565,47 +6393,28 @@ impl<'a> Ut<'a> {
 
     fn musk_araw_arm_partial_big(
         &mut self,
-        one: Noun,
+        one: SemiId,
         axis: &BigUint,
-        memo: &mut FastHashMap<(u64, u64), Noun>,
-    ) -> Result<Option<Noun>> {
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment_big(axis, one)?;
         self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo))
     }
 
-    fn semi_complete_value_id(&mut self, semi: Noun) -> Result<ValueId> {
-        let raw = unsafe { semi.as_raw() };
-        if let Some(id) = self.semi_value_ids.get(&raw).copied() {
-            return Ok(id);
+    #[cfg(test)]
+    fn semi_complete_value_id(&self, semi: SemiId) -> Result<ValueId> {
+        match self.semi_arena.node(semi) {
+            SemiNode::Complete(value) => Ok(*value),
+            _ => Err(CompilerError::Noun(
+                "value identity requested for incomplete seminoun".into(),
+            )),
         }
-        let (mask, data) = self.semi_parts(semi)?;
-        if self.semi_mask_tag(mask)? != SemiTag::Full {
-            return Err(CompilerError::Noun(
-                "value identity requested for non-full seminoun".into(),
-            ));
-        }
-        let blocks = self.semi_mask_full_blocks(mask)?;
-        if !noun_is_zero(blocks) {
-            return Err(CompilerError::Noun(
-                "value identity requested for blocked seminoun".into(),
-            ));
-        }
-        let id = self.value_import(data);
-        self.semi_value_ids.insert(raw, id);
-        Ok(id)
     }
 
-    fn semi_full_complete_data(&mut self, semi: Noun) -> Result<Option<(Noun, ValueId)>> {
-        let (mask, data) = self.semi_parts(semi)?;
-        if self.semi_mask_tag(mask)? != SemiTag::Full {
-            return Ok(None);
-        }
-        let blocks = self.semi_mask_full_blocks(mask)?;
-        if noun_is_zero(blocks) {
-            let value = self.semi_complete_value_id(semi)?;
-            Ok(Some((data, value)))
-        } else {
-            Ok(None)
+    fn semi_full_complete_data(&self, semi: SemiId) -> Option<(Noun, ValueId)> {
+        match self.semi_arena.node(semi) {
+            SemiNode::Complete(value) => Some((self.value_arena.noun(*value), *value)),
+            _ => None,
         }
     }
 
@@ -6738,17 +6547,15 @@ impl<'a> Ut<'a> {
         }
     }
 
-    fn musk_apex_output(&mut self, bus: Noun, fol: Noun) -> Result<MuskOutput> {
-        let mut memo: FastHashMap<(u64, u64), Noun> = Default::default();
+    fn musk_apex_output(&mut self, bus: SemiId, fol: Noun) -> Result<MuskOutput> {
+        let mut memo: FastHashMap<(SemiId, u64), SemiId> = Default::default();
         let Some(noy) = self.musk_araw(bus, fol, &mut memo)? else {
             return Ok(MuskOutput::Stop);
         };
-        let (mask, data) = self.semi_parts(noy)?;
-        let blocks = self.semi_squash_mask(mask)?;
-        if noun_is_zero(blocks) {
-            Ok(MuskOutput::Done(data))
-        } else {
-            Ok(MuskOutput::Wait)
+        let complete = self.semi_complete(noy)?;
+        match self.semi_arena.node(complete) {
+            SemiNode::Complete(value) => Ok(MuskOutput::Done(self.value_arena.noun(*value))),
+            _ => Ok(MuskOutput::Wait),
         }
     }
 
@@ -6759,7 +6566,7 @@ impl<'a> Ut<'a> {
     // %hold cycle guard + raw-recursion guard key on the interned `Rc` pointer
     // (`NRc::as_ptr`), and the cache re-keys on that pointer (no mug of the
     // deepening subject). The OUTPUT stays a seminoun (semi_* algebra is noun).
-    fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<Noun> {
+    fn bran_canonical_semi(&mut self, sut: NRc<NTy>) -> Result<SemiId> {
         let mut seen_holds: Vec<NRc<NTy>> = Vec::new();
         self.bran_canonical_semi_inner(sut, &mut seen_holds)
     }
@@ -6809,7 +6616,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: &NRc<NTy>,
         seen_holds: &[NRc<NTy>],
-    ) -> Result<Option<Noun>> {
+    ) -> Result<Option<SemiId>> {
         let key = self.bran_semi_cache_key(sut, seen_holds);
         let Some(entries) = self.bran_semi_memo.get(&key) else {
             return Ok(None);
@@ -6824,7 +6631,7 @@ impl<'a> Ut<'a> {
         Ok(None)
     }
 
-    fn bran_semi_cache_store(&mut self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>], semi: Noun) {
+    fn bran_semi_cache_store(&mut self, sut: &NRc<NTy>, seen_holds: &[NRc<NTy>], semi: SemiId) {
         let key = self.bran_semi_cache_key(sut, seen_holds);
         let bucket = self
             .bran_semi_memo
@@ -6843,7 +6650,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<SemiId> {
         // Matches hoon-138 `++bran` exactly: cycles are broken ONLY at `%hold`
         // (via `seen_holds` == hoon's `gil`); every other (shared, non-hold)
         // subtree is re-descended and the result memoized (`bran_semi_cache` ==
@@ -6873,7 +6680,7 @@ impl<'a> Ut<'a> {
         &mut self,
         sut: NRc<NTy>,
         seen_holds: &mut Vec<NRc<NTy>>,
-    ) -> Result<Noun> {
+    ) -> Result<SemiId> {
         match &*sut {
             NTy::Noun | NTy::Void => Ok(self.semi_full_blocked()),
             NTy::Atom { .. } => {
@@ -6905,7 +6712,7 @@ impl<'a> Ut<'a> {
                 })?;
                 let coil_semi = rest_cell.head().noun();
                 let payload_semi = self.bran_canonical_semi_inner(payload, seen_holds)?;
-                let _ = self.semi_parts(coil_semi)?;
+                let coil_semi = self.semi_import_noun(coil_semi)?;
                 self.semi_combine(coil_semi, payload_semi)
             }
             NTy::Face { .. } | NTy::Hint { .. } => match self.repo(sut.clone()) {
@@ -7905,7 +7712,7 @@ impl<'a> Ut<'a> {
         let tomes_sig =
             (self.noun_mug_cached(tomes_map) ^ Self::prefix_signature(prefix.as_deref())) as u64;
         let resolver_id = self.lazy_resolver_canonical_id(&sut, tomes_sig, poly);
-        let lazy_semi = self.semi_lazy_root(resolver_id);
+        let lazy_semi = self.semi_noun_lazy_root(resolver_id);
         let lazy_rest = T(self.slab, &[lazy_semi, tomes_map]);
         // PHASE 2: build the NATIVE lazy core (the deepening site) ONCE, native-only
         // (cons_core), with payload AND context = the SHARED native `sut`. No noun
@@ -8561,7 +8368,7 @@ impl<'a> Ut<'a> {
     }
 
     fn semi_noun_blocked(&mut self) -> Noun {
-        self.semi_full_blocked()
+        self.semi_noun_blocked_encoded()
     }
 
     fn mint_opened(

@@ -95,6 +95,70 @@ fn complete_seminouns_share_structural_value_identity() {
 }
 
 #[test]
+fn native_seminoun_combine_fragment_and_mutate_preserve_values() {
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let one = ut.semi_full_complete(D(1));
+    let two = ut.semi_full_complete(D(2));
+    let pair = ut.semi_combine(one, two).expect("combine complete values");
+
+    let (data, _) = ut
+        .semi_full_complete_data(pair)
+        .expect("combined value is complete");
+    let expected = T(ut.slab, &[D(1), D(2)]);
+    assert!(noun_eq(data, expected, &ut.slab.noun_space()).expect("combined value equality"));
+
+    let head = ut
+        .semi_fragment(2, pair)
+        .expect("fragment head")
+        .expect("head exists");
+    assert_eq!(
+        ut.semi_complete_value_id(head).expect("head value"),
+        ut.semi_complete_value_id(one).expect("one value"),
+    );
+    let three = ut.semi_full_complete(D(3));
+    let mutated = ut
+        .semi_mutate(3, three, pair)
+        .expect("mutate tail")
+        .expect("mutation succeeds");
+    let (data, _) = ut
+        .semi_full_complete_data(mutated)
+        .expect("mutated value is complete");
+    let expected = T(ut.slab, &[D(1), D(3)]);
+    assert!(noun_eq(data, expected, &ut.slab.noun_space()).expect("mutated value equality"));
+}
+
+#[test]
+fn encoded_half_seminoun_import_preserves_complete_and_blocked_sides() {
+    let mut slab = NounSlab::new();
+    let full_mask = T(&mut slab, &[D(super::SEMI_TAG_FULL), D(0)]);
+    let root_blocks = T(&mut slab, &[D(0), D(0), D(0)]);
+    let blocked_mask = T(&mut slab, &[D(super::SEMI_TAG_FULL), root_blocks]);
+    let half_mask = T(
+        &mut slab,
+        &[D(super::SEMI_TAG_HALF), full_mask, blocked_mask],
+    );
+    let data = T(&mut slab, &[D(7), D(0)]);
+    let encoded = T(&mut slab, &[half_mask, data]);
+
+    let mut ut = Ut::new(&mut slab);
+    let semi = ut.semi_import_noun(encoded).expect("import half seminoun");
+    let head = ut
+        .semi_fragment(2, semi)
+        .expect("fragment head")
+        .expect("head exists");
+    let tail = ut
+        .semi_fragment(3, semi)
+        .expect("fragment tail")
+        .expect("tail exists");
+    assert!(matches!(
+        ut.semi_arena.node(head),
+        super::SemiNode::Complete(_)
+    ));
+    assert!(matches!(ut.semi_arena.node(tail), super::SemiNode::Blocked));
+}
+
+#[test]
 fn struct_noun_pair_set_is_structural() {
     let mut slab = NounSlab::new();
     let sut_a = {
