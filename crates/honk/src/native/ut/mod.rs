@@ -24,7 +24,7 @@ use nockvm::jets::cold::{Cold, Nounable};
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
-use nockvm::mem::NockStack;
+use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{get_mug, set_mug};
 use nockvm::noun::{Atom, AtomHandle, Noun, NounAllocator, NounSpace, D, T};
 use num_bigint::BigUint;
@@ -1976,21 +1976,40 @@ impl<'a> Ut<'a> {
         context: &mut NockContext,
         core: Noun,
         core_space: &NounSpace,
-    ) -> Noun {
+    ) -> Option<Noun> {
         self.ensure_musk_mack_core_cache_context(context);
         let raw = core.as_raw();
         if let Some(cached) = self.musk.mack_core_cache_raw.get(&raw).copied() {
-            return cached;
+            return Some(cached);
         }
-        // Fill the slab-side mug cache for the whole core before copying:
-        // the copy below propagates cached mugs onto the eval-stack nouns,
-        // which lets cold-state registration inside `interpret` short-circuit
-        // its unifying-equality checks on mug mismatch instead of walking
-        // whole battery structures per call.
-        self.noun_mug_cached(core);
-        let cached = self.copy_into_eval_stack_shared(context, core, core_space);
-        self.musk.mack_core_cache_raw.insert(raw, cached);
-        cached
+        let stack_checkpoint = context.stack.checkpoint();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Fill the slab-side mug cache for the whole core before copying:
+            // the copy below propagates cached mugs onto the eval-stack nouns,
+            // which lets cold-state registration inside `interpret` short-circuit
+            // its unifying-equality checks on mug mismatch instead of walking
+            // whole battery structures per call.
+            self.noun_mug_cached(core);
+            self.copy_into_eval_stack_shared(context, core, core_space)
+        }));
+        match outcome {
+            Ok(cached) => {
+                self.musk.mack_core_cache_raw.insert(raw, cached);
+                Some(cached)
+            }
+            Err(payload) => {
+                // Recursive copying populates the cache as it goes. Roll back
+                // its allocations and discard every pointer that may now refer
+                // into the released stack region before declining this fold.
+                unsafe { context.stack.restore_checkpoint(&stack_checkpoint) };
+                self.musk.clear_context_dependent_caches();
+                if payload.is::<AllocationError>() {
+                    None
+                } else {
+                    std::panic::resume_unwind(payload)
+                }
+            }
+        }
     }
 
     /// Copy a slab noun onto the musk eval stack with structural sharing:
@@ -6158,7 +6177,7 @@ impl<'a> Ut<'a> {
         let context = &mut self.musk.context as *mut NockContext;
         unsafe {
             let context = &mut *context;
-            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space);
+            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space)?;
             Self::musk_interpret_mack_in_context(context, slab, core, axis)
         }
     }
@@ -6217,7 +6236,10 @@ impl<'a> Ut<'a> {
         let context = &mut self.musk.context as *mut NockContext;
         unsafe {
             let context = &mut *context;
-            let core = self.musk_mack_cached_core_in_context(context, core, &slab_space);
+            let Some(core) = self.musk_mack_cached_core_in_context(context, core, &slab_space)
+            else {
+                return Ok(None);
+            };
             Self::musk_interpret_mack_axis_noun_in_context(context, slab, core, axis, &slab_space)
         }
     }
