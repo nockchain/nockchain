@@ -12,7 +12,7 @@ must agree with what is written here.
 | `T` | consensus target | `page.target` for an `%ai-pow` block; emitted by `+compute-target-ai-asert` |
 | `F` | shape work factor | `h · w · dot_product_length`, derived from the statement's `PearlMiningConfig` |
 | `Θ` | effective jackpot threshold | `T · F`; never stored, always derived |
-| `W` | fork-choice work credit | `+block-work-at(height, T)` |
+| `W` | fork-choice work credit | `+block-work-at(height, puzzle, T)` |
 
 `h` and `w` are the opened tile's row and column counts (`rows_pattern.size()`,
 `cols_pattern.size()`); `dot_product_length` is Pearl's `k − (k mod r)`.
@@ -79,16 +79,25 @@ Four constants encode this and must move together:
   `--fakenet-ai-asert-anchor-target-bex` bound
 - the `%ai-pow` target gate in `+validate-page-without-txs`
 
-### I4 — fork choice weights every block equally
+### I4 — fork choice prices expected work per puzzle, at a hardware exchange rate
 
-From `+dual-puzzle-phase` on, every block contributes the same heaviness
-whichever puzzle produced it (`+dual-puzzle-block-work`). Heaviness does not read
-the pow artifact and does not scale with either puzzle's target.
+From `+dual-puzzle-phase` on, a block's heaviness is the expected work at its
+own target for the puzzle named by its pow artifact, priced in
+ZKPoW-attempt-equivalents (`+block-work-at`):
 
-**The boundary is the ZK re-pin / AI ASERT introduction, not admission.** Equal
-weighting is justified by each puzzle's ASERT holding its own puzzle at its own
-`ideal-block-time` — that is what makes the block-rate ratio the chainwork ratio.
-The argument starts holding when the dual-puzzle regime does.
+- `%dumb-zkpow`: `2^320 / (T+1)` attempts — the unchanged pre-activation
+  formula, so every ZK block already on the chain keeps its weight.
+- `%ai-pow`: `2^256 / (T+1)` MAC-equivalents (I2), converted at
+  `+mac-equivalents-per-zk-attempt`.
+
+Heaviness therefore scales inversely with target for both puzzles: a branch
+whose ASERT lets its target drift to a ceiling earns proportionally less
+fork-choice credit per block and cannot win by count.
+
+**The boundary is the ZK re-pin / AI ASERT introduction, not admission.**
+Per-puzzle pricing is justified by each puzzle's ASERT holding its own puzzle
+at its own `ideal-block-time` — that is what makes per-target expected work the
+chainwork ratio. The argument starts holding when the dual-puzzle regime does.
 
 `+dual-puzzle-phase` is **one constant**, `phase.ai-asert`, not a derived value.
 The ZK re-pin (`zk-asert-post-ai`) and the introduction of the AI puzzle's own
@@ -103,52 +112,105 @@ dual-puzzle-phase`, also asserted).
 `ai-pow-activation-height` is when AI blocks become *admissible* — the same
 height on mainnet, but a separate question. A fakenet may admit AI below the
 re-pin, and until the re-pin neither puzzle is retargeting under the regime this
-rule describes, so gating on admission would stop accumulating real difficulty
-too early.
+rule describes, so a pre-phase block accumulates the ZK formula on its own
+target whatever puzzle produced it.
 
-**Why not `1/target`.** ASERT pins each puzzle's target to that puzzle's own
-capacity, so a `1/target` heaviness would make per-block weight track each
-puzzle's capacity *relative to the other's*. The two are not comparable
-quantities — one prices ZK proof attempts, the other matmul MAC-equivalents,
-and the computations are heterogeneous and optimized separately — so that ratio
-is arbitrary and drifts. Concretely: at a ratio `R`, one block of the heavier
-puzzle outweighs `R` blocks of the lighter one, so at every height both puzzles
-reached the lighter block loses, and a single late block can reorg `R` blocks of
-history. Measured against real hardware, `R` was ~`2^37`.
+#### Deriving the exchange rate
 
-Equal weighting makes a block of either puzzle worth a block of the other: no
-puzzle's blocks are systematically orphaned, and no single block can displace
-more than one block.
+The rate was measured on one reference consumer GPU (RTX 5090 class, 2026-07)
+by co-benchmarking the ZK prover against the Pearl mining kernel on identical
+hardware: measured MAC-equivalent throughput divided by measured attempt
+throughput prices one ZKPoW attempt at
 
-**Each puzzle's share of accumulated work is therefore the ratio of its block
-rate**, which its own ASERT holds at its own `ideal-block-time`. The 250s/375s
-pair splits fork-choice weight exactly as it splits block production, and
-neither share depends on how either puzzle's work happens to be counted.
+```
+mac-equivalents-per-zk-attempt = 25,750,000,000
+```
 
-**What is given up, and what covers it.** Difficulty is enforced but no longer
-accumulated: a block whose target is not the one its branch's ASERT computed is
-invalid. The property this leans on is that every branch's ASERT drives that
-branch to the same block *rate*, so a minority miner's private branch retargets
-down to the same cadence but starts and stays behind on count — it can match the
-honest chain's rate, never outpace it.
+The prover-side throughput figure is deliberately not published: it prices
+exactly how fast the ZK puzzle can be attacked. The AI-side figure is public
+(Pearl pools report ~309 TH/s for this GPU class — see the unit warning
+below), so anyone with reference hardware can reproduce the rate without this
+document disclosing it.
 
-Blocks below the phase keep the unchanged `+compute-work` on their own target, so
-nothing already on the chain changes weight. The constant above it is what a ZK
-block at its own post-activation ASERT anchor contributed under the previous
-rule, so accumulated work is continuous across the boundary.
+**Unit warning: Pearl's "H" is ambiguous — check the magnitude.** Pearl's own
+difficulty scaling (`MiningJob.adjust_target`: win probability per check is
+`T · (h·w·dot) / 2^256`) prices one tile-level PoW check at `h·w·dot`
+MAC-equivalents, i.e. exactly `F`, so a pool displaying native Pearl units
+reads `MAC-rate / F`. In practice pools pre-normalize: the observed figure for
+one 5090 is **309 TH/s**, which read as tile-checks would imply 2 × 10¹⁹
+MAC/s — ~48× the card's theoretical dense int8 peak (~419 TMAC/s) and
+therefore impossible. That pool's "H/s" is already MAC-scale and enters this
+derivation unmultiplied. A pool displaying native units would instead read
+~4.71 MH/s for the same card; the 65,536× spread makes the two conventions
+easy to distinguish empirically.
+
+This constant is consensus-critical: every node must use the same value. It
+need not be exact; it must be stable and roughly track the real hardware ratio.
+
+**Cross-check at the launch anchors.** The ZK anchor (`2^291`) prices
+`2^320/(2^291+1) = 2^29 − 1 = 536,870,911` attempts per block; the AI anchor
+(`2^193`) prices `2^63` MAC-equivalents per block. At their ideals both lanes
+produce ≈ 1.43 × 10⁶ attempt-equivalents of heaviness per second — within
+0.1% of each other — and both calibrate to roughly a hundred reference-class
+consumer GPUs at their lane's ideal interval. At launch calibration neither
+puzzle orphans the other, and per-block weights differ only by the 375s/250s
+cadence ratio (≈ 1.499).
+
+**Why not unnormalized `1/target`.** ASERT pins each puzzle's target to that
+puzzle's own capacity, so a raw `1/target` heaviness would make per-block
+weight track each puzzle's capacity *relative to the other's*. The two are not
+comparable quantities without a measured rate — one prices ZK proof attempts,
+the other matmul MAC-equivalents, and the computations are heterogeneous and
+optimized separately — so that ratio is arbitrary and drifts. Concretely: at a
+ratio `R`, one block of the heavier puzzle outweighs `R` blocks of the lighter
+one, so at every height both puzzles reached the lighter block loses, and a
+single late block can reorg `R` blocks of history. Measured against real
+hardware, `R` was ~`2^37`. The exchange rate above is exactly that ratio,
+benchmarked and frozen as a constant instead of left to emerge.
+
+**Why not equal weight.** A flat per-block weight makes a capped block worth a
+hard block. A branch forked at the activation parent banks elapsed wall-clock
+time against a zero branch-local ASERT count; six legal timestamps flip the
+median-time-past window, the branch's targets clamp at their ceilings, and the
+branch wins fork choice by raw block count. Reproduced end-to-end against the
+live kernel; see `2026-07-29_TIME_BANKED_FORK_EXPLOIT.md`. Difficulty must be
+priced into heaviness, not only enforced at admission.
+
+**What exchange-rate drift does.** The constant freezes the 2026-07 hardware
+ratio; reality drifts as provers and inference hardware improve.
+
+- *Within one puzzle, drift is harmless.* Same-puzzle heaviness comparisons
+  share the constant, so it cancels: weight is proportional to expected work
+  for any value of the rate. The property that kills the time-bank exploit —
+  a discounted target earns proportionally less credit — does not depend on
+  the rate's accuracy at all.
+- *Across puzzles, drift is a fairness skew equal to the drift factor.* If the
+  true ratio rises above the constant (AI underpriced), AI blocks earn less
+  heaviness per unit of real work than ZK blocks; miners migrate off the AI
+  lane, its ASERT eases to hold cadence, and per-block AI weight falls
+  further. If the ratio falls (AI overpriced), the mirror image starves the
+  ZK lane, and an attacker concentrated on the overpriced lane converts
+  hardware time into heaviness up to the drift factor faster than honest
+  miners on the other lane.
+- *The failure mode is lane imbalance, never a difficulty discount.* No value
+  of the rate lets any branch earn more heaviness than the expected work at
+  its blocks' targets. GPU generations are years apart, so the ratio moves
+  slowly; recalibrate the constant at an upgrade when the hardware benchmark
+  does.
 
 **One definition.** `+block-work-at` (tx-engine) is the only place a block's work
-is computed; candidate construction (`+new-candidate`) and validation
-(`+block-compute-work`) both call it, so a candidate can never store an
-accumulated-work that validation then rejects. `+new-candidate:v1` takes the work
-rather than deriving it — only a caller holding the activation height can compute
-it.
+is computed; candidate construction (`+new-candidate`, `+build-ai-candidate`)
+and validation (`+block-compute-work`) both call it, so a candidate can never
+store an accumulated-work that validation then rejects. `+new-candidate:v1`
+takes the work rather than deriving it — only a caller holding the activation
+height and the puzzle can compute it.
 
-### I5 — the anchor targets a block interval, and only that
+### I5 — the anchor targets a block interval and prices launch weight
 
-`anchor-target-atom.ai-asert = 2^193`. Under I4 the anchor carries no
-fork-choice weight, so it is free to serve the one thing it can: the AI puzzle's
-launch block interval.
+`anchor-target-atom.ai-asert = 2^193`. Under I4 the anchor prices both the AI
+puzzle's launch block interval and its launch fork-choice weight:
+`2^256 / anchor` is both the expected MAC-equivalents per block and the
+anchor block's heaviness, convertible to attempt-equivalents at the I4 rate.
 
 An `%ai-pow` target prices one MAC-equivalent, so `2^256 / anchor` is the
 expected MAC-equivalents per block and the cadence is that over the network's
@@ -177,7 +239,7 @@ rejects.
 | I1 | `ai-pow-miner`: `canonical_grind_threshold_matches_the_consensus_verifier` |
 | I2 | `ai-pow`: `difficulty::tests::expected_work_is_shape_invariant` |
 | I3 | `nockchain`: `ai_pow_valid_block_is_admitted` (real block admitted through the kernel); `ai-pow`: `difficulty::tests::max_consensus_target_never_overflows`, `..._is_the_tight_bound`; `ai-pow-miner`: `canonical_grind_threshold_covers_the_whole_consensus_target_domain`; Hoon: `test-max-ai-target-atom-keeps-every-shape-representable`, `test-max-ai-target-atom-is-the-tight-bound`; `nockchain`: `validate_rejects_ai_asert_bex_above_the_minable_domain` |
-| I4 | Hoon: `test-equal-weight-starts-at-the-asert-phase-not-admission`, `test-post-activation-blocks-weigh-the-same`, `test-post-activation-weight-is-difficulty-independent`, `test-single-block-cannot-outweigh-a-run`, `test-dual-puzzle-mixed-accumulated-work`, `test-block-work-continuous-at-activation`, `test-pre-ai-heaviness-uses-zk-normalizer` |
+| I4 | Hoon: `test-puzzle-pricing-starts-at-the-asert-phase-not-admission`, `test-post-activation-work-is-puzzle-priced`, `test-post-activation-weight-tracks-target`, `test-single-block-cannot-outweigh-a-run`, `test-dual-puzzle-mixed-accumulated-work`, `test-zk-work-continuous-at-activation`, `test-anchor-work-is-exchange-rate-priced`, `test-pre-ai-heaviness-uses-zk-normalizer`, `test-time-banked-fork-loses-by-work` |
 | I5 | Hoon: `test-ai-anchor-sets-the-launch-block-interval`, `test-mainnet-ai-anchor-is-inside-the-minable-domain`; `nockchain-types`: `ai_anchor_sets_the_launch_block_interval` |
 
 ## Worked example — the canonical shape
@@ -195,6 +257,7 @@ At an anchor `T = 2^227`:
 Θ  = 2^227 · 2^16 = 2^243
 A  = 2^256 / Θ    = 2^13  = 8,192 attempts per block
 W  = 2^256 / T    = 2^29           MAC-equivalents per block
+W  = 2^29 / 25.75e9 ≈ 20.8       ZKPoW-attempt-equivalents of fork-choice credit
 ```
 
 Reading `A` as `2^256 / T = 2^29` — the shape factor omitted — overstates the

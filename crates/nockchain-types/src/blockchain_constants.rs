@@ -117,10 +117,10 @@ impl AsertParams {
     /// block, so the shared puzzle-keyed re-pin schedule can recover the
     /// branch timestamp before the first AI block arrives.
     ///
-    /// The anchor sets the AI puzzle's LAUNCH BLOCK INTERVAL and only that:
-    /// every post-activation block contributes the same heaviness whichever
-    /// puzzle produced it (Hoon `+dual-puzzle-block-work`), so the anchor
-    /// carries no fork-choice weight.
+    /// The anchor sets the AI puzzle's LAUNCH BLOCK INTERVAL and its launch
+    /// fork-choice weight: a post-activation block's heaviness is the expected
+    /// work at its own target (Hoon `+block-work-at`), so `2^256 / anchor`
+    /// below is also the anchor block's weight in MAC-equivalents.
     ///
     /// An `%ai-pow` target prices one MAC-equivalent of matmul, so
     /// `2^256 / anchor` is the expected MAC-equivalents per block. `2^193` is

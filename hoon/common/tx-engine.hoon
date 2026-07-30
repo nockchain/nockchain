@@ -375,24 +375,61 @@
   ::    creates a v1 page with hash-based coinbase-split. `zk-asert-phase`
   ::    threads through so post-asert-activation candidates carry the 80/20
   ::    miner/fund split (014-aletheia).
-  ::  +block-work-at: the heaviness a block at `height` with `target-bn`
-  ::  contributes. SINGLE definition -- candidate construction and validation
-  ::  (+block-compute-work) both go through it, so a candidate can never store an
-  ::  accumulated-work that validation then rejects.
+  ::  +block-work-at: the heaviness a block at `height` produced by `puzzle`
+  ::  with `target-bn` contributes. SINGLE definition -- candidate construction
+  ::  and validation (+block-compute-work) both go through it, so a candidate
+  ::  can never store an accumulated-work that validation then rejects.
   ::
   ::  Before AI activation this is the unchanged ZK formula on the block's own
-  ::  target, so every block already on the chain keeps the work it was accepted
-  ::  with. From activation on it is +dual-puzzle-block-work, the same for both
-  ::  puzzles.
+  ::  target, so every block already on the chain keeps the work it was
+  ::  accepted with. From activation on it is the EXPECTED work at the block's
+  ::  own target for the producing puzzle, priced in ZKPoW-attempt-equivalents:
+  ::
+  ::  - %dumb-zkpow: 2^320/(target+1) attempts -- identical to the
+  ::    pre-activation formula, so ZK weight is continuous across the boundary.
+  ::  - %ai-pow: 2^256/(target+1) MAC-equivalents, converted at
+  ::    +mac-equivalents-per-zk-attempt.
+  ::
+  ::  Heaviness therefore scales inversely with target for both puzzles. A
+  ::  branch whose branch-local ASERT drives its target to the ceiling earns
+  ::  proportionally less fork-choice credit per block and cannot win by
+  ::  count. At the launch anchors both lanes produce the same heaviness per
+  ::  second (each anchor prices ~120 5090 GPUs at its ideal cadence), so
+  ::  steady-state puzzle shares still track block rate, without letting a
+  ::  discounted target subsidize a reorg.
   ++  block-work-at
-    |=  [height=page-number target-bn=bignum:bn]
+    |=  [height=page-number puzzle=?(%dumb-zkpow %ai-pow) target-bn=bignum:bn]
     ^-  bignum:bn
-    ?:  (gte height dual-puzzle-phase)
-      dual-puzzle-block-work
-    (compute-work:page:v0 target-bn)
+    ?:  (lth height dual-puzzle-phase)
+      (compute-work:page:v0 target-bn)
+    ?-  puzzle
+      %dumb-zkpow  (compute-work:page:v0 target-bn)
+      %ai-pow      (ai-pow-work target-bn)
+    ==
+  ::
+  ::  +ai-pow-work: expected MAC-equivalents of matmul work at `target-bn`
+  ::  (2^256/(target+1)), priced in ZKPoW-attempt-equivalents. Mirrors
+  ::  +compute-work:page:v0's GetBlockProof convention, floored at 1.
+  ++  ai-pow-work
+    |=  target-bn=bignum:bn
+    ^-  bignum:bn
+    =/  target-atom=@  (merge:bignum target-bn)
+    =/  raw=@  (div (bex 256) (mul mac-equivalents-per-zk-attempt +(target-atom)))
+    (chunk:bignum ?:(=(0 raw) 1 raw))
+  ::
+  ::  +mac-equivalents-per-zk-attempt: the cross-puzzle exchange rate, from a
+  ::  2026-07 co-benchmark of the ZK prover and the Pearl mining kernel on one
+  ::  reference consumer GPU (RTX 5090 class): measured MAC-equivalent
+  ::  throughput per measured attempt throughput. The prover-side throughput
+  ::  figure is deliberately not published; the AI side is public via Pearl
+  ::  pool rates. Consensus-critical: every node must use the same value. It
+  ::  need only be stable and roughly track the real hardware ratio; if the
+  ::  ratio drifts, revise it at an upgrade.
+  ++  mac-equivalents-per-zk-attempt
+    ^~  25.750.000.000
   ::
   ::  +dual-puzzle-phase: the height at which the dual-puzzle regime begins, and
-  ::  therefore the first height at which every block weighs the same.
+  ::  therefore the first height at which heaviness is priced per puzzle.
   ::
   ::    ONE constant, not a derived value. The ZK puzzle's re-pin
   ::    (+zk-asert-post-ai) and the introduction of the AI puzzle's own ASERT
@@ -406,7 +443,7 @@
   ::    `ai-pow-activation-height` is when AI blocks become ADMISSIBLE. That is
   ::    the same height on mainnet but is a separate question: a fakenet may
   ::    admit AI below the re-pin, and until the re-pin neither puzzle is
-  ::    retargeting under the regime equal weighting describes.
+  ::    retargeting under the regime per-puzzle pricing describes.
   ++  dual-puzzle-phase
     ^-  page-number
     phase.ai-asert
@@ -421,7 +458,7 @@
       target-bn
       shares
       asert-phase
-      (block-work-at +(par-height) target-bn)
+      (block-work-at +(par-height) %dumb-zkpow target-bn)
     ==
   ::
   ++  get
@@ -506,42 +543,6 @@
     |=  target-bn=bignum:bn
     ^-  bignum:bn
     (compute-work:page:v0 target-bn)
-  ::
-  ::  +dual-puzzle-block-work: the heaviness EVERY block contributes once both
-  ::  puzzles are live, whichever puzzle produced it.
-  ::
-  ::    Two puzzles' targets are not comparable numbers -- they price different
-  ::    computations, in different spaces, optimized independently -- and each
-  ::    puzzle's ASERT pins its own target to its own capacity. So a
-  ::    heaviness that scaled as 1/target would make one puzzle's per-block
-  ::    weight track its capacity RELATIVE to the other's, and a single block of
-  ::    the heavier puzzle could displace as many blocks of the lighter one as
-  ::    that ratio. At every height both puzzles reached, the lighter block would
-  ::    lose. Weighting every block the same is what makes a block of either
-  ::    puzzle worth a block of the other, so neither puzzle's blocks are
-  ::    systematically orphaned by the other's and no single block can reorg more
-  ::    than one block of history.
-  ::
-  ::    Each puzzle's SHARE of accumulated work is then the ratio of its block
-  ::    rate, which its own ASERT holds at its own ideal-block-time -- the 250s /
-  ::    375s pair splits fork-choice weight exactly as it splits block
-  ::    production, and neither share depends on how either puzzle's work happens
-  ::    to be counted.
-  ::
-  ::    Difficulty is still enforced, just not accumulated: a block whose target
-  ::    is not the one its branch's ASERT computed is invalid, and every branch's
-  ::    ASERT drives that branch to the same block rate. A minority miner's
-  ::    private branch therefore retargets down to the same CADENCE but starts
-  ::    and stays behind on count; it cannot outpace the honest chain, only match
-  ::    it.
-  ::
-  ::    The value is what a ZK block at its own post-activation ASERT anchor
-  ::    contributed under the previous rule, so accumulated work is continuous
-  ::    across the activation boundary.
-  ++  dual-puzzle-block-work
-    ^-  bignum:bn
-    %-  compute-work:page:v0
-    (chunk:bignum anchor-target-atom.zk-asert-post-ai)
   ::
   ++  compute-digest
     |=  pag=form

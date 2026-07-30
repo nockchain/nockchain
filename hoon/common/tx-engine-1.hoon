@@ -451,9 +451,10 @@
   $+  ai-asert
   $~  :*  phase=114.300
           anchor-height=114.299
-          ::  Sets the AI puzzle's LAUNCH BLOCK INTERVAL, and only that: every
-          ::  post-activation block contributes the same heaviness whichever
-          ::  puzzle produced it, so the anchor carries no fork-choice weight.
+          ::  Sets the AI puzzle's LAUNCH BLOCK INTERVAL and its launch
+          ::  fork-choice weight: a post-activation block's heaviness is the
+          ::  expected work at its own target, so 2^256/anchor below is also
+          ::  the anchor block's weight in MAC-equivalents.
           ::
           ::  An %ai-pow target prices one MAC-equivalent of matmul, so
           ::    expected-MAC-equivalents-per-block == 2^256 / anchor

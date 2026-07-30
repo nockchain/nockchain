@@ -149,11 +149,11 @@
   =/  target  ~(target get:page:t tip)
   =/  actual=@   (merge:bignum:t (~(block-compute-work dcon con der bc-pre-ai) tip))
   =/  zk-work=@  (merge:bignum:t (compute-work:page:t target))
-  =/  flat-work=@  (merge:bignum:t dual-puzzle-block-work:page:t)
+  =/  post-work=@  (merge:bignum:t (block-work-at:page:t 1.000 %dumb-zkpow target))
   ;:  weld
     (expect-eq !>(zk-work) !>(actual))
-    ::  the two rules genuinely differ here, so the equality above is meaningful
-    (expect-eq !>(%.n) !>(=(zk-work flat-work)))
+    ::  the ZK formula is unchanged across the boundary: same target, same work
+    (expect-eq !>(zk-work) !>(post-work))
   ==
 ::
 ::  ---- (G6) version recording: pre-activation versions are height-derived ----

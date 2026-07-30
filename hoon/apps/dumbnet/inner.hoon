@@ -62,7 +62,7 @@
     ::  A chain where one has happened and the other has not has no defined
     ::  cross-puzzle regime: one puzzle would be retargeting under the dual
     ::  cadence while the other is not, and +dual-puzzle-phase -- the height from
-    ::  which every block weighs the same -- would not describe either.
+    ::  which heaviness is priced per puzzle -- would not describe either.
     ~|  %zk-asert-re-pin-and-ai-asert-must-be-simultaneous
     ?>  =(phase.zk-asert-post-ai.constants.k phase.ai-asert.constants.k)
     ::  Each schedule pin anchors at the preceding accepted block. This lets
@@ -74,9 +74,10 @@
     ::  The original Aletheia ZK pin predates the dual puzzle.
     ~|  %zk-asert-phase-must-precede-the-dual-puzzle-phase
     ?>  (lte phase.zk-asert.constants.k dual-puzzle-phase:page:t)
-    ::  From +dual-puzzle-phase on, every block contributes the same heaviness.
-    ::  Only the v1 candidate builder is told that; the v0 one derives work from
-    ::  the target. So a v0 page at or above that height would store an
+    ::  From +dual-puzzle-phase on, a block's heaviness is the expected work at
+    ::  its own target for the puzzle named by its pow artifact. Only the v1
+    ::  candidate builder prices the puzzle; the v0 one derives work from the
+    ::  target alone. So a v0 page at or above that height could store an
     ::  accumulated-work validation rejects, and no miner could build on the
     ::  chain.
     ~|  %v1-phase-must-be-lte-dual-puzzle-phase

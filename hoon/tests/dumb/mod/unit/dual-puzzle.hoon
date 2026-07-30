@@ -2,12 +2,14 @@
 ::
 ::    Dual-puzzle (ZK-PoW %2 + AI-PoW %3) consensus mechanism tests.
 ::
-::    Focus: fork choice must not favour either puzzle. Once both are live every
-::    block contributes the SAME heaviness whichever puzzle produced it, so a
-::    block of one is worth a block of the other, no single block can reorg more
-::    than one block of history, and each puzzle's share of accumulated work is
-::    the ratio of its block rate — which its own ASERT holds at its own
-::    ideal-block-time.
+::    Focus: fork choice must not favour either puzzle at calibration and must
+::    not reward a discount. Once both are live every block contributes the
+::    expected work at its own target, priced per puzzle in
+::    ZKPoW-attempt-equivalents at the +mac-equivalents-per-zk-attempt
+::    exchange rate. At the launch anchors both lanes produce the same heaviness
+::    per second, so a block of one is worth a block of the other; a block
+::    whose target is cheap for its puzzle earns proportionally less, so an
+::    ASERT discount can never subsidize a reorg.
 ::
 /=  helpers  /tests/dumb/helpers
 /=  dcon     /apps/dumbnet/lib/consensus
@@ -24,11 +26,11 @@
 ++  hp  ~(. helpers bc-dual-post:helpers)
 ++  ht  ~(. helpers bc-tandem:helpers)
 ::
-::  Every post-activation block weighs the same, whichever puzzle produced it.
-::  This is what stops one puzzle's blocks being systematically orphaned by the
-::  other's at heights both reached, and what bounds a single block to displacing
-::  at most one block of history.
-++  test-post-activation-blocks-weigh-the-same
+::  Post-activation heaviness is the expected work at the block's own target,
+::  priced per puzzle in ZKPoW-attempt-equivalents. ZK blocks keep the
+::  pre-activation formula exactly; AI blocks contribute 2^256/(target+1)
+::  MAC-equivalents over the +mac-equivalents-per-zk-attempt exchange rate.
+++  test-post-activation-work-is-puzzle-priced
   ^-  tang
   =/  pt  ~(. txe bc-dual-post:helpers)
   ::  Tips at height 2, the first height at or above +dual-puzzle-asert-phase.
@@ -40,42 +42,49 @@
   =/  ai-w
     %-  merge:bignum
     (~(block-compute-work dcon con.ai-built der.ai-built bc-dual-post:helpers) tip.ai-built)
-  %+  weld
-    (expect-eq !>(zk-w) !>(ai-w))
-  ::  ...and it is the shared constant, not a coincidence of equal targets
-  (expect-eq !>(zk-w) !>((merge:bignum dual-puzzle-block-work:page:pt)))
+  ;:  weld
+    ::  ZK keeps the pre-activation formula on its own target
+    %+  expect-eq  !>(zk-w)
+    !>((merge:bignum (compute-work:page:pt ~(target get:page:t tip.zk-built))))
+    ::  AI contributes its MAC-equivalents in attempt-equivalents
+    %+  expect-eq  !>(ai-w)
+    !>((merge:bignum (ai-pow-work:page:pt ~(target get:page:t tip.ai-built))))
+  ==
 ::
-::  ...and the weight does not move with difficulty. Two AI blocks whose ASERT
-::  targets differ contribute the same. A heaviness that scaled as 1/target would
-::  make per-block weight track each puzzle's capacity relative to the other, so
-::  one block of the heavier puzzle could displace as many blocks of the lighter
-::  one as that ratio -- the reorg churn this rule exists to prevent.
-++  test-post-activation-weight-is-difficulty-independent
+::  ...and the weight tracks difficulty: of two AI blocks whose ASERT targets
+::  differ, the one with the EASIER target contributes LESS. A branch that
+::  retargets to a cheaper target earns less fork-choice credit per block, so
+::  an ASERT discount can never subsidize a reorg.
+++  test-post-activation-weight-tracks-target
   ^-  tang
   =/  one  (build-typed-chain:hp ~[%zk %ai])
   =/  two  (build-typed-chain:hp ~[%zk %ai %ai])
+  =/  t1=@  (merge:bignum ~(target get:page:t tip.one))
+  =/  t2=@  (merge:bignum ~(target get:page:t tip.two))
   =/  w1
     %-  merge:bignum
     (~(block-compute-work dcon con.one der.one bc-dual-post:helpers) tip.one)
   =/  w2
     %-  merge:bignum
     (~(block-compute-work dcon con.two der.two bc-dual-post:helpers) tip.two)
-  %+  expect-eq  !>(w1)  !>(w2)
+  ::  the test chain runs behind its ideal, so the ASERT eases the target
+  ?>  (gth t2 t1)
+  %+  expect-eq  !>(%.y)  !>((lth w2 w1))
 ::
-::  Equal weighting starts at +dual-puzzle-phase and NO EARLIER. That is the
-::  height of the ZK re-pin / AI ASERT introduction, NOT `ai-pow-activation-
-::  height`: admission can be configured below the re-pin, and until the re-pin
-::  neither puzzle is retargeting under the regime the rule describes, so a block
-::  must still accumulate its own difficulty.
+::  Per-puzzle pricing starts at +dual-puzzle-phase and NO EARLIER. That is
+::  the height of the ZK re-pin / AI ASERT introduction, NOT
+::  `ai-pow-activation-height`: admission can be configured below the re-pin,
+::  and until the re-pin a block still accumulates the ZK formula on its own
+::  target, whatever puzzle produced it.
 ::
-::  Here admission is height 1 but the phases are height 2, so the height-1 block
-::  keeps +compute-work on its own target while the height-2 block goes flat.
-++  test-equal-weight-starts-at-the-asert-phase-not-admission
+::  Here admission is height 1 but the phases are height 2, so the height-1 AI
+::  block keeps +compute-work on its own target while the height-2 AI block is
+::  priced in MAC-equivalents.
+++  test-puzzle-pricing-starts-at-the-asert-phase-not-admission
   ^-  tang
   =/  pt  ~(. txe bc-dual-post:helpers)
-  =/  built  (build-typed-chain:hp ~[%zk %zk])
+  =/  built  (build-typed-chain:hp ~[%ai %ai])
   =/  h1=page:t  (to-page:local-page:t (~(got h-by blocks.con.built) ~(parent get:page:t tip.built)))
-  =/  flat=@  (merge:bignum dual-puzzle-block-work:page:pt)
   =/  w1=@
     %-  merge:bignum
     (~(block-compute-work dcon con.built der.built bc-dual-post:helpers) h1)
@@ -86,31 +95,34 @@
     ::  admission is below the phase, so the two heights straddle the boundary
     (expect-eq !>(1) !>(ai-pow-activation-height:bc-dual-post:helpers))
     (expect-eq !>(2) !>(dual-puzzle-phase:page:pt))
-    ::  height 1: own difficulty, NOT the flat weight
-    (expect-eq !>(%.y) !>(!=(w1 flat)))
+    ::  height 1 (pre-phase): the ZK formula on the block's own target
     (expect-eq !>(w1) !>((merge:bignum (compute-work:page:pt ~(target get:page:t h1)))))
-    ::  height 2: flat
-    (expect-eq !>(w2) !>(flat))
+    ::  height 2 (post-phase): MAC-equivalents over the exchange rate
+    (expect-eq !>(w2) !>((merge:bignum (ai-pow-work:page:pt ~(target get:page:t tip.built)))))
+    ::  ...and the two rules genuinely differ here, so both pins are meaningful
+    (expect-eq !>(%.y) !>(!=(w1 w2)))
   ==
 ::
-::  Accumulated work is continuous across the activation boundary: a
-::  post-activation block contributes what a ZK block at its own post-activation
-::  ASERT anchor contributed under the previous rule.
-++  test-block-work-continuous-at-activation
+::  ZK weight is continuous across the activation boundary: a post-activation
+::  ZK block contributes exactly what the pre-activation formula gives on the
+::  same target. KAT: at the mainnet post-activation anchor (2^291) that is
+::  2^29 - 1 attempts.
+++  test-zk-work-continuous-at-activation
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
-  =/  actual=@  (merge:bignum dual-puzzle-block-work:page:mt)
-  =/  expected=@
-    %-  merge:bignum
-    (compute-work:page:mt (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))
-  %+  expect-eq  !>(expected)  !>(actual)
+  =/  anchor-bn  (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet)
+  =/  post-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow anchor-bn))
+  =/  pre-w=@   (merge:bignum (compute-work:page:mt anchor-bn))
+  ;:  weld
+    (expect-eq !>(pre-w) !>(post-w))
+    (expect-eq !>(536.870.911) !>(post-w))
+  ==
 ::
-::  The AI ASERT anchor sets the puzzle's LAUNCH BLOCK INTERVAL and nothing else
-::  -- it carries no fork-choice weight under the equal-weight rule. An %ai-pow
-::  target prices one MAC-equivalent, so 2^256/anchor is the expected
-::  MAC-equivalents per block; bex 193 is 2^63 of them, about a hundred consumer
-::  GPUs at the 250s ideal.
+::  The AI ASERT anchor sets the puzzle's LAUNCH BLOCK INTERVAL and prices its
+::  launch weight. An %ai-pow target prices one MAC-equivalent, so 2^256/anchor
+::  is the expected MAC-equivalents per block; bex 193 is 2^63 of them, about a
+::  hundred consumer GPUs at the 250s ideal.
 ++  test-ai-anchor-sets-the-launch-block-interval
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
@@ -190,38 +202,58 @@
     ==
   %+  expect-eq  !>(max-ai-target-atom:t)  !>(target)
 ::
-::  Cross-puzzle accumulated-work over a MIXED chain: because every
-::  post-activation block weighs the same, two chains of the same length
-::  accumulate the same total whatever order the puzzles produced them in. No
-::  interleaving of ZK and AI is heavier than another of equal length.
+::  Cross-puzzle accumulated-work over a MIXED chain: each block adds the
+::  expected work at its own target for its own puzzle, so a chain's total is
+::  the per-puzzle sum, whatever order the puzzles produced the blocks in.
 ++  test-dual-puzzle-mixed-accumulated-work
   ^-  tang
-  =/  zk-first  (build-typed-chain:hp ~[%zk %zk %ai])
-  =/  ai-first  (build-typed-chain:hp ~[%zk %ai %zk])
-  %+  expect-eq
-    !>((merge:bignum ~(accumulated-work get:page:t tip.zk-first)))
-  !>((merge:bignum ~(accumulated-work get:page:t tip.ai-first)))
+  =/  built  (build-typed-chain:hp ~[%zk %zk %ai])
+  =/  h2=page:t  (to-page:local-page:t (~(got h-by blocks.con.built) ~(parent get:page:t tip.built)))
+  =/  h1=page:t  (to-page:local-page:t (~(got h-by blocks.con.built) ~(parent get:page:t h2)))
+  =/  work  |=(pag=page:t (merge:bignum (~(block-compute-work dcon con.built der.built bc-dual-post:helpers) pag)))
+  =/  sum=@
+    :(add (merge:bignum ~(accumulated-work get:page:t h1)) (work h2) (work tip.built))
+  %+  expect-eq  !>(sum)  !>((merge:bignum ~(accumulated-work get:page:t tip.built)))
 ::
-::  A single block of either puzzle can never outweigh a longer run of the other.
-::  Under a 1/target heaviness the heavier puzzle's block could displace as many
-::  of the lighter puzzle's blocks as their capacity ratio; here one AI block
-::  loses to two ZK blocks, and one ZK block loses to two AI blocks.
+::  A block that reaches its puzzle's ceiling contributes the floored minimum,
+::  so a discounted branch cannot win by count. At the launch anchors one block
+::  of either puzzle is within 1.5x of the other, so neither puzzle orphans the
+::  other's blocks at calibration; but a capped block is worth less than any
+::  honest anchor block of either puzzle.
 ++  test-single-block-cannot-outweigh-a-run
   ^-  tang
-  =/  one-ai  (build-typed-chain:hp ~[%zk %ai])
-  =/  one-zk  (build-typed-chain:hp ~[%zk %zk])
-  =/  two-zk  (build-typed-chain:hp ~[%zk %zk %zk])
-  =/  two-ai  (build-typed-chain:hp ~[%zk %ai %ai])
-  =/  w  |=(pag=page:t (merge:bignum ~(accumulated-work get:page:t pag)))
-  %+  weld
-    (expect-eq !>(%.y) !>((lth (w tip.one-ai) (w tip.two-zk))))
-  (expect-eq !>(%.y) !>((lth (w tip.one-zk) (w tip.two-ai))))
+  =/  mt  ~(. txe *blockchain-constants:txe)
+  =/  mainnet  *blockchain-constants:txe
+  =/  zk-anchor-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet)))
+  =/  ai-anchor-w=@  (merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet)))
+  =/  zk-cap-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum max-target-atom:mt)))
+  =/  ai-cap-w=@  (merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum max-ai-target-atom:mt)))
+  ;:  weld
+    ::  anchor blocks are within 2x of each other (1.499x exactly)
+    (expect-eq !>(%.y) !>((lth zk-anchor-w (mul 2 ai-anchor-w))))
+    (expect-eq !>(%.y) !>((lth ai-anchor-w (mul 2 zk-anchor-w))))
+    ::  capped blocks contribute the floored minimum
+    (expect-eq !>(1) !>(zk-cap-w))
+    (expect-eq !>(1) !>(ai-cap-w))
+    ::  ...so a capped block is worth less than any honest anchor block
+    (expect-eq !>(%.y) !>((lth zk-cap-w ai-anchor-w)))
+    (expect-eq !>(%.y) !>((lth ai-cap-w zk-anchor-w)))
+  ==
 ::
-::  Per-block work is a real quantity, not the clamped floor of 1.
-++  test-dual-puzzle-anchor-work-nonzero
+::  Per-block work at the launch anchors, in ZKPoW-attempt-equivalents. The
+::  exchange rate is +mac-equivalents-per-zk-attempt, from the reference-GPU
+::  co-benchmark (see tx-engine).
+++  test-anchor-work-is-exchange-rate-priced
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
-  %+  expect-eq  !>(%.y)  !>((gth (merge:bignum dual-puzzle-block-work:page:mt) 1))
+  =/  mainnet  *blockchain-constants:txe
+  ;:  weld
+    (expect-eq !>(25.750.000.000) !>(mac-equivalents-per-zk-attempt:page:mt))
+    %+  expect-eq  !>(536.870.911)
+    !>((merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))))
+    %+  expect-eq  !>(358.189.205)
+    !>((merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet))))
+  ==
 ::
 ::  Branch-local state counts each puzzle independently on a mixed chain.
 ++  test-ai-subchain-count
@@ -281,7 +313,7 @@
   =/  expected-target
     (~(compute-target-ai-asert dcon con der.built bc-dual-post:helpers) ~(height get:page:t zk-cand) ~(parent get:page:t zk-cand))
   =/  parent-work  (merge:bignum ~(accumulated-work get:page:t tip.built))
-  =/  expected-work  (add parent-work (merge:bignum dual-puzzle-block-work:page:t))
+  =/  expected-work  (add parent-work (merge:bignum (ai-pow-work:page:t expected-target)))
   %+  expect-eq
     !>([(merge:bignum expected-target) expected-work])
   !>  :-  (merge:bignum ~(target get:page:t ai-cand))

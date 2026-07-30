@@ -41,11 +41,12 @@ Logos activates AI-PoW at height 114,300 (`ai-pow-activation-height`) as an
    recursive certificate. Consensus verifies the certificate with a mandatory
    Rust jet.
 
-2. **Equal-weight heaviness across both puzzles.** The two puzzles live in
+2. **Puzzle-priced heaviness, normalized by hardware.** The two puzzles live in
    different target spaces (ZK in the ~2³²⁰ tip5 space, AI in a 256-bit BLAKE3
-   jackpot space). A single normalizer makes one unit of expected AI work weigh
-   exactly the same as one unit of expected ZK work in fork choice, so neither
-   puzzle can be "cheap-weighted" and the heaviest chain is a faithful sum of
+   jackpot space). Each block accumulates the expected work at its own target
+   for its own puzzle, with AI MAC-equivalents converted to
+   ZKPoW-attempt-equivalents at a measured exchange rate, so neither puzzle
+   can be "cheap-weighted" and the heaviest chain is a faithful sum of
    real work regardless of which puzzle mined which block.
 
 3. **Independent per-puzzle ASERT, weighted 60/40 toward AI.** Each puzzle
@@ -93,7 +94,7 @@ same chain; a node validates each block against whichever puzzle it proves.
 The one hard requirement this creates is fork-choice *fairness*: if AI blocks
 weighed less (or more) than ZK blocks per unit of expected work, miners would
 pile onto the cheaper-weight puzzle and the "heaviest chain" would stop tracking
-total work. The equal-weight normalizer (below) is what makes a dual puzzle
+total work. The hardware exchange rate (below) is what makes a dual puzzle
 sound rather than a footgun.
 
 ### Why per-puzzle ASERT
@@ -172,10 +173,11 @@ phase − 1`. A `--fakenet-ai-pow-activation-height 0` is rejected (it would mak
 `phase − 1` underflow).
 
 The AI anchor target is `2^193`, and it sets the AI puzzle's **launch block
-interval** — nothing else. Every post-activation block contributes the same
-heaviness whichever puzzle produced it (see *Equal-weight heaviness* below), so
-the anchor carries no fork-choice weight and is not calibrated against the ZK
-anchor.
+interval** and its launch fork-choice weight (see *Puzzle-priced heaviness*
+below): the anchor block's heaviness is `2^256/anchor` MAC-equivalents,
+converted at the exchange rate. The two anchors are cross-calibrated — both
+price ~120 consumer GPUs at their lane's ideal interval, so both lanes produce
+the same heaviness per second at launch.
 
 An `%ai-pow` target prices one MAC-equivalent of matmul, so
 `expected-MAC-equivalents-per-block == 2^256 / anchor`; `2^193` is `2^63`
@@ -226,51 +228,65 @@ glue), `ai-pow-zk` (the Plonky3 AIR + recursion), `ai-pow-jets` (the consensus
 verify jet + verifier-setup residency), and the miner-side `ai-pow-miner` +
 `zk-pow-miner` + shared `nockchain-mining-common`.
 
-### Equal-weight heaviness
+### Puzzle-priced heaviness
 
-From `dual-puzzle-phase` (`== phase.ai-asert == phase.zk-asert-post-ai`) on,
-**every block contributes the same heaviness**, whichever puzzle produced it.
-`block-compute-work` (in `consensus.hoon`) is `+block-work-at` on the block's
-height and target (`+tx-engine`):
+From `dual-puzzle-phase` (`== phase.ai-asert == phase.zk-asert-post-ai`) on, a
+block's heaviness is the expected work at its own target for the puzzle named
+by its pow artifact, priced in ZKPoW-attempt-equivalents. `block-compute-work`
+(in `consensus.hoon`) is `+block-work-at` on the block's height, puzzle, and
+target (`+tx-engine`):
 
 ```
-block-work-at(height, T) = dual-puzzle-block-work            if height >= dual-puzzle-phase
-                         = compute-work:page:v0(T)           otherwise
+block-work-at(height, puzzle, T) = compute-work:page:v0(T)   if height < dual-puzzle-phase
+                                 = compute-work:page:v0(T)   if puzzle = %dumb-zkpow
+                                 = ai-pow-work(T)            if puzzle = %ai-pow
 
-dual-puzzle-block-work   = compute-work:page:v0(2^291)       :: a constant
+ai-pow-work(T) = 2^256 / (mac-equivalents-per-zk-attempt × (T+1))   :: floored at 1
 ```
 
-Heaviness therefore does not read the pow artifact at all. Below the phase the
-rule is the unchanged ZK formula on the block's own target, so every block
-already on the chain keeps the accumulated work it was accepted with, and
-`dual-puzzle-block-work` is exactly what a ZK block at its own post-activation
-ASERT anchor contributed under that rule — so accumulated work is continuous
-across the boundary.
+ZK blocks keep the unchanged pre-activation formula, so every block already on
+the chain keeps the accumulated work it was accepted with — ZK weight is
+continuous across the boundary. AI blocks contribute their expected
+MAC-equivalents (`2^256/(T+1)`) converted at `+mac-equivalents-per-zk-attempt`
+= 25,750,000,000, the measured hardware exchange rate (co-benchmarked on a
+reference consumer GPU; derivation and drift analysis in
+`crates/ai-pow/docs/DIFFICULTY.md` I4).
 
-Two puzzles' targets are not comparable numbers: they price different
-computations, in different spaces, optimized independently, and each puzzle's
-ASERT pins its own target to its own capacity. A heaviness that scaled as
-`1/target` would therefore make one puzzle's per-block weight track its capacity
-*relative* to the other's, and a single block of the heavier puzzle could
-displace as many blocks of the lighter one as that ratio — at every height both
-puzzles reached, the lighter block would lose. Weighting every block the same is
-what makes a block of either puzzle worth a block of the other, so neither
-puzzle's blocks are systematically orphaned and no single block can reorg more
-than one block of history.
+Two puzzles' targets are not comparable numbers without that rate: they price
+different computations, in different spaces, optimized independently, and each
+puzzle's ASERT pins its own target to its own capacity. A heaviness that scaled
+as raw `1/target` would therefore make one puzzle's per-block weight track its
+capacity *relative* to the other's, and a single block of the heavier puzzle
+could displace as many blocks of the lighter one as that ratio — measured
+against real hardware, ~`2^37`. The exchange rate is that ratio, benchmarked
+and frozen as a consensus constant instead of left to emerge.
 
-Each puzzle's *share* of accumulated work is then the ratio of its block rate,
-which its own ASERT holds at its own ideal-block-time: the 250 s / 375 s pair
-splits fork-choice weight exactly as it splits block production, and neither
-share depends on how either puzzle's work happens to be counted.
+Equal weight — one constant for every post-phase block — is not safe either: a
+branch forked at the activation parent banks elapsed wall-clock time against a
+zero branch-local ASERT count, a six-timestamp median-time-past flip clamps its
+targets at the ceilings, and flat weight then lets the branch win by raw block
+count (`crates/ai-pow/docs/2026-07-29_TIME_BANKED_FORK_EXPLOIT.md`). Difficulty
+must be accumulated, not only enforced at admission.
 
-Difficulty is still enforced, just not accumulated. `check-target` requires the
-block's target to equal the ASERT-recomputed target and `check-heaviness`
-requires `accumulated-work == parent + block-compute-work` exactly — both
-deterministic, so a forged easy target or inflated work is rejected
-(`%page-target-invalid` / `%page-heaviness-invalid`). Every branch's ASERT drives
-that branch to the same block rate, so a minority miner's private branch
-retargets down to the same *cadence* but starts and stays behind on count; it can
-match the honest chain, not outpace it.
+Heaviness therefore scales inversely with target for both puzzles: a branch
+whose ASERT lets its target drift to a ceiling earns proportionally less
+fork-choice credit per block and cannot win by count. At the launch anchors
+both lanes produce the same heaviness per second — both calibrate to ~120
+consumer GPUs at their ideals (375 s ZK / 250 s AI), so neither puzzle's blocks
+are systematically orphaned, and per-block weights differ only by the cadence
+ratio.
+
+Difficulty is enforced exactly as before: `check-target` requires the block's
+target to equal the ASERT-recomputed target and `check-heaviness` requires
+`accumulated-work == parent + block-compute-work` exactly — both deterministic,
+so a forged easy target or inflated work is rejected (`%page-target-invalid` /
+`%page-heaviness-invalid`).
+
+Should the exchange rate drift from the true hardware ratio, the failure mode
+is lane imbalance — one puzzle's blocks earn less per unit of real work and its
+miners migrate — bounded by the drift factor. Within one puzzle the rate
+cancels out of every comparison, so reorg resistance never depends on its
+accuracy.
 
 ### Per-puzzle ASERT
 
@@ -431,8 +447,8 @@ the v1 10-slot layout, whose Rust encode/decode round-trip is regression-pinned.
 
 Rollback to a pre-Logos binary is safe only before `ai-pow-activation-height`.
 From `dual-puzzle-phase` on, a pre-Logos node computes divergent heaviness for
-*every* block (it applies the old `1/target` formula where Logos applies the
-constant `dual-puzzle-block-work`), and it rejects the first `%ai-pow` block
+*every* block (it applies the old `1/target` formula where Logos applies
+per-puzzle expected work), and it rejects the first `%ai-pow` block
 outright (unknown block variant / no verify jet), so it forks off.
 
 ## Backward Compatibility
@@ -478,9 +494,10 @@ structurally valid across the boundary.
   rotation from one IP escalates through the bounded IP-exclusion policy. Other
   liar reasons remain peer-scoped because protocol-version skew can produce
   honest disagreement at an upgrade boundary.
-- **Equal-weight soundness.** Post-activation heaviness is a constant per block
-  and never reads the pow artifact, so no choice of puzzle or target buys extra
-  weight; `check-heaviness` and `check-target` re-derive both deterministically,
+- **Puzzle-priced soundness.** Post-activation heaviness is the expected work
+  at the block's own target for the puzzle its pow artifact names, so a branch
+  that lets its target drift earns proportionally less weight per block;
+  `check-heaviness` and `check-target` re-derive both deterministically,
   so a forged easy target or inflated work is rejected
   (`%page-target-invalid` / `%page-heaviness-invalid`).
 - **AI target stays in the minable domain.** The jackpot is compared against
@@ -569,8 +586,8 @@ structurally valid across the boundary.
 - `ai-pow-jet.hoon`: the `%ai-pow-verify` jet fires and the fail-closed Hoon arm
   behaves.
 - `dual-puzzle.hoon` + the tandem ASERT unit tests: the two puzzles retarget
-  independently over their own subchains; equal-weight heaviness scales the AI
-  contribution to match the ZK contribution.
+  independently over their own subchains; the exchange-rate normalizer scales
+  the AI contribution into ZKPoW-attempt-equivalents.
 
 ### Live fakenet
 

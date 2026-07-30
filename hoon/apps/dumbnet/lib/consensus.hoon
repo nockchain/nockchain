@@ -219,19 +219,26 @@
 ::  unchanged, so every block already on the chain keeps the accumulated work it
 ::  was accepted with.
 ::
-::  From AI activation on, EVERY block contributes the same amount whichever
-::  puzzle produced it (+dual-puzzle-block-work). Heaviness therefore does not
-::  read the pow artifact at all, and the two puzzles' shares of accumulated work
-::  are the ratio of their block rates, which each ASERT holds at that puzzle's
-::  own ideal-block-time.
+::  From AI activation on, heaviness is the expected work at the block's own
+::  target for the puzzle named by its pow artifact, priced in
+::  ZKPoW-attempt-equivalents at the +mac-equivalents-per-zk-attempt exchange
+::  rate. It therefore reads the pow artifact: a block whose target is cheap
+::  for its puzzle earns proportionally less, so neither puzzle's ASERT
+::  discount can subsidize a reorg. At the launch anchors both puzzles produce
+::  the same heaviness per second, so steady-state shares still track block
+::  rate as under the previous equal-weight rule.
 ::
 ::  Single source of truth for a block's work: validation heaviness AND the
 ::  finalized block's stored accumulated-work MUST both use it.
 ++  block-compute-work
   |=  pag=page:t
   ^-  bignum:bignum:t
+  =/  puzzle=?(%dumb-zkpow %ai-pow)
+    =/  pow-unit  ~(pow get:page:t pag)
+    ?~  pow-unit  %dumb-zkpow
+    (version-to-puzzle-type (pow-artifact-to-proof-version u.pow-unit))
   %+  block-work-at:page:t  ~(height get:page:t pag)
-  ~(target get:page:t pag)
+  [puzzle ~(target get:page:t pag)]
 ::
 ::  +block-id-to-proof-version: returns the proof version of an
 ::  already-accepted block. Post-activation versions are recorded in
@@ -553,8 +560,8 @@
 :::    +compute-target-ai-asert (validation rejects any other target as
 :::    %page-target-invalid). This deterministically:
 :::      - re-targets to the AI ASERT target from the parent's branch-local AI
-:::        lineage and recomputes accumulated-work with the shared per-block work
-:::        (+dual-puzzle-block-work, matching validation's +block-compute-work);
+:::        lineage and recomputes accumulated-work with the per-puzzle work
+:::        (+block-work-at, matching validation's +block-compute-work);
 :::      - rebuilds the coinbase from the start with +protocol-fund-address via
 :::        the same +new-with-fund-share the ZK candidate uses. `shares` is the
 :::        miner's coinbase split; fees are recovered from the ZK candidate's
@@ -586,7 +593,7 @@
   =/  ai-work=bignum:bignum:t
     %-  chunk:bignum:t
     %+  add  parent-work
-    (merge:bignum:t (block-work-at:page:t candidate-height ai-target))
+    (merge:bignum:t (block-work-at:page:t candidate-height %ai-pow ai-target))
   ::  The %ai-pow coinbase uses the same protocol-fund recipient as the ZK
   ::  candidate. Emission is fixed by height; fees are the ZK candidate's
   ::  coinbase total minus the subsidy, so the miner-side split reproduces the

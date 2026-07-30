@@ -36,7 +36,7 @@
   %*  .  default-bc
     v1-phase  1.000.000
     ::  v0-only: v1 never activates, so the dual-puzzle regime must not either.
-    ::  From +dual-puzzle-phase every block weighs the same, and only the v1
+    ::  From +dual-puzzle-phase heaviness is priced per puzzle, and only the v1
     ::  candidate builder knows that -- a v0 page at that height would store an
     ::  accumulated-work validation rejects. +load asserts the ordering.
     phase.zk-asert-post-ai  2.000.000
@@ -102,7 +102,7 @@
     coinbase-timelock-min  0
     v1-phase  1.000.000
     ::  v0-only: v1 never activates, so the dual-puzzle regime must not either.
-    ::  From +dual-puzzle-phase every block weighs the same, and only the v1
+    ::  From +dual-puzzle-phase heaviness is priced per puzzle, and only the v1
     ::  candidate builder knows that -- a v0 page at that height would store an
     ::  accumulated-work validation rejects. +load asserts the ordering.
     phase.zk-asert-post-ai  2.000.000
@@ -195,7 +195,7 @@
     ::  Simultaneous with the ZK re-pin; +load asserts it.
     phase.ai-asert                         2
     anchor-height.zk-asert-post-ai         1
-    ::  Anchors are the ZK/AI equal-weight pair (zk == ai * 2^64), placed where
+    ::  Anchors are the ZK/AI calibration pair (zk == ai * 2^64), placed where
     ::  production places them: the AI anchor must stay at or below
     ::  +max-ai-target-atom or every AI block at it is rejected for
     ::  shape-scaling overflow. `div ... (bex 29)` puts ZK at ~2^291 and AI at
@@ -222,7 +222,7 @@
     blocks-per-epoch               1.000.000
     ::  All four dual-puzzle phases sit together: +dual-puzzle-asert-phase is the
     ::  LAST of them, so leaving the post-AI ZK / AI ASERT phases at their mainnet
-    ::  defaults would put the equal-weight regime 114.300 blocks above any test
+    ::  defaults would put the per-puzzle-priced regime 114.300 blocks above any test
     ::  chain. Mainnet has all four at 114.300 for the same reason.
     phase.zk-asert-post-ai         2
     anchor-height.zk-asert-post-ai   1
