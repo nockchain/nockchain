@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn parses_imports_after_comment_lines_in_import_block() {
         let source = concat!(
-            "/=  a  /common/a\n", ":: /=  skipped  /common/skipped\n", "/=  b  /common/b\n",
+            "/=  a  /common/a\n", "\n", ":: /=  skipped  /common/skipped\n", "/=  b  /common/b\n",
             "::  file docs\n", "|%\n", "--\n",
         );
         let imports = parse_leading_imports(source).expect("imports parse");
