@@ -869,8 +869,15 @@ enum CanonicalOutcome {
     Joined(Result<GrindResult, tokio::task::JoinError>),
 }
 
+/// Borrows the worker handle instead of taking it: inside `tokio::select!`
+/// this branch's future is dropped whenever another branch wins first, and a
+/// take-based version would detach the grind task on every losing race — the
+/// detached prove keeps running (multi-GB, ~30s) while the loop spawns a new
+/// grind per candidate, so a candidate storm accumulates concurrent proves
+/// until memory is exhausted. The handle is only consumed (`worker.take()` by
+/// the caller's match arms) when this branch actually wins.
 async fn await_canonical_worker(worker: &mut Option<JoinHandle<GrindResult>>) -> CanonicalOutcome {
-    match worker.take() {
+    match worker.as_mut() {
         Some(h) => CanonicalOutcome::Joined(h.await),
         None => CanonicalOutcome::None,
     }
@@ -1097,6 +1104,12 @@ pub async fn run_canonical(
                     }));
                 }
                 joined = await_canonical_worker(&mut worker) => {
+                    // A Joined outcome means the grind task resolved; consume the
+                    // handle so the next poll does not re-await the completed task
+                    // and replay the outcome.
+                    if matches!(joined, CanonicalOutcome::Joined(_)) {
+                        worker = None;
+                    }
                     match joined {
                         CanonicalOutcome::None => {
                             tokio::time::sleep(Duration::from_millis(50)).await;
