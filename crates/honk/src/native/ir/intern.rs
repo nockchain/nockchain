@@ -1064,6 +1064,21 @@ mod tests {
         assert_eq!(tab.distinct, 2, "only the atom and the cell are distinct");
     }
 
+    #[test]
+    fn arena_handles_are_one_word_copies_with_dense_ids() {
+        assert_eq!(
+            std::mem::size_of::<Rc<Type>>(),
+            std::mem::size_of::<usize>()
+        );
+        let mut tab = TypeTable::new();
+        let atom = tab.intern_shallow(atom());
+        let noun = tab.intern_shallow(Type::Noun);
+        let atom_copy = atom;
+        assert!(Rc::ptr_eq(&atom, &atom_copy));
+        assert_eq!(atom.arena_id(), TypeId(0));
+        assert_eq!(noun.arena_id(), TypeId(1));
+    }
+
     // The subject-deepening fix in miniature: a fully-duplicated balanced cell
     // tree of depth D has 2^(D+1)-1 structural nodes but only D+1 distinct after
     // hash-consing — O(2^n) → O(n).
