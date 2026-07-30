@@ -24,11 +24,5 @@ exec env RUST_LOG="${RUST_LOG:-info}" "$node_bin" \
     --fakenet \
     --fakenet-log-difficulty 1 \
     --fakenet-pow-len 2 \
-    --fakenet-asert-phase 1 \
-    --fakenet-asert-anchor-height 0 \
-    --fakenet-asert-anchor-target-bex 291 \
-    --fakenet-ai-pow-activation-height 1 \
-    --fakenet-ai-asert-phase 1 \
-    --fakenet-ai-asert-anchor-height 0 \
-    --fakenet-ai-asert-anchor-target-bex 232 \
+    --fakenet-ai-pow \
     --fakenet-update-candidate-interval-secs 120
