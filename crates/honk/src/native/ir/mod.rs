@@ -18,6 +18,7 @@ pub mod formula;
 pub mod formula_dag;
 pub(crate) mod intern;
 pub mod leaf;
+pub(crate) mod semi_dag;
 pub(crate) mod ty;
 pub(crate) mod value_dag;
 

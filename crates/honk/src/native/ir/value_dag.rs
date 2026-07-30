@@ -178,7 +178,6 @@ impl ValueArena {
         self.entry(id).noun
     }
 
-    #[cfg(test)]
     pub fn children(&self, id: ValueId) -> Option<(ValueId, ValueId)> {
         match self.entry(id).kind {
             ValueKind::Atom => None,

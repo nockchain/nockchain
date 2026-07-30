@@ -9,6 +9,7 @@ use num_bigint::BigUint;
 
 use crate::errors::Result;
 use crate::native::ir::formula_dag::FormulaId;
+use crate::native::ir::semi_dag::SemiId;
 use crate::native::ir::ty::{Type as NTy, TypeRef as NRc};
 use crate::native::ut::{noun_eq, Ut};
 
@@ -165,11 +166,11 @@ pub type HoldRepoCoreMemoKey = (u32, u32, u32, u32, u32, u64);
 #[derive(Clone)]
 pub struct BranSemiCacheEntry {
     // Native re-key (Phase-2 tail): the bran subject + the active hold scope are
-    // interned native types, matched by `NRc::ptr_eq`. The `semi` output stays a
-    // seminoun (the semi_* algebra is noun-based).
+    // interned native types, matched by `NRc::ptr_eq`. The output is a compact
+    // identity in the compile-local native seminoun arena.
     pub sut: NRc<NTy>,
     pub seen_holds: Vec<NRc<NTy>>,
-    pub semi: Noun,
+    pub semi: SemiId,
 }
 
 pub struct BoundaryMemoSet {
