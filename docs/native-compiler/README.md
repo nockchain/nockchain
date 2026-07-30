@@ -34,6 +34,10 @@ bazel test //open/crates/honk/test-assets:hoon_138_arbitrary_parity_test
 bazel test //open/assets/native:kernel_parity_test
 ```
 
+Performance design notes:
+
+- [`ARENA-HOON-IR.md`](ARENA-HOON-IR.md) describes the scope-local `HoonId` graph, nested lowering arenas, lifetime invariants, and acceptance gates.
+
 Ignored tests do not validate parity in normal Cargo runs. If an ignored heavy
 parity test is the evidence for a change, run it explicitly with `--ignored` and
 record that fact in the change notes.

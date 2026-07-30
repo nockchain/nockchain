@@ -3,6 +3,9 @@
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hasher;
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::sync::Arc;
 
 use hatch::ast::hoon::{
@@ -141,6 +144,149 @@ struct CacheContextKey {
     memo: MemoContextKey,
 }
 
+/// Dense, scope-local identity for a parsed Hoon node.
+///
+/// IDs are valid only while the outermost `mint`/`play` call that registered
+/// the borrowed AST is active. Compiler sidecars use this index instead of
+/// independently hashing the same AST address for every property.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct HoonId(u32);
+
+#[derive(Default)]
+struct HoonArenaEntry {
+    source: Option<NonNull<Hoon>>,
+    signature: Option<u64>,
+    children: std::ops::Range<u32>,
+    noun: Option<Noun>,
+    // `Some(None)` is a cached negative result: canonical `open` returned the
+    // node unchanged. `None` means the node has not been opened yet.
+    opened: Option<Option<Arc<Hoon>>>,
+}
+
+#[derive(Default)]
+struct HoonArena {
+    by_ptr: FastHashMap<usize, HoonId>,
+    entries: Vec<HoonArenaEntry>,
+    children: Vec<HoonId>,
+}
+
+struct HoonArenaBuildNode {
+    ptr: usize,
+    signature: u64,
+    children: SmallVec<[usize; 4]>,
+}
+
+impl HoonArena {
+    fn clear(&mut self) {
+        self.by_ptr.clear();
+        self.entries.clear();
+        self.children.clear();
+    }
+
+    fn register(&mut self, nodes: Vec<HoonArenaBuildNode>) {
+        self.clear();
+        self.entries.reserve(nodes.len());
+        self.by_ptr.reserve(nodes.len());
+        for node in &nodes {
+            let id = HoonId(
+                u32::try_from(self.entries.len())
+                    .expect("one Hoon compiler scope cannot contain more than u32::MAX nodes"),
+            );
+            self.by_ptr.insert(node.ptr, id);
+            self.entries.push(HoonArenaEntry {
+                source: NonNull::new(node.ptr as *mut Hoon),
+                signature: Some(node.signature),
+                children: 0..0,
+                noun: None,
+                opened: None,
+            });
+        }
+        for (index, node) in nodes.into_iter().enumerate() {
+            let start = u32::try_from(self.children.len())
+                .expect("one Hoon compiler scope cannot contain more than u32::MAX edges");
+            self.children
+                .extend(node.children.into_iter().map(|ptr| self.by_ptr[&ptr]));
+            let end = u32::try_from(self.children.len())
+                .expect("one Hoon compiler scope cannot contain more than u32::MAX edges");
+            self.entries[index].children = start..end;
+        }
+    }
+
+    fn register_unsigned_root(&mut self, ptr: usize) {
+        self.clear();
+        self.by_ptr.insert(ptr, HoonId(0));
+        self.entries.push(HoonArenaEntry {
+            source: NonNull::new(ptr as *mut Hoon),
+            children: 0..0,
+            ..HoonArenaEntry::default()
+        });
+    }
+
+    #[inline]
+    fn id_for(&self, hoon: &Hoon) -> Option<HoonId> {
+        self.by_ptr.get(&(hoon as *const Hoon as usize)).copied()
+    }
+
+    #[inline]
+    fn entry(&self, id: HoonId) -> &HoonArenaEntry {
+        &self.entries[id.0 as usize]
+    }
+
+    #[inline]
+    fn entry_mut(&mut self, id: HoonId) -> &mut HoonArenaEntry {
+        &mut self.entries[id.0 as usize]
+    }
+
+    #[inline]
+    fn source_ptr(&self, id: HoonId) -> *const Hoon {
+        self.entry(id)
+            .source
+            .expect("active HoonId must have a source node")
+            .as_ptr()
+    }
+
+    #[inline]
+    fn child(&self, id: HoonId, index: usize) -> HoonId {
+        let range = self.entry(id).children.clone();
+        self.children[range.start as usize + index]
+    }
+
+    #[inline]
+    #[cfg(test)]
+    fn child_count(&self, id: HoonId) -> usize {
+        self.entry(id).children.len()
+    }
+}
+
+struct HoonAstScope<'ut, 'slab, 'root> {
+    ut: &'ut mut Ut<'slab>,
+    pushed: bool,
+    root: HoonId,
+    // Keeps every raw source pointer in `hoon_arena` bounded by the borrow of
+    // the root whose descendants were registered.
+    _root: PhantomData<&'root Hoon>,
+}
+
+impl<'ut, 'slab, 'root> Deref for HoonAstScope<'ut, 'slab, 'root> {
+    type Target = Ut<'slab>;
+
+    fn deref(&self) -> &Self::Target {
+        self.ut
+    }
+}
+
+impl DerefMut for HoonAstScope<'_, '_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.ut
+    }
+}
+
+impl Drop for HoonAstScope<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.ut.leave_hoon_ast_scope(self.pushed);
+    }
+}
+
 pub struct Ut<'a> {
     pub slab: &'a mut NounSlab,
     // Owned per-compile native-IR state (intern table + decode/encode memos +
@@ -186,17 +332,16 @@ pub struct Ut<'a> {
     pub decoded_hold_hoon_cache_raw: HashMap<u64, Arc<Hoon>>,
     pub decoded_hold_hoon_cache_order: VecDeque<u64>,
     pub decoded_hold_hoon_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
-    // A top-level mint/play call borrows its input for the whole recursive
-    // compiler scope. Descendant addresses are stable only inside that scope;
-    // generated lowering temporaries are deliberately never registered.
+    // Arena IR for the borrowed top-level Hoon tree. Address lookup happens
+    // once at a compiler boundary; signatures, canonical nouns, and opened
+    // forms are then dense HoonId-indexed properties. Generated lowering
+    // temporaries get a nested arena for the duration of their shorter borrow.
     hoon_ast_scope_depth: usize,
-    hoon_ast_stable_ptrs: FastHashSet<usize>,
-    // Spot-sensitive structural identity, computed compositionally for every
-    // node during the root's single registration traversal.
-    hoon_ast_signature_by_ptr: FastHashMap<usize, u64>,
-    // Slab-bound noun representation for each stable native node. A Ut owns one
-    // slab for one compile, so these nouns remain valid for the cache lifetime.
-    hoon_ast_noun_by_ptr: FastHashMap<usize, Noun>,
+    hoon_arena: HoonArena,
+    // Compiler-generated lowerings have shorter borrows than their parsed
+    // parent. They receive their own dense arena and suspend the parent here;
+    // LIFO scope guards restore the previous graph without pointer probing.
+    hoon_arena_stack: Vec<HoonArena>,
     pub hoon_ast_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
     pub hoon_ast_ptr_cache_order: VecDeque<usize>,
     pub hold_memo: HoldMemoSet,
@@ -289,6 +434,14 @@ pub struct Sig64 {
     // Besides avoiding quadratic subtree rescans, this records the digest for
     // every native AST node reached through Spec/Tome/etc. in one traversal.
     hoon_signatures: FastHashMap<usize, u64>,
+    // Post-order is also the arena layout: children precede parents, keeping
+    // related compiler metadata close while retaining O(1) signature reuse.
+    hoon_order: Vec<usize>,
+    // Direct Hoon edges in the native compiler graph. Hoon nodes nested in
+    // Spec/Type helper payloads remain first-class children of the enclosing
+    // gene, so every recursive gene is represented by a HoonId.
+    hoon_children: FastHashMap<usize, SmallVec<[usize; 4]>>,
+    hoon_parent: Option<usize>,
 }
 
 impl Sig64 {
@@ -302,6 +455,9 @@ impl Sig64 {
             state: Self::OFFSET,
             include_dbug_spot,
             hoon_signatures: Default::default(),
+            hoon_order: Vec::new(),
+            hoon_children: Default::default(),
+            hoon_parent: None,
         }
     }
 
@@ -372,14 +528,23 @@ impl Sig64 {
             .copied()
     }
 
-    fn hoon_signatures_spot_sensitive(hoon: &Hoon) -> Option<(u64, FastHashMap<usize, u64>)> {
+    fn hoon_signatures_spot_sensitive(hoon: &Hoon) -> Option<(u64, Vec<HoonArenaBuildNode>)> {
         let mut sig = Self::new_with_dbug_spots(true);
         sig.write_hoon(hoon)?;
         let root = sig
             .hoon_signatures
             .get(&(hoon as *const Hoon as usize))
             .copied()?;
-        Some((root, sig.hoon_signatures))
+        let nodes = sig
+            .hoon_order
+            .into_iter()
+            .map(|ptr| HoonArenaBuildNode {
+                ptr,
+                signature: sig.hoon_signatures[&ptr],
+                children: sig.hoon_children.remove(&ptr).unwrap_or_default(),
+            })
+            .collect();
+        Some((root, nodes))
     }
 
     fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
@@ -1193,6 +1358,10 @@ impl Sig64 {
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
         let ptr = hoon as *const Hoon as usize;
+        let enclosing_hoon = self.hoon_parent;
+        if let Some(parent) = enclosing_hoon {
+            self.hoon_children.entry(parent).or_default().push(ptr);
+        }
         if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
             self.write_byte(0xff);
             self.write_u64(signature);
@@ -1204,6 +1373,7 @@ impl Sig64 {
         // a root computes each descendant exactly once rather than hashing the
         // same suffix again at every recursive mint/play/mull boundary.
         let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
+        self.hoon_parent = Some(ptr);
         match hoon {
             Hoon::Pair(a, b) => {
                 self.write_byte(0x01);
@@ -1896,7 +2066,9 @@ impl Sig64 {
             }
         }
         let signature = self.state;
+        self.hoon_parent = enclosing_hoon;
         self.hoon_signatures.insert(ptr, signature);
+        self.hoon_order.push(ptr);
         self.state = parent_state;
         self.write_byte(0xff);
         self.write_u64(signature);
@@ -1941,9 +2113,8 @@ impl<'a> Ut<'a> {
             decoded_hold_hoon_cache_order: VecDeque::new(),
             decoded_hold_hoon_ptr_cache: HashMap::new(),
             hoon_ast_scope_depth: 0,
-            hoon_ast_stable_ptrs: Default::default(),
-            hoon_ast_signature_by_ptr: Default::default(),
-            hoon_ast_noun_by_ptr: Default::default(),
+            hoon_arena: Default::default(),
+            hoon_arena_stack: Vec::new(),
             hoon_ast_ptr_cache: HashMap::new(),
             hoon_ast_ptr_cache_order: VecDeque::new(),
             hold_memo: Default::default(),
@@ -2744,51 +2915,65 @@ impl<'a> Ut<'a> {
         hash
     }
 
-    fn enter_hoon_ast_scope(&mut self, gen: &Hoon) -> bool {
-        let outermost = self.hoon_ast_scope_depth == 0;
-        if outermost {
-            debug_assert!(self.hoon_ast_stable_ptrs.is_empty());
-            debug_assert!(self.hoon_ast_signature_by_ptr.is_empty());
-            debug_assert!(self.hoon_ast_noun_by_ptr.is_empty());
-            if let Some((_root_signature, signatures)) = Sig64::hoon_signatures_spot_sensitive(gen)
-            {
-                for (ptr, signature) in signatures {
-                    self.hoon_ast_stable_ptrs.insert(ptr);
-                    self.hoon_ast_signature_by_ptr.insert(ptr, signature);
+    fn enter_hoon_ast_scope(&mut self, gen: &Hoon) -> (bool, HoonId) {
+        let (pushed, root) = match self.hoon_arena.id_for(gen) {
+            Some(root) => (false, root),
+            None => {
+                let mut next = HoonArena::default();
+                if let Some((_root_signature, nodes)) = Sig64::hoon_signatures_spot_sensitive(gen) {
+                    next.register(nodes);
+                } else {
+                    next.register_unsigned_root(Self::hoon_ast_ptr_key(gen));
                 }
-            } else {
-                self.hoon_ast_stable_ptrs
-                    .insert(Self::hoon_ast_ptr_key(gen));
+                let root = next
+                    .id_for(gen)
+                    .expect("new Hoon arena must contain its root");
+                let previous = std::mem::replace(&mut self.hoon_arena, next);
+                self.hoon_arena_stack.push(previous);
+                (true, root)
             }
-        }
+        };
         self.hoon_ast_scope_depth += 1;
-        outermost
+        (pushed, root)
     }
 
-    fn leave_hoon_ast_scope(&mut self, outermost: bool) {
-        self.hoon_ast_scope_depth -= 1;
-        if outermost {
-            debug_assert_eq!(self.hoon_ast_scope_depth, 0);
-            // The borrowed root may die or its address may be reused after the
-            // public call. Structural boundary caches keep their copied u64
-            // signatures, while all raw-address sidecar state ends here.
-            self.hoon_ast_stable_ptrs.clear();
-            self.hoon_ast_signature_by_ptr.clear();
-            self.hoon_ast_noun_by_ptr.clear();
+    fn hoon_ast_scope<'ut, 'root>(&'ut mut self, gen: &'root Hoon) -> HoonAstScope<'ut, 'a, 'root> {
+        let (pushed, root) = self.enter_hoon_ast_scope(gen);
+        HoonAstScope {
+            ut: self,
+            pushed,
+            root,
+            _root: PhantomData,
         }
+    }
+
+    fn leave_hoon_ast_scope(&mut self, pushed: bool) {
+        self.hoon_ast_scope_depth -= 1;
+        if pushed {
+            // The borrowed root may die or its address may be reused after this
+            // call. Drop its graph before restoring the longer-lived parent.
+            self.hoon_arena = self
+                .hoon_arena_stack
+                .pop()
+                .expect("every pushed Hoon arena must have a suspended parent");
+        }
+    }
+
+    fn mint_cache_signature_for(&mut self, gen: &Hoon, id: Option<HoonId>) -> Option<u64> {
+        // `mint` returns formula nouns with `%spot` hints, so cache keys must include debug spots.
+        if let Some(id) = id.or_else(|| self.hoon_arena.id_for(gen)) {
+            return self.hoon_arena.entry(id).signature;
+        }
+        Sig64::hoon_signature_spot_sensitive(gen)
+    }
+
+    #[inline]
+    fn mint_cache_signature_id(&self, id: HoonId) -> Option<u64> {
+        self.hoon_arena.entry(id).signature
     }
 
     fn mint_cache_signature(&mut self, gen: &Hoon) -> Option<u64> {
-        // `mint` returns formula nouns with `%spot` hints, so cache keys must include debug spots.
-        let ptr = Self::hoon_ast_ptr_key(gen);
-        if let Some(signature) = self.hoon_ast_signature_by_ptr.get(&ptr) {
-            return Some(*signature);
-        }
-        let signature = Sig64::hoon_signature_spot_sensitive(gen)?;
-        if self.hoon_ast_stable_ptrs.contains(&ptr) {
-            self.hoon_ast_signature_by_ptr.insert(ptr, signature);
-        }
-        Some(signature)
+        self.mint_cache_signature_for(gen, None)
     }
 
     fn strip_dbug_wrapper_noun(mut hoon_noun: Noun, space: &NounSpace) -> Noun {
@@ -3862,13 +4047,37 @@ impl<'a> Ut<'a> {
     }
 
     pub fn mint(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
-        let outermost = self.enter_hoon_ast_scope(gen);
-        let result = match self.mint_inner(sut, gol, gen) {
+        let mut scope = self.hoon_ast_scope(gen);
+        let root = scope.root;
+        let result = scope.mint_arena(sut, gol, root);
+        match result {
+            Ok(value) => Ok(value),
+            Err(err) => Err(scope.decorate_error(err)),
+        }
+    }
+
+    fn mint_arena(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, id: HoonId) -> Result<(NRc<NTy>, Noun)> {
+        let source = self.hoon_arena.source_ptr(id);
+        // SAFETY: the outermost mint/play scope holds the caller's root borrow
+        // until `leave_hoon_ast_scope`; registration visits only descendants of
+        // that root, and nested calls cannot clear the arena. The pointer is
+        // read-only, and the arena never mutates the borrowed AST.
+        let gen = unsafe { &*source };
+        self.mint_inner(sut, gol, gen, id)
+    }
+
+    fn mint_arena_child(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        parent: HoonId,
+        index: usize,
+    ) -> Result<(NRc<NTy>, Noun)> {
+        let child = self.hoon_arena.child(parent, index);
+        match self.mint_arena(sut, gol, child) {
             Ok(value) => Ok(value),
             Err(err) => Err(self.decorate_error(err)),
-        };
-        self.leave_hoon_ast_scope(outermost);
-        result
+        }
     }
 
     /// Noun-bridged `mint` for not-yet-flipped callers (C-final.1a): lift sut/gol
@@ -3884,13 +4093,19 @@ impl<'a> Ut<'a> {
         Ok((ty_noun, formula))
     }
 
-    fn mint_inner(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    fn mint_inner(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+        gen_id: HoonId,
+    ) -> Result<(NRc<NTy>, Noun)> {
         // ATOMIC FLIP (C-final.1a): mint reads/returns the native enum (type slot;
         // the formula slot stays Noun). C-final.1b: the mint boundary cache is now
         // native-re-keyed on the interned (sut, gol) `Rc` pointers, so we no
         // longer lower sut/gol just to compute the cache key. C-final.2: play now
         // takes a native subject too, so mint no longer lowers sut for play.
-        let cache_sig = self.mint_cache_signature(gen);
+        let cache_sig = self.mint_cache_signature_id(gen_id);
         if let Some(gen_sig) = cache_sig {
             if let Some(cached) = self.mint_cache_lookup(&sut, &gol, gen_sig)? {
                 return Ok(cached);
@@ -3921,11 +4136,11 @@ impl<'a> Ut<'a> {
         let cache_sut = sut.clone();
         let cache_gol = gol.clone();
         let result = match gen {
-            Hoon::Pair(p, q) => {
+            Hoon::Pair(_, _) => {
                 let gol_head = cons_noun(&mut self.cx);
-                let (t_head, f_head) = self.mint(sut.clone(), gol_head, p)?;
+                let (t_head, f_head) = self.mint_arena_child(sut.clone(), gol_head, gen_id, 0)?;
                 let gol_tail = cons_noun(&mut self.cx);
-                let (t_tail, f_tail) = self.mint(sut.clone(), gol_tail, q)?;
+                let (t_tail, f_tail) = self.mint_arena_child(sut.clone(), gol_tail, gen_id, 1)?;
                 let ty = cons_cell(&mut self.cx, t_head, t_tail);
                 let ty = self.nice(sut, gol, ty)?;
                 let formula = cons(self.slab, f_head, f_tail)?;
@@ -3947,7 +4162,7 @@ impl<'a> Ut<'a> {
             Hoon::Dbug(spot, inner) => self.mint_dbug(sut, gol, spot, inner),
             Hoon::Note(note, inner) => self.mint_note(sut, gol, note, inner),
             Hoon::Lost(_) => self.mint_lost(sut, gol),
-            Hoon::TisGar(p, q) => self.mint_tsgr(sut, gol, p, q),
+            Hoon::TisGar(_, _) => self.mint_tsgr_arena(sut, gol, gen_id),
             Hoon::TisGal(_, _) | Hoon::TisHep(_, _) | Hoon::TisLus(_, _) => {
                 self.mint_opened(sut, gol, gen)
             }
@@ -4207,15 +4422,32 @@ impl<'a> Ut<'a> {
     }
 
     pub fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
-        let outermost = self.enter_hoon_ast_scope(gen);
+        let mut scope = self.hoon_ast_scope(gen);
         // Canonical ++play runs with vet disabled for the entire evaluation
         // scope; restore it afterward (safe save/restore — see with_vet_off).
         // ATOMIC FLIP (C-final.2): play TAKES native sut and RETURNS native
         // Rc<Type>. No compile path lowers the deepening subject to a noun for
         // play anymore — the subject threads natively (the O(N^2)->O(N) win).
-        let result = self.with_vet_off(|ut| ut.play_inner(sut, gen));
-        self.leave_hoon_ast_scope(outermost);
-        result
+        let root = scope.root;
+        scope.with_vet_off(|ut| ut.play_arena(sut, root))
+    }
+
+    fn play_arena(&mut self, sut: NRc<NTy>, id: HoonId) -> Result<NRc<NTy>> {
+        let source = self.hoon_arena.source_ptr(id);
+        // SAFETY: identical scope invariant to `mint_arena`; this is an
+        // immutable descendant pointer registered under the active root borrow.
+        let gen = unsafe { &*source };
+        self.play_inner(sut, gen, id)
+    }
+
+    fn play_arena_child(
+        &mut self,
+        sut: NRc<NTy>,
+        parent: HoonId,
+        index: usize,
+    ) -> Result<NRc<NTy>> {
+        let child = self.hoon_arena.child(parent, index);
+        self.play_arena(sut, child)
     }
 
     /// Noun-input/noun-output bridge for external callers that still hold a noun
@@ -4227,12 +4459,12 @@ impl<'a> Ut<'a> {
         Ok(live_to_noun(&mut self.cx, &r, self.slab))
     }
 
-    fn play_inner(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+    fn play_inner(&mut self, sut: NRc<NTy>, gen: &Hoon, gen_id: HoonId) -> Result<NRc<NTy>> {
         let result = {
             match gen {
-                Hoon::Pair(p, q) => {
-                    let head = self.play(sut.clone(), p)?;
-                    let tail = self.play(sut, q)?;
+                Hoon::Pair(_, _) => {
+                    let head = self.play_arena_child(sut.clone(), gen_id, 0)?;
+                    let tail = self.play_arena_child(sut, gen_id, 1)?;
                     Ok(cons_cell(&mut self.cx, head, tail))
                 }
                 Hoon::Rock(aura, expr) => Ok(self.play_rock(aura, expr)),
@@ -4241,9 +4473,9 @@ impl<'a> Ut<'a> {
                 Hoon::Dbug(_, inner) => self.play_dbug(sut, inner),
                 Hoon::Note(note, inner) => self.play_note(sut, note, inner),
                 Hoon::Lost(_) => Ok(cons_void(&mut self.cx)),
-                Hoon::TisGar(p, q) => {
-                    let next = self.play(sut, p)?;
-                    self.play(next, q)
+                Hoon::TisGar(_, _) => {
+                    let next = self.play_arena_child(sut, gen_id, 0)?;
+                    self.play_arena_child(next, gen_id, 1)
                 }
                 Hoon::TisGal(_, _) | Hoon::TisHep(_, _) | Hoon::TisLus(_, _) => {
                     self.play_opened(sut, gen)
@@ -4496,16 +4728,15 @@ impl<'a> Ut<'a> {
         result
     }
 
-    fn mint_tsgr(
+    fn mint_tsgr_arena(
         &mut self,
         sut: NRc<NTy>,
         gol: NRc<NTy>,
-        p: &Hoon,
-        q: &Hoon,
+        id: HoonId,
     ) -> Result<(NRc<NTy>, Noun)> {
         let goal = cons_noun(&mut self.cx);
-        let (p_ty, p_formula) = self.mint(sut, goal, p)?;
-        let (q_ty, q_formula) = self.mint(p_ty, gol, q)?;
+        let (p_ty, p_formula) = self.mint_arena_child(sut, goal, id, 0)?;
+        let (q_ty, q_formula) = self.mint_arena_child(p_ty, gol, id, 1)?;
         let formula = comb(self.slab, p_formula, q_formula)?;
         Ok((q_ty, formula))
     }
@@ -7411,6 +7642,15 @@ impl<'a> Ut<'a> {
             let opened = open(gen.clone());
             return (&opened != gen).then(|| Arc::new(opened));
         };
+        if let Some(id) = self.hoon_arena.id_for(gen) {
+            if let Some(cached) = &self.hoon_arena.entry(id).opened {
+                return cached.clone();
+            }
+            let opened = open(gen.clone());
+            let cached = (&opened != gen).then(|| Arc::new(opened));
+            self.hoon_arena.entry_mut(id).opened = Some(cached.clone());
+            return cached;
+        }
         let ptr = Self::hoon_ast_ptr_key(gen);
         if let Some((cached_sig, cached)) = self.open_cache.get(&ptr) {
             if *cached_sig == sig {
@@ -8411,15 +8651,18 @@ impl<'a> Ut<'a> {
                 return noun;
             }
         }
-        if !self.hoon_ast_stable_ptrs.contains(&ptr) {
+        let Some(id) = self.hoon_arena.id_for(gen) else {
             return hoon_to_noun(self.slab, gen);
-        }
-        if let Some(noun) = self.hoon_ast_noun_by_ptr.get(&ptr).copied() {
+        };
+        if let Some(noun) = self.hoon_arena.entry(id).noun {
             return noun;
         }
-        let noun_cache = &mut self.hoon_ast_noun_by_ptr;
+        let by_ptr = &self.hoon_arena.by_ptr;
+        let entries = &mut self.hoon_arena.entries;
         hoon_to_noun_with_cache(self.slab, gen, |ptr, noun| {
-            noun_cache.insert(ptr, noun);
+            if let Some(id) = by_ptr.get(&ptr) {
+                entries[id.0 as usize].noun = Some(noun);
+            }
         })
     }
 

@@ -842,8 +842,11 @@ fn active_rest_fan_context_partitions_context_sensitive_native_ut_caches() {
 #[test]
 fn hoon_ast_identity_is_scoped_to_the_borrowed_root_lifetime() {
     let root = Hoon::Pair(
-        Box::new(Hoon::Axis(2)),
-        Box::new(Hoon::Pair(Box::new(Hoon::Axis(6)), Box::new(Hoon::ZapZap))),
+        Box::new(Hoon::Axis(2u64.into())),
+        Box::new(Hoon::Pair(
+            Box::new(Hoon::Axis(6u64.into())),
+            Box::new(Hoon::ZapZap),
+        )),
     );
     let child = match &root {
         Hoon::Pair(child, _) => child.as_ref(),
@@ -857,25 +860,75 @@ fn hoon_ast_identity_is_scoped_to_the_borrowed_root_lifetime() {
     let mut slab = NounSlab::new();
     let mut ut = Ut::new(&mut slab);
 
-    let outermost = ut.enter_hoon_ast_scope(&root);
+    let (outermost, entered_root_id) = ut.enter_hoon_ast_scope(&root);
     assert!(outermost);
     assert_eq!(ut.hoon_ast_scope_depth, 1);
-    assert_eq!(ut.hoon_ast_signature_by_ptr.len(), 5);
-    assert!(ut
-        .hoon_ast_signature_by_ptr
-        .contains_key(&Ut::hoon_ast_ptr_key(child)));
+    assert_eq!(ut.hoon_arena.entries.len(), 5);
+    let child_id = ut
+        .hoon_arena
+        .id_for(child)
+        .expect("borrowed child must have a dense arena identity");
+    assert!(ut.hoon_arena.entry(child_id).signature.is_some());
+    let child_noun = ut.hoon_noun_for_node(child);
+    assert_eq!(
+        ut.hoon_arena
+            .entry(child_id)
+            .noun
+            .map(|noun| unsafe { noun.as_raw() }),
+        Some(unsafe { child_noun.as_raw() })
+    );
+    let root_id = ut
+        .hoon_arena
+        .id_for(&root)
+        .expect("borrowed root must have a dense arena identity");
+    assert_eq!(entered_root_id, root_id);
+    assert_eq!(ut.hoon_arena.child_count(root_id), 2);
+    assert_eq!(ut.hoon_arena.child(root_id, 0), child_id);
+    let _ = ut.open_cached(&root);
+    assert!(
+        ut.hoon_arena.entry(root_id).opened.is_some(),
+        "positive and negative open results must both be dense arena properties"
+    );
 
-    let nested = ut.enter_hoon_ast_scope(child);
+    let (nested, entered_child_id) = ut.enter_hoon_ast_scope(child);
     assert!(!nested);
+    assert_eq!(entered_child_id, child_id);
     ut.leave_hoon_ast_scope(nested);
     assert_eq!(ut.hoon_ast_scope_depth, 1);
-    assert_eq!(ut.hoon_ast_signature_by_ptr.len(), 5);
+    assert_eq!(ut.hoon_arena.entries.len(), 5);
+
+    let lowered = Hoon::Pair(Box::new(Hoon::Axis(14u64.into())), Box::new(Hoon::ZapZap));
+    let (lowered_scope, lowered_id) = ut.enter_hoon_ast_scope(&lowered);
+    assert!(lowered_scope);
+    assert_eq!(ut.hoon_ast_scope_depth, 2);
+    assert_eq!(ut.hoon_arena.id_for(&lowered), Some(lowered_id));
+    assert!(ut.hoon_arena.id_for(&root).is_none());
+    ut.leave_hoon_ast_scope(lowered_scope);
+    assert_eq!(ut.hoon_ast_scope_depth, 1);
+    assert_eq!(ut.hoon_arena.id_for(&root), Some(root_id));
 
     ut.leave_hoon_ast_scope(outermost);
     assert_eq!(ut.hoon_ast_scope_depth, 0);
-    assert!(ut.hoon_ast_stable_ptrs.is_empty());
-    assert!(ut.hoon_ast_signature_by_ptr.is_empty());
-    assert!(ut.hoon_ast_noun_by_ptr.is_empty());
+    assert!(ut.hoon_arena.entries.is_empty());
+    assert!(ut.hoon_arena.by_ptr.is_empty());
+    assert!(ut.hoon_arena_stack.is_empty());
+}
+
+#[test]
+fn hoon_ast_arena_clears_on_unwind_before_the_root_can_drop() {
+    let root = Hoon::Pair(Box::new(Hoon::Axis(2u64.into())), Box::new(Hoon::ZapZap));
+    let mut slab = NounSlab::new();
+    let mut ut = Ut::new(&mut slab);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let scope = ut.hoon_ast_scope(&root);
+        assert_eq!(scope.hoon_arena.entries.len(), 3);
+        panic!("exercise Hoon arena unwind guard");
+    }));
+    assert!(unwind.is_err());
+    assert_eq!(ut.hoon_ast_scope_depth, 0);
+    assert!(ut.hoon_arena.entries.is_empty());
+    assert!(ut.hoon_arena.by_ptr.is_empty());
+    assert!(ut.hoon_arena_stack.is_empty());
 }
 
 #[test]
