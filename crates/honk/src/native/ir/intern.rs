@@ -21,14 +21,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::rc::Rc;
+use std::rc::Rc as SharedRc;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
 use num_bigint::BigUint;
 
 use super::leaf::Leaf;
-use super::ty::{tas, Garb, Type};
+use super::ty::{tas, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::noun_pair;
 
@@ -210,24 +210,24 @@ pub struct Context {
     live: LiveIntern,
 
     // --- encode memos ---
-    to_noun_memo: HashMap<usize, Noun>, // was TO_NOUN_MEMO
-    leaf_memo: HashMap<usize, Noun>,    // was LEAF_MEMO
+    to_noun_memo: HashMap<u32, Noun>, // was TO_NOUN_MEMO
+    leaf_memo: HashMap<usize, Noun>,  // was LEAF_MEMO
 
     // --- boundary caches (key/value tuples copied verbatim) ---
-    nest_cache: HashMap<(usize, usize, u8, u64), bool>, // NEST_CACHE
+    nest_cache: HashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
     #[allow(clippy::type_complexity)]
-    core_mint_cache: HashMap<(usize, usize, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
+    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mint_cache: HashMap<(usize, usize, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
+    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mull_cache: HashMap<(usize, usize, usize, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<(usize, usize, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(usize, BigUint, u8, u64), Noun>,   // FISH_CACHE
+    mull_cache: HashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
+    fuse_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
+    crop_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
+    fish_cache: HashMap<(u32, BigUint, u8, u64), Noun>, // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
     native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<usize>, Rc<Type>>,       // FORK_CACHE
+    fork_cache: HashMap<Vec<u32>, Rc<Type>>,         // FORK_CACHE
 
     // --- scope-precise fan key support (reachable %hold legs per type) ---
     // `legset_memo` maps an interned `Rc<Type>` pointer to the sorted-deduped set
@@ -235,7 +235,7 @@ pub struct Context {
     // Sound because `intern_node` hash-conses (ptr == structural identity), so the
     // legset is a pure function of the pointer; computed bottom-up over the Rc DAG
     // and memoized so each distinct node is visited once (O(1) amortized).
-    legset_memo: HashMap<usize, Rc<[u64]>>,
+    legset_memo: HashMap<u32, SharedRc<[u64]>>,
 }
 
 impl Context {
@@ -272,6 +272,13 @@ impl Default for Context {
     }
 }
 
+#[inline(always)]
+fn canonical_id(ty: &Rc<Type>) -> u32 {
+    ty.type_id()
+        .expect("native type algebra only accepts context-interned types")
+        .0
+}
+
 static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 /// Look up a memoized `cons_fork` result by its canonical option-pointer key.
@@ -285,25 +292,25 @@ static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// set_put_mug/slab_mug) PLUS a decode+jam of the treap leaf (native_of). This
 /// memo collapses the recurrence to O(1). Byte-exact: returns the SAME interned
 /// `Rc` the rebuild would. Cleared with the table by `Context::reset`.
-pub fn fork_cache_lookup(cx: &Context, key: &[usize]) -> Option<Rc<Type>> {
+pub fn fork_cache_lookup(cx: &Context, key: &[u32]) -> Option<Rc<Type>> {
     cx.fork_cache.get(key).cloned()
 }
 
 /// Store a `cons_fork` result keyed by its canonical option-pointer key.
-pub fn fork_cache_store(cx: &mut Context, key: Vec<usize>, fork: Rc<Type>) {
+pub fn fork_cache_store(cx: &mut Context, key: Vec<u32>, fork: Rc<Type>) {
     cx.fork_cache.insert(key, fork);
 }
 
 /// Look up the memoized reachable-leg set for an interned type pointer.
-/// `ptr` is `Rc::as_ptr(t) as usize`; the value is the sorted-deduped set of
+/// `ptr` is `canonical_id(t)`; the value is the sorted-deduped set of
 /// %hold leg-ids reachable from `t`. See `reachable_legs` in ut/mod.rs.
-pub fn legset_memo_lookup(cx: &Context, ptr: usize) -> Option<Rc<[u64]>> {
-    cx.legset_memo.get(&ptr).cloned()
+pub fn legset_memo_lookup(cx: &Context, id: u32) -> Option<SharedRc<[u64]>> {
+    cx.legset_memo.get(&id).cloned()
 }
 
 /// Store a memoized reachable-leg set for an interned type pointer.
-pub fn legset_memo_store(cx: &mut Context, ptr: usize, legs: Rc<[u64]>) {
-    cx.legset_memo.insert(ptr, legs);
+pub fn legset_memo_store(cx: &mut Context, id: u32, legs: SharedRc<[u64]>) {
+    cx.legset_memo.insert(id, legs);
 }
 
 /// Content-keyed `native_of` fast path (see `Context::native_of_mug_memo`).
@@ -338,8 +345,8 @@ pub fn core_mint_cache_lookup(
     placeholder: u64,
 ) -> Option<(Rc<Type>, Noun)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         tomes_sig,
         vet,
         poly,
@@ -366,8 +373,8 @@ pub fn core_mint_cache_store(
     formula: Noun,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         tomes_sig,
         vet,
         poly,
@@ -393,8 +400,8 @@ pub fn mint_cache_lookup(
     placeholder: u64,
 ) -> Option<(Rc<Type>, Noun)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         vet,
         gen_sig,
         fan,
@@ -419,8 +426,8 @@ pub fn mint_cache_store(
     formula: Noun,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
         vet,
         gen_sig,
         fan,
@@ -446,9 +453,9 @@ pub fn mull_cache_lookup(
     placeholder: u64,
 ) -> Option<(Rc<Type>, Rc<Type>)> {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
-        Rc::as_ptr(dox) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
+        canonical_id(dox),
         vet,
         gen_sig,
         fan,
@@ -474,9 +481,9 @@ pub fn mull_cache_store(
     q_ty: Rc<Type>,
 ) {
     let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(gol) as usize,
-        Rc::as_ptr(dox) as usize,
+        canonical_id(sut),
+        canonical_id(gol),
+        canonical_id(dox),
         vet,
         gen_sig,
         fan,
@@ -494,12 +501,7 @@ pub fn nest_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<bool> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.nest_cache.get(&key).copied()
 }
 
@@ -512,12 +514,7 @@ pub fn nest_cache_store(
     fan: u64,
     result: bool,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.nest_cache.insert(key, result);
 }
 
@@ -530,12 +527,7 @@ pub fn fuse_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.fuse_cache.get(&key).cloned()
 }
 
@@ -548,12 +540,7 @@ pub fn fuse_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.fuse_cache.insert(key, result);
 }
 
@@ -566,12 +553,7 @@ pub fn crop_cache_lookup(
     vet: u8,
     fan: u64,
 ) -> Option<Rc<Type>> {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.crop_cache.get(&key).cloned()
 }
 
@@ -584,12 +566,7 @@ pub fn crop_cache_store(
     fan: u64,
     result: Rc<Type>,
 ) {
-    let key = (
-        Rc::as_ptr(sut) as usize,
-        Rc::as_ptr(ref_) as usize,
-        vet,
-        fan,
-    );
+    let key = (canonical_id(sut), canonical_id(ref_), vet, fan);
     cx.crop_cache.insert(key, result);
 }
 
@@ -603,7 +580,7 @@ pub fn fish_cache_lookup(
     fan: u64,
 ) -> Option<Noun> {
     cx.fish_cache
-        .get(&(Rc::as_ptr(sut) as usize, axis.clone(), vet, fan))
+        .get(&(canonical_id(sut), axis.clone(), vet, fan))
         .copied()
 }
 
@@ -617,7 +594,7 @@ pub fn fish_cache_store(
     fan: u64,
     result: Noun,
 ) {
-    let key = (Rc::as_ptr(sut) as usize, axis.clone(), vet, fan);
+    let key = (canonical_id(sut), axis.clone(), vet, fan);
     cx.fish_cache.insert(key, result);
 }
 
@@ -642,7 +619,7 @@ pub fn live_enabled() -> bool {
 /// so the address is stable + not reused) and the bridges always lower into the
 /// one compile slab; reset per compile via `live_reset`.
 pub fn live_to_noun(cx: &mut Context, native: &Rc<Type>, dst: &mut NounSlab) -> Noun {
-    let ptr = Rc::as_ptr(native) as usize;
+    let ptr = canonical_id(native);
     if let Some(noun) = cx.to_noun_memo.get(&ptr).copied() {
         return noun;
     }
@@ -852,6 +829,9 @@ pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
 #[derive(Default)]
 pub struct TypeTable {
     buckets: HashMap<u64, Vec<Rc<Type>>>,
+    /// Stable ownership for canonical nodes. Handles point into these boxes and
+    /// therefore clone without touching a reference count.
+    slots: Vec<Box<TypeSlot<Type>>>,
     /// Total node-constructions seen by `intern` (the un-shared structural size).
     pub interned_calls: u64,
     /// Distinct canonical nodes retained (the hash-consed size).
@@ -942,7 +922,13 @@ impl TypeTable {
                 }
             }
         }
-        let rc = Rc::new(node);
+        let id = TypeId(
+            u32::try_from(self.slots.len())
+                .expect("one compiler context cannot contain more than u32::MAX type nodes"),
+        );
+        let slot = Box::new(TypeSlot::new(id, node));
+        let rc = Rc::from_arena_slot(&slot);
+        self.slots.push(slot);
         self.buckets.entry(h).or_default().push(Rc::clone(&rc));
         self.distinct += 1;
         rc
@@ -957,7 +943,7 @@ impl TypeTable {
 fn node_hash(t: &Type) -> u64 {
     let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
-    let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (Rc::as_ptr(rc) as usize).hash(h);
+    let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (canonical_id(rc)).hash(h);
     match t {
         Type::Void | Type::Noun => {}
         Type::Atom { aura, bits } => {

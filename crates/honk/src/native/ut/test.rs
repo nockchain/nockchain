@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::rc::{Rc, Rc as NRc};
 
 use hatch::ast::hoon::{BaseType, Hoon, NounExpr, ParsedAtom, Pint, Skin, Spec, Spot, Tome};
 use nockapp::noun::slab::NounSlab;
@@ -298,7 +297,7 @@ fn nest_cell_branch_resets_hold_seen_guards() {
     let mut memo = Default::default();
 
     assert!(
-        seen_sut_holds.insert_id(Rc::<NTy>::as_ptr(&hold_n) as u64),
+        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
         "seed insert should succeed"
     );
 
@@ -330,7 +329,7 @@ fn nest_hold_seen_guard_still_applies_outside_cell() {
     let mut gil = NestPairSet::new();
     let mut memo = Default::default();
     assert!(
-        seen_sut_holds.insert_id(Rc::<NTy>::as_ptr(&hold_n) as u64),
+        seen_sut_holds.insert_id(u64::from(hold_n.arena_id().0)),
         "seed insert should succeed"
     );
 
@@ -1327,7 +1326,7 @@ fn gain_atom_skin_hold_guard_is_structural() {
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
     let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(NRc::as_ptr(&hold_a_n) as u64), "seed guard");
+    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
     let out = ut
         .gain_atom_skin(sut, hold_b_n, "@", &mut seen)
         .expect("gain atom skin");
@@ -1356,7 +1355,7 @@ fn lose_leaf_skin_hold_guard_is_structural() {
     let hold_a_n = native_of(&mut ut.cx, hold_a, &ut.slab.noun_space()).expect("native hold_a");
     let hold_b_n = native_of(&mut ut.cx, hold_b, &ut.slab.noun_space()).expect("native hold_b");
     let mut seen: HashSet<u64> = HashSet::new();
-    assert!(seen.insert(NRc::as_ptr(&hold_a_n) as u64), "seed guard");
+    assert!(seen.insert(u64::from(hold_a_n.arena_id().0)), "seed guard");
     let out = ut
         .lose_leaf_skin(sut, hold_b_n, "@", &ParsedAtom::Small(7), &mut seen)
         .expect("lose leaf skin");

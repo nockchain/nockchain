@@ -82,8 +82,8 @@ impl<'a> Ut<'a> {
         hoon_noun: Noun,
     ) -> Result<bool> {
         if self.fire_wet_rib_raw.contains(&(
-            NRc::as_ptr(sut) as usize,
-            NRc::as_ptr(dox) as usize,
+            native_type_id_usize(sut),
+            native_type_id_usize(dox),
             unsafe { hoon_noun.as_raw() },
         )) {
             return Ok(true);
@@ -116,8 +116,8 @@ impl<'a> Ut<'a> {
             return Ok(());
         }
         self.fire_wet_rib_raw.insert((
-            NRc::as_ptr(&wet_core) as usize,
-            NRc::as_ptr(&dox) as usize,
+            native_type_id_usize(&wet_core),
+            native_type_id_usize(&dox),
             unsafe { hoon_identity.as_raw() },
         ));
         self.fire_wet_rib
@@ -135,8 +135,8 @@ impl<'a> Ut<'a> {
         })();
         if let Some((entry_sut, entry_dox, entry_hoon)) = self.fire_wet_rib.pop() {
             self.fire_wet_rib_raw.remove(&(
-                NRc::as_ptr(&entry_sut) as usize,
-                NRc::as_ptr(&entry_dox) as usize,
+                native_type_id_usize(&entry_sut),
+                native_type_id_usize(&entry_dox),
                 unsafe { entry_hoon.as_raw() },
             ));
         }

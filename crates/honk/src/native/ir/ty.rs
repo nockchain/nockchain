@@ -22,7 +22,12 @@
 #![allow(dead_code)]
 
 use std::cell::{Cell, OnceCell};
-use std::rc::Rc;
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::ops::Deref;
+use std::rc::Rc as SharedRc;
 
 use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
@@ -32,6 +37,201 @@ use super::leaf::Leaf;
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::{atom_to_string, noun_pair, term_to_noun};
 use crate::native::ut::types::{Poly, Vair};
+
+/// Dense identity for a canonical native compiler type.
+///
+/// `TypeId` values are local to one [`super::intern::Context`]. Canonical type
+/// nodes are owned by that context's arena and keep this ID for their complete
+/// lifetime, so recursive type algebra can key directly on a compact integer
+/// instead of repeatedly materializing and hashing allocation addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct TypeId(pub(crate) u32);
+
+/// One arena allocation. The type table owns these boxes for the entire
+/// compiler context, making the address stable while handles remain live.
+#[repr(align(2))]
+pub(super) struct TypeSlot<T> {
+    pub(super) id: TypeId,
+    pub(super) value: T,
+}
+
+impl<T> TypeSlot<T> {
+    pub(super) fn new(id: TypeId, value: T) -> Self {
+        Self { id, value }
+    }
+}
+
+/// Context-owned native type handle.
+///
+/// The hot compiler path uses the tagged arena form: cloning it is a single
+/// word copy and dropping it is a no-op. The cold boundary decoder still needs
+/// to construct temporary recursive `Type` trees before a `Context` exists, so
+/// the untagged form owns a conventional `Rc<T>`. Interning converts every such
+/// temporary into the arena form before it enters type algebra.
+///
+/// The arena tag is stored in the low pointer bit. `TypeSlot<T>` is explicitly
+/// aligned to keep that bit available.
+#[repr(transparent)]
+pub struct TypeRef<T> {
+    tagged: NonZeroUsize,
+    marker: PhantomData<T>,
+}
+
+impl<T> TypeRef<T> {
+    const ARENA_TAG: usize = 1;
+
+    /// Construct a cold, independently-owned recursive value. Canonical hot
+    /// values are created with `from_arena_slot` by the type interner.
+    pub fn new(value: T) -> Self {
+        let ptr = SharedRc::into_raw(SharedRc::new(value)) as usize;
+        debug_assert_ne!(ptr, 0);
+        debug_assert_eq!(ptr & Self::ARENA_TAG, 0);
+        Self {
+            tagged: NonZeroUsize::new(ptr).expect("Rc pointers are non-null"),
+            marker: PhantomData,
+        }
+    }
+
+    pub(super) fn from_arena_slot(slot: &TypeSlot<T>) -> Self {
+        let ptr = slot as *const TypeSlot<T> as usize;
+        debug_assert_ne!(ptr, 0);
+        debug_assert_eq!(ptr & Self::ARENA_TAG, 0);
+        Self {
+            tagged: NonZeroUsize::new(ptr | Self::ARENA_TAG)
+                .expect("tagged arena pointers are non-null"),
+            marker: PhantomData,
+        }
+    }
+
+    #[inline(always)]
+    fn is_arena(&self) -> bool {
+        self.tagged.get() & Self::ARENA_TAG != 0
+    }
+
+    #[inline(always)]
+    fn arena_slot(&self) -> *const TypeSlot<T> {
+        (self.tagged.get() & !Self::ARENA_TAG) as *const TypeSlot<T>
+    }
+
+    #[inline(always)]
+    fn shared_ptr(&self) -> *const T {
+        self.tagged.get() as *const T
+    }
+
+    /// Stable canonical identity. Arena IDs occupy odd values; cold shared
+    /// pointers occupy even values, so the two domains cannot collide.
+    #[inline(always)]
+    pub fn identity(&self) -> usize {
+        if self.is_arena() {
+            // SAFETY: arena handles are only constructed from slots owned for
+            // the entire Context lifetime.
+            let id = unsafe { (*self.arena_slot()).id.0 };
+            ((id as usize) << 1) | 1
+        } else {
+            self.shared_ptr() as usize
+        }
+    }
+
+    #[inline(always)]
+    pub fn type_id(&self) -> Option<TypeId> {
+        if self.is_arena() {
+            // SAFETY: identical lifetime invariant to `identity`.
+            Some(unsafe { (*self.arena_slot()).id })
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn arena_id(&self) -> TypeId {
+        self.type_id()
+            .expect("native type algebra only accepts context-interned types")
+    }
+
+    #[inline(always)]
+    pub fn as_ptr(this: &Self) -> *const T {
+        if this.is_arena() {
+            // SAFETY: identical lifetime invariant to `identity`.
+            unsafe { &(*this.arena_slot()).value as *const T }
+        } else {
+            this.shared_ptr()
+        }
+    }
+
+    #[inline(always)]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        this.tagged == other.tagged
+    }
+}
+
+impl<T> Clone for TypeRef<T> {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        if !self.is_arena() {
+            // SAFETY: the untagged representation was produced by
+            // `Rc::into_raw`, and this creates exactly one additional owner.
+            unsafe { SharedRc::increment_strong_count(self.shared_ptr()) };
+        }
+        Self {
+            tagged: self.tagged,
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Drop for TypeRef<T> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if !self.is_arena() {
+            // SAFETY: every shared clone increments exactly once and every
+            // shared handle decrements exactly once.
+            unsafe { SharedRc::decrement_strong_count(self.shared_ptr()) };
+        }
+    }
+}
+
+impl<T> Deref for TypeRef<T> {
+    type Target = T;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: shared pointers are kept alive by their Rc count; arena
+        // pointers are kept alive by the owning Context's TypeTable.
+        unsafe { &*Self::as_ptr(self) }
+    }
+}
+
+impl<T> AsRef<T> for TypeRef<T> {
+    #[inline(always)]
+    fn as_ref(&self) -> &T {
+        self
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for TypeRef<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+impl<T> PartialEq for TypeRef<T> {
+    #[inline(always)]
+    fn eq(&self, other: &Self) -> bool {
+        Self::ptr_eq(self, other)
+    }
+}
+
+impl<T> Eq for TypeRef<T> {}
+
+impl<T> Hash for TypeRef<T> {
+    #[inline(always)]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.identity().hash(state);
+    }
+}
+
+type Rc<T> = TypeRef<T>;
 
 /// A native `%core` garb — the head of a coil, `[nym poly vair]`.
 ///

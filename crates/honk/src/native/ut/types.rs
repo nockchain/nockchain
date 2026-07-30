@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::rc::Rc as NRc;
 use std::sync::Arc;
 
 use hatch::ast::hoon::WingType;
@@ -9,7 +8,7 @@ use nockvm::noun::{NounAllocator, NounSpace};
 use num_bigint::BigUint;
 
 use crate::errors::Result;
-use crate::native::ir::ty::Type as NTy;
+use crate::native::ir::ty::{Type as NTy, TypeRef as NRc};
 use crate::native::ut::{noun_eq, Ut};
 
 // Compiler inputs are not attacker-controlled; prefer a fast, non-cryptographic hasher for

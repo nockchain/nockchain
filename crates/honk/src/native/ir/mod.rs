@@ -15,7 +15,7 @@
 
 pub mod core;
 pub mod formula;
-pub mod intern;
+pub(crate) mod intern;
 pub mod leaf;
 pub mod ty;
 
