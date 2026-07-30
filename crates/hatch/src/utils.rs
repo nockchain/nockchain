@@ -15626,10 +15626,13 @@ mod tests {
         // helper serializers must participate in the same materialization.
         let hoon = Hoon::KetHep(
             Box::new(Spec::BucMic(Hoon::Pair(
-                Box::new(Hoon::Axis(2)),
+                Box::new(Hoon::Axis(2u64.into())),
                 Box::new(Hoon::ZapZap),
             ))),
-            Box::new(Hoon::Pair(Box::new(Hoon::Axis(7)), Box::new(Hoon::ZapZap))),
+            Box::new(Hoon::Pair(
+                Box::new(Hoon::Axis(7u64.into())),
+                Box::new(Hoon::ZapZap),
+            )),
         );
         let mut cached_slab = NounSlab::new();
         let mut nodes = HashMap::new();

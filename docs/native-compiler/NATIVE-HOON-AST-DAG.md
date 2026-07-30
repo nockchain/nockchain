@@ -1,5 +1,7 @@
 # Interned native Hoon AST DAG
 
+> This pointer-sidecar stage is the measured parent of the later [`ARENA-HOON-IR.md`](ARENA-HOON-IR.md) work. The arena commit replaces its three stable-pointer property tables and registers compiler-generated lowerings; the historical measurements below remain the control evidence for that follow-up.
+
 ## Outcome
 
 Honk now gives every node in a borrowed top-level Hoon AST a scope-bound native identity, computes spot-sensitive structural signatures compositionally in one traversal, and materializes each stable node's canonical noun at most once per compiler scope. The optimization does not change the parser AST, emitted noun, type semantics, or kernel artifact: it adds a sidecar DAG over the AST that already exists and preserves the historical serializer as the sole output authority.
