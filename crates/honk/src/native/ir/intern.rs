@@ -18,6 +18,7 @@
 //! phases nativize the remaining coil/gene leaves; the table is unchanged.
 #![allow(dead_code)]
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc as SharedRc;
@@ -30,7 +31,6 @@ use super::leaf::Leaf;
 use super::ty::{tas, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::noun_pair;
-use crate::native::ut::types::{FastHashMap, FastHasher};
 
 /// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
 /// persistent pointer-identity `memo` so the noun DAG (and anything carried over
@@ -830,7 +830,7 @@ pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
 
 #[derive(Default)]
 pub struct TypeTable {
-    buckets: FastHashMap<u64, Vec<Rc<Type>>>,
+    buckets: HashMap<u64, Vec<Rc<Type>>>,
     /// Stable ownership for canonical nodes. Handles point into these boxes and
     /// therefore clone without touching a reference count.
     slots: Vec<Box<TypeSlot<Type>>>,
@@ -884,9 +884,9 @@ impl TypeTable {
 /// pure caches of the exact `set` witness, and interior mutation must never
 /// change a key after insertion into `TypeTable`.
 fn node_hash(t: &Type) -> u64 {
-    let mut h = FastHasher::default();
+    let mut h = DefaultHasher::new();
     std::mem::discriminant(t).hash(&mut h);
-    let p = |rc: &Rc<Type>, h: &mut FastHasher| (canonical_id(rc)).hash(h);
+    let p = |rc: &Rc<Type>, h: &mut DefaultHasher| (canonical_id(rc)).hash(h);
     match t {
         Type::Void | Type::Noun => {}
         Type::Atom { aura, bits } => {
