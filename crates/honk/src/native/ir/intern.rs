@@ -28,7 +28,7 @@ use nockvm::noun::{Noun, NounSpace, D, T};
 use num_bigint::BigUint;
 
 use super::leaf::Leaf;
-use super::ty::{tas, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
+use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::noun_pair;
 
@@ -263,10 +263,6 @@ impl Context {
     #[allow(dead_code)]
     pub fn reset(&mut self) {
         *self = Context::new();
-    }
-
-    pub(crate) fn type_stats(&self) -> (u64, u64) {
-        (self.live.table.interned_calls, self.live.table.distinct)
     }
 }
 
@@ -845,6 +841,63 @@ pub struct TypeTable {
 impl TypeTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Intern the independently-owned boundary decoder tree. This path only
+    /// serves the optional public stats oracle; live compilation constructs
+    /// canonical arena nodes directly through `intern_shallow`.
+    pub(super) fn intern_boundary(&mut self, t: &BoundaryType) -> Rc<Type> {
+        let node = match t {
+            BoundaryType::Void => Type::Void,
+            BoundaryType::Noun => Type::Noun,
+            BoundaryType::Atom { aura, bits } => Type::Atom {
+                aura: aura.clone(),
+                bits: bits.clone(),
+            },
+            BoundaryType::Cell(head, tail) => {
+                Type::Cell(self.intern_boundary(head), self.intern_boundary(tail))
+            }
+            BoundaryType::Core {
+                payload,
+                garb,
+                context,
+                rest,
+            } => Type::Core {
+                payload: self.intern_boundary(payload),
+                garb: garb.clone(),
+                context: self.intern_boundary(context),
+                rest: rest.clone(),
+            },
+            BoundaryType::Face { tool, inner } => Type::Face {
+                tool: tool.clone(),
+                inner: self.intern_boundary(inner),
+            },
+            BoundaryType::Hint { head, payload } => Type::Hint {
+                head: head.clone(),
+                payload: self.intern_boundary(payload),
+            },
+            BoundaryType::Fork { set, options } => {
+                let native_options = std::cell::OnceCell::new();
+                native_options
+                    .set(
+                        options
+                            .iter()
+                            .map(|option| self.intern_boundary(option))
+                            .collect(),
+                    )
+                    .expect("fresh fork options cell");
+                Type::Fork {
+                    set: set.clone(),
+                    options: native_options,
+                    options_seen: std::cell::Cell::new(true),
+                }
+            }
+            BoundaryType::Hold { subject, gene } => Type::Hold {
+                subject: self.intern_boundary(subject),
+                gene: gene.clone(),
+            },
+        };
+        self.intern_node(node)
     }
 
     /// Intern a single node whose children are ALREADY canonical (interned).
