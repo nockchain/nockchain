@@ -434,14 +434,10 @@ pub struct Sig64 {
     // Besides avoiding quadratic subtree rescans, this records the digest for
     // every native AST node reached through Spec/Tome/etc. in one traversal.
     hoon_signatures: FastHashMap<usize, u64>,
-    // Post-order is also the arena layout: children precede parents, keeping
-    // related compiler metadata close while retaining O(1) signature reuse.
-    hoon_order: Vec<usize>,
-    // Direct Hoon edges in the native compiler graph. Hoon nodes nested in
-    // Spec/Type helper payloads remain first-class children of the enclosing
-    // gene, so every recursive gene is represented by a HoonId.
-    hoon_children: FastHashMap<usize, SmallVec<[usize; 4]>>,
-    hoon_parent: Option<usize>,
+    // Completed nodes are emitted in post-order. A traversal stack collects
+    // direct child addresses without a second per-edge hash table.
+    hoon_nodes: Vec<HoonArenaBuildNode>,
+    hoon_child_stack: Vec<SmallVec<[usize; 4]>>,
 }
 
 impl Sig64 {
@@ -455,9 +451,8 @@ impl Sig64 {
             state: Self::OFFSET,
             include_dbug_spot,
             hoon_signatures: Default::default(),
-            hoon_order: Vec::new(),
-            hoon_children: Default::default(),
-            hoon_parent: None,
+            hoon_nodes: Vec::new(),
+            hoon_child_stack: Vec::new(),
         }
     }
 
@@ -535,16 +530,7 @@ impl Sig64 {
             .hoon_signatures
             .get(&(hoon as *const Hoon as usize))
             .copied()?;
-        let nodes = sig
-            .hoon_order
-            .into_iter()
-            .map(|ptr| HoonArenaBuildNode {
-                ptr,
-                signature: sig.hoon_signatures[&ptr],
-                children: sig.hoon_children.remove(&ptr).unwrap_or_default(),
-            })
-            .collect();
-        Some((root, nodes))
+        Some((root, sig.hoon_nodes))
     }
 
     fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
@@ -1358,9 +1344,8 @@ impl Sig64 {
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
         let ptr = hoon as *const Hoon as usize;
-        let enclosing_hoon = self.hoon_parent;
-        if let Some(parent) = enclosing_hoon {
-            self.hoon_children.entry(parent).or_default().push(ptr);
+        if let Some(children) = self.hoon_child_stack.last_mut() {
+            children.push(ptr);
         }
         if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
             self.write_byte(0xff);
@@ -1373,7 +1358,7 @@ impl Sig64 {
         // a root computes each descendant exactly once rather than hashing the
         // same suffix again at every recursive mint/play/mull boundary.
         let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
-        self.hoon_parent = Some(ptr);
+        self.hoon_child_stack.push(SmallVec::new());
         match hoon {
             Hoon::Pair(a, b) => {
                 self.write_byte(0x01);
@@ -2066,9 +2051,16 @@ impl Sig64 {
             }
         }
         let signature = self.state;
-        self.hoon_parent = enclosing_hoon;
+        let children = self
+            .hoon_child_stack
+            .pop()
+            .expect("every Hoon signature frame must own a child list");
         self.hoon_signatures.insert(ptr, signature);
-        self.hoon_order.push(ptr);
+        self.hoon_nodes.push(HoonArenaBuildNode {
+            ptr,
+            signature,
+            children,
+        });
         self.state = parent_state;
         self.write_byte(0xff);
         self.write_u64(signature);
