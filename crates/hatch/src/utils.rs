@@ -15626,10 +15626,11 @@ mod tests {
         //  the bound face failed to resolve at mint.
         let src = "=/(a 1 a)\n";
         let linemap = Arc::new(LineMap::new_with_docs(src, true));
-        let parsed = crate::native_parser(vec!["test".into(), "tisfas.hoon".into()], false, linemap)
-            .parse(src)
-            .into_result()
-            .expect("wide =/ should parse");
+        let parsed =
+            crate::native_parser(vec!["test".into(), "tisfas.hoon".into()], false, linemap)
+                .parse(src)
+                .into_result()
+                .expect("wide =/ should parse");
 
         let Hoon::TisSig(items) = parsed else {
             panic!("expected top-level TisSig");
