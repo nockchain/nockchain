@@ -156,7 +156,7 @@ struct HoonId(u32);
 struct HoonArenaEntry {
     source: Option<NonNull<Hoon>>,
     signature: Option<u64>,
-    children: std::ops::Range<u32>,
+    hot_children: Option<[HoonId; 2]>,
     noun: Option<Noun>,
     // `Some(None)` is a cached negative result: canonical `open` returned the
     // node unchanged. `None` means the node has not been opened yet.
@@ -167,20 +167,18 @@ struct HoonArenaEntry {
 struct HoonArena {
     by_ptr: FastHashMap<usize, HoonId>,
     entries: Vec<HoonArenaEntry>,
-    children: Vec<HoonId>,
 }
 
 struct HoonArenaBuildNode {
     ptr: usize,
     signature: u64,
-    children: SmallVec<[usize; 4]>,
+    hot_children: Option<[usize; 2]>,
 }
 
 impl HoonArena {
     fn clear(&mut self) {
         self.by_ptr.clear();
         self.entries.clear();
-        self.children.clear();
     }
 
     fn register(&mut self, nodes: Vec<HoonArenaBuildNode>) {
@@ -196,19 +194,15 @@ impl HoonArena {
             self.entries.push(HoonArenaEntry {
                 source: NonNull::new(node.ptr as *mut Hoon),
                 signature: Some(node.signature),
-                children: 0..0,
+                hot_children: None,
                 noun: None,
                 opened: None,
             });
         }
         for (index, node) in nodes.into_iter().enumerate() {
-            let start = u32::try_from(self.children.len())
-                .expect("one Hoon compiler scope cannot contain more than u32::MAX edges");
-            self.children
-                .extend(node.children.into_iter().map(|ptr| self.by_ptr[&ptr]));
-            let end = u32::try_from(self.children.len())
-                .expect("one Hoon compiler scope cannot contain more than u32::MAX edges");
-            self.entries[index].children = start..end;
+            self.entries[index].hot_children = node
+                .hot_children
+                .map(|[head, tail]| [self.by_ptr[&head], self.by_ptr[&tail]]);
         }
     }
 
@@ -217,7 +211,6 @@ impl HoonArena {
         self.by_ptr.insert(ptr, HoonId(0));
         self.entries.push(HoonArenaEntry {
             source: NonNull::new(ptr as *mut Hoon),
-            children: 0..0,
             ..HoonArenaEntry::default()
         });
     }
@@ -247,14 +240,15 @@ impl HoonArena {
 
     #[inline]
     fn child(&self, id: HoonId, index: usize) -> HoonId {
-        let range = self.entry(id).children.clone();
-        self.children[range.start as usize + index]
+        self.entry(id)
+            .hot_children
+            .expect("arena child lookup is only valid for a hot binary gene")[index]
     }
 
     #[inline]
     #[cfg(test)]
     fn child_count(&self, id: HoonId) -> usize {
-        self.entry(id).children.len()
+        self.entry(id).hot_children.map_or(0, |_| 2)
     }
 }
 
@@ -434,10 +428,10 @@ pub struct Sig64 {
     // Besides avoiding quadratic subtree rescans, this records the digest for
     // every native AST node reached through Spec/Tome/etc. in one traversal.
     hoon_signatures: FastHashMap<usize, u64>,
-    // Completed nodes are emitted in post-order. A traversal stack collects
-    // direct child addresses without a second per-edge hash table.
+    // Completed nodes are emitted in post-order. Only the two canonical binary
+    // forms that recurse directly by ID carry child edges; every other form
+    // enters through the arena boundary without paying generic edge costs.
     hoon_nodes: Vec<HoonArenaBuildNode>,
-    hoon_child_stack: Vec<SmallVec<[usize; 4]>>,
 }
 
 impl Sig64 {
@@ -452,7 +446,6 @@ impl Sig64 {
             include_dbug_spot,
             hoon_signatures: Default::default(),
             hoon_nodes: Vec::new(),
-            hoon_child_stack: Vec::new(),
         }
     }
 
@@ -1344,9 +1337,6 @@ impl Sig64 {
 
     fn write_hoon(&mut self, hoon: &Hoon) -> Option<()> {
         let ptr = hoon as *const Hoon as usize;
-        if let Some(children) = self.hoon_child_stack.last_mut() {
-            children.push(ptr);
-        }
         if let Some(signature) = self.hoon_signatures.get(&ptr).copied() {
             self.write_byte(0xff);
             self.write_u64(signature);
@@ -1358,7 +1348,6 @@ impl Sig64 {
         // a root computes each descendant exactly once rather than hashing the
         // same suffix again at every recursive mint/play/mull boundary.
         let parent_state = std::mem::replace(&mut self.state, Self::OFFSET);
-        self.hoon_child_stack.push(SmallVec::new());
         match hoon {
             Hoon::Pair(a, b) => {
                 self.write_byte(0x01);
@@ -2051,15 +2040,17 @@ impl Sig64 {
             }
         }
         let signature = self.state;
-        let children = self
-            .hoon_child_stack
-            .pop()
-            .expect("every Hoon signature frame must own a child list");
+        let hot_children = match hoon {
+            Hoon::Pair(head, tail) | Hoon::TisGar(head, tail) => {
+                Some([head.as_ref() as *const Hoon as usize, tail.as_ref() as *const Hoon as usize])
+            }
+            _ => None,
+        };
         self.hoon_signatures.insert(ptr, signature);
         self.hoon_nodes.push(HoonArenaBuildNode {
             ptr,
             signature,
-            children,
+            hot_children,
         });
         self.state = parent_state;
         self.write_byte(0xff);
