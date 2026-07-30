@@ -27,6 +27,7 @@ use nockapp::noun::slab::NounSlab;
 use nockvm::noun::{Noun, NounSpace, D, T};
 use num_bigint::BigUint;
 
+use super::formula_dag::FormulaId;
 use super::leaf::Leaf;
 use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
@@ -216,14 +217,14 @@ pub struct Context {
     // --- boundary caches (key/value tuples copied verbatim) ---
     nest_cache: HashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
     #[allow(clippy::type_complexity)]
-    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
+    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, FormulaId)>, // CORE_MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
+    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, FormulaId)>, // MINT_CACHE
     #[allow(clippy::type_complexity)]
     mull_cache: HashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
     fuse_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
     crop_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(u32, BigUint, u8, u64), Noun>, // FISH_CACHE
+    fish_cache: HashMap<(u32, BigUint, u8, u64), FormulaId>, // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
     native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
@@ -341,7 +342,7 @@ pub fn core_mint_cache_lookup(
     fan: u64,
     arm_epoch: u64,
     placeholder: u64,
-) -> Option<(Rc<Type>, Noun)> {
+) -> Option<(Rc<Type>, FormulaId)> {
     let key = (
         canonical_id(sut),
         canonical_id(gol),
@@ -368,7 +369,7 @@ pub fn core_mint_cache_store(
     arm_epoch: u64,
     placeholder: u64,
     core_type: Rc<Type>,
-    formula: Noun,
+    formula: FormulaId,
 ) {
     let key = (
         canonical_id(sut),
@@ -396,7 +397,7 @@ pub fn mint_cache_lookup(
     fan: u64,
     arm_epoch: u64,
     placeholder: u64,
-) -> Option<(Rc<Type>, Noun)> {
+) -> Option<(Rc<Type>, FormulaId)> {
     let key = (
         canonical_id(sut),
         canonical_id(gol),
@@ -421,7 +422,7 @@ pub fn mint_cache_store(
     arm_epoch: u64,
     placeholder: u64,
     ty: Rc<Type>,
-    formula: Noun,
+    formula: FormulaId,
 ) {
     let key = (
         canonical_id(sut),
@@ -569,20 +570,20 @@ pub fn crop_cache_store(
 }
 
 /// Look up a native `fish` result by interned (sut) pointer + (axis, vet, fan).
-/// Returns the cached NOCK FORMULA `Noun` directly.
+/// Returns the cached canonical formula ID directly.
 pub fn fish_cache_lookup(
     cx: &Context,
     sut: &Rc<Type>,
     axis: &BigUint,
     vet: u8,
     fan: u64,
-) -> Option<Noun> {
+) -> Option<FormulaId> {
     cx.fish_cache
         .get(&(canonical_id(sut), axis.clone(), vet, fan))
         .copied()
 }
 
-/// Store a native `fish` result (formula `Noun`) by interned (sut) pointer +
+/// Store a native `fish` result by interned (sut) pointer +
 /// (axis, vet, fan).
 pub fn fish_cache_store(
     cx: &mut Context,
@@ -590,7 +591,7 @@ pub fn fish_cache_store(
     axis: &BigUint,
     vet: u8,
     fan: u64,
-    result: Noun,
+    result: FormulaId,
 ) {
     let key = (canonical_id(sut), axis.clone(), vet, fan);
     cx.fish_cache.insert(key, result);

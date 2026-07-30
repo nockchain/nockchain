@@ -130,7 +130,7 @@ impl<'a> Ut<'a> {
                 let goal = cons_noun(&mut self.cx);
                 let (new_ty, new_formula) =
                     self.mint(typ, goal, &Hoon::Wing(vec![head.clone()]))?;
-                let combined = comb(self.slab, formula, new_formula)?;
+                let combined = self.formula_comb(formula, new_formula);
                 Ok(Pony::Synthetic {
                     typ: new_ty,
                     formula: combined,
@@ -181,9 +181,9 @@ impl<'a> Ut<'a> {
         name: Option<&str>,
         lon: Vec<Option<BigUint>>,
     ) -> Result<Pony> {
-        fn compose_axis_formula(ut: &mut Ut<'_>, axe: BigUint, formula: Noun) -> Result<Noun> {
-            let axis_formula = slot_formula_axis_big(ut.slab, axe);
-            comb(ut.slab, axis_formula, formula)
+        fn compose_axis_formula(ut: &mut Ut<'_>, axe: BigUint, formula: FormulaId) -> FormulaId {
+            let axis_formula = ut.formula_slot(axe);
+            ut.formula_comb(axis_formula, formula)
         }
 
         fn here(sut: NRc<NTy>, axe: &BigUint, skip: u64, lon: &[Option<BigUint>]) -> Pony {
@@ -407,7 +407,7 @@ impl<'a> Ut<'a> {
                                         }
                                         Port::Synthetic { typ, formula } => {
                                             let formula =
-                                                compose_axis_formula(ut, axe.clone(), formula)?;
+                                                compose_axis_formula(ut, axe.clone(), formula);
                                             Ok(Pony::Synthetic { typ, formula })
                                         }
                                     };
@@ -470,8 +470,8 @@ impl<'a> Ut<'a> {
                                 // directly as `NRc<NTy>`, no native_of round-trip.
                                 let (fid_ty_n, fid_formula) = ut.fine(&Port::Palo(palo))?;
                                 let composed =
-                                    compose_axis_formula(ut, axe.clone(), bridge_formula)?;
-                                let formula = comb(ut.slab, composed, fid_formula)?;
+                                    compose_axis_formula(ut, axe.clone(), bridge_formula);
+                                let formula = ut.formula_comb(composed, fid_formula);
                                 return Ok(Pony::Synthetic {
                                     typ: fid_ty_n,
                                     formula,
@@ -479,8 +479,8 @@ impl<'a> Ut<'a> {
                             }
                             Pony::Synthetic { typ, formula } => {
                                 let composed =
-                                    compose_axis_formula(ut, axe.clone(), bridge_formula)?;
-                                let formula = comb(ut.slab, composed, formula)?;
+                                    compose_axis_formula(ut, axe.clone(), bridge_formula);
+                                let formula = ut.formula_comb(composed, formula);
                                 return Ok(Pony::Synthetic { typ, formula });
                             }
                         }
@@ -648,8 +648,7 @@ impl<'a> Ut<'a> {
                     formula: right_formula,
                 },
             ) => {
-                // Synthetic.formula is a FORMULA noun (not a type): keep noun_eq.
-                if !noun_eq(left_formula, right_formula, &self.slab.noun_space())? {
+                if !self.formula_arena.equal(left_formula, right_formula) {
                     return Err(CompilerError::Noun("find-fork".to_string()));
                 }
                 // Fork rebuild via the NOUN fork path (RT-07 ordering).

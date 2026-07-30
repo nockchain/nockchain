@@ -1,8 +1,7 @@
 pub mod formula;
 pub mod hot;
-// Native-types migration (docs/native-compiler/NATIVE-TYPES-MIGRATION.md):
-// Phase-0 skeleton of the native Type/Formula IR. Not yet wired into the
-// compiler — definitions only, so the shapes compile and can be reviewed.
+// Native compiler IR; see docs/native-compiler for the migration and
+// performance-validation record.
 pub mod ir;
 pub mod noun;
 pub mod ut;
