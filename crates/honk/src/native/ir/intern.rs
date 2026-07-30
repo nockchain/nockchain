@@ -30,7 +30,7 @@ use num_bigint::BigUint;
 use super::leaf::Leaf;
 use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
-use crate::native::noun::noun_pair;
+use crate::native::noun::{noun_eq, noun_pair};
 
 /// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
 /// persistent pointer-identity `memo` so the noun DAG (and anything carried over
@@ -71,8 +71,8 @@ fn intern_type_noun(
     let node = if tag.eq_bytes(b"atom") {
         let (aura, bits) = pair(tail, space)?;
         Type::Atom {
-            aura: Leaf::from_noun_raw(aura, space),
-            bits: Leaf::from_noun_raw(bits, space),
+            aura: table.intern_live_leaf(aura, space),
+            bits: table.intern_live_leaf(bits, space),
         }
     } else if tag.eq_bytes(b"cell") {
         let (h, t) = pair(tail, space)?;
@@ -89,23 +89,23 @@ fn intern_type_noun(
             payload: intern_type_noun(table, memo, payload, space)?,
             garb: Garb::from_noun(garb, space)?,
             context: intern_type_noun(table, memo, context, space)?,
-            rest: Leaf::from_noun_raw(rest, space),
+            rest: table.intern_live_leaf(rest, space),
         }
     } else if tag.eq_bytes(b"face") {
         let (tool, inner) = pair(tail, space)?;
         Type::Face {
-            tool: Leaf::from_noun_raw(tool, space),
+            tool: table.intern_live_leaf(tool, space),
             inner: intern_type_noun(table, memo, inner, space)?,
         }
     } else if tag.eq_bytes(b"hint") {
         let (head, payload) = pair(tail, space)?;
         Type::Hint {
-            head: Leaf::from_noun_raw(head, space),
+            head: table.intern_live_leaf(head, space),
             payload: intern_type_noun(table, memo, payload, space)?,
         }
     } else if tag.eq_bytes(b"fork") {
         Type::Fork {
-            set: Leaf::from_noun_raw(tail, space),
+            set: table.intern_live_leaf(tail, space),
             options: Default::default(),
             options_seen: Default::default(),
         }
@@ -113,7 +113,7 @@ fn intern_type_noun(
         let (subject, gene) = pair(tail, space)?;
         Type::Hold {
             subject: intern_type_noun(table, memo, subject, space)?,
-            gene: Leaf::from_noun_raw(gene, space),
+            gene: table.intern_live_leaf(gene, space),
         }
     } else {
         return Err(CompilerError::Decode(
@@ -779,6 +779,14 @@ pub fn native_of(cx: &mut Context, noun: Noun, space: &NounSpace) -> Result<Rc<T
     intern_type_noun(&mut cx.live.table, &mut cx.live.memo, noun, space)
 }
 
+/// Canonicalize a carried live noun before embedding it in a native type node.
+/// Pointer-distinct but structurally equal leaves pay one exact comparison on
+/// first sight and thereafter share the same raw noun, making hot type-table
+/// equality checks pointer-fast.
+pub fn live_leaf_from_noun(cx: &mut Context, noun: Noun, space: &NounSpace) -> Leaf {
+    cx.live.table.intern_live_leaf(noun, space)
+}
+
 /// Memoized leaf lowering for the flipped consumers: lower a carried `Leaf`
 /// (core coil, fork set, hold gene, atom aura/bits, face tool, hint head) to a
 /// noun for the still-noun leaf helpers (coil_parts/fork_set_options/garb_*/fitz),
@@ -827,6 +835,12 @@ pub fn assert_native_eq(noun: Noun, native: &Rc<Type>, space: &NounSpace) {
 #[derive(Default)]
 pub struct TypeTable {
     buckets: HashMap<u64, Vec<Rc<Type>>>,
+    /// Source-noun identity to its canonical carried leaf.
+    live_leaves_by_raw: HashMap<u64, Leaf>,
+    /// Mug buckets for the one exact comparison needed to canonicalize a new
+    /// source identity. The full noun comparison protects against mug
+    /// collisions; equal leaves then share one raw noun.
+    live_leaves_by_mug: HashMap<u32, Vec<Leaf>>,
     /// Stable ownership for canonical nodes. Handles point into these boxes and
     /// therefore clone without touching a reference count.
     slots: Vec<Box<TypeSlot<Type>>>,
@@ -841,6 +855,44 @@ pub struct TypeTable {
 impl TypeTable {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn intern_live_leaf(&mut self, noun: Noun, space: &NounSpace) -> Leaf {
+        if noun.is_direct() {
+            return Leaf::from_noun_raw(noun, space);
+        }
+        let raw = unsafe { noun.as_raw() };
+        if let Some(canonical) = self.live_leaves_by_raw.get(&raw) {
+            return canonical.clone();
+        }
+        let leaf = Leaf::from_noun_raw(noun, space);
+        let Leaf::Noun(_, mug) = &leaf else {
+            return leaf;
+        };
+
+        let canonical = self.live_leaves_by_mug.get(mug).and_then(|bucket| {
+            bucket
+                .iter()
+                .find(|candidate| {
+                    let Leaf::Noun(existing, _) = candidate else {
+                        unreachable!("live leaf mug buckets contain only raw nouns")
+                    };
+                    noun_eq(*existing, noun, space)
+                        .expect("live native-type leaves must be valid slab nouns")
+                })
+                .cloned()
+        });
+        if let Some(canonical) = canonical {
+            self.live_leaves_by_raw.insert(raw, canonical.clone());
+            return canonical;
+        }
+
+        self.live_leaves_by_mug
+            .entry(*mug)
+            .or_default()
+            .push(leaf.clone());
+        self.live_leaves_by_raw.insert(raw, leaf.clone());
+        leaf
     }
 
     /// Intern the independently-owned boundary decoder tree. This path only
@@ -1038,6 +1090,8 @@ fn node_eq(a: &Type, b: &Type) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nockvm::noun::NounAllocator;
+
     use super::*;
     use crate::native::ir::leaf::Leaf;
 
@@ -1062,6 +1116,30 @@ mod tests {
         let rc2 = tab.intern_shallow(Type::Cell(r2, r2));
         assert!(Rc::ptr_eq(&rc1, &rc2), "equal cells intern to one Rc");
         assert_eq!(tab.distinct, 2, "only the atom and the cell are distinct");
+    }
+
+    #[test]
+    fn live_leaf_interning_canonicalizes_equal_distinct_nouns() {
+        let mut slab: NounSlab = NounSlab::new();
+        let first = T(&mut slab, &[D(1), D(2)]);
+        let second = T(&mut slab, &[D(1), D(2)]);
+        assert!(!unsafe { first.raw_equals(&second) });
+        let space = slab.noun_space();
+        let mut tab = TypeTable::new();
+
+        let first_leaf = tab.intern_live_leaf(first, &space);
+        let second_leaf = tab.intern_live_leaf(second, &space);
+        let (Leaf::Noun(first_noun, _), Leaf::Noun(second_noun, _)) = (&first_leaf, &second_leaf)
+        else {
+            panic!("cell leaves must remain raw nouns")
+        };
+
+        assert!(unsafe { first_noun.raw_equals(second_noun) });
+        assert_eq!(tab.live_leaves_by_raw.len(), 2);
+        assert_eq!(
+            tab.live_leaves_by_mug.values().map(Vec::len).sum::<usize>(),
+            1
+        );
     }
 
     #[test]

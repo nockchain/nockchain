@@ -145,7 +145,7 @@ impl<'a> Ut<'a> {
     /// (hoon-138.hoon:9529) stores it: holds carry the verbatim tome hoon and
     /// `++open` lowering happens only when a hold is forced (repo/rest/play).
     fn cons_hold(&mut self, inner: NRc<NTy>, hoon: Noun) -> NRc<NTy> {
-        let gene = NLeaf::from_noun_raw(hoon, &self.slab.noun_space());
+        let gene = live_leaf_from_noun(&mut self.cx, hoon, &self.slab.noun_space());
         live_intern(
             &mut self.cx,
             NTy::Hold {

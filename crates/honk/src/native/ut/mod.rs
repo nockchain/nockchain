@@ -4927,7 +4927,7 @@ impl<'a> Ut<'a> {
         self.cache_hoon_ast_for_node(gen);
         let pair = T(self.slab, &[gen_noun, D(0)]);
         let tool = T(self.slab, &[D(0), pair]);
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         cons_face(&mut self.cx, tool_leaf, sut)
     }
 
@@ -7130,7 +7130,7 @@ impl<'a> Ut<'a> {
         // play_tune wraps the WHOLE subject in a %face; native now: the subject
         // threads through as a SHARED native Rc inside the new %face (no lowering).
         let tool = term_or_tune_to_noun(self.slab, tune)?;
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         Ok(cons_face(&mut self.cx, tool_leaf, sut))
     }
 
@@ -7475,7 +7475,7 @@ impl<'a> Ut<'a> {
     ) -> Result<(NRc<NTy>, Noun)> {
         let tool = term_or_tune_to_noun(self.slab, tune)?;
         // %face over the native subject (collapse-aware cons_face).
-        let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+        let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
         let ty = cons_face(&mut self.cx, tool_leaf, sut.clone());
         let ty = self.nice(sut, gol, ty)?;
         let formula = T(self.slab, &[D(0), D(1)]);
@@ -7746,7 +7746,7 @@ impl<'a> Ut<'a> {
         // pointer identity.
         let core_native_lazy = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(lazy_rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, lazy_rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -7792,7 +7792,7 @@ impl<'a> Ut<'a> {
         // identity-on-success; the cache is native-keyed) and `sut` is never lowered.
         let core_native = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -7849,7 +7849,7 @@ impl<'a> Ut<'a> {
         let semi_noun = self.semi_noun_blocked();
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let space = self.slab.noun_space();
-        let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+        let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
         let native = cons_core(&mut self.cx, sut.clone(), garb, sut.clone(), rest_leaf);
         Ok(native)
     }
@@ -8548,7 +8548,7 @@ impl<'a> Ut<'a> {
         }
         let inner_noun = live_to_noun(&mut self.cx, &inner, self.slab);
         let head = T(self.slab, &[inner_noun, note]);
-        let head_leaf = NLeaf::from_noun_raw(head, &self.slab.noun_space());
+        let head_leaf = live_leaf_from_noun(&mut self.cx, head, &self.slab.noun_space());
         Ok(cons_hint(&mut self.cx, head_leaf, payload))
     }
 
@@ -10034,13 +10034,15 @@ impl<'a> Ut<'a> {
                 // cons_hint preserves the void/noun collapse hint_type applies.
                 let sut_noun = live_to_noun(&mut self.cx, &sut, self.slab);
                 let head_noun = T(self.slab, &[sut_noun, note_noun]);
-                let head_leaf = NLeaf::from_noun_raw(head_noun, &self.slab.noun_space());
+                let head_leaf =
+                    live_leaf_from_noun(&mut self.cx, head_noun, &self.slab.noun_space());
                 Ok(cons_hint(&mut self.cx, head_leaf, payload))
             }
             Skin::Name(name, inner) => {
                 let inner_ty = self.gain_skin_inner(sut, ref_, inner, seen)?;
                 let tool_noun = term_to_noun(self.slab, name);
-                let tool_leaf = NLeaf::from_noun_raw(tool_noun, &self.slab.noun_space());
+                let tool_leaf =
+                    live_leaf_from_noun(&mut self.cx, tool_noun, &self.slab.noun_space());
                 Ok(cons_face(&mut self.cx, tool_leaf, inner_ty))
             }
             Skin::Over(wing, inner) => {
@@ -11571,7 +11573,7 @@ impl<'a> Ut<'a> {
             // ---- Face: %tune ----
             Hoon::Tune(tune) => {
                 let tool = term_or_tune_to_noun(self.slab, tune)?;
-                let tool_leaf = NLeaf::from_noun_raw(tool, &self.slab.noun_space());
+                let tool_leaf = live_leaf_from_noun(&mut self.cx, tool, &self.slab.noun_space());
                 let p_ty = cons_face(&mut self.cx, tool_leaf.clone(), sut);
                 let q_ty = cons_face(&mut self.cx, tool_leaf, dox);
                 Ok((p_ty, q_ty))
@@ -11958,7 +11960,7 @@ impl<'a> Ut<'a> {
         let rest = T(self.slab, &[semi_noun, tomes_map]);
         let yet = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(
                 &mut self.cx,
                 sut.clone(),
@@ -11972,7 +11974,7 @@ impl<'a> Ut<'a> {
         let garb_hum = garb_native(nym, hud, Vair::Gold);
         let hum = {
             let space = self.slab.noun_space();
-            let rest_leaf = NLeaf::from_noun_raw(rest, &space);
+            let rest_leaf = live_leaf_from_noun(&mut self.cx, rest, &space);
             cons_core(&mut self.cx, dox.clone(), garb_hum, dox.clone(), rest_leaf)
         };
 
@@ -13325,11 +13327,11 @@ use crate::native::ir::intern::{
     crop_cache_lookup as native_crop_cache_lookup, crop_cache_store as native_crop_cache_store,
     fish_cache_lookup as native_fish_cache_lookup, fish_cache_store as native_fish_cache_store,
     fuse_cache_lookup as native_fuse_cache_lookup, fuse_cache_store as native_fuse_cache_store,
-    legset_memo_lookup, legset_memo_store, live_intern, live_leaf_to_noun, live_to_noun,
-    mint_cache_lookup as native_mint_cache_lookup, mint_cache_store as native_mint_cache_store,
-    mull_cache_lookup as native_mull_cache_lookup, mull_cache_store as native_mull_cache_store,
-    native_of, native_of_mug_candidates, native_of_mug_insert, nest_cache_lookup, nest_cache_store,
-    Context,
+    legset_memo_lookup, legset_memo_store, live_intern, live_leaf_from_noun, live_leaf_to_noun,
+    live_to_noun, mint_cache_lookup as native_mint_cache_lookup,
+    mint_cache_store as native_mint_cache_store, mull_cache_lookup as native_mull_cache_lookup,
+    mull_cache_store as native_mull_cache_store, native_of, native_of_mug_candidates,
+    native_of_mug_insert, nest_cache_lookup, nest_cache_store, Context,
 };
 use crate::native::ir::leaf::Leaf as NLeaf;
 use crate::native::ir::ty::{garb_native, visit_fork_set_members, Garb as NGarb, Type as NTy};
@@ -13380,7 +13382,7 @@ fn ty_face_tool_n(
     let native = match kind {
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         _ => {
-            let tool_leaf = NLeaf::from_noun_raw(tool, &slab.noun_space());
+            let tool_leaf = live_leaf_from_noun(cx, tool, &slab.noun_space());
             live_intern(
                 cx,
                 NTy::Face {
@@ -13426,7 +13428,7 @@ fn ty_hint_n(
                 .and_then(|c| c.tail().as_cell())
                 .map(|c| c.head().noun())
                 .expect("ty_hint_n: hint noun shape");
-            let head_leaf = NLeaf::from_noun_raw(head, &space);
+            let head_leaf = live_leaf_from_noun(cx, head, &space);
             live_intern(
                 cx,
                 NTy::Hint {
@@ -13447,7 +13449,7 @@ fn ty_hold_n(
     hoon: Noun,
 ) -> (Noun, NRc<NTy>) {
     let noun = ty_hold(slab, inner.0, hoon);
-    let gene = NLeaf::from_noun_raw(hoon, &slab.noun_space());
+    let gene = live_leaf_from_noun(cx, hoon, &slab.noun_space());
     let native = live_intern(
         cx,
         NTy::Hold {
@@ -13474,7 +13476,7 @@ fn ty_core_n(
         Ok(TypeTagKind::Void) => live_intern(cx, NTy::Void),
         _ => {
             let garb_native = NGarb::from_noun(garb, &slab.noun_space()).expect("ty_core_n garb");
-            let rest_leaf = NLeaf::from_noun_raw(rest, &slab.noun_space());
+            let rest_leaf = live_leaf_from_noun(cx, rest, &slab.noun_space());
             live_intern(
                 cx,
                 NTy::Core {
