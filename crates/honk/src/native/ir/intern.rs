@@ -31,6 +31,7 @@ use super::leaf::Leaf;
 use super::ty::{tas, BoundaryType, Garb, Type, TypeId, TypeRef as Rc, TypeSlot};
 use crate::errors::{CompilerError, Result};
 use crate::native::noun::noun_pair;
+use crate::native::ut::types::FastHashMap;
 
 /// Decode a type noun into the native IR AND intern it in one O(n) pass, using a
 /// persistent pointer-identity `memo` so the noun DAG (and anything carried over
@@ -149,13 +150,13 @@ fn pair(n: Noun, space: &NounSpace) -> Result<(Noun, Noun)> {
 /// stays live for the whole compile). The memo therefore just accumulates for the
 /// life of the `Context` (one compile) — a plain map, no frame-scoped eviction.
 struct InternMemo {
-    map: HashMap<u64, Rc<Type>>,
+    map: FastHashMap<u64, Rc<Type>>,
 }
 
 impl InternMemo {
     fn new() -> Self {
         InternMemo {
-            map: HashMap::new(),
+            map: FastHashMap::default(),
         }
     }
 
@@ -210,24 +211,24 @@ pub struct Context {
     live: LiveIntern,
 
     // --- encode memos ---
-    to_noun_memo: HashMap<u32, Noun>, // was TO_NOUN_MEMO
-    leaf_memo: HashMap<usize, Noun>,  // was LEAF_MEMO
+    to_noun_memo: FastHashMap<u32, Noun>, // was TO_NOUN_MEMO
+    leaf_memo: FastHashMap<usize, Noun>,  // was LEAF_MEMO
 
     // --- boundary caches (key/value tuples copied verbatim) ---
-    nest_cache: HashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
+    nest_cache: FastHashMap<(u32, u32, u8, u64), bool>, // NEST_CACHE
     #[allow(clippy::type_complexity)]
-    core_mint_cache: HashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
+    core_mint_cache: FastHashMap<(u32, u32, u64, u8, u8, u64, u64, u64), (Rc<Type>, Noun)>, // CORE_MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mint_cache: HashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
+    mint_cache: FastHashMap<(u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Noun)>, // MINT_CACHE
     #[allow(clippy::type_complexity)]
-    mull_cache: HashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
-    fuse_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
-    crop_cache: HashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
-    fish_cache: HashMap<(u32, BigUint, u8, u64), Noun>, // FISH_CACHE
+    mull_cache: FastHashMap<(u32, u32, u32, u8, u64, u64, u64, u64), (Rc<Type>, Rc<Type>)>, // MULL_CACHE
+    fuse_cache: FastHashMap<(u32, u32, u8, u64), Rc<Type>>, // FUSE_CACHE
+    crop_cache: FastHashMap<(u32, u32, u8, u64), Rc<Type>>, // CROP_CACHE
+    fish_cache: HashMap<(u32, BigUint, u8, u64), Noun>,     // FISH_CACHE
 
     // --- native_of content-keyed decode cache + fork cache ---
-    native_of_mug_memo: HashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
-    fork_cache: HashMap<Vec<u32>, Rc<Type>>,         // FORK_CACHE
+    native_of_mug_memo: FastHashMap<u64, Vec<Rc<Type>>>, // NATIVE_OF_MUG_MEMO
+    fork_cache: FastHashMap<Vec<u32>, Rc<Type>>,         // FORK_CACHE
 
     // --- scope-precise fan key support (reachable %hold legs per type) ---
     // `legset_memo` maps an interned `Rc<Type>` pointer to the sorted-deduped set
@@ -235,25 +236,25 @@ pub struct Context {
     // Sound because `intern_node` hash-conses (ptr == structural identity), so the
     // legset is a pure function of the pointer; computed bottom-up over the Rc DAG
     // and memoized so each distinct node is visited once (O(1) amortized).
-    legset_memo: HashMap<u32, SharedRc<[u64]>>,
+    legset_memo: FastHashMap<u32, SharedRc<[u64]>>,
 }
 
 impl Context {
     pub fn new() -> Self {
         Context {
             live: LiveIntern::new(),
-            to_noun_memo: HashMap::new(),
-            leaf_memo: HashMap::new(),
-            nest_cache: HashMap::new(),
-            core_mint_cache: HashMap::new(),
-            mint_cache: HashMap::new(),
-            mull_cache: HashMap::new(),
-            fuse_cache: HashMap::new(),
-            crop_cache: HashMap::new(),
+            to_noun_memo: FastHashMap::default(),
+            leaf_memo: FastHashMap::default(),
+            nest_cache: FastHashMap::default(),
+            core_mint_cache: FastHashMap::default(),
+            mint_cache: FastHashMap::default(),
+            mull_cache: FastHashMap::default(),
+            fuse_cache: FastHashMap::default(),
+            crop_cache: FastHashMap::default(),
             fish_cache: HashMap::new(),
-            native_of_mug_memo: HashMap::new(),
-            fork_cache: HashMap::new(),
-            legset_memo: HashMap::new(),
+            native_of_mug_memo: FastHashMap::default(),
+            fork_cache: FastHashMap::default(),
+            legset_memo: FastHashMap::default(),
         }
     }
 
@@ -1062,6 +1063,21 @@ mod tests {
         let rc2 = tab.intern_shallow(Type::Cell(r2, r2));
         assert!(Rc::ptr_eq(&rc1, &rc2), "equal cells intern to one Rc");
         assert_eq!(tab.distinct, 2, "only the atom and the cell are distinct");
+    }
+
+    #[test]
+    fn arena_handles_are_one_word_copies_with_dense_ids() {
+        assert_eq!(
+            std::mem::size_of::<Rc<Type>>(),
+            std::mem::size_of::<usize>()
+        );
+        let mut tab = TypeTable::new();
+        let atom = tab.intern_shallow(atom());
+        let noun = tab.intern_shallow(Type::Noun);
+        let atom_copy = atom;
+        assert!(Rc::ptr_eq(&atom, &atom_copy));
+        assert_eq!(atom.arena_id(), TypeId(0));
+        assert_eq!(noun.arena_id(), TypeId(1));
     }
 
     // The subject-deepening fix in miniature: a fully-duplicated balanced cell
