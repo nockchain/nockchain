@@ -2628,8 +2628,12 @@ fn musk_mack_core_cache_reuses_runtime_copy() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        let first = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
-        let second = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let first = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
+        let second = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("cached core copy");
 
         // The copy shares structure: every cell of the core gets its own
         // cache entry ([[1 2] [3 4]] = root + two leaves).
@@ -2648,9 +2652,13 @@ fn musk_mack_core_cache_persists_across_runtime_frames() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        let first = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let first = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
         (*context).with_stack_frame(0, |_context| D(0));
-        let second = ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        let second = ut
+            .musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("cached core copy");
         assert!(first.raw_equals(&second));
         assert_eq!(ut.musk.mack_core_cache_raw.len(), 3);
     }
@@ -2665,12 +2673,58 @@ fn musk_mack_core_cache_clears_when_runtime_is_reset() {
     let context = &mut ut.musk.context as *mut _;
 
     unsafe {
-        ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space);
+        ut.musk_mack_cached_core_in_context(&mut *context, core, &core_space)
+            .expect("core copy");
     }
     assert_eq!(ut.musk.mack_core_cache_raw.len(), 3);
 
     ut.clear_musk_context_dependent_caches();
     assert!(ut.musk.mack_core_cache_raw.is_empty());
+}
+
+fn mack_copy_exhaustion_test_core(slab: &mut NounSlab) -> Noun {
+    let mut core = D(0);
+    for value in 0..256 {
+        core = T(slab, &[D(value), core]);
+    }
+    core
+}
+
+#[test]
+fn musk_mack_recovers_when_call_core_copy_exhausts_eval_stack() {
+    let mut slab = NounSlab::new();
+    let large_core = mack_copy_exhaustion_test_core(&mut slab);
+    let small_core = mack_cache_test_core(&mut slab, 1, 2, 3, 4);
+    let mut ut = Ut::new(&mut slab);
+
+    ut.musk.context.stack.set_alloc_floor_budget(Some(64));
+    assert!(
+        ut.musk_interpret_mack(large_core, 2).is_none(),
+        "an exhausted call-core copy must decline the fold"
+    );
+    assert!(
+        ut.musk.mack_core_cache_raw.is_empty(),
+        "recovery must discard cache entries into rolled-back stack storage"
+    );
+
+    let wide_axis = Atom::from_bytes(&mut *ut.slab, &[0, 0, 0, 0, 0, 0, 0, 0, 1]).as_noun();
+    ut.musk.context.stack.set_alloc_floor_budget(Some(64));
+    assert!(
+        ut.musk_interpret_mack_axis_noun(large_core, wide_axis)
+            .expect("wide-axis mack")
+            .is_none(),
+        "the wide-axis path must use the same guarded call-core copy"
+    );
+    assert!(
+        ut.musk.mack_core_cache_raw.is_empty(),
+        "wide-axis recovery must also discard partial cache entries"
+    );
+
+    ut.musk.context.stack.set_alloc_floor_budget(None);
+    assert!(
+        ut.musk_interpret_mack(small_core, 2).is_some(),
+        "the eval context must remain usable after copy exhaustion"
+    );
 }
 
 // Validates the Step-2 chunked prelude mint mechanism on a small `=>` chain:
