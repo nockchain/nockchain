@@ -354,6 +354,11 @@ pub struct NockchainCli {
     pub fakenet_log_difficulty: u64,
     #[arg(
         long,
+        help = "One-flag dual-puzzle fakenet: activates AI-PoW at height 20 with working per-puzzle ASERT defaults (phase 20, anchor 19, cache-recovered anchor timestamps, 60s ideals, 600s half-life, 120s candidate interval). Individual --fakenet-*asert-* / activation / interval flags still override. Requires --fakenet."
+    )]
+    pub fakenet_ai_pow: bool,
+    #[arg(
+        long,
         help = "Override the v1-phase activation height when running on fakenet. Requires --fakenet.",
         default_value = "1",
         requires = "fakenet"

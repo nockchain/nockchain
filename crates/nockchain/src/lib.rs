@@ -433,6 +433,48 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
         if let Some(bythos_phase) = cli.fakenet_bythos_phase {
             fakenet_constants = fakenet_constants.with_bythos_phase(bythos_phase);
         }
+        // --fakenet-ai-pow: one-flag working dual-puzzle defaults. Activation
+        // at height 20 (not 1) so the ASERT anchors sit on real, recent
+        // blocks and the shared anchor cache — populated when the anchor
+        // block is accepted — drives both retargets. An anchor at genesis
+        // would read the prebuilt jam's ancient baked timestamp and pin every
+        // target at its ceiling. Explicit ASERT/activation flags override
+        // piecemeal below.
+        if cli.fakenet_ai_pow {
+            const AI_POW_FAKENET_ACTIVATION: u64 = 20;
+            let anchor = AI_POW_FAKENET_ACTIVATION - 1;
+            if effective_fakenet_ai_activation_height.is_none()
+                && fakenet_ai_asert_override.is_none()
+            {
+                fakenet_constants = fakenet_constants
+                    .with_ai_pow_activation_height(AI_POW_FAKENET_ACTIVATION);
+                let mut ai_asert = fakenet_constants.ai_asert.clone();
+                ai_asert.phase = AI_POW_FAKENET_ACTIVATION;
+                ai_asert.anchor_height = anchor;
+                ai_asert.anchor_target_atom = ibig::UBig::from(1u64) << 232;
+                ai_asert.ideal_block_time = 60;
+                ai_asert.half_life = 600;
+                ai_asert.anchor_min_timestamp = 0;
+                fakenet_constants = fakenet_constants.with_ai_asert(ai_asert);
+            }
+            if cli.fakenet_asert.clone().into_config()?.is_none() {
+                let mut zk_asert = fakenet_constants.zk_asert.clone();
+                zk_asert.phase = AI_POW_FAKENET_ACTIVATION;
+                fakenet_constants = fakenet_constants.with_zk_asert(zk_asert);
+                let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
+                zk_post.phase = AI_POW_FAKENET_ACTIVATION;
+                zk_post.anchor_height = anchor;
+                zk_post.anchor_target_atom = ibig::UBig::from(1u64) << 320;
+                zk_post.ideal_block_time = 60;
+                zk_post.half_life = 600;
+                zk_post.anchor_min_timestamp = 0;
+                fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
+            }
+            if cli.fakenet_update_candidate_interval_secs.is_none() {
+                fakenet_constants = fakenet_constants
+                    .with_update_candidate_timestamp_interval(Seconds(120));
+            }
+        }
         let ai_asert_override = fakenet_ai_asert_override;
         if let Some(ai_activation) = effective_fakenet_ai_activation_height {
             // AI admission, the AI ASERT pin, and the post-AI ZK regime share
@@ -466,13 +508,11 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             // Fakenet ergonomics: the ZK flags also drive the post-AI-activation
             // regime (zk_asert_post_ai), which is the regime actually in force once
             // AI is active from a low height. Copy the same anchor target / ideal /
-            // half-life so there is ONE ZK difficulty knob across the regime switch,
-            // and pin anchor_min_timestamp to a non-zero sentinel so the regime-2
-            // target reads its hardcoded anchor instead of the (empty) cache — which
-            // otherwise crashes the first ZK candidate a dual-miner run builds. With
-            // a large half-life the sentinel timestamp is absorbed, giving a stable
-            // (~constant) normalized fakenet difficulty; the phase/anchor-height stay
-            // as --fakenet-ai-pow-activation-height set them.
+            // half-life so there is ONE ZK difficulty knob across the regime
+            // switch. anchor_min_timestamp stays 0: the target reads the
+            // recovered anchor median from the shared cache, which is populated
+            // when the anchor block (phase - 1) is accepted — pinning a sentinel
+            // here would pin the ZK target at its ceiling forever.
             let mut zk_post = fakenet_constants.zk_asert_post_ai.clone();
             zk_post.anchor_target_atom =
                 ibig::UBig::from(1u64) << (asert.anchor_target_bex as usize);
@@ -481,9 +521,6 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             }
             if let Some(half_life) = asert.half_life {
                 zk_post.half_life = half_life;
-            }
-            if zk_post.anchor_min_timestamp == 0 {
-                zk_post.anchor_min_timestamp = 1;
             }
             fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
         }
