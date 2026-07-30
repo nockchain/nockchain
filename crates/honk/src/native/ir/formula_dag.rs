@@ -401,14 +401,18 @@ impl FormulaArena {
                 let body = self.materialize(body, slab);
                 T(slab, &[D(11), clue, body])
             }
-            FormulaNode::Op { code, args } => {
-                let mut nouns = Vec::with_capacity(args.len() + 1);
-                nouns.push(D(u64::from(code)));
-                for arg in args {
-                    nouns.push(self.materialize(arg, slab));
+            FormulaNode::Op { code, args } => match args.as_slice() {
+                [arg] => {
+                    let arg = self.materialize(*arg, slab);
+                    T(slab, &[D(u64::from(code)), arg])
                 }
-                T(slab, &nouns)
-            }
+                [left, right] => {
+                    let left = self.materialize(*left, slab);
+                    let right = self.materialize(*right, slab);
+                    T(slab, &[D(u64::from(code)), left, right])
+                }
+                _ => unreachable!("native formula opcodes have arity one or two"),
+            },
         };
         self.entry_mut(id).materialized = Some(noun);
         self.materializations += 1;
