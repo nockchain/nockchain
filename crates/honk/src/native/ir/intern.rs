@@ -264,6 +264,10 @@ impl Context {
     pub fn reset(&mut self) {
         *self = Context::new();
     }
+
+    pub(crate) fn type_stats(&self) -> (u64, u64) {
+        (self.live.table.interned_calls, self.live.table.distinct)
+    }
 }
 
 impl Default for Context {
@@ -274,9 +278,7 @@ impl Default for Context {
 
 #[inline(always)]
 fn canonical_id(ty: &Rc<Type>) -> u32 {
-    ty.type_id()
-        .expect("native type algebra only accepts context-interned types")
-        .0
+    ty.arena_id().0
 }
 
 static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -845,65 +847,6 @@ impl TypeTable {
         Self::default()
     }
 
-    /// Intern a type tree bottom-up, returning its canonical `Rc`.
-    pub fn intern(&mut self, t: &Type) -> Rc<Type> {
-        let node = match t {
-            Type::Void => Type::Void,
-            Type::Noun => Type::Noun,
-            Type::Atom { aura, bits } => Type::Atom {
-                aura: aura.clone(),
-                bits: bits.clone(),
-            },
-            Type::Cell(h, tl) => Type::Cell(self.intern(h), self.intern(tl)),
-            Type::Core {
-                payload,
-                garb,
-                context,
-                rest,
-            } => Type::Core {
-                payload: self.intern(payload),
-                garb: garb.clone(),
-                context: self.intern(context),
-                rest: rest.clone(),
-            },
-            Type::Face { tool, inner } => Type::Face {
-                tool: tool.clone(),
-                inner: self.intern(inner),
-            },
-            Type::Hint { head, payload } => Type::Hint {
-                head: head.clone(),
-                payload: self.intern(payload),
-            },
-            Type::Fork {
-                set,
-                options,
-                options_seen,
-            } => Type::Fork {
-                set: set.clone(),
-                options: {
-                    let native_options: std::cell::OnceCell<Vec<Rc<Type>>> = Default::default();
-                    if let Some(options) = options.get() {
-                        native_options
-                            .set(
-                                options
-                                    .iter()
-                                    .map(|option| self.intern(option))
-                                    .collect::<Vec<_>>(),
-                            )
-                            .expect("fresh fork options cell");
-                    }
-                    native_options
-                },
-                options_seen: std::cell::Cell::new(options_seen.get()),
-            },
-            Type::Hold { subject, gene } => Type::Hold {
-                subject: self.intern(subject),
-                gene: gene.clone(),
-            },
-        };
-        self.intern_node(node)
-    }
-
     /// Intern a single node whose children are ALREADY canonical (interned).
     /// O(1) amortized. Used by the memoized decode-and-intern walk
     /// ([`intern_type_noun`]) which interns bottom-up itself.
@@ -1055,17 +998,15 @@ mod tests {
     #[test]
     fn dedups_structurally_equal_to_one_rc() {
         let mut tab = TypeTable::new();
-        let r1 = tab.intern(&atom());
-        let r2 = tab.intern(&atom()); // distinct allocation, equal structure
+        let r1 = tab.intern_shallow(atom());
+        let r2 = tab.intern_shallow(atom());
         assert!(Rc::ptr_eq(&r1, &r2), "equal atoms intern to one Rc");
         assert_eq!(tab.distinct, 1);
         assert_eq!(tab.hits, 1);
 
         // Equal cells over equal children also collapse.
-        let c1 = Type::Cell(Rc::new(atom()), Rc::new(atom()));
-        let c2 = Type::Cell(Rc::new(atom()), Rc::new(atom()));
-        let rc1 = tab.intern(&c1);
-        let rc2 = tab.intern(&c2);
+        let rc1 = tab.intern_shallow(Type::Cell(r1, r1));
+        let rc2 = tab.intern_shallow(Type::Cell(r2, r2));
         assert!(Rc::ptr_eq(&rc1, &rc2), "equal cells intern to one Rc");
         assert_eq!(tab.distinct, 2, "only the atom and the cell are distinct");
     }
@@ -1075,16 +1016,18 @@ mod tests {
     // hash-consing — O(2^n) → O(n).
     #[test]
     fn hash_consing_collapses_duplicated_structure() {
-        fn build(depth: u32) -> Type {
+        fn build(tab: &mut TypeTable, depth: u32) -> Rc<Type> {
             if depth == 0 {
-                atom()
+                tab.intern_shallow(atom())
             } else {
-                Type::Cell(Rc::new(build(depth - 1)), Rc::new(build(depth - 1)))
+                let head = build(tab, depth - 1);
+                let tail = build(tab, depth - 1);
+                tab.intern_shallow(Type::Cell(head, tail))
             }
         }
         let depth = 12;
         let mut tab = TypeTable::new();
-        let _root = tab.intern(&build(depth));
+        let _root = build(&mut tab, depth);
         assert_eq!(
             tab.distinct as u32,
             depth + 1,
@@ -1106,14 +1049,14 @@ mod tests {
             options_seen: Default::default(),
         };
         let mut tab = TypeTable::new();
-        let canonical = tab.intern(&fork);
+        let canonical = tab.intern_shallow(fork);
         let hash_before = node_hash(&canonical);
 
         let Type::Fork { options, .. } = &*canonical else {
             unreachable!()
         };
         options
-            .set(vec![tab.intern(&atom())])
+            .set(vec![tab.intern_shallow(atom())])
             .expect("first fork-edge materialization");
         assert_eq!(
             hash_before,
@@ -1126,7 +1069,7 @@ mod tests {
             options: std::cell::OnceCell::new(),
             options_seen: Default::default(),
         };
-        let reinterned = tab.intern(&duplicate);
+        let reinterned = tab.intern_shallow(duplicate);
         assert!(
             Rc::ptr_eq(&canonical, &reinterned),
             "the exact set witness remains fork identity after edge caching"
