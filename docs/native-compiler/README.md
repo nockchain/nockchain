@@ -38,6 +38,7 @@ Performance design notes:
 
 - [`ARENA-HOON-IR.md`](ARENA-HOON-IR.md) describes the scope-local `HoonId` graph, nested lowering arenas, lifetime invariants, and acceptance gates.
 - [`ARENA-FORMULA-IR.md`](ARENA-FORMULA-IR.md) describes the end-to-end `FormulaId` graph, explicit formula-as-data boundaries, exactness rules, and measured validation.
+- [`ARENA-SEMINOUN-IR.md`](ARENA-SEMINOUN-IR.md) describes canonical complete-value identity, the native seminoun lattice, exact Musk cache keys, and the measured 2.668× compile-throughput result.
 
 Ignored tests do not validate parity in normal Cargo runs. If an ignored heavy
 parity test is the evidence for a change, run it explicitly with `--ignored` and
