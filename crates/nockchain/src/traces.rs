@@ -64,7 +64,11 @@ pub fn traces_driver() -> IODriverFn {
                             continue;
                         }
 
-                        let height = num_fields.get("block_height").copied().unwrap_or(0);
+                        let height = num_fields
+                            .get("block_height")
+                            .or_else(|| num_fields.get("new_height"))
+                            .copied()
+                            .unwrap_or(0);
                         let digest = str_fields
                             .get("heaviest_block_digest")
                             .cloned()
@@ -132,16 +136,28 @@ pub fn traces_driver() -> IODriverFn {
                                 );
                             }
                             "orphaned-block" => {
-                                debug!(
+                                info!(
                                     block_height = height,
-                                    block_digest = digest.as_str(),
+                                    block_id = block_id.as_str(),
+                                    event_type = str_fields
+                                        .get("event_type")
+                                        .map(|s| s.as_str())
+                                        .unwrap_or(""),
+                                    new_heaviest_block = str_fields
+                                        .get("new_heaviest_block")
+                                        .map(|s| s.as_str())
+                                        .unwrap_or(""),
                                     "orphaned_block"
                                 );
                             }
                             "chain-reorg" => {
-                                debug!(
+                                info!(
                                     block_height = height,
-                                    new_tip_digest = digest.as_str(),
+                                    block_id = block_id.as_str(),
+                                    new_heaviest_height = num_fields
+                                        .get("new_heaviest_height")
+                                        .copied()
+                                        .unwrap_or(0),
                                     "chain_reorg"
                                 );
                             }
