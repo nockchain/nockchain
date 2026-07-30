@@ -56,9 +56,10 @@ pub fn roundtrip_check(formula: Noun, space: &NounSpace) -> Result<()> {
 /// how much structurally-equal duplication (subject-deepening) the intern table
 /// collapses — concrete evidence for the Phase-2 memory thesis.
 pub fn type_intern_stats(type_noun: Noun, space: &NounSpace) -> Result<(u64, u64)> {
-    let mut cx = intern::Context::new();
-    let _ = intern::native_of(&mut cx, type_noun, space)?;
-    Ok(cx.type_stats())
+    let parsed = ty::BoundaryType::from_noun(type_noun, space)?;
+    let mut table = intern::TypeTable::new();
+    let _ = table.intern_boundary(&parsed);
+    Ok((table.interned_calls, table.distinct))
 }
 
 /// Type-IR completeness invariant: `from_noun(type).to_noun() == type`
