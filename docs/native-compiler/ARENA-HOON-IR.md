@@ -6,9 +6,9 @@ Honk compiles parsed and compiler-generated Hoon through a scope-local graph ind
 
 ## Representation
 
-Each arena has one dense entry vector, one flat child-ID vector, and one address-to-ID ingress map. An entry holds the read-only source node, its spot-sensitive structural signature, its child range, its lazily materialized canonical noun, and its cached `open` result. The former stable-pointer set, pointer-to-signature map, pointer-to-noun map, and stable-node `open_cache` probes collapse into one ingress lookup followed by indexed loads. IDs are post-order, so children precede parents and related metadata stays close in memory.
+Each arena has one dense entry vector and one address-to-ID ingress map. An entry holds the read-only source node, its spot-sensitive structural signature, inline child IDs for the hot canonical binary forms, its lazily materialized canonical noun, and its cached `open` result. The former stable-pointer set, pointer-to-signature map, pointer-to-noun map, and stable-node `open_cache` probes collapse into one ingress lookup followed by indexed loads. IDs are post-order, so children precede parents and related metadata stays close in memory.
 
-`Sig64` constructs the graph in one compositional traversal. It records every Hoon node reached directly or through helper payloads such as `Spec` and `Type`, records direct Hoon edges, and computes every node signature once. Registration assigns dense IDs in a first pass and resolves child addresses to IDs in a second pass.
+`Sig64` constructs the graph in one compositional traversal. It records every Hoon node reached directly or through helper payloads such as `Spec` and `Type`, records the `%pair` and `%tsgr` edges used by direct ID recursion, and computes every node signature once. Registration assigns dense IDs in a first pass and resolves those hot child addresses to IDs in a second pass. Collecting generic edges for every Hoon form was measured and rejected because the extra per-node work cost compiler throughput without serving the current dispatch path.
 
 ## Generated lowerings
 
