@@ -6,6 +6,7 @@ use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
+use std::rc::Rc as SharedRc;
 use std::sync::Arc;
 
 use hatch::ast::hoon::{
@@ -2543,7 +2544,7 @@ impl<'a> Ut<'a> {
     /// `reachable_legs` resolves a hold's leg-id O(1) amortized. Byte-neutral:
     /// returns the SAME id `redo_subject_hold_in_fan` would (same intern path).
     fn hold_repo_fan_leg_id_for_hold_native(&mut self, hold: &NRc<NTy>) -> Result<u64> {
-        let ptr = NRc::as_ptr(hold) as usize;
+        let ptr = native_type_id_usize(hold);
         if let Some(id) = self.hold_repo_fan_leg_id_by_ptr.get(&ptr).copied() {
             return Ok(id);
         }
@@ -2569,19 +2570,19 @@ impl<'a> Ut<'a> {
     /// visited at most once and the closure is O(1) amortized per node. See the
     /// linearity proof in the design memo. The `Fork` case decodes options once
     /// per fork ptr (also memoized) and unions their legsets.
-    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
-        let ptr = NRc::as_ptr(t) as usize;
-        if let Some(legs) = legset_memo_lookup(&self.cx, ptr) {
+    fn reachable_legs(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
+        let id = t.arena_id().0;
+        if let Some(legs) = legset_memo_lookup(&self.cx, id) {
             return Ok(legs);
         }
         let legs = self.with_stack_guard(|ut| ut.reachable_legs_node(t))?;
-        legset_memo_store(&mut self.cx, ptr, legs.clone());
+        legset_memo_store(&mut self.cx, id, legs.clone());
         Ok(legs)
     }
 
     /// One node of `reachable_legs`' memoized recursion (the `with_stack_guard`
     /// wraps each level for deep DAGs). See `reachable_legs`.
-    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<NRc<[u64]>> {
+    fn reachable_legs_node(&mut self, t: &NRc<NTy>) -> Result<SharedRc<[u64]>> {
         let legs: Vec<u64> = match &**t {
             NTy::Void | NTy::Noun | NTy::Atom { .. } => Vec::new(),
             NTy::Cell(h, tl) => {
@@ -2630,7 +2631,7 @@ impl<'a> Ut<'a> {
                 Self::merge_sorted_legs(&ls, std::slice::from_ref(&self_leg))
             }
         };
-        Ok(NRc::from(legs.into_boxed_slice()))
+        Ok(SharedRc::from(legs.into_boxed_slice()))
     }
 
     /// Sorted-merge-dedup union of two sorted leg-id slices (mirrors the
@@ -4029,7 +4030,12 @@ impl<'a> Ut<'a> {
         bucket.push_back(NestCacheEntry { sut, ref_, result });
     }
 
-    pub fn mint(&mut self, sut: NRc<NTy>, gol: NRc<NTy>, gen: &Hoon) -> Result<(NRc<NTy>, Noun)> {
+    pub(crate) fn mint(
+        &mut self,
+        sut: NRc<NTy>,
+        gol: NRc<NTy>,
+        gen: &Hoon,
+    ) -> Result<(NRc<NTy>, Noun)> {
         let mut scope = self.hoon_ast_scope(gen);
         let root = scope.root;
         let result = scope.mint_arena(sut, gol, root);
@@ -4404,7 +4410,7 @@ impl<'a> Ut<'a> {
         path.join("/")
     }
 
-    pub fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
+    pub(crate) fn play(&mut self, sut: NRc<NTy>, gen: &Hoon) -> Result<NRc<NTy>> {
         let mut scope = self.hoon_ast_scope(gen);
         // Canonical ++play runs with vet disabled for the entire evaluation
         // scope; restore it afterward (safe save/restore — see with_vet_off).
@@ -5596,7 +5602,7 @@ impl<'a> Ut<'a> {
             Poly::Dry => 0u8,
             Poly::Wet => 1u8,
         };
-        let key = (NRc::as_ptr(sut) as usize, tomes_sig, poly_key);
+        let key = (native_type_id_usize(sut), tomes_sig, poly_key);
         if let Some(&id) = self.lazy_resolver_canonical_ids.get(&key) {
             return id;
         }
@@ -6618,7 +6624,7 @@ impl<'a> Ut<'a> {
         let mut sum = 0u64;
         let mut xor = 0u64;
         for hold in seen_holds {
-            let id = NRc::as_ptr(hold) as u64;
+            let id = native_type_id_u64(hold);
             let component = id.wrapping_mul(0x9e37_79b9_7f4a_7c15);
             sum = sum.wrapping_add(component);
             xor ^= component.rotate_left((id as u32) & 31);
@@ -6630,7 +6636,7 @@ impl<'a> Ut<'a> {
         let semantic = self.semantic_context_key();
         let (seen_sum, seen_xor, seen_len) = Self::bran_seen_holds_signature(seen_holds);
         (
-            NRc::as_ptr(sut) as u64,
+            native_type_id_u64(sut),
             semantic.vet_key,
             semantic.fan_context_key,
             seen_sum,
@@ -8255,7 +8261,7 @@ impl<'a> Ut<'a> {
 
         // The in-progress dedup id is the interned core Rc's pointer (one canonical
         // Rc per type via hash-cons), replacing the old noun as_raw() identity.
-        let core_type_id = NRc::as_ptr(&core_type) as u64;
+        let core_type_id = native_type_id_u64(&core_type);
         let in_progress_key = (Arc::clone(&key), core_type_id);
         let in_progress_entry = ArmInProgressEntry {
             key: Arc::clone(&key),
@@ -8276,16 +8282,16 @@ impl<'a> Ut<'a> {
         debug_assert_eq!(
             popped.map(|entry| (
                 entry.key,
-                NRc::as_ptr(&entry.core),
+                entry.core.arena_id(),
                 unsafe { entry.hoon.as_raw() },
-                NRc::as_ptr(&entry.goal),
+                entry.goal.arena_id(),
                 entry.vet,
             )),
             Some((
                 Arc::clone(&key),
-                NRc::as_ptr(&core_type),
+                core_type.arena_id(),
                 unsafe { hoon_noun.as_raw() },
-                NRc::as_ptr(&goal),
+                goal.arena_id(),
                 arm_vet,
             ))
         );
@@ -8905,8 +8911,8 @@ impl<'a> Ut<'a> {
                 return Ok(true);
             }
             let memo_key = NestMemoKey {
-                sut_id: NRc::as_ptr(&sut) as u64,
-                ref_id: NRc::as_ptr(&ref_) as u64,
+                sut_id: native_type_id_u64(&sut),
+                ref_id: native_type_id_u64(&ref_),
                 seg: seen_sut_holds.snapshot(),
                 reg: seen_ref_holds.snapshot(),
                 gil: gil.snapshot(),
@@ -9047,8 +9053,8 @@ impl<'a> Ut<'a> {
                     )
                 }
                 NTy::Hold { .. } => {
-                    let sut_id = NRc::as_ptr(&sut) as u64;
-                    let ref_id = NRc::as_ptr(&ref_) as u64;
+                    let sut_id = native_type_id_u64(&sut);
+                    let ref_id = native_type_id_u64(&ref_);
                     if !seen_sut_holds.insert_id(sut_id) {
                         return Ok(false);
                     }
@@ -9126,8 +9132,8 @@ impl<'a> Ut<'a> {
                 self.nest_inner(sut, inner, depth, seen_sut_holds, seen_ref_holds, gil, memo)
             }
             NTy::Hold { .. } => {
-                let sut_id = NRc::as_ptr(&sut) as u64;
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let sut_id = native_type_id_u64(&sut);
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen_ref_holds.insert_id(ref_id) {
                     return Ok(true);
                 }
@@ -9251,8 +9257,8 @@ impl<'a> Ut<'a> {
             }
             return Ok(true);
         }
-        let sut_id = NRc::as_ptr(&sut) as u64;
-        let ref_id = NRc::as_ptr(&ref_) as u64;
+        let sut_id = native_type_id_u64(&sut);
+        let ref_id = native_type_id_u64(&ref_);
         if !gil.insert_id(sut_id, ref_id) {
             return Ok(true);
         }
@@ -9844,7 +9850,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, new_payload))
             }
             NTy::Hold { .. } => {
-                let sut_id = NRc::as_ptr(&sut) as u64;
+                let sut_id = native_type_id_u64(&sut);
                 if !vil.insert(sut_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10115,7 +10121,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10202,7 +10208,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10284,7 +10290,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10407,7 +10413,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10497,7 +10503,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, hd, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10556,7 +10562,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, payload))
             }
             NTy::Hold { .. } => {
-                let ref_id = NRc::as_ptr(&ref_) as u64;
+                let ref_id = native_type_id_u64(&ref_);
                 if !seen.insert(ref_id) {
                     return Ok(cons_void(&mut self.cx));
                 }
@@ -10633,8 +10639,8 @@ impl<'a> Ut<'a> {
     #[inline]
     fn miss_memo_key(&self, sut: &NRc<NTy>, ref_: &NRc<NTy>) -> (u64, u64, u8) {
         (
-            NRc::as_ptr(sut) as u64,
-            NRc::as_ptr(ref_) as u64,
+            native_type_id_u64(sut),
+            native_type_id_u64(ref_),
             u8::from(self.vet),
         )
     }
@@ -10711,8 +10717,8 @@ impl<'a> Ut<'a> {
                 self.miss_dext(payload, ref_, seen, memo)
             }
             NTy::Hold { .. } => {
-                let sp = NRc::as_ptr(&sut) as u64;
-                let rp = NRc::as_ptr(&ref_) as u64;
+                let sp = native_type_id_u64(&sut);
+                let rp = native_type_id_u64(&ref_);
                 for (a, b) in seen.iter() {
                     if (*a == sp && *b == rp) || (*a == rp && *b == sp) {
                         return Ok(true);
@@ -10847,7 +10853,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, fused))
             }
             NTy::Hold { .. } => {
-                let key = (NRc::as_ptr(&sut) as usize, NRc::as_ptr(&ref_) as usize);
+                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: fuse-loop".to_string(),
@@ -10966,7 +10972,7 @@ impl<'a> Ut<'a> {
                 Ok(cons_hint(&mut self.cx, head, cropped))
             }
             NTy::Hold { .. } => {
-                let key = (NRc::as_ptr(&sut) as usize, NRc::as_ptr(&ref_) as usize);
+                let key = (native_type_id_usize(&sut), native_type_id_usize(&ref_));
                 if seen.contains(&key) {
                     return Err(CompilerError::UnsupportedExpr(
                         "native mint: crop-loop".to_string(),
@@ -13246,7 +13252,17 @@ fn coil_from_parts(slab: &mut NounSlab, garb: Noun, context: Noun, rest: Noun) -
 // Additive: the noun-only `ty_*` call sites are untouched; callers migrate to
 // `_n` incrementally (INC2+). Validated per-node by `assert_native_eq`.
 // ---------------------------------------------------------------------------
-use std::rc::Rc as NRc;
+use crate::native::ir::ty::TypeRef as NRc;
+
+#[inline(always)]
+fn native_type_id_u64(ty: &NRc<NTy>) -> u64 {
+    u64::from(ty.arena_id().0)
+}
+
+#[inline(always)]
+fn native_type_id_usize(ty: &NRc<NTy>) -> usize {
+    ty.arena_id().0 as usize
+}
 
 enum NativeForkOptions<'a> {
     Cached(&'a [NRc<NTy>]),

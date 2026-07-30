@@ -491,7 +491,7 @@ impl<'a> Ut<'a> {
                     go(ut, inner, way, axe, skip, name, lon, seen)
                 }
                 NTy::Hold { .. } => {
-                    let sut_id = NRc::as_ptr(&sut) as u64;
+                    let sut_id = native_type_id_u64(&sut);
                     if seen.hold_path.contains(&sut_id) {
                         return Ok(Pony::Void);
                     }
