@@ -614,4 +614,144 @@ mod tests {
             Err(PearlMergeMiningError::Cancelled)
         ));
     }
+
+    #[test]
+    fn dense_search_kat_snapshot() {
+        use ai_pow::matmul::{compute_pattern_tile_trace_from_slices, BlockNoise};
+
+        let params = pearl_test_params();
+        let header = pearl_test_header();
+        let config = pearl_test_config();
+        let target = crate::easy_nock_target();
+        let (a, b) = synth_matrices(b"pearl-search-kat-v1", &params);
+        let checked = evaluate_pearl_merge_checked_ticket_attempt(
+            &header,
+            &config,
+            &params,
+            0,
+            0,
+            &a,
+            &b,
+            &target,
+            16,
+            pearl_test_aux(),
+        )
+        .expect("checked dense ticket");
+        let attempt = checked.attempt();
+        let ticket = &attempt.ticket;
+        let noise = BlockNoise::expand(&attempt.commitments.s_a, &attempt.commitments.s_b, &params);
+        let mut a_prime = Vec::with_capacity(ticket.a_rows.len() * params.k as usize);
+        let mut e_row = vec![0i8; params.k as usize];
+        for &row in &ticket.a_rows {
+            noise.e_row_into(row, &mut e_row);
+            let offset = row as usize * params.k as usize;
+            a_prime.extend(
+                a[offset..offset + params.k as usize]
+                    .iter()
+                    .zip(&e_row)
+                    .map(|(&a, &e)| (a as i16 + e as i16) as i8),
+            );
+        }
+        let mut b_prime = Vec::with_capacity(ticket.b_cols.len() * params.k as usize);
+        let mut f_col = vec![0i8; params.k as usize];
+        for &col in &ticket.b_cols {
+            noise.f_col_into(col, &mut f_col);
+            let offset = col as usize * params.k as usize;
+            b_prime.extend(
+                b[offset..offset + params.k as usize]
+                    .iter()
+                    .zip(&f_col)
+                    .map(|(&b, &f)| (b as i16 + f as i16) as i8),
+            );
+        }
+        let trace = compute_pattern_tile_trace_from_slices(
+            &a_prime,
+            &b_prime,
+            ticket.a_rows.len(),
+            ticket.b_cols.len(),
+            params.k as usize,
+            params.noise_rank as usize,
+            params.k as usize,
+        );
+
+        assert_eq!(
+            hex::encode(header.to_bytes()),
+            "040302011111111111111111111111111111111111111111111111111111111111111111222222222222222222222222222222222222222222222222222222222222222299887766ffff7f1e"
+        );
+        assert_eq!(
+            hex::encode(config.to_bytes().expect("config bytes")),
+            "00040000400000000007000000000007000000000000000000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(attempt.commitments.kappa),
+            "9b2bf4287f7a0a9d5b9ebf42e285c8d0c8f9cc1d670784a343178bd808f7aee1"
+        );
+        assert_eq!(
+            hex::encode(attempt.commitments.h_a),
+            "7ba6f6fe82d206d74600bf85d43692f8b8f41adc97af8773785ed4089cba1814"
+        );
+        assert_eq!(
+            hex::encode(attempt.commitments.h_b),
+            "596644dfe94469924c984b17b66ab056ba54dd9329ab06b526e48c513b3fccec"
+        );
+        assert_eq!(
+            hex::encode(attempt.commitments.s_a),
+            "bbe24a10b583c706be7042fb18171f16dcb2a3271f802f463c7b56001aa3f8a9"
+        );
+        assert_eq!(
+            hex::encode(attempt.commitments.s_b),
+            "4a83ab25d7ced880e64ab9e90aa4c4f1418a8507d711b31de0455067ea725251"
+        );
+        assert_eq!(ticket.a_rows, [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(ticket.b_cols, [0, 1, 2, 3, 4, 5, 6, 7]);
+        // These digest every byte of the selected noised strips in their ticket order.
+        assert_eq!(
+            hex::encode(
+                blake3::hash(&a_prime.iter().map(|&value| value as u8).collect::<Vec<_>>())
+                    .as_bytes()
+            ),
+            "052800efb90b7b41c97c3967b5c4d61a5be462e023b7975cf16765b207b415f6"
+        );
+        assert_eq!(
+            hex::encode(
+                blake3::hash(&b_prime.iter().map(|&value| value as u8).collect::<Vec<_>>())
+                    .as_bytes()
+            ),
+            "3455e9f5dee9af837ad95b4352de1bedb475599f21f1028cccacb70bf6ae49fb"
+        );
+        assert_eq!(
+            trace.x_steps,
+            [
+                -36_633, -73_153, -88_024, -117_660, 93_727, -7_320, 62_516, -1_131, -4_466,
+                254_109, 85_380, 56_393, -17_856, 254_390, -224_814, 124_669,
+            ]
+        );
+        assert_eq!(
+            trace.state,
+            ai_pow::matmul::TileState([
+                -36_633, -73_153, -88_024, -117_660, 93_727, -7_320, 62_516, -1_131, -4_466,
+                254_109, 85_380, 56_393, -17_856, 254_390, -224_814, 124_669,
+            ])
+        );
+        assert_eq!(trace.state, ticket.tile_state);
+        assert_eq!(
+            hex::encode(ticket.jackpot_hash),
+            "5ea5a252bb7637b002054493e07d6df54c329b049a485306f71ad913bbb68ec7"
+        );
+        assert_eq!(
+            hex::encode(attempt.pearl_target),
+            "0000000000000000000000000000000000000000000000000000000000ffff7f"
+        );
+        assert_eq!(
+            hex::encode(
+                attempt
+                    .public_params
+                    .nockchain_adjusted_target(&target)
+                    .expect("Nockchain target")
+            ),
+            "0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        );
+        assert_eq!(attempt.public_params.t_rows, 0);
+        assert_eq!(attempt.public_params.t_cols, 0);
+    }
 }

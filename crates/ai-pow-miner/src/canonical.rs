@@ -731,4 +731,137 @@ mod tests {
         )
         .expect("a canonical statement must pass the node MoE work precheck");
     }
+
+    #[test]
+    fn canonical_search_kat_snapshot() {
+        use ai_pow::matmul::{compute_pattern_tile_trace_from_slices, BlockNoise};
+
+        let params = canonical_params();
+        let commit = [0x42u8; 32];
+        let extranonce = 7;
+        let inputs =
+            canonical_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("canonical inputs");
+        let ticket = compute_pearl_moe_ticket(
+            &inputs.commitments.kappa, &inputs.commitments.h_a, &inputs.commitments.h_b, &inputs.a,
+            &inputs.b, &inputs.routing, 0, &inputs.inner, &inputs.local_b, inputs.n_e,
+            params.k as usize, params.noise_rank as usize, params.k as usize,
+        )
+        .expect("canonical ticket");
+        let noise = BlockNoise::expand(&ticket.s_a, &ticket.s_b, &params);
+        let mut a_prime = Vec::with_capacity(ticket.outer_indices.len() * params.k as usize);
+        let mut e_row = vec![0i8; params.k as usize];
+        for &row in &ticket.outer_indices {
+            noise.e_row_into(row, &mut e_row);
+            let offset = row as usize * params.k as usize;
+            a_prime.extend(
+                inputs.a[offset..offset + params.k as usize]
+                    .iter()
+                    .zip(&e_row)
+                    .map(|(&a, &e)| (a as i16 + e as i16) as i8),
+            );
+        }
+        let mut b_prime = Vec::with_capacity(ticket.b_cols_global.len() * params.k as usize);
+        let mut f_col = vec![0i8; params.k as usize];
+        for &col in &ticket.b_cols_global {
+            noise.f_col_into(col, &mut f_col);
+            let offset = col as usize * params.k as usize;
+            b_prime.extend(
+                inputs.b[offset..offset + params.k as usize]
+                    .iter()
+                    .zip(&f_col)
+                    .map(|(&b, &f)| (b as i16 + f as i16) as i8),
+            );
+        }
+        let trace = compute_pattern_tile_trace_from_slices(
+            &a_prime,
+            &b_prime,
+            ticket.outer_indices.len(),
+            ticket.b_cols_global.len(),
+            params.k as usize,
+            params.noise_rank as usize,
+            params.k as usize,
+        );
+        let mut target = [0u8; 32];
+        target[..28].fill(0xff);
+        let public =
+            canonical_public_params(&params, 8, 2, 1, commit, extranonce).expect("public params");
+
+        assert_eq!(
+            hex::encode(inputs.header.to_bytes()),
+            "0403020111111111111111111111111111111111111111111111111111111111111111115dfa1ba6cad1f126ee44599121967ab8382909541fb115f6780c6fcbe3de59eca0887766ffff7f1d"
+        );
+        assert_eq!(
+            hex::encode(inputs.config.to_bytes().expect("config bytes")),
+            "00040000400000000007000000000007000000000200010000000000000000000000000000000000000000000000000000000000"
+        );
+        assert_eq!(
+            hex::encode(inputs.commitments.kappa),
+            "7b306ed3bb831b1db2a4f12bff99fcaf9b83bad2199ab1ee2c209486f8ab6bf2"
+        );
+        assert_eq!(
+            hex::encode(inputs.commitments.h_a),
+            "5322f08c4b6587587e954b7eec68cb210775222a9e8328c781a6f583233c1f07"
+        );
+        assert_eq!(
+            hex::encode(inputs.commitments.h_b),
+            "dc79f290caff0d668fe026e509814f45fe13c1af0dee8d45712fa375f958438b"
+        );
+        assert_eq!(
+            hex::encode(ticket.s_a),
+            "f15e4d42af662ab77b891f4df9de391bcb64a3d646a7052773380006eb33ed02"
+        );
+        assert_eq!(
+            hex::encode(ticket.s_b),
+            "0e38fcf89c5a0e738503fc2f6afa4808400bcad6ec1cb8c98d7cc6c6eb067286"
+        );
+        assert_eq!(ticket.outer_indices, [0, 2, 4, 6, 8, 10, 12, 14]);
+        assert_eq!(ticket.b_cols_global, [0, 1, 2, 3, 4, 5, 6, 7]);
+        // These digest every byte of the selected noised strips in their ticket order.
+        assert_eq!(
+            hex::encode(
+                blake3::hash(&a_prime.iter().map(|&value| value as u8).collect::<Vec<_>>())
+                    .as_bytes()
+            ),
+            "33595ec0d3c36471c2620fc418b9b7b7793a535c70d020a8f4994d14c35b1916"
+        );
+        assert_eq!(
+            hex::encode(
+                blake3::hash(&b_prime.iter().map(|&value| value as u8).collect::<Vec<_>>())
+                    .as_bytes()
+            ),
+            "cb9e2145932f256544049528d2bd32aa4e6a25d9396d0ce9bdf57e2a26850eab"
+        );
+        assert_eq!(
+            trace.x_steps,
+            [
+                -23_840, -49_433, -125_158, 130_123, 114_330, -56_923, 24_887, -91_155, 193_098,
+                -175_334, 34_005, -76_577, 40_365, 196_283, -242_181, -224_530,
+            ]
+        );
+        assert_eq!(
+            trace.state,
+            ai_pow::matmul::TileState([
+                -23_840, -49_433, -125_158, 130_123, 114_330, -56_923, 24_887, -91_155, 193_098,
+                -175_334, 34_005, -76_577, 40_365, 196_283, -242_181, -224_530,
+            ])
+        );
+        assert_eq!(trace.state, ticket.tile_state);
+        assert_eq!(
+            hex::encode(ticket.jackpot_hash),
+            "c12f50465e3153e5c01d7ffcc25ed0c2495566af7e46fe5036c44ea4ea9f9f6e"
+        );
+        assert_eq!(
+            hex::encode(public.pearl_adjusted_target().expect("Pearl target")),
+            "00000000000000000000000000000000000000000000000000000000ffff7f00"
+        );
+        assert_eq!(
+            hex::encode(
+                public
+                    .nockchain_adjusted_target(&target)
+                    .expect("Nockchain target")
+            ),
+            "0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000"
+        );
+        assert_eq!(extranonce, 7);
+    }
 }

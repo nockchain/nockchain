@@ -18,6 +18,11 @@ name = "ai-pow-mine"
 path = "src/bin/ai_pow_mine.rs"
 required-features = ["node"]
 
+[[bench]]
+name = "search"
+harness = false
+required-features = ["node"]
+
 [features]
 default = []
 # Out-of-process node-connecting integration: pulls in the gRPC +
