@@ -9,6 +9,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
@@ -18,6 +19,7 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow_miner::canonical::PreparedCanonicalMoeTemplate;
+use ai_pow_miner::search::{CpuSearchBackend, SearchBackend, SearchBatch};
 use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 
 struct CountingAllocator;
@@ -112,11 +114,11 @@ fn dense_header() -> PearlIncompleteBlockHeader {
     }
 }
 
-fn print_measurement(name: &str, attempts: u64, measurement: Measurement) {
+fn print_measurement(name: &str, attempts: u64, workers: usize, measurement: Measurement) {
     let elapsed_s = measurement.elapsed.as_secs_f64();
     let attempts_per_s = (attempts as f64) / elapsed_s;
     println!(
-        "{name}: attempts={attempts} elapsed_ms={:.3} attempts_per_s={attempts_per_s:.3} allocations={} workers=1",
+        "{name}: attempts={attempts} elapsed_ms={:.3} attempts_per_s={attempts_per_s:.3} allocations={} workers={workers}",
         elapsed_s * 1_000.0,
         measurement.allocations,
     );
@@ -127,10 +129,20 @@ fn main() {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .filter(|&attempts| attempts > 0)
-        .unwrap_or(16);
+        .unwrap_or(256);
+    let workers = CpuSearchBackend::default_worker_count();
+    let backend = CpuSearchBackend::new(workers).expect("dedicated CPU search backend");
     let canonical = canonical_params();
-    let canonical_template = PreparedCanonicalMoeTemplate::new(&canonical, 8, 2, 1, [0x5a; 32])
-        .expect("canonical template");
+    let canonical_template = Arc::new(
+        PreparedCanonicalMoeTemplate::new(&canonical, 8, 2, 1, [0x5a; 32])
+            .expect("canonical template"),
+    );
+    backend
+        .search_canonical(
+            Arc::clone(&canonical_template),
+            SearchBatch::new(0, 1, [0; 32]).expect("canonical warmup batch"),
+        )
+        .expect("canonical dedicated warmup");
     let mut canonical_scratch = canonical_template.scratch();
     let canonical_measurement = measure(|| {
         for extranonce in 0..canonical_attempts {
@@ -142,17 +154,42 @@ fn main() {
         }
     });
     print_measurement(
-        "canonical_prepared",
+        "canonical_prepared_scalar",
         u64::from(canonical_attempts),
+        1,
         canonical_measurement,
+    );
+    let canonical_parallel_measurement = measure(|| {
+        std::hint::black_box(
+            backend
+                .search_canonical(
+                    Arc::clone(&canonical_template),
+                    SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
+                        .expect("canonical batch"),
+                )
+                .expect("canonical dedicated search"),
+        );
+    });
+    print_measurement(
+        "canonical_prepared_dedicated",
+        u64::from(canonical_attempts),
+        workers,
+        canonical_parallel_measurement,
     );
 
     let header = dense_header();
     let config = dense_config();
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, &DENSE_PRODUCTION_PARAMS);
-    let dense_prepared =
+    let dense_prepared = Arc::new(
         prepare_pearl_pattern_job(&header, &config, &DENSE_PRODUCTION_PARAMS, &a, &b, 8)
-            .expect("prepared dense Pearl job");
+            .expect("prepared dense Pearl job"),
+    );
+    backend
+        .search_dense(
+            Arc::clone(&dense_prepared),
+            SearchBatch::new(0, 1, [0; 32]).expect("dense warmup batch"),
+        )
+        .expect("dense dedicated warmup");
     let dense_attempts = u64::try_from(
         dense_prepared
             .row_offsets()
@@ -175,6 +212,19 @@ fn main() {
         }
     });
     print_measurement(
-        "dense_prepared_full_sweep", dense_attempts, dense_measurement,
+        "dense_prepared_scalar_full_sweep", dense_attempts, 1, dense_measurement,
+    );
+    let dense_parallel_measurement = measure(|| {
+        std::hint::black_box(
+            backend
+                .search_dense(
+                    Arc::clone(&dense_prepared),
+                    SearchBatch::new(0, dense_attempts, [0; 32]).expect("dense batch"),
+                )
+                .expect("dense dedicated search"),
+        );
+    });
+    print_measurement(
+        "dense_prepared_dedicated_full_sweep", dense_attempts, workers, dense_parallel_measurement,
     );
 }

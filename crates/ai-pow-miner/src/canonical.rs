@@ -292,6 +292,30 @@ impl PreparedCanonicalMoeTemplate {
         }
     }
 
+    /// Whether a worker scratch allocation has this template's matrix shape.
+    pub fn scratch_matches(&self, scratch: &PreparedCanonicalMoeScratch) -> bool {
+        let k = self.params.k as usize;
+        scratch.noise.m == self.params.m
+            && scratch.noise.k == self.params.k
+            && scratch.noise.n == self.params.n
+            && scratch.noise.r == self.params.noise_rank
+            && scratch.e_row.len() == k
+            && scratch.f_col.len() == k
+            && self
+                .outer_indices
+                .len()
+                .checked_mul(k)
+                .is_some_and(|len| scratch.a_prime_rows.len() == len)
+            && self
+                .b_cols_global
+                .len()
+                .checked_mul(k)
+                .is_some_and(|len| scratch.b_prime_cols.len() == len)
+            && scratch
+                .tile
+                .matches_dimensions(self.outer_indices.len(), self.b_cols_global.len())
+    }
+
     pub fn header_for(&self, extranonce: u32) -> PearlIncompleteBlockHeader {
         PearlIncompleteBlockHeader {
             timestamp: self.header.timestamp.wrapping_add(extranonce),

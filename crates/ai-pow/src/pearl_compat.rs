@@ -1564,6 +1564,34 @@ impl PreparedPearlPatternJob {
         &self.col_offsets
     }
 
+    /// Decode a lexicographic ticket ordinal into its valid pattern offsets.
+    pub fn offsets_at_ordinal(&self, ordinal: u64) -> Option<(u32, u32)> {
+        let col_count = u64::try_from(self.col_offsets.len()).ok()?;
+        if col_count == 0 {
+            return None;
+        }
+        let row = usize::try_from(ordinal / col_count).ok()?;
+        let col = usize::try_from(ordinal % col_count).ok()?;
+        Some((*self.row_offsets.get(row)?, *self.col_offsets.get(col)?))
+    }
+
+    /// Whether a worker scratch allocation has this prepared job's shape.
+    pub fn scratch_matches(&self, scratch: &PreparedPearlPatternScratch) -> bool {
+        let k = self.params.k as usize;
+        self.row_indices
+            .len()
+            .checked_mul(k)
+            .is_some_and(|len| scratch.a_prime_rows.len() == len)
+            && self
+                .col_indices
+                .len()
+                .checked_mul(k)
+                .is_some_and(|len| scratch.b_prime_cols.len() == len)
+            && scratch
+                .tile
+                .matches_dimensions(self.row_indices.len(), self.col_indices.len())
+    }
+
     /// Allocate one reusable scratch instance for a searching worker.
     pub fn scratch(&self) -> PreparedPearlPatternScratch {
         let k = self.params.k as usize;

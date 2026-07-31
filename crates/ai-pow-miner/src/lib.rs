@@ -83,6 +83,9 @@ impl MiningCancel {
 /// Pearl-compatible merge-mining ticket loop.
 pub mod pearl_mining;
 
+/// Bounded CPU and accelerator ticket-search backend contract.
+pub mod search;
+
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///
 /// Internal by design: Hoon and external Nockchain callers submit only the

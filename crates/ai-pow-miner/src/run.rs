@@ -74,11 +74,9 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-#[cfg(test)]
-use crate::canonical::evaluate_canonical_moe_jackpot;
 use crate::canonical::{
-    prove_canonical_moe_block_at_for_miner, CanonicalBlock, CanonicalProveError,
-    PreparedCanonicalMoeTemplate,
+    evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
+    CanonicalProveError, PreparedCanonicalMoeTemplate,
 };
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
@@ -92,6 +90,10 @@ use crate::pearl_mining::{
     self, PearlMergeMineOptions, PearlMergeMinedTicket, PearlMergeMiningError, PearlMergeMiningJob,
 };
 use crate::pearl_plain_proof::PearlPlainProof;
+use crate::search::{
+    CpuSearchBackend, OrderedBatchScheduler, SearchBackend, SearchScheduleEnd,
+    DEFAULT_SEARCH_BATCH_ATTEMPTS,
+};
 use crate::wire::AiPowMinerWire;
 use crate::{DifficultyTarget, MiningCancel};
 
@@ -323,6 +325,8 @@ pub struct MinerConfig {
     pub mining_pkh_configs: Vec<MiningPkhConfig>,
     /// AI puzzle local-state inputs (matrices, params, Pearl work source).
     pub puzzle: AiPuzzleInputs,
+    /// Dedicated CPU ticket-search workers. Defaults to physical core count.
+    pub mining_threads: usize,
     pub reconnect_backoff_initial: Duration,
     pub reconnect_backoff_max: Duration,
     pub reconnect_max_attempts: u32,
@@ -343,6 +347,7 @@ impl MinerConfig {
             reconnect_backoff_initial: Duration::from_secs(1),
             reconnect_backoff_max: Duration::from_secs(30),
             reconnect_max_attempts: 5,
+            mining_threads: CpuSearchBackend::default_worker_count(),
         }
     }
 
@@ -361,6 +366,11 @@ impl MinerConfig {
         if self.reconnect_backoff_max.is_zero() {
             return Err(MinerError::InvalidConfig(
                 "reconnect_backoff_max must be nonzero".to_string(),
+            ));
+        }
+        if self.mining_threads == 0 {
+            return Err(MinerError::InvalidConfig(
+                "mining_threads must be nonzero".to_string(),
             ));
         }
 
@@ -391,15 +401,28 @@ pub enum MinerError {
     CandidateDecode(String),
     #[error("worker join failed: {0}")]
     WorkerJoin(String),
+    #[error("search backend setup failed: {0}")]
+    SearchBackend(#[from] crate::search::SearchBackendError),
     #[error("{0}")]
     CertificateBuild(String),
     #[error("{0}")]
     CanonicalCertificateUnavailable(String),
 }
 
-/// Production entry point. Returns `Ok(())` on clean shutdown, `Err` on
-/// unrecoverable failure.
+/// Production entry point using a physical-core CPU search backend.
 pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), MinerError> {
+    cfg.validate()?;
+    cfg.puzzle.validate_canonical_submission_ready()?;
+    let backend: Arc<dyn SearchBackend> = Arc::new(CpuSearchBackend::new(cfg.mining_threads)?);
+    run_with_backend(cfg, shutdown, backend).await
+}
+
+/// Production entry point with an owned ticket-search backend.
+pub async fn run_with_backend(
+    cfg: MinerConfig,
+    shutdown: CancellationToken,
+    backend: Arc<dyn SearchBackend>,
+) -> Result<(), MinerError> {
     cfg.validate()?;
     cfg.puzzle.validate_canonical_submission_ready()?;
     info!(
@@ -651,6 +674,7 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                         &mut workers,
                         current_generation,
                         &cfg,
+                        backend.clone(),
                         pearl_job,
                         pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
                         cancel.clone(),
@@ -723,6 +747,7 @@ pub async fn run(cfg: MinerConfig, shutdown: CancellationToken) -> Result<(), Mi
                                 &mut workers,
                                 current_generation,
                                 &cfg,
+                                backend.clone(),
                                 pearl_job,
                                 pearl_mine_opts_with_attempt_start(&cfg, next_pearl_attempt_start),
                                 cancel.clone(),
@@ -898,15 +923,10 @@ async fn cancel_and_await_canonical_worker(
     Ok(())
 }
 
-/// Proof-of-work grind for the gateway-free canonical miner. Iterates the
-/// extranonce (header timestamp), and for each attempt computes the full MoE
-/// tile jackpot through a prepared template and tests it against the effective
-/// jackpot threshold for the canonical tile shape. On the first nonce that
-/// clears it, pays the one-time recursive-certificate cost
-/// ([`prove_canonical_moe_block_at`]). Checks `cancel` every
-/// [`GRIND_CANCEL_CHECK_STRIDE`] attempts so a superseding candidate abandons
-/// the grind promptly. Runs on a blocking thread.
-const GRIND_CANCEL_CHECK_STRIDE: u32 = 64;
+/// Proof-of-work grind for the gateway-free canonical miner. Batches consecutive
+/// extranonces through a prepared template and returns only after a scalar-oracle
+/// recheck has matched the backend winner. Cancellation is observed before and
+/// after every bounded batch. Runs on a blocking thread.
 
 /// MAC-equivalents one canonical grind attempt costs — the shape work factor
 /// `F` consensus prices this miner's attempts at. The node's `target` prices
@@ -943,36 +963,92 @@ pub fn canonical_grind_threshold(
     })
 }
 
+#[cfg(test)]
 fn grind_canonical_block(
     commit: [u8; 32],
     target: DifficultyTarget,
     cancel: Arc<AtomicBool>,
 ) -> GrindResult {
+    let backend = CpuSearchBackend::default();
+    grind_canonical_block_with_backend(commit, target, cancel, &backend)
+}
+
+fn grind_canonical_block_with_backend(
+    commit: [u8; 32],
+    target: DifficultyTarget,
+    cancel: Arc<AtomicBool>,
+    backend: &dyn SearchBackend,
+) -> GrindResult {
     let threshold = canonical_grind_threshold(&target)?;
     if cancel.load(Ordering::Relaxed) {
         return Ok(None);
     }
-    let template = PreparedCanonicalMoeTemplate::new(
+    let template = Arc::new(PreparedCanonicalMoeTemplate::new(
         &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
-    )?;
-    let mut scratch = template.scratch();
-    for extranonce in 0u32..=u32::MAX {
-        if extranonce % GRIND_CANCEL_CHECK_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
+    )?);
+    let mut scheduler = OrderedBatchScheduler::new(
+        0,
+        u64::from(u32::MAX) + 1,
+        None,
+        DEFAULT_SEARCH_BATCH_ATTEMPTS,
+    )
+    .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let jackpot = template.evaluate(extranonce, &mut scratch).jackpot_hash;
-        if hash_le_target(&jackpot, &threshold) {
-            info!(
-                extranonce,
-                commit = %hex::encode(commit),
-                "canonical AI-PoW jackpot hit; proving certificate (~25-30s)"
-            );
-            let proved = prove_canonical_moe_block_at_for_miner(
-                &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
-                extranonce,
-            )?;
-            return Ok(Some(proved));
+        let batch = match scheduler.next_batch(threshold) {
+            Ok(batch) => batch,
+            Err(SearchScheduleEnd::AttemptSpaceExhausted) => break,
+            Err(SearchScheduleEnd::BudgetExhausted { .. }) => {
+                return Err(CanonicalProveError(
+                    "canonical grind has no configured attempt budget".to_string(),
+                ));
+            }
+        };
+        let winner = backend
+            .search_canonical(Arc::clone(&template), batch)
+            .map_err(|error| CanonicalProveError(format!("search backend: {error}")))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
         }
+        let Some(winner) = winner else {
+            scheduler
+                .record_miss(batch)
+                .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+            continue;
+        };
+        scheduler
+            .record_winner(batch, winner)
+            .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+        let extranonce = u32::try_from(winner.ordinal).map_err(|_| {
+            CanonicalProveError("backend returned out-of-range extranonce".to_string())
+        })?;
+        let jackpot = evaluate_canonical_moe_jackpot(
+            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
+            extranonce,
+        )?;
+        if jackpot != winner.jackpot_hash {
+            return Err(CanonicalProveError(
+                "search backend jackpot disagrees with canonical scalar oracle".to_string(),
+            ));
+        }
+        if !hash_le_target(&jackpot, &threshold) {
+            return Err(CanonicalProveError(
+                "search backend reported a canonical jackpot above its threshold".to_string(),
+            ));
+        }
+        info!(
+            extranonce,
+            commit = %hex::encode(commit),
+            "canonical AI-PoW jackpot hit; proving certificate (~25-30s)"
+        );
+        let proved = prove_canonical_moe_block_at_for_miner(
+            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
+            extranonce,
+        )?;
+        return Ok(Some(proved));
     }
     warn!(
         commit = %hex::encode(commit),
@@ -1000,6 +1076,19 @@ pub async fn run_canonical(
     node_addr: String,
     mining_pkh_configs: Vec<MiningPkhConfig>,
     shutdown: CancellationToken,
+) -> Result<(), MinerError> {
+    let backend: Arc<dyn SearchBackend> = Arc::new(CpuSearchBackend::new(
+        CpuSearchBackend::default_worker_count(),
+    )?);
+    run_canonical_with_backend(node_addr, mining_pkh_configs, shutdown, backend).await
+}
+
+/// Gateway-free canonical miner with an owned ticket-search backend.
+pub async fn run_canonical_with_backend(
+    node_addr: String,
+    mining_pkh_configs: Vec<MiningPkhConfig>,
+    shutdown: CancellationToken,
+    backend: Arc<dyn SearchBackend>,
 ) -> Result<(), MinerError> {
     validate_mining_pkh_configs(&mining_pkh_configs)?;
     info!(
@@ -1104,8 +1193,9 @@ pub async fn run_canonical(
                         "new %mine-ai candidate; grinding canonical AI-PoW block against target"
                     );
                     let cancel = grind_cancel.clone();
+                    let backend = backend.clone();
                     worker = Some(tokio::task::spawn_blocking(move || {
-                        grind_canonical_block(commit, target, cancel)
+                        grind_canonical_block_with_backend(commit, target, cancel, &*backend)
                     }));
                 }
                 joined = await_canonical_worker(&mut worker) => {
@@ -1917,6 +2007,7 @@ fn spawn_pearl_merge_attempt(
     workers: &mut JoinSet<(u64, Result<PearlMergeWorkerOutput, PearlMergeMiningError>)>,
     generation: u64,
     cfg: &MinerConfig,
+    backend: Arc<dyn SearchBackend>,
     job_inputs: PearlMergeCandidateJob,
     mine_opts: PearlMergeMineOptions,
     cancel: MiningCancel,
@@ -1938,7 +2029,7 @@ fn spawn_pearl_merge_attempt(
             aux: job_inputs.aux,
         };
         let proof_cancel = cancel.clone();
-        let ticket = match pearl_mining::run(&job, &mine_opts, cancel) {
+        let ticket = match pearl_mining::run_with_backend(&job, &mine_opts, cancel, &*backend) {
             Ok(ticket) => ticket,
             Err(e) => return (generation, Err(e)),
         };
@@ -2257,7 +2348,33 @@ mod tests {
     use crate::pearl_mining::{
         self, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
     };
+    use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
     use crate::wire::AiPowMinerWire;
+
+    struct CorruptCanonicalBackend {
+        jackpot_hash: [u8; 32],
+    }
+
+    impl SearchBackend for CorruptCanonicalBackend {
+        fn search_dense(
+            &self,
+            _: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
+            _: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            Ok(None)
+        }
+
+        fn search_canonical(
+            &self,
+            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            batch: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            Ok(Some(SearchWinner {
+                ordinal: batch.start,
+                jackpot_hash: self.jackpot_hash,
+            }))
+        }
+    }
 
     /// Measure the two cost components of AI-PoW mining on THIS machine, using the
     /// exact canonical shape the run loop mines (`CANONICAL_MATMUL_PARAMS`,
@@ -2383,6 +2500,32 @@ mod tests {
                 .expect("cancelled grind should exit cleanly")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn canonical_backend_winner_must_match_scalar_oracle_before_proving() {
+        let commit = [0x5au8; 32];
+        let mut corrupt = evaluate_canonical_moe_jackpot(
+            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit, 0,
+        )
+        .expect("scalar canonical jackpot");
+        corrupt[0] ^= 1;
+        let backend = CorruptCanonicalBackend {
+            jackpot_hash: corrupt,
+        };
+
+        let error = match grind_canonical_block_with_backend(
+            commit,
+            crate::easy_nock_target(),
+            Arc::new(AtomicBool::new(false)),
+            &backend,
+        ) {
+            Ok(_) => panic!("corrupt backend result must not reach the prover"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("disagrees with canonical scalar oracle"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3230,6 +3373,7 @@ mod tests {
                 pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
             }],
             puzzle,
+            mining_threads: 1,
             reconnect_backoff_initial: Duration::from_millis(50),
             reconnect_backoff_max: Duration::from_millis(200),
             reconnect_max_attempts: 3,
@@ -3676,6 +3820,20 @@ mod tests {
             .expect_err("zero Pearl Gateway timeout is invalid");
         assert!(
             err.to_string().contains("request_timeout must be nonzero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn miner_config_rejects_zero_dedicated_search_workers() {
+        let mut cfg = test_cfg("http://127.0.0.1:1".to_string());
+        cfg.mining_threads = 0;
+
+        let err = cfg
+            .validate()
+            .expect_err("zero dedicated search workers is invalid");
+        assert!(
+            err.to_string().contains("mining_threads must be nonzero"),
             "unexpected error: {err}"
         );
     }

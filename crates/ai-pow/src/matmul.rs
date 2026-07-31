@@ -285,6 +285,11 @@ impl PatternTileScratch {
         }
     }
 
+    /// Whether this scratch allocation can evaluate a tile of `h × w` cells.
+    pub fn matches_dimensions(&self, h: usize, w: usize) -> bool {
+        h.checked_mul(w) == Some(self.c_blk.len())
+    }
+
     fn reset(&mut self, cells: usize) {
         assert_eq!(
             self.c_blk.len(),

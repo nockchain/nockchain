@@ -45,9 +45,10 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow_miner::pearl_mining::PearlMergeMineOptions;
 use ai_pow_miner::run::{
-    run, run_canonical, AiPuzzleInputs, MinerConfig, MinerError, PearlGatewayMinerRpcConfig,
-    PearlGatewayTransport, PearlMergeSubmissionConfig,
+    run, run_canonical_with_backend, AiPuzzleInputs, MinerConfig, MinerError,
+    PearlGatewayMinerRpcConfig, PearlGatewayTransport, PearlMergeSubmissionConfig,
 };
+use ai_pow_miner::search::{CpuSearchBackend, SearchBackend};
 use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
@@ -109,6 +110,10 @@ struct Args {
     #[arg(long, conflicts_with = "canonical")]
     dense_production: bool,
 
+    /// Dedicated CPU ticket-search workers. Defaults to physical core count.
+    #[arg(long, value_name = "N")]
+    mining_threads: Option<usize>,
+
     /// Log filter (env-filter syntax). Override with the `RUST_LOG` env var.
     #[arg(
         long,
@@ -120,6 +125,13 @@ struct Args {
 fn main() -> ExitCode {
     let args = Args::parse();
     init_tracing(&args.log);
+    let mining_threads = args
+        .mining_threads
+        .unwrap_or_else(CpuSearchBackend::default_worker_count);
+    if mining_threads == 0 {
+        eprintln!("ai-pow-mine: --mining-threads must be nonzero");
+        return ExitCode::from(1);
+    }
 
     let Some(pkh_configs) = build_pkh_configs(&args) else {
         eprintln!("ai-pow-mine: must supply --mining-pkh <HASH> or --mining-pkh-adv \"share,pkh\"");
@@ -139,6 +151,13 @@ fn main() -> ExitCode {
 
     let r: Result<(), MinerError> = if args.canonical {
         let node_addr = args.node_addr.clone();
+        let backend: Arc<dyn SearchBackend> = match CpuSearchBackend::new(mining_threads) {
+            Ok(backend) => Arc::new(backend),
+            Err(error) => {
+                eprintln!("ai-pow-mine: cannot initialize search backend: {error}");
+                return ExitCode::from(1);
+            }
+        };
         rt.block_on(async move {
             info!(node = %node_addr, "ai-pow-mine: starting (canonical, gateway-free CPU miner)");
             let shutdown = CancellationToken::new();
@@ -149,7 +168,7 @@ fn main() -> ExitCode {
                     shutdown_clone.cancel();
                 }
             });
-            run_canonical(node_addr, pkh_configs, shutdown).await
+            run_canonical_with_backend(node_addr, pkh_configs, shutdown, backend).await
         })
     } else {
         let puzzle = match build_puzzle_inputs(&args) {
@@ -165,6 +184,7 @@ fn main() -> ExitCode {
             puzzle,
             reconnect_backoff_initial: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_INITIAL_MS),
             reconnect_backoff_max: Duration::from_millis(DEFAULT_RECONNECT_BACKOFF_MAX_MS),
+            mining_threads,
             reconnect_max_attempts: DEFAULT_RECONNECT_MAX_ATTEMPTS,
         };
         rt.block_on(async {

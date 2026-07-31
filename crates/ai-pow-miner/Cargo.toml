@@ -41,7 +41,6 @@ node = [
     "dep:futures",
     "dep:tokio-util",
     "dep:tracing-subscriber",
-    "dep:num_cpus",
 ]
 
 [dependencies]
@@ -55,6 +54,7 @@ hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 thiserror = { workspace = true }
+num_cpus = { workspace = true }
 tracing = { workspace = true }
 
 # `node` feature (out-of-process gRPC integration).
@@ -65,7 +65,6 @@ nockapp-grpc = { workspace = true, optional = true }
 nockchain-mining-common = { workspace = true, optional = true }
 nockvm = { workspace = true, optional = true }
 nockvm_macros = { workspace = true, optional = true }
-num_cpus = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter", "ansi"] }

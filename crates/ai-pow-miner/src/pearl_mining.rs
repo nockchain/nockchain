@@ -5,6 +5,7 @@
 //! Pearl target or the Nockchain target. Recursive proof construction and
 //! canonical `%ai-pow` artifact submission happen only after a Nockchain hit.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
@@ -15,7 +16,11 @@ use ai_pow::pearl_compat::{
     PearlIncompleteBlockHeader, PearlMergeCheckedTicketAttempt, PearlMiningConfig,
     PearlNockchainAux, PearlPublicProofParams,
 };
+use ai_pow::tile_hash::hash_le_target;
 
+use crate::search::{
+    CpuSearchBackend, OrderedBatchScheduler, SearchBackend, SearchBackendError, SearchScheduleEnd,
+};
 use crate::{DifficultyTarget, MiningCancel, MiningStats};
 
 /// One Pearl-compatible merge-mining job.
@@ -74,6 +79,10 @@ pub enum PearlMergeMiningError {
     BudgetExhausted { max: u64 },
     #[error("Pearl-valid ticket offset space exhausted")]
     AttemptSpaceExhausted,
+    #[error("search backend: {0}")]
+    Backend(#[from] SearchBackendError),
+    #[error("search backend reported a winner that fails both effective targets")]
+    BackendWinnerTargetMismatch,
     #[error("recursive certificate build failed: {0}")]
     CertificateBuild(String),
 }
@@ -82,10 +91,26 @@ pub enum PearlMergeMiningError {
 ///
 /// Every counted attempt evaluates exactly one `(t_rows, t_cols)` pair. Misses
 /// return no proof artifact and no recursive certificate work is performed here.
+/// Run Pearl-compatible ticket mining with the private dedicated CPU backend.
 pub fn run(
     job: &PearlMergeMiningJob<'_>,
     opts: &PearlMergeMineOptions,
     cancel: MiningCancel,
+) -> Result<PearlMergeMinedTicket, PearlMergeMiningError> {
+    let backend = CpuSearchBackend::default();
+    run_with_backend(job, opts, cancel, &backend)
+}
+
+/// Run Pearl-compatible ticket mining through a caller-owned bounded backend.
+///
+/// The backend receives only the prepared ticket evaluator and a maximum target.
+/// Every returned winner is reconstructed through the checked scalar oracle
+/// before its target class or recursive-certificate path is observable.
+pub fn run_with_backend(
+    job: &PearlMergeMiningJob<'_>,
+    opts: &PearlMergeMineOptions,
+    cancel: MiningCancel,
+    backend: &dyn SearchBackend,
 ) -> Result<PearlMergeMinedTicket, PearlMergeMiningError> {
     if cancel.is_cancelled() {
         return Err(PearlMergeMiningError::Cancelled);
@@ -95,31 +120,24 @@ pub fn run(
             return Err(PearlMergeMiningError::DeadlineElapsed);
         }
     }
-    let prepared = prepare_pearl_pattern_job(
+    let prepared = Arc::new(prepare_pearl_pattern_job(
         job.header, job.config, job.params, job.a, job.b, job.max_pattern_len,
-    )?;
-    let row_offsets = prepared.row_offsets();
-    let col_offsets = prepared.col_offsets();
-    if row_offsets.is_empty() || col_offsets.is_empty() {
-        return Err(PearlMergeMiningError::AttemptSpaceExhausted);
-    }
-    let col_count = u64::try_from(col_offsets.len())
-        .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
-    let total_attempts = u64::try_from(row_offsets.len())
+    )?);
+    let total_attempts = u64::try_from(prepared.row_offsets().len())
         .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?
-        .checked_mul(col_count)
+        .checked_mul(
+            u64::try_from(prepared.col_offsets().len())
+                .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?,
+        )
         .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-    if opts.attempt_start >= total_attempts {
-        return Err(PearlMergeMiningError::AttemptSpaceExhausted);
-    }
-    let mut scratch = prepared.scratch();
-
-    let start = Instant::now();
-    let mut stats = MiningStats {
-        matmul_attempts_tried: 0,
-        elapsed: Duration::ZERO,
-    };
-    let mut last_progress = start;
+    let mut scheduler = OrderedBatchScheduler::new(
+        opts.attempt_start,
+        total_attempts,
+        opts.max_attempts,
+        crate::search::DEFAULT_SEARCH_BATCH_ATTEMPTS,
+    )?;
+    let started = Instant::now();
+    let mut last_progress = started;
 
     loop {
         if cancel.is_cancelled() {
@@ -130,87 +148,122 @@ pub fn run(
                 return Err(PearlMergeMiningError::DeadlineElapsed);
             }
         }
-        if let Some(max) = opts.max_attempts {
-            if stats.matmul_attempts_tried >= max {
+        let unthresholded_batch = match scheduler.next_batch([0; 32]) {
+            Ok(batch) => batch,
+            Err(SearchScheduleEnd::BudgetExhausted { max }) => {
                 return Err(PearlMergeMiningError::BudgetExhausted { max });
             }
-        }
-
-        let linear = opts
-            .attempt_start
-            .checked_add(stats.matmul_attempts_tried)
+            Err(SearchScheduleEnd::AttemptSpaceExhausted) => {
+                return Err(PearlMergeMiningError::AttemptSpaceExhausted);
+            }
+        };
+        let (t_rows, t_cols) = prepared
+            .offsets_at_ordinal(unthresholded_batch.start)
             .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-        if linear >= total_attempts {
-            return Err(PearlMergeMiningError::AttemptSpaceExhausted);
-        }
-        let row_ordinal = usize::try_from(linear / col_count)
-            .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
-        let col_ordinal = usize::try_from(linear % col_count)
-            .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
-        let t_rows = *row_offsets
-            .get(row_ordinal)
-            .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-        let t_cols = *col_offsets
-            .get(col_ordinal)
-            .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-        let prepared_result = prepared.evaluate(t_rows, t_cols, &mut scratch)?;
-        let public_params = PearlPublicProofParams {
+        let target_params = PearlPublicProofParams {
             block_header: *job.header,
             mining_config: *job.config,
             hash_a: prepared.commitments().h_a,
             hash_b: prepared.commitments().h_b,
-            hash_jackpot: prepared_result.jackpot_hash,
+            hash_jackpot: [0; 32],
             m: job.params.m,
             n: job.params.n,
             t_rows,
             t_cols,
         };
-        let pearl_target_hit = public_params.check_pearl_jackpot_difficulty().is_ok();
-        let nockchain_target_hit = public_params
+        let pearl_target = target_params.pearl_adjusted_target()?;
+        let nockchain_target = target_params.nockchain_adjusted_target(&job.nockchain_target)?;
+        let threshold = max_target_le(pearl_target, nockchain_target);
+        let batch = crate::search::SearchBatch::new(
+            unthresholded_batch.start, unthresholded_batch.len, threshold,
+        )?;
+        let winner = backend.search_dense(Arc::clone(&prepared), batch)?;
+
+        if cancel.is_cancelled() {
+            return Err(PearlMergeMiningError::Cancelled);
+        }
+        if let Some(deadline) = opts.deadline {
+            if Instant::now() >= deadline {
+                return Err(PearlMergeMiningError::DeadlineElapsed);
+            }
+        }
+        let stats = match winner {
+            Some(winner) => {
+                let matmul_attempts_tried = scheduler.record_winner(batch, winner)?;
+                MiningStats {
+                    matmul_attempts_tried,
+                    elapsed: started.elapsed(),
+                }
+            }
+            None => {
+                scheduler.record_miss(batch)?;
+                let stats = MiningStats {
+                    matmul_attempts_tried: scheduler.attempts_tried(),
+                    elapsed: started.elapsed(),
+                };
+                if let Some(interval) = opts.progress_interval {
+                    if last_progress.elapsed() >= interval {
+                        tracing::trace!(
+                            target: "ai_pow_miner",
+                            pearl_ticket_attempts = stats.matmul_attempts_tried,
+                            elapsed_s = stats.elapsed.as_secs_f64(),
+                            matmul_attempt_rate = stats.matmul_attempt_rate_per_sec(),
+                            "Pearl merge mining progress"
+                        );
+                        last_progress = Instant::now();
+                    }
+                }
+                continue;
+            }
+        };
+
+        let winner = winner.expect("winner branch constructed statistics");
+        let (t_rows, t_cols) = prepared
+            .offsets_at_ordinal(winner.ordinal)
+            .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
+        let checked_attempt = evaluate_pearl_merge_checked_ticket_attempt(
+            job.header,
+            job.config,
+            job.params,
+            t_rows,
+            t_cols,
+            job.a,
+            job.b,
+            &job.nockchain_target,
+            job.max_pattern_len,
+            job.aux.clone(),
+        )?;
+        let attempt = checked_attempt.attempt();
+        if attempt.ticket.jackpot_hash != winner.jackpot_hash {
+            return Err(PearlMergeMiningError::Pearl(
+                PearlCompatError::JackpotHashMismatch,
+            ));
+        }
+        let pearl_target_hit = attempt
+            .public_params
+            .check_pearl_jackpot_difficulty()
+            .is_ok();
+        let nockchain_target_hit = attempt
+            .public_params
             .check_nockchain_jackpot_target(&job.nockchain_target)
             .is_ok();
-        stats.matmul_attempts_tried += 1;
-        stats.elapsed = start.elapsed();
-
-        if pearl_target_hit || nockchain_target_hit {
-            let checked_attempt = evaluate_pearl_merge_checked_ticket_attempt(
-                job.header,
-                job.config,
-                job.params,
-                t_rows,
-                t_cols,
-                job.a,
-                job.b,
-                &job.nockchain_target,
-                job.max_pattern_len,
-                job.aux.clone(),
-            )?;
-            let attempt = checked_attempt.attempt();
-            if attempt.ticket.jackpot_hash != prepared_result.jackpot_hash {
-                return Err(PearlMergeMiningError::Pearl(
-                    PearlCompatError::JackpotHashMismatch,
-                ));
-            }
-            return Ok(PearlMergeMinedTicket {
-                attempt: checked_attempt,
-                pearl_target_hit,
-                nockchain_target_hit,
-                stats,
-            });
+        if !pearl_target_hit && !nockchain_target_hit {
+            return Err(PearlMergeMiningError::BackendWinnerTargetMismatch);
         }
+        return Ok(PearlMergeMinedTicket {
+            attempt: checked_attempt,
+            pearl_target_hit,
+            nockchain_target_hit,
+            stats,
+        });
+    }
+}
 
-        if let Some(interval) = opts.progress_interval {
-            if last_progress.elapsed() >= interval {
-                tracing::trace!(
-                    target: "ai_pow_miner",
-                    pearl_ticket_attempts = stats.matmul_attempts_tried,
-                    elapsed_s = stats.elapsed.as_secs_f64(),
-                    matmul_attempt_rate = stats.matmul_attempt_rate_per_sec(),
-                    "Pearl merge mining progress"
-                );
-                last_progress = Instant::now();
-            }
-        }
+fn max_target_le(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    if hash_le_target(&left, &right) {
+        right
+    } else {
+        left
     }
 }
 
@@ -320,6 +373,8 @@ fn nth_valid_offset(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use ai_pow::pearl_compat::{
         verify_pearl_merge_public_statement_bytes, PearlIncompleteBlockHeader, PearlMiningConfig,
         PearlNockchainAux, PearlPeriodicPattern, PEARL_MINING_CONFIG_RESERVED_SIZE,
@@ -328,6 +383,7 @@ mod tests {
     use ai_pow::synth::synth_matrices;
 
     use super::*;
+    use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
 
     fn pearl_test_pattern(length: u32) -> PearlPeriodicPattern {
         PearlPeriodicPattern {
@@ -394,6 +450,88 @@ mod tests {
             b,
             max_pattern_len: 16,
             aux: pearl_test_aux(),
+        }
+    }
+
+    struct NoHitBackend {
+        batches: Mutex<Vec<SearchBatch>>,
+    }
+
+    impl SearchBackend for NoHitBackend {
+        fn search_dense(
+            &self,
+            _: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
+            batch: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            self.batches.lock().expect("test lock").push(batch);
+            Ok(None)
+        }
+
+        #[cfg(feature = "node")]
+        fn search_canonical(
+            &self,
+            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            Ok(None)
+        }
+    }
+
+    struct CancellingBackend {
+        cancel: MiningCancel,
+    }
+
+    impl SearchBackend for CancellingBackend {
+        fn search_dense(
+            &self,
+            _: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
+            _: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            self.cancel.cancel();
+            Ok(None)
+        }
+
+        #[cfg(feature = "node")]
+        fn search_canonical(
+            &self,
+            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            self.cancel.cancel();
+            Ok(None)
+        }
+    }
+
+    struct CorruptDenseBackend;
+
+    impl SearchBackend for CorruptDenseBackend {
+        fn search_dense(
+            &self,
+            template: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
+            batch: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            let (t_rows, t_cols) = template
+                .offsets_at_ordinal(batch.start)
+                .expect("test batch starts in prepared offset space");
+            let mut scratch = template.scratch();
+            let mut jackpot_hash = template
+                .evaluate(t_rows, t_cols, &mut scratch)
+                .expect("test prepared ticket")
+                .jackpot_hash;
+            jackpot_hash[0] ^= 1;
+            Ok(Some(SearchWinner {
+                ordinal: batch.start,
+                jackpot_hash,
+            }))
+        }
+
+        #[cfg(feature = "node")]
+        fn search_canonical(
+            &self,
+            _: Arc<crate::canonical::PreparedCanonicalMoeTemplate>,
+            _: SearchBatch,
+        ) -> Result<Option<SearchWinner>, SearchBackendError> {
+            Ok(None)
         }
     }
 
@@ -569,6 +707,75 @@ mod tests {
         assert!(matches!(
             run(&job, &opts, MiningCancel::new()),
             Err(PearlMergeMiningError::BudgetExhausted { max: 2 })
+        ));
+    }
+
+    #[test]
+    fn pearl_scheduler_caps_final_batch_at_remaining_budget() {
+        let mut params = pearl_test_params();
+        params.m = 136;
+        params.n = 136;
+        let mut header = pearl_test_header();
+        header.nbits = 0x1d00_0000;
+        let config = pearl_test_config();
+        let (a, b) = synth_matrices(b"pearl-ticket-loop-batch-budget", &params);
+        let job = pearl_job(&header, &config, &params, &a, &b, [0; 32]);
+        let backend = NoHitBackend {
+            batches: Mutex::new(Vec::new()),
+        };
+        let opts = PearlMergeMineOptions {
+            max_attempts: Some(257),
+            progress_interval: None,
+            ..PearlMergeMineOptions::default()
+        };
+
+        assert!(matches!(
+            run_with_backend(&job, &opts, MiningCancel::new(), &backend),
+            Err(PearlMergeMiningError::BudgetExhausted { max: 257 })
+        ));
+        let batches = backend.batches.lock().expect("test lock");
+        assert_eq!(batches.len(), 2);
+        assert_eq!((batches[0].start, batches[0].len), (0, 256));
+        assert_eq!((batches[1].start, batches[1].len), (256, 1));
+    }
+
+    #[test]
+    fn pearl_scheduler_discards_completed_batch_after_cancellation() {
+        let params = pearl_test_params();
+        let mut header = pearl_test_header();
+        header.nbits = 0x1d00_0000;
+        let config = pearl_test_config();
+        let (a, b) = synth_matrices(b"pearl-ticket-loop-batch-cancel", &params);
+        let job = pearl_job(&header, &config, &params, &a, &b, [0; 32]);
+        let cancel = MiningCancel::new();
+        let backend = CancellingBackend {
+            cancel: cancel.clone(),
+        };
+
+        assert!(matches!(
+            run_with_backend(&job, &PearlMergeMineOptions::default(), cancel, &backend),
+            Err(PearlMergeMiningError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn dense_backend_winner_must_match_checked_ticket_oracle() {
+        let params = pearl_test_params();
+        let header = pearl_test_header();
+        let config = pearl_test_config();
+        let (a, b) = synth_matrices(b"pearl-ticket-loop-corrupt-backend", &params);
+        let job = pearl_job(&header, &config, &params, &a, &b, crate::easy_nock_target());
+
+        assert!(matches!(
+            run_with_backend(
+                &job,
+                &PearlMergeMineOptions::default(),
+                MiningCancel::new(),
+                &CorruptDenseBackend,
+            ),
+            Err(PearlMergeMiningError::Pearl(
+                PearlCompatError::JackpotHashMismatch
+            ))
         ));
     }
 
