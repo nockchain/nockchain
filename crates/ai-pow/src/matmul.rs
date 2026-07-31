@@ -49,42 +49,55 @@ impl BlockNoise {
     /// `fiat_shamir.rs` from the nonce-bound attempt transcript and matrix
     /// commitments.
     pub fn expand(s_a: &[u8; 32], s_b: &[u8; 32], params: &MatmulParams) -> Self {
-        #[cfg(test)]
-        BLOCK_NOISE_EXPAND_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut noise = Self::for_params(params);
+        noise.refill(s_a, s_b, params);
+        noise
+    }
 
+    /// Allocate storage for one matrix shape without deriving attempt-bound data.
+    pub fn for_params(params: &MatmulParams) -> Self {
         let m = params.m as usize;
         let k = params.k as usize;
         let n = params.n as usize;
         let r = params.noise_rank as usize;
-
-        let mut e_l = vec![0i8; m * r];
-        for i in 0..params.m {
-            let off = (i as usize) * r;
-            prng::expand_e_l_row(s_a, i, params.noise_rank, &mut e_l[off..off + r]);
-        }
-        let mut e_r_pos = Vec::with_capacity(k);
-        for l in 0..params.k {
-            e_r_pos.push(prng::e_r_col_positions(s_a, l, params.noise_rank));
-        }
-        let mut f_r = vec![0i8; n * r];
-        for j in 0..params.n {
-            let off = (j as usize) * r;
-            prng::expand_f_r_col(s_b, j, params.noise_rank, &mut f_r[off..off + r]);
-        }
-        let mut f_l_pos = Vec::with_capacity(k);
-        for k_idx in 0..params.k {
-            f_l_pos.push(prng::f_l_row_positions(s_b, k_idx, params.noise_rank));
-        }
-
         Self {
             m: params.m,
             k: params.k,
             n: params.n,
             r: params.noise_rank,
-            e_l,
-            e_r_pos,
-            f_r,
-            f_l_pos,
+            e_l: vec![0; m * r],
+            e_r_pos: vec![(0, 0); k],
+            f_r: vec![0; n * r],
+            f_l_pos: vec![(0, 0); k],
+        }
+    }
+
+    /// Derive fresh noise factors into existing shape-matched storage.
+    ///
+    /// The storage is reusable, never the derived values: every call replaces
+    /// all factors and permutation pairs from the supplied attempt seeds.
+    pub fn refill(&mut self, s_a: &[u8; 32], s_b: &[u8; 32], params: &MatmulParams) {
+        #[cfg(test)]
+        BLOCK_NOISE_EXPAND_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        assert_eq!(self.m, params.m, "BlockNoise m changed");
+        assert_eq!(self.k, params.k, "BlockNoise k changed");
+        assert_eq!(self.n, params.n, "BlockNoise n changed");
+        assert_eq!(self.r, params.noise_rank, "BlockNoise rank changed");
+        let r = self.r as usize;
+        for i in 0..self.m {
+            let offset = i as usize * r;
+            prng::expand_e_l_row(s_a, i, self.r, &mut self.e_l[offset..offset + r]);
+        }
+        for (column, positions) in self.e_r_pos.iter_mut().enumerate() {
+            *positions = prng::e_r_col_positions(s_a, column as u32, self.r);
+        }
+        for j in 0..self.n {
+            let offset = j as usize * r;
+            prng::expand_f_r_col(s_b, j, self.r, &mut self.f_r[offset..offset + r]);
+        }
+        for (row, positions) in self.f_l_pos.iter_mut().enumerate() {
+            *positions = prng::f_l_row_positions(s_b, row as u32, self.r);
         }
     }
 
@@ -252,6 +265,37 @@ pub struct TileTrace {
     pub state: TileState,
 }
 
+/// Reusable storage for a search-only Pearl pattern tile evaluation.
+///
+/// The accumulator and folded state remain owned by the caller so a ticket
+/// search can reuse them across attempts without retaining the proof-only
+/// `x_steps` trace.
+#[derive(Debug)]
+pub struct PatternTileScratch {
+    c_blk: Vec<i32>,
+    state: TileState,
+}
+
+impl PatternTileScratch {
+    pub fn new(h: usize, w: usize) -> Self {
+        let cells = h.checked_mul(w).expect("Pearl pattern tile cells overflow");
+        Self {
+            c_blk: vec![0; cells],
+            state: TileState::zero(),
+        }
+    }
+
+    fn reset(&mut self, cells: usize) {
+        assert_eq!(
+            self.c_blk.len(),
+            cells,
+            "Pearl pattern scratch dimensions changed"
+        );
+        self.c_blk.fill(0);
+        self.state = TileState::zero();
+    }
+}
+
 /// Compute one output tile `(tile_i, tile_j)`, stepping in stripes of width
 /// `r` along the `k`-axis and folding each stripe's XOR into the 512-bit
 /// state `M` per Pearl §4.5. Returns the final `M` state; the caller derives
@@ -319,12 +363,17 @@ pub fn compute_tile_from_slices(
     b_prime_cols: &[i8],
     params: &MatmulParams,
 ) -> TileState {
-    compute_tile_trace_from_slices(a_prime_rows, b_prime_cols, params).state
+    let t = params.tile as usize;
+    let mut scratch = PatternTileScratch::new(t, t);
+    compute_pattern_tile_state_from_slices(
+        a_prime_rows, b_prime_cols, t, t, params.k as usize, params.noise_rank as usize,
+        params.k as usize, &mut scratch,
+    )
 }
 
 /// [`compute_tile_from_slices`] that also returns the per-stripe
-/// `x` sequence. `.state` is bit-identical to
-/// `compute_tile_from_slices`'s return; that fn delegates here.
+/// `x` sequence. Its `.state` result is bit-identical to the search-only
+/// state construction used by [`compute_tile_from_slices`].
 pub fn compute_tile_trace_from_slices(
     a_prime_rows: &[i8],
     b_prime_cols: &[i8],
@@ -352,22 +401,8 @@ pub fn compute_pattern_tile_trace_from_slices(
     r: usize,
     dot_product_len: usize,
 ) -> TileTrace {
-    assert!(h > 0, "Pearl pattern tile height must be nonzero");
-    assert!(w > 0, "Pearl pattern tile width must be nonzero");
-    assert!(k > 0, "Pearl pattern common dimension must be nonzero");
-    assert!(r > 0, "Pearl pattern rank must be nonzero");
-    assert!(
-        dot_product_len <= k,
-        "Pearl pattern dot_product_len must be <= common dimension"
-    );
-    assert_eq!(
-        dot_product_len % r,
-        0,
-        "Pearl pattern rank must divide dot_product_len"
-    );
-    assert_eq!(a_prime_rows.len(), h * k, "a_prime_rows must be h*k");
-    assert_eq!(b_prime_cols.len(), w * k, "b_prime_cols must be w*k");
-    let steps = dot_product_len / r;
+    let steps =
+        validate_pattern_tile_inputs(a_prime_rows, b_prime_cols, h, w, k, r, dot_product_len);
 
     let mut c_blk = vec![0i32; h * w];
     let mut state = TileState::zero();
@@ -395,6 +430,75 @@ pub fn compute_pattern_tile_trace_from_slices(
         state.fold(step as u32, x);
     }
     TileTrace { x_steps, state }
+}
+
+/// Compute a pattern tile state without retaining the proof-only stripe trace.
+///
+/// `scratch` must be created for the same `h × w` geometry and is reset for
+/// every invocation. The function makes no heap allocations.
+pub fn compute_pattern_tile_state_from_slices(
+    a_prime_rows: &[i8],
+    b_prime_cols: &[i8],
+    h: usize,
+    w: usize,
+    k: usize,
+    r: usize,
+    dot_product_len: usize,
+    scratch: &mut PatternTileScratch,
+) -> TileState {
+    let steps =
+        validate_pattern_tile_inputs(a_prime_rows, b_prime_cols, h, w, k, r, dot_product_len);
+    let cells = h.checked_mul(w).expect("Pearl pattern tile cells overflow");
+    scratch.reset(cells);
+
+    for step in 0..steps {
+        let lo = step * r;
+        for u in 0..h {
+            let a_row = &a_prime_rows[u * k + lo..u * k + lo + r];
+            for v in 0..w {
+                let b_col = &b_prime_cols[v * k + lo..v * k + lo + r];
+                let mut delta: i32 = 0;
+                for l in 0..r {
+                    delta = delta.wrapping_add((a_row[l] as i32) * (b_col[l] as i32));
+                }
+                let idx = u * w + v;
+                scratch.c_blk[idx] = scratch.c_blk[idx].wrapping_add(delta);
+            }
+        }
+        let mut x: i32 = 0;
+        for &value in &scratch.c_blk {
+            x ^= value;
+        }
+        scratch.state.fold(step as u32, x);
+    }
+    scratch.state
+}
+
+fn validate_pattern_tile_inputs(
+    a_prime_rows: &[i8],
+    b_prime_cols: &[i8],
+    h: usize,
+    w: usize,
+    k: usize,
+    r: usize,
+    dot_product_len: usize,
+) -> usize {
+    assert!(h > 0, "Pearl pattern tile height must be nonzero");
+    assert!(w > 0, "Pearl pattern tile width must be nonzero");
+    assert!(k > 0, "Pearl pattern common dimension must be nonzero");
+    assert!(r > 0, "Pearl pattern rank must be nonzero");
+    assert!(
+        dot_product_len <= k,
+        "Pearl pattern dot_product_len must be <= common dimension"
+    );
+    assert_eq!(
+        dot_product_len % r,
+        0,
+        "Pearl pattern rank must divide dot_product_len"
+    );
+    assert_eq!(a_prime_rows.len(), h * k, "a_prime_rows must be h*k");
+    assert_eq!(b_prime_cols.len(), w * k, "b_prime_cols must be w*k");
+    dot_product_len / r
 }
 
 #[cfg(test)]
@@ -440,6 +544,29 @@ mod tests {
                 let expected = noise.e_l[row_off + pp as usize] - noise.e_l[row_off + pm as usize];
                 assert_eq!(e_row[l], expected);
             }
+        }
+    }
+
+    #[test]
+    fn block_noise_refill_matches_fresh_expansion_without_reallocation() {
+        let params = MatmulParams::TEST_SMALL;
+        let mut reusable = BlockNoise::for_params(&params);
+        let e_l = reusable.e_l.as_ptr();
+        let e_r = reusable.e_r_pos.as_ptr();
+        let f_r = reusable.f_r.as_ptr();
+        let f_l = reusable.f_l_pos.as_ptr();
+
+        for (s_a, s_b) in [([3u8; 32], [4u8; 32]), ([7u8; 32], [11u8; 32])] {
+            let fresh = BlockNoise::expand(&s_a, &s_b, &params);
+            reusable.refill(&s_a, &s_b, &params);
+            assert_eq!(reusable.e_l, fresh.e_l);
+            assert_eq!(reusable.e_r_pos, fresh.e_r_pos);
+            assert_eq!(reusable.f_r, fresh.f_r);
+            assert_eq!(reusable.f_l_pos, fresh.f_l_pos);
+            assert_eq!(reusable.e_l.as_ptr(), e_l);
+            assert_eq!(reusable.e_r_pos.as_ptr(), e_r);
+            assert_eq!(reusable.f_r.as_ptr(), f_r);
+            assert_eq!(reusable.f_l_pos.as_ptr(), f_l);
         }
     }
 
@@ -636,6 +763,41 @@ mod tests {
             full.state, full_mutated.state,
             "mutated suffix should affect a full-length rank-aligned computation"
         );
+    }
+
+    #[test]
+    fn search_state_path_matches_trace_with_reusable_scratch() {
+        let h = 4usize;
+        let w = 8usize;
+        let k = 80usize;
+        let r = 16usize;
+        let dot_product_len = 64usize;
+        let mut a_rows = vec![0i8; h * k];
+        let mut b_cols = vec![0i8; w * k];
+        for (idx, cell) in a_rows.iter_mut().enumerate() {
+            *cell = ((idx * 17 + 3) % 101) as i8 - 50;
+        }
+        for (idx, cell) in b_cols.iter_mut().enumerate() {
+            *cell = ((idx * 29 + 11) % 97) as i8 - 48;
+        }
+
+        let expected =
+            compute_pattern_tile_trace_from_slices(&a_rows, &b_cols, h, w, k, r, dot_product_len);
+        let mut scratch = PatternTileScratch::new(h, w);
+        let accumulator = scratch.c_blk.as_ptr();
+        let capacity = scratch.c_blk.capacity();
+
+        let first = compute_pattern_tile_state_from_slices(
+            &a_rows, &b_cols, h, w, k, r, dot_product_len, &mut scratch,
+        );
+        let second = compute_pattern_tile_state_from_slices(
+            &a_rows, &b_cols, h, w, k, r, dot_product_len, &mut scratch,
+        );
+
+        assert_eq!(first, expected.state);
+        assert_eq!(second, expected.state);
+        assert_eq!(scratch.c_blk.as_ptr(), accumulator);
+        assert_eq!(scratch.c_blk.capacity(), capacity);
     }
 
     #[test]

@@ -14,12 +14,17 @@
 //! depend back on it. Keep them in sync with the jets copy (the node's setup
 //! builder must prove the same shape it later verifies).
 
+use ai_pow::fiat_shamir::canonical_noise_seeds_moe;
+use ai_pow::matmul::{
+    compute_pattern_tile_state_from_slices, BlockNoise, PatternTileScratch, TileState,
+};
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    compute_pearl_moe_ticket, derive_pearl_work_commitments, pearl_bitcoin_double_sha256_raw,
+    compute_pearl_moe_ticket, derive_pearl_work_commitments, moe_expert_b_cols_from_local,
+    pearl_bitcoin_double_sha256_raw, pearl_jackpot_hash, pearl_kappa, pearl_matrix_commitments,
     PearlAuxInclusionProof, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams,
-    PearlNockchainAux, PearlPeriodicPattern, PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32,
-    PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
+    PearlNockchainAux, PearlPeriodicPattern, PearlPublicProofParams, PearlWorkCommitments,
+    PEARL_MMA_INT7XINT7_TO_INT32, PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
@@ -162,6 +167,204 @@ struct CanonicalMoeSchedule {
     local_b: Vec<u32>,
     n_e: usize,
     m: usize,
+}
+
+/// Immutable canonical MoE schedule and transcript-independent matrices.
+///
+/// An extranonce changes only the header timestamp. All resulting transcript
+/// values—commitments, seeds, noised strips, tile state, and jackpot—are
+/// recomputed for every evaluation.
+pub struct PreparedCanonicalMoeTemplate {
+    params: MatmulParams,
+    config: PearlMiningConfig,
+    a: Vec<i8>,
+    b: Vec<i8>,
+    routing: ai_pow::pearl_moe_routing::RoutingData,
+    routing_data: Vec<u8>,
+    routing_offsets: Vec<u8>,
+    inner: Vec<u32>,
+    local_b: Vec<u32>,
+    n_e: usize,
+    m: usize,
+    outer_indices: Vec<u32>,
+    b_cols_global: Vec<u32>,
+    header: PearlIncompleteBlockHeader,
+    aux: PearlNockchainAux,
+    aux_commitment: [u8; 32],
+    aux_inclusion: PearlAuxInclusionProof,
+    mu: [u8; ai_pow::pearl_compat::PEARL_MINING_CONFIG_SIZE],
+}
+
+/// Reusable mutable storage for one canonical template worker.
+pub struct PreparedCanonicalMoeScratch {
+    noise: BlockNoise,
+    e_row: Vec<i8>,
+    f_col: Vec<i8>,
+    a_prime_rows: Vec<i8>,
+    b_prime_cols: Vec<i8>,
+    tile: PatternTileScratch,
+}
+
+/// Search-only values for one canonical extranonce.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalMoeSearchResult {
+    pub commitments: PearlWorkCommitments,
+    pub tile_state: TileState,
+    pub jackpot_hash: [u8; 32],
+}
+
+impl PreparedCanonicalMoeTemplate {
+    pub fn new(
+        params: &MatmulParams,
+        hw: u32,
+        e: usize,
+        top_k: usize,
+        nock_commit: [u8; 32],
+    ) -> Result<Self, CanonicalProveError> {
+        let CanonicalMoeSchedule {
+            config,
+            routing,
+            inner,
+            local_b,
+            n_e,
+            m,
+        } = canonical_moe_schedule(params, hw, e, top_k)?;
+        let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
+        let aux = setup_aux(nock_commit);
+        let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
+        let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment, 0);
+        let mu = config.to_bytes().map_err(err("config bytes"))?;
+        let outer_indices = routing
+            .outer_indices(0, &inner)
+            .map_err(err("outer indices"))?;
+        let b_cols_global =
+            moe_expert_b_cols_from_local(&local_b, 0, n_e).map_err(err("expert columns"))?;
+        let routing_data = routing.routing_data_le_bytes();
+        let routing_offsets = routing.routing_offsets_le_bytes();
+
+        Ok(Self {
+            params: *params,
+            config,
+            a,
+            b,
+            routing,
+            routing_data,
+            routing_offsets,
+            inner,
+            local_b,
+            n_e,
+            m,
+            outer_indices,
+            b_cols_global,
+            header,
+            aux,
+            aux_commitment,
+            aux_inclusion,
+            mu,
+        })
+    }
+
+    pub fn config(&self) -> PearlMiningConfig {
+        self.config
+    }
+
+    pub fn aux(&self) -> &PearlNockchainAux {
+        &self.aux
+    }
+
+    pub const fn aux_commitment(&self) -> &[u8; 32] {
+        &self.aux_commitment
+    }
+
+    pub fn aux_inclusion(&self) -> &PearlAuxInclusionProof {
+        &self.aux_inclusion
+    }
+
+    pub fn scratch(&self) -> PreparedCanonicalMoeScratch {
+        let k = self.params.k as usize;
+        PreparedCanonicalMoeScratch {
+            noise: BlockNoise::for_params(&self.params),
+            e_row: vec![0; k],
+            f_col: vec![0; k],
+            a_prime_rows: vec![0; self.outer_indices.len() * k],
+            b_prime_cols: vec![0; self.b_cols_global.len() * k],
+            tile: PatternTileScratch::new(self.outer_indices.len(), self.b_cols_global.len()),
+        }
+    }
+
+    pub fn header_for(&self, extranonce: u32) -> PearlIncompleteBlockHeader {
+        PearlIncompleteBlockHeader {
+            timestamp: self.header.timestamp.wrapping_add(extranonce),
+            ..self.header
+        }
+    }
+
+    /// Recompute the complete attempt-dependent canonical transcript in reusable storage.
+    pub fn evaluate(
+        &self,
+        extranonce: u32,
+        scratch: &mut PreparedCanonicalMoeScratch,
+    ) -> CanonicalMoeSearchResult {
+        let header = self.header_for(extranonce);
+        let kappa = pearl_kappa(&header.to_bytes(), &self.mu);
+        let (h_a, h_b) = pearl_matrix_commitments(&self.a, &self.b, &kappa);
+        let (s_a, s_b, _) = canonical_noise_seeds_moe(
+            &kappa, &h_a, &h_b, &self.routing_data, &self.routing_offsets,
+        );
+        scratch.noise.refill(&s_a, &s_b, &self.params);
+
+        let k = self.params.k as usize;
+        for (slot, &row) in self.outer_indices.iter().enumerate() {
+            scratch.noise.e_row_into(row, &mut scratch.e_row);
+            let source = &self.a[row as usize * k..(row as usize + 1) * k];
+            let destination = &mut scratch.a_prime_rows[slot * k..(slot + 1) * k];
+            for ((out, &value), &noise) in destination.iter_mut().zip(source).zip(&scratch.e_row) {
+                *out = (value as i16 + noise as i16) as i8;
+            }
+        }
+        for (slot, &col) in self.b_cols_global.iter().enumerate() {
+            scratch.noise.f_col_into(col, &mut scratch.f_col);
+            let source = &self.b[col as usize * k..(col as usize + 1) * k];
+            let destination = &mut scratch.b_prime_cols[slot * k..(slot + 1) * k];
+            for ((out, &value), &noise) in destination.iter_mut().zip(source).zip(&scratch.f_col) {
+                *out = (value as i16 + noise as i16) as i8;
+            }
+        }
+        let tile_state = compute_pattern_tile_state_from_slices(
+            &scratch.a_prime_rows,
+            &scratch.b_prime_cols,
+            self.outer_indices.len(),
+            self.b_cols_global.len(),
+            k,
+            self.params.noise_rank as usize,
+            k,
+            &mut scratch.tile,
+        );
+        let commitments = PearlWorkCommitments {
+            kappa,
+            h_a,
+            h_b,
+            s_a,
+            s_b,
+        };
+        CanonicalMoeSearchResult {
+            commitments,
+            tile_state,
+            jackpot_hash: pearl_jackpot_hash(&tile_state, &s_a),
+        }
+    }
+
+    pub fn schedule(
+        &self,
+    ) -> (
+        &ai_pow::pearl_moe_routing::RoutingData,
+        &[u32],
+        &[u32],
+        usize,
+        usize,
+    ) {
+        (&self.routing, &self.inner, &self.local_b, self.n_e, self.m)
+    }
 }
 
 /// The Pearl mining config the canonical miner puts in every statement it
@@ -863,5 +1066,38 @@ mod tests {
             "0000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff0000"
         );
         assert_eq!(extranonce, 7);
+    }
+
+    #[test]
+    fn prepared_canonical_template_matches_scalar_ticket_oracle() {
+        let params = canonical_params();
+        let commit = [0x42u8; 32];
+        let template =
+            PreparedCanonicalMoeTemplate::new(&params, 8, 2, 1, commit).expect("template");
+        let mut scratch = template.scratch();
+        let a_prime_rows = scratch.a_prime_rows.as_ptr();
+        let b_prime_cols = scratch.b_prime_cols.as_ptr();
+
+        for extranonce in [0, 1, 7, u32::MAX] {
+            let inputs =
+                canonical_moe_inputs(&params, 8, 2, 1, commit, extranonce).expect("inputs");
+            let scalar = evaluate_canonical_moe_ticket(&params, 8, 2, 1, commit, extranonce)
+                .expect("scalar");
+            let prepared = template.evaluate(extranonce, &mut scratch);
+
+            assert_eq!(prepared.commitments.kappa, inputs.commitments.kappa);
+            assert_eq!(prepared.commitments.h_a, inputs.commitments.h_a);
+            assert_eq!(prepared.commitments.h_b, inputs.commitments.h_b);
+            assert_eq!(prepared.commitments.s_a, scalar.s_a);
+            assert_eq!(prepared.commitments.s_b, scalar.s_b);
+            assert_eq!(prepared.tile_state, scalar.tile_state);
+            assert_eq!(prepared.jackpot_hash, scalar.jackpot_hash);
+        }
+        assert_eq!(scratch.a_prime_rows.as_ptr(), a_prime_rows);
+        assert_eq!(scratch.b_prime_cols.as_ptr(), b_prime_cols);
+        assert_eq!(
+            template.header_for(u32::MAX).timestamp,
+            CANONICAL_BASE_TIMESTAMP.wrapping_add(u32::MAX)
+        );
     }
 }

@@ -25,7 +25,8 @@ use thiserror::Error;
 use crate::commit::matrix_commitment;
 use crate::fiat_shamir::{moe_hash_activations, moe_hash_routing, noise_seed_a, noise_seed_b};
 use crate::matmul::{
-    compute_pattern_tile_trace_from_slices, compute_tile, BlockNoise, Matrices, TileState,
+    compute_pattern_tile_state_from_slices, compute_pattern_tile_trace_from_slices, compute_tile,
+    BlockNoise, Matrices, PatternTileScratch, TileState,
 };
 use crate::params::{MatmulParams, ParamError, PEARL_HW_MAX, PEARL_HW_MIN, PEARL_STRIPE_MAX};
 use crate::prng;
@@ -1447,6 +1448,195 @@ pub struct PearlPatternTicket {
     pub jackpot_hash: [u8; 32],
 }
 
+/// Precomputed invariant state for a fixed dense Pearl work transcript.
+///
+/// The header and mining configuration bind the commitment and noise seeds.
+/// A prepared job therefore never spans headers; create a new job whenever any
+/// transcript input changes.
+pub struct PreparedPearlPatternJob {
+    header: PearlIncompleteBlockHeader,
+    config: PearlMiningConfig,
+    params: MatmulParams,
+    sigma: [u8; PEARL_INCOMPLETE_BLOCK_HEADER_SIZE],
+    mu: [u8; PEARL_MINING_CONFIG_SIZE],
+    commitments: PearlWorkCommitments,
+    matrices: Matrices,
+    row_indices: Vec<u32>,
+    col_indices: Vec<u32>,
+    row_offsets: Vec<u32>,
+    col_offsets: Vec<u32>,
+    dot_product_len: usize,
+}
+
+/// Per-worker mutable storage for a [`PreparedPearlPatternJob`] evaluation.
+#[derive(Debug)]
+pub struct PreparedPearlPatternScratch {
+    a_prime_rows: Vec<i8>,
+    b_prime_cols: Vec<i8>,
+    tile: PatternTileScratch,
+}
+
+/// Search-only output for one prepared dense Pearl ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedPearlPatternResult {
+    pub tile_state: TileState,
+    pub jackpot_hash: [u8; 32],
+}
+
+/// Validate and precompute the fixed portion of a dense Pearl search job.
+///
+/// Matrix commitments, noise factors, and noised matrices are all bound to
+/// `sigma = header.to_bytes()` and `mu = config.to_bytes()`. They are computed
+/// exactly once here and must not be reused for another header or config.
+pub fn prepare_pearl_pattern_job(
+    header: &PearlIncompleteBlockHeader,
+    config: &PearlMiningConfig,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    max_pattern_len: usize,
+) -> Result<PreparedPearlPatternJob, PearlCompatError> {
+    if let Some(moe) = config.moe() {
+        return Err(PearlCompatError::UnsupportedMoeConfig {
+            e: moe.e,
+            top_k: moe.top_k,
+        });
+    }
+    validate_config_matches_params(config, params)?;
+    validate_attempt_inputs(a_row_major, b_col_major, params)?;
+    let sigma = header.to_bytes();
+    let mu = config.to_bytes()?;
+    let commitments = derive_pearl_work_commitments(&sigma, &mu, a_row_major, b_col_major);
+    let noise = BlockNoise::expand(&commitments.s_a, &commitments.s_b, params);
+    let matrices = Matrices::build(a_row_major, b_col_major, &noise, params);
+    let (row_indices, row_offsets) =
+        materialize_pattern_offsets(&config.rows_pattern, params.m, max_pattern_len)?;
+    let (col_indices, col_offsets) =
+        materialize_pattern_offsets(&config.cols_pattern, params.n, max_pattern_len)?;
+    let dot_product_len = config.dot_product_length()?;
+
+    Ok(PreparedPearlPatternJob {
+        header: *header,
+        config: *config,
+        params: *params,
+        sigma,
+        mu,
+        commitments,
+        matrices,
+        row_indices,
+        col_indices,
+        row_offsets,
+        col_offsets,
+        dot_product_len,
+    })
+}
+
+impl PreparedPearlPatternJob {
+    pub fn header(&self) -> PearlIncompleteBlockHeader {
+        self.header
+    }
+
+    pub fn config(&self) -> PearlMiningConfig {
+        self.config
+    }
+
+    pub fn params(&self) -> MatmulParams {
+        self.params
+    }
+
+    pub fn sigma(&self) -> &[u8] {
+        &self.sigma
+    }
+
+    pub fn mu(&self) -> &[u8] {
+        &self.mu
+    }
+
+    pub const fn commitments(&self) -> &PearlWorkCommitments {
+        &self.commitments
+    }
+
+    pub fn row_offsets(&self) -> &[u32] {
+        &self.row_offsets
+    }
+
+    pub fn col_offsets(&self) -> &[u32] {
+        &self.col_offsets
+    }
+
+    /// Allocate one reusable scratch instance for a searching worker.
+    pub fn scratch(&self) -> PreparedPearlPatternScratch {
+        let k = self.params.k as usize;
+        PreparedPearlPatternScratch {
+            a_prime_rows: vec![0; self.row_indices.len() * k],
+            b_prime_cols: vec![0; self.col_indices.len() * k],
+            tile: PatternTileScratch::new(self.row_indices.len(), self.col_indices.len()),
+        }
+    }
+
+    /// Evaluate one valid offset pair without allocating or constructing proof material.
+    pub fn evaluate(
+        &self,
+        t_rows: u32,
+        t_cols: u32,
+        scratch: &mut PreparedPearlPatternScratch,
+    ) -> Result<PreparedPearlPatternResult, PearlCompatError> {
+        if self.row_offsets.binary_search(&t_rows).is_err()
+            || self.col_offsets.binary_search(&t_cols).is_err()
+        {
+            return Err(PearlCompatError::InvalidPatternOffset);
+        }
+        let k = self.params.k as usize;
+        for (slot, &index) in self.row_indices.iter().enumerate() {
+            let row = t_rows
+                .checked_add(index)
+                .ok_or(PearlCompatError::PatternPeriodTooLarge)?;
+            scratch.a_prime_rows[slot * k..(slot + 1) * k]
+                .copy_from_slice(self.matrices.a_prime_row(row));
+        }
+        for (slot, &index) in self.col_indices.iter().enumerate() {
+            let col = t_cols
+                .checked_add(index)
+                .ok_or(PearlCompatError::PatternPeriodTooLarge)?;
+            scratch.b_prime_cols[slot * k..(slot + 1) * k]
+                .copy_from_slice(self.matrices.b_prime_col(col));
+        }
+        let tile_state = compute_pattern_tile_state_from_slices(
+            &scratch.a_prime_rows,
+            &scratch.b_prime_cols,
+            self.row_indices.len(),
+            self.col_indices.len(),
+            k,
+            self.params.noise_rank as usize,
+            self.dot_product_len,
+            &mut scratch.tile,
+        );
+        Ok(PreparedPearlPatternResult {
+            tile_state,
+            jackpot_hash: pearl_jackpot_hash(&tile_state, &self.commitments.s_a),
+        })
+    }
+}
+
+fn materialize_pattern_offsets(
+    pattern: &PearlPeriodicPattern,
+    total_dimension: u32,
+    max_pattern_len: usize,
+) -> Result<(Vec<u32>, Vec<u32>), PearlCompatError> {
+    let indices = pattern.to_list_bounded(max_pattern_len)?;
+    let max_index = indices.iter().copied().max().unwrap_or(0);
+    let Some(max_offset_exclusive) = total_dimension.checked_sub(max_index) else {
+        return Ok((indices, Vec::new()));
+    };
+    let mut offsets = Vec::new();
+    for offset in 0..max_offset_exclusive {
+        if pattern.offset_is_valid(offset) {
+            offsets.push(offset);
+        }
+    }
+    Ok((indices, offsets))
+}
+
 pub fn compute_pearl_pattern_ticket(
     public_params: &PearlPublicProofParams,
     a_row_major: &[i8],
@@ -2072,6 +2262,81 @@ mod tests {
             u64::from_le_bytes(out[..8].try_into().unwrap()),
             0x0003_0a08
         );
+    }
+
+    #[test]
+    fn prepared_dense_job_matches_scalar_ticket_oracle() {
+        let params = MatmulParams {
+            m: 128,
+            k: 1024,
+            n: 128,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let header = PearlIncompleteBlockHeader {
+            version: 0x0102_0304,
+            prev_block: [0x11; 32],
+            merkle_root: [0x22; 32],
+            timestamp: 0x6677_8899,
+            nbits: 0x1e7f_ffff,
+        };
+        let config = PearlMiningConfig {
+            common_dim: params.k,
+            rank: params.noise_rank as u16,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: PearlPeriodicPattern {
+                shape: [(1, 8), (8, 1), (8, 1)],
+            },
+            cols_pattern: PearlPeriodicPattern {
+                shape: [(1, 8), (8, 1), (8, 1)],
+            },
+            reserved: [0; PEARL_MINING_CONFIG_RESERVED_SIZE],
+        };
+        let (a, b) = crate::synth::synth_matrices(b"prepared-dense-job", &params);
+        let prepared =
+            prepare_pearl_pattern_job(&header, &config, &params, &a, &b, 16).expect("prepare");
+
+        assert_eq!(prepared.header(), header);
+        assert_eq!(prepared.config(), config);
+        assert_eq!(prepared.params(), params);
+        assert_eq!(prepared.sigma(), header.to_bytes());
+        assert_eq!(prepared.mu(), config.to_bytes().expect("config bytes"));
+        assert_eq!(
+            prepared.row_offsets(),
+            (0..16).map(|ordinal| ordinal * 8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prepared.col_offsets(),
+            (0..16).map(|ordinal| ordinal * 8).collect::<Vec<_>>()
+        );
+
+        let mut scratch = prepared.scratch();
+        for (t_rows, t_cols) in [(0, 0), (0, 8), (8, 0), (120, 120)] {
+            let public = PearlPublicProofParams {
+                block_header: header,
+                mining_config: config,
+                hash_a: prepared.commitments().h_a,
+                hash_b: prepared.commitments().h_b,
+                hash_jackpot: [0; 32],
+                m: params.m,
+                n: params.n,
+                t_rows,
+                t_cols,
+            };
+            let oracle = compute_pearl_pattern_ticket(&public, &a, &b, prepared.commitments(), 16)
+                .expect("scalar ticket");
+            let result = prepared
+                .evaluate(t_rows, t_cols, &mut scratch)
+                .expect("prepared ticket");
+            assert_eq!(result.tile_state, oracle.tile_state);
+            assert_eq!(result.jackpot_hash, oracle.jackpot_hash);
+        }
+        assert!(matches!(
+            prepared.evaluate(1, 0, &mut scratch),
+            Err(PearlCompatError::InvalidPatternOffset)
+        ));
     }
 }
 

@@ -8,9 +8,12 @@
 use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
+#[cfg(test)]
+use ai_pow::pearl_compat::PearlPeriodicPattern;
 use ai_pow::pearl_compat::{
-    evaluate_pearl_merge_checked_ticket_attempt, PearlCompatError, PearlIncompleteBlockHeader,
-    PearlMergeCheckedTicketAttempt, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
+    evaluate_pearl_merge_checked_ticket_attempt, prepare_pearl_pattern_job, PearlCompatError,
+    PearlIncompleteBlockHeader, PearlMergeCheckedTicketAttempt, PearlMiningConfig,
+    PearlNockchainAux, PearlPublicProofParams,
 };
 
 use crate::{DifficultyTarget, MiningCancel, MiningStats};
@@ -84,21 +87,32 @@ pub fn run(
     opts: &PearlMergeMineOptions,
     cancel: MiningCancel,
 ) -> Result<PearlMergeMinedTicket, PearlMergeMiningError> {
-    let row_offsets =
-        PatternOffsetSpace::new(&job.config.rows_pattern, job.params.m, job.max_pattern_len)?;
-    let col_offsets =
-        PatternOffsetSpace::new(&job.config.cols_pattern, job.params.n, job.max_pattern_len)?;
+    if cancel.is_cancelled() {
+        return Err(PearlMergeMiningError::Cancelled);
+    }
+    if let Some(deadline) = opts.deadline {
+        if Instant::now() >= deadline {
+            return Err(PearlMergeMiningError::DeadlineElapsed);
+        }
+    }
+    let prepared = prepare_pearl_pattern_job(
+        job.header, job.config, job.params, job.a, job.b, job.max_pattern_len,
+    )?;
+    let row_offsets = prepared.row_offsets();
+    let col_offsets = prepared.col_offsets();
     if row_offsets.is_empty() || col_offsets.is_empty() {
         return Err(PearlMergeMiningError::AttemptSpaceExhausted);
     }
-    let col_count = col_offsets.len();
-    let total_attempts = row_offsets
-        .len()
+    let col_count = u64::try_from(col_offsets.len())
+        .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
+    let total_attempts = u64::try_from(row_offsets.len())
+        .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?
         .checked_mul(col_count)
         .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
     if opts.attempt_start >= total_attempts {
         return Err(PearlMergeMiningError::AttemptSpaceExhausted);
     }
+    let mut scratch = prepared.scratch();
 
     let start = Instant::now();
     let mut stats = MiningStats {
@@ -129,39 +143,54 @@ pub fn run(
         if linear >= total_attempts {
             return Err(PearlMergeMiningError::AttemptSpaceExhausted);
         }
-        let t_rows = row_offsets
-            .offset_at(linear / col_count)
+        let row_ordinal = usize::try_from(linear / col_count)
+            .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
+        let col_ordinal = usize::try_from(linear % col_count)
+            .map_err(|_| PearlMergeMiningError::AttemptSpaceExhausted)?;
+        let t_rows = *row_offsets
+            .get(row_ordinal)
             .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-        let t_cols = col_offsets
-            .offset_at(linear % col_count)
+        let t_cols = *col_offsets
+            .get(col_ordinal)
             .ok_or(PearlMergeMiningError::AttemptSpaceExhausted)?;
-
-        let checked_attempt = evaluate_pearl_merge_checked_ticket_attempt(
-            job.header,
-            job.config,
-            job.params,
+        let prepared_result = prepared.evaluate(t_rows, t_cols, &mut scratch)?;
+        let public_params = PearlPublicProofParams {
+            block_header: *job.header,
+            mining_config: *job.config,
+            hash_a: prepared.commitments().h_a,
+            hash_b: prepared.commitments().h_b,
+            hash_jackpot: prepared_result.jackpot_hash,
+            m: job.params.m,
+            n: job.params.n,
             t_rows,
             t_cols,
-            job.a,
-            job.b,
-            &job.nockchain_target,
-            job.max_pattern_len,
-            job.aux.clone(),
-        )?;
-        let attempt = checked_attempt.attempt();
+        };
+        let pearl_target_hit = public_params.check_pearl_jackpot_difficulty().is_ok();
+        let nockchain_target_hit = public_params
+            .check_nockchain_jackpot_target(&job.nockchain_target)
+            .is_ok();
         stats.matmul_attempts_tried += 1;
         stats.elapsed = start.elapsed();
 
-        let pearl_target_hit = attempt
-            .public_params
-            .check_pearl_jackpot_difficulty()
-            .is_ok();
-        let nockchain_target_hit = attempt
-            .public_params
-            .check_nockchain_jackpot_target(&job.nockchain_target)
-            .is_ok();
-
         if pearl_target_hit || nockchain_target_hit {
+            let checked_attempt = evaluate_pearl_merge_checked_ticket_attempt(
+                job.header,
+                job.config,
+                job.params,
+                t_rows,
+                t_cols,
+                job.a,
+                job.b,
+                &job.nockchain_target,
+                job.max_pattern_len,
+                job.aux.clone(),
+            )?;
+            let attempt = checked_attempt.attempt();
+            if attempt.ticket.jackpot_hash != prepared_result.jackpot_hash {
+                return Err(PearlMergeMiningError::Pearl(
+                    PearlCompatError::JackpotHashMismatch,
+                ));
+            }
             return Ok(PearlMergeMinedTicket {
                 attempt: checked_attempt,
                 pearl_target_hit,
@@ -185,6 +214,7 @@ pub fn run(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy)]
 struct PatternOffsetSpace<'a> {
     pattern: &'a PearlPeriodicPattern,
@@ -194,6 +224,7 @@ struct PatternOffsetSpace<'a> {
     len: u64,
 }
 
+#[cfg(test)]
 impl<'a> PatternOffsetSpace<'a> {
     fn new(
         pattern: &'a PearlPeriodicPattern,
@@ -241,10 +272,6 @@ impl<'a> PatternOffsetSpace<'a> {
         }
     }
 
-    fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     fn len(&self) -> u64 {
         self.len
     }
@@ -264,6 +291,7 @@ impl<'a> PatternOffsetSpace<'a> {
     }
 }
 
+#[cfg(test)]
 fn count_valid_offsets(pattern: &PearlPeriodicPattern, upper_exclusive: u32) -> u32 {
     (0..upper_exclusive)
         .filter(|offset| pattern.offset_is_valid(*offset))
@@ -272,6 +300,7 @@ fn count_valid_offsets(pattern: &PearlPeriodicPattern, upper_exclusive: u32) -> 
         .unwrap_or(u32::MAX)
 }
 
+#[cfg(test)]
 fn nth_valid_offset(
     pattern: &PearlPeriodicPattern,
     upper_exclusive: u32,

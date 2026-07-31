@@ -13,15 +13,12 @@ use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    PearlIncompleteBlockHeader, PearlMiningConfig, PearlNockchainAux, PearlPeriodicPattern,
+    prepare_pearl_pattern_job, PearlIncompleteBlockHeader, PearlMiningConfig, PearlPeriodicPattern,
     PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
 };
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow_miner::canonical::evaluate_canonical_moe_jackpot;
-use ai_pow_miner::pearl_mining::{
-    run, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
-};
-use ai_pow_miner::{MiningCancel, DENSE_PRODUCTION_PARAMS};
+use ai_pow_miner::canonical::PreparedCanonicalMoeTemplate;
+use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 
 struct CountingAllocator;
 
@@ -115,15 +112,6 @@ fn dense_header() -> PearlIncompleteBlockHeader {
     }
 }
 
-fn dense_aux() -> PearlNockchainAux {
-    PearlNockchainAux {
-        nockchain_chain_id: b"nockchain-mainnet".to_vec(),
-        nock_block_commitment: [0x42; 32],
-        nockchain_target_epoch_or_height: 123_456,
-        extra_domain_data: b"ai-pow-search-benchmark".to_vec(),
-    }
-}
-
 fn print_measurement(name: &str, attempts: u64, measurement: Measurement) {
     let elapsed_s = measurement.elapsed.as_secs_f64();
     let attempts_per_s = (attempts as f64) / elapsed_s;
@@ -141,16 +129,20 @@ fn main() {
         .filter(|&attempts| attempts > 0)
         .unwrap_or(16);
     let canonical = canonical_params();
+    let canonical_template = PreparedCanonicalMoeTemplate::new(&canonical, 8, 2, 1, [0x5a; 32])
+        .expect("canonical template");
+    let mut canonical_scratch = canonical_template.scratch();
     let canonical_measurement = measure(|| {
         for extranonce in 0..canonical_attempts {
             std::hint::black_box(
-                evaluate_canonical_moe_jackpot(&canonical, 8, 2, 1, [0x5a; 32], extranonce)
-                    .expect("canonical jackpot"),
+                canonical_template
+                    .evaluate(extranonce, &mut canonical_scratch)
+                    .jackpot_hash,
             );
         }
     });
     print_measurement(
-        "canonical_scalar",
+        "canonical_prepared",
         u64::from(canonical_attempts),
         canonical_measurement,
     );
@@ -158,29 +150,31 @@ fn main() {
     let header = dense_header();
     let config = dense_config();
     let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, &DENSE_PRODUCTION_PARAMS);
-    let dense_job = PearlMergeMiningJob {
-        header: &header,
-        config: &config,
-        params: &DENSE_PRODUCTION_PARAMS,
-        nockchain_target: [0; 32],
-        a: &a,
-        b: &b,
-        max_pattern_len: 8,
-        aux: dense_aux(),
-    };
+    let dense_prepared =
+        prepare_pearl_pattern_job(&header, &config, &DENSE_PRODUCTION_PARAMS, &a, &b, 8)
+            .expect("prepared dense Pearl job");
+    let dense_attempts = u64::try_from(
+        dense_prepared
+            .row_offsets()
+            .len()
+            .checked_mul(dense_prepared.col_offsets().len())
+            .expect("dense attempt count"),
+    )
+    .expect("dense attempt count fits u64");
+    let mut dense_scratch = dense_prepared.scratch();
     let dense_measurement = measure(|| {
-        let outcome = run(
-            &dense_job,
-            &PearlMergeMineOptions {
-                progress_interval: None,
-                ..PearlMergeMineOptions::default()
-            },
-            MiningCancel::new(),
-        );
-        assert!(
-            matches!(outcome, Err(PearlMergeMiningError::AttemptSpaceExhausted)),
-            "impossible targets must sweep the complete dense offset space"
-        );
+        for &t_rows in dense_prepared.row_offsets() {
+            for &t_cols in dense_prepared.col_offsets() {
+                std::hint::black_box(
+                    dense_prepared
+                        .evaluate(t_rows, t_cols, &mut dense_scratch)
+                        .expect("prepared dense ticket")
+                        .jackpot_hash,
+                );
+            }
+        }
     });
-    print_measurement("dense_scalar_full_sweep", 4_096, dense_measurement);
+    print_measurement(
+        "dense_prepared_full_sweep", dense_attempts, dense_measurement,
+    );
 }

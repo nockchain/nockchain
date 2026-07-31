@@ -74,9 +74,11 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+#[cfg(test)]
+use crate::canonical::evaluate_canonical_moe_jackpot;
 use crate::canonical::{
-    evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
-    CanonicalProveError,
+    prove_canonical_moe_block_at_for_miner, CanonicalBlock, CanonicalProveError,
+    PreparedCanonicalMoeTemplate,
 };
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
@@ -897,13 +899,13 @@ async fn cancel_and_await_canonical_worker(
 }
 
 /// Proof-of-work grind for the gateway-free canonical miner. Iterates the
-/// extranonce (header timestamp), and for each attempt computes the cheap MoE
-/// tile jackpot ([`evaluate_canonical_moe_jackpot`]) and tests it against the
-/// effective jackpot threshold for the canonical tile shape. On the first nonce
-/// that clears it, pays the one-time recursive-certificate cost
-/// ([`prove_canonical_moe_block_at`]) and returns the block. Checks `cancel`
-/// every [`GRIND_CANCEL_CHECK_STRIDE`] attempts so a superseding candidate
-/// abandons the grind promptly. Runs on a blocking thread.
+/// extranonce (header timestamp), and for each attempt computes the full MoE
+/// tile jackpot through a prepared template and tests it against the effective
+/// jackpot threshold for the canonical tile shape. On the first nonce that
+/// clears it, pays the one-time recursive-certificate cost
+/// ([`prove_canonical_moe_block_at`]). Checks `cancel` every
+/// [`GRIND_CANCEL_CHECK_STRIDE`] attempts so a superseding candidate abandons
+/// the grind promptly. Runs on a blocking thread.
 const GRIND_CANCEL_CHECK_STRIDE: u32 = 64;
 
 /// MAC-equivalents one canonical grind attempt costs — the shape work factor
@@ -947,15 +949,18 @@ fn grind_canonical_block(
     cancel: Arc<AtomicBool>,
 ) -> GrindResult {
     let threshold = canonical_grind_threshold(&target)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let template = PreparedCanonicalMoeTemplate::new(
+        &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
+    )?;
+    let mut scratch = template.scratch();
     for extranonce in 0u32..=u32::MAX {
         if extranonce % GRIND_CANCEL_CHECK_STRIDE == 0 && cancel.load(Ordering::Relaxed) {
             return Ok(None);
         }
-        let jackpot = evaluate_canonical_moe_jackpot(
-            &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
-            extranonce,
-        )
-        .map_err(|e| CanonicalProveError(format!("grind attempt {extranonce}: {}", e.0)))?;
+        let jackpot = template.evaluate(extranonce, &mut scratch).jackpot_hash;
         if hash_le_target(&jackpot, &threshold) {
             info!(
                 extranonce,
