@@ -1,0 +1,30 @@
+[package]
+name = "ai-pow-miner-cuda"
+version = "0.1.15"
+edition = "2021"
+description = "CUDA search backend and standalone AI-PoW miner."
+publish = false
+
+# This package is excluded from Nockchain's root workspace so normal Rust
+# builds never resolve CUDA toolchain or driver dependencies.
+[workspace]
+
+[[bin]]
+name = "ai-pow-mine-cuda"
+path = "src/main.rs"
+
+[dependencies]
+ai-pow = { path = "../ai-pow", features = ["zk"] }
+ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
+anyhow = "1"
+clap = { version = "4.6.1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+# CUDA 12.x is required by cuda-bindings. Pin every public cuda-oxide package
+# to one source revision so host and device ABI contracts cannot drift.
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
+cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
+cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }

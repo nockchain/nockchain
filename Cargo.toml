@@ -3,7 +3,7 @@ members = ["crates/ai-pow", "crates/ai-pow-miner", "crates/ai-pow-jets", "crates
 # `pearl/` is the Rust 2024 upstream reference implementation, vendored for
 # cross-comparison only. Nockchain's Plonky3-recursion changes live in the
 # pinned public fork used by `ai-pow-zk`'s recursion feature.
-exclude = ["pearl"]
+exclude = ["pearl", "crates/ai-pow-miner-cuda"]
 resolver = "2"
 
 [workspace.package]

@@ -182,6 +182,8 @@ pub enum SearchBackendError {
     DenseOrdinalOutOfRange(u64),
     #[error("prepared dense ticket evaluation: {0}")]
     DenseEvaluation(#[from] PearlCompatError),
+    #[error("search backend is unavailable: {0}")]
+    BackendUnavailable(String),
     #[error("CPU search worker count must be nonzero")]
     ZeroWorkerCount,
     #[error("could not spawn CPU search worker: {0}")]

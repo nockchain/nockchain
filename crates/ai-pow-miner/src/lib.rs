@@ -120,6 +120,11 @@ pub mod canonical;
 #[cfg(feature = "node")]
 pub mod run;
 
+/// Shared CLI arguments and node-miner configuration. Backend binaries flatten
+/// the same work arguments and choose their search implementation explicitly.
+#[cfg(feature = "node")]
+pub mod cli;
+
 /// Test-only synthetic nockchain targets sized so the factor-adjusted
 /// product fits the 256-bit band: fixtures previously used `[0xff; 32]`,
 /// which the fail-closed adjusted-target multiply rejects as over-band.
