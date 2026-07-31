@@ -1,0 +1,3 @@
+# AI-PoW signed INT8 MMA requires Ampere-or-newer hardware. PTX remains
+# driver-JIT portable across compatible later architectures; do not materialize cubins.
+default-arch = "sm_80"
