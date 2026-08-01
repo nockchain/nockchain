@@ -10,20 +10,32 @@
     ~/  %push
     |=  dat=proof-data
     ^-  proof
-    :^    %0
-        (snoc objects dat)
+    ::  Proof-stream bookkeeping must not erase the protocol version.  The v3
+    ::  FRI verifier uses this tag after earlier objects have been consumed.
+    =/  new-objects  (snoc objects dat)
+    =/  new-hashes
       (snoc hashes (hash-hashable:tip5 (hashable-proof-data dat)))
-    read-index
+    ?-  version
+      %0  [%0 new-objects new-hashes read-index]
+      %1  [%1 new-objects new-hashes read-index]
+      %2  [%2 new-objects new-hashes read-index]
+      %3  [%3 new-objects new-hashes read-index]
+    ==
   ::
   ++  pull
     ^-  [proof-data proof]
     ?>  (lth read-index (lent objects))
     =/  dat  (snag read-index objects)
-    :-  dat
-    :^     %0
-         objects
+    =/  new-hashes
       (snoc hashes (hash-hashable:tip5 (hashable-proof-data dat)))
-    +(read-index)
+    =/  new-read-index  +(read-index)
+    :-  dat
+    ?-  version
+      %0  [%0 objects new-hashes new-read-index]
+      %1  [%1 objects new-hashes new-read-index]
+      %2  [%2 objects new-hashes new-read-index]
+      %3  [%3 objects new-hashes new-read-index]
+    ==
   ::
   ++  prover-fiat-shamir
     ^+  tog:tip5

@@ -98,6 +98,35 @@
   ==
 ::
 ::
+::  Keep version construction and v3 polynomial preparation outside the large
+::  +prove-door core.  Besides making the invariants reusable, this avoids
+::  growing +generate-proof's subject axes past the native compiler's current
+::  64-bit axis representation.
+++  empty-proof-for-version
+  |=  version=proof-version
+  ^-  proof
+  ?-  version
+    %0  [%0 ~ ~ 0]
+    %1  [%1 ~ ~ 0]
+    %2  [%2 ~ ~ 0]
+    %3  [%3 ~ ~ 0]
+  ==
+::
+++  prepare-extra-composition-poly
+  |=  $:  version=proof-version
+          heights=(list @)
+          constraint-map=(map @ constraints)
+          extra=bpoly
+      ==
+  ^-  bpoly
+  ?.  =(%3 version)  extra
+  =/  canonical  (bpcan extra)
+  =/  extra-dp  (degree-processing heights constraint-map %.y)
+  ?>  (lte len.canonical (add 1 fri-deg-bound.extra-dp))
+  ?>  ~(cank bop canonical)
+  canonical
+::
+::
 ::  +prove: prove the Nock computation [s f]
 ++  prove
   ~/  %prove
@@ -340,7 +369,7 @@
             return=fock-return
         ==
     ^-  proof-work
-    =|  =proof
+    =/  proof=proof  (empty-proof-for-version version)
     =.  proof  (~(push proof-stream proof) [%puzzle header nonce pow-len prod])
     =/  tables=(list table-dat)
       (build-table-dats return)
@@ -622,6 +651,9 @@
           dyn-list
           %.y
       ==
+    =.  extra-composition-poly
+      %-  prepare-extra-composition-poly
+      [original-version heights constraint-map.pre extra-composition-poly]
     =.  proof
       (~(push proof-stream proof) [%poly extra-composition-poly])
     =.  rng  ~(prover-fiat-shamir proof-stream proof)

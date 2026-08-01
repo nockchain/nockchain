@@ -162,6 +162,7 @@
     ~/  %verify
     |=  [stream=proof root=noun-digest:tip5]
     ^-  [[top-level-indices=(list @) merks=(list merk-data) deep-cosets=(map @ fpoly) res=?] proof]
+    =/  original-version=proof-version  version.stream
     ::
     ::  extract roots and alphas values from commit phase
     =^  [roots=(list noun-digest:tip5) alphas=(list felt)]  stream
@@ -194,6 +195,9 @@
     ::  Verify that the last codeword is low degree
     ~|  "last codeword len is not correct"
     ?>  =(len.last-codeword last-codeword-len)
+    ?>  ?|  !=(%3 original-version)
+            ~(cank fop last-codeword)
+        ==
     =/  poly  (fp-ifft last-codeword)
     =/  deg  (fdegree ~(to-poly fop poly))
     =/  degree-bound
@@ -222,6 +226,11 @@
       ::  read opening for index from proof
       =^  opening=proof-path  stream
         =^(o stream ~(pull proof-stream stream) ?>(?=(%m-path -.o) p.o^stream))
+      ?>  ?|  !=(%3 original-version)
+              ?&  =(len.leaf.opening folding-deg)
+                  ~(cank fop leaf.opening)
+              ==
+          ==
       ::
       :_  stream
       :+  [idx new-indices]
@@ -262,6 +271,11 @@
       ::  read opening for index from proof
       =^  opening=proof-path  stream
         =^(o stream ~(pull proof-stream stream) ?>(?=(%m-path -.o) p.o^stream))
+      ?>  ?|  !=(%3 original-version)
+              ?&  =(len.leaf.opening folding-deg)
+                  ~(cank fop leaf.opening)
+              ==
+          ==
       ::
       :^    [new-idx new-indices]
           (~(put by cosets) coset-idx leaf.opening)

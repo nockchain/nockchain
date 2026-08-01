@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
 use nockchain_math::belt::Belt;
+use nockchain_math::convert::poly_noun_has_exact_shape;
 use nockchain_math::felt::Felt;
 use nockchain_math::mary::Mary;
 use nockchain_math::noun_ext::{AtomMathExt, NounMathExt};
@@ -52,7 +53,7 @@ pub struct ProofPathBf {
     pub path: Vec<[u64; 5]>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, NounEncode, NounDecode)]
+#[derive(Debug, Clone, PartialEq, Eq, NounEncode)]
 pub struct Proof {
     pub version: ProofVersion,
     pub objects: Vec<ProofData>,
@@ -66,6 +67,60 @@ pub enum ProofVersion {
     V1,
     V2,
     V3,
+}
+
+fn proof_arrays_have_exact_shape(objects_noun: Noun, space: &NounSpace) -> bool {
+    let Ok(objects) = HoonList::try_from(objects_noun, space) else {
+        return false;
+    };
+    for object in objects {
+        let Ok(cell) = object.in_space(space).as_cell() else {
+            return false;
+        };
+        let Ok(tag) = cell.head().as_atom().and_then(|atom| atom.as_u64()) else {
+            return false;
+        };
+        let tail = cell.tail().noun();
+        let valid = match tag {
+            tas!(b"codeword") | tas!(b"evals") => poly_noun_has_exact_shape::<Felt>(&tail, space),
+            tas!(b"terms") | tas!(b"poly") => poly_noun_has_exact_shape::<Belt>(&tail, space),
+            tas!(b"m-path") => {
+                let Ok([leaf, _path]) = tail.uncell(space) else {
+                    return false;
+                };
+                poly_noun_has_exact_shape::<Felt>(&leaf, space)
+            }
+            tas!(b"m-pathbf") => {
+                let Ok([leaf, _path]) = tail.uncell(space) else {
+                    return false;
+                };
+                poly_noun_has_exact_shape::<Belt>(&leaf, space)
+            }
+            _ => true,
+        };
+        if !valid {
+            return false;
+        }
+    }
+    true
+}
+
+impl NounDecode for Proof {
+    fn from_noun(noun: &Noun, space: &NounSpace) -> Result<Self, NounDecodeError> {
+        let [version_noun, objects_noun, hashes_noun, read_index_noun] = noun.uncell(space)?;
+        let version = ProofVersion::from_noun(&version_noun, space)?;
+        if version == ProofVersion::V3 && !proof_arrays_have_exact_shape(objects_noun, space) {
+            return Err(NounDecodeError::Custom(
+                "v3 proof contains a noncanonical array encoding".to_string(),
+            ));
+        }
+        Ok(Self {
+            version,
+            objects: Vec::<ProofData>::from_noun(&objects_noun, space)?,
+            hashes: Vec::<[u64; 5]>::from_noun(&hashes_noun, space)?,
+            read_index: u32::from_noun(&read_index_noun, space)?,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
@@ -1216,9 +1271,20 @@ pub fn reassemble_noun<A: NounAllocator>(
 mod tests {
     use nockvm::ext::NounExt;
     use nockvm::mem::{NockStack, NOCK_STACK_SIZE};
+    use nockvm::noun::{IndirectAtom, Noun, D, T};
+    use nockvm_macros::tas;
     use noun_serde::{NounDecode, NounEncode};
 
     use super::{Proof, ProofVersion};
+
+    fn proof_with_noncanonical_marker(stack: &mut NockStack, version: u64) -> Noun {
+        let words = [7_u64, 2_u64];
+        let tail = unsafe { IndirectAtom::new_raw(stack, words.len(), words.as_ptr()) }.as_noun();
+        let poly = T(stack, &[D(1), tail]);
+        let object = T(stack, &[D(tas!(b"poly")), poly]);
+        let objects = T(stack, &[object, D(0)]);
+        T(stack, &[D(version), objects, D(0), D(0)])
+    }
 
     #[test]
     fn decodes_and_reencodes_public_fixtures() {
@@ -1265,5 +1331,21 @@ mod tests {
         let space = stack.noun_space();
         let decoded = ProofVersion::from_noun(&encoded, &space).expect("v3 should decode");
         assert_eq!(decoded, ProofVersion::V3);
+    }
+
+    #[test]
+    fn v2_decode_preserves_historical_terminal_marker_acceptance() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let noun = proof_with_noncanonical_marker(&mut stack, 2);
+        let space = stack.noun_space();
+        assert!(Proof::from_noun(&noun, &space).is_ok());
+    }
+
+    #[test]
+    fn v3_decode_rejects_noncanonical_terminal_marker() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let noun = proof_with_noncanonical_marker(&mut stack, 3);
+        let space = stack.noun_space();
+        assert!(Proof::from_noun(&noun, &space).is_err());
     }
 }

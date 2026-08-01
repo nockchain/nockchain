@@ -111,6 +111,63 @@
   ?:  (gte height proof-version-1-start)
     %1
   %0
+::
+::  Proof versions are selected by block height.  Keep this predicate shared
+::  by normal and genesis validation so height zero cannot bypass the schedule.
+++  proof-version-valid
+  ~/  %proof-version-valid
+  |=  [height=page-number:t =proof:sp]
+  ^-  ?
+  =((height-to-proof-version height) version.proof)
+::
+::  Check a block digest against checkpointed history.  Fakenets are
+::  identified by their non-realnet genesis seal and intentionally skip the
+::  realnet checkpoint map.
+++  checkpoint-digest-valid
+  ~/  %checkpoint-digest-valid
+  |=  [height=page-number:t digest=hash:t =genesis-seal:t]
+  ^-  ?
+  ?~  genesis-seal
+    %.n
+  ?|  !=(realnet-genesis-msg:dk msg-hash.u.genesis-seal)
+      ?!((~(has z-by checkpointed-digests) height))
+      =(digest (~(got z-by checkpointed-digests) height))
+  ==
+::
+::  Loading a checkpointed ID is not sufficient for legacy blocks because
+::  their IDs do not bind the proof-version tag.  Audit the stored page too.
+++  checkpoint-page-valid
+  ~/  %checkpoint-page-valid
+  |=  [height=page-number:t expected=hash:t pag=page:t]
+  ^-  ?
+  =/  pow  ~(pow get:page:t pag)
+  ?~  pow
+    %.n
+  ?&  =(height ~(height get:page:t pag))
+      =(expected ~(digest get:page:t pag))
+      (check-digest:page:t pag)
+      (proof-version-valid [height u.pow])
+      =(~ hashes.u.pow)
+      =(0 read-index.u.pow)
+      (canonical-pow-proof:dk [height u.pow])
+  ==
+::
+::  Custom networks may deliberately disable PoW in tests and persist
+::  proofless pages.  Loading may retain those pages only when a proof is not
+::  required; any proof that is present still receives the full version and
+::  canonical-envelope audit.
+++  persisted-page-valid
+  ~/  %persisted-page-valid
+  |=  [require-proof=? height=page-number:t expected=hash:t pag=page:t]
+  ^-  ?
+  =/  pow  ~(pow get:page:t pag)
+  ?~  pow
+    ?&  !require-proof
+        =(height ~(height get:page:t pag))
+        =(expected ~(digest get:page:t pag))
+        (check-digest:page:t pag)
+    ==
+  (checkpoint-page-valid [height expected pag])
 ::  What block to start using proof version 3
 ++  proof-version-3-start  120.400
 :: What block to start using proof version 2
@@ -492,13 +549,16 @@
   ~/  %validate-page-without-txs
   |=  [pag=page:t now-secs=@]
   ^-  (reason:dk ~)
-  =/  version  (height-to-proof-version ~(height get:page:t pag))
+  =/  page-pow  ~(pow get:page:t pag)
   =/  version-check=?
-    ?.  check-pow-flag:t
-      %.y
-    =(version version:(need ~(pow get:page:t pag)))
+    ?~  page-pow
+      ?:(check-pow-flag:t %.n %.y)
+    (proof-version-valid [~(height get:page:t pag) u.page-pow])
   ?.  version-check
-    ~&  [%expected-vs-actual version version:(need ~(pow get:page:t pag))]
+    ~&  :*  %expected-vs-actual
+            (height-to-proof-version ~(height get:page:t pag))
+            page-pow
+        ==
     [%.n %proof-version-invalid]
   =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) ~(parent get:page:t pag)))
   ::  this is already checked in +heard-block but is done here again
@@ -555,10 +615,8 @@
   ?~  genesis-seal.c
     ~>  %slog.[1 'validate-page-without-txs: Fatal error: Genesis seal not set!']
     [%.n %genesis-seal-not-set]
-  ?.  ?|  !=(realnet-genesis-msg:dk msg-hash.u.genesis-seal.c)
-          ?!((~(has z-by checkpointed-digests) ~(height get:page:t pag)))
-          =(~(digest get:page:t pag) (~(got z-by checkpointed-digests) ~(height get:page:t pag)))
-      ==
+  ?.  %-  checkpoint-digest-valid
+      [~(height get:page:t pag) ~(digest get:page:t pag) genesis-seal.c]
     ~>  %slog.[1 'validate-page-without-txs: Checkpoint match failed']
     [%.n %checkpoint-match-failed]
   ::
@@ -597,6 +655,17 @@
   ~/  %validate-page-with-txs
   |=  pag=page:t
   ^-  (reason:dk tx-acc:t)
+  ::  Pending pages can survive a software upgrade after their header was
+  ::  checked.  Repeat the cheap height/version gate before accepting one so a
+  ::  pre-Zoe %2 page at the %3 activation height cannot become valid merely
+  ::  because its final transaction arrived after restart.
+  =/  page-pow  ~(pow get:page:t pag)
+  =/  version-check=?
+    ?~  page-pow
+      ?:(check-pow-flag:t %.n %.y)
+    (proof-version-valid [~(height get:page:t pag) u.page-pow])
+  ?.  version-check
+    [%.n %proof-version-invalid]
   =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))
   ?.  (check-size pag)
     ~>  %slog.[1 (cat 3 'validate-page-with-txs: Block too large: ' digest-b58)]

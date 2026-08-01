@@ -15,16 +15,409 @@
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
 ::
-++  test-proof-version-3-activation-boundary
+++  test-zoe-proof-version-3-activation-boundary
   =/  con  ~(. dcon initial-consensus-state:h constants)
   %+  expect-eq
-    !>(~[%2 %3 %3])
-  !>  :~  (height-to-proof-version:con 120.399)
+    !>(~[%0 %2 %3 %3])
+  !>  :~  (height-to-proof-version:con 0)
+          (height-to-proof-version:con 120.399)
           (height-to-proof-version:con 120.400)
           (height-to-proof-version:con 120.401)
       ==
 ::
-++  test-proof-version-3-retag-cannot-preserve-block-id
+++  test-zoe-proof-version-gate-includes-genesis
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  base=proof:t  *proof:t
+  =/  v0=proof:t  [%0 objects.base hashes.base read-index.base]
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  %+  expect-eq
+    !>([%.y %.n %.y])
+  !>  :*  (proof-version-valid:con [0 v0])
+          (proof-version-valid:con [0 v3])
+          (proof-version-valid:con [120.400 v3])
+      ==
+::
+++  test-zoe-load-audit-rejects-genesis-version-retag-despite-legacy-id
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  base=proof:t  *proof:t
+  =/  v0=proof:t  [%0 objects.base hashes.base read-index.base]
+  =/  v1=proof:t  [%1 objects.base hashes.base read-index.base]
+  =/  template=page:v1:t  *page:v1:t
+  =/  page-v0=page:v1:t  template(pow (some v0))
+  =/  valid-v0=page:v1:t
+    page-v0(digest (compute-digest:page:t page-v0))
+  =/  retagged=page:v1:t  valid-v0(pow (some v1))
+  =/  indexed-proof=proof:t  v0(read-index 1)
+  =/  indexed=page:v1:t  valid-v0(pow (some indexed-proof))
+  =/  cached-proof=proof:t  v0(hashes ~[*noun-digest:tip5:z])
+  =/  cached=page:v1:t  valid-v0(pow (some cached-proof))
+  %+  expect-eq
+    !>([%.y %.n %.y %.n %.n %.n])
+  !>  :*  (check-digest:page:t retagged)
+          (proof-version-valid:con [0 v1])
+          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) valid-v0])
+          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) retagged])
+          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) indexed])
+          (checkpoint-page-valid:con [0 ~(digest get:page:t valid-v0) cached])
+      ==
+::
+++  test-zoe-load-resets-malformed-realnet-genesis
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  canonical=block-id:t  (~(got z-by checkpointed-digests:con) 0)
+  =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
+  =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
+  =/  base=proof:t  *proof:t
+  =/  v1=proof:t  [%1 objects.base hashes.base read-index.base]
+  =/  malformed=page:v1:t
+    %*  .  *page:v1:t
+      digest  canonical
+      pow     (some v1)
+    ==
+  =/  bad-consensus=consensus-state
+    %*  .  *consensus-state
+      blocks
+        (~(put h-by *(h-map block-id:t local-page:t)) canonical (to-local-page:page:t malformed))
+      heaviest-block  `canonical
+      btc-data        boot-btc-data
+      genesis-seal    realnet-seal
+    ==
+  =/  bad-derived=derived-state
+    %*  .  *derived-state
+      highest-block-height  `0
+      heaviest-chain
+        (~(put z-by *(z-map page-number:t block-id:t)) 0 canonical)
+    ==
+  =/  post-born-admin=admin-state  *admin-state
+  =.  post-born-admin  post-born-admin(init %.n)
+  =/  bad-state=kernel-state
+    %*  .  *kernel-state
+      c          bad-consensus
+      a          post-born-admin
+      d          bad-derived
+      constants  constants
+    ==
+  =/  loaded=kernel-state  (load:inner:dumb bad-state)
+  %+  expect-eq
+    !>([%11 %.y 0 %.n %.y %.y])
+  !>  :*  -.loaded
+          ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          init.a.loaded
+          =(boot-btc-data btc-data.c.loaded)
+          =(realnet-seal genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-load-preserves-born-realnet-waiting-for-genesis
+  =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
+  =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
+  =/  waiting-consensus=consensus-state
+    %*  .  *consensus-state
+      btc-data      boot-btc-data
+      genesis-seal  realnet-seal
+    ==
+  =/  post-born-admin=admin-state  *admin-state
+  =.  post-born-admin  post-born-admin(init %.n)
+  =/  waiting-state=kernel-state
+    %*  .  *kernel-state
+      c          waiting-consensus
+      a          post-born-admin
+      constants  constants
+    ==
+  =/  loaded=kernel-state  (load:inner:dumb waiting-state)
+  %+  expect-eq
+    !>([%.n %.y %.y %.y 0])
+  !>  :*  init.a.loaded
+          =(boot-btc-data btc-data.c.loaded)
+          =(realnet-seal genesis-seal.c.loaded)
+          ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+      ==
+::
+++  test-zoe-load-resets-partially-stored-genesis
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  canonical=block-id:t  (~(got z-by checkpointed-digests:con) 0)
+  =/  boot-btc-data=(unit (unit btc-hash:t))  ``*btc-hash:t
+  =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
+  =/  stray-page=page:v1:t  *page:v1:t
+  =/  partial-consensus=consensus-state
+    %*  .  *consensus-state
+      blocks
+        (~(put h-by *(h-map block-id:t local-page:t)) canonical (to-local-page:page:t stray-page))
+      btc-data      boot-btc-data
+      genesis-seal  realnet-seal
+    ==
+  =/  partial-state=kernel-state
+    %*  .  *kernel-state
+      c          partial-consensus
+      constants  constants
+    ==
+  =/  loaded=kernel-state  (load:inner:dumb partial-state)
+  %+  expect-eq
+    !>([%.y 0 %.y %.y])
+  !>  :*  ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(boot-btc-data btc-data.c.loaded)
+          =(realnet-seal genesis-seal.c.loaded)
+      ==
+::
+++  zoe-fakenet-tip-state
+  |=  page-pow=(unit proof:t)
+  ^-  kernel-state
+  =/  tip-page=page:v1:t
+    %*  .  *page:v1:t
+      height  120.400
+      pow     page-pow
+    ==
+  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
+  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
+  =/  genesis-id=block-id:t  *block-id:t
+  =/  fakenet-seal=genesis-seal:t  `[0 *hash:t]
+  =/  fakenet-consensus=consensus-state
+    %*  .  *consensus-state
+      blocks
+        (~(put h-by *(h-map block-id:t local-page:t)) tip-id (to-local-page:page:t tip-page))
+      heaviest-block  `tip-id
+      genesis-seal    fakenet-seal
+    ==
+  =/  fakenet-derived=derived-state
+    %*  .  *derived-state
+      highest-block-height  `120.400
+      heaviest-chain
+        %+  ~(put z-by (~(put z-by *(z-map page-number:t block-id:t)) 0 genesis-id))
+          120.400
+        tip-id
+    ==
+  %*  .  *kernel-state
+    c          fakenet-consensus
+    d          fakenet-derived
+    constants  constants(check-pow-flag %.n)
+  ==
+::
+++  test-zoe-load-resets-postactivation-v2-fakenet-tip
+  =/  base=proof:t  *proof:t
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  stale-state=kernel-state  (zoe-fakenet-tip-state `stale-v2)
+  =/  loaded=kernel-state  (load:inner:dumb stale-state)
+  %+  expect-eq
+    !>([%.y 0 %.y])
+  !>  :*  ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(genesis-seal.c.stale-state genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-load-preserves-postactivation-v3-fakenet-tip
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  valid-state=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  loaded=kernel-state  (load:inner:dumb valid-state)
+  %+  expect-eq
+    !>([%.y 1 %.y])
+  !>  :*  ?=(^ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(genesis-seal.c.valid-state genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-state-11-valid-migration-is-idempotent
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  current=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  legacy=kernel-state-10
+    :*  %10
+        c=c.current
+        a=a.current
+        m=m.current
+        d=d.current
+        constants=constants.current
+    ==
+  =/  migrated=kernel-state  (load:inner:dumb legacy)
+  =/  reloaded=kernel-state  (load:inner:dumb migrated)
+  %+  expect-eq
+    !>([%11 %11 %.y %.y 1 1 %.y])
+  !>  :*  -.migrated
+          -.reloaded
+          ?=(^ heaviest-block.c.migrated)
+          =(heaviest-block.c.migrated heaviest-block.c.reloaded)
+          ~(wyt h-by blocks.c.migrated)
+          ~(wyt h-by blocks.c.reloaded)
+          =(genesis-seal.c.current genesis-seal.c.reloaded)
+      ==
+::
+++  test-zoe-load-resets-postactivation-v2-fakenet-side-fork
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  forked-state=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  stale-page=page:v1:t
+    %*  .  *page:v1:t
+      height  120.400
+      pow     (some stale-v2)
+    ==
+  =.  stale-page  stale-page(digest (compute-digest:page:t stale-page))
+  =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
+  =.  blocks.c.forked-state
+    %-  ~(put h-by blocks.c.forked-state)
+    [stale-id (to-local-page:page:t stale-page)]
+  =/  loaded=kernel-state  (load:inner:dumb forked-state)
+  %+  expect-eq
+    !>([%.y 0 %.y])
+  !>  :*  ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(genesis-seal.c.forked-state genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-state-11-migration-rejects-mixed-canonical-suffix
+  =/  base=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  mixed=kernel-state  (zoe-fakenet-tip-state `v3)
+  =/  activation-id=block-id:t  (need heaviest-block.c.mixed)
+  =/  stale-page=page:v1:t
+    %*  .  *page:v1:t
+      height  120.401
+      parent  activation-id
+      pow     (some stale-v2)
+    ==
+  =.  stale-page  stale-page(digest (compute-digest:page:t stale-page))
+  =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
+  =/  tip-page=page:v1:t
+    %*  .  *page:v1:t
+      height  120.402
+      parent  stale-id
+      pow     (some v3)
+    ==
+  =.  tip-page  tip-page(digest (compute-digest:page:t tip-page))
+  =/  tip-id=block-id:t  ~(digest get:page:t tip-page)
+  =.  blocks.c.mixed
+    %+  ~(put h-by blocks.c.mixed)
+      stale-id
+    (to-local-page:page:t stale-page)
+  =.  blocks.c.mixed
+    %+  ~(put h-by blocks.c.mixed)
+      tip-id
+    (to-local-page:page:t tip-page)
+  =.  heaviest-block.c.mixed  `tip-id
+  =.  heaviest-chain.d.mixed
+    %+  ~(put z-by heaviest-chain.d.mixed)
+      120.401
+    stale-id
+  =.  heaviest-chain.d.mixed
+    %+  ~(put z-by heaviest-chain.d.mixed)
+      120.402
+    tip-id
+  =.  highest-block-height.d.mixed  `120.402
+  =/  legacy=kernel-state-10
+    :*  %10
+        c=c.mixed
+        a=a.mixed
+        m=m.mixed
+        d=d.mixed
+        constants=constants.mixed
+    ==
+  =/  loaded=kernel-state  (load:inner:dumb legacy)
+  %+  expect-eq
+    !>([%11 %.y 0 %.y])
+  !>  :*  -.loaded
+          ?=(~ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(genesis-seal.c.mixed genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-load-preserves-proofless-check-disabled-fakenet-tip
+  =/  valid-state=kernel-state  (zoe-fakenet-tip-state ~)
+  =/  loaded=kernel-state  (load:inner:dumb valid-state)
+  %+  expect-eq
+    !>([%.y 1 %.y])
+  !>  :*  ?=(^ heaviest-block.c.loaded)
+          ~(wyt h-by blocks.c.loaded)
+          =(genesis-seal.c.valid-state genesis-seal.c.loaded)
+      ==
+::
+++  test-zoe-realnet-genesis-checkpoint-is-enforced
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  canonical=hash:t  (~(got z-by checkpointed-digests:con) 0)
+  =/  realnet-seal=genesis-seal:t  `[0 realnet-genesis-msg]
+  =/  fakenet-seal=genesis-seal:t  `[0 *hash:t]
+  %+  expect-eq
+    !>([%.y %.n %.y])
+  !>  :*  (checkpoint-digest-valid:con [0 canonical realnet-seal])
+          (checkpoint-digest-valid:con [0 *hash:t realnet-seal])
+          (checkpoint-digest-valid:con [0 *hash:t fakenet-seal])
+      ==
+::
+++  test-zoe-pending-page-rechecks-version-after-upgrade
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  =/  base=proof:t  *proof:t
+  =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
+  =/  pag=page:v1:t
+    %*  .  *page:v1:t
+      height  120.400
+      pow     (some stale-v2)
+    ==
+  %+  expect-eq
+    !>([%.n %proof-version-invalid])
+  !>((validate-page-with-txs:con pag))
+::
+++  zoe-genesis-chain
+  |=  strict=?
+  ^-  _nockchain:h
+  =/  selected-constants=blockchain-constants:tx-engine
+    ?:(strict constants(check-pow-flag %.y) constants)
+  =/  chain=_nockchain:h  nockchain:h
+  =^  effects=(list effect:h)  chain
+    (pok:h [%command %set-constants selected-constants] chain)
+  =^  effects  chain  (pok:h [%command %btc-data ~] chain)
+  =^  effects  chain
+    (pok:h [%command %set-genesis-seal 0 default-genesis-seal:h] chain)
+  =^  effects  chain  (pok:h [%command %born ~] chain)
+  chain
+::
+++  zoe-wrong-version-genesis-page
+  ^-  page:t
+  =/  base-page=page:t  default-genesis-page:h
+  =/  base-proof=proof:t  *proof:t
+  =/  wrong-proof=proof:t
+    [%1 objects.base-proof hashes.base-proof read-index.base-proof]
+  =/  pag=page:t  base-page
+  =.  pag
+    ?^  -.pag
+      pag(pow (some wrong-proof))
+    pag(pow (some wrong-proof))
+  =/  digest=block-id:t  (compute-digest:page:t pag)
+  ?^  -.pag
+    pag(digest digest)
+  pag(digest digest)
+::
+++  test-zoe-genesis-intake-rejects-wrong-proof-version
+  =/  chain=_nockchain:h  (zoe-genesis-chain %.n)
+  %+  expect-fail
+    |.((pok:h [%fact %0 %heard-block zoe-wrong-version-genesis-page] chain))
+  ~
+::
+++  test-zoe-genesis-intake-rejects-wrong-page-variant
+  =/  v1-page=page:v1:t  *page:v1:t
+  =.  v1-page  v1-page(digest (compute-digest:page:t v1-page))
+  =/  chain=_nockchain:h  (zoe-genesis-chain %.n)
+  %+  expect-fail
+    |.((pok:h [%fact %0 %heard-block v1-page] chain))
+  ~
+::
+++  test-zoe-genesis-intake-accepts-proofless-fakenet-test-page
+  =/  base-page=page:t  default-genesis-page:h
+  =/  chain=_nockchain:h  (zoe-genesis-chain %.n)
+  =^  effects=(list effect:h)  chain
+    (pok:h [%fact %0 %heard-block base-page] chain)
+  %+  expect-eq
+    !>(`~(digest get:page:t base-page))
+  !>(heaviest-block.c.internal.outer.chain)
+::
+++  test-zoe-genesis-intake-rejects-missing-production-proof
+  =/  base-page=page:t  default-genesis-page:h
+  =/  chain=_nockchain:h  (zoe-genesis-chain %.y)
+  %+  expect-fail
+    |.((pok:h [%fact %0 %heard-block base-page] chain))
+  ~
+::
+++  test-zoe-proof-version-3-retag-cannot-preserve-block-id
   =/  v2=proof:t  *proof:t
   =/  v3=proof:t  [%3 objects.v2 hashes.v2 read-index.v2]
   =/  template=page:v1:t  *page:v1:t
@@ -33,11 +426,12 @@
   =/  valid-v3=page:v1:t
     page-v3(digest (compute-digest:page:t page-v3))
   =/  retagged=page:v1:t  valid-v3(pow (some v2))
+  =/  retagged-digest=block-id:t  (compute-digest:page:t retagged)
   %+  expect-eq
     !>([%.n %.y %.n])
   !>  :*  =((compute-digest:page:t page-v2) (compute-digest:page:t page-v3))
-          (check-digest:page:t valid-v3)
-          (check-digest:page:t retagged)
+          =((compute-digest:page:t valid-v3) ~(digest get:page:t valid-v3))
+          =(retagged-digest ~(digest get:page:t retagged))
       ==
 ::
 ++  consensus-h-apt
@@ -131,7 +525,7 @@
   =/  original-block=local-page:t  (~(got h-by blocks.con8) bid)
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%10 -.k9)
+  !>  :*  =(%11 -.k9)
           (consensus-h-apt c9)
           =((hz-molt blocks.c9) (hz-molt blocks.con8))
           =((hz-milt balance.c9) (hz-milt balance.con8))
@@ -180,7 +574,7 @@
   =/  up=consensus-state  c.k9
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%10 -.k9)
+  !>  :*  =(%11 -.k9)
           =(~[needed-id] missing)
           =(~[pending-id] ready)
           =(~ extra-ready)
@@ -259,7 +653,7 @@
     ==
   %+  expect-eq
     !>([%.y %.y %.y])
-  !>  [=(%10 -.k9) upgraded-ok after-one-reject-ok]
+  !>  [=(%11 -.k9) upgraded-ok after-one-reject-ok]
 ::
 ++  test-consensus-add-raw-tx-h-index-flow
   =/  con=consensus-state  initial-consensus-state:h

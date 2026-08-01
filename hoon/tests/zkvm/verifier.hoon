@@ -723,6 +723,47 @@
       (canonical-pow-proof:dk [canonical-pow-polynomial-height:dk padded-proof])
   ==
 :::
+++  test-proof-array-shape-validation
+  =/  poly
+    =/  m  (grab-proof-entry:bp pf %poly 1)
+    ?>  ?=(%poly -.m)  m
+  =/  malformed=bpoly  p.poly(len +(len.p.poly))
+  =/  malformed-proof=proof:sp
+    %-  replace-proof-entry:bp
+    :*  pf
+        %poly
+        [%poly malformed]
+        1
+    ==
+  ::  Keep the logical length and payload words fixed but change the ignored
+  ::  terminal marker from 1 to 2.  This used to pass Hoon while native decoding
+  ::  rejected the same proof noun.
+  =/  bad-marker=bpoly
+    p.poly(dat (add dat.p.poly (lsh [6 len.p.poly] 1)))
+  =/  bad-marker-proof=proof:sp
+    %-  replace-proof-entry:bp
+    :*  pf
+        %poly
+        [%poly bad-marker]
+        1
+    ==
+  =/  m-path
+    =/  m  (grab-proof-entry:bp pf %m-path 1)
+    ?>  ?=(%m-path -.m)  m
+  =/  bad-path-proof=proof:sp
+    %-  replace-proof-entry:bp
+    :*  pf
+        %m-path
+        m-path(path.p (unbase-noun-digests:bp path.p.m-path))
+        1
+    ==
+  %+  expect-eq  !>([%.y %.n %.n %.n])
+  !>  :*  (proof-arrays-valid pf)
+          (proof-arrays-valid malformed-proof)
+          (proof-arrays-valid bad-marker-proof)
+          (proof-arrays-valid bad-path-proof)
+      ==
+:::
 ++  test-bad-proof-poly-wrong
   =/  poly
     =/  m  (grab-proof-entry:bp pf %poly 1)

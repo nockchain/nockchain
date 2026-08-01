@@ -19,6 +19,7 @@
       kernel-state-8
       kernel-state-9
       kernel-state-10
+      kernel-state-11
   ==
 ::
 +$  kernel-state-0
@@ -178,7 +179,20 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-10
+::  kernel-state-11 marks completion of the one-time Zoe stored-proof audit.
+::  Its payload is unchanged; the version tag prevents recurring full-chain
+::  proof decoding on every restart.
++$  kernel-state-11
+  $:  %11
+      c=consensus-state-10
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-9
+      constants=blockchain-constants:v1:dt
+  ==
+::
++$  kernel-state  kernel-state-11
 ::
 +$  consensus-state-0
   $+  consensus-state-0

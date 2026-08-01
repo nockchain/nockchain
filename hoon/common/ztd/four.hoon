@@ -51,6 +51,45 @@
       ==
   ==
 ::
+::  Array payloads carry a logical length and a backing atom.  Fiat-Shamir
+::  hashes both, so accepting a mismatch gives the prover transcript entropy
+::  that later arithmetic may ignore.  Merkle siblings must also be based
+::  before a hash jet sees them; relying on a check inside the Hoon hash arm can
+::  diverge when the arm is replaced by a release jet.  Version 3 validates the
+::  complete representation before any proof object is absorbed.
+++  proof-digest-based
+  |=  [a=belt b=belt c=belt d=belt e=belt]
+  ^-  ?
+  ?&  (based a)
+      (based b)
+      (based c)
+      (based d)
+      (based e)
+  ==
+::
+++  proof-arrays-valid
+  |=  p=proof
+  ^-  ?
+  %+  levy  objects.p
+  |=  pd=proof-data
+  ?+  -.pd  %.y
+    %m-root   (proof-digest-based p.pd)
+    %puzzle   ?&  (proof-digest-based commitment.pd)
+                  (proof-digest-based nonce.pd)
+              ==
+    %codeword  ~(cank fop p.pd)
+    %terms     ~(cank bop p.pd)
+    %m-path    ?&  ~(cank fop leaf.p.pd)
+                   (levy path.p.pd proof-digest-based)
+               ==
+    %m-pathbf  ?&  ~(cank bop leaf.p.pd)
+                   (levy path.p.pd proof-digest-based)
+               ==
+    %comp-m    (proof-digest-based p.pd)
+    %evals     ~(cank fop p.pd)
+    %poly      ~(cank bop p.pd)
+  ==
+::
 +$  tip5-hash-atom  @ux
 ::
 ::  number of items in proof used for pow
@@ -99,7 +138,9 @@
   ?.  =(%3 version.p)
     proof-digest
   %-  hash-hashable:tip5
-  :*  leaf+%zkblock-v3
+  ::  Keep the domain atom within one base-field element.  The Tip5 leaf
+  ::  encoder rejects wider atoms rather than reducing them modulo the field.
+  :*  leaf+%zkblk-v3
       leaf+version.p
       hash+proof-digest
       (hashable-noun-digests:tip5 hashes.p)

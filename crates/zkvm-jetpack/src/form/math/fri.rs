@@ -49,6 +49,7 @@ pub fn fri_verify(
     calc: &StarkCalc,
     stream: &mut ProofStream<'_>,
     root: [u64; 5],
+    enforce_v3_shapes: bool,
 ) -> Result<FriVerifyOutput, FriError> {
     let folding_deg = calc.fri.folding_deg;
     let num_rounds = calc.fri.num_rounds();
@@ -108,6 +109,9 @@ pub fn fri_verify(
             ProofData::MPath(path) => path.clone(),
             _ => return Err(FriError::InvalidProof("expected FRI m-path")),
         };
+        if enforce_v3_shapes && opening.leaf.0.len() != folding_deg {
+            return Err(FriError::InvalidProof("FRI opening length mismatch"));
+        }
         ensure_fpoly_based(&opening.leaf, "FRI opening contains non-based elements")?;
         deep_cosets.insert(coset_idx as u64, opening.leaf.clone());
         merks.push(MerkData {
@@ -140,6 +144,9 @@ pub fn fri_verify(
                     ProofData::MPath(path) => path.clone(),
                     _ => return Err(FriError::InvalidProof("expected FRI m-path")),
                 };
+                if enforce_v3_shapes && opening.leaf.0.len() != folding_deg {
+                    return Err(FriError::InvalidProof("FRI opening length mismatch"));
+                }
                 ensure_fpoly_based(&opening.leaf, "FRI opening contains non-based elements")?;
                 next_indices.push(new_idx);
                 next_cosets.insert(coset_idx as u64, opening.leaf.clone());

@@ -41,8 +41,8 @@
     ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
     =/  ks=kernel-state:dk
-      ~>  %slog.[0 'load: [1/5] state-n-to-10: migrating state to version 10']
-      ~>  %bout  (state-n-to-10 arg)
+      ~>  %slog.[0 'load: [1/5] state-n-to-11: migrating state to version 11']
+      ~>  %bout  (state-n-to-11 arg)
     =.  ks
       ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
       ~>  %bout  (check-checkpoints ks)
@@ -60,10 +60,10 @@
     ~>  %slog.[0 'load: complete']
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-10
+    ++  state-n-to-11
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%10 -.arg)
+      ?.  ?=(%11 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -77,8 +77,30 @@
           %7  $(arg (state-7-to-8 arg))
           %8  $(arg (state-8-to-9 arg))
           %9  $(arg (state-9-to-10 arg))
+          %10  $(arg (state-10-to-11 arg))
         ==
       arg
+    ::
+    ::  Version 11 is a same-shape migration marker for the one-time Zoe
+    ::  stored-proof audit.  Audit every post-boundary page here, including the
+    ::  canonical suffix, so custom check-disabled networks cannot retain a
+    ::  mixed %3/%2/%3 history produced by an intermediate build.  Subsequent
+    ::  %11 loads need only inspect noncanonical entries before orphan cleanup.
+    ++  state-10-to-11
+      |=  arg=kernel-state-10:dk
+      ^-  kernel-state-11:dk
+      =/  upgraded=kernel-state-11:dk
+        :*  %11
+            c=c.arg
+            a=a.arg
+            m=m.arg
+            d=d.arg
+            constants=constants.arg
+        ==
+      ?:  (stored-postactivation-pages-valid upgraded %.n)
+        upgraded
+      ~>  %slog.[1 'load: Invalid stored Zoe page during state-11 migration, resetting state']
+      (reset-consensus-state upgraded)
     ::
     ::  upgrade kernel state 9 to kernel state 10 with typed dynamic anchor timestamps
     ++  state-9-to-10
@@ -404,28 +426,155 @@
         arg
       arg(constants *blockchain-constants:t)
     ::
+    ++  reset-consensus-state
+      |=  arg=kernel-state:dk
+      ^-  kernel-state:dk
+      =|  nk=kernel-state:dk
+      ::  Preserve mining options and boot metadata, otherwise drop all
+      ::  consensus state so genesis intake can resume safely.
+      =.  mining.m.nk  mining.m.arg
+      =.  shares.m.nk  shares.m.arg
+      =.  v0-shares.m.nk  v0-shares.m.arg
+      =.  init.a.nk  init.a.arg
+      =.  btc-data.c.nk  btc-data.c.arg
+      =.  genesis-seal.c.nk  genesis-seal.c.arg
+      nk
+    ::
+    ++  stored-postactivation-pages-valid
+      |=  [arg=kernel-state:dk only-noncanonical=?]
+      ^-  ?
+      =/  mainnet=(unit ?)
+        (~(is-mainnet dumb-derived d.arg constants.arg) c.arg)
+      ::  Ambiguous nonempty states are reset by +check-checkpoints.  Avoid
+      ::  cueing arbitrary pages before a network identity is established.
+      ?~  mainnet  %.y
+      =/  arg-t  ~(. c-transact constants.arg)
+      =/  require-stored-proof=?  ?|(u.mainnet check-pow-flag:arg-t)
+      %-  ~(rep h-by blocks.c.arg)
+      |=  [[block-id=block-id:t local=local-page:t] valid=?]
+      ?.  valid  %.n
+      ::  Height lives outside the jammed proof in local-page.  Read it first
+      ::  so historical proofs never need to be decoded by this audit.
+      =/  height=page-number:t  ~(height get:local-page:t local)
+      ?:  (lth height proof-version-3-start:con)
+        %.y
+      =/  canonical-id  (~(get z-by heaviest-chain.d.arg) height)
+      =/  canonical=?
+        ?&  ?=(^ canonical-id)
+            =(u.canonical-id block-id)
+        ==
+      ?:  ?&(only-noncanonical canonical)
+        %.y
+      =/  pag=page:t  (to-page:local-page:t local)
+      %-  persisted-page-valid:con
+      [require-stored-proof height block-id pag]
+    ::
     ++  check-checkpoints
       |=  arg=kernel-state:dk
+      =/  reset-state=kernel-state:dk  (reset-consensus-state arg)
+      =/  chain-empty=?
+        ?&  =(~ heaviest-block.c.arg)
+            =(0 ~(wyt h-by blocks.c.arg))
+            =(0 ~(wyt h-by pending-blocks.c.arg))
+            =(0 ~(wyt z-by heaviest-chain.d.arg))
+        ==
       =/  mainnet=(unit ?)  (~(is-mainnet dumb-derived d.arg constants.arg) c.arg)
       ~&  check-checkpoints-mainnet+mainnet
       ?~  mainnet
-        arg
-      ?.  u.mainnet
-        arg
-      =/  checkpoints  ~(tap z-by checkpointed-digests:con)
-      |-  ^-  kernel-state:dk
-      ?~  checkpoints  arg
-      =/  block-at-checkpoint  (~(get z-by heaviest-chain.d.arg) -.i.checkpoints)
-      ?~  block-at-checkpoint  $(checkpoints t.checkpoints)
-      ?.  =(u.block-at-checkpoint +.i.checkpoints)
-        ~>  %slog.[1 'load: Mismatched checkpoint when loading, resetting state']
-        =|  nk=kernel-state:dk
-        :: preserve mining options and init status, otherwise drop all consensus state
-        =.  mining.m.nk  mining.m.arg
-        =.  shares.m.nk  shares.m.arg
-        =.  v0-shares.m.nk  v0-shares.m.arg
-        =.  init.a.k  init.a.arg
-        nk
+        ?:  chain-empty
+          arg
+        ~>  %slog.[1 'load: Ambiguous nonempty chain has no network identity, resetting state']
+        reset-state
+      =/  arg-t  ~(. c-transact constants.arg)
+      =/  require-stored-proof=?  ?|(u.mainnet check-pow-flag:arg-t)
+      =/  genesis-id  (~(get z-by heaviest-chain.d.arg) 0)
+      ?~  genesis-id
+        ::  A born node may restart while it is still waiting for genesis.
+        ::  Preserve that state only when every chain-bearing store is empty;
+        ::  a partially stored genesis would otherwise make all retries look
+        ::  like duplicates and wedge the node permanently.
+        ?:  chain-empty
+          arg
+        ~>  %slog.[1 'load: Chain is missing stored genesis, resetting state']
+        reset-state
+      =/  tip-id  heaviest-block.c.arg
+      ?~  tip-id
+        ~>  %slog.[1 'load: Indexed chain has no heaviest block, resetting state']
+        reset-state
+      =/  tip-local  (~(get h-by blocks.c.arg) u.tip-id)
+      ?~  tip-local
+        ~>  %slog.[1 'load: Heaviest block page is missing, resetting state']
+        reset-state
+      =/  tip-page=page:t  (to-page:local-page:t u.tip-local)
+      =/  tip-height=page-number:t  ~(height get:page:t tip-page)
+      =/  indexed-tip  (~(get z-by heaviest-chain.d.arg) tip-height)
+      ?.  ?&  ?=(^ indexed-tip)
+              =(u.indexed-tip u.tip-id)
+              %-  persisted-page-valid:con
+              [require-stored-proof tip-height u.tip-id tip-page]
+          ==
+        ~>  %slog.[1 'load: Invalid stored heaviest block proof, resetting state']
+        reset-state
+      ::  Every pinned checkpoint at or below the tip must have both its
+      ::  expected ID and a canonical stored proof envelope.  ID-only checks
+      ::  cannot detect legacy proof-version or stream-bookkeeping retags.
+      =/  checkpoints-valid=?
+        ::  Custom networks have no realnet checkpoint IDs, but they still run
+        ::  the generic tip and Zoe activation-page audits below.
+        ?.  u.mainnet
+          %.y
+        =/  checkpoints  ~(tap z-by checkpointed-digests:con)
+        |-
+        ?~  checkpoints  %.y
+        =/  checkpoint-height=page-number:t  -.i.checkpoints
+        ?:  (gth checkpoint-height tip-height)
+          $(checkpoints t.checkpoints)
+        =/  expected-id=block-id:t  +.i.checkpoints
+        =/  checkpoint-id
+          (~(get z-by heaviest-chain.d.arg) checkpoint-height)
+        ?~  checkpoint-id  %.n
+        =/  checkpoint-local  (~(get h-by blocks.c.arg) u.checkpoint-id)
+        ?~  checkpoint-local  %.n
+        ?.  ?&  =(u.checkpoint-id expected-id)
+                %-  checkpoint-page-valid:con
+                [checkpoint-height expected-id (to-page:local-page:t u.checkpoint-local)]
+            ==
+          %.n
+        $(checkpoints t.checkpoints)
+      ?.  checkpoints-valid
+        ~>  %slog.[1 'load: Invalid or missing checkpoint page, resetting state']
+        reset-state
+      ::  A node upgraded from pre-Zoe software may already have accepted %2
+      ::  pages at the %3 boundary.  Audit the boundary page whenever the tip
+      ::  has crossed it; auditing the tip above also catches the ordinary
+      ::  old-software chain, whose whole post-boundary suffix is %2.
+      =/  activation-valid=?
+        ?:  (lth tip-height proof-version-3-start:con)
+          %.y
+        =/  activation-id
+          (~(get z-by heaviest-chain.d.arg) proof-version-3-start:con)
+        ?~  activation-id  %.n
+        =/  activation-local  (~(get h-by blocks.c.arg) u.activation-id)
+        ?~  activation-local  %.n
+        %-  persisted-page-valid:con
+        :*  require-stored-proof
+            proof-version-3-start:con
+            u.activation-id
+            (to-page:local-page:t u.activation-local)
+        ==
+      ?.  activation-valid
+        ~>  %slog.[1 'load: Invalid Zoe activation page, resetting state']
+        reset-state
+      ::  The canonical activation page is not the only persisted page that
+      ::  can become consensus-relevant after restart.  A pre-Zoe node may
+      ::  also have accepted a %2 side fork at or above the boundary; if left
+      ::  in .blocks, a later %3 child can extend that trusted parent and
+      ::  reorg it onto the canonical chain without rechecking the parent's
+      ::  proof version.  Audit every stored post-activation page so no stale
+      ::  fork can cross the upgrade boundary through the duplicate fast path.
+      ?.  (stored-postactivation-pages-valid [arg %.y])
+        ~>  %slog.[1 'load: Invalid stored post-Zoe side-fork page, resetting state']
+        reset-state
       arg
     --
   ::
@@ -1051,14 +1200,17 @@
      |=  [pag=page:t btc-hash=(unit btc-hash:t) =genesis-seal:t]
      ^-  ?
      =/  check-digest  (check-digest:page:t pag)
+     =/  pow  ~(pow get:page:t pag)
      =/  check-pow-hash=?
       ?.  check-pow-flag:t
          ::  this case only happens during testing
          ::~&  "skipping pow hash check for {(trip (to-b58:hash:t ~(digest get:page:t pag)))}"
          %.y
+       ?~  pow
+         %.n
        %-  check-target:mine
        :_  ~(target get:page:t pag)
-       (proof-to-pow:zeke (need ~(pow get:page:t pag)))
+       (proof-to-pow:zeke u.pow)
      =/  check-pow-valid=?  (check-pow pag)
      ::
      ::  check if timestamp is in base field, this will anchor subsequent timestamp checks
@@ -1070,8 +1222,11 @@
      =/  check-target=?  =(~(target get:page:t pag) genesis-target:t)
      =/  check-work=?  =(~(accumulated-work get:page:t pag) (compute-work:page:t genesis-target:t))
      =/  cb=coinbase-split:t  ~(coinbase get:page:t pag)
-     ?>  ?=(%0 -.cb)
-     =/  check-coinbase=?  =(+.cb *(z-map sig:t @))
+     =/  check-coinbase=?
+       ?-  -.cb
+         %0  =(+.cb *(z-map sig:t @))
+         %1  %.n
+       ==
      =/  check-height=?  =(~(height get:page:t pag) *page-number:t)
      =/  check-btc-hash=?
        ?~  btc-hash
@@ -1084,6 +1239,9 @@
        ?~  genesis-seal
          ~>  %slog.[1 'check-genesis: Genesis seal not set, cannot check genesis block']  !!
        =((hash:page-msg:t ~(msg get:page:t pag)) msg-hash.u.genesis-seal)
+     =/  check-checkpoint=?
+       %-  checkpoint-digest-valid:con
+       [~(height get:page:t pag) ~(digest get:page:t pag) genesis-seal]
      ~&  :*  check-digest+check-digest
              check-pow-hash+check-pow-hash
              check-pow-valid+check-pow-valid
@@ -1096,6 +1254,7 @@
              check-height+check-height
              check-msg+check-msg
              check-btc-hash+check-btc-hash
+             check-checkpoint+check-checkpoint
          ==
      ?&  check-digest
          check-pow-hash
@@ -1109,18 +1268,22 @@
          check-height
          check-msg
          check-btc-hash
+         check-checkpoint
      ==
     ++  check-pow
       ~/  %check-pow
       |=  pag=page:t
       ^-  ?
-      ?.  check-pow-flag:t
-        ~>  %slog.[1 'check-pow: check-pow-flag is off, skipping pow check']
-        ::  this case only happens during testing
-        %.y
       =/  pow  ~(pow get:page:t pag)
       ?~  pow
+        ::  Missing proofs are permitted only by explicit test configuration.
+        ?:(check-pow-flag:t %.n %.y)
+      ?.  (proof-version-valid:con [~(height get:page:t pag) u.pow])
         %.n
+      ?.  check-pow-flag:t
+        ~>  %slog.[1 'check-pow: check-pow-flag is off, skipping expensive pow check']
+        ::  Version selection remains enforced in this test-only case.
+        %.y
       ::
       ::  validate that powork puzzle in the proof is correct.
       ?&  (check-pow-puzzle u.pow pag)

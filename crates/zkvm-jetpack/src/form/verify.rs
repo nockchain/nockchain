@@ -486,7 +486,33 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         heights.len(),
         true,
     )?;
+    let degrees = preprocess_degrees(&version, &heights);
     let extra_comp_bpoly = read_poly(&mut stream)?;
+    if version == ProofVersion::V3 {
+        let expected_len = degrees
+            .extra
+            .fri_degree_bound
+            .checked_add(1)
+            .and_then(|len| usize::try_from(len).ok())
+            .ok_or(VerifyError::Invalid(
+                "extra composition polynomial length overflow",
+            ))?;
+        if extra_comp_bpoly.0.is_empty()
+            || (extra_comp_bpoly.0.len() > 1 && extra_comp_bpoly.0.last() == Some(&Belt(0)))
+        {
+            return Err(VerifyError::Invalid(
+                "extra composition polynomial is not canonical",
+            ));
+        }
+        if extra_comp_bpoly.0.len() > expected_len {
+            return Err(VerifyError::Invalid(
+                "extra composition polynomial exceeds degree bound",
+            ));
+        }
+        ensure_belts_based(
+            &extra_comp_bpoly.0, "extra composition polynomial contains non-based coefficients",
+        )?;
+    }
 
     let mut rng = stream.transcript_rng()?;
     let extra_comp_eval_point = felt(&mut rng);
@@ -507,7 +533,6 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         .map(|poly| PolySlice(poly.as_slice()))
         .collect();
     let augmented_slice: BPolySlice<'_> = PolySlice(augmented_chals.as_slice());
-    let degrees = preprocess_degrees(&version, &heights);
 
     let extra_composition_eval = eval_composition(
         &PolySlice(extra_trace_evaluations.as_slice()),
@@ -536,6 +561,13 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let comp_weight_map =
         build_weight_map(&comp_weights, &preprocess.count_map, heights.len(), false)?;
     let (comp_root, num_comp_pieces) = read_comp_root(&mut stream)?;
+    if version == ProofVersion::V3
+        && num_comp_pieces != expected_composition_piece_count(preprocess)
+    {
+        return Err(VerifyError::Invalid(
+            "composition piece count does not match constraints",
+        ));
+    }
 
     let mut rng = stream.transcript_rng()?;
     let deep_challenge = sample_deep_challenge(&mut rng, &calc)?;
@@ -620,7 +652,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let deep_weights = PolyVec(felts(&mut rng, deep_weights_len as u32));
 
     let deep_root = expect_mroot(&mut stream, "deep composition commitment")?;
-    let fri_output = fri_verify(&calc, &mut stream, deep_root)?;
+    let fri_output = fri_verify(&calc, &mut stream, deep_root, version == ProofVersion::V3)?;
 
     let mut merks = fri_output.merks;
     let mut elems = Vec::with_capacity(fri_output.indices.len());
@@ -646,6 +678,14 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             leaf: comp_leaf,
             path: comp_path,
         } = read_mpathbf(&mut stream)?;
+
+        if version == ProofVersion::V3
+            && comp_leaf.0.len()
+                != usize::try_from(num_comp_pieces)
+                    .map_err(|_| VerifyError::Invalid("composition opening length overflow"))?
+        {
+            return Err(VerifyError::Invalid("composition opening length mismatch"));
+        }
 
         merks.push(MerkData {
             leaf: hash_bpoly_leaf(&base_leaf),
@@ -700,7 +740,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         });
     }
 
-    if !verify_merk_proofs(&merks, verifier_eny) {
+    if !verify_merk_proofs(&merks, verifier_eny, version == ProofVersion::V3) {
         return Err(VerifyError::Invalid("failed to verify merkle proofs"));
     }
 
@@ -1278,6 +1318,24 @@ fn total_constraints(
     Ok(total)
 }
 
+fn expected_composition_piece_count(preprocess: &PreprocessData) -> u64 {
+    preprocess
+        .constraints
+        .0
+        .values()
+        .flat_map(|table| {
+            table
+                .boundary
+                .iter()
+                .chain(&table.row)
+                .chain(&table.transition)
+                .chain(&table.terminal)
+        })
+        .flat_map(|constraint| constraint.degs.iter().copied())
+        .max()
+        .unwrap_or(0)
+}
+
 fn build_weight_map<'a>(
     weights: &'a [Belt],
     count_map: &CountMap,
@@ -1411,7 +1469,16 @@ fn assemble_trace_elems(
     Ok(trace_elems)
 }
 
-fn verify_merk_proofs(merks: &[MerkData], eny: u64) -> bool {
+fn merk_encoding_based(merk: &MerkData) -> bool {
+    merk.leaf
+        .iter()
+        .chain(merk.root.iter())
+        .chain(merk.path.iter().flatten())
+        .copied()
+        .all(based_check)
+}
+
+fn verify_merk_proofs(merks: &[MerkData], eny: u64, enforce_based: bool) -> bool {
     let mut sponge = [0u64; STATE_SIZE];
     let seed = [eny % PRIME];
     absorb(&mut sponge, &seed);
@@ -1425,6 +1492,9 @@ fn verify_merk_proofs(merks: &[MerkData], eny: u64) -> bool {
 
     tagged.sort_by(|a, b| a.0.cmp(&b.0));
     for (_, merk) in tagged {
+        if enforce_based && !merk_encoding_based(merk) {
+            return false;
+        }
         if !verify_merk_proof(merk.leaf, merk.axis, merk.root, &merk.path) {
             return false;
         }
@@ -1438,7 +1508,8 @@ mod tests {
     use nockvm::mem::{NockStack, NOCK_STACK_SIZE};
     use noun_serde::NounDecode;
 
-    use super::{verify, VerifyArgs};
+    use super::{verify, verify_merk_proofs, VerifyArgs};
+    use crate::form::merk::MerkData;
     use crate::form::proof::{Proof, ProofData};
 
     fn decode_proof(bytes: &[u8]) -> Proof {
@@ -1447,6 +1518,20 @@ mod tests {
             .expect("proof fixture should cue");
         let space = stack.noun_space();
         Proof::from_noun(&noun, &space).expect("proof fixture should decode")
+    }
+
+    #[test]
+    fn v3_merkle_encoding_rejects_non_based_limbs_without_tightening_legacy() {
+        let mut digest = [0; 5];
+        digest[0] = nockchain_math::belt::PRIME;
+        let merk = MerkData {
+            leaf: digest,
+            axis: 1,
+            root: digest,
+            path: Vec::new(),
+        };
+        assert!(verify_merk_proofs(std::slice::from_ref(&merk), 0, false));
+        assert!(!verify_merk_proofs(&[merk], 0, true));
     }
 
     fn verify_fixture(bytes: &[u8]) {
@@ -1485,6 +1570,127 @@ mod tests {
             "../../../roswell/tests/fixtures/proof-v2-len1.jam"
         ));
         proof.version = crate::form::proof::ProofVersion::V3;
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_v3_extra_composition_trailing_zero() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        match &mut proof.objects[5] {
+            ProofData::Poly(poly) => poly.0.push(nockchain_math::belt::Belt(0)),
+            _ => panic!("v3 fixture should carry object 5 as a polynomial"),
+        }
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(matches!(
+            result,
+            Err(super::VerifyError::Invalid(
+                "extra composition polynomial is not canonical"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_v3_extra_composition_above_degree_bound() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        match &mut proof.objects[5] {
+            ProofData::Poly(poly) => poly.0.push(nockchain_math::belt::Belt(1)),
+            _ => panic!("v3 fixture should carry object 5 as a polynomial"),
+        }
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(matches!(
+            result,
+            Err(super::VerifyError::Invalid(
+                "extra composition polynomial exceeds degree bound"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_v3_wrong_composition_piece_count() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        let num = proof
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                ProofData::CompM { num, .. } => Some(num),
+                _ => None,
+            })
+            .expect("v3 fixture should carry a composition commitment");
+        *num += 1;
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(matches!(
+            result,
+            Err(super::VerifyError::Invalid(
+                "composition piece count does not match constraints"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_v3_oversized_composition_opening() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        let opening = proof
+            .objects
+            .iter_mut()
+            .filter_map(|object| match object {
+                ProofData::MPathBf(path) => Some(path),
+                _ => None,
+            })
+            .nth(3)
+            .expect("v3 fixture should carry a composition opening");
+        opening.leaf.0.push(nockchain_math::belt::Belt(0));
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(matches!(
+            result,
+            Err(super::VerifyError::Invalid(
+                "composition opening length mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_v3_oversized_fri_opening() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v3-len1.jam"
+        ));
+        let opening = proof
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                ProofData::MPath(path) => Some(path),
+                _ => None,
+            })
+            .expect("v3 fixture should carry a FRI opening");
+        opening.leaf.0.push(nockchain_math::felt::Felt::zero());
         let result = verify(VerifyArgs {
             proof,
             table_override: None,

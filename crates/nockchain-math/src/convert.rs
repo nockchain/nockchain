@@ -12,6 +12,42 @@ use crate::mary::*;
 use crate::noun_ext::{AtomMathExt, AtomMathExtHandle, NounMathExt, NounMathExtHandle};
 use crate::poly::*;
 
+#[inline(always)]
+fn poly_expected_words<T: Element>(len: u32) -> Option<usize> {
+    (len as usize).checked_mul(T::len())
+}
+
+#[inline(always)]
+fn poly_atom_has_legacy_shape<T: Element>(tail: AtomHandle<'_>, len: u32) -> bool {
+    let expected_words = poly_expected_words::<T>(len);
+    let actual_blocks = tail.bit_size().checked_add(63).map(|bits| bits / 64);
+    tail.is_indirect()
+        && matches!((expected_words, actual_blocks), (Some(expected), Some(actual)) if actual >= expected)
+}
+
+#[inline(always)]
+fn poly_atom_has_exact_shape<T: Element>(tail: AtomHandle<'_>, len: u32) -> bool {
+    let expected_bits = poly_expected_words::<T>(len)
+        .and_then(|words| words.checked_mul(u64::BITS as usize))
+        .and_then(|bits| bits.checked_add(1));
+    tail.is_indirect() && expected_bits == Some(tail.bit_size())
+}
+
+/// Check the canonical v3 array representation without changing the historical
+/// decoder's acceptance of noncanonical terminal markers.
+pub fn poly_noun_has_exact_shape<T: Element>(noun: &Noun, space: &NounSpace) -> bool {
+    let Ok(cell) = noun.in_space(space).as_cell() else {
+        return false;
+    };
+    let (Ok(head), Ok(tail)) = (cell.head().as_atom(), cell.tail().as_atom()) else {
+        return false;
+    };
+    let Ok(len) = head.atom().as_u32() else {
+        return false;
+    };
+    poly_atom_has_exact_shape::<T>(tail, len)
+}
+
 impl AtomMathExt for Atom {
     fn as_u32(&self) -> Result<u32> {
         if let Ok(a) = self.as_direct() {
@@ -312,7 +348,7 @@ impl BPolySlice<'_> {
         let tail = c.tail().as_atom();
         if let (Ok(head), Ok(tail)) = (head, tail) {
             let len32 = head.atom().as_u32()?;
-            if tail.is_direct() {
+            if !poly_atom_has_legacy_shape::<Belt>(tail, len32) {
                 return Err(BAIL_FAIL);
             }
             let dat_slice: BPolySlice = unsafe {
@@ -347,7 +383,7 @@ impl FPolySlice<'_> {
         let tail = c.tail().as_atom();
         if let (Ok(head), Ok(tail)) = (head, tail) {
             let len32 = head.atom().as_u32()?;
-            if tail.is_direct() {
+            if !poly_atom_has_legacy_shape::<Felt>(tail, len32) {
                 return Err(BAIL_FAIL);
             }
             let dat_slice: FPolySlice = unsafe {
@@ -382,7 +418,7 @@ impl FPolyVec {
         let tail = c.tail().as_atom();
         if let (Ok(head), Ok(tail)) = (head, tail) {
             let len32 = head.atom().as_u32()?;
-            if tail.is_direct() {
+            if !poly_atom_has_legacy_shape::<Felt>(tail, len32) {
                 return Err(BAIL_FAIL);
             }
             let dat_vec: FPolyVec = unsafe {
@@ -417,7 +453,7 @@ impl BPolyVec {
         let tail = c.tail().as_atom();
         if let (Ok(head), Ok(tail)) = (head, tail) {
             let len32 = head.atom().as_u32()?;
-            if tail.is_direct() {
+            if !poly_atom_has_legacy_shape::<Belt>(tail, len32) {
                 return Err(BAIL_FAIL);
             }
             let dat_vec: BPolyVec = unsafe {
@@ -466,5 +502,78 @@ impl NounEncode for BPolyVec {
             new_handle_mut_slice(allocator, Some(self.0.len()));
         res_poly.copy_from_slice(&self.0);
         finalize_poly(allocator, Some(self.0.len()), res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nockvm::mem::{NockStack, NOCK_STACK_SIZE};
+    use nockvm::noun::T;
+    use noun_serde::{NounDecode, NounEncode};
+
+    use super::*;
+
+    #[test]
+    fn rejects_bpoly_length_larger_than_backing_atom() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let encoded = PolyVec::<Belt>(vec![Belt(7)]).to_noun(&mut stack);
+        let tail = {
+            let space = stack.noun_space();
+            encoded
+                .in_space(&space)
+                .as_cell()
+                .expect("encoded bpoly should be a cell")
+                .tail()
+                .noun()
+        };
+        let malformed = T(&mut stack, &[D(3), tail]);
+        let space = stack.noun_space();
+        assert!(BPolyVec::from_noun(&malformed, &space).is_err());
+    }
+
+    #[test]
+    fn rejects_fpoly_length_larger_than_backing_atom() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let encoded = PolyVec::<Felt>(vec![Felt::one()]).to_noun(&mut stack);
+        let tail = {
+            let space = stack.noun_space();
+            encoded
+                .in_space(&space)
+                .as_cell()
+                .expect("encoded fpoly should be a cell")
+                .tail()
+                .noun()
+        };
+        let malformed = T(&mut stack, &[D(2), tail]);
+        let space = stack.noun_space();
+        assert!(FPolyVec::from_noun(&malformed, &space).is_err());
+    }
+
+    #[test]
+    fn legacy_decoder_accepts_noncanonical_terminal_marker_safely() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let words = [7_u64, 2_u64];
+        let tail =
+            unsafe { IndirectAtom::new_raw(&mut stack, words.len(), words.as_ptr()) }.as_noun();
+        let malformed = T(&mut stack, &[D(1), tail]);
+        let space = stack.noun_space();
+        assert_eq!(
+            BPolyVec::from_noun(&malformed, &space).expect("legacy shape remains decodable"),
+            PolyVec(vec![Belt(7)])
+        );
+    }
+
+    #[test]
+    fn legacy_decoder_safely_ignores_overlong_backing_atom() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let words = [7_u64, 1_u64, 5_u64];
+        let tail =
+            unsafe { IndirectAtom::new_raw(&mut stack, words.len(), words.as_ptr()) }.as_noun();
+        let malformed = T(&mut stack, &[D(1), tail]);
+        let space = stack.noun_space();
+        assert_eq!(
+            BPolyVec::from_noun(&malformed, &space).expect("legacy suffix remains decodable"),
+            PolyVec(vec![Belt(7)])
+        );
     }
 }

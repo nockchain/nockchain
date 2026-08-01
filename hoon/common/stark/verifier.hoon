@@ -51,6 +51,9 @@
     |=  [=proof override=(unit (list term)) verifier-eny=@ test-mode=?]
     ^-  verify-result
     =/  original-version=proof-version  version.proof
+    ?>  ?|  !=(%3 original-version)
+            (proof-arrays-valid proof)
+        ==
     ?>  =(~ hashes.proof)
     =^  puzzle  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%puzzle -.c) c^proof))
@@ -221,6 +224,17 @@
     ::
     =^  extra-comp-bpoly  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%poly -.c) p.c^proof))
+    ::  Version 3 admits one canonical encoding of object 5 and caps it at the
+    ::  declared degree bound.  The degree-processing bound is D-1, so at most
+    ::  D coefficients are allowed.  Canonicalization removes trailing-zero
+    ::  transcript entropy without rejecting an honestly lower-degree result.
+    =/  extra-dp  (degree-processing heights constraint-map.pre %.y)
+    ?>  ?|  !=(%3 original-version)
+            ?&  (lte len.extra-comp-bpoly (add 1 fri-deg-bound.extra-dp))
+                ~(cank bop extra-comp-bpoly)
+                =(extra-comp-bpoly (bpcan extra-comp-bpoly))
+            ==
+        ==
     ::
     =.  rng  ~(verifier-fiat-shamir proof-stream proof)
     ::
@@ -303,6 +317,9 @@
     ::  read the composition piece codewords
     =^  comp-root  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%comp-m -.c) [p.c num.c]^proof))
+    ?>  ?|  !=(%3 original-version)
+            =(+.comp-root (get-max-constraint-degree cd.pre))
+        ==
     ::
     ::
     =.  rng  ~(verifier-fiat-shamir proof-stream proof)
@@ -431,6 +448,12 @@
     ::
     ::  Open trace and composition piece polynomials at the top level FRI indices
     ::
+    =/  expected-base-opening-len=@
+      (roll table-base-widths-static:nock-common add)
+    =/  expected-ext-opening-len=@
+      (roll table-ext-widths-static:nock-common add)
+    =/  expected-mega-opening-len=@
+      (roll table-mega-ext-widths-static:nock-common add)
     =^  [elems=elem-list merk-proofs=(list merk-data:merkle)]
         proof
       %+  roll  fri-indices
@@ -450,6 +473,15 @@
       =^  comp-opening  proof
         =^(mp proof ~(pull proof-stream proof) ?>(?=(%m-pathbf -.mp) p.mp^proof))
       ::
+      ::  In v3 every Merkle leaf has its committed semantic width.  A larger
+      ::  leaf or a forged logical length must not become an ignored root nonce.
+      ?>  ?|  !=(%3 original-version)
+              ?&  =(len.leaf.base-trace-opening expected-base-opening-len)
+                  =(len.leaf.ext-opening expected-ext-opening-len)
+                  =(len.leaf.mega-ext-opening expected-mega-opening-len)
+                  =(len.leaf.comp-opening +.comp-root)
+              ==
+          ==
       =.  proofs
         :*
           :*  (hash-hashable:tip5 (hashable-bpoly:tip5 leaf.base-trace-opening))
