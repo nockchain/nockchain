@@ -549,7 +549,7 @@
     |=  pag=form
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
-        [leaf+~ hash+(hash-proof u.pow.pag)]
+        [leaf+~ hash+(hash-proof-for-block u.pow.pag)]
     (hashable-block-commitment pag)
   ::
   ++  block-commitment
@@ -596,7 +596,7 @@
           %-  hash-hashable:tip5
           ^-  hashable:tip5
           ?~  pow.pag  leaf+~
-          [leaf+~ hash+(hash-proof u.pow.pag)]
+          [leaf+~ hash+(hash-proof-for-block u.pow.pag)]
             %parent
           :-  2
           (hash-hashable:tip5 hash+parent.pag)

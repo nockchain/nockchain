@@ -24,6 +24,22 @@
           (height-to-proof-version:con 120.401)
       ==
 ::
+++  test-proof-version-3-retag-cannot-preserve-block-id
+  =/  v2=proof:t  *proof:t
+  =/  v3=proof:t  [%3 objects.v2 hashes.v2 read-index.v2]
+  =/  template=page:v1:t  *page:v1:t
+  =/  page-v2=page:v1:t  template(pow (some v2))
+  =/  page-v3=page:v1:t  template(pow (some v3))
+  =/  valid-v3=page:v1:t
+    page-v3(digest (compute-digest:page:t page-v3))
+  =/  retagged=page:v1:t  valid-v3(pow (some v2))
+  %+  expect-eq
+    !>([%.n %.y %.n])
+  !>  :*  =((compute-digest:page:t page-v2) (compute-digest:page:t page-v3))
+          (check-digest:page:t valid-v3)
+          (check-digest:page:t retagged)
+      ==
+::
 ++  consensus-h-apt
   |=  con=consensus-state
   ^-  ?

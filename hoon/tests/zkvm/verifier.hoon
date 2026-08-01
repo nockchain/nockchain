@@ -31,6 +31,19 @@
   !>  :_  =((proof-to-pow v3) raw-pow)
       =((proof-to-pow v2) raw-pow)
 ::
+++  test-v3-version-is-bound-only-in-block-proof-digest
+  =/  v2=proof  [%2 objects.pf ~ 0]
+  =/  v3=proof  [%3 objects.pf ~ 0]
+  =/  v3-hashes=proof  v3(hashes ~[*noun-digest:tip5])
+  =/  v3-index=proof  v3(read-index 1)
+  %+  expect-eq
+    !>([%.y %.n %.n %.n])
+  !>  :*  =((hash-proof v2) (hash-proof v3))
+          =((hash-proof-for-block v2) (hash-proof-for-block v3))
+          =((hash-proof-for-block v3) (hash-proof-for-block v3-hashes))
+          =((hash-proof-for-block v3) (hash-proof-for-block v3-index))
+      ==
+::
 ++  test-bad-proof-empty-proof
   =/  pf  pf(objects *proof-objects)
   =/  res  (verify:vrf pf ~ 4)

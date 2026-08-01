@@ -180,7 +180,7 @@
     |=  pag=form
     ^-  hashable:tip5
     :-  ?~  pow.pag  leaf+~
-        [leaf+~ hash+(hash-proof:v0 u.pow.pag)]
+        [leaf+~ hash+(hash-proof-for-block:v0 u.pow.pag)]
     (hashable-block-commitment pag)
   ::
   ++  block-commitment

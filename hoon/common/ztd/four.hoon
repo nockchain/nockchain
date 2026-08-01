@@ -87,6 +87,25 @@
   =-  ?>  ?=(noun-digest:tip5 -)  -
   (list-to-tuple:tip5 lis)
 ::
+::  Hash a complete proof for inclusion in a block ID.  Historical proof
+::  versions retain their object-only digest.  Version 3 also binds its tag and
+::  proof-stream bookkeeping, so changing any verifier-visible proof field
+::  cannot preserve the block ID.
+++  hash-proof-for-block
+  ~/  %hash-proof-for-block
+  |=  p=proof
+  ^-  noun-digest:tip5
+  =/  proof-digest=noun-digest:tip5  (hash-proof p)
+  ?.  =(%3 version.p)
+    proof-digest
+  %-  hash-hashable:tip5
+  :*  leaf+%zkblock-v3
+      leaf+version.p
+      hash+proof-digest
+      (hashable-noun-digests:tip5 hashes.p)
+      leaf+read-index.p
+  ==
+::
 ++  absorb-proof-objects
   ~/  %absorb-proof-objects
   |=  [objs=proof-objects hashes=(list noun-digest:tip5)]
