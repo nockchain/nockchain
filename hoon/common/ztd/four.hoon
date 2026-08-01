@@ -23,9 +23,16 @@
 ::
 +$  proof-objects  (list proof-data)
 ::
-+$  proof-version  ?(%2 %1 %0)
+::  Keep %2 first so the bunt/default remains backward-compatible.
++$  proof-version  ?(%2 %3 %1 %0)
 +$  proof
   $%  $:  version=%2
+          objects=proof-objects
+          hashes=(list noun-digest:tip5)
+          read-index=@
+      ==
+    ::
+      $:  version=%3
           objects=proof-objects
           hashes=(list noun-digest:tip5)
           read-index=@
@@ -59,7 +66,11 @@
   ~/  %proof-to-pow
   |=  =proof
   ^-  tip5-hash-atom
-  (digest-to-atom:tip5 (hash-proof (get-pow proof)))
+  =/  pow-digest=noun-digest:tip5  (hash-proof (get-pow proof))
+  =?  pow-digest  =(%3 version.proof)
+    %-  hash-hashable:tip5
+    [leaf+%zkpow-v3 hash+pow-digest]
+  (digest-to-atom:tip5 pow-digest)
 ::
 ++  hashable-proof-objects
   ~/  %hashable-proof-objects

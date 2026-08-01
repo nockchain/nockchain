@@ -65,6 +65,7 @@ pub enum ProofVersion {
     V0,
     V1,
     V2,
+    V3,
 }
 
 #[derive(Debug, Clone, PartialEq, NounEncode, NounDecode)]
@@ -1135,6 +1136,7 @@ impl NounDecode for ProofVersion {
             0 => Ok(ProofVersion::V0),
             1 => Ok(ProofVersion::V1),
             2 => Ok(ProofVersion::V2),
+            3 => Ok(ProofVersion::V3),
             _ => Err(NounDecodeError::InvalidEnumVariant),
         }
     }
@@ -1146,6 +1148,7 @@ impl NounEncode for ProofVersion {
             ProofVersion::V0 => Atom::new(allocator, 0).as_noun(),
             ProofVersion::V1 => Atom::new(allocator, 1).as_noun(),
             ProofVersion::V2 => Atom::new(allocator, 2).as_noun(),
+            ProofVersion::V3 => Atom::new(allocator, 3).as_noun(),
         }
     }
 }
@@ -1249,5 +1252,14 @@ mod tests {
             let reencoded = encoded.jam_self(&mut stack);
             assert_eq!(bytes, reencoded.0.as_ref());
         }
+    }
+
+    #[test]
+    fn proof_version_v3_round_trips() {
+        let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
+        let encoded = ProofVersion::V3.to_noun(&mut stack);
+        let space = stack.noun_space();
+        let decoded = ProofVersion::from_noun(&encoded, &space).expect("v3 should decode");
+        assert_eq!(decoded, ProofVersion::V3);
     }
 }

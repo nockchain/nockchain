@@ -16,7 +16,7 @@ A complete proof is a four-field noun:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `version` | `%0`, `%1`, or `%2` | Proof version. |
+| `version` | `%0`, `%1`, `%2`, or `%3` | Proof version. |
 | `objects` | `(list proof-data)` | Ordered transcript objects. |
 | `hashes` | `(list noun-digest:tip5)` | Incremental transcript-hash cache. |
 | `read-index` | `@` | Number of transcript objects consumed. |
@@ -75,7 +75,19 @@ The prover emits the following fixed prefix:
 | 9 | `%evals` | Trace evaluations at the DEEP point. |
 | 10 | `%evals` | Composition-piece evaluations at the DEEP point. |
 
-The PoW digest commits to objects `0` through `6`, inclusive. In particular, the `%poly` object is within the mined prefix.
+The PoW digest commits to objects `0` through `6`, inclusive. In particular, the `%poly` object is within the mined prefix. Versions `%0` through `%2` use the raw transcript-prefix digest for consensus compatibility. Version `%3` hashes that digest once more as `[leaf+%zkpow-v3 hash+prefix-digest]`, separating mining output from Fiat-Shamir output without adding codeword commitments to the mining loop.
+
+### Version 3 post-commitment binding
+
+Version `%3` retains the same proof-object sequence and the version `%2` AIR. It adds a verifier equation at the existing DEEP challenge `y`, which is sampled only after the mega-extension and composition Merkle roots (objects `7` and `8`) have been absorbed:
+
+```text
+C_extra(trace_evaluations_at_y, y) = P(y)
+```
+
+Object `9` supplies `trace_evaluations_at_y`; the subsequent DEEP/FRI checks bind those claims to the committed trace codewords. This second equation prevents a miner from changing `P`, repairing object `6` at its pre-commitment challenge, and reusing the expensive trace work.
+
+The Merkle roots themselves deliberately remain outside the PoW prefix. Putting a codeword root directly into the mining digest would permit cheap root grinding by changing one received-word leaf and updating one Merkle path; a small number of spot checks is unlikely to query that leaf. Version `%3` instead makes any fixed, inconsistent `P` satisfy a fresh extension-field equation only with the polynomial-identity error probability, while preserving winner-only Merkle construction.
 
 Let `r` be the FRI round count and `s` the FRI spot-check count. The suffix contains:
 

@@ -15,6 +15,15 @@
 +*  t  ~(. tx-engine constants)
     h  ~(. helpers constants)
 ::
+++  test-proof-version-3-activation-boundary
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  %+  expect-eq
+    !>(~[%2 %3 %3])
+  !>  :~  (height-to-proof-version:con 120.399)
+          (height-to-proof-version:con 120.400)
+          (height-to-proof-version:con 120.401)
+      ==
+::
 ++  consensus-h-apt
   |=  con=consensus-state
   ^-  ?

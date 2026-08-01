@@ -142,7 +142,7 @@ static PRE_V2_DEGREES: LazyLock<ProcessedDegreesCache> = LazyLock::new(Processed
 pub fn preprocess_for(version: &ProofVersion) -> &'static PreprocessData {
     match version {
         ProofVersion::V0 | ProofVersion::V1 => &PRE_V0_V1,
-        ProofVersion::V2 => &PRE_V2,
+        ProofVersion::V2 | ProofVersion::V3 => &PRE_V2,
     }
 }
 
@@ -154,14 +154,14 @@ pub struct ProcessedDegreesPair<'a> {
 fn constraints_slice_for(version: &ProofVersion) -> &'static ConstraintsSlice<'static> {
     match version {
         ProofVersion::V0 | ProofVersion::V1 => &PRE_V0_V1_SLICE,
-        ProofVersion::V2 => &PRE_V2_SLICE,
+        ProofVersion::V2 | ProofVersion::V3 => &PRE_V2_SLICE,
     }
 }
 
 fn processed_degrees_cache_for(version: &ProofVersion) -> &'static ProcessedDegreesCache {
     match version {
         ProofVersion::V0 | ProofVersion::V1 => &PRE_V0_V1_DEGREES,
-        ProofVersion::V2 => &PRE_V2_DEGREES,
+        ProofVersion::V2 | ProofVersion::V3 => &PRE_V2_DEGREES,
     }
 }
 

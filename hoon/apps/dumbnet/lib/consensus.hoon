@@ -104,11 +104,15 @@
   ~/  %height-to-proof-version
   |=  height=page-number:t
   ^-  proof-version:sp
+  ?:  (gte height proof-version-3-start)
+    %3
   ?:  (gte height proof-version-2-start)
     %2
   ?:  (gte height proof-version-1-start)
     %1
   %0
+::  What block to start using proof version 3
+++  proof-version-3-start  120.400
 :: What block to start using proof version 2
 ++  proof-version-2-start  12.000
 ::  What block to start using proof version 1

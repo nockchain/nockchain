@@ -16,6 +16,21 @@
   =/  res  (verify:vrf pf ~ 4)
   (expect !>(res))
 ::
+++  test-good-v3-proof
+  =/  v3=proof  [%3 objects.pf ~ 0]
+  =/  res  (verify:vrf v3 ~ 4)
+  (expect !>(res))
+::
+++  test-v3-pow-is-domain-separated-from-fiat-shamir
+  =/  v2=proof  [%2 objects.pf ~ 0]
+  =/  v3=proof  [%3 objects.pf ~ 0]
+  =/  raw-pow=tip5-hash-atom
+    (digest-to-atom:tip5 (hash-proof (get-pow v2)))
+  %+  expect-eq
+    !>([%.y %.n])
+  !>  :_  =((proof-to-pow v3) raw-pow)
+      =((proof-to-pow v2) raw-pow)
+::
 ++  test-bad-proof-empty-proof
   =/  pf  pf(objects *proof-objects)
   =/  res  (verify:vrf pf ~ 4)

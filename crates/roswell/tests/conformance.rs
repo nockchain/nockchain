@@ -285,9 +285,12 @@ fn regenerates_v2_public_proof_fixture() {
 
 #[test]
 fn generates_stream_windows_for_public_proof_versions() {
-    for (version_arg, expected_version) in
-        [(0, ProofVersion::V0), (1, ProofVersion::V1), (2, ProofVersion::V2)]
-    {
+    for (version_arg, expected_version) in [
+        (0, ProofVersion::V0),
+        (1, ProofVersion::V1),
+        (2, ProofVersion::V2),
+        (3, ProofVersion::V3),
+    ] {
         let path = generate_stream_window(version_arg, 1, 0, Some(1), "stream-version");
         let bytes = fs::read(&path).expect("read stream window");
         let _ = fs::remove_file(&path);

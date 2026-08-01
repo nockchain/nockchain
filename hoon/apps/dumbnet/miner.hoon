@@ -21,6 +21,7 @@
     $%  [%0 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
         [%1 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
         [%2 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
+        [%3 header=noun-digest:tip5 nonce=noun-digest:tip5 target=bignum:bignum pow-len=@]
     ==
   --
 |%
@@ -50,6 +51,7 @@
         %0  [%0 header.cause nonce.cause pow-len.cause]
         %1  [%1 header.cause nonce.cause pow-len.cause]
         %2  [%2 header.cause nonce.cause pow-len.cause]
+        %3  [%3 header.cause nonce.cause pow-len.cause]
       ==
     :: XX TODO set up stark config, construct effect
     =/  [prf=proof:sp dig=tip5-hash-atom]

@@ -11,7 +11,7 @@ authors = ["@nockchain-core"]
 reviewers = ["@nockchain-core"]
 
 supersedes = "0.1.13"
-superseded_by = ""
+superseded_by = "0.1.15"
 +++
 
 # Aletheia

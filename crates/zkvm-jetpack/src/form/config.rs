@@ -57,14 +57,14 @@ static CORE_NAMES_V2: [Term; 2] = [Term::from_static(TERM_COMPUTE), Term::from_s
 fn tables_for(version: &ProofVersion) -> &'static [TableMeta] {
     match version {
         ProofVersion::V0 | ProofVersion::V1 => &V0_V1_TABLES,
-        ProofVersion::V2 => &V2_TABLES,
+        ProofVersion::V2 | ProofVersion::V3 => &V2_TABLES,
     }
 }
 
 pub fn core_table_names(version: &ProofVersion) -> &'static [Term] {
     match version {
         ProofVersion::V0 | ProofVersion::V1 => &CORE_NAMES_V0_V1,
-        ProofVersion::V2 => &CORE_NAMES_V2,
+        ProofVersion::V2 | ProofVersion::V3 => &CORE_NAMES_V2,
     }
 }
 

@@ -548,6 +548,30 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         &trace_evaluations.0, "trace evaluations contain non-based elements",
     )?;
 
+    // V3 rechecks the extra composition polynomial at a challenge sampled
+    // only after the trace and composition codewords have been committed.
+    // V0-V2 deliberately keep their historical verification semantics.
+    if version == ProofVersion::V3 {
+        let extra_composition_deep_eval = eval_composition(
+            &PolySlice(trace_evaluations.as_slice()),
+            &heights,
+            &degrees.extra,
+            &preprocess.count_map,
+            &dyn_slices,
+            &extra_weight_map,
+            &augmented_slice,
+            &deep_challenge,
+            &full_widths,
+            true,
+        )?;
+        let extra_comp_bpoly_deep_eval = bpeval_lift_(extra_comp_bpoly.as_slice(), &deep_challenge);
+        if extra_composition_deep_eval != extra_comp_bpoly_deep_eval {
+            return Err(VerifyError::Invalid(
+                "post-commitment extra composition evaluation mismatch",
+            ));
+        }
+    }
+
     let composition_piece_evaluations = read_evals(&mut stream)?;
     if composition_piece_evaluations.0.len() != num_comp_pieces as usize {
         return Err(VerifyError::Invalid(
@@ -1431,6 +1455,20 @@ mod tests {
         ] {
             verify_fixture(bytes);
         }
+    }
+
+    #[test]
+    fn verifies_v3_post_commitment_extra_composition_check() {
+        let mut proof = decode_proof(include_bytes!(
+            "../../../roswell/tests/fixtures/proof-v2-len1.jam"
+        ));
+        proof.version = crate::form::proof::ProofVersion::V3;
+        let result = verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        });
+        assert!(result.is_ok());
     }
 
     #[test]

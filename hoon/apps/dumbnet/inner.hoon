@@ -810,6 +810,7 @@
         %0  [%mine-zk %0 commit target pow-len:t]
         %1  [%mine-zk %1 commit target pow-len:t]
         %2  [%mine-zk %2 commit target pow-len:t]
+        %3  [%mine-zk %3 commit target pow-len:t]
       ==
     ::
     ::  +heard-genesis-block: check if block is a genesis block and decide whether to keep it
@@ -1830,6 +1831,7 @@
             %0  [%0 commit target pow-len:t]
             %1  [%1 commit target pow-len:t]
             %2  [%2 commit target pow-len:t]
+            %3  [%3 commit target pow-len:t]
           ==
         :_  k
         [%mine-zk mine-start]~

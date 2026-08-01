@@ -21,12 +21,14 @@
       %0  nock-common-v0-v1
       %1  nock-common-v0-v1
       %2  nock-common-v2
+      %3  nock-common-v2
     ==
   =/  pre=preprocess-data
     ?-  version.proof
       %0  p.pre-0-1.prep.stark-config
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
+      %3  p.pre-2.prep.stark-config
     ==
   ::
   =/  verify  ~(verify verify-door [nock-common pre])
@@ -48,6 +50,7 @@
     ~/  %verify-inner
     |=  [=proof override=(unit (list term)) verifier-eny=@ test-mode=?]
     ^-  verify-result
+    =/  original-version=proof-version  version.proof
     ?>  =(~ hashes.proof)
     =^  puzzle  proof
       =^(c proof ~(pull proof-stream proof) ?>(?=(%puzzle -.c) c^proof))
@@ -326,6 +329,33 @@
     ::  columns across all tables
     ?>  =(len.trace-evaluations (mul 2 total-cols))
     ?>  ~(chck fop trace-evaluations)
+    ::
+    ::  Version 3 binds the PoW-mutable extra composition polynomial to
+    ::  committed trace codewords at the post-commitment DEEP challenge.
+    ::  Earlier versions intentionally retain their historical acceptance
+    ::  rules so old blocks remain verifiable.
+    =/  extra-composition-deep-check=?
+      ?.  =(%3 original-version)
+        %.y
+      =/  extra-composition-deep-eval=felt
+        %-  eval-composition-poly
+        :*  trace-evaluations
+            heights
+            constraint-map.pre
+            count-map.pre
+            dyn-list
+            extra-composition-weights
+            augmented-chals
+            deep-challenge
+            table-full-widths
+            %.y
+        ==
+      =/  extra-comp-bpoly-deep-eval=felt
+        (bpeval-lift extra-comp-bpoly deep-challenge)
+      =(extra-composition-deep-eval extra-comp-bpoly-deep-eval)
+    ?.  extra-composition-deep-check
+      ~&  %extra-composition-deep-eval-failed
+      ~&  %invalid-proof  !!
     ::
     ::  read the composition piece evaluations at the DEEP challenge point
     =^  composition-piece-evaluations=fpoly  proof

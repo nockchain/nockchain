@@ -34,6 +34,12 @@
           nonce=noun-digest:tip5
           pow-len=@
       ==
+  ::
+      $:  version=%3
+          header=noun-digest:tip5
+          nonce=noun-digest:tip5
+          pow-len=@
+      ==
   ==
 ::
 +$  prove-result  (each =proof err=prove-err)
@@ -104,36 +110,42 @@
       %0  nock-common-v0-v1
       %1  nock-common-v0-v1
       %2  nock-common-v2
+      %3  nock-common-v2
     ==
   =/  compute-funcs=table-funcs
     ?-  version
       %0  funcs:compute-table-v0-v1
       %1  funcs:compute-table-v0-v1
       %2  funcs:compute-table-v2
+      %3  funcs:compute-table-v2
     ==
   =/  compute-common=static-table-common
     ?-  version
       %0  static:common:compute-table-v0-v1
       %1  static:common:compute-table-v0-v1
       %2  static:common:compute-table-v2
+      %3  static:common:compute-table-v2
     ==
   =/  memory-funcs=table-funcs
     ?-  version
       %0  funcs:memory-table-v0-v1
       %1  funcs:memory-table-v0-v1
       %2  funcs:memory-table-v2
+      %3  funcs:memory-table-v2
     ==
   =/  memory-common=static-table-common
     ?-  version
       %0  static:common:memory-table-v0-v1
       %1  static:common:memory-table-v0-v1
       %2  static:common:memory-table-v2
+      %3  static:common:memory-table-v2
     ==
   =/  pre=preprocess-data
     ?-  version
       %0  p.pre-0-1.prep.stark-config
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
+      %3  p.pre-2.prep.stark-config
     ==
   %-  %~  generate-proof
         prove-door
@@ -157,36 +169,42 @@
       %0  nock-common-v0-v1
       %1  nock-common-v0-v1
       %2  nock-common-v2
+      %3  nock-common-v2
     ==
   =/  compute-funcs=table-funcs
     ?-  version
       %0  funcs:compute-table-v0-v1
       %1  funcs:compute-table-v0-v1
       %2  funcs:compute-table-v2
+      %3  funcs:compute-table-v2
     ==
   =/  compute-common=static-table-common
     ?-  version
       %0  static:common:compute-table-v0-v1
       %1  static:common:compute-table-v0-v1
       %2  static:common:compute-table-v2
+      %3  static:common:compute-table-v2
     ==
   =/  memory-funcs=table-funcs
     ?-  version
       %0  funcs:memory-table-v0-v1
       %1  funcs:memory-table-v0-v1
       %2  funcs:memory-table-v2
+      %3  funcs:memory-table-v2
     ==
   =/  memory-common=static-table-common
     ?-  version
       %0  static:common:memory-table-v0-v1
       %1  static:common:memory-table-v0-v1
       %2  static:common:memory-table-v2
+      %3  static:common:memory-table-v2
     ==
   =/  pre=preprocess-data
     ?-  version
       %0  p.pre-0-1.prep.stark-config
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
+      %3  p.pre-2.prep.stark-config
     ==
   %-  %~  make-proof-snapshot
         prove-door
@@ -229,6 +247,7 @@
         %0  [%0 objects ~ 0]
         %1  [%1 objects ~ 0]
         %2  [%2 objects ~ 0]
+        %3  [%3 objects ~ 0]
       ==
     ?.  =(digest.ctx (hash-proof proof))  [%| [%invalid-stream ~]]
     [%& proof]
@@ -825,6 +844,7 @@
       %0  [%& %0 objects.proof ~ 0]
       %1  [%& %1 objects.proof ~ 0]
       %2  [%& %2 objects.proof ~ 0]
+      %3  [%& %3 objects.proof ~ 0]
     ==
   ::
   ::

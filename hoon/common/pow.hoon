@@ -20,6 +20,7 @@
       %0  (prove:np version header nonce pow-len)
       %1  (prove:np version header nonce pow-len)
       %2  (prove:np version header nonce pow-len)
+      %3  (prove:np version header nonce pow-len)
     ==
   ?>  ?=(%& -.prove-result)
   =/  =proof:sp  p.prove-result
