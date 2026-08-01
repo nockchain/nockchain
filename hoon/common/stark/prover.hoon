@@ -417,7 +417,9 @@
             return=fock-return
         ==
     ^-  prove-result
-    =/  work=proof-work  (make-proof-work +<)
+    =/  original-version=proof-version  version
+    =/  work=proof-work
+      (make-proof-work [version header nonce pow-len s f prod return])
     =/  proof  proof.work
     =/  tables  tables.work
     =/  num-tables  num-tables.work
@@ -768,24 +770,58 @@
     ::
     ::  compute weights used in linear combination of deep polynomial. These
     ::  are from the extension field.
+    =/  num-base-deep-weights=@
+      (add (mul 4 total-cols) max-constraint-degree)
+    =/  num-deep-weights=@
+      ?:  =(%3 original-version)
+        (add num-base-deep-weights total-cols)
+      num-base-deep-weights
     =^  deep-weights=fpoly  rng
       =^  felt-list  rng
         %-  felts:rng
-        (add (mul 4 total-cols) max-constraint-degree)
+        num-deep-weights
       [(init-fpoly felt-list) rng]
     =/  all-evals  (~(weld fop trace-evaluations) extra-trace-evaluations)
     ::~&  %computing-deep-poly
     =/  deep-poly=fpoly
-      %-  compute-deep
-      :*  trace-polys
-          all-evals
-          composition-pieces-fpoly
-          composition-piece-evaluations
-          deep-weights
-          omicrons-fpoly
-          deep-challenge
-          extra-comp-eval-point
-      ==
+      =/  base-deep-poly=fpoly
+        %-  compute-deep
+        :*  trace-polys
+            all-evals
+            composition-pieces-fpoly
+            composition-piece-evaluations
+            deep-weights
+            omicrons-fpoly
+            deep-challenge
+            extra-comp-eval-point
+        ==
+      ?.  =(%3 original-version)
+        base-deep-poly
+      ::  Version 3 batches every trace column against its declared table
+      ::  degree.  An honest table-height-h column has degree <h, so
+      ::  X^(H-h)*T(X) has degree <H.  Adding a multiple of X^h-1 reaches
+      ::  degree H and is rejected by the existing strict FRI bound.
+      =/  trace-degree-weights=fpoly
+        (~(slag fop deep-weights) num-base-deep-weights)
+      =/  [trace-degree-poly=fpoly weight-idx=@]
+        %^  zip-roll  (range (lent heights))  trace-polys
+        |=  [[table-idx=@ polys=mary] acc=_zero-fpoly weight-idx=@]
+        =/  height=@  (snag table-idx heights)
+        =/  degree-shift=@  (sub max-height height)
+        =/  [table-poly=fpoly weight-idx=@]
+          %+  roll  (range len.array.polys)
+          |=  [column-idx=@ acc=_zero-fpoly weight-idx=_weight-idx]
+          =/  poly=fpoly
+            (bpoly-to-fpoly (~(snag-as-bpoly ave polys) column-idx))
+          =/  normalized=fpoly
+            %-  ~(weld fop (init-fpoly (reap degree-shift (lift 0))))
+            (fpscal (~(snag fop trace-degree-weights) weight-idx) poly)
+          :_  +(weight-idx)
+          (fpadd acc normalized)
+        :_  weight-idx
+        (fpadd acc table-poly)
+      ?>  =(weight-idx total-cols)
+      (fpadd base-deep-poly trace-degree-poly)
     ::
     ::  create DEEP codeword and push to proof
     ::~&  %computing-deep-codeword

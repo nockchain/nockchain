@@ -234,7 +234,9 @@ fn assemble_proof_continuation(
 
 #[test]
 fn verifies_public_proof_fixtures() {
-    for proof in ["proof-v0-len1.jam", "proof-v1-len1.jam", "proof-v2-len1.jam"] {
+    for proof in [
+        "proof-v0-len1.jam", "proof-v1-len1.jam", "proof-v2-len1.jam", "proof-v3-len1.jam",
+    ] {
         let path = fixture(proof);
         let output = Command::new(roswell_bin())
             .args(["--new", "--ephemeral", "check-proof", "--proof"])
@@ -279,6 +281,20 @@ fn regenerates_v2_public_proof_fixture() {
     let generated_path = stem.with_extension("jam");
     let generated = fs::read(&generated_path).expect("read generated fixture");
     let expected = fs::read(fixture("proof-v2-len1.jam")).expect("read expected fixture");
+    let _ = fs::remove_file(&generated_path);
+    assert_eq!(generated, expected);
+}
+
+#[test]
+fn regenerates_v3_public_proof_fixture() {
+    let stem = temp_stem("v3-fixture");
+    let stem_arg = stem.to_string_lossy().into_owned();
+    let output = run_roswell(&["prove-puzzle", "3", "1", "--filename", &stem_arg]);
+    assert_success(output, "regenerate v3 fixture");
+
+    let generated_path = stem.with_extension("jam");
+    let generated = fs::read(&generated_path).expect("read generated fixture");
+    let expected = fs::read(fixture("proof-v3-len1.jam")).expect("read expected fixture");
     let _ = fs::remove_file(&generated_path);
     assert_eq!(generated, expected);
 }

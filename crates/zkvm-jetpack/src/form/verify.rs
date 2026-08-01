@@ -27,7 +27,7 @@ use crate::form::proof::{
 };
 use crate::form::term::Term;
 use crate::form::tog::{absorb, belts, felt, felts, Tog};
-use crate::form::verifier_math::bpeval_lift_;
+use crate::form::verifier_math::{bpeval_lift_, evaluate_trace_degree_normalization};
 
 #[derive(Copy, Clone)]
 struct TermComponents {
@@ -607,9 +607,16 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
         return Err(VerifyError::Invalid("composition evaluation mismatch"));
     }
 
-    let deep_weights_len = trace_evaluations.0.len()
+    let base_deep_weights_len = trace_evaluations.0.len()
         + extra_trace_evaluations.0.len()
         + composition_piece_evaluations.0.len();
+    let deep_weights_len = if version == ProofVersion::V3 {
+        base_deep_weights_len
+            .checked_add(total_cols)
+            .ok_or(VerifyError::Invalid("deep weight count overflow"))?
+    } else {
+        base_deep_weights_len
+    };
     let deep_weights = PolyVec(felts(&mut rng, deep_weights_len as u32));
 
     let deep_root = expect_mroot(&mut stream, "deep composition commitment")?;
@@ -703,7 +710,7 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
     let omega = Felt::lift(calc.fri.omega);
 
     for elem in elems {
-        let deep_eval = crate::form::verifier_math::evaluate_deep(
+        let mut deep_eval = crate::form::verifier_math::evaluate_deep(
             &PolySlice(all_evals.as_slice()),
             &PolySlice(composition_piece_evaluations.as_slice()),
             &elem.trace_elems,
@@ -717,6 +724,20 @@ pub fn verify(args: VerifyArgs) -> Result<VerifyResult, VerifyError> {
             &deep_challenge,
             &extra_comp_eval_point,
         )?;
+        if version == ProofVersion::V3 {
+            let x = fmul_(&Felt::lift(calc.fri.generator), &fpow_(&omega, elem.idx));
+            let degree_eval = evaluate_trace_degree_normalization(
+                &elem.trace_elems,
+                &deep_weights.0[base_deep_weights_len..],
+                &heights,
+                &full_widths,
+                &x,
+            )
+            .ok_or(VerifyError::Invalid(
+                "trace degree normalization shape mismatch",
+            ))?;
+            deep_eval = fadd_(&deep_eval, &degree_eval);
+        }
         if deep_eval != elem.deep_elem {
             return Err(VerifyError::Invalid("deep evaluation mismatch"));
         }
@@ -1452,13 +1473,14 @@ mod tests {
             include_bytes!("../../../roswell/tests/fixtures/proof-v0-len1.jam").as_slice(),
             include_bytes!("../../../roswell/tests/fixtures/proof-v1-len1.jam").as_slice(),
             include_bytes!("../../../roswell/tests/fixtures/proof-v2-len1.jam").as_slice(),
+            include_bytes!("../../../roswell/tests/fixtures/proof-v3-len1.jam").as_slice(),
         ] {
             verify_fixture(bytes);
         }
     }
 
     #[test]
-    fn verifies_v3_post_commitment_extra_composition_check() {
+    fn rejects_v2_transcript_relabelled_as_v3() {
         let mut proof = decode_proof(include_bytes!(
             "../../../roswell/tests/fixtures/proof-v2-len1.jam"
         ));
@@ -1468,7 +1490,7 @@ mod tests {
             table_override: None,
             verifier_eny: 0,
         });
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]

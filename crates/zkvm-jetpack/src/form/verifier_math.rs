@@ -290,6 +290,45 @@ pub fn evaluate_deep(
     Ok(acc)
 }
 
+/// Evaluate the V3 random batch that enforces each trace column's declared
+/// per-table degree. For a table of height `h` and global height `H`, an honest
+/// column has `deg(T) < h`, hence `deg(X^(H-h) * T) < H`. A zerofier shift
+/// `T + c(X^h - 1)` reaches degree `H` and fails the existing strict FRI bound,
+/// except with the extension-field probability of a random leading-term
+/// cancellation.
+pub fn evaluate_trace_degree_normalization(
+    trace_elems: &[Belt],
+    weights: &[Felt],
+    heights: &[u64],
+    full_widths: &[u64],
+    x: &Felt,
+) -> Option<Felt> {
+    if heights.len() != full_widths.len() {
+        return None;
+    }
+    let max_height = heights.iter().copied().max()?;
+    let expected_cols = full_widths.iter().try_fold(0usize, |acc, width| {
+        acc.checked_add(usize::try_from(*width).ok()?)
+    })?;
+    if trace_elems.len() != expected_cols || weights.len() != expected_cols {
+        return None;
+    }
+
+    let mut acc = Felt::zero();
+    let mut offset = 0usize;
+    for (&height, &width) in heights.iter().zip(full_widths) {
+        let width = usize::try_from(width).ok()?;
+        let end = offset.checked_add(width)?;
+        let degree_factor = fpow_(x, max_height.checked_sub(height)?);
+        for (elem, weight) in trace_elems[offset..end].iter().zip(&weights[offset..end]) {
+            let term = fmul_(weight, &fmul_(&degree_factor, &Felt::lift(*elem)));
+            acc = fadd_(&acc, &term);
+        }
+        offset = end;
+    }
+    Some(acc)
+}
+
 fn process_belt(
     elems: &[Belt],
     evals: &[Felt],
@@ -316,4 +355,34 @@ fn process_belt(
     }
 
     (acc, num)
+}
+
+#[cfg(test)]
+mod tests {
+    use nockchain_math::fpoly::{fpdiv_, fpeval};
+
+    use super::*;
+    use crate::form::poly::{Poly, PolyVec};
+
+    #[test]
+    fn normalized_trace_term_exposes_zerofier_degree() {
+        const HEIGHT: usize = 4;
+        const MAX_HEIGHT: usize = 8;
+
+        let c = Felt::lift(Belt(7));
+        let mut shifted_trace = vec![Felt::zero(); HEIGHT + 1];
+        shifted_trace[0] = -c;
+        shifted_trace[HEIGHT] = c;
+
+        let r = Felt::lift(Belt(2));
+        let opening = fpeval(&shifted_trace, r);
+        let mut numerator = shifted_trace.clone();
+        numerator[0] = fsub_(&numerator[0], &opening);
+        let quotient = fpdiv_(&numerator, &[-r, Felt::one()]);
+        assert_eq!(PolyVec(quotient).degree(), (HEIGHT - 1) as u32);
+
+        let mut normalized = vec![Felt::zero(); MAX_HEIGHT - HEIGHT];
+        normalized.extend_from_slice(&shifted_trace);
+        assert_eq!(PolyVec(normalized).degree(), MAX_HEIGHT as u32);
+    }
 }

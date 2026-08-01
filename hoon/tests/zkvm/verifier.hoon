@@ -16,10 +16,10 @@
   =/  res  (verify:vrf pf ~ 4)
   (expect !>(res))
 ::
-++  test-good-v3-proof
+++  test-v2-proof-relabelled-v3-is-bad
   =/  v3=proof  [%3 objects.pf ~ 0]
   =/  res  (verify:vrf v3 ~ 4)
-  (expect !>(res))
+  (expect !>(!res))
 ::
 ++  test-v3-pow-is-domain-separated-from-fiat-shamir
   =/  v2=proof  [%2 objects.pf ~ 0]

@@ -1235,6 +1235,10 @@ mod tests {
                 include_bytes!("../../../roswell/tests/fixtures/proof-v2-len1.jam").as_slice(),
                 ProofVersion::V2,
             ),
+            (
+                include_bytes!("../../../roswell/tests/fixtures/proof-v3-len1.jam").as_slice(),
+                ProofVersion::V3,
+            ),
         ] {
             let mut stack = NockStack::new(NOCK_STACK_SIZE, 0);
             let noun = <nockvm::noun::Noun as NounExt>::cue_bytes_slice(&mut stack, bytes)

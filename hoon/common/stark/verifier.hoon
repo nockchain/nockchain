@@ -399,10 +399,16 @@
     ::
     ::
     ::  generate random weights for DEEP composition polynomial
+    =/  num-base-deep-weights=@
+      :(add len.trace-evaluations len.extra-trace-evaluations len.composition-piece-evaluations)
+    =/  num-deep-weights=@
+      ?:  =(%3 original-version)
+        (add num-base-deep-weights total-cols)
+      num-base-deep-weights
     =^  deep-weights=fpoly  rng
       =^  felt-list  rng
         %-  felts:rng
-        :(add len.trace-evaluations len.extra-trace-evaluations len.composition-piece-evaluations)
+        num-deep-weights
       [(init-fpoly felt-list) rng]
     ::
     ::  read the merkle root of the DEEP composition polynomial
@@ -508,7 +514,7 @@
       %+  roll  elems
       |=  [[idx=@ trace-elems=(list belt) comp-elems=(list belt) deep-elem=felt] acc=?]
       ^-  ?
-      =/  deep-eval
+      =/  base-deep-eval=felt
         %-  evaluate-deep
         :*  all-evals
             composition-piece-evaluations
@@ -522,6 +528,18 @@
             idx
             deep-challenge
             extra-comp-eval-point
+        ==
+      =/  deep-eval=felt
+        ?.  =(%3 original-version)
+          base-deep-eval
+        %+  fadd  base-deep-eval
+        %-  evaluate-trace-degree-normalization
+        :*  trace-elems
+            (~(slag fop deep-weights) num-base-deep-weights)
+            heights
+            table-full-widths
+            omega
+            idx
         ==
       ~|  "DEEP codeword doesn't match evaluation"
       ?>  =(deep-eval deep-elem)
@@ -803,6 +821,38 @@
         ==
     ^-  felt
     (do-evaluate-deep +<)
+  ::
+  ++  evaluate-trace-degree-normalization
+    |=  $:  trace-elems=(list belt)
+            weights=fpoly
+            heights=(list @)
+            full-widths=(list @)
+            omega=felt
+            index=@
+        ==
+    ^-  felt
+    =/  max-height=@  (roll heights max)
+    =/  x=felt  (fmul (lift g) (fpow omega index))
+    =/  [acc=felt weight-idx=@ elem-idx=@]
+      %^  zip-roll  (range (lent heights))  heights
+      |=  [[table-idx=@ height=@] acc=_(lift 0) weight-idx=@ elem-idx=@]
+      =/  width=@  (snag table-idx full-widths)
+      =/  degree-factor=felt  (fpow x (sub max-height height))
+      =/  current-elems=(list belt)  (swag [elem-idx width] trace-elems)
+      =/  [table-acc=felt weight-idx=@]
+        %+  roll  current-elems
+        |=  [elem=belt acc=_(lift 0) weight-idx=_weight-idx]
+        :_  +(weight-idx)
+        %+  fadd  acc
+        %+  fmul  (~(snag fop weights) weight-idx)
+        (fmul degree-factor (lift elem))
+      :*  (fadd acc table-acc)
+          weight-idx
+          (add elem-idx width)
+      ==
+    ?>  =(weight-idx len.weights)
+    ?>  =(elem-idx (lent trace-elems))
+    acc
   ::
   ++  do-evaluate-deep
     ~/  %evaluate-deep
