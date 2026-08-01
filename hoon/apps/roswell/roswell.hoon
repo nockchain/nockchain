@@ -46,7 +46,8 @@
       [%test-zoon ~]
       [%test-bridge ~]
       [%test-verifier ~]
-      [%bench-verifier ~]
+      [%prepare-verifier-bench v=proof-version:z n=@]
+      [%bench-verifier v=proof-version:z]
       [%verify-proof p=(unit (unit proof:sp))]
       [%test-puzzle v=proof-version:z n=@ override=(unit (list term))]
       $:  %prove-puzzle
@@ -146,11 +147,17 @@
 ++  poke
   |=  [=wire eny=@ our=@ux now=@da dat=*]
   ^-  [(list effect) test-state]
-  ~&  "poked at {<now>}"
   =/  soft-cau  ((soft cause) dat)
   ?~  soft-cau
     ~&  "could not mold poke type:"  !!
   =/  c=cause  u.soft-cau
+  ::  The verifier benchmark times this entire poke.  Keep its path free of
+  ::  slog rendering even when the tracing filter would suppress emission.
+  =.  c
+    ?:  =(%bench-verifier -.c)
+      c
+    ~&  "poked at {<now>}"
+    c
   ?-    -.c    ::TODO why does this not work with ?+ ~|("invalid cause {<c>}" !!)
   ::
       %test-soft
@@ -178,10 +185,30 @@
     :_  k
     [%exit suc]~
   ::
+      %prepare-verifier-bench
+    ::  Proof construction is intentionally outside the measured benchmark
+    ::  pokes.  +proof holds v2 and +test-proof holds v3.  Preparing them in
+    ::  separate events avoids retaining both prover computations at once.
+    =/  res=prove-result:sp  (prove-puzzle:lib v.c n.c ~)
+    ?>  ?=(%& -.res)
+    =/  p=proof:sp  p.res
+    :_  ?-  v.c
+          %2  k(proof `p)
+          %3  k(test-proof `p)
+          %0  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+          %1  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+        ==
+    [%exit -.res]~
+  ::
       %bench-verifier
-    =.  proof.k  (some ~(get-proof util k))
-    =/  suc=?  (test-verify:lib (need proof.k))
-    ~&  res+suc
+    =/  bench-proof=proof:sp
+      ?-  v.c
+        %2  (need proof.k)
+        %3  (need test-proof.k)
+        %0  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+        %1  ~|("verifier benchmark only supports proof versions 2 and 3" !!)
+      ==
+    =/  suc=?  (test-verify:lib bench-proof)
     :_  k
     [%exit suc]~
   ::

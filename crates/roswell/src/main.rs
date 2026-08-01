@@ -15,6 +15,7 @@ use nockvm::noun::{Noun, D, T};
 use noun_serde::{NounDecode, NounEncode};
 use roswell::{
     check_success, cue_file_to_stack, list_to_noun, make_tas, validate_puzzle_length, Roswell,
+    RoswellCommand,
 };
 use tracing::info;
 use zkvm_jetpack::form::ProofStreamWindow;
@@ -50,8 +51,15 @@ enum Commands {
     RunSuite,
     #[command(about = "Run all verifier tests")]
     TestVerifier,
-    #[command(about = "Time verifying one proof")]
-    BenchVerifier,
+    #[command(about = "Compare release verifier latency for equivalent v2 and v3 proofs")]
+    BenchVerifier {
+        #[arg(long, default_value_t = 8, help = "Measured runs per proof version")]
+        runs: u64,
+        #[arg(long, default_value_t = 2, help = "Warmup runs per proof version")]
+        warmups: u64,
+        #[arg(long, default_value_t = 64, help = "Power-of-two puzzle length")]
+        puzzle_length: u64,
+    },
     #[command(about = "Run all cryptography tests")]
     TestCrypto,
     #[command(about = "Run all nockchain tests")]
@@ -180,6 +188,16 @@ async fn main() -> Result<(), NockAppError> {
         return Ok(());
     }
 
+    if let Commands::BenchVerifier {
+        runs,
+        warmups,
+        puzzle_length,
+    } = &cli.command
+    {
+        bench_verifier(&cli, *runs, *warmups, *puzzle_length).await?;
+        return Ok(());
+    }
+
     let mut roswell =
         Roswell::boot_with_hot_state(cli.boot.clone(), &produce_prover_hot_state()).await?;
     let wire = SystemWire.to_wire();
@@ -199,9 +217,10 @@ async fn main() -> Result<(), NockAppError> {
             let slab = roswell.roswell_command("test-verifier", &[], &mut dummy_slab)?;
             roswell.app.poke(wire, slab).await?
         }
-        Commands::BenchVerifier => {
-            let slab = roswell.roswell_command("bench-verifier", &[], &mut dummy_slab)?;
-            roswell.app.poke(wire, slab).await?
+        Commands::BenchVerifier { .. } => {
+            return Err(NockAppError::OtherError(
+                "bench-verifier should run before regular app boot".to_string(),
+            ));
         }
         Commands::TestCrypto => {
             let slab = roswell.roswell_command("test-crypto", &[], &mut dummy_slab)?;
@@ -424,6 +443,243 @@ async fn main() -> Result<(), NockAppError> {
 }
 
 #[derive(Clone, Copy)]
+enum VerifierBenchVersion {
+    V2,
+    V3,
+}
+
+impl VerifierBenchVersion {
+    const fn atom(self) -> u64 {
+        match self {
+            Self::V2 => 2,
+            Self::V3 => 3,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::V2 => "v2",
+            Self::V3 => "v3",
+        }
+    }
+}
+
+#[derive(Default)]
+struct VerifierBenchSamples {
+    v2: Vec<Duration>,
+    v3: Vec<Duration>,
+}
+
+impl VerifierBenchSamples {
+    fn push(&mut self, version: VerifierBenchVersion, duration: Duration) {
+        match version {
+            VerifierBenchVersion::V2 => self.v2.push(duration),
+            VerifierBenchVersion::V3 => self.v3.push(duration),
+        }
+    }
+
+    fn get(&self, version: VerifierBenchVersion) -> &[Duration] {
+        match version {
+            VerifierBenchVersion::V2 => &self.v2,
+            VerifierBenchVersion::V3 => &self.v3,
+        }
+    }
+}
+
+const VERIFIER_BENCH_VERSIONS: [VerifierBenchVersion; 2] =
+    [VerifierBenchVersion::V2, VerifierBenchVersion::V3];
+
+async fn bench_verifier(
+    cli: &RoswellCli,
+    runs: u64,
+    warmups: u64,
+    puzzle_length: u64,
+) -> Result<(), NockAppError> {
+    if cfg!(debug_assertions) {
+        return Err(NockAppError::OtherError(
+            "bench-verifier requires a release build".to_string(),
+        ));
+    }
+    if runs == 0 || runs % 2 != 0 {
+        return Err(NockAppError::OtherError(
+            "bench-verifier requires a positive even number of measured runs".to_string(),
+        ));
+    }
+    if warmups % 2 != 0 {
+        return Err(NockAppError::OtherError(
+            "bench-verifier requires an even number of warmup runs".to_string(),
+        ));
+    }
+
+    let puzzle_length_noun = validate_puzzle_length(puzzle_length)?;
+    let mut boot_cli = cli.boot.clone();
+    boot_cli.new = true;
+    boot_cli.ephemeral = true;
+    let mut roswell = Roswell::boot_with_hot_state(boot_cli, &produce_prover_hot_state()).await?;
+
+    let setup_start = Instant::now();
+    for version in VERIFIER_BENCH_VERSIONS {
+        let setup = roswell
+            .poke_command(
+                RoswellCommand::PrepareVerifierBench,
+                &[D(version.atom()), puzzle_length_noun],
+                None,
+            )
+            .await?;
+        setup.ensure_success(RoswellCommand::PrepareVerifierBench.as_str())?;
+    }
+    let setup_elapsed = setup_start.elapsed();
+
+    for warmup_index in 0..warmups {
+        for version in verifier_bench_order(warmup_index) {
+            run_verifier_bench_arm(&mut roswell, version).await?;
+        }
+    }
+
+    let mut samples = VerifierBenchSamples::default();
+    for run_index in 0..runs {
+        for version in verifier_bench_order(run_index) {
+            let duration = run_verifier_bench_arm(&mut roswell, version).await?;
+            samples.push(version, duration);
+        }
+    }
+
+    let v2_median = median_duration(samples.get(VerifierBenchVersion::V2))?;
+    if v2_median.is_zero() {
+        return Err(NockAppError::OtherError(
+            "v2 verifier benchmark had zero duration".to_string(),
+        ));
+    }
+    let paired_delta_ms = samples
+        .v2
+        .iter()
+        .zip(&samples.v3)
+        .map(|(v2, v3)| (v3.as_secs_f64() - v2.as_secs_f64()) * 1_000.0)
+        .collect::<Vec<_>>();
+    let paired_delta_percent = samples
+        .v2
+        .iter()
+        .zip(&samples.v3)
+        .map(|(v2, v3)| ((v3.as_secs_f64() / v2.as_secs_f64()) - 1.0) * 100.0)
+        .collect::<Vec<_>>();
+    let delta_ms = median_f64(&paired_delta_ms)?;
+    let delta_percent = median_f64(&paired_delta_percent)?;
+    let mean_delta_ms = mean_f64(&paired_delta_ms)?;
+    let mean_delta_percent = mean_f64(&paired_delta_percent)?;
+
+    println!("Zoe verifier benchmark");
+    println!("proof versions: v2 baseline vs v3 Zoe");
+    println!("puzzle length: {puzzle_length}");
+    println!("runs: {runs}, warmups: {warmups}");
+    println!("runtime: fresh ephemeral kernel (no PMA or event-log I/O)");
+    println!(
+        "proof handling: both proofs preloaded; no timed proof serialization or per-arm proof ingress/copy"
+    );
+    if warmups == 0 {
+        println!("result type: verifier-event latency without explicit verifier warmups");
+    } else {
+        println!("result type: warmed steady-state verifier-event latency");
+    }
+    println!(
+        "proof generation: {} (excluded)",
+        format_duration(setup_elapsed)
+    );
+    println!(
+        "measurement boundary: app poke wall time, including common dispatch, cause/effect copying, and state cleanup; boot, proof generation, command construction, and effect decoding excluded"
+    );
+    for version in VERIFIER_BENCH_VERSIONS {
+        let version_samples = samples.get(version);
+        println!(
+            "{} median:  {}",
+            version.label(),
+            format_duration(median_duration(version_samples)?)
+        );
+        println!(
+            "{} mean:    {}",
+            version.label(),
+            format_duration(mean_duration(version_samples)?)
+        );
+        println!(
+            "{} samples: {}",
+            version.label(),
+            format_samples(version_samples)
+        );
+    }
+    println!("Zoe v3 paired median delta: {delta_ms:+.3}ms ({delta_percent:+.2}%)");
+    println!("Zoe v3 paired mean delta:   {mean_delta_ms:+.3}ms ({mean_delta_percent:+.2}%)");
+
+    roswell.save().await?;
+    Ok(())
+}
+
+fn verifier_bench_order(index: u64) -> [VerifierBenchVersion; 2] {
+    if index % 2 == 0 {
+        [VerifierBenchVersion::V2, VerifierBenchVersion::V3]
+    } else {
+        [VerifierBenchVersion::V3, VerifierBenchVersion::V2]
+    }
+}
+
+async fn run_verifier_bench_arm(
+    roswell: &mut Roswell,
+    version: VerifierBenchVersion,
+) -> Result<Duration, NockAppError> {
+    let mut slab = NounSlab::new();
+    let command = roswell.roswell_command(
+        RoswellCommand::BenchVerifier.as_str(),
+        &[D(version.atom())],
+        &mut slab,
+    )?;
+    let start = Instant::now();
+    let effects = roswell.app.poke(SystemWire.to_wire(), command).await?;
+    let elapsed = start.elapsed();
+    let success = check_success(effects)?;
+    if !success {
+        return Err(NockAppError::OtherError(format!(
+            "{} verifier benchmark arm failed",
+            version.label()
+        )));
+    }
+    Ok(elapsed)
+}
+
+fn mean_duration(samples: &[Duration]) -> Result<Duration, NockAppError> {
+    if samples.is_empty() {
+        return Err(NockAppError::OtherError(
+            "no benchmark samples collected".to_string(),
+        ));
+    }
+    let mean_seconds =
+        samples.iter().map(Duration::as_secs_f64).sum::<f64>() / samples.len() as f64;
+    Ok(Duration::from_secs_f64(mean_seconds))
+}
+
+fn median_f64(samples: &[f64]) -> Result<f64, NockAppError> {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    if sorted.is_empty() {
+        return Err(NockAppError::OtherError(
+            "no benchmark samples collected".to_string(),
+        ));
+    }
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        Ok((sorted[middle - 1] + sorted[middle]) / 2.0)
+    } else {
+        Ok(sorted[middle])
+    }
+}
+
+fn mean_f64(samples: &[f64]) -> Result<f64, NockAppError> {
+    if samples.is_empty() {
+        return Err(NockAppError::OtherError(
+            "no benchmark samples collected".to_string(),
+        ));
+    }
+    Ok(samples.iter().sum::<f64>() / samples.len() as f64)
+}
+
+#[derive(Clone, Copy)]
 enum HZoonBenchKind {
     Noop,
     ZMapBuild,
@@ -620,10 +876,18 @@ async fn run_h_zoon_bench_arm(
 fn median_duration(samples: &[Duration]) -> Result<Duration, NockAppError> {
     let mut sorted = samples.to_vec();
     sorted.sort();
-    sorted
-        .get(sorted.len() / 2)
-        .copied()
-        .ok_or_else(|| NockAppError::OtherError("no benchmark samples collected".to_string()))
+    if sorted.is_empty() {
+        return Err(NockAppError::OtherError(
+            "no benchmark samples collected".to_string(),
+        ));
+    }
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        let seconds = (sorted[middle - 1].as_secs_f64() + sorted[middle].as_secs_f64()) / 2.0;
+        Ok(Duration::from_secs_f64(seconds))
+    } else {
+        Ok(sorted[middle])
+    }
 }
 
 fn duration_net(total: Duration, baseline: Duration) -> Duration {
