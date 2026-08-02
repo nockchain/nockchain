@@ -2904,6 +2904,30 @@ fn musk_mack_recovers_when_call_core_copy_exhausts_eval_stack() {
     );
 }
 
+#[test]
+fn musk_rejects_a_self_recursive_partial_arm() {
+    let mut slab = NounSlab::new();
+    // A partial core whose battery immediately kicks itself. The payload is
+    // blocked, so op 9 follows the seminoun arm path and rediscovers the exact
+    // same (subject, formula) pair. This is the minimal shape behind a mold
+    // with a divergent recursive bunt.
+    let formula = T(&mut slab, &[D(9), D(2), D(0), D(1)]);
+    let mut ut = Ut::new(&mut slab);
+    let battery = ut.semi_full_complete(formula);
+    let payload = ut.semi_full_blocked();
+    let core = ut
+        .semi_combine(battery, payload)
+        .expect("partial core construction");
+
+    let err = ut
+        .musk_apex_output(core, formula)
+        .expect_err("a compile-time evaluation cycle must be rejected");
+    assert!(
+        matches!(err, CompilerError::Noun(message) if message == "musk-loop"),
+        "recursive partial evaluation should report musk-loop"
+    );
+}
+
 // Validates the Step-2 chunked prelude mint mechanism on a small `=>` chain:
 // `=> |%(a 1) => |%(b a) b` exercises cross-layer name resolution (arm `b`
 // resolves `a` from the prior layer's subject; the body resolves `b`). The
