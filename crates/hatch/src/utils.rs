@@ -150,19 +150,27 @@ pub fn binary_to_atom(s: String) -> ParsedAtom {
     }
 }
 
-//  @t to @
-pub fn cord_chars_to_atom(chars: Vec<char>) -> ParsedAtom {
+fn cord_bytes_to_atom(bytes: impl IntoIterator<Item = u8>) -> ParsedAtom {
     let mut atom = BigUint::zero();
     let mut power = BigUint::from(1u32);
     let base = BigUint::from(256u32);
 
-    for &c in &chars {
-        let byte = BigUint::from(c as u32 & 0xFF);
+    for byte in bytes {
+        let byte = BigUint::from(byte);
         atom += &byte * &power;
         power *= &base;
     }
 
     ParsedAtom::Big(atom)
+}
+
+//  @t to @
+pub fn cord_chars_to_atom(chars: Vec<char>) -> ParsedAtom {
+    cord_bytes_to_atom(chars.into_iter().flat_map(|c| {
+        let mut encoded = [0; 4];
+        let len = c.encode_utf8(&mut encoded).len();
+        encoded.into_iter().take(len)
+    }))
 }
 
 const ALPH64: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-~";
@@ -5329,10 +5337,12 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
         .then_ignore(just("'''"))
         .to(cord_chars_to_atom(Vec::new()));
 
-    //  \\, \' and \AA were A is a hex digit
+    //  \\, \' and \AA where A is a hex digit. Escapes produce bytes, not
+    //  Unicode scalar values: `\d7` is one byte while a literal `×` is the two
+    //  bytes of its UTF-8 encoding.
     let escape = just('\\').ignore_then(choice((
-        just('\\').to('\\'),
-        just('\'').to('\''),
+        just('\\').to(vec![b'\\']),
+        just('\'').to(vec![b'\'']),
         // \HH hex escape
         any()
             .filter(|c: &char| c.is_ascii_hexdigit())
@@ -5340,18 +5350,24 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
             .map(|(a, b)| {
                 let hx = format!("{}{}", a, b);
                 let byte = u8::from_str_radix(&hx, 16).expect("hex cord escape was validated");
-                byte as char
+                vec![byte]
             }),
     )));
 
     //  non-control chars excluding DEL, single quote, and backslash
-    let raw_char = any().filter(|c: &char| {
-        let x = *c as u32;
-        x >= 0x20
-            && x != 0x7F // DEL
-            && x != 0x27 // '
-            && x != 0x5C // '\'
-    });
+    let raw_char = any()
+        .filter(|c: &char| {
+            let x = *c as u32;
+            x >= 0x20
+                && x != 0x7F // DEL
+                && x != 0x27 // '
+                && x != 0x5C // '\'
+        })
+        .map(|c| {
+            let mut encoded = [0; 4];
+            let len = c.encode_utf8(&mut encoded).len();
+            encoded[..len].to_vec()
+        });
 
     let gon = just("\\") // multiline separator
         .ignore_then(gap())
@@ -5364,9 +5380,9 @@ pub fn cord<'src>(linemap: Arc<LineMap>) -> impl Parser<'src, &'src str, ParsedA
     let single_quoted = char_in_singled_quoted
         .then_ignore(gon.or_not())
         .repeated()
-        .collect::<Vec<char>>()
+        .collect::<Vec<Vec<u8>>>()
         .delimited_by(just("'"), just("'"))
-        .map(cord_chars_to_atom);
+        .map(|chunks| cord_bytes_to_atom(chunks.into_iter().flatten()));
 
     let prefix_spaces = just(' ').repeated();
 
@@ -15604,9 +15620,10 @@ mod tests {
     use nockchain_math::zoon::common::{gor_tip, DefaultTipHasher};
     use nockvm::ext::noun_equality;
     use nockvm::noun::{Noun, NounAllocator, D, DIRECT_MAX, T};
+    use num_bigint::BigUint;
 
     use super::{
-        chumsky_spot_to_hoon_spot, flay, gor_mug, hoon_to_noun, hoon_to_noun_with_cache,
+        chumsky_spot_to_hoon_spot, cord, flay, gor_mug, hoon_to_noun, hoon_to_noun_with_cache,
         limb_to_noun, map_to_noun, mor_mug, nock_to_noun, open, peg, rent_co, slab_mug,
         string_to_atom, term_to_noun, winglist, Limb, LineMap,
     };
@@ -15723,6 +15740,38 @@ mod tests {
             panic!("expected one |% expression");
         };
         assert!(tomes.is_empty(), "empty battery should have no tomes");
+    }
+
+    #[test]
+    fn non_ascii_cord_uses_utf8_bytes() {
+        let src = "'×'";
+        let linemap = Arc::new(LineMap::new(src));
+        let parsed = cord(linemap)
+            .parse(src)
+            .into_result()
+            .expect("non-ASCII cord should parse");
+
+        assert_eq!(
+            parsed.to_biguint(),
+            BigUint::from_bytes_le("×".as_bytes()),
+            "@t cords encode source text as UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn hexadecimal_cord_escape_is_one_exact_byte() {
+        let src = "'\\d7'";
+        let linemap = Arc::new(LineMap::new(src));
+        let parsed = cord(linemap)
+            .parse(src)
+            .into_result()
+            .expect("hexadecimal cord escape should parse");
+
+        assert_eq!(
+            parsed.to_biguint(),
+            BigUint::from(0xd7u32),
+            "\\HH must encode one byte rather than UTF-8-encoding a codepoint"
+        );
     }
 
     #[test]

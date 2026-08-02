@@ -69,11 +69,53 @@ sh_test(
 # without directory-hash or source-spot waivers.
 CORRECTNESS_PARITY_FIXTURES = [
     ("empty_core", "correctness/empty-core.hoon"),
+    ("non_ascii_cord", "correctness/non-ascii-cord.hoon"),
     ("wide_tisfas", "correctness/wide-tisfas.hoon"),
     ("wide_tuple_62", "axis-overflow/wide-tuple-62.hoon"),
     ("wide_tuple_63", "axis-overflow/wide-tuple-63.hoon"),
     ("wide_tuple_64", "axis-overflow/wide-tuple-64.hoon"),
 ]
+
+# Wild imports are a graph-level regression: the second imported core must
+# remain searchable when its mold appears in a gate signature. Keep this out
+# of the empty-deps comprehension above so both compilers receive the same two
+# dependency leaves and dependency root.
+hoon_library(
+    name = "wild_import_ref",
+    src = "correctness/wild-import/entry.hoon",
+    arbitrary = True,
+    deps_dir = "crates/honk/test-assets/correctness/wild-import",
+    output = True,
+    deps = [
+        "correctness/wild-import/sur/first.hoon",
+        "correctness/wild-import/sur/second.hoon",
+    ],
+)
+
+honk_library(
+    name = "wild_import_native",
+    src = "correctness/wild-import/entry.hoon",
+    arbitrary = True,
+    deps_dir = "crates/honk/test-assets/correctness/wild-import",
+    deps = [
+        "correctness/wild-import/sur/first.hoon",
+        "correctness/wild-import/sur/second.hoon",
+    ],
+)
+
+sh_test(
+    name = "wild_import_acceptance_test",
+    size = "small",
+    srcs = ["native_artifact_test.sh"],
+    args = [
+        "$(rootpath :wild_import_ref)",
+        "$(rootpath :wild_import_native)",
+    ],
+    data = [
+        ":wild_import_native",
+        ":wild_import_ref",
+    ],
+)
 
 [
     hoon_library(
@@ -121,6 +163,7 @@ test_suite(
     ] + [
         ":forked_softed_constraints_batch_parity_test",
         ":forked_softed_constraints_parity_test",
+        ":wild_import_acceptance_test",
     ],
 )
 
