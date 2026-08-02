@@ -88,6 +88,8 @@ struct MemoContextKey {
 struct MuskRuntime {
     context: NockContext,
     cold_state: Option<&'static [u8]>,
+    // Dynamic subject/formula states on the current partial-evaluation stack.
+    araw_active: Vec<(SemiId, u64)>,
     // Copied interpreter-side cores keyed by the source core raw noun. These nouns live on the
     // runtime's long-lived eval stack, outside per-mack call frames, so repeated `^~` folds share
     // copied batteries/context instead of copying the same core tree for every arm invocation.
@@ -103,6 +105,7 @@ impl MuskRuntime {
         Self {
             context: create_musk_eval_context(),
             cold_state: None,
+            araw_active: Default::default(),
             mack_core_cache_raw: Default::default(),
             mack_core_cache_context: None,
             mack_cache_by_value: Default::default(),
@@ -6085,24 +6088,12 @@ impl<'a> Ut<'a> {
         bus: SemiId,
         fol: Noun,
         memo: &mut FastHashMap<(SemiId, u64), SemiId>,
-        active: &mut FastHashSet<(SemiId, u64)>,
     ) -> Result<Option<SemiId>> {
         let key = (bus, unsafe { fol.as_raw() });
         if let Some(cached) = memo.get(&key) {
             return Ok(Some(*cached));
         }
-        // A partial evaluator cannot make progress by re-entering the exact
-        // same subject/formula pair. Reject this fold instead of recursing
-        // until the process stack overflows. Since musk is evaluating a `^~`
-        // assertion, silently leaving the formula unfolded would accept a
-        // compile-time computation that cannot terminate. Report the cycle as
-        // a compiler error instead. The guard is deliberately scoped to one
-        // active call chain so completed results remain safe to memoize.
-        if !active.insert(key) {
-            return Err(CompilerError::Noun("musk-loop".to_string()));
-        }
-        let result = self.musk_araw_uncached(bus, fol, memo, active);
-        active.remove(&key);
+        let result = self.musk_araw_uncached(bus, fol, memo);
         let result = result?;
         if let Some(noun) = result {
             memo.insert(key, noun);
@@ -6110,12 +6101,37 @@ impl<'a> Ut<'a> {
         Ok(result)
     }
 
+    fn musk_araw_dynamic(
+        &mut self,
+        bus: SemiId,
+        fol: Noun,
+        memo: &mut FastHashMap<(SemiId, u64), SemiId>,
+    ) -> Result<Option<SemiId>> {
+        let key = (bus, unsafe { fol.as_raw() });
+        if let Some(cached) = memo.get(&key) {
+            return Ok(Some(*cached));
+        }
+        // Literal formula descent is acyclic because nouns cannot contain a
+        // reference to an ancestor. Only op 2 and partial op 9 jump to a
+        // formula obtained at run time, so guard those edges rather than
+        // checking every recursive step. Re-entering the same dynamic state
+        // cannot make progress; for a `^~` fold it must be a compiler error,
+        // not an excuse to leave a divergent assertion unfolded.
+        if self.musk.araw_active.contains(&key) {
+            return Err(CompilerError::Noun("musk-loop".to_string()));
+        }
+        self.musk.araw_active.push(key);
+        let result = self.musk_araw(bus, fol, memo);
+        let popped = self.musk.araw_active.pop();
+        debug_assert_eq!(popped, Some(key));
+        result
+    }
+
     fn musk_araw_uncached(
         &mut self,
         bus: SemiId,
         fol: Noun,
         memo: &mut FastHashMap<(SemiId, u64), SemiId>,
-        active: &mut FastHashSet<(SemiId, u64)>,
     ) -> Result<Option<SemiId>> {
         let space = self.slab.noun_space();
         let (head, tail) = {
@@ -6127,10 +6143,10 @@ impl<'a> Ut<'a> {
         };
 
         if head.in_space(&space).as_cell().is_ok() {
-            let Some(hed) = self.musk_araw(bus, head, memo, active)? else {
+            let Some(hed) = self.musk_araw(bus, head, memo)? else {
                 return Ok(None);
             };
-            let Some(tal) = self.musk_araw(bus, tail, memo, active)? else {
+            let Some(tal) = self.musk_araw(bus, tail, memo)? else {
                 return Ok(None);
             };
             return self.semi_combine(hed, tal).map(Some);
@@ -6167,23 +6183,23 @@ impl<'a> Ut<'a> {
                 };
                 let b = args.head().noun();
                 let c = args.tail().noun();
-                let c_eval = self.musk_araw(bus, c, memo, active)?;
+                let c_eval = self.musk_araw(bus, c, memo)?;
                 self.semi_require(c_eval, |ut, ryf| {
-                    let Some(lub) = ut.musk_araw(bus, b, memo, active)? else {
+                    let Some(lub) = ut.musk_araw(bus, b, memo)? else {
                         return Ok(None);
                     };
-                    ut.musk_araw(lub, ryf, memo, active)
+                    ut.musk_araw_dynamic(lub, ryf, memo)
                 })
             }
             3 => {
-                let tail_eval = self.musk_araw(bus, tail, memo, active)?;
+                let tail_eval = self.musk_araw(bus, tail, memo)?;
                 self.semi_require(tail_eval, |ut, fig| {
                     let val = if fig.as_cell().is_ok() { D(0) } else { D(1) };
                     Ok(Some(ut.semi_full_complete(val)))
                 })
             }
             4 => {
-                let tail_eval = self.musk_araw(bus, tail, memo, active)?;
+                let tail_eval = self.musk_araw(bus, tail, memo)?;
                 self.semi_require(tail_eval, |ut, fig| {
                     let fig_space = ut.slab.noun_space();
                     let atom = match fig.in_space(&fig_space).as_atom() {
@@ -6221,9 +6237,9 @@ impl<'a> Ut<'a> {
                 };
                 let b = args.head().noun();
                 let c = args.tail().noun();
-                let b_eval = self.musk_araw(bus, b, memo, active)?;
+                let b_eval = self.musk_araw(bus, b, memo)?;
                 self.semi_require(b_eval, |ut, hed| {
-                    let c_eval = ut.musk_araw(bus, c, memo, active)?;
+                    let c_eval = ut.musk_araw(bus, c, memo)?;
                     ut.semi_require(c_eval, |ut, tal| {
                         let eq = noun_eq(hed, tal, &ut.slab.noun_space())?;
                         let val = if eq { D(0) } else { D(1) };
@@ -6243,13 +6259,13 @@ impl<'a> Ut<'a> {
                 };
                 let c = rest.head().noun();
                 let d = rest.tail().noun();
-                let b_eval = self.musk_araw(bus, b, memo, active)?;
+                let b_eval = self.musk_araw(bus, b, memo)?;
                 self.semi_require(b_eval, |ut, fig| {
                     if noun_eq(fig, D(0), &ut.slab.noun_space())? {
-                        return ut.musk_araw(bus, c, memo, active);
+                        return ut.musk_araw(bus, c, memo);
                     }
                     if noun_eq(fig, D(1), &ut.slab.noun_space())? {
-                        return ut.musk_araw(bus, d, memo, active);
+                        return ut.musk_araw(bus, d, memo);
                     }
                     Ok(None)
                 })
@@ -6261,10 +6277,10 @@ impl<'a> Ut<'a> {
                 };
                 let b = args.head().noun();
                 let c = args.tail().noun();
-                let Some(one) = self.musk_araw(bus, b, memo, active)? else {
+                let Some(one) = self.musk_araw(bus, b, memo)? else {
                     return Ok(None);
                 };
-                self.musk_araw(one, c, memo, active)
+                self.musk_araw(one, c, memo)
             }
             8 => {
                 let args = match tail.in_space(&space).as_cell() {
@@ -6273,11 +6289,11 @@ impl<'a> Ut<'a> {
                 };
                 let b = args.head().noun();
                 let c = args.tail().noun();
-                let Some(one) = self.musk_araw(bus, b, memo, active)? else {
+                let Some(one) = self.musk_araw(bus, b, memo)? else {
                     return Ok(None);
                 };
                 let combined = self.semi_combine(one, bus)?;
-                self.musk_araw(combined, c, memo, active)
+                self.musk_araw(combined, c, memo)
             }
             9 => {
                 let args = match tail.in_space(&space).as_cell() {
@@ -6296,7 +6312,7 @@ impl<'a> Ut<'a> {
                 } else {
                     None
                 };
-                let Some(one) = self.musk_araw(bus, c, memo, active)? else {
+                let Some(one) = self.musk_araw(bus, c, memo)? else {
                     return Ok(None);
                 };
                 // hoon-138 op-9 macks only when the raw core semi is already
@@ -6305,7 +6321,7 @@ impl<'a> Ut<'a> {
                 if let Some((core, core_id)) = self.semi_full_complete_data(one) {
                     if let Some(axis) = axis_small {
                         let Some(value) = self.musk_mack_constant_core(core, core_id, axis)? else {
-                            return self.musk_araw_arm_partial(one, axis, memo, active);
+                            return self.musk_araw_arm_partial(one, axis, memo);
                         };
                         return Ok(Some(self.semi_full_complete(value)));
                     }
@@ -6316,7 +6332,7 @@ impl<'a> Ut<'a> {
                     let Some(value) =
                         self.musk_interpret_mack_axis_noun(core, axis_atom.as_noun().noun())?
                     else {
-                        return self.musk_araw_arm_partial_big(one, axis_big, memo, active);
+                        return self.musk_araw_arm_partial_big(one, axis_big, memo);
                     };
                     return Ok(Some(self.semi_full_complete(value)));
                 }
@@ -6329,7 +6345,7 @@ impl<'a> Ut<'a> {
                     self.semi_fragment_big(axis_big, one)?
                 };
                 let partial =
-                    self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo, active))?;
+                    self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))?;
                 Ok(partial)
             }
             10 => {
@@ -6355,10 +6371,10 @@ impl<'a> Ut<'a> {
                 } else {
                     None
                 };
-                let Some(tar) = self.musk_araw(bus, d, memo, active)? else {
+                let Some(tar) = self.musk_araw(bus, d, memo)? else {
                     return Ok(None);
                 };
-                let Some(inn) = self.musk_araw(bus, c, memo, active)? else {
+                let Some(inn) = self.musk_araw(bus, c, memo)? else {
                     return Ok(None);
                 };
                 match axis_small {
@@ -6379,17 +6395,17 @@ impl<'a> Ut<'a> {
                 let b = args.head().noun();
                 let c = args.tail().noun();
                 if b.in_space(&space).as_atom().is_ok() {
-                    return self.musk_araw(bus, c, memo, active);
+                    return self.musk_araw(bus, c, memo);
                 }
                 let b_cell = match b.in_space(&space).as_cell() {
                     Ok(cell) => cell,
                     Err(_) => return Ok(None),
                 };
                 let hint_expr = b_cell.tail().noun();
-                let Some(_noy) = self.musk_araw(bus, hint_expr, memo, active)? else {
+                let Some(_noy) = self.musk_araw(bus, hint_expr, memo)? else {
                     return Ok(None);
                 };
-                self.musk_araw(bus, c, memo, active)
+                self.musk_araw(bus, c, memo)
             }
             _ => Ok(None),
         }
@@ -6400,10 +6416,9 @@ impl<'a> Ut<'a> {
         one: SemiId,
         axis: u64,
         memo: &mut FastHashMap<(SemiId, u64), SemiId>,
-        active: &mut FastHashSet<(SemiId, u64)>,
     ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment(axis, one)?;
-        let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo, active))?;
+        let partial = self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))?;
         Ok(partial)
     }
 
@@ -6412,10 +6427,9 @@ impl<'a> Ut<'a> {
         one: SemiId,
         axis: &BigUint,
         memo: &mut FastHashMap<(SemiId, u64), SemiId>,
-        active: &mut FastHashSet<(SemiId, u64)>,
     ) -> Result<Option<SemiId>> {
         let frag = self.semi_fragment_big(axis, one)?;
-        self.semi_require(frag, |ut, ryf| ut.musk_araw(one, ryf, memo, active))
+        self.semi_require(frag, |ut, ryf| ut.musk_araw_dynamic(one, ryf, memo))
     }
 
     #[cfg(test)]
@@ -6566,8 +6580,10 @@ impl<'a> Ut<'a> {
 
     fn musk_apex_output(&mut self, bus: SemiId, fol: Noun) -> Result<MuskOutput> {
         let mut memo: FastHashMap<(SemiId, u64), SemiId> = Default::default();
-        let mut active: FastHashSet<(SemiId, u64)> = Default::default();
-        let Some(noy) = self.musk_araw(bus, fol, &mut memo, &mut active)? else {
+        self.musk.araw_active.clear();
+        let result = self.musk_araw(bus, fol, &mut memo);
+        self.musk.araw_active.clear();
+        let Some(noy) = result? else {
             return Ok(MuskOutput::Stop);
         };
         let complete = self.semi_complete(noy)?;
