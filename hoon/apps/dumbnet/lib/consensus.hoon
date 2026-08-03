@@ -169,7 +169,7 @@
     ==
   (checkpoint-page-valid [height expected pag])
 ::  What block to start using proof version 3
-++  proof-version-3-start  120.400
+++  proof-version-3-start  119.400
 :: What block to start using proof version 2
 ++  proof-version-2-start  12.000
 ::  What block to start using proof version 1

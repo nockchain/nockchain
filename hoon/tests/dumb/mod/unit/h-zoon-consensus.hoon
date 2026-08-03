@@ -20,9 +20,9 @@
   %+  expect-eq
     !>(~[%0 %2 %3 %3])
   !>  :~  (height-to-proof-version:con 0)
-          (height-to-proof-version:con 120.399)
-          (height-to-proof-version:con 120.400)
-          (height-to-proof-version:con 120.401)
+          (height-to-proof-version:con (dec proof-version-3-start:dcon))
+          (height-to-proof-version:con proof-version-3-start:dcon)
+          (height-to-proof-version:con +(proof-version-3-start:dcon))
       ==
 ::
 ++  test-zoe-proof-version-gate-includes-genesis
@@ -34,7 +34,7 @@
     !>([%.y %.n %.y])
   !>  :*  (proof-version-valid:con [0 v0])
           (proof-version-valid:con [0 v3])
-          (proof-version-valid:con [120.400 v3])
+          (proof-version-valid:con [proof-version-3-start:dcon v3])
       ==
 ::
 ++  test-zoe-load-audit-rejects-genesis-version-retag-despite-legacy-id
@@ -98,7 +98,7 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb bad-state)
   %+  expect-eq
-    !>([%12 %.y 0 %.n %.y %.y])
+    !>([%11 %.y 0 %.n %.y %.y])
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
@@ -195,7 +195,7 @@
 ::
 ++  zoe-fakenet-tip-state
   |=  page-pow=(unit proof:t)
-  (fakenet-tip-state-at 120.400 page-pow)
+  (fakenet-tip-state-at proof-version-3-start:dcon page-pow)
 ::
 ++  test-zoe-load-resets-postactivation-v2-fakenet-tip
   =/  base=proof:t  *proof:t
@@ -221,12 +221,10 @@
           =(genesis-seal.c.valid-state genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-rejects-pre-reanchor-postactivation-state
-  =/  base=proof:t  *proof:t
-  =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  current=kernel-state  (zoe-fakenet-tip-state `v3)
-  =/  legacy=kernel-state-11
-    :*  %11
+++  test-zoe-state-11-rejects-pre-zoe-proofless-postactivation-state
+  =/  current=kernel-state  (zoe-fakenet-tip-state ~)
+  =/  legacy=kernel-state-10
+    :*  %10
         c=c.current
         a=a.current
         m=m.current
@@ -235,18 +233,19 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%12 %.y 0 %.y])
+    !>([%11 %.y 0 %.y])
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-preserves-preactivation-chain-and-rebuilds-mining-work
+++  test-zoe-state-11-preserves-preactivation-chain-and-rebuilds-mining-work
   =/  base=proof:t  *proof:t
   =/  v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
-  =/  current=kernel-state  (fakenet-tip-state-at 120.399 `v2)
+  =/  current=kernel-state
+    (fakenet-tip-state-at (dec proof-version-3-start:dcon) `v2)
   =/  tip-id=block-id:t  (need heaviest-block.c.current)
   =.  min-timestamps.c.current
     (~(put h-by min-timestamps.c.current) tip-id 1)
@@ -256,7 +255,7 @@
     (~(put by asert-anchor-min-timestamps.c.current) %zk timestamp-map)
   =/  pending=page:v1:t
     %*  .  *page:v1:t
-      height  120.400
+      height  proof-version-3-start:dcon
       parent  tip-id
       pow     (some v3)
     ==
@@ -266,15 +265,15 @@
     (~(put h-by pending-blocks.c.current) pending-id [pending 0])
   ::  A real pending header raises this monotone marker before its transactions
   ::  are complete.  Migration must not mistake that for an accepted tip.
-  =.  highest-block-height.d.current  `120.400
+  =.  highest-block-height.d.current  `proof-version-3-start:dcon
   =.  m.current
     %*  .  m.current
       mining          %.y
       shares          (~(put z-by *(z-map hash:t @)) *hash:t 1)
       candidate-block  pending
     ==
-  =/  legacy=kernel-state-11
-    :*  %11
+  =/  legacy=kernel-state-10
+    :*  %10
         c=c.current
         a=a.current
         m=m.current
@@ -283,7 +282,7 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>  [%12 %.y 1 0 %.y 120.400 %.y %.y %.y]
+    !>  [%11 %.y 1 0 %.y proof-version-3-start:dcon %.y %.y %.y]
   !>  :*  -.loaded
           =(heaviest-block.c.current heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
@@ -295,7 +294,7 @@
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-resets-cache-starved-state-9-late-upgrade
+++  test-zoe-state-11-resets-cache-starved-state-9-late-upgrade
   =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
   =/  legacy-c=consensus-state-9
     %*  .  *consensus-state-9
@@ -324,14 +323,14 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>  [%12 %.y 0 %.y]
+    !>  [%11 %.y 0 %.y]
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-rejects-side-only-dynamic-cache
+++  test-zoe-state-11-rejects-side-only-dynamic-cache
   =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
   =/  tip-id=block-id:t  (need heaviest-block.c.current)
   =.  min-timestamps.c.current
@@ -341,8 +340,8 @@
     (~(put h-by *(h-map block-id:t @)) side-id 1)
   =.  asert-anchor-min-timestamps.c.current
     (~(put by asert-anchor-min-timestamps.c.current) %zk side-only)
-  =/  legacy=kernel-state-11
-    :*  %11
+  =/  legacy=kernel-state-10
+    :*  %10
         c=c.current
         a=a.current
         m=m.current
@@ -351,22 +350,22 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%12 %.y 0 %.y])
+    !>([%11 %.y 0 %.y])
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-rejects-missing-canonical-min-timestamp
+++  test-zoe-state-11-rejects-missing-canonical-min-timestamp
   =/  current=kernel-state  (fakenet-tip-state-at 112.500 ~)
   =/  tip-id=block-id:t  (need heaviest-block.c.current)
   =/  exact-cache=(h-map block-id:t @)
     (~(put h-by *(h-map block-id:t @)) tip-id 1)
   =.  asert-anchor-min-timestamps.c.current
     (~(put by asert-anchor-min-timestamps.c.current) %zk exact-cache)
-  =/  legacy=kernel-state-11
-    :*  %11
+  =/  legacy=kernel-state-10
+    :*  %10
         c=c.current
         a=a.current
         m=m.current
@@ -375,7 +374,7 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%12 %.y 0 %.y])
+    !>([%11 %.y 0 %.y])
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
@@ -389,7 +388,7 @@
   =/  forked-state=kernel-state  (zoe-fakenet-tip-state `v3)
   =/  stale-page=page:v1:t
     %*  .  *page:v1:t
-      height  120.400
+      height  proof-version-3-start:dcon
       pow     (some stale-v2)
     ==
   =.  stale-page  stale-page(digest (compute-digest:page:t stale-page))
@@ -405,7 +404,7 @@
           =(genesis-seal.c.forked-state genesis-seal.c.loaded)
       ==
 ::
-++  test-zoe-state-12-deletes-pre-reanchor-v3-side-work-before-events
+++  test-zoe-state-11-deletes-preactivation-v3-side-work-before-events
   =/  base=proof:t  *proof:t
   =/  v3=proof:t  [%3 objects.base hashes.base read-index.base]
   =/  current=kernel-state  (fakenet-tip-state-at 0 ~)
@@ -414,7 +413,7 @@
     (~(put h-by min-timestamps.c.current) tip-id 1)
   =/  side-page=page:v1:t
     %*  .  *page:v1:t
-      height  120.400
+      height  proof-version-3-start:dcon
       target  (chunk:bignum:t 42)
       pow     (some v3)
     ==
@@ -422,9 +421,9 @@
   =/  side-id=block-id:t  ~(digest get:page:t side-page)
   =.  blocks.c.current
     (~(put h-by blocks.c.current) side-id (to-local-page:page:t side-page))
-  =.  highest-block-height.d.current  `120.400
-  =/  legacy=kernel-state-11
-    :*  %11
+  =.  highest-block-height.d.current  `proof-version-3-start:dcon
+  =/  legacy=kernel-state-10
+    :*  %10
         c=c.current
         a=a.current
         m=m.current
@@ -433,7 +432,7 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%12 %.y 1 %.n %.y])
+    !>([%11 %.y 1 %.n %.y])
   !>  :*  -.loaded
           =(heaviest-block.c.current heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
@@ -449,7 +448,7 @@
   =/  activation-id=block-id:t  (need heaviest-block.c.mixed)
   =/  stale-page=page:v1:t
     %*  .  *page:v1:t
-      height  120.401
+      height  +(proof-version-3-start:dcon)
       parent  activation-id
       pow     (some stale-v2)
     ==
@@ -457,7 +456,7 @@
   =/  stale-id=block-id:t  ~(digest get:page:t stale-page)
   =/  tip-page=page:v1:t
     %*  .  *page:v1:t
-      height  120.402
+      height  +(+(proof-version-3-start:dcon))
       parent  stale-id
       pow     (some v3)
     ==
@@ -474,13 +473,13 @@
   =.  heaviest-block.c.mixed  `tip-id
   =.  heaviest-chain.d.mixed
     %+  ~(put z-by heaviest-chain.d.mixed)
-      120.401
+      +(proof-version-3-start:dcon)
     stale-id
   =.  heaviest-chain.d.mixed
     %+  ~(put z-by heaviest-chain.d.mixed)
-      120.402
+      +(+(proof-version-3-start:dcon))
     tip-id
-  =.  highest-block-height.d.mixed  `120.402
+  =.  highest-block-height.d.mixed  `+(+(proof-version-3-start:dcon))
   =/  legacy=kernel-state-10
     :*  %10
         c=c.mixed
@@ -491,7 +490,7 @@
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
   %+  expect-eq
-    !>([%12 %.y 0 %.y])
+    !>([%11 %.y 0 %.y])
   !>  :*  -.loaded
           ?=(~ heaviest-block.c.loaded)
           ~(wyt h-by blocks.c.loaded)
@@ -526,7 +525,7 @@
   =/  stale-v2=proof:t  [%2 objects.base hashes.base read-index.base]
   =/  pag=page:v1:t
     %*  .  *page:v1:t
-      height  120.400
+      height  proof-version-3-start:dcon
       pow     (some stale-v2)
     ==
   %+  expect-eq
@@ -701,7 +700,7 @@
   =/  original-block=local-page:t  (~(got h-by blocks.con8) bid)
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%12 -.k9)
+  !>  :*  =(%11 -.k9)
           (consensus-h-apt c9)
           =((hz-molt blocks.c9) (hz-molt blocks.con8))
           =((hz-milt balance.c9) (hz-milt balance.con8))
@@ -750,7 +749,7 @@
   =/  up=consensus-state  c.k9
   %+  expect-eq
     !>([%.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y %.y])
-  !>  :*  =(%12 -.k9)
+  !>  :*  =(%11 -.k9)
           =(~[needed-id] missing)
           =(~[pending-id] ready)
           =(~ extra-ready)
@@ -829,7 +828,7 @@
     ==
   %+  expect-eq
     !>([%.y %.y %.y])
-  !>  [=(%12 -.k9) upgraded-ok after-one-reject-ok]
+  !>  [=(%11 -.k9) upgraded-ok after-one-reject-ok]
 ::
 ++  test-consensus-add-raw-tx-h-index-flow
   =/  con=consensus-state  initial-consensus-state:h

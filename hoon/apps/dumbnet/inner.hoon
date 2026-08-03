@@ -41,8 +41,8 @@
     ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
     =/  ks=kernel-state:dk
-      ~>  %slog.[0 'load: [1/5] state-n-to-12: migrating state to version 12']
-      ~>  %bout  (state-n-to-12 arg)
+      ~>  %slog.[0 'load: [1/5] state-n-to-11: migrating state to version 11']
+      ~>  %bout  (state-n-to-11 arg)
     =.  ks
       ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
       ~>  %bout  (check-checkpoints ks)
@@ -60,10 +60,10 @@
     ~>  %slog.[0 'load: complete']
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-12
+    ++  state-n-to-11
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%12 -.arg)
+      ?.  ?=(%11 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -78,12 +78,11 @@
           %8  $(arg (state-8-to-9 arg))
           %9  $(arg (state-9-to-10 arg))
           %10  $(arg (state-10-to-11 arg))
-          %11  $(arg (state-11-to-12 arg))
         ==
       arg
     ::
-    ::  Version 12 is a same-payload marker for Zoe's ASERT schedule.  A
-    ::  version-11 state whose accepted canonical tip crossed the cutover used
+    ::  Version 11 is the one-time marker for Zoe's proof and ASERT schedule.  A
+    ::  version-10 state whose accepted canonical tip crossed the cutover used
     ::  the prior anchor and cannot be reinterpreted safely.  Reset it instead
     ::  of scanning or rebuilding ancestry; the existing boot cleanup removes
     ::  noncanonical work before events resume.  A version-9 late upgrade past
@@ -95,13 +94,13 @@
     ::  rejected through +reject-pending-block so their transaction indexes
     ::  remain consistent.  The miner candidate is rebuilt immediately through
     ::  the normal candidate constructor, before +born can emit mining work.
-    ++  state-11-to-12
-      |=  arg=kernel-state-11:dk
-      ^-  kernel-state-12:dk
+    ++  state-10-to-11
+      |=  arg=kernel-state-10:dk
+      ^-  kernel-state-11:dk
       =/  cleaned-c=consensus-state:dk
         (reject-post-zoe-pending-pages c.arg constants.arg)
-      =/  upgraded=kernel-state-12:dk
-        :*  %12
+      =/  upgraded=kernel-state-11:dk
+        :*  %11
             c=cleaned-c
             a=a.arg
             m=m.arg(candidate-block *page:t, candidate-acc *tx-acc:t)
@@ -137,25 +136,8 @@
               dynamic-cache-ready
           ==
         upgraded(m (rebuild-mining-candidate c.upgraded m.upgraded constants.arg))
-      ~>  %slog.[1 'load: Stale ASERT state during state-12 migration, resetting state']
+      ~>  %slog.[1 'load: Stale Zoe state during state-11 migration, resetting state']
       (reset-consensus-state upgraded)
-    ::
-    ::  Version 11 remains a decoding bridge for Zoe builds that predate the
-    ::  ASERT re-anchor.  Version 12 immediately follows it, resets a canonical
-    ::  chain that crossed under the prior schedule, and lets boot cleanup
-    ::  discard noncanonical work before events resume.
-    ++  state-10-to-11
-      |=  arg=kernel-state-10:dk
-      ^-  kernel-state-11:dk
-      =/  upgraded=kernel-state-11:dk
-        :*  %11
-            c=c.arg
-            a=a.arg
-            m=m.arg
-            d=d.arg
-            constants=constants.arg
-        ==
-      upgraded
     ::
     ::  upgrade kernel state 9 to kernel state 10 with typed dynamic anchor timestamps
     ++  state-9-to-10

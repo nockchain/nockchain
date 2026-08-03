@@ -16,7 +16,7 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
-- Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `120400`, target `2026-08-08`.
+- Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `119400`, target `2026-08-06`.
 - Next scheduled activation: [`013-nous.md`](./changelog/protocol/013-nous.md), version `1.0.0`, target `2026-Q2`, rollout-gated (non-consensus, `activation_height = 0`).
 - Previous: [`012-bythos.md`](./changelog/protocol/012-bythos.md), version `0.1.11`, target date `2026-03-01`, activation height `54000`.
 
@@ -30,7 +30,7 @@ Legend:
 
 | Seq | Codename                                 | Version | Status     | Activation Height | Activation Target | Spec                                                                                                  |
 | --- | ---------------------------------------- | ------- | ---------- | ----------------- | ----------------- | ----------------------------------------------------------------------------------------------------- |
-| 015 | Zoe                                      | 0.1.15  | draft      | 120400            | 2026-08-08        | [`015-zoe.md`](./changelog/protocol/015-zoe.md)                                                       |
+| 015 | Zoe                                      | 0.1.15  | draft      | 119400            | 2026-08-06        | [`015-zoe.md`](./changelog/protocol/015-zoe.md)                                                       |
 | 014 | Aletheia                                 | 0.1.14  | draft      | 65500             | -                 | [`014-aletheia.md`](./changelog/protocol/014-aletheia.md)                                             |
 | 013 | Nous                                     | 1.0.0   | final      | 0                 | 2026-Q2           | [`013-nous.md`](./changelog/protocol/013-nous.md)                                                     |
 | 012 | Bythos                                   | 0.1.11  | final      | 54000             | 2026-03-01        | [`012-bythos.md`](./changelog/protocol/012-bythos.md)                                                 |

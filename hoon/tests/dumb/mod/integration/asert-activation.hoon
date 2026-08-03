@@ -301,7 +301,6 @@
                 expected-next
                 expected-after-next
                 (bex 291)
-                120.400
             ==
     !>  :*  before
               active
@@ -310,7 +309,6 @@
               (merge:bignum next-bn)
               (merge:bignum after-next-bn)
               asert-anchor-target-atom.production-bc
-              proof-version-3-start:dcon
           ==
   ==
 --
