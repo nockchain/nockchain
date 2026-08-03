@@ -1761,4 +1761,236 @@ mod tests {
             ))
         ));
     }
+
+    const V3_FIXTURE: &[u8] = include_bytes!("../../../roswell/tests/fixtures/proof-v3-len1.jam");
+    const V2_FIXTURE: &[u8] = include_bytes!("../../../roswell/tests/fixtures/proof-v2-len1.jam");
+
+    fn verify_result(proof: Proof) -> Result<super::VerifyResult, super::VerifyError> {
+        verify(VerifyArgs {
+            proof,
+            table_override: None,
+            verifier_eny: 0,
+        })
+    }
+
+    /// Index of the Nth `%evals` object. Object 6 is the pre-commitment (`y0`) evaluation set
+    /// and object 9 is the post-commitment (`y`) one that Zoe's binding constrains.
+    fn nth_evals_index(proof: &Proof, n: usize) -> usize {
+        proof
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(index, object)| matches!(object, ProofData::Evals(_)).then_some(index))
+            .nth(n)
+            .expect("proof should carry the requested evals object")
+    }
+
+    fn rebuild(mut proof: Proof) -> Proof {
+        proof.hashes.clear();
+        proof.read_index = 0;
+        proof
+    }
+
+    /// The post-commitment extra-composition binding is the core Zoe fix, and it only ever
+    /// *holds* for honest proofs -- so without a negative test it could be a no-op and every
+    /// acceptance test would still pass. Tampering object 9 breaks the binding before the main
+    /// composition equation is reached, so the specific error pins that the check is live and
+    /// correctly ordered.
+    #[test]
+    fn v3_post_commitment_binding_rejects_tampered_deep_trace_evaluations() {
+        let mut proof = decode_proof(V3_FIXTURE);
+        let index = nth_evals_index(&proof, 1);
+        assert_eq!(
+            index, 9,
+            "object 9 should be the DEEP-point trace evaluations"
+        );
+        match &mut proof.objects[index] {
+            ProofData::Evals(evals) => {
+                evals.0[0] =
+                    nockchain_math::felt::fadd_(&evals.0[0], &nockchain_math::felt::Felt::one());
+            }
+            _ => panic!("object 9 should be an evals object"),
+        }
+        assert!(matches!(
+            verify_result(rebuild(proof)),
+            Err(super::VerifyError::Invalid(
+                "post-commitment extra composition evaluation mismatch"
+            ))
+        ));
+    }
+
+    /// Under v2 the same tamper is caught only by the later, weaker composition equation. This
+    /// is the concrete statement of what Zoe adds: the binding fires earlier, against
+    /// randomness sampled after the mega-extension and composition commitments exist.
+    #[test]
+    fn v2_catches_tampered_deep_trace_evaluations_only_at_the_later_composition_equation() {
+        let mut proof = decode_proof(V2_FIXTURE);
+        let index = nth_evals_index(&proof, 1);
+        match &mut proof.objects[index] {
+            ProofData::Evals(evals) => {
+                evals.0[0] =
+                    nockchain_math::felt::fadd_(&evals.0[0], &nockchain_math::felt::Felt::one());
+            }
+            _ => panic!("object 9 should be an evals object"),
+        }
+        assert!(matches!(
+            verify_result(rebuild(proof)),
+            Err(super::VerifyError::Invalid(
+                "composition evaluation mismatch"
+            ))
+        ));
+    }
+
+    /// Tampering the *pre*-commitment evaluations (object 6) must still be caught, by the
+    /// historical first equality, on both versions.
+    #[test]
+    fn tampered_pre_commitment_trace_evaluations_are_rejected_on_v2_and_v3() {
+        for fixture in [V2_FIXTURE, V3_FIXTURE] {
+            let mut proof = decode_proof(fixture);
+            let index = nth_evals_index(&proof, 0);
+            assert_eq!(index, 6);
+            match &mut proof.objects[index] {
+                ProofData::Evals(evals) => {
+                    evals.0[0] = nockchain_math::felt::fadd_(
+                        &evals.0[0],
+                        &nockchain_math::felt::Felt::one(),
+                    );
+                }
+                _ => panic!("object 6 should be an evals object"),
+            }
+            assert!(matches!(
+                verify_result(rebuild(proof)),
+                Err(super::VerifyError::Invalid(
+                    "extra composition evaluation mismatch"
+                ))
+            ));
+        }
+    }
+
+    /// A v3 transcript read under v2 rules must fail: v2 draws `4C+d` DEEP weights where v3
+    /// draws `5C+d` and never adds the trace-degree normalization batch. With
+    /// `rejects_v2_transcript_relabelled_as_v3` this pins both directions, so neither path can
+    /// silently fall back to the other's semantics.
+    #[test]
+    fn rejects_v3_transcript_relabelled_as_v2() {
+        let mut proof = decode_proof(V3_FIXTURE);
+        proof.version = crate::form::proof::ProofVersion::V2;
+        assert!(verify_result(proof).is_err());
+    }
+
+    /// Representation-only manipulation: shrinking an opening is as much a new Fiat-Shamir
+    /// challenge as growing one, so v3 must reject undersized openings too.
+    #[test]
+    fn rejects_v3_undersized_composition_opening() {
+        let mut proof = decode_proof(V3_FIXTURE);
+        let opening = proof
+            .objects
+            .iter_mut()
+            .filter_map(|object| match object {
+                ProofData::MPathBf(path) => Some(path),
+                _ => None,
+            })
+            .nth(3)
+            .expect("v3 fixture should carry a composition opening");
+        opening.leaf.0.pop();
+        assert!(matches!(
+            verify_result(rebuild(proof)),
+            Err(super::VerifyError::Invalid(
+                "composition opening length mismatch"
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_v3_undersized_fri_opening() {
+        let mut proof = decode_proof(V3_FIXTURE);
+        let opening = proof
+            .objects
+            .iter_mut()
+            .find_map(|object| match object {
+                ProofData::MPath(path) => Some(path),
+                _ => None,
+            })
+            .expect("v3 fixture should carry a FRI opening");
+        opening.leaf.0.pop();
+        assert!(verify_result(rebuild(proof)).is_err());
+    }
+
+    /// Base / extension / mega-extension openings have exact semantic widths under v3.
+    #[test]
+    fn rejects_v3_oversized_trace_openings() {
+        for nth in 0..3 {
+            let mut proof = decode_proof(V3_FIXTURE);
+            let opening = proof
+                .objects
+                .iter_mut()
+                .filter_map(|object| match object {
+                    ProofData::MPathBf(path) => Some(path),
+                    _ => None,
+                })
+                .nth(nth)
+                .expect("v3 fixture should carry trace openings");
+            opening.leaf.0.push(nockchain_math::belt::Belt(0));
+            assert!(
+                verify_result(rebuild(proof)).is_err(),
+                "v3 must reject an oversized trace opening at position {nth}"
+            );
+        }
+    }
+
+    /// Lengthening a Merkle authentication path is another representation-only way to reach a
+    /// fresh root; it must not verify.
+    #[test]
+    fn rejects_v3_tampered_merkle_path_length() {
+        let mut proof = decode_proof(V3_FIXTURE);
+        let opening = proof
+            .objects
+            .iter_mut()
+            .filter_map(|object| match object {
+                ProofData::MPathBf(path) => Some(path),
+                _ => None,
+            })
+            .next()
+            .expect("v3 fixture should carry a trace opening");
+        opening.path.push([0; 5]);
+        assert!(verify_result(rebuild(proof)).is_err());
+    }
+
+    /// The trace-degree normalization batch must actually depend on the declared table
+    /// heights: `X^(H-h)` is what makes an honest height-`h` column land strictly below `H`.
+    /// A verifier that ignored the heights would return the same value for both.
+    #[test]
+    fn trace_degree_normalization_depends_on_declared_heights() {
+        use nockchain_math::belt::Belt;
+        use nockchain_math::felt::Felt;
+
+        use crate::form::verifier_math::evaluate_trace_degree_normalization;
+
+        let trace: Vec<Belt> = (1..=4).map(Belt).collect();
+        let weights: Vec<Felt> = (1..=4).map(|v| Felt::lift(Belt(v))).collect();
+        let widths = [2u64, 2];
+        let x = Felt::lift(Belt(7));
+
+        let equal_heights =
+            evaluate_trace_degree_normalization(&trace, &weights, &[8, 8], &widths, &x)
+                .expect("equal heights");
+        let mixed_heights =
+            evaluate_trace_degree_normalization(&trace, &weights, &[8, 4], &widths, &x)
+                .expect("mixed heights");
+        assert_ne!(
+            equal_heights, mixed_heights,
+            "the degree-shift exponent must depend on each table's declared height"
+        );
+
+        // Shape mismatches must be refused rather than silently truncated.
+        assert!(
+            evaluate_trace_degree_normalization(&trace, &weights, &[8, 4], &[2, 3], &x).is_none(),
+            "column-count mismatch must be rejected"
+        );
+        assert!(
+            evaluate_trace_degree_normalization(&trace[..3], &weights, &[8, 4], &widths, &x)
+                .is_none(),
+            "short trace vector must be rejected"
+        );
+    }
 }
