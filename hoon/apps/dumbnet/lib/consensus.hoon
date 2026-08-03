@@ -296,10 +296,20 @@
 :::
 ++  asert-anchor-schedule
   ^-  (list asert-anchor)
-  ::  Zoe restores the original Aletheia 2^291 target at the proof-version
-  ::  cutover.  Under Tip5's uniform digest model, the first Zoe block and
-  ::  zero-drift baseline require approximately 536.9 million full attempts.
-  :~  [proof-version-3-start asert-anchor-target-atom.blockchain-constants ~]
+  ::  Zoe carries the height-112500 anchor target forward across the
+  ::  proof-version cutover rather than restoring the original Aletheia
+  ::  2^291 constant.
+  ::
+  ::  Zoe closes the coefficient-permutation grinding channel, so effective
+  ::  attempt throughput falls sharply at the boundary for anyone who was
+  ::  grinding.  Anchoring to 2^291 would have additionally raised the
+  ::  zero-drift baseline from approximately 450 million to approximately
+  ::  536.9 million full attempts per ideal block, compounding that drop with
+  ::  a difficulty step in the same direction at the same height.  Reusing the
+  ::  established three-million-proofs-per-second anchor keeps the target
+  ::  continuous across the cutover and leaves the throughput change entirely
+  ::  to ASERT, which converges on its usual 12-hour half-life.
+  :~  [proof-version-3-start (asert-target-for-rate 3.000.000) ~]
       [first-dynamic-asert-anchor-height (asert-target-for-rate 3.000.000) ~]
       [asert-phase.blockchain-constants asert-anchor-target-atom.blockchain-constants `asert-anchor-min-timestamp.blockchain-constants]
   ==

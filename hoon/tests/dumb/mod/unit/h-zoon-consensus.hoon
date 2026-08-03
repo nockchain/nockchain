@@ -281,6 +281,12 @@
         constants=constants.current
     ==
   =/  loaded=kernel-state  (load:inner:dumb legacy)
+  ::  The Zoe anchor carries the height-112500 target forward rather than
+  ::  restoring 2^291, so the rebuilt candidate is built against that target.
+  ::  Derive it from the same helper consensus uses instead of restating the
+  ::  literal, so the assertion tracks the schedule.
+  =/  zcon  ~(. dcon c.current constants.current)
+  =/  expected-anchor-target=@  (asert-target-for-rate:zcon 3.000.000)
   %+  expect-eq
     !>  [%11 %.y 1 0 %.y proof-version-3-start:dcon %.y %.y %.y]
   !>  :*  -.loaded
@@ -290,7 +296,7 @@
           !=(*page:t candidate-block.m.loaded)
           ~(height get:page:t candidate-block.m.loaded)
           =(tip-id ~(parent get:page:t candidate-block.m.loaded))
-          =((bex 291) (merge:bignum:t ~(target get:page:t candidate-block.m.loaded)))
+          =(expected-anchor-target (merge:bignum:t ~(target get:page:t candidate-block.m.loaded)))
           =(genesis-seal.c.current genesis-seal.c.loaded)
       ==
 ::
