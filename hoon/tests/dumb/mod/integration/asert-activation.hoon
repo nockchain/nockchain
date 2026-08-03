@@ -149,8 +149,10 @@
 ::
 :::
 ::  The %zk schedule starts at the canonical anchor and changes at 112.500.
-::  At activation, the anchor's timestamp remains available before its cache exists.
-++  test-asert-reanchor-rate-and-timestamp-capture
+::  The first child can read its parent timestamp directly, but every later
+::  lookup must use the accepted branch's O(1) timestamp cache.  Missing cache
+::  state fails closed instead of walking retained ancestry.
+++  test-asert-reanchor-requires-cached-timestamp
   =/  bc  bc-asert
   =/  con  (initial-consensus-state-custom:h bc)
   =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
@@ -179,23 +181,136 @@
   =/  recovered-target
     (~(compute-target-asert dcon con bc) %zk 112.500 anchor-id)
   =.  con  (~(update-asert-anchor-min-timestamps dcon con bc) %zk child)
+  =.  blocks.con
+    (~(put h-by blocks.con) anchor-id (to-local-page:page:t anchor))
+  =.  blocks.con
+    (~(put h-by blocks.con) child-id (to-local-page:page:t child))
+  =/  uncached
+    con(asert-anchor-min-timestamps (~(del by asert-anchor-min-timestamps.con) %zk))
+  =/  cached-no-blocks
+    con(blocks *(h-map block-id:t local-page:t))
   =/  got-bn
     (~(compute-target-asert dcon con bc) %zk 112.500 anchor-id)
   =/  expected-target
     (div max-target-atom.bc (mul 3.000.000 asert-ideal-block-time.bc))
-  %+  expect-eq
-    !>  :*  %.y
-              %.y
-              %.y
-              expected-target
-              expected-target
-              anchor-min-ts
+  ;:  weld
+    %+  expect-fail
+      |.  (~(get-asert-anchor-min-timestamp dcon uncached bc) %zk 112.499 child-id)
+    ~
+    %+  expect-eq
+      !>  :*  %.y
+                %.y
+                %.y
+                expected-target
+                expected-target
+                anchor-min-ts
+            ==
+    !>  :*  =(before `expected-original)
+              =(active `expected-reanchor)
+              =(wrong-type ~)
+              (merge:bignum recovered-target)
+              (merge:bignum got-bn)
+              (~(get-asert-anchor-min-timestamp dcon cached-no-blocks bc) %zk 112.499 child-id)
           ==
-  !>  :*  =(before `expected-original)
-            =(active `expected-reanchor)
-            =(wrong-type ~)
-            (merge:bignum recovered-target)
-            (merge:bignum got-bn)
-            (~(get-asert-anchor-min-timestamp dcon con bc) %zk 112.499 child-id)
-        ==
+  ==
+::
+::  Zoe re-pins ASERT at the same height that selects proof version %3.  The
+::  target is the original Aletheia 2^291 target, not a newly calibrated
+::  approximation, so the first Zoe block and zero-drift baseline return to
+::  about 536.9 million expected attempts.
+++  test-zoe-asert-reanchor-restores-aletheia-target
+  =/  bc  bc-asert
+  =/  production-bc  default-bc:helpers
+  =/  con  (initial-consensus-state-custom:h bc)
+  =^  par=page:t  con  (add-n-pages:h 4 con default-retain:h)
+  =/  before=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con bc) %zk (dec proof-version-3-start:dcon))
+  =/  active=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con bc) %zk proof-version-3-start:dcon)
+  =/  after=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con bc) %zk +(proof-version-3-start:dcon))
+  =/  expected-before=asert-anchor:dcon
+    [112.500 (div max-target-atom.bc (mul 3.000.000 asert-ideal-block-time.bc)) ~]
+  =/  expected-active=asert-anchor:dcon
+    [proof-version-3-start:dcon asert-anchor-target-atom.bc ~]
+  =/  anchor=page:t
+    ?^  -.par
+      par(height (dec proof-version-3-start:dcon))
+    par(height (dec proof-version-3-start:dcon))
+  =/  anchor-id=block-id:t  ~(digest get:page:t anchor)
+  =/  anchor-min-ts=@  (~(got h-by min-timestamps.con) anchor-id)
+  =/  first-bn
+    (~(compute-target-asert dcon con bc) %zk proof-version-3-start:dcon anchor-id)
+  =.  con  (~(update-asert-anchor-min-timestamps dcon con bc) %zk anchor)
+  =/  child=page:t  (make-empty-page:h anchor)
+  =/  child-id=block-id:t  ~(digest get:page:t child)
+  =.  min-timestamps.con
+    (~(put h-by min-timestamps.con) child-id anchor-min-ts)
+  =.  con  (~(update-asert-anchor-min-timestamps dcon con bc) %zk child)
+  =/  grandchild=page:t  (make-empty-page:h child)
+  =/  grandchild-id=block-id:t  ~(digest get:page:t grandchild)
+  =.  min-timestamps.con
+    (~(put h-by min-timestamps.con) grandchild-id anchor-min-ts)
+  ::  This update takes the recursive cache-to-cache propagation branch.
+  =.  con  (~(update-asert-anchor-min-timestamps dcon con bc) %zk grandchild)
+  =.  blocks.con
+    (~(put h-by blocks.con) anchor-id (to-local-page:page:t anchor))
+  =.  blocks.con
+    (~(put h-by blocks.con) child-id (to-local-page:page:t child))
+  =.  blocks.con
+    (~(put h-by blocks.con) grandchild-id (to-local-page:page:t grandchild))
+  =/  expected-next=@
+    %-  compute-target:asert
+    :*  asert-anchor-target-atom.bc
+        anchor-min-ts
+        (dec proof-version-3-start:dcon)
+        anchor-min-ts
+        +(proof-version-3-start:dcon)
+        asert-ideal-block-time.bc
+        asert-half-life.bc
+        max-target-atom.bc
+    ==
+  =/  cached-no-blocks
+    con(blocks *(h-map block-id:t local-page:t))
+  =/  uncached
+    con(asert-anchor-min-timestamps (~(del by asert-anchor-min-timestamps.con) %zk))
+  =/  next-bn
+    (~(compute-target-asert dcon cached-no-blocks bc) %zk +(proof-version-3-start:dcon) child-id)
+  =/  expected-after-next=@
+    %-  compute-target:asert
+    :*  asert-anchor-target-atom.bc
+        anchor-min-ts
+        (dec proof-version-3-start:dcon)
+        anchor-min-ts
+        +(+(proof-version-3-start:dcon))
+        asert-ideal-block-time.bc
+        asert-half-life.bc
+        max-target-atom.bc
+    ==
+  =/  after-next-bn
+    (~(compute-target-asert dcon cached-no-blocks bc) %zk +(+(proof-version-3-start:dcon)) grandchild-id)
+  ;:  weld
+    %+  expect-fail
+      |.  (~(compute-target-asert dcon uncached bc) %zk +(+(proof-version-3-start:dcon)) grandchild-id)
+    ~
+    %+  expect-eq
+      !>  :*  `expected-before
+                `expected-active
+                `expected-active
+                asert-anchor-target-atom.bc
+                expected-next
+                expected-after-next
+                (bex 291)
+                120.400
+            ==
+    !>  :*  before
+              active
+              after
+              (merge:bignum first-bn)
+              (merge:bignum next-bn)
+              (merge:bignum after-next-bn)
+              asert-anchor-target-atom.production-bc
+              proof-version-3-start:dcon
+          ==
+  ==
 --

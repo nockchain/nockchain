@@ -20,6 +20,7 @@
       kernel-state-9
       kernel-state-10
       kernel-state-11
+      kernel-state-12
   ==
 ::
 +$  kernel-state-0
@@ -179,9 +180,9 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-::  kernel-state-11 marks completion of the one-time Zoe stored-proof audit.
-::  Its payload is unchanged; the version tag prevents recurring full-chain
-::  proof decoding on every restart.
+::  kernel-state-11 is the same-payload state emitted by the initial Zoe proof
+::  activation build.  It remains decodable so state 12 can distinguish and
+::  reject any chain that may have crossed under the earlier ASERT schedule.
 +$  kernel-state-11
   $:  %11
       c=consensus-state-10
@@ -192,7 +193,20 @@
       constants=blockchain-constants:v1:dt
   ==
 ::
-+$  kernel-state  kernel-state-11
+::  kernel-state-12 marks adoption of Zoe's ASERT re-anchor semantics.  Its
+::  payload is unchanged; the migration rejects state that may have crossed
+::  the cutover under the earlier schedule and rebuilds stale mining work.
++$  kernel-state-12
+  $:  %12
+      c=consensus-state-10
+      a=admin-state-9
+      m=mining-state-9
+    ::
+      d=derived-state-9
+      constants=blockchain-constants:v1:dt
+  ==
+::
++$  kernel-state  kernel-state-12
 ::
 +$  consensus-state-0
   $+  consensus-state-0

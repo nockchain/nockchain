@@ -2,7 +2,7 @@
 
 Status: Active
 Owner: Nockchain Maintainers
-Last Reviewed: 2026-08-01
+Last Reviewed: 2026-08-03
 Canonical/Legacy: Canonical (protocol authority entrypoint for the nockchain repository)
 
 This is the canonical protocol index for the nockchain repository.
@@ -16,7 +16,7 @@ If protocol guidance conflicts with workflow or crate docs, this page and the li
 
 ## Current Release Track
 
-- Proposed emergency activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `120400`, target `2026-08-08`.
+- Proposed emergency proof/ASERT activation: [`015-zoe.md`](./changelog/protocol/015-zoe.md), version `0.1.15`, activation height `120400`, target `2026-08-08`.
 - Next scheduled activation: [`013-nous.md`](./changelog/protocol/013-nous.md), version `1.0.0`, target `2026-Q2`, rollout-gated (non-consensus, `activation_height = 0`).
 - Previous: [`012-bythos.md`](./changelog/protocol/012-bythos.md), version `0.1.11`, target date `2026-03-01`, activation height `54000`.
 

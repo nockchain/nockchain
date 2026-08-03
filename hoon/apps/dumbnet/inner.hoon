@@ -41,8 +41,8 @@
     ::  print unlabelled, are attributable
     ~>  %slog.[0 'load: begin']
     =/  ks=kernel-state:dk
-      ~>  %slog.[0 'load: [1/5] state-n-to-11: migrating state to version 11']
-      ~>  %bout  (state-n-to-11 arg)
+      ~>  %slog.[0 'load: [1/5] state-n-to-12: migrating state to version 12']
+      ~>  %bout  (state-n-to-12 arg)
     =.  ks
       ~>  %slog.[0 'load: [2/5] check-checkpoints: verifying checkpointed digests']
       ~>  %bout  (check-checkpoints ks)
@@ -60,10 +60,10 @@
     ~>  %slog.[0 'load: complete']
     k
     ::  this arm should be renamed each state upgrade to state-n-to-[latest] and extended to loop through all upgrades
-    ++  state-n-to-11
+    ++  state-n-to-12
       |=  arg=load-kernel-state:dk
       ^-  kernel-state:dk
-      ?.  ?=(%11 -.arg)
+      ?.  ?=(%12 -.arg)
         ~>  %slog.[0 'load: State upgrade required']
         ?-  -.arg
             ::
@@ -78,14 +78,72 @@
           %8  $(arg (state-8-to-9 arg))
           %9  $(arg (state-9-to-10 arg))
           %10  $(arg (state-10-to-11 arg))
+          %11  $(arg (state-11-to-12 arg))
         ==
       arg
     ::
-    ::  Version 11 is a same-shape migration marker for the one-time Zoe
-    ::  stored-proof audit.  Audit every post-boundary page here, including the
-    ::  canonical suffix, so custom check-disabled networks cannot retain a
-    ::  mixed %3/%2/%3 history produced by an intermediate build.  Subsequent
-    ::  %11 loads need only inspect noncanonical entries before orphan cleanup.
+    ::  Version 12 is a same-payload marker for Zoe's ASERT schedule.  A
+    ::  version-11 state whose accepted canonical tip crossed the cutover used
+    ::  the prior anchor and cannot be reinterpreted safely.  Reset it instead
+    ::  of scanning or rebuilding ancestry; the existing boot cleanup removes
+    ::  noncanonical work before events resume.  A version-9 late upgrade past
+    ::  the first dynamic re-pin likewise arrives through version 10 with an
+    ::  empty cache; fail safely here rather than leaving the kernel unable to
+    ::  compute its next target.
+    ::
+    ::  Pending Zoe pages were header-checked under the old target and are
+    ::  rejected through +reject-pending-block so their transaction indexes
+    ::  remain consistent.  The miner candidate is rebuilt immediately through
+    ::  the normal candidate constructor, before +born can emit mining work.
+    ++  state-11-to-12
+      |=  arg=kernel-state-11:dk
+      ^-  kernel-state-12:dk
+      =/  cleaned-c=consensus-state:dk
+        (reject-post-zoe-pending-pages c.arg constants.arg)
+      =/  upgraded=kernel-state-12:dk
+        :*  %12
+            c=cleaned-c
+            a=a.arg
+            m=m.arg(candidate-block *page:t, candidate-acc *tx-acc:t)
+            d=d.arg
+            constants=constants.arg
+        ==
+      =/  accepted-tip-height=(unit page-number:t)
+        ?~  heaviest-block.c.arg  ~
+        =/  tip-local=(unit local-page:t)
+          (~(get h-by blocks.c.arg) u.heaviest-block.c.arg)
+        ?~  tip-local  ~
+        `~(height get:local-page:t u.tip-local)
+      =/  accepted-state-readable=?
+        ?~  heaviest-block.c.arg  %.y
+        ?=(^ accepted-tip-height)
+      =/  crossed-zoe=?
+        ?~  accepted-tip-height  %.n
+        (gte u.accepted-tip-height proof-version-3-start:con)
+      =/  min-timestamp-ready=?
+        ?~  heaviest-block.c.arg  %.y
+        (~(has h-by min-timestamps.c.arg) u.heaviest-block.c.arg)
+      =/  dynamic-cache-ready=?
+        ?~  accepted-tip-height  %.y
+        ?:  (lth u.accepted-tip-height first-dynamic-asert-anchor-height:con)
+          %.y
+        =/  timestamps=(unit (h-map block-id:t @))
+          (~(get by asert-anchor-min-timestamps.c.arg) %zk)
+        ?~  timestamps  %.n
+        (~(has h-by u.timestamps) (need heaviest-block.c.arg))
+      ?:  ?&  accepted-state-readable
+              !crossed-zoe
+              min-timestamp-ready
+              dynamic-cache-ready
+          ==
+        upgraded(m (rebuild-mining-candidate c.upgraded m.upgraded constants.arg))
+      ~>  %slog.[1 'load: Stale ASERT state during state-12 migration, resetting state']
+      (reset-consensus-state upgraded)
+    ::
+    ::  Version 11 remains a decoding bridge for Zoe builds that predate the
+    ::  ASERT re-anchor.  Version 12 immediately follows it, resets a canonical
+    ::  chain that crossed under the prior schedule, and lets boot cleanup
+    ::  discard noncanonical work before events resume.
     ++  state-10-to-11
       |=  arg=kernel-state-10:dk
       ^-  kernel-state-11:dk
@@ -97,10 +155,7 @@
             d=d.arg
             constants=constants.arg
         ==
-      ?:  (stored-postactivation-pages-valid upgraded %.n)
-        upgraded
-      ~>  %slog.[1 'load: Invalid stored Zoe page during state-11 migration, resetting state']
-      (reset-consensus-state upgraded)
+      upgraded
     ::
     ::  upgrade kernel state 9 to kernel state 10 with typed dynamic anchor timestamps
     ++  state-9-to-10
@@ -430,15 +485,48 @@
       |=  arg=kernel-state:dk
       ^-  kernel-state:dk
       =|  nk=kernel-state:dk
-      ::  Preserve mining options and boot metadata, otherwise drop all
-      ::  consensus state so genesis intake can resume safely.
+      ::  Preserve mining options, boot metadata, and custom-network constants;
+      ::  otherwise drop consensus state so genesis intake can resume safely.
       =.  mining.m.nk  mining.m.arg
       =.  shares.m.nk  shares.m.arg
       =.  v0-shares.m.nk  v0-shares.m.arg
       =.  init.a.nk  init.a.arg
       =.  btc-data.c.nk  btc-data.c.arg
       =.  genesis-seal.c.nk  genesis-seal.c.arg
+      =.  constants.nk  constants.arg
       nk
+    ::
+    ::  Rebuild a discarded candidate through the same path used after a new
+    ::  heaviest block.  +load has no wall clock, so use the accepted parent's
+    ::  median timestamp (the validation lower bound already stored for the
+    ::  candidate) as a seed; the first normal event refreshes it to current
+    ::  time.  Shifting by 64 reconstructs an exact-second @da, the inverse of
+    ::  +time-in-secs for this purpose.
+    ++  rebuild-mining-candidate
+      |=  $:  con-state=consensus-state:dk
+              cleared-mining=mining-state:dk
+              bc=blockchain-constants:t
+          ==
+      ^-  mining-state:dk
+      ?.  mining.cleared-mining  cleared-mining
+      ?~  heaviest-block.con-state  cleared-mining
+      =/  seed-seconds=(unit @)
+        (~(get h-by min-timestamps.con-state) u.heaviest-block.con-state)
+      ?~  seed-seconds  cleared-mining
+      (~(heard-new-block dumb-miner cleared-mining bc) con-state (lsh 6 u.seed-seconds))
+    ::
+    ++  reject-post-zoe-pending-pages
+      |=  [con-state=consensus-state:dk bc=blockchain-constants:t]
+      ^-  consensus-state:dk
+      =/  stale=(list block-id:t)
+        %-  ~(rep h-by pending-blocks.con-state)
+        |=  [[block-id=block-id:t pag=page:t heard-at=@] ids=(list block-id:t)]
+        ?:  (gte ~(height get:page:t pag) proof-version-3-start:con)
+          [block-id ids]
+        ids
+      %+  roll  stale
+      |=  [block-id=block-id:t current=_con-state]
+      (~(reject-pending-block dumb-consensus current bc) block-id)
     ::
     ++  stored-postactivation-pages-valid
       |=  [arg=kernel-state:dk only-noncanonical=?]

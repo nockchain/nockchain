@@ -292,9 +292,15 @@
   ^-  @
   (div max-target-atom:t (mul proofs-per-second asert-ideal-block-time.blockchain-constants))
 :::
+++  first-dynamic-asert-anchor-height  112.500
+:::
 ++  asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [112.500 (asert-target-for-rate 3.000.000) ~]
+  ::  Zoe restores the original Aletheia 2^291 target at the proof-version
+  ::  cutover.  Under Tip5's uniform digest model, the first Zoe block and
+  ::  zero-drift baseline require approximately 536.9 million full attempts.
+  :~  [proof-version-3-start asert-anchor-target-atom.blockchain-constants ~]
+      [first-dynamic-asert-anchor-height (asert-target-for-rate 3.000.000) ~]
       [asert-phase.blockchain-constants asert-anchor-target-atom.blockchain-constants `asert-anchor-min-timestamp.blockchain-constants]
   ==
 :::
@@ -316,32 +322,20 @@
     `anchor
   $(anchors t.anchors)
 :::
+::  Dynamic ASERT re-pins resolve only through the O(1), puzzle-keyed branch
+::  cache populated during block acceptance.  A missing entry is incomplete
+::  consensus state, not permission to walk the retained ancestry.
 ++  get-asert-anchor-min-timestamp
   |=  [puzzle-type=@tas anchor-height=@ block-id=block-id:t]
   ^-  @
   =/  timestamps=(unit (h-map block-id:t @))
     (~(get by asert-anchor-min-timestamps.c) puzzle-type)
   ?~  timestamps
-    (find-asert-anchor-min-timestamp anchor-height block-id)
+    ~|  %missing-asert-anchor-timestamp-cache  !!
   =/  timestamp=(unit @)  (~(get h-by u.timestamps) block-id)
   ?~  timestamp
-    (find-asert-anchor-min-timestamp anchor-height block-id)
+    ~|  %missing-asert-anchor-timestamp-cache  !!
   u.timestamp
-:::
-::  The anchor timestamp remains derivable from a validated branch.
-++  find-asert-anchor-min-timestamp
-  |=  [anchor-height=@ block-id=block-id:t]
-  ^-  @
-  =/  local=(unit local-page:t)  (~(get h-by blocks.c) block-id)
-  ?~  local
-    ~|  %missing-asert-anchor-block  !!
-  =/  pag=page:t  (to-page:local-page:t u.local)
-  =/  height=@  ~(height get:page:t pag)
-  ?:  =(height anchor-height)
-    (~(got h-by min-timestamps.c) block-id)
-  ?.  (gth height anchor-height)
-    ~|  %asert-anchor-after-tip  !!
-  $(block-id ~(parent get:page:t pag))
 :::
 ++  delete-asert-anchor-min-timestamps
   |=  [block-id=block-id:t timestamps=(map @tas (h-map block-id:t @))]
