@@ -154,10 +154,8 @@ pub fn traces_driver() -> IODriverFn {
                                 info!(
                                     block_height = height,
                                     block_id = block_id.as_str(),
-                                    new_heaviest_height = num_fields
-                                        .get("new_heaviest_height")
-                                        .copied()
-                                        .unwrap_or(0),
+                                    new_heaviest_height =
+                                        num_fields.get("new_heaviest_height").copied().unwrap_or(0),
                                     "chain_reorg"
                                 );
                             }

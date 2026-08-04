@@ -446,8 +446,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
             if effective_fakenet_ai_activation_height.is_none()
                 && fakenet_ai_asert_override.is_none()
             {
-                fakenet_constants = fakenet_constants
-                    .with_ai_pow_activation_height(AI_POW_FAKENET_ACTIVATION);
+                fakenet_constants =
+                    fakenet_constants.with_ai_pow_activation_height(AI_POW_FAKENET_ACTIVATION);
                 let mut ai_asert = fakenet_constants.ai_asert.clone();
                 ai_asert.phase = AI_POW_FAKENET_ACTIVATION;
                 ai_asert.anchor_height = anchor;
@@ -471,8 +471,8 @@ pub async fn init_with_kernel<J: Jammer + Send + 'static>(
                 fakenet_constants = fakenet_constants.with_zk_asert_post_ai(zk_post);
             }
             if cli.fakenet_update_candidate_interval_secs.is_none() {
-                fakenet_constants = fakenet_constants
-                    .with_update_candidate_timestamp_interval(Seconds(120));
+                fakenet_constants =
+                    fakenet_constants.with_update_candidate_timestamp_interval(Seconds(120));
             }
         }
         let ai_asert_override = fakenet_ai_asert_override;
