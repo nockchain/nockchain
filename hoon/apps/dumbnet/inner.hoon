@@ -761,7 +761,7 @@
       ^-  (unit (unit heavy-txs))
       ?~  height=((soft page-number:t) pag.pole)
         ~
-      ?~  found=(heavy-txs-at u.height)
+      ?~  found=(heavy-txs-at u.height %.y)
         [~ ~]
       ``u.found
     ::
@@ -800,7 +800,10 @@
       ``heaviest-chain.d.k
     ::
         [%heaviest-chain-blocks-range start=@ end=@ ~]
-      (heaviest-chain-blocks-range start.pole end.pole)
+      (heaviest-chain-blocks-range start.pole end.pole %.y)
+    ::
+        [%heaviest-chain-blocks-range-no-pow start=@ end=@ ~]
+      (heaviest-chain-blocks-range start.pole end.pole %.n)
     ::
         [%desk-hash ~]
       ^-  (unit (unit (unit @uvI)))
@@ -946,13 +949,17 @@
       ==
     ::
     ++  heavy-txs-at
-      |=  =page-number:t
+      |=  [=page-number:t include-pow=?]
       ^-  (unit heavy-txs)
       ?~  block-id=(~(get z-by heaviest-chain.d.k) page-number)
         ~
       ?~  local-page=(~(get h-by blocks.c.k) u.block-id)
         ~
-      =/  =page:t  (to-page:local-page:t u.local-page)
+      =/  to-page
+        ?:  include-pow
+          to-page:local-page:t
+        to-page-no-pow:local-page:t
+      =/  =page:t  (to-page u.local-page)
       =/  txs=(list heavy-tx)
         %+  turn  ~(tap z-in ~(tx-ids get:page:t page))
         |=  =tx-id:t
@@ -960,7 +967,7 @@
       `[page-number u.block-id page txs]
     ::
     ++  heaviest-chain-blocks-range
-      |=  [start=@ end=@]
+      |=  [start=@ end=@ include-pow=?]
       ^-  (unit (unit (list [page-number:t block-id:t page:t (z-map tx-id:t raw-tx:t)])))
       =/  start-height  ((soft page-number:t) start)
       =/  end-height  ((soft page-number:t) end)
@@ -973,7 +980,7 @@
         |-  ^-  (list [page-number:t block-id:t page:t (z-map tx-id:t raw-tx:t)])
         ?:  (gth height u.end-height)
           ~
-        ?~  heavy-txs=(heavy-txs-at height)
+        ?~  heavy-txs=(heavy-txs-at height include-pow)
           $(height +(height))
         =/  txs-map=(z-map tx-id:t raw-tx:t)
           %+  roll  txs.u.heavy-txs
