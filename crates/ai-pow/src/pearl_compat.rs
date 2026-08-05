@@ -112,6 +112,8 @@ pub enum PearlCompatError {
     MoeTopKNotLessThanExperts { top_k: usize, e: usize },
     #[error("Pearl MoE expert {expert} span {span} exceeds the token count m={m} (a token routes to an expert at most once)")]
     MoeExpertSpanExceedsTokens { expert: usize, span: u32, m: u32 },
+    #[error("Pearl MoE routing_data must be strictly increasing within every expert span")]
+    MoeRoutingNotStrictlyIncreasing,
     #[error("Pearl MoE local column {local} reaches outside expert {expert_idx}'s block (n_e={n_e}); would bleed into a neighbouring expert's weights")]
     MoeColumnOutsideExpert {
         local: u32,
@@ -1937,13 +1939,10 @@ pub fn verify_pearl_moe_routing_binding(
         return Err(PearlCompatError::MoeOffsetsInconsistent);
     }
 
-    // Pearl acceptance-set parity (`zk-pow/src/api/sanity_checks.rs`): `top_k < e`
-    // and each expert's span `<= m`. A token routes to a given expert at most once,
-    // so an expert holds at most `m` of the `m*top_k` slots; without these bounds
-    // we would accept degenerate over-routings (a token repeated within an expert,
-    // or `top_k >= e`) that Pearl rejects — a merge-mining divergence, and a
-    // routing the difficulty model never priced. `offsets[0] <= m` is the span of
-    // expert 0 (start 0), covered by the loop below.
+    // Pearl acceptance-set parity: `top_k < e`; each expert has at most `m`
+    // routed slots; and every expert span is strictly increasing. The latter
+    // establishes that a token routes to a given expert at most once. A bounded
+    // span alone does not establish this because it can contain repeated tokens.
     // Pearl acceptance parity (`sanity_checks.rs`): `top_k > 0`. `top_k == 0` is a
     // degenerate routing (no token routed anywhere) that Pearl rejects; the
     // trailer parse permits it for `e > 0`, so gate it here explicitly rather than
@@ -1960,6 +1959,12 @@ pub fn verify_pearl_moe_routing_binding(
         let span = end - prev;
         if span > m {
             return Err(PearlCompatError::MoeExpertSpanExceedsTokens { expert, span, m });
+        }
+        if !routing_data[prev as usize..end as usize]
+            .windows(2)
+            .all(|window| window[0] < window[1])
+        {
+            return Err(PearlCompatError::MoeRoutingNotStrictlyIncreasing);
         }
         prev = end;
     }

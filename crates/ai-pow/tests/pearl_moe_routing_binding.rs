@@ -155,6 +155,47 @@ fn expert_span_exceeding_m_rejected() {
     );
 }
 
+/// A short expert span can still repeat tokens. The pattern offsets 0 and 4
+/// open strictly increasing tiles `[0,1,2,3]` and `[1,2,3,4]`, but reuse rows
+/// 1, 2, and 3. Every expert span must therefore be strictly increasing.
+#[test]
+fn duplicate_expert_tokens_across_tiles_rejected() {
+    let (m, h, e, top_k) = (8u32, 4u32, 2usize, 1usize);
+    let routing_data: Vec<u32> = (0..m).map(|p| p / h + p % h).collect();
+    let first_tile = &routing_data[..h as usize];
+    let second_tile = routing_data[h as usize..].to_vec();
+    assert_eq!(first_tile, &[0, 1, 2, 3]);
+    assert_eq!(second_tile, vec![1, 2, 3, 4]);
+
+    let rows_pattern = PearlPeriodicPattern::from_list(&[0, 1, 2, 3]).unwrap();
+    assert!(rows_pattern.offset_is_valid(h));
+    let config = PearlMiningConfig {
+        common_dim: 1024,
+        rank: 64,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern,
+        cols_pattern: PearlPeriodicPattern::from_list(&[0, 1]).unwrap(),
+        reserved: PearlMiningConfig::moe_trailer(e as u16, top_k as u16),
+    };
+    let moe = PearlMoeParams {
+        expert_idx: 0,
+        routing_offsets: vec![m, m],
+        hash_routing: matrix_commitment(
+            &routing_data
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>(),
+            &KAPPA,
+        ),
+        outer_indices: second_tile,
+    };
+
+    assert_eq!(
+        verify_pearl_moe_routing_binding(&KAPPA, &config, &moe, m, h, &routing_data, 4096),
+        Err(PearlCompatError::MoeRoutingNotStrictlyIncreasing)
+    );
+}
+
 /// Column-within-expert bleed. The opened B-columns for expert
 /// `expert_idx` must stay inside that expert's `[expert_idx·n_e, (expert_idx+1)·n_e)`
 /// block. A `cols_pattern`/`t_cols` reaching `local ≥ n_e` bleeds into a
@@ -261,9 +302,9 @@ fn moe_public_wire_serializes_per_expert_n() {
 #[test]
 fn tampered_routing_data_root_mismatch() {
     let (config, mut routing, moe) = valid();
-    // Change routing_data so outer_indices' claimed source differs; hash_routing
-    // (committed) no longer matches.
-    routing.routing_data[1] = 0; // was 2
+    // Preserve expert-span ordering so the committed-root check is the first
+    // rejection for this unauthenticated routing value.
+    routing.routing_data[1] = 1;
     assert_eq!(
         check(&config, &routing, &moe),
         Err(PearlCompatError::MoeRoutingRootMismatch)

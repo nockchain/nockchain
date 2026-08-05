@@ -39,7 +39,12 @@ BLAKE3 commitments authenticate the model data. The canonical opened schedule is
 
 ### MoE binding
 
-Pearl bounds such as `top_k < experts`, routing span, selected expert, `n_e`, and expert-local columns are checked before proof work. The proof binds routed token positions to opened rows and prevents columns from escaping the selected expert.
+Pearl bounds such as `top_k < experts`, routing span, selected expert, `n_e`,
+and expert-local columns are checked before proof work. `routing_data` is
+strictly increasing within each expert span, so a token appears once per expert
+and valid row-pattern offsets cannot reuse an A row across that expert's tiles.
+The proof binds routed token positions to opened rows and prevents columns from
+escaping the selected expert.
 
 ### Difficulty binding
 
