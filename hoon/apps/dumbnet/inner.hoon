@@ -495,38 +495,6 @@
       =.  constants.nk  constants.arg
       nk
     ::
-    ::  Rebuild a discarded candidate through the same path used after a new
-    ::  heaviest block.  +load has no wall clock, so use the accepted parent's
-    ::  median timestamp (the validation lower bound already stored for the
-    ::  candidate) as a seed; the first normal event refreshes it to current
-    ::  time.  Shifting by 64 reconstructs an exact-second @da, the inverse of
-    ::  +time-in-secs for this purpose.
-    ++  rebuild-mining-candidate
-      |=  $:  con-state=consensus-state:dk
-              cleared-mining=mining-state:dk
-              bc=blockchain-constants:t
-          ==
-      ^-  mining-state:dk
-      ?.  mining.cleared-mining  cleared-mining
-      ?~  heaviest-block.con-state  cleared-mining
-      =/  seed-seconds=(unit @)
-        (~(get h-by min-timestamps.con-state) u.heaviest-block.con-state)
-      ?~  seed-seconds  cleared-mining
-      (~(heard-new-block dumb-miner cleared-mining bc) con-state (lsh 6 u.seed-seconds))
-    ::
-    ++  reject-post-zoe-pending-pages
-      |=  [con-state=consensus-state:dk bc=blockchain-constants:t]
-      ^-  consensus-state:dk
-      =/  stale=(list block-id:t)
-        %-  ~(rep h-by pending-blocks.con-state)
-        |=  [[block-id=block-id:t pag=page:t heard-at=@] ids=(list block-id:t)]
-        ?:  (gte ~(height get:page:t pag) proof-version-3-start:con)
-          [block-id ids]
-        ids
-      %+  roll  stale
-      |=  [block-id=block-id:t current=_con-state]
-      (~(reject-pending-block dumb-consensus current bc) block-id)
-    ::
     ++  stored-postactivation-pages-valid
       |=  [arg=kernel-state:dk only-noncanonical=?]
       ^-  ?
@@ -540,10 +508,14 @@
       %-  ~(rep h-by blocks.c.arg)
       |=  [[block-id=block-id:t local=local-page:t] valid=?]
       ?.  valid  %.n
-      ::  Height lives outside the jammed proof in local-page.  Read it first
-      ::  so historical proofs never need to be decoded by this audit.
+      ::  Audit every artifact from the first consensus change that adds a
+      ::  versioned proof path. Earlier pages retain their historical encoding.
       =/  height=page-number:t  ~(height get:local-page:t local)
-      ?:  (lth height proof-version-3-start:con)
+      =/  first-versioned-height=page-number:t
+        ?:  (lth ai-pow-activation-height.constants.arg proof-version-3-start:con)
+          ai-pow-activation-height.constants.arg
+        proof-version-3-start:con
+      ?:  (lth height first-versioned-height)
         %.y
       =/  canonical-id  (~(get z-by heaviest-chain.d.arg) height)
       =/  canonical=?

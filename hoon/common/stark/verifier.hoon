@@ -22,7 +22,6 @@
       %1  nock-common-v0-v1
       %2  nock-common-v2
       %3  nock-common-v2
-      %4  ~|(%zk-verifier-cannot-verify-v4-ai-proof !!)
     ==
   =/  pre=preprocess-data
     ?-  version.proof
@@ -30,7 +29,6 @@
       %1  p.pre-0-1.prep.stark-config
       %2  p.pre-2.prep.stark-config
       %3  p.pre-2.prep.stark-config
-      %4  ~|(%zk-verifier-cannot-verify-v4-ai-proof !!)
     ==
   ::
   =/  verify  ~(verify verify-door [nock-common pre])

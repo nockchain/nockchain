@@ -234,12 +234,12 @@
   ::  page.pow is a generic persisted noun (`pow-artifact`, `*`) so page
   ::  consumers don't force the recursive AI proof mold. Recover the version
   ::  discriminator the same way consensus does (+pow-artifact-to-proof-version):
-  ::  an `[%ai-pow ...]` artifact is v3; otherwise soft-cast to a `proof` and
+  ::  an `[%ai-pow ...]` artifact is v4; otherwise soft-cast to a `proof` and
   ::  read its version tag.
   =/  pow  ~(pow get:page:t page)
   =/  proof-version=(unit @ud)
     ?~  pow  ~
-    ?:  ?=([%ai-pow *] u.pow)  `3
+    ?:  ?=([%ai-pow *] u.pow)  `4
     `version:(need ((soft proof:t) u.pow))
   =/  height=@ud  ~(height get:page:t page)
   =/  digest=block-id:t  ~(digest get:page:t page)

@@ -195,13 +195,13 @@ fn format_blockchain_constants_difference(
 ) -> String {
     let mut differences = Vec::new();
     macro_rules! differing_field {
-        ($field:ident) => {
-            if expected.$field != actual.$field {
+        ($($field:ident).+) => {
+            if expected.$($field).+ != actual.$($field).+ {
                 differences.push(format!(
                     "{} expected={:?} actual={:?}",
-                    stringify!($field),
-                    expected.$field,
-                    actual.$field,
+                    stringify!($($field).+),
+                    expected.$($field).+,
+                    actual.$($field).+,
                 ));
             }
         };
@@ -215,7 +215,6 @@ fn format_blockchain_constants_difference(
     differing_field!(min_past_blocks);
     differing_field!(genesis_target_atom);
     differing_field!(max_target_atom);
-    differing_field!(check_pow_flag);
     differing_field!(coinbase_timelock_min);
     differing_field!(pow_len);
     differing_field!(max_coinbase_split);
@@ -225,12 +224,25 @@ fn format_blockchain_constants_difference(
     differing_field!(note_data);
     differing_field!(base_fee);
     differing_field!(input_fee_divisor);
-    differing_field!(asert_phase);
-    differing_field!(asert_anchor_height);
-    differing_field!(asert_anchor_target_atom);
-    differing_field!(asert_ideal_block_time);
-    differing_field!(asert_half_life);
-    differing_field!(asert_anchor_min_timestamp);
+    differing_field!(zk_asert.phase);
+    differing_field!(zk_asert.anchor_height);
+    differing_field!(zk_asert.anchor_target_atom);
+    differing_field!(zk_asert.ideal_block_time);
+    differing_field!(zk_asert.half_life);
+    differing_field!(zk_asert.anchor_min_timestamp);
+    differing_field!(zk_asert_post_ai.phase);
+    differing_field!(zk_asert_post_ai.anchor_height);
+    differing_field!(zk_asert_post_ai.anchor_target_atom);
+    differing_field!(zk_asert_post_ai.ideal_block_time);
+    differing_field!(zk_asert_post_ai.half_life);
+    differing_field!(zk_asert_post_ai.anchor_min_timestamp);
+    differing_field!(ai_pow_activation_height);
+    differing_field!(ai_asert.phase);
+    differing_field!(ai_asert.anchor_height);
+    differing_field!(ai_asert.anchor_target_atom);
+    differing_field!(ai_asert.ideal_block_time);
+    differing_field!(ai_asert.half_life);
+    differing_field!(ai_asert.anchor_min_timestamp);
 
     differences.join(", ")
 }
@@ -1328,13 +1340,13 @@ mod tests {
     fn validate_blockchain_constants_match_rejects_mismatch() {
         let expected = default_fakenet_blockchain_constants();
         let mut actual = expected.clone();
-        actual.asert_anchor_min_timestamp += 1;
+        actual.ai_asert.anchor_min_timestamp += 1;
 
         let err = validate_blockchain_constants_match(&expected, &actual)
             .expect_err("mismatched constants should fail");
         let message = err.to_string();
         assert!(message.contains("bridge kernel state"));
-        assert!(message.contains("asert_anchor_min_timestamp"));
-        assert!(message.contains("asert_anchor_min_timestamp expected="));
+        assert!(message.contains("ai_asert.anchor_min_timestamp"));
+        assert!(message.contains("ai_asert.anchor_min_timestamp expected="));
     }
 }

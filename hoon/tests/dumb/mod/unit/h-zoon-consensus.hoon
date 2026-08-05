@@ -36,6 +36,15 @@
           (proof-version-valid:con [0 v3])
           (proof-version-valid:con [proof-version-3-start:dcon v3])
       ==
+:::
+++  test-zoe-and-logos-proof-discriminators-coexist
+  =/  con  ~(. dcon initial-consensus-state:h constants)
+  %+  expect-eq
+    !>([%.y %.y %.n])
+  !>  :*  (~(proof-version-valid-at-height dcon con der constants) %3 proof-version-3-start:dcon)
+            (~(proof-version-valid-at-height dcon con der constants) %4 proof-version-3-start:dcon)
+            (~(proof-version-valid-at-height dcon con der constants) %4 (dec ai-pow-activation-height.constants))
+        ==
 ::
 ++  test-zoe-load-audit-rejects-genesis-version-retag-despite-legacy-id
   =/  con  ~(. dcon initial-consensus-state:h constants)

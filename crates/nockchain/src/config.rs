@@ -533,6 +533,7 @@ mod tests {
             max_system_memory_bytes: None,
             fakenet_pow_len: 2,
             fakenet_log_difficulty: 1,
+            fakenet_ai_pow: false,
             fakenet_v1_phase: None,
             fakenet_bythos_phase: None,
             fakenet_ai_pow_activation_height: None,

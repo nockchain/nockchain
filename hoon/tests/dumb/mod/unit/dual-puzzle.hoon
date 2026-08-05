@@ -1,6 +1,6 @@
 ::  tests/dumb/mod/unit/dual-puzzle.hoon
 ::
-::    Dual-puzzle (ZK-PoW %2 + AI-PoW %3) consensus mechanism tests.
+::    Dual-puzzle (ZK-PoW %3 + AI-PoW %4) consensus mechanism tests.
 ::
 ::    Focus: fork choice must not favour either puzzle at calibration and must
 ::    not reward a discount. Once both are live every block contributes the

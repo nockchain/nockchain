@@ -110,6 +110,7 @@
     %1  [%1 ~ ~ 0]
     %2  [%2 ~ ~ 0]
     %3  [%3 ~ ~ 0]
+    %4  ~|(%zk-prover-cannot-generate-v4-ai-proof !!)
   ==
 ::
 ++  prepare-extra-composition-poly

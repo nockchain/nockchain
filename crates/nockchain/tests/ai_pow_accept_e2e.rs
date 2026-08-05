@@ -411,7 +411,7 @@ async fn malformed_ai_pow_artifact_is_rejected_without_admission() {
 /// Consensus safety BELOW activation: `do-mine` must emit ONLY the legacy
 /// `%mine-zk` candidate, never a `%mine-ai` one, while the candidate height is
 /// below `ai-pow-activation-height`. A node that mined an AI block pre-activation
-/// would produce a version-3 block that every node — upgraded or not — rejects
+/// would produce a version-4 artifact that every node — upgraded or not — rejects
 /// via `proof-version-valid-at-height`; refusing to emit the AI candidate at all
 /// keeps a pre-activation node's mining effort on valid work and its behavior
 /// identical to a pre-Logos node. Fast: no proving — only the candidate KIND is

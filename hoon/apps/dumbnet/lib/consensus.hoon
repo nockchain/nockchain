@@ -142,8 +142,8 @@
       =(digest (~(got z-by checkpointed-digests) height))
   ==
 ::
-::  Loading a checkpointed ID is not sufficient for legacy blocks because
-::  their IDs do not bind the proof-version tag.  Audit the stored page too.
+::  Checkpointed IDs bind historical page identity. The stored artifact must
+::  also retain its admitted version and canonical envelope.
 ++  checkpoint-page-valid
   ~/  %checkpoint-page-valid
   |=  [height=page-number:t expected=hash:t pag=page:t]
@@ -154,10 +154,37 @@
   ?&  =(height ~(height get:page:t pag))
       =(expected ~(digest get:page:t pag))
       (check-digest:page:t pag)
-      (proof-version-valid [height u.pow])
-      =(~ hashes.u.pow)
-      =(0 read-index.u.pow)
-      (canonical-pow-proof:dk [height u.pow])
+      (persisted-pow-valid height u.pow)
+  ==
+:::
+++  persisted-pow-valid
+  |=  [height=page-number:t pow=*]
+  ^-  ?
+  ?:  (legacy-v4-proof-artifact pow)
+    %.n
+  ?.  %+  proof-version-valid-at-height
+        (pow-artifact-to-proof-version pow)
+      height
+    %.n
+  ?:  ?=([%ai-pow *] pow)
+    (ai-pow-artifact-resource-ok:t pow)
+  =/  prf=(unit proof:sp)  ((soft proof:sp) pow)
+  ?~  prf
+    %.n
+  ?&  =(~ hashes.u.prf)
+      =(0 read-index.u.prf)
+      (canonical-pow-proof:dk [height u.prf])
+  ==
+:::
+++  pow-artifact-shape-valid
+  |=  pow=*
+  ^-  ?
+  ?:  ?=([%ai-pow *] pow)
+    (ai-pow-artifact-resource-ok:t pow)
+  ?|  ?=([%0 * * *] pow)
+      ?=([%1 * * *] pow)
+      ?=([%2 * * *] pow)
+      ?=([%3 * * *] pow)
   ==
 ::
 ::  Custom networks may deliberately disable PoW in tests and persist
@@ -207,10 +234,7 @@
   ^-  ?
   ?:  ?=([%ai-pow *] pow)
     %.n
-  =/  prf=(unit proof:sp)  ((soft proof:sp) pow)
-  ?~  prf
-    %.n
-  ?=(%4 version.u.prf)
+  ?=([%4 * * *] pow)
 ::
 ::
 ::  +block-compute-work: a block's heaviness contribution.
@@ -758,6 +782,7 @@
     ?~  page-pow
       ?:(check-pow-flag:t %.n %.y)
     ?&  ?!((legacy-v4-proof-artifact u.page-pow))
+        (pow-artifact-shape-valid u.page-pow)
         %+  proof-version-valid-at-height
           (pow-artifact-to-proof-version u.page-pow)
         ~(height get:page:t pag)
@@ -771,10 +796,10 @@
   =/  ai-target-valid=?
     ?~  page-pow
       %.y
-    ?|  ?!((?=([%ai-pow *] u.page-pow)))
-        %+  lte  (merge:bignum:t ~(target get:page:t pag))
-        max-ai-target-atom:t
-    ==
+    ?:  ?=([%ai-pow *] u.page-pow)
+      %+  lte  (merge:bignum:t ~(target get:page:t pag))
+      max-ai-target-atom:t
+    %.y
   ?.  ai-target-valid
     [%.n %ai-pow-target-outside-minable-domain]
   =/  par=page:t  (to-page:local-page:t (~(got h-by blocks.c) ~(parent get:page:t pag)))
@@ -897,7 +922,12 @@
   =/  version-check=?
     ?~  page-pow
       ?:(check-pow-flag:t %.n %.y)
-    (proof-version-valid [~(height get:page:t pag) u.page-pow])
+    ?&  ?!((legacy-v4-proof-artifact u.page-pow))
+        (pow-artifact-shape-valid u.page-pow)
+        %+  proof-version-valid-at-height
+          (pow-artifact-to-proof-version u.page-pow)
+        ~(height get:page:t pag)
+    ==
   ?.  version-check
     [%.n %proof-version-invalid]
   =/  digest-b58=cord  (to-b58:hash:t ~(digest get:page:t pag))

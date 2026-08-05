@@ -101,7 +101,7 @@ use crate::{DifficultyTarget, MiningCancel};
 // target, and JSON-RPC envelope while still bounding untrusted Gateway input.
 const PEARL_GATEWAY_MAX_RESPONSE_LINE_BYTES: usize = 160 * 1024;
 const MAX_CHAIN_TARGET_U32_LIMBS: usize = 10;
-const AI_POW_MINE_CANDIDATE_VERSION: u64 = 3;
+const AI_POW_MINE_CANDIDATE_VERSION: u64 = 4;
 const NODE_POKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3663,10 +3663,10 @@ mod tests {
             candidate_with_version(version, bignum_target_slab(&[u64::from(u32::MAX)]), 0xA100);
 
         let err = match derive_pearl_merge_job_inputs(&cfg, &candidate) {
-            Ok(_) => panic!("AI miner must reject non-%3 mine-ai candidates"),
+            Ok(_) => panic!("AI miner must reject non-%4 mine-ai candidates"),
             Err(err) => err,
         };
-        assert!(err.contains("%3"), "unexpected error: {err}");
+        assert!(err.contains("%4"), "unexpected error: {err}");
     }
 
     #[test]

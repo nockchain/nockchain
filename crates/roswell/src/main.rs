@@ -514,7 +514,7 @@ async fn bench_verifier(
     let mut boot_cli = cli.boot.clone();
     boot_cli.new = true;
     boot_cli.ephemeral = true;
-    let mut roswell = Roswell::boot_with_hot_state(boot_cli, &produce_prover_hot_state()).await?;
+    let mut roswell = Roswell::boot_with_hot_state(boot_cli, &produce_full_hot_state()).await?;
 
     let setup_start = Instant::now();
     for version in VERIFIER_BENCH_VERSIONS {

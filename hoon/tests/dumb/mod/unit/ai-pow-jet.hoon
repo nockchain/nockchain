@@ -32,6 +32,7 @@
   ?|  (has-liar-cause %failed-pow-check effs)
       (has-liar-cause %ai-pow-target-outside-minable-domain effs)
       (has-liar-cause %pow-target-check-failed effs)
+      (has-liar-cause %proof-version-invalid effs)
   ==
 ::
 ++  has-liar-cause
@@ -66,7 +67,7 @@
   ++  make-malformed-non-ai-page
   |=  parent=page:t
   ^-  page:t
-  =/  pag=page:t  (make-empty-page:h parent)
+  =/  pag=page:t  (make-empty-page:h-v1 parent)
   =.  pag
     ?^  -.pag
       pag
@@ -74,25 +75,31 @@
   ?^  -.pag
     pag(digest (compute-digest:page:t pag))
   pag(digest (compute-digest:page:t pag))
-::  A legacy proof mold admits %3 even though that tag is reserved for AI. The
-::  retained digest is deliberately stale: hashing this representation crashes.
-++  make-legacy-v3-proof-page
+::  A raw proof stream claiming discriminator %4 is never an AI artifact and
+::  must be rejected before proof-stream hashing.
+++  make-legacy-v4-proof-page
   |=  parent=page:t
   ^-  page:t
   =/  pag=page:t  (prove-page:h-v1 (make-empty-page:h-v1 parent))
   =/  prf=proof
     (need ((soft proof) (need ~(pow get:page:t pag))))
+  =/  raw=*
+    [%4 objects.prf hashes.prf read-index.prf]
   =.  pag
     ?^  -.pag
       pag
-    pag(pow `[%3 objects.prf hashes.prf read-index.prf])
+    pag(pow `raw)
+  =.  pag
+    ?^  -.pag
+      pag(digest (compute-digest:page:t pag))
+    pag(digest (compute-digest:page:t pag))
   pag
 ::
 ::
   ++  make-oversized-ai-page
   |=  parent=page:t
   ^-  page:t
-  =/  pag=page:t  (make-empty-page:h parent)
+  =/  pag=page:t  (make-empty-page:h-v1 parent)
   =/  cert=ai-pow-certificate:t  (sample-ai-pow-cert 4)
   =.  pag
     ?^  -.pag
@@ -111,18 +118,14 @@
   =/  result=?  (ai-pow-verify:mine [%ai-pow 0 0] 0 0)
   (expect-eq !>(%.n) !>(result))
 ::
-::  Integration: a height-1 page carrying a garbage %ai-pow pow travels the live
-::  consensus path. It passes +validate-page-without-txs (version %3 valid at
-::  height >= ai-pow-activation-height=0; target = parent epoch target since
-::  pre-zk-asert; digest via the belt-safe +hashable-digest %ai-pow fix) and
-::  reaches +check-pow, whose %ai-pow branch calls `ai-pow-verify:mine`. The jet
-::  decode-fails -> %.n, so +heard-block emits %liar-block-id %failed-pow-check.
-::  This exercises BOTH the jet firing in-consensus AND the digest fix (without
-::  it, +make-ai-pow-garbage-page crashes building the block).
+::  Integration: a height-1 v1 page carrying a malformed `%ai-pow` artifact
+::  travels the live consensus path. Its discriminator is valid with
+::  ai-pow-activation-height=0, but the envelope fails the structural gate
+::  before the expensive PoW verifier runs.
 ++  test-ai-pow-block-rejected
   ^-  tang
-  =+  [nockchain genesis]=init-nockchain:h
-  =/  block1=page:t  (make-ai-pow-garbage-page:h genesis)
+  =+  [nockchain genesis]=init-nockchain:h-v1
+  =/  block1=page:t  (make-ai-pow-garbage-page:h-v1 genesis)
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block1)
   =/  rejected=?  (cleanly-rejected effs)
@@ -130,34 +133,35 @@
 ::
 ++  test-malformed-non-ai-pow-cleanly-rejected
   ^-  tang
-  =+  [nockchain genesis]=init-nockchain:h
+  =+  [nockchain genesis]=init-nockchain:h-v1
   =/  block1=page:t  (make-malformed-non-ai-page genesis)
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block1)
   =/  rejected=?
     ?|  (has-liar-cause %pow-target-check-failed effs)
         (has-liar-cause %failed-pow-check effs)
+        (has-liar-cause %proof-version-invalid effs)
     ==
   (expect-eq !>(%.y) !>(rejected))
 ::
 ++  test-oversized-ai-pow-artifact-cleanly-rejected
   ^-  tang
-  =+  [nockchain genesis]=init-nockchain:h
+  =+  [nockchain genesis]=init-nockchain:h-v1
   =/  block1=page:t  (make-oversized-ai-page genesis)
   =^  effs=(list effect:h)  nockchain
     (~(heard-block k-by:h nockchain) block1)
   =/  rejected=?  (cleanly-rejected effs)
   (expect-eq !>(%.y) !>(rejected))
 ::
-::  A peer can encode %3 in the legacy proof mold. It must be rejected before
-::  the undefined proof hash can process the untrusted page digest.
-++  test-legacy-v3-proof-cleanly-rejected
+::  A peer can encode %4 in the raw proof-stream shape. It must be rejected
+::  before the proof-stream hash processes the untrusted page digest.
+++  test-legacy-v4-proof-cleanly-rejected
   ^-  tang
   =+  [nockchain genesis]=init-nockchain:h-v1
-  =/  block1=page:t  (make-legacy-v3-proof-page genesis)
+  =/  block1=page:t  (make-legacy-v4-proof-page genesis)
   =/  =cause:h-v1  [%fact %0 %heard-block block1]
   =^  effs=(list effect:h-v1)  nockchain
     (pok-on-wire:h-v1 libp2p-gossip-wire:h-v1 cause nockchain)
-  =/  rejected=?  (has-liar-peer-cause %legacy-v3-proof-artifact effs)
+  =/  rejected=?  (has-liar-peer-cause %legacy-v4-proof-artifact effs)
   (expect-eq !>(%.y) !>(rejected))
 --

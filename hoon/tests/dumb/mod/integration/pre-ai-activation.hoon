@@ -1,13 +1,13 @@
 ::  tests/dumb/mod/integration/pre-ai-activation.hoon
 ::
 ::    Consensus-safety tests for the window BELOW ai-pow-activation-height
-::    (015-logos). The invariant: a node running the dual-puzzle code at any
+::    (016-logos). The invariant: a node running the dual-puzzle code at any
 ::    height h < ai-pow-activation-height must make byte-identical consensus
 ::    decisions to a pre-Logos (014-aletheia) node. Any divergence at an
 ::    activation-gated code path forks upgraded nodes from un-upgraded ones
 ::    before AI-PoW ever goes live. Each arm pins one gate's pre-activation
 ::    branch:
-::      - proof-version:        %ai-pow (v3) blocks are REJECTED below activation
+::      - proof-version:        %ai-pow (v4) blocks are REJECTED below activation
 ::                              (+proof-version-valid-at-height / validation),
 ::      - ZK difficulty regime: the ZK ASERT re-anchor switches EXACTLY at
 ::                              activation, so pre-activation targets use the
@@ -58,44 +58,39 @@
 ::
 |%
 ::
-::  ---- (a) version gate: %ai-pow (v3) rejected below activation ----
-::
-::  +test-pre-ai-proof-version-rejects-v3: the +proof-version-valid-at-height
-::    truth table across the activation boundary (8). A v3 (%ai-pow) proof is
-::    valid ONLY at/after activation; the legacy ZK version is valid at every
-::    height. This is the exact gate an un-upgraded node also enforces (it has
-::    no v3 concept), so upgraded and un-upgraded nodes agree on every
-::    pre-activation block — no fork.
-++  test-pre-ai-proof-version-rejects-v3
+::  ---- (a) version gate: %ai-pow (v4) rejected below activation ----
+:::
+::  +test-pre-ai-proof-version-rejects-v4: the +proof-version-valid-at-height
+::    truth table across the activation boundary (8). A v4 (%ai-pow) artifact
+::    is valid only at and after activation; the height-selected ZK version is
+::    valid at every height. This keeps pre-activation consensus unchanged.
+++  test-pre-ai-proof-version-rejects-v4
   =/  con  (initial-consensus-state-custom:h bc-pre-ai)
   =/  legacy-6
     (~(height-to-proof-version-legacy dcon con der bc-pre-ai) 6)
   =/  legacy-8
     (~(height-to-proof-version-legacy dcon con der bc-pre-ai) 8)
   ;:  weld
-    ::  %3 rejected strictly below activation (heights 6, 7)
-    (expect-eq !>(%.n) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %3 6)))
-    (expect-eq !>(%.n) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %3 7)))
-    ::  %3 accepted at and after activation (heights 8, 9)
-    (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %3 8)))
-    (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %3 9)))
+    ::  %4 rejected strictly below activation (heights 6, 7)
+    (expect-eq !>(%.n) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %4 6)))
+    (expect-eq !>(%.n) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %4 7)))
+    ::  %4 accepted at and after activation (heights 8, 9)
+    (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %4 8)))
+    (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) %4 9)))
     ::  the legacy ZK version stays valid on BOTH sides of the boundary
     (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) legacy-6 6)))
     (expect-eq !>(%.y) !>((~(proof-version-valid-at-height dcon con der bc-pre-ai) legacy-8 8)))
   ==
 ::
-::  +test-pre-ai-v3-block-rejected-by-validation: end-to-end — a structurally
-::    well-formed %ai-pow block at a pre-activation height (7 < 8) is rejected by
-::    +validate-page-without-txs with %proof-version-invalid, BEFORE any
-::    certificate check. This is the reason an un-upgraded node also produces
-::    (unknown version), so the block is orphaned identically on both.
-++  test-pre-ai-v3-block-rejected-by-validation
+::  +test-pre-ai-v4-block-rejected-by-validation: a structurally well-formed
+::    %ai-pow block below activation is rejected before certificate verification.
+++  test-pre-ai-v4-block-rejected-by-validation
   =/  con  (initial-consensus-state-custom:h bc-pre-ai)
   =^  tip=page:t  con  (add-n-pages:h 6 con default-retain:h)
-  =/  v3-page=page:t  (make-ai-pow-garbage-page:h tip)
+  =/  v4-page=page:t  (make-ai-pow-garbage-page:h tip)
   ::  the garbage page sits at height 7 (tip 6 + 1), strictly below activation 8
-  =/  height-ok=?  =(7 ~(height get:page:t v3-page))
-  =/  r  (~(validate-page-without-txs dcon con der bc-pre-ai) v3-page *@)
+  =/  height-ok=?  =(7 ~(height get:page:t v4-page))
+  =/  r  (~(validate-page-without-txs dcon con der bc-pre-ai) v4-page *@)
   =/  reject-term=term  ?:(?=(%.n -.r) p.r %accepted)
   ;:  weld
     (expect-eq !>(%.y) !>(height-ok))

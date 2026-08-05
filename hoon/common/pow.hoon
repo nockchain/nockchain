@@ -3,7 +3,7 @@
 /=  *  /common/zeke
 ~%  %pow-lib  ..ut  ~
 |%
-::  +ai-pow-verify: consensus verifier for a version-%3 (%ai-pow) block's
+::  +ai-pow-verify: consensus verifier for a version-%4 (%ai-pow) block's
 ::  recursive certificate. Branch (b): the Hoon body is a fail-safe `!!`; the
 ::  real implementation is the mandatory `~/ %ai-pow-verify` jet (crate
 ::  `ai-pow-jets`), which canonicalizes the block commitment (`BLAKE3(jam(..))`,

@@ -142,11 +142,9 @@
     genesis-target-atom  max-tip5-atom:tip5
     pow-len              1
   ==
-::  provable variant with AI-PoW active from genesis: lets a low-height page
-::  carry a version-%3 (%ai-pow) pow so `check-pow`'s `%ai-pow` branch (the
-::  mandatory `ai-pow-verify` jet) runs. `ai-pow-activation-height=0` avoids the
-::  activation-boundary ASERT re-anchor, so ordinary provable blocks stay valid;
-::  `proof-version-valid-at-height` then accepts %3 at every height.
+::  Provable variant with AI-PoW active from genesis. The structured %ai-pow
+::  artifact has discriminator %4, so the mandatory verifier jet runs without
+::  changing the height-selected ZK proof version.
 ++  bc-ai-pow-provable
   %*  .  bc-pending-provable
     ai-pow-activation-height  0
@@ -838,7 +836,7 @@
   new-page
 ::
 ::  +make-ai-pow-garbage-page: like +make-empty-page but stamps a GARBAGE
-::  version-%3 (%ai-pow) pow instead of the mock zk proof, so a poked
+::  version-%4 (%ai-pow) artifact instead of the mock ZK proof, so a poked
 ::  %heard-block reaches +check-pow's `%ai-pow` branch (the mandatory
 ::  ++ai-pow-verify jet). `page:t` is `$^(page:v0 page:v1)`, so mutation must
 ::  branch on `?^ -.new-page` (cell head ⇒ v0, atom head ⇒ v1). +new-candidate

@@ -163,6 +163,7 @@
 ++  ai-recursive-certificate  ai-recursive-certificate:v1
 ++  ai-pow-certificate  ai-pow-certificate:v1
 ++  ai-pow-artifact  ai-pow-artifact:v1
+++  ai-pow-artifact-resource-ok  ai-pow-artifact-resource-ok:v1
 ++  pow-artifact  pow-artifact:v1
 ++  reason
   |$  object

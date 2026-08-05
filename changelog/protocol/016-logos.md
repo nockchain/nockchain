@@ -1,20 +1,20 @@
 +++
-version = "0.1.15"
+version = "0.1.16"
 status = "draft"
 consensus_critical = true
 
-# Activation (filled in after coordination)
+# Activation
 activation_height = 114300  # ai-pow-activation-height (mainnet default; fakenet-overridable)
 
 # Dates
 published = "2026-07-17"
-activation_target = "2026-07-31"
+activation_target = ""
 
 # People
 authors = ["Logan Allen (National Compute Co)"]
 reviewers = ["@nockchain-core"]
 
-supersedes = "0.1.14"
+supersedes = "0.1.15"
 superseded_by = ""
 +++
 
@@ -409,7 +409,7 @@ the protocol-fund recipient.
 
 ### Requirements
 
-- Software version: 0.1.15+.
+- Software version: 0.1.16+.
 - All nodes must upgrade before `ai-pow-activation-height = 114,300`.
 - Validating nodes must complete the one-time verifier-setup generation (or ship
   a cache) before the first `%ai-pow` block.
@@ -429,17 +429,17 @@ values are rejected.
 
 ### Data Migration
 
-Kernel state advances to `kernel-state-12`; its `derived-state-11` replaces the
-process-global anchor caches with the branch-local `puzzle-asert-states` map.
-State 11 upgrades only before AI activation (or at genesis), when the lineage is
-empty and deterministic; a post-activation state-11 load fails closed because
-its missing fork lineage cannot be reconstructed. `blockchain-constants` keeps
-the v1 10-slot layout, whose Rust encode/decode round-trip is regression-pinned.
+Kernel state advances to `kernel-state-11`; its `derived-state-11` stores
+branch-local `puzzle-asert-states`. A state-10 load upgrades only before AI
+activation (or at genesis), when that lineage is empty and deterministic; a
+post-activation state-10 load resets consensus state because its missing fork
+lineage cannot be reconstructed. `blockchain-constants` keeps the v1 10-slot
+layout, whose Rust encode/decode round-trip is regression-pinned.
 
 ### Steps
 
 1. Stop the node.
-2. Update to version 0.1.15+ before block 114,300.
+2. Update to version 0.1.16+ before block 114,300.
 3. Restart. On first boot the node generates + caches the AI-PoW verifier setup
    (~15 min, logged) and auto-upgrades kernel state.
 
@@ -457,16 +457,16 @@ outright (unknown block variant / no verify jet), so it forks off.
 
 This is a **consensus-critical** upgrade. After activation:
 
-- Pre-0.1.15 nodes cannot decode or verify `%ai-pow` blocks (unknown block
+- Pre-0.1.16 nodes cannot decode or verify `%ai-pow` blocks (unknown block
   variant; no `%ai-pow-verify` jet) and will reject them.
-- Heaviness diverges: pre-0.1.15 nodes apply the `1/target` work formula to
+- Heaviness diverges: pre-0.1.16 nodes apply the `1/target` work formula to
   post-`dual-puzzle-phase` blocks, so they cannot reproduce the accumulated work
   of any post-activation chain — including one containing only `%pow` blocks.
 - Per-puzzle ASERT changes ZK target computation for candidate height 114,300,
-  using block 114,299 as the new regime's anchor; pre-0.1.15 nodes will not
+  using block 114,299 as the new regime's anchor; pre-0.1.16 nodes will not
   reproduce it.
 - The `blockchain-constants` noun gains the AI-PoW fields, causing decode
-  failures on pre-0.1.15 software.
+  failures on pre-0.1.16 software.
 
 ### Network Partition Risk
 

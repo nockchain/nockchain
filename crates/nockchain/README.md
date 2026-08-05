@@ -37,7 +37,7 @@ Chain safety depends on deterministic Hoon execution, canonical noun serializati
 
 Rust process behavior must be deterministic wherever it feeds consensus. Local concerns such as cache residency, peer selection, scheduling, and metrics may vary only when they cannot affect the accepted chain.
 
-The Logos dual-puzzle implementation and its remaining independent cryptographic-review gate are described in [`../../changelog/protocol/015-logos.md`](../../changelog/protocol/015-logos.md) and the [`ai-pow` audit](../ai-pow/docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md).
+The Logos dual-puzzle implementation and its remaining independent cryptographic-review gate are described in [`../../changelog/protocol/016-logos.md`](../../changelog/protocol/016-logos.md) and the [`ai-pow` audit](../ai-pow/docs/2026-07-17_DUAL_PUZZLE_CONSENSUS_AUDIT.md).
 
 ## Build and run
 
