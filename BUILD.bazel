@@ -29,6 +29,11 @@ alias(
 )
 
 alias(
+    name = "nockchain-mcp",
+    actual = "//crates/nockchain-mcp",
+)
+
+alias(
     name = "hoonc",
     actual = "//crates/hoonc:hoonc_bin",
 )

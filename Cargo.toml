@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hatch", "crates/honc-cold-138", "crates/honk", "crates/honk-tools", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-mining-common", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zk-pow-miner", "crates/zkvm-jetpack"]
+members = ["crates/bridge", "crates/bridge-dev", "crates/equix-latency", "crates/habit", "crates/hatch", "crates/honc-cold-138", "crates/honk", "crates/honk-tools", "crates/hoon", "crates/hoonc", "crates/kernels", "crates/kernels/bridge", "crates/kernels/dumb", "crates/kernels/miner", "crates/kernels/nockchain-peek", "crates/kernels/roswell", "crates/kernels/wallet", "crates/nockapp", "crates/nockapp-grpc", "crates/nockapp-grpc-proto", "crates/nockchain", "crates/nockchain-api", "crates/nockchain-bridge-sequencer", "crates/nockchain-e2e", "crates/nockchain-explorer-tui", "crates/nockchain-libp2p-io", "crates/nockchain-math", "crates/nockchain-mcp", "crates/nockchain-mining-common", "crates/nockchain-peek", "crates/nockchain-testkit", "crates/nockchain-types", "crates/nockchain-wallet", "crates/nockup", "crates/nockvm/rust/ibig", "crates/nockvm/rust/murmur3", "crates/nockvm/rust/nockvm", "crates/nockvm/rust/nockvm_macros", "crates/noun-serde", "crates/noun-serde-derive", "crates/raw-tx-checker", "crates/roswell", "crates/wallet-tx-builder", "crates/zk-pow-miner", "crates/zkvm-jetpack"]
 resolver = "2"
 
 [workspace.package]
@@ -54,6 +54,7 @@ aes = { version = "0.8.3", default-features = false }
 aes-siv = { version = "0.7.0", default-features = false, features = ["alloc"] }
 alloy = "=1.8.2"
 anyhow = "1.0"
+base64 = "0.22.1"
 argon2 = "0.5.3"
 arrayref = "0.3.7"
 askama = "0.12.1"
@@ -71,6 +72,7 @@ bardecoder = "0.5.0"
 bincode = "2.0.0-rc.3"
 bitcoincore-rpc = "0.19.0"
 bitvec = { version = "1.0.1", default-features = true }
+boa_engine = "0.21.1"
 blake3 = { version = "1.5.1", features = ["serde"] }
 bs58 = "0.5.1"
 byteorder = "1.5.0"
@@ -144,6 +146,7 @@ proc-macro2 = "1.0.91"
 proptest = "1.9.0"
 prost = "0.14.1"
 prost-build = "0.14.1"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
 protoc-bin-vendored = "3.2.0"
 prost-types = "0.14.1"
 qrcode = "0.14.1"
@@ -162,12 +165,14 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "blocking",
 ] }
+rmcp = { version = "3.1.1", features = ["transport-io", "transport-streamable-http-server"] }
 rkyv = "0.8.13"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 rustix = { version = "0.38", features = ["fs", "mm"] }
 rustls = "0.23.0"
 rustls-pemfile = "2.0.0"
 rustls-pki-types = "1.13.1"
+schemars = "1.2.1"
 serde = "1.0.217"
 serde_bytes = { version = "0.11.15", features = ["alloc"] }
 serde_cbor = "0.11"
