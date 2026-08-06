@@ -1,0 +1,105 @@
+#!/usr/bin/env rust-script
+//! ```cargo
+//! [dependencies]
+//! serde_json = "1"
+//! ```
+
+use serde_json::{json, Value};
+use std::io::{self, Write};
+
+const PROTOCOL: &str = "nockchain-mcp-rust-v1";
+
+#[derive(Clone, Copy, Debug)]
+pub enum Format {
+    Json,
+    Native,
+}
+
+impl Format {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Native => "native",
+        }
+    }
+}
+
+pub struct Codemode {
+    next_id: u64,
+}
+
+impl Codemode {
+    fn new() -> Self {
+        Self { next_id: 0 }
+    }
+
+    pub fn spec(&mut self) -> Result<Value, String> {
+        self.call("spec", json!({}))
+    }
+
+    pub fn request(
+        &mut self,
+        operation: &str,
+        input: Value,
+        format: Format,
+    ) -> Result<Value, String> {
+        self.call(
+            "request",
+            json!({
+                "operation": operation,
+                "input": input,
+                "format": format.as_str(),
+            }),
+        )
+    }
+
+    pub fn explain(&mut self, operation: &str, input: Value) -> Result<Value, String> {
+        self.call(
+            "explain",
+            json!({
+                "operation": operation,
+                "input": input,
+            }),
+        )
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.next_id += 1;
+        let id = self.next_id;
+        emit(&json!({
+            "protocol": PROTOCOL,
+            "kind": "call",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+
+        let mut line = String::new();
+        io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| format!("read code-mode response: {error}"))?;
+        if line.is_empty() {
+            return Err("code-mode host closed the protocol channel".to_string());
+        }
+        let response: Value = serde_json::from_str(&line)
+            .map_err(|error| format!("decode code-mode response: {error}"))?;
+        if response["id"].as_u64() != Some(id) {
+            return Err("code-mode response id did not match the request".to_string());
+        }
+        if response["ok"].as_bool() == Some(true) {
+            Ok(response["value"].clone())
+        } else {
+            Err(response["error"]
+                .as_str()
+                .unwrap_or("code-mode host rejected the call")
+                .to_string())
+        }
+    }
+}
+
+fn emit(value: &Value) {
+    println!("{}", value);
+    io::stdout()
+        .flush()
+        .expect("flush code-mode protocol frame");
+}

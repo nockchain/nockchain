@@ -22,6 +22,7 @@ This guide lists the Rust crates in the open workspace and briefly explains what
 | `nockchain-explorer-tui` | `open/crates/nockchain-explorer-tui` | Terminal UI for exploring Nockchain state. |
 | `nockchain-libp2p-io` | `open/crates/nockchain-libp2p-io` | libp2p networking IO support for Nockchain. |
 | `nockchain-math` | `open/crates/nockchain-math` | Shared math, numeric, and proof-related helpers. |
+| `nockchain-mcp` | `open/crates/nockchain-mcp` | Read-only code-mode MCP server for public protobuf queries and private JAM peeks over Nockchain gRPC. |
 | `nockchain-peek` | `open/crates/nockchain-peek` | CLI/tooling for peeking Nockchain state. |
 | `nockchain-types` | `open/crates/nockchain-types` | Shared Nockchain domain types, JAM fixtures, and serialization helpers. |
 | `nockchain-wallet` | `open/crates/nockchain-wallet` | Wallet CLI and library support for keys, addresses, notes, and transactions. |
