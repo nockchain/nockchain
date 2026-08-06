@@ -6,8 +6,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, ValueEnum};
 use nockchain_mcp::backend::Backend;
 use nockchain_mcp::catalog::ApiMode;
-use nockchain_mcp::process::run_internal_sandbox;
-use nockchain_mcp::sandbox::{SandboxKind, DEFAULT_MAX_CALLS, DEFAULT_MAX_RESULT_BYTES};
+use nockchain_mcp::sandbox::{DEFAULT_MAX_CALLS, DEFAULT_MAX_RESULT_BYTES};
 use nockchain_mcp::server::{serve_http, serve_stdio, HttpConfig, NockchainMcp, SandboxConfig};
 use tracing_subscriber::EnvFilter;
 
@@ -56,11 +55,15 @@ struct Cli {
     #[arg(long, env = "NOCKCHAIN_MCP_BEARER_TOKEN", hide_env_values = true)]
     bearer_token: Option<String>,
 
-    /// Wall-time limit for each isolated JavaScript execution.
+    /// rust-script executable used to compile and run agent Rust code.
+    #[arg(long, default_value = "rust-script", env = "NOCKCHAIN_MCP_RUST_SCRIPT")]
+    rust_script: PathBuf,
+
+    /// Wall-time limit for each isolated Rust compilation and execution.
     #[arg(long, default_value_t = 30_000)]
     sandbox_timeout_ms: u64,
 
-    /// Address-space limit for each isolated JavaScript process on Linux.
+    /// Address-space limit for each rust-script process tree on Linux.
     #[arg(long, default_value_t = 512)]
     sandbox_memory_mib: u64,
 
@@ -71,10 +74,6 @@ struct Cli {
     /// Maximum JSON bytes returned by one search/execute program.
     #[arg(long, default_value_t = DEFAULT_MAX_RESULT_BYTES)]
     max_result_bytes: usize,
-
-    /// Internal child-process entry point; not part of the user CLI.
-    #[arg(long, value_enum, hide = true)]
-    internal_sandbox_kind: Option<SandboxKind>,
 }
 
 #[tokio::main]
@@ -90,10 +89,6 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|| cli.mode.default_backend().to_string()),
         timeout: Duration::from_millis(cli.grpc_timeout_ms),
     };
-
-    if let Some(kind) = cli.internal_sandbox_kind {
-        return run_internal_sandbox(kind, backend, cli.max_calls, cli.max_result_bytes).await;
-    }
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -115,6 +110,7 @@ async fn main() -> Result<()> {
     }
 
     let sandbox = SandboxConfig {
+        rust_script: cli.rust_script,
         process_timeout: Duration::from_millis(cli.sandbox_timeout_ms),
         memory_limit_mib: cli.sandbox_memory_mib,
         max_calls: cli.max_calls,

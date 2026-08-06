@@ -187,19 +187,23 @@ pub fn catalog(mode: ApiMode) -> Result<Value> {
                 "name": "Hoon epoch absolute seconds",
                 "protobufType": "uint64 encoded as a decimal string in JSON",
                 "unixOffsetSeconds": HOON_UNIX_EPOCH_SECONDS,
-                "toUnixSeconds": "BigInt(timestamp) - 9223372091860848000n",
-                "warning": "This is not a Unix timestamp and exceeds JavaScript Number.MAX_SAFE_INTEGER. Parse it with BigInt and subtract the offset before converting to Number or Date."
+                "toUnixSeconds": "timestamp.parse::<u64>()? - 9_223_372_091_860_848_000u64",
+                "warning": "This is not a Unix timestamp. Protobuf JSON returns it as a decimal string; parse it as u64 and subtract the Hoon-to-Unix offset."
             }
         },
         "operations": operations,
         "executeApi": {
-            "request": "await codemode.request({ operation, input, format?: 'json' | 'native' })",
-            "explain": "codemode.explain({ operation, input })",
+            "language": "rust",
+            "runner": "rust-script",
+            "functionBodyReturnType": "Result<serde_json::Value, String>",
+            "request": "codemode.request(operation, json!(input), Format::Json | Format::Native)?",
+            "explain": "codemode.explain(operation, json!(input))?",
             "notes": [
                 "JSON is de-referenced for agents: scalar wrapper messages are unwrapped and hashes include base58.",
                 "Native public results contain base64 protobuf response bytes; native private peek results contain base64 JAM bytes.",
                 "Only operations in this catalog can be called. Mutation RPCs are absent and rejected.",
-                "Block timestamps use Hoon epoch absolute seconds, not Unix time. In JavaScript use BigInt(timestamp) - 9223372091860848000n before converting to Number or Date."
+                "Do not print to stdout from submitted Rust; stdout carries the private code-mode host protocol.",
+                "Block timestamps use Hoon epoch absolute seconds, not Unix time. In Rust parse the JSON string as u64 and subtract 9_223_372_091_860_848_000u64."
             ]
         }
     }))
@@ -342,11 +346,12 @@ mod tests {
         );
         assert_eq!(
             public["timeEncoding"]["blockTimestamp"]["toUnixSeconds"],
-            "BigInt(timestamp) - 9223372091860848000n"
+            "timestamp.parse::<u64>()? - 9_223_372_091_860_848_000u64"
         );
         assert!(public["timeEncoding"]["blockTimestamp"]["warning"]
             .as_str()
-            .is_some_and(|warning| warning.contains("Number.MAX_SAFE_INTEGER")));
+            .is_some_and(|warning| warning.contains("parse it as u64")));
+        assert_eq!(public["executeApi"]["language"], "rust");
 
         let private = catalog(ApiMode::Private).expect("private catalog");
         assert_eq!(private["operations"].as_array().map(Vec::len), Some(1));

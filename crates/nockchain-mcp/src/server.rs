@@ -25,6 +25,7 @@ use crate::sandbox::{SandboxKind, DEFAULT_MAX_CALLS, DEFAULT_MAX_RESULT_BYTES};
 
 #[derive(Clone, Debug)]
 pub struct SandboxConfig {
+    pub rust_script: PathBuf,
     pub process_timeout: Duration,
     pub memory_limit_mib: u64,
     pub max_calls: usize,
@@ -34,6 +35,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
+            rust_script: PathBuf::from("rust-script"),
             process_timeout: Duration::from_secs(30),
             memory_limit_mib: 512,
             max_calls: DEFAULT_MAX_CALLS,
@@ -45,7 +47,7 @@ impl Default for SandboxConfig {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CodeInput {
     #[schemars(
-        description = "A JavaScript async arrow function. The function must return JSON-serializable data."
+        description = "A Rust function body evaluated by rust-script. It receives `codemode: &mut Codemode`, has `serde_json::{json, Value}` and `Format` in scope, and must end with `Result<Value, String>`. Do not print to stdout; it carries the host protocol."
     )]
     pub code: String,
 }
@@ -68,8 +70,9 @@ impl NockchainMcp {
 
     async fn run(&self, kind: SandboxKind, code: String) -> Result<CallToolResult, String> {
         run_isolated(
-            kind, &self.backend, code, self.sandbox.max_calls, self.sandbox.max_result_bytes,
-            self.sandbox.process_timeout, self.sandbox.memory_limit_mib,
+            kind, &self.backend, code, &self.sandbox.rust_script, self.sandbox.max_calls,
+            self.sandbox.max_result_bytes, self.sandbox.process_timeout,
+            self.sandbox.memory_limit_mib,
         )
         .await
         .map(CallToolResult::structured)
@@ -79,10 +82,9 @@ impl NockchainMcp {
 
 #[tool_router]
 impl NockchainMcp {
-    /// Run JavaScript against the in-memory, fully de-referenced Nockchain query catalog.
-    /// Use `codemode.spec()` to get `{ mode, operations }`, then filter/map it and return only
-    /// relevant operation definitions. No network, filesystem, timers, imports, or query calls
-    /// are available in this sandbox.
+    /// Run a Rust function body against the fully de-referenced Nockchain query catalog.
+    /// `codemode.spec()?` returns a `serde_json::Value`; filter/map it in Rust and end with
+    /// `Ok(json!(result))`. Search cannot make backend calls. Do not print to stdout.
     #[tool(annotations(title = "Search Nockchain query API", read_only_hint = true))]
     async fn search(
         &self,
@@ -91,13 +93,12 @@ impl NockchainMcp {
         self.run(SandboxKind::Search, input.code).await
     }
 
-    /// Run JavaScript that composes read-only Nockchain queries. Available functions are
-    /// `codemode.request({ operation, input, format: 'json'|'native' })`,
-    /// `codemode.explain({ operation, input })`, and `codemode.spec()`. Use JSON for direct
-    /// evaluation or native for base64 protobuf/JAM bytes. Mutation RPCs do not exist in the
-    /// catalog and are rejected by the host boundary. Block timestamps are Hoon-epoch absolute
-    /// seconds, not Unix timestamps, and exceed JavaScript's safe integer range. Convert with
-    /// `BigInt(timestamp) - 9223372091860848000n` before constructing a `Date`.
+    /// Run a Rust function body that composes read-only Nockchain queries. Use
+    /// `codemode.request(operation, json!(input), Format::Json|Format::Native)?`,
+    /// `codemode.explain(operation, json!(input))?`, and `codemode.spec()?`; end with a
+    /// `Result<Value, String>`. Mutations are absent and rejected by the Rust host. Block
+    /// timestamps are Hoon-epoch absolute seconds, not Unix timestamps. Convert with
+    /// `timestamp.parse::<u64>()? - 9_223_372_091_860_848_000u64`. Do not print to stdout.
     #[tool(annotations(title = "Execute Nockchain queries", read_only_hint = true))]
     async fn execute(
         &self,
@@ -113,7 +114,7 @@ impl ServerHandler for NockchainMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("nockchain-mcp", env!("CARGO_PKG_VERSION")))
             .with_instructions(format!(
-                "Read-only code-mode access to the Nockchain {:?} gRPC API. Start with search, then use execute. Only search and execute are exposed; all backend operations are allowlisted queries. Block timestamps are Hoon-epoch absolute seconds, not Unix timestamps, and exceed JavaScript's safe integer range. Convert to Unix seconds with BigInt(timestamp) - 9223372091860848000n before converting to Number or Date.",
+                "Read-only Rust code-mode access to the Nockchain {:?} gRPC API. Submit Rust function bodies that return Result<serde_json::Value, String>; rust-script provides json!, Value, Format, and codemode. Start with search, then use execute. Only search and execute are exposed; all backend operations are allowlisted queries. Block timestamps are Hoon-epoch absolute seconds, not Unix timestamps. Convert to Unix seconds by parsing the string as u64 and subtracting 9_223_372_091_860_848_000u64.",
                 self.backend.mode
             ))
     }
@@ -254,7 +255,7 @@ mod tests {
         assert!(execute
             .description
             .as_deref()
-            .is_some_and(|description| description.contains("9223372091860848000")));
+            .is_some_and(|description| description.contains("9_223_372_091_860_848_000")));
         assert!(tools.iter().all(|tool| {
             tool.annotations
                 .as_ref()
@@ -264,6 +265,7 @@ mod tests {
 
         let instructions = server.get_info().instructions.expect("server instructions");
         assert!(instructions.contains("Hoon-epoch"));
-        assert!(instructions.contains("9223372091860848000"));
+        assert!(instructions.contains("9_223_372_091_860_848_000"));
+        assert!(instructions.contains("Rust code-mode"));
     }
 }

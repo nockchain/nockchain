@@ -1,21 +1,20 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::path::Path;
+use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context as _, Result};
-use boa_engine::builtins::promise::PromiseState;
-use boa_engine::property::Attribute;
-use boa_engine::{
-    js_string, Context, JsArgs, JsNativeError, JsResult, JsValue, NativeFunction, Source,
-};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::backend::Backend;
 use crate::catalog::{catalog, OutputFormat};
+use crate::process::{rust_script_command, terminate_process_group};
 
 pub const DEFAULT_MAX_CODE_BYTES: usize = 32 * 1024;
 pub const DEFAULT_MAX_RESULT_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_MAX_CALLS: usize = 32;
+const PROTOCOL: &str = "nockchain-mcp-rust-v1";
+const RUST_RUNTIME: &str = include_str!("rust_runtime.rs.template");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum SandboxKind {
@@ -41,16 +40,36 @@ struct ExplainOptions {
     input: Value,
 }
 
+#[derive(Debug, Deserialize)]
+struct ScriptFrame {
+    protocol: String,
+    kind: String,
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Value,
+    #[serde(default)]
+    value: Value,
+    #[serde(default)]
+    error: Option<String>,
+}
+
 fn empty_object() -> Value {
     json!({})
 }
 
-pub fn run_code(
+#[allow(clippy::too_many_arguments)]
+pub async fn run_code(
     kind: SandboxKind,
     backend: Backend,
     code: &str,
+    rust_script: &Path,
     max_calls: usize,
     max_result_bytes: usize,
+    process_timeout: Duration,
+    memory_limit_mib: u64,
 ) -> Result<Value> {
     if code.len() > DEFAULT_MAX_CODE_BYTES {
         bail!(
@@ -59,172 +78,226 @@ pub fn run_code(
             DEFAULT_MAX_CODE_BYTES
         );
     }
-    let spec = catalog(backend.mode)?;
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut context = Context::default();
-    context
-        .runtime_limits_mut()
-        .set_loop_iteration_limit(250_000);
-    context.runtime_limits_mut().set_recursion_limit(256);
-    context
-        .runtime_limits_mut()
-        .set_stack_size_limit(512 * 1024);
 
-    let js_spec = boa_result(
-        JsValue::from_json(&spec, &mut context),
-        "convert the query catalog to JavaScript",
-    )?;
-    boa_result(
-        context.register_global_property(
-            js_string!("__nockchain_spec"),
-            js_spec,
-            Attribute::READONLY,
-        ),
-        "register the query catalog",
-    )?;
+    let directory = tempfile::Builder::new()
+        .prefix("nockchain-mcp-rust-")
+        .tempdir()
+        .context("create Rust code-mode temporary directory")?;
+    let source_path = directory.path().join("query.rs");
+    std::fs::write(&source_path, render_script(code))
+        .context("write generated rust-script source")?;
+    let stderr_path = directory.path().join("stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_path).context("create rust-script stderr")?;
 
-    if kind == SandboxKind::Execute {
-        register_request(&mut context, backend.clone(), Arc::clone(&calls), max_calls)?;
-        register_explain(&mut context, backend)?;
-        boa_result(
-            context.eval(Source::from_bytes(
-                br#"
-                globalThis.codemode = Object.freeze({
-                    spec: () => JSON.parse(JSON.stringify(__nockchain_spec)),
-                    request: async (options) => __nockchain_request(options),
-                    explain: (options) => __nockchain_explain(options),
-                });
-            "#,
-            )),
-            "initialize the execute sandbox",
-        )?;
-    } else {
-        boa_result(
-            context.eval(Source::from_bytes(
-                br#"
-                globalThis.codemode = Object.freeze({
-                    spec: () => JSON.parse(JSON.stringify(__nockchain_spec)),
-                });
-            "#,
-            )),
-            "initialize the search sandbox",
-        )?;
-    }
+    let mut command = rust_script_command(rust_script, memory_limit_mib, process_timeout)?;
+    command
+        .arg("--debug")
+        .arg(&source_path)
+        .current_dir(directory.path())
+        .stderr(stderr_file);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("start Rust code-mode runner {}", rust_script.display()))?;
+    let stdin = child.stdin.take().context("open rust-script stdin")?;
+    let stdout = child.stdout.take().context("open rust-script stdout")?;
 
-    let script = format!("const __nockchain_result = ({code})(); __nockchain_result;");
-    let value = context
-        .eval(Source::from_bytes(script.as_bytes()))
-        .map_err(|error| anyhow!("JavaScript evaluation failed: {error}"))?;
-    context
-        .run_jobs()
-        .map_err(|error| anyhow!("JavaScript job failed: {error}"))?;
-    let value = settle(value, &mut context)?;
-    let result = boa_result(
-        value.to_json(&mut context),
-        "convert the JavaScript result to JSON",
-    )?
-    .unwrap_or(Value::Null);
-    let result_size = serde_json::to_vec(&result)?.len();
-    if result_size > max_result_bytes {
-        bail!(
-            "JavaScript result is {result_size} bytes; maximum is {max_result_bytes} bytes. Filter or project the result in code."
-        );
-    }
-    Ok(result)
-}
-
-fn register_request(
-    context: &mut Context,
-    backend: Backend,
-    calls: Arc<AtomicUsize>,
-    max_calls: usize,
-) -> Result<()> {
-    // SAFETY: the closure captures only Rust-owned Backend/Arc values and no Boa GC-managed
-    // values. Neither capture can contain or outlive a JavaScript heap reference.
-    let function = unsafe {
-        NativeFunction::from_closure(move |_this, args, context| {
-            let call_number = calls.fetch_add(1, Ordering::Relaxed) + 1;
-            if call_number > max_calls {
-                return Err(js_error(format!(
-                    "code exceeded the maximum of {max_calls} backend calls"
-                )));
-            }
-            let input = args
-                .get_or_undefined(0)
-                .to_json(context)?
-                .context("codemode.request options are undefined")
-                .map_err(|error| js_error(error.to_string()))?;
-            let options: RequestOptions = serde_json::from_value(input)
-                .map_err(|error| js_error(format!("invalid codemode.request options: {error}")))?;
-            let result = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(backend.request(&options.operation, options.input, options.format))
-            })
-            .map_err(|error| js_error(format!("{error:#}")))?;
-            JsValue::from_json(&result, context)
-        })
-    };
-    boa_result(
-        context.register_global_callable(js_string!("__nockchain_request"), 1, function),
-        "register codemode.request",
-    )?;
-    Ok(())
-}
-
-fn register_explain(context: &mut Context, backend: Backend) -> Result<()> {
-    // SAFETY: Backend is ordinary Rust-owned data and contains no Boa GC-managed references.
-    let function = unsafe {
-        NativeFunction::from_closure(move |_this, args, context| {
-            let input = args
-                .get_or_undefined(0)
-                .to_json(context)?
-                .context("codemode.explain options are undefined")
-                .map_err(|error| js_error(error.to_string()))?;
-            let options: ExplainOptions = serde_json::from_value(input)
-                .map_err(|error| js_error(format!("invalid codemode.explain options: {error}")))?;
-            let result = backend
-                .explain(&options.operation, options.input)
-                .map_err(|error| js_error(error.to_string()))?;
-            JsValue::from_json(&result, context)
-        })
-    };
-    boa_result(
-        context.register_global_callable(js_string!("__nockchain_explain"), 1, function),
-        "register codemode.explain",
-    )?;
-    Ok(())
-}
-
-fn settle(value: JsValue, context: &mut Context) -> Result<JsValue> {
-    let Some(promise) = value.as_promise() else {
-        return Ok(value);
-    };
-    match promise.state() {
-        PromiseState::Fulfilled(value) => Ok(value),
-        PromiseState::Rejected(reason) => {
-            let message = reason
-                .to_string(context)
-                .map(|message| message.to_std_string_escaped())
-                .unwrap_or_else(|_| "unknown rejection".to_string());
-            bail!("JavaScript promise rejected: {message}")
+    let lifecycle = drive_script(
+        &mut child,
+        BufReader::new(stdout),
+        stdin,
+        kind,
+        backend,
+        max_calls,
+        max_result_bytes,
+    );
+    let outcome = tokio::time::timeout(process_timeout, lifecycle).await;
+    let result = match outcome {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            terminate_process_group(&mut child).await;
+            Err(error)
         }
-        PromiseState::Pending => bail!(
-            "JavaScript promise remained pending; timers, fetch, imports, and external async APIs are unavailable"
-        ),
+        Err(_) => {
+            terminate_process_group(&mut child).await;
+            bail!("Rust code-mode execution exceeded the {process_timeout:?} wall-time limit")
+        }
+    };
+
+    let stderr = read_stderr(&stderr_path);
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if stderr.is_empty() => Err(error),
+        Err(error) => Err(error.context(format!("rust-script stderr:\n{stderr}"))),
     }
 }
 
-fn js_error(message: String) -> boa_engine::JsError {
-    JsNativeError::error().with_message(message).into()
+#[allow(clippy::too_many_arguments)]
+async fn drive_script(
+    child: &mut tokio::process::Child,
+    mut stdout: BufReader<tokio::process::ChildStdout>,
+    mut stdin: tokio::process::ChildStdin,
+    kind: SandboxKind,
+    backend: Backend,
+    max_calls: usize,
+    max_result_bytes: usize,
+) -> Result<Value> {
+    let mut calls = 0_usize;
+    let mut result = None;
+    while let Some(line) = read_protocol_line(&mut stdout, max_result_bytes + 64 * 1024).await? {
+        let frame: ScriptFrame = serde_json::from_slice(&line)
+            .context("Rust code wrote non-protocol data to stdout; return a JSON value and do not print to stdout")?;
+        if frame.protocol != PROTOCOL {
+            bail!("Rust code emitted an unsupported protocol frame")
+        }
+        match frame.kind.as_str() {
+            "call" => {
+                let id = frame.id.context("Rust code-mode call is missing an id")?;
+                let method = frame
+                    .method
+                    .as_deref()
+                    .context("Rust code-mode call is missing a method")?;
+                let response =
+                    match handle_call(kind, &backend, &mut calls, max_calls, method, frame.params)
+                        .await
+                    {
+                        Ok(value) => json!({"id": id, "ok": true, "value": value}),
+                        Err(error) => json!({"id": id, "ok": false, "error": format!("{error:#}")}),
+                    };
+                let mut encoded = serde_json::to_vec(&response)?;
+                if encoded.len() > max_result_bytes + 64 * 1024 {
+                    bail!("Rust code-mode broker response exceeded its configured limit")
+                }
+                encoded.push(b'\n');
+                stdin.write_all(&encoded).await?;
+                stdin.flush().await?;
+            }
+            "result" => {
+                if result.is_some() {
+                    bail!("Rust code emitted more than one result")
+                }
+                let encoded = serde_json::to_vec(&frame.value)?;
+                if encoded.len() > max_result_bytes {
+                    bail!(
+                        "Rust result is {} bytes; maximum is {} bytes. Filter or project the result in code.",
+                        encoded.len(),
+                        max_result_bytes
+                    )
+                }
+                result = Some(frame.value);
+            }
+            "error" => bail!(
+                "Rust code returned an error: {}",
+                frame.error.as_deref().unwrap_or("unspecified error")
+            ),
+            other => bail!("Rust code emitted unknown protocol frame kind {other:?}"),
+        }
+    }
+    drop(stdin);
+    let status = child.wait().await.context("wait for rust-script")?;
+    if !status.success() {
+        bail!("rust-script failed with {status}")
+    }
+    result.context("Rust code exited without returning a result")
 }
 
-fn boa_result<T>(result: JsResult<T>, action: &str) -> Result<T> {
-    result.map_err(|error| anyhow!("{action}: {error}"))
+async fn handle_call(
+    kind: SandboxKind,
+    backend: &Backend,
+    calls: &mut usize,
+    max_calls: usize,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    match method {
+        "spec" => catalog(backend.mode),
+        "request" if kind == SandboxKind::Search => {
+            bail!("search Rust code can only call codemode.spec()")
+        }
+        "explain" if kind == SandboxKind::Search => {
+            bail!("search Rust code can only call codemode.spec()")
+        }
+        "request" => {
+            *calls += 1;
+            if *calls > max_calls {
+                bail!("code exceeded the maximum of {max_calls} backend calls")
+            }
+            let options: RequestOptions = serde_json::from_value(params)
+                .context("invalid codemode.request arguments from Rust code")?;
+            backend
+                .request(&options.operation, options.input, options.format)
+                .await
+        }
+        "explain" => {
+            let options: ExplainOptions = serde_json::from_value(params)
+                .context("invalid codemode.explain arguments from Rust code")?;
+            backend.explain(&options.operation, options.input)
+        }
+        other => bail!("unknown Rust code-mode method {other:?}"),
+    }
+}
+
+async fn read_protocol_line(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    limit: usize,
+) -> Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(line))
+            };
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if line.len().saturating_add(consumed) > limit {
+            bail!("Rust code-mode stdout frame exceeded its configured limit")
+        }
+        line.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            return Ok(Some(line));
+        }
+    }
+}
+
+fn render_script(code: &str) -> String {
+    let mut source = String::with_capacity(RUST_RUNTIME.len() + code.len() + 256);
+    source.push_str(RUST_RUNTIME);
+    source.push_str("\nfn user_code(codemode: &mut Codemode) -> Result<Value, String> {\n");
+    source.push_str(code);
+    source.push_str("\n}\n\n");
+    source.push_str(
+        r#"fn main() {
+    let mut codemode = Codemode::new();
+    let frame = match user_code(&mut codemode) {
+        Ok(value) => json!({"protocol": PROTOCOL, "kind": "result", "value": value}),
+        Err(error) => json!({"protocol": PROTOCOL, "kind": "error", "error": error}),
+    };
+    emit(&frame);
+}
+"#,
+    );
+    source
+}
+
+fn read_stderr(path: &Path) -> String {
+    const LIMIT: usize = 64 * 1024;
+    let Ok(bytes) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = bytes.len().saturating_sub(LIMIT);
+    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::path::PathBuf;
 
     use super::*;
     use crate::catalog::ApiMode;
@@ -238,60 +311,76 @@ mod tests {
     }
 
     #[test]
-    fn search_filters_the_in_memory_catalog() {
-        let result = run_code(
-            SandboxKind::Search,
-            backend(ApiMode::Public),
-            "async () => codemode.spec().operations.filter(op => op.name.includes('block')).map(op => op.name)",
-            DEFAULT_MAX_CALLS,
-            DEFAULT_MAX_RESULT_BYTES,
-        )
-        .expect("search code");
-        assert_eq!(
-            result,
-            json!(["get_blocks", "get_block_details", "get_transaction_block"])
-        );
+    fn generated_program_is_rust() {
+        let source = render_script("Ok(json!({\"answer\": 42}))");
+        assert!(source.contains("fn user_code(codemode: &mut Codemode)"));
+        assert!(source.contains("serde_json"));
+        assert!(source.contains("rust-script"));
     }
 
-    #[test]
-    fn execute_explains_without_contacting_a_node() {
-        let result = run_code(
+    #[tokio::test]
+    async fn broker_explains_without_contacting_a_node() {
+        let mut calls = 0;
+        let result = handle_call(
             SandboxKind::Execute,
-            backend(ApiMode::Public),
-            "async () => codemode.explain({ operation: 'get_blocks', input: { page: { clientPageItemsLimit: 1 } } })",
+            &backend(ApiMode::Public),
+            &mut calls,
             DEFAULT_MAX_CALLS,
-            DEFAULT_MAX_RESULT_BYTES,
+            "explain",
+            json!({"operation": "get_blocks", "input": {"page": {"clientPageItemsLimit": 1}}}),
         )
-        .expect("execute explain code");
+        .await
+        .expect("explain");
         assert_eq!(
             result["grpc"]["fullMethod"],
             "/nockchain.public.v2.NockchainBlockService/GetBlocks"
         );
     }
 
-    #[test]
-    fn execute_cannot_explain_mutations() {
-        let error = run_code(
+    #[tokio::test]
+    async fn broker_rejects_mutations() {
+        let mut calls = 0;
+        let error = handle_call(
             SandboxKind::Execute,
-            backend(ApiMode::Public),
-            "async () => codemode.explain({ operation: 'wallet_send_transaction', input: {} })",
+            &backend(ApiMode::Public),
+            &mut calls,
             DEFAULT_MAX_CALLS,
-            DEFAULT_MAX_RESULT_BYTES,
+            "explain",
+            json!({"operation": "wallet_send_transaction", "input": {}}),
         )
+        .await
         .expect_err("mutation must fail");
         assert!(error.to_string().contains("unknown or unavailable"));
     }
 
-    #[test]
-    fn loops_are_limited() {
-        let error = run_code(
+    #[tokio::test]
+    #[ignore = "requires the rust-script executable"]
+    async fn rust_script_executes_agent_code() {
+        let result = run_code(
             SandboxKind::Search,
             backend(ApiMode::Public),
-            "() => { while (true) {} }",
+            r#"
+let spec = codemode.spec()?;
+let names = spec["operations"]
+    .as_array()
+    .ok_or_else(|| "operations is not an array".to_string())?
+    .iter()
+    .filter_map(|operation| operation["name"].as_str())
+    .filter(|name| name.contains("block"))
+    .collect::<Vec<_>>();
+Ok(json!(names))
+"#,
+            &PathBuf::from("rust-script"),
             DEFAULT_MAX_CALLS,
             DEFAULT_MAX_RESULT_BYTES,
+            Duration::from_secs(30),
+            512,
         )
-        .expect_err("infinite loop must fail");
-        assert!(error.to_string().contains("loop iteration"));
+        .await
+        .expect("run Rust code");
+        assert_eq!(
+            result,
+            json!(["get_blocks", "get_block_details", "get_transaction_block"])
+        );
     }
 }

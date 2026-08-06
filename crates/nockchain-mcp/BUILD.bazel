@@ -18,6 +18,7 @@ rust_library(
         exclude = ["src/main.rs"],
     ),
     aliases = aliases(),
+    compile_data = ["src/rust_runtime.rs.template"],
     crate_name = "nockchain_mcp",
     edition = "2021",
     deps = [
