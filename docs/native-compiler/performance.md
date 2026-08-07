@@ -23,4 +23,4 @@ In particular:
 
 ## Useful workload
 
-`open/crates/hoonc/hoon/hoon-138.hoon` arbitrary compilation is a good open stress case because it exercises parser source spots, compiler type operations, and large emitted artifacts in a single parity target.
+`crates/hoonc/hoon/hoon-138.hoon` arbitrary compilation is a useful stress case because it exercises parser source spots, compiler type operations, and large emitted artifacts in a single parity target.

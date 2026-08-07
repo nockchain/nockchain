@@ -1,0 +1,31 @@
+[honk] start loading canonical honc cold state
+[honk] done loading canonical honc cold state 0.472s
+[honk] start loading canonical honc musk cold state
+[honk] done loading canonical honc musk cold state 0.548s
+[honk] start seeding shared honc type
+[honk] done seeding shared honc type 0.000s
+[honk] start minting shared honc formula
+[honk] mint_honc_formula path: prelude root = other | debug = TisSig([TisGal(Wing([Term("ride")]), TisGar(Rock("ud", ParsedAtom(Small(138))), TisGar(SigCen(StdKel("k", Small(138)), Bust(Null), [], BarCen(None, {"$": (None, {"hoon-version": CenTis([Axis(3)], [])}
+[honk] chunked prelude: 7 layers + ride; layer variants = [other, other, other, other, other, other, other]
+[honk] chunked prelude: minted layer 1/8
+[honk] chunked prelude: minted layer 2/8
+[honk] chunked prelude: minted layer 3/8
+[honk] chunked prelude: minted layer 4/8
+[honk] chunked prelude: minted layer 5/8
+[honk] chunked prelude: minted layer 6/8
+[honk] chunked prelude: minted layer 7/8
+[honk] chunked prelude: minted layer 8/8
+[honk] done minting shared honc formula 20.493s
+[honk] start cueing canonical hoonc octs type
+[honk] done cueing canonical hoonc octs type 0.058s
+[honk] start constructing native hoonc wrapper traps
+[honk] done constructing native hoonc wrapper traps 0.000s
+[honk] compiling hoon/common/hoon.hoon
+[honk] start resolving imports hoon/common/hoon.hoon
+[honk] done resolving imports hoon/common/hoon.hoon 0.000s
+[honk] start assembling subject type hoon/common/hoon.hoon
+[honk] done assembling subject type hoon/common/hoon.hoon 0.000s
+[honk] start parsing leaf hoon/common/hoon.hoon
+[honk] done parsing leaf hoon/common/hoon.hoon 0.098s
+[honk] start swetting hoon/common/hoon.hoon
+[honk] done swetting hoon/common/hoon.hoon 35.749s

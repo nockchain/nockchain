@@ -1,16 +1,27 @@
 # Phase 0 Decision: Chunked Prelude Mint (RT-18)
 
-**Status:** DECISION REQUIRED  
+**Status:** RESOLVED — productized for native-parity mode
 **Author:** Code Analysis  
 **Date:** 2026-06-16  
+**Resolved:** 2026-08-06
 **Scope:** honk native compiler, canonical hoon-138 prelude compilation  
-**Decision Options:** DELETE / QUARANTINE / PRODUCTIZE
+**Decision:** PRODUCTIZE for `HONK_NATIVE_PARITY=1`; retain monolithic escape hatch
 
 ---
 
 ## Executive Summary
 
-The chunked prelude mint path (`mint_honc_prelude_chunked` in `honk.rs:2534-2601`) is **currently active and in production use**, not obsolete. It is **unconditionally routed** for canonical prelude compilation when the top-level syntax is `=<` (TisGal). However, it has a critical limitation: **it is not byte-exact under `dbug=true`** due to loss of `Dbug`/`Note` location metadata during transparent-node peeling, making it unsuitable for Phase-3 parity evidence. This document establishes what the chunked path does, validates that it is actively used, and recommends a path forward.
+The chunked prelude mint is now the bounded implementation used when
+`HONK_NATIVE_PARITY=1` asks Honk to rebuild hoon-138 instead of substituting the
+embedded prelude. That route intentionally parses the prelude with `dbug=false`
+and passes the strict whole-artifact comparison in `just honk-138-parity`.
+`NATIVE_HOON_NO_CHUNK=1` retains the monolithic diagnostic path. Chunking must
+not be reused with prelude debugging spots enabled until the peeled outer
+`Dbug`/`Note` wrappers are preserved.
+
+The remainder of this document is the historical Phase-0 decision analysis.
+Its quarantine proposal explains the risk that informed the final routing, but
+it is not a current implementation instruction.
 
 ---
 

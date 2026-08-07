@@ -2032,6 +2032,7 @@ impl<'a> NativeBuildContext<'a> {
         self.mint_with_sut(sut, expr, vet)
     }
 
+    #[allow(clippy::result_large_err)]
     fn mint_with_sut(&mut self, sut: Noun, expr: &Hoon, vet: bool) -> Result<(Noun, Noun)> {
         let gol = ty_noun(&mut *self.ut.slab);
         let ut = &mut self.ut;
@@ -2645,10 +2646,12 @@ fn seed_honc_type_with_ut(
 /// `chunked_tisgar_chain_matches_monolithic_mint`).
 /// Peel transparent wrappers the parser adds around the prelude (a single-
 /// element `=~`/TisSig, and `Dbug`/`Note` spot/hint wrappers) to reach the
-/// underlying compose node. NOTE: this is for NAVIGATION only — minting the
-/// peeled layers loses the outer `Dbug` location stack, so chunked output is
-/// NOT byte-exact under dbug=true yet (spot preservation is follow-on work);
-/// it is correct for measuring the memory trajectory and for dbug=false.
+/// underlying compose node. This is for NAVIGATION only: peeling would lose an
+/// outer `Dbug` location stack if the prelude were parsed with debugging spots.
+/// The native-parity route intentionally parses the prelude with `dbug=false`
+/// (see `prelude_dbug`), and the strict hoon-138 gate proves that configuration
+/// byte-exact against hoonc. A future caller that enables prelude dbug must
+/// preserve the peeled wrappers before treating chunked output as byte-exact.
 fn peel_transparent(mut hoon: &Hoon) -> &Hoon {
     loop {
         hoon = match hoon {

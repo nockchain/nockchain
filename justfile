@@ -139,10 +139,9 @@ honk-parity:
 
 # Arbitrary-build parity for the hoon-138 prelude: honk's NATIVE mint
 # (HONK_NATIVE_PARITY=1, no embedded prelude) vs hoonc's arbitrary build,
-# byte-compared. NOTE: honk's native mint of the full prelude currently
-# exhausts memory before completing (~4GB/min, no plateau), so this reports the
-# blowup under an RSS guard; it becomes a real parity gate once native mint
-# memory is bounded. Build honk + hoonc first (`just build`).
+# byte-compared. The native self-mint completes with bounded memory; an RSS
+# guard remains in place as a regression ceiling. Build honk + hoonc first
+# (`just build`).
 honk-138-parity:
     crates/honk/test-assets/honk_138_native_parity.sh
 

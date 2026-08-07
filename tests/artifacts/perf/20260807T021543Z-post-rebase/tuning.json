@@ -1,0 +1,7 @@
+{
+  "global_tuning_applied": false,
+  "reason": "No global macOS settings were changed; measurements use the user's normal host configuration.",
+  "power_mode": "unmodified",
+  "cpu_pinning": null,
+  "cache_state": "warm"
+}

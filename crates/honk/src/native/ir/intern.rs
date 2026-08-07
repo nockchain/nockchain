@@ -1,21 +1,11 @@
-//! Hash-cons intern table for [`super::ty::Type`] (plan §3.3) — the keystone of
-//! the memory win.
+//! Hash-cons table for [`super::ty::Type`].
 //!
-//! Returns the canonical `Rc<Type>` for a structurally-equal type, so equal
-//! subtrees — including pointer-distinct ones produced by minting — collapse to
-//! ONE shared `Rc`. This is what fixes subject-deepening: the repeated embedded
-//! subjects become a single shared node instead of O(N²) duplicated structure.
-//!
-//! Interning is BOTTOM-UP: children are interned first, so a node's hash/eq use
-//! the children's canonical `Rc` IDENTITY (`Rc::ptr_eq`) plus its own leaf
-//! content — O(1) per node (no deep recursion in the compare), O(total) overall.
-//! Fork members are canonical child pointers too; their exact Hoon treap remains
-//! separately attached as the serialization witness and fork-node key.
-//!
-//! NOTE: this operates on the Phase-1 boundary `Type` (native skeleton + carried
-//! leaves). It already dedups the native skeleton — crucially the recursive
-//! payload/cell/inner/subject/fork chains where subject-deepening lives. Later
-//! phases nativize the remaining coil/gene leaves; the table is unchanged.
+//! A [`TypeTable`] owns boxed slots for one compiler context. Equal nodes map to
+//! one dense [`super::ty::TypeId`] and one stable [`super::ty::TypeRef`], so the
+//! repeated subjects produced while minting share their representation. Nodes
+//! are interned bottom-up; child IDs make shallow hashing and exact comparison
+//! constant-time with respect to descendant depth. Exact Hoon nouns retained by
+//! leaves and forks remain the serialization witnesses at noun boundaries.
 #![allow(dead_code)]
 
 use std::collections::hash_map::DefaultHasher;
@@ -199,9 +189,10 @@ impl LiveIntern {
 /// each compile an isolated cache universe (replacing the old per-compile
 /// `live_reset`).
 ///
-/// `new`/`reset` start every field empty (and `live` is eagerly constructed,
-/// replacing the former thread-local's lazy `Option<LiveIntern>` +
-/// `get_or_insert_with`).
+/// `new` starts every field empty (and `live` is eagerly constructed, replacing
+/// the former thread-local's lazy `Option<LiveIntern>` + `get_or_insert_with`).
+/// Dropping the owning `Ut` drops this context and every handle together; the
+/// arena is deliberately not reset while `TypeRef` handles may be live.
 pub struct Context {
     // --- LIVE (hash-cons core): was `static LIVE: RefCell<Option<LiveIntern>>` ---
     // `LiveIntern` bundles `table: TypeTable`, `memo: InternMemo`, `cores`,
@@ -257,14 +248,6 @@ impl Context {
             legset_memo: HashMap::new(),
         }
     }
-
-    /// Re-init every field (mirrors the `live_reset` body exactly). Provided for a
-    /// later `live_reset()` -> `self.cx.reset()` swap even though the chosen wiring
-    /// constructs a fresh `Context` per compile.
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        *self = Context::new();
-    }
 }
 
 impl Default for Context {
@@ -290,7 +273,7 @@ static LIVE_ENABLED: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::
 /// `cons_fork` miss costs a full mug-treap rebuild (fork_from_options:
 /// set_put_mug/slab_mug) PLUS a decode+jam of the treap leaf (native_of). This
 /// memo collapses the recurrence to O(1). Byte-exact: returns the SAME interned
-/// `Rc` the rebuild would. Cleared with the table by `Context::reset`.
+/// `Rc` the rebuild would. Its lifetime is the lifetime of the owning `Context`.
 pub fn fork_cache_lookup(cx: &Context, key: &[u32]) -> Option<Rc<Type>> {
     cx.fork_cache.get(key).cloned()
 }
@@ -843,7 +826,10 @@ pub struct TypeTable {
     /// collisions; equal leaves then share one raw noun.
     live_leaves_by_mug: HashMap<u32, Vec<Leaf>>,
     /// Stable ownership for canonical nodes. Handles point into these boxes and
-    /// therefore clone without touching a reference count.
+    /// therefore clone without touching a reference count. The boxes are
+    /// required: growing the outer vector must not move slots while `TypeRef`
+    /// handles point at them.
+    #[allow(clippy::vec_box)]
     slots: Vec<Box<TypeSlot<Type>>>,
     /// Total node-constructions seen by `intern` (the un-shared structural size).
     pub interned_calls: u64,
