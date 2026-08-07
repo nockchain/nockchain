@@ -4753,7 +4753,10 @@ dependencies = [
 name = "honk-tools"
 version = "0.1.15"
 dependencies = [
+ "bytes",
+ "libc",
  "nockapp",
+ "nockasm",
  "nockvm",
 ]
 
@@ -6569,6 +6572,11 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
 ]
+
+[[package]]
+name = "nockasm"
+version = "0.2.0"
+source = "git+https://github.com/bitemyapp/nockasm.git?rev=f21c853a4cc5b3e6df0e916ae924eed0b1a771de#f21c853a4cc5b3e6df0e916ae924eed0b1a771de"
 
 [[package]]
 name = "nockchain"

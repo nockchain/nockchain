@@ -125,6 +125,14 @@ honk-kernel-jams:
     target/release/honk --new --output assets/native/bridge.jam --prelude hoon/common/hoon.hoon hoon/apps/bridge/bridge.hoon hoon
     target/release/honk --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon
 
+# Compare production JAM against Nockasm DAG AST and DAG text serialization
+# for one fully compiled Dumbnet kernel noun. Kernel compilation and cueing are
+# setup and are excluded from every timed sample.
+honk-nockasm-serialization-bench: build-honk
+    mkdir -p target/honk-nockasm-serialization
+    target/release/honk --new --output target/honk-nockasm-serialization/dumb.jam --prelude hoon/common/hoon.hoon hoon/apps/dumbnet/outer.hoon hoon
+    HONK_KERNEL_JAM=target/honk-nockasm-serialization/dumb.jam HONK_BENCH_REPORT=target/honk-nockasm-serialization/results.txt cargo bench -p honk-tools --bench kernel_serialization
+
 # Compare every honk-built kernel against the hoonc-built reference.
 # PASS requires byte equality or a dir-hash-only difference (proven by
 # substitution + rejam). See jam-diff --kernel-parity.
