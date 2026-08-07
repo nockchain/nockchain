@@ -34,6 +34,8 @@ Important source areas:
 | `src/pipeline.rs` | Native parser integration and import resolution helpers. |
 | `src/bin/honk.rs` | CLI used by Bazel native Hoon rules. |
 | `src/arm_map.rs` | Arm-name-to-axis extraction from compiled core types used by parity and arm-axis validation. |
+| `src/artifact.rs` | Import, export, verification, and structural diffing for Nockasm kernel artifacts. |
+| `src/build_cache.rs` | Atomic content-addressed storage for persistent native build products. |
 | `../honk-tools/` | Standalone JAM/asset diagnostics such as `jam-diff` and `extract-hoonc-octs-type`. |
 | `test-assets/` | Minimal open compiler fixtures and Bazel parity targets. |
 
@@ -151,3 +153,54 @@ Diff two JAM artifacts structurally:
 cargo build --release -p honk-tools --bin jam-diff
 target/release/jam-diff left.jam right.jam
 ```
+
+## Persistent incremental builds
+
+Pass `--cache-dir` to persist compiled dependency vases and entry products as
+compact Nockasm DAG bundles. Cache keys are Merkle hashes over the source,
+ordered Hoon and data imports, import faces, logical debug path, prelude and
+subject identities, compiler ABI, and semantic flags. File timestamps and
+absolute checkout paths are not inputs.
+
+```bash
+target/release/honk \
+  --cache-dir target/honk-cache \
+  --output out.jam \
+  --prelude hoon/common/hoon.hoon \
+  hoon/apps/dumbnet/outer.hoon hoon
+```
+
+`--new` bypasses cache reads and atomically repopulates the same
+content-addressed objects. Cache writes use a temporary file, `fsync`, and
+rename; a missing, truncated, noncanonical, or hash-mismatched object is a
+cache miss and is repaired by the successful build. The compiler does not
+persist `Ut`'s semantic memo tables because those depend on mutable compilation
+state and are not safe across builds.
+
+Inspect or age out the cache with:
+
+```bash
+target/release/honk cache stats --cache-dir target/honk-cache
+target/release/honk cache gc --cache-dir target/honk-cache --max-age-days 30
+```
+
+## Nockasm artifact inspection
+
+Any valid kernel JAM can be imported, whether it came from `hoonc` or `honk`:
+
+```bash
+target/release/honk nockasm export kernel.jam --output kernel.nockasm
+target/release/honk nockasm verify kernel.nockasm
+target/release/honk nockasm diff hoonc.jam honk.jam --output compiler.diff
+```
+
+`graph.ndag` is the authoritative compact, lossless noun DAG. `manifest.json`
+records source, graph, root, and canonical-JAM hashes. `tree/` is a
+content-addressed debug view split into 256 files; its 128-bit display IDs and
+sorted records stay stable when unrelated nodes move. The specialized diff
+skips equal subgraphs by full BLAKE3 hash and emits small changed subtrees as
+named-op Nockasm fragments. Large mismatched subtrees are represented by an
+axis and full hash rather than expanded into an unmanageable file.
+
+The exported tree is for review and diagnostics, not the build-cache hot path.
+Persistent builds read the compact bundle directly.

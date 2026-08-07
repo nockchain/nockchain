@@ -2,6 +2,53 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::{env, fs, io};
 
+fn collect_files(path: &std::path::Path, files: &mut Vec<PathBuf>) -> io::Result<()> {
+    if path.is_file() {
+        files.push(path.to_path_buf());
+        return Ok(());
+    }
+    for entry in fs::read_dir(path)? {
+        collect_files(&entry?.path(), files)?;
+    }
+    Ok(())
+}
+
+fn compiler_fingerprint(manifest_dir: &std::path::Path) -> io::Result<String> {
+    let repository = manifest_dir.join("../..").canonicalize()?;
+    let roots = [
+        manifest_dir.join("src"),
+        manifest_dir.join("build.rs"),
+        manifest_dir.join("Cargo.toml"),
+        manifest_dir.join("../hatch/src"),
+        manifest_dir.join("../nockapp/src/noun"),
+        manifest_dir.join("../nockvm/rust/nockvm/src"),
+        repository.join("Cargo.lock"),
+        repository.join("Cargo.toml"),
+    ];
+    let mut files = Vec::new();
+    for root in &roots {
+        println!("cargo:rerun-if-changed={}", root.display());
+        collect_files(root, &mut files)?;
+    }
+    files.sort();
+    let mut left = 0xcbf2_9ce4_8422_2325u64;
+    let mut right = 0x8422_2325_cbf2_9ce4u64;
+    for file in files {
+        let relative = file.strip_prefix(&repository).unwrap_or(&file);
+        for byte in relative.to_string_lossy().bytes().chain([0]) {
+            left = (left ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            right = (right ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            right = right.rotate_left(7);
+        }
+        for byte in fs::read(&file)? {
+            left = (left ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            right = (right ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3);
+            right = right.rotate_left(7);
+        }
+    }
+    Ok(format!("{left:016x}{right:016x}"))
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
@@ -10,6 +57,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let honc_type_asset = manifest_dir.join("assets/honc-type-138.jam");
     let honc_formula_asset = manifest_dir.join("assets/honc-formula-138.jam");
     let hoonc_octs_type_asset = manifest_dir.join("assets/hoonc-octs-type-138.jam");
+    println!(
+        "cargo:rustc-env=HONK_NATIVE_COMPILER_FINGERPRINT={}",
+        compiler_fingerprint(&manifest_dir)?
+    );
 
     // The canonical hoonc `$octs` type is a required parity input: data
     // imports (`/*`) must vase their bytes with hoonc's `$octs` hold, not a

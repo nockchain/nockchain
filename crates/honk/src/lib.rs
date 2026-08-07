@@ -8,6 +8,8 @@
 )]
 
 pub mod arm_map;
+pub mod artifact;
+pub mod build_cache;
 pub mod errors;
 pub mod native;
 pub mod pipeline;

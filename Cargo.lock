@@ -4737,10 +4737,14 @@ dependencies = [
  "honc-cold-138",
  "hoonc",
  "nockapp",
+ "nockasm",
  "nockvm",
  "num-bigint",
+ "serde",
+ "serde_json",
  "smallvec",
  "stacker",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6576,7 +6580,7 @@ dependencies = [
 [[package]]
 name = "nockasm"
 version = "0.2.0"
-source = "git+https://github.com/bitemyapp/nockasm.git?rev=f21c853a4cc5b3e6df0e916ae924eed0b1a771de#f21c853a4cc5b3e6df0e916ae924eed0b1a771de"
+source = "git+https://github.com/bitemyapp/nockasm.git?rev=9473f4ba3f30bbc06865a05fc098c8a45957bec7#9473f4ba3f30bbc06865a05fc098c8a45957bec7"
 
 [[package]]
 name = "nockchain"

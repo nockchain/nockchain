@@ -9,13 +9,14 @@ use std::{cmp, env, fs, process};
 
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
+use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
 use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
 use honk::native::ut::{ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
-use nockapp::noun::slab::{NockJammer, NounSlab};
+use nockapp::noun::slab::{Jammer, NockJammer, NounSlab};
 use nockapp::noun::{BrandedEvalExt, BrandedNounSpaceExt, NounAllocatorExt};
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
 use nockapp::AtomExt;
@@ -69,6 +70,8 @@ struct Cli {
     batch_manifest: Option<PathBuf>,
     wrapper_asset_dump: Option<PathBuf>,
     native_wrapper_asset_dump: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    fresh: bool,
     dbug: bool,
     vet: bool,
 }
@@ -129,7 +132,9 @@ fn usage(program: &str) -> String {
          Usage: {program} [--new] --batch-manifest <file> --prelude <hoon.hoon> [--sut-jam <file>] <deps_dir>\n\
          Usage: {program} --dump-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
          Usage: {program} --dump-native-wrapper-assets <dir> --prelude <hoon.hoon> <deps_dir>\n\
-         --new is accepted for hoonc-script compatibility and has no effect. Vet checking is enabled by default and applies to the whole build (entry and dependency files, matching hoonc); pass --no-vet to disable strict/nice type-checking.\n\
+         Usage: {program} nockasm <export|verify|diff> ...\n\
+         Usage: {program} cache <stats|gc> --cache-dir <dir>\n\
+         --cache-dir enables the persistent content-addressed Nockasm cache; --new bypasses reads and atomically repopulates it. Vet checking is enabled by default and applies to the whole build (entry and dependency files, matching hoonc); pass --no-vet to disable strict/nice type-checking.\n\
          Example: {program} --new --output assets/native/roswell.jam --prelude hoon/common/hoon.hoon hoon/apps/roswell/roswell.hoon hoon"
     )
 }
@@ -142,6 +147,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
     let mut batch_manifest: Option<PathBuf> = None;
     let mut wrapper_asset_dump: Option<PathBuf> = None;
     let mut native_wrapper_asset_dump: Option<PathBuf> = None;
+    let mut cache_dir: Option<PathBuf> = None;
+    let mut fresh = false;
     let mut arbitrary = false;
     let mut dynock = false;
     let mut dynock_typed = false;
@@ -154,7 +161,7 @@ fn parse_args() -> std::result::Result<Cli, String> {
             "--arbitrary" => arbitrary = true,
             "--dynock" => dynock = true,
             "--dynock-typed" => dynock_typed = true,
-            "--new" => {}
+            "--new" => fresh = true,
             "--no-dbug" => dbug = false,
             "--dbug" => dbug = true,
             "--no-vet" => vet = false,
@@ -176,6 +183,12 @@ fn parse_args() -> std::result::Result<Cli, String> {
                     .next()
                     .ok_or_else(|| "missing value after --sut-jam".to_string())?;
                 sut_jam = Some(PathBuf::from(value));
+            }
+            "--cache-dir" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "missing value after --cache-dir".to_string())?;
+                cache_dir = Some(PathBuf::from(value));
             }
             "--batch-manifest" => {
                 let value = args
@@ -237,6 +250,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest: None,
             wrapper_asset_dump: Some(wrapper_asset_dump),
             native_wrapper_asset_dump: None,
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -268,6 +283,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest: None,
             wrapper_asset_dump: None,
             native_wrapper_asset_dump: Some(native_wrapper_asset_dump),
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -296,6 +313,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
             batch_manifest,
             wrapper_asset_dump: None,
             native_wrapper_asset_dump: None,
+            cache_dir,
+            fresh,
             dbug,
             vet,
         });
@@ -315,6 +334,8 @@ fn parse_args() -> std::result::Result<Cli, String> {
         batch_manifest: None,
         wrapper_asset_dump: None,
         native_wrapper_asset_dump: None,
+        cache_dir,
+        fresh,
         dbug,
         vet,
     })
@@ -504,6 +525,31 @@ fn main() {
     reset_native_timing_totals();
 
     let program = env::args().next().unwrap_or_else(|| "honk".to_string());
+    let raw_args: Vec<String> = env::args().skip(1).collect();
+    if raw_args.first().map(String::as_str) == Some("nockasm") {
+        match honk::artifact::run_cli(&raw_args[1..]) {
+            Ok(message) => {
+                println!("{message}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("nockasm artifact operation failed: {error}");
+                process::exit(1);
+            }
+        }
+    }
+    if raw_args.first().map(String::as_str) == Some("cache") {
+        match honk::build_cache::run_cli(&raw_args[1..]) {
+            Ok(message) => {
+                println!("{message}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("cache operation failed: {error}");
+                process::exit(1);
+            }
+        }
+    }
     let cli = match parse_args() {
         Ok(parsed) => parsed,
         Err(err) if err.is_empty() => {
@@ -652,6 +698,7 @@ async fn run(cli: Cli) -> Result<()> {
     let mut product = builder.compile_entry(entry)?;
     let mut jam = builder.jam_product(&mut product, cli.mode, entry, None)?;
     pad_hoonc_jam_atom_bytes(&mut jam);
+    builder.flush_build_cache()?;
 
     if let Some(parent) = output
         .parent()
@@ -919,6 +966,32 @@ fn native_parity_enabled() -> bool {
     std::env::var_os("HONK_NATIVE_PARITY").is_some()
 }
 
+fn native_cache_namespace(
+    cli: &Cli,
+    prelude_source: &str,
+    subject_type_jam: Option<&[u8]>,
+) -> blake3::Hash {
+    let mut hash = blake3::Hasher::new();
+    // Bump whenever native compilation semantics or the serialized cache
+    // payload changes. Source/dependency contents are Merkle-hashed separately.
+    hash.update(b"honk-native-cache-compiler-abi-2026-08-07-1\0");
+    hash.update(env!("CARGO_PKG_VERSION").as_bytes());
+    hash.update(env!("HONK_NATIVE_COMPILER_FINGERPRINT").as_bytes());
+    hash.update(&[u8::from(cli.dbug), u8::from(cli.vet)]);
+    hash.update(&[u8::from(native_parity_enabled())]);
+    hash.update(blake3::hash(prelude_source.as_bytes()).as_bytes());
+    if let Some(subject_type_jam) = subject_type_jam {
+        hash.update(blake3::hash(subject_type_jam).as_bytes());
+    } else {
+        hash.update(&[0; 32]);
+    }
+    hash.update(blake3::hash(EMBEDDED_HONC_FORMULA_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HONC_TYPE_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HONC_COLD_138_JAM).as_bytes());
+    hash.update(blake3::hash(EMBEDDED_HOONC_OCTS_TYPE_138_JAM).as_bytes());
+    hash.finalize()
+}
+
 fn build_context_with_shared_prelude(
     cli: &Cli,
     prelude: &Hoon,
@@ -1071,6 +1144,9 @@ fn build_context_with_shared_prelude(
         canonical_data_octs_ty,
         cli.dbug,
         cli.vet,
+        cli.cache_dir.clone(),
+        cli.fresh,
+        native_cache_namespace(cli, prelude_source, subject_type_jam),
         ut,
         eval_context,
     );
@@ -1176,8 +1252,19 @@ fn build_context_with_dynamic_wrapper_prelude(
         .canonicalize()
         .unwrap_or_else(|_| cli.directory.clone());
     let mut builder = NativeBuildContext::new(
-        directory, prelude_vase, prelude_eval.value, wrapper_subject_ty, wrapper_subject_value,
-        canonical_data_octs_ty, cli.dbug, cli.vet, ut, eval_context,
+        directory,
+        prelude_vase,
+        prelude_eval.value,
+        wrapper_subject_ty,
+        wrapper_subject_value,
+        canonical_data_octs_ty,
+        cli.dbug,
+        cli.vet,
+        cli.cache_dir.clone(),
+        cli.fresh,
+        native_cache_namespace(cli, prelude_source, subject_type_jam),
+        ut,
+        eval_context,
     );
     trace_timed("building exact hoonc wrapper traps", || {
         builder.initialize_exact_wrappers(prelude_eval.formula, prelude_source)
@@ -1218,6 +1305,7 @@ async fn compile_batch_with_shared_prelude(
         }
         fs::write(&entry.output, jam)?;
     }
+    builder.flush_build_cache()?;
     Ok(())
 }
 
@@ -1230,6 +1318,21 @@ struct NativeVase {
 
 type PathCacheKey = PathBuf;
 type ContentCacheKey = blake3::Hash;
+
+#[derive(Clone)]
+struct DependencyMerkle {
+    key: blake3::Hash,
+    dependency_keys: Vec<blake3::Hash>,
+    logical_source: String,
+}
+
+struct PendingCacheObject {
+    key: blake3::Hash,
+    kind: CacheObjectKind,
+    merkle: DependencyMerkle,
+    root_name: String,
+    root: Noun,
+}
 
 struct PreludeEval {
     value: Noun,
@@ -1304,6 +1407,12 @@ struct NativeBuildContext<'a> {
     eval_context: Context,
     cache: HashMap<PathCacheKey, NativeVase>,
     content_cache: HashMap<ContentCacheKey, NativeVase>,
+    dependency_merkle: HashMap<PathBuf, DependencyMerkle>,
+    key_visiting: HashSet<PathBuf>,
+    build_cache: Option<BuildCache>,
+    pending_cache: Vec<PendingCacheObject>,
+    hydrated_cache_roots: HashMap<String, Noun>,
+    cache_namespace: blake3::Hash,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
     empty_trap_vase: Noun,
@@ -1321,6 +1430,9 @@ impl<'a> NativeBuildContext<'a> {
         canonical_data_octs_ty: Option<Noun>,
         dbug: bool,
         entry_vet: bool,
+        cache_dir: Option<PathBuf>,
+        fresh_cache: bool,
+        cache_namespace: blake3::Hash,
         ut: Ut<'a>,
         eval_context: Context,
     ) -> Self {
@@ -1336,6 +1448,12 @@ impl<'a> NativeBuildContext<'a> {
             eval_context,
             cache: HashMap::new(),
             content_cache: HashMap::new(),
+            dependency_merkle: HashMap::new(),
+            key_visiting: HashSet::new(),
+            build_cache: cache_dir.map(|directory| BuildCache::new(directory, fresh_cache)),
+            pending_cache: Vec::new(),
+            hydrated_cache_roots: HashMap::new(),
+            cache_namespace,
             visiting: HashSet::new(),
             wrappers: ExactWrapperBatteries::empty(),
             empty_trap_vase: D(0),
@@ -1809,6 +1927,275 @@ impl<'a> NativeBuildContext<'a> {
         ))
     }
 
+    fn dependency_merkle_for_path(&mut self, path: &Path) -> Result<DependencyMerkle> {
+        let canonical = path.canonicalize()?;
+        if let Some(cached) = self.dependency_merkle.get(&canonical) {
+            return Ok(cached.clone());
+        }
+        if !self.key_visiting.insert(canonical.clone()) {
+            return Err(format!("cyclic native dependency at {}", canonical.display()).into());
+        }
+        let result = (|| -> Result<DependencyMerkle> {
+            let source = fs::read(path)?;
+            let logical_source = build_import_wer(path, &self.directory).join("/");
+            let imports =
+                pipeline::resolve_native_imports(path, &self.directory, ScopeMode::Standard)?;
+            let mut dependency_keys = Vec::with_capacity(imports.len());
+            let mut hash = blake3::Hasher::new();
+            hash.update(b"honk-native-dependency-merkle-v1\0");
+            hash.update(self.cache_namespace.as_bytes());
+            hash.update(&(logical_source.len() as u64).to_le_bytes());
+            hash.update(logical_source.as_bytes());
+            hash.update(&(source.len() as u64).to_le_bytes());
+            hash.update(&source);
+            hash.update(&(imports.len() as u64).to_le_bytes());
+            for import in imports {
+                let face = import.face.as_deref().unwrap_or("");
+                hash.update(&(face.len() as u64).to_le_bytes());
+                hash.update(face.as_bytes());
+                let dependency_key = match import.kind {
+                    NativeImportKind::Hoon => self.dependency_merkle_for_path(&import.path)?.key,
+                    NativeImportKind::Data => {
+                        let data = fs::read(&import.path)?;
+                        let logical = build_import_wer(&import.path, &self.directory).join("/");
+                        let mut data_hash = blake3::Hasher::new();
+                        data_hash.update(b"honk-native-data-dependency-v1\0");
+                        data_hash.update(self.cache_namespace.as_bytes());
+                        data_hash.update(&(logical.len() as u64).to_le_bytes());
+                        data_hash.update(logical.as_bytes());
+                        data_hash.update(&(data.len() as u64).to_le_bytes());
+                        data_hash.update(&data);
+                        data_hash.finalize()
+                    }
+                };
+                hash.update(&[match import.kind {
+                    NativeImportKind::Hoon => 0,
+                    NativeImportKind::Data => 1,
+                }]);
+                hash.update(dependency_key.as_bytes());
+                dependency_keys.push(dependency_key);
+            }
+            Ok(DependencyMerkle {
+                key: hash.finalize(),
+                dependency_keys,
+                logical_source,
+            })
+        })();
+        self.key_visiting.remove(&canonical);
+        let merkle = result?;
+        self.dependency_merkle.insert(canonical, merkle.clone());
+        Ok(merkle)
+    }
+
+    fn cache_object_key(
+        merkle: blake3::Hash,
+        kind: CacheObjectKind,
+        need_eval: bool,
+    ) -> blake3::Hash {
+        let mut hash = blake3::Hasher::new();
+        hash.update(b"honk-native-cache-object-v1\0");
+        hash.update(merkle.as_bytes());
+        hash.update(&[match kind {
+            CacheObjectKind::DependencyVase => 0,
+            CacheObjectKind::EntryProduct => 1,
+        }]);
+        hash.update(&[u8::from(need_eval)]);
+        hash.finalize()
+    }
+
+    fn decode_cache_noun(&mut self, cached: &CacheRead) -> Result<Noun> {
+        if let Some(root) = self.hydrated_cache_roots.get(&cached.root_name) {
+            return Ok(*root);
+        }
+        let lowered = cached.bundle.lower();
+        let mut list = nockasm::Noun::from(0u64);
+        for (_, noun) in lowered.iter().rev() {
+            list = nockasm::Noun::cell(noun.clone(), list);
+        }
+        let jam = nockasm::jam(&list);
+        let mut cursor = self
+            .ut
+            .slab
+            .cue_into(bytes::Bytes::from(jam))
+            .map_err(|error| format!("cache payload cue: {error}"))?;
+        let space = self.ut.slab.noun_space();
+        for (name, _) in lowered {
+            let cell = cursor
+                .in_space(&space)
+                .as_cell()
+                .map_err(|_| "cache pack root list has the wrong shape")?;
+            self.hydrated_cache_roots.insert(name, cell.head().noun());
+            cursor = cell.tail().noun();
+        }
+        if atom_u64(cursor, &space) != Some(0) {
+            return Err("cache pack root list has a nonzero tail".into());
+        }
+        self.hydrated_cache_roots
+            .get(&cached.root_name)
+            .copied()
+            .ok_or_else(|| "cache pack has no indexed root".into())
+    }
+
+    fn cached_vase_noun(&mut self, vase: &NativeVase) -> Noun {
+        let eval_flag = u64::from(vase.eval_value.is_some());
+        let eval_value = vase.eval_value.unwrap_or(D(0));
+        T(
+            &mut *self.ut.slab,
+            &[D(1), vase.ty, D(eval_flag), eval_value, vase.trap],
+        )
+    }
+
+    fn decode_cached_vase(&mut self, cached: &CacheRead) -> Result<NativeVase> {
+        let root = self.decode_cache_noun(cached)?;
+        let space = self.ut.slab.noun_space();
+        let fields = cache_tuple_fields(root, 5, &space)?;
+        if atom_u64(fields[0], &space) != Some(1) {
+            return Err("unsupported cached vase version".into());
+        }
+        let eval_value = match atom_u64(fields[2], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[3]),
+            _ => return Err("invalid cached vase eval flag".into()),
+        };
+        Ok(NativeVase {
+            ty: fields[1],
+            eval_value,
+            trap: fields[4],
+        })
+    }
+
+    fn cached_product_noun(&mut self, product: &NativeBuildProduct) -> Noun {
+        let eval_flag = u64::from(product.eval_value.is_some());
+        let trap_flag = u64::from(product.vase_trap.is_some());
+        T(
+            &mut *self.ut.slab,
+            &[
+                D(1),
+                product.ty,
+                D(eval_flag),
+                product.eval_value.unwrap_or(D(0)),
+                product.formula,
+                D(trap_flag),
+                product.vase_trap.unwrap_or(D(0)),
+            ],
+        )
+    }
+
+    fn decode_cached_product(&mut self, cached: &CacheRead) -> Result<NativeBuildProduct> {
+        let root = self.decode_cache_noun(cached)?;
+        let space = self.ut.slab.noun_space();
+        let fields = cache_tuple_fields(root, 7, &space)?;
+        if atom_u64(fields[0], &space) != Some(1) {
+            return Err("unsupported cached product version".into());
+        }
+        let eval_value = match atom_u64(fields[2], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[3]),
+            _ => return Err("invalid cached product eval flag".into()),
+        };
+        let vase_trap = match atom_u64(fields[5], &space) {
+            Some(0) => None,
+            Some(1) => Some(fields[6]),
+            _ => return Err("invalid cached product trap flag".into()),
+        };
+        Ok(NativeBuildProduct {
+            ty: fields[1],
+            eval_value,
+            formula: fields[4],
+            vase_trap,
+            // This depends on the standard build's directory hash and is
+            // intentionally regenerated from the cached trap.
+            standard_jam: None,
+        })
+    }
+
+    fn read_cache_object(
+        &mut self,
+        key: blake3::Hash,
+        kind: CacheObjectKind,
+    ) -> Result<Option<CacheRead>> {
+        match self.build_cache.as_mut() {
+            Some(cache) => cache.read(key, kind),
+            None => Ok(None),
+        }
+    }
+
+    fn reject_cache_payload(&mut self, key: blake3::Hash, error: &dyn Error) {
+        if let Some(cache) = self.build_cache.as_mut() {
+            cache.reject_loaded_payload(key);
+        }
+        eprintln!(
+            "[honk-cache] ignoring invalid payload {}: {error}",
+            key.to_hex()
+        );
+    }
+
+    fn queue_cache_object(
+        &mut self,
+        key: blake3::Hash,
+        kind: CacheObjectKind,
+        merkle: DependencyMerkle,
+        root: Noun,
+    ) {
+        self.pending_cache.push(PendingCacheObject {
+            key,
+            kind,
+            merkle,
+            root_name: key.to_hex().to_string(),
+            root,
+        });
+    }
+
+    fn flush_build_cache(&mut self) -> Result<()> {
+        if self.pending_cache.is_empty() || self.build_cache.is_none() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.pending_cache);
+        let mut list = D(0);
+        for object in pending.iter().rev() {
+            list = T(&mut *self.ut.slab, &[object.root, list]);
+        }
+        let space = self.ut.slab.noun_space();
+        let jam = NockJammer::jam(list, &space);
+        let list_noun = nockasm::cue(&jam).map_err(|error| format!("cache pack cue: {error}"))?;
+        let mut roots = Vec::with_capacity(pending.len());
+        let mut cursor = &list_noun;
+        for _ in &pending {
+            let nockasm::NounRef::Cell(head, tail) = cursor.view() else {
+                return Err("cache pack list has the wrong shape".into());
+            };
+            roots.push(head.clone());
+            cursor = tail;
+        }
+        if !matches!(cursor.view(), nockasm::NounRef::Atom(atom) if atom.is_zero()) {
+            return Err("cache pack list has a nonzero tail".into());
+        }
+        let inputs: Vec<_> = pending
+            .iter()
+            .zip(&roots)
+            .map(|(object, noun)| nockasm::DagInput {
+                name: &object.root_name,
+                noun,
+                mode: nockasm::DagMode::Noun,
+            })
+            .collect();
+        let graph = nockasm::lift_bundle(&inputs)?.to_bytes();
+        let entries: Vec<_> = pending
+            .iter()
+            .map(|object| CacheWrite {
+                key: object.key,
+                kind: object.kind,
+                logical_source: &object.merkle.logical_source,
+                dependency_keys: &object.merkle.dependency_keys,
+                root_name: &object.root_name,
+            })
+            .collect();
+        self.build_cache
+            .as_mut()
+            .expect("cache checked above")
+            .write_pack(&entries, &graph)
+    }
+
     fn compile_entry(&mut self, path: &Path) -> Result<NativeBuildProduct> {
         // Entry/kernel compiles always use per-call `miss` memos, never the
         // cross-call persistent one. Persisting `miss` verdicts is only sound
@@ -1822,14 +2209,38 @@ impl<'a> NativeBuildContext<'a> {
         // time (all six kernels stay byte-exact and compile in <60s).
         self.ut.set_miss_memo_persistence(false);
         let canonical = path.canonicalize()?;
-        match self.compile_path_uncached(path, true, false, false, true, true)? {
-            NativeCompileOutput::Product(product) => Ok(product),
-            NativeCompileOutput::Vase(_) => Err(format!(
-                "missing top-level native product for {}",
-                canonical.display()
-            )
-            .into()),
+        let cache_identity = if self.build_cache.is_some() {
+            let merkle = self.dependency_merkle_for_path(path)?;
+            let key = Self::cache_object_key(merkle.key, CacheObjectKind::EntryProduct, true);
+            Some((key, merkle))
+        } else {
+            None
+        };
+        if let Some((cache_key, _)) = cache_identity.as_ref() {
+            if let Some(cached) =
+                self.read_cache_object(*cache_key, CacheObjectKind::EntryProduct)?
+            {
+                match self.decode_cached_product(&cached) {
+                    Ok(product) => return Ok(product),
+                    Err(error) => self.reject_cache_payload(*cache_key, &*error),
+                }
+            }
         }
+        let product = match self.compile_path_uncached(path, true, false, false, true, true)? {
+            NativeCompileOutput::Product(product) => product,
+            NativeCompileOutput::Vase(_) => {
+                return Err(format!(
+                    "missing top-level native product for {}",
+                    canonical.display()
+                )
+                .into());
+            }
+        };
+        if let Some((cache_key, merkle)) = cache_identity {
+            let root = self.cached_product_noun(&product);
+            self.queue_cache_object(cache_key, CacheObjectKind::EntryProduct, merkle, root);
+        }
+        Ok(product)
     }
 
     fn subject_vase_from_cached(vase: &NativeVase) -> SubjectVase {
@@ -1842,9 +2253,8 @@ impl<'a> NativeBuildContext<'a> {
 
     fn compile_path(&mut self, path: &Path, need_eval: bool) -> Result<SubjectVase> {
         let canonical = path.canonicalize()?;
-        let content_key = hoon_source_content_key(path)?;
+        let memory_content_key = hoon_source_content_key(path)?;
         let cache_key = canonical.clone();
-        let content_cache_key = content_key;
         if let Some(cached) = self.cache.get(&cache_key) {
             let cached = cached.clone();
             if need_eval && cached.eval_value.is_none() {
@@ -1853,7 +2263,7 @@ impl<'a> NativeBuildContext<'a> {
                 return Ok(Self::subject_vase_from_cached(&cached));
             }
         }
-        if let Some(cached) = self.content_cache.get(&content_cache_key) {
+        if let Some(cached) = self.content_cache.get(&memory_content_key) {
             let cached = cached.clone();
             if need_eval && cached.eval_value.is_none() {
                 // Recompile with evaluation if an earlier deferred-only pass cached the trap.
@@ -1867,6 +2277,33 @@ impl<'a> NativeBuildContext<'a> {
         } else if let Some(cached) = self.cache.get(&cache_key) {
             let cached = cached.clone();
             return Ok(Self::subject_vase_from_cached(&cached));
+        }
+        let persistent_identity = if self.build_cache.is_some() {
+            let merkle = self.dependency_merkle_for_path(path)?;
+            let key =
+                Self::cache_object_key(merkle.key, CacheObjectKind::DependencyVase, need_eval);
+            Some((key, merkle))
+        } else {
+            None
+        };
+        if let Some((persistent_key, _)) = persistent_identity.as_ref() {
+            if let Some(cached_object) =
+                self.read_cache_object(*persistent_key, CacheObjectKind::DependencyVase)?
+            {
+                match self.decode_cached_vase(&cached_object) {
+                    Ok(cached) if !need_eval || cached.eval_value.is_some() => {
+                        self.cache.insert(cache_key.clone(), cached.clone());
+                        self.content_cache
+                            .insert(memory_content_key, cached.clone());
+                        return Ok(Self::subject_vase_from_cached(&cached));
+                    }
+                    Ok(_) => self.reject_cache_payload(
+                        *persistent_key,
+                        &std::io::Error::other("cached vase omitted required eval value"),
+                    ),
+                    Err(error) => self.reject_cache_payload(*persistent_key, &*error),
+                }
+            }
         }
         if !self.visiting.insert(canonical.clone()) {
             return Err(format!("cyclic native dependency at {}", canonical.display()).into());
@@ -1889,8 +2326,17 @@ impl<'a> NativeBuildContext<'a> {
             eval_value: subject_vase.eval_value,
             trap: subject_vase.trap,
         };
+        if let Some((persistent_key, merkle)) = persistent_identity {
+            let root = self.cached_vase_noun(&native_vase);
+            self.queue_cache_object(
+                persistent_key,
+                CacheObjectKind::DependencyVase,
+                merkle,
+                root,
+            );
+        }
         self.cache.insert(cache_key, native_vase.clone());
-        self.content_cache.insert(content_cache_key, native_vase);
+        self.content_cache.insert(memory_content_key, native_vase);
         Ok(subject_vase)
     }
 
@@ -2495,6 +2941,18 @@ impl<'a> NativeBuildContext<'a> {
     ) -> Result<Vec<u8>> {
         let trap = self.standard_output_trap(gate_ty, gate_trap, dir_hash)?;
         Ok(jam_ut_noun(&mut self.ut, trap))
+    }
+}
+
+impl Drop for NativeBuildContext<'_> {
+    fn drop(&mut self) {
+        if let Some(cache) = self.build_cache.as_ref() {
+            let stats = cache.stats();
+            eprintln!(
+                "[honk-cache] hits={} misses={} writes={} corrupt={}",
+                stats.hits, stats.misses, stats.writes, stats.corrupt
+            );
+        }
     }
 }
 
@@ -3673,6 +4131,23 @@ fn atom_text(noun: Noun, space: &NounSpace) -> Option<String> {
 
 fn atom_u64(noun: Noun, space: &NounSpace) -> Option<u64> {
     noun.in_space(space).as_atom().ok()?.as_u64().ok()
+}
+
+fn cache_tuple_fields(mut noun: Noun, count: usize, space: &NounSpace) -> Result<Vec<Noun>> {
+    if count < 2 {
+        return Err("cache tuple must have at least two fields".into());
+    }
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count - 1 {
+        let cell = noun
+            .in_space(space)
+            .as_cell()
+            .map_err(|_| "cached payload has the wrong tuple shape")?;
+        fields.push(cell.head().noun());
+        noun = cell.tail().noun();
+    }
+    fields.push(noun);
+    Ok(fields)
 }
 
 fn copy_noun_to_allocator<A: NounAllocator>(
