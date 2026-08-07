@@ -1,16 +1,12 @@
 //! Native IR for honk's Hoon type system and Nock output.
 //!
-//! This is the foundation of the native-types migration — see
-//! `docs/native-compiler/NATIVE-TYPES-MIGRATION.md`. It replaces the noun-based
-//! working representation of compiler **types** and **formulas** with native
-//! Rust enums (`Rc`-shared, hash-consed), emitting nouns only at provenanced
-//! boundaries via [`ToNoun`].
-//!
-//! STATUS: Phase 0 SKELETON. These are the type definitions and module layout
-//! only — there is no algorithm yet (mint/nest/play/`to_noun` land in Phases
-//! 1–2). The skeleton exists so the shapes are fixed, compile, and can be
-//! reviewed before the large port begins. Nothing in `crate::native::ut`
-//! depends on this yet.
+//! This is the implemented native-types architecture described by
+//! `docs/native-compiler/ARENA-TYPE-IR.md`, `ARENA-FORMULA-IR.md`, and
+//! `ARENA-SEMINOUN-IR.md`. Compiler types, formulas, intermediate values, and
+//! seminouns are stored in context-owned arenas and referenced by dense IDs.
+//! Nouns are retained or materialized only where compiler semantics require a
+//! noun boundary. `crate::native::ut` uses these arenas throughout minting,
+//! type operations, formula construction, and seminoun completion.
 #![allow(dead_code)]
 
 pub mod core;

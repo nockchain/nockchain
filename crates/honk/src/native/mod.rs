@@ -1,3 +1,10 @@
+// The arena migration kept the former `Rc<Type>` call shape by aliasing the
+// one-word, `Copy` `TypeRef` handle as `Rc` inside native compiler modules.
+// Existing `.clone()` calls are therefore zero-cost handle copies. Removing
+// hundreds of them mechanically would obscure the semantic arena change; keep
+// that cosmetic cleanup separate from the migration review.
+#![allow(clippy::clone_on_copy)]
+
 pub mod formula;
 pub mod hot;
 // Native compiler IR; see docs/native-compiler for the migration and

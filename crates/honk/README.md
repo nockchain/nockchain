@@ -4,16 +4,16 @@ Rust native compiler for Hoon-to-Nock compilation and byte-for-byte parity with 
 
 Canonical compiler reference file:
 
-- `open/crates/hoonc/hoon/hoon-138.hoon`
+- `crates/hoonc/hoon/hoon-138.hoon`
 
 Native compiler notes:
 
-- `../../../docs/native-compiler/README.md`
-- `../../../docs/native-compiler/architecture.md`
-- `../../../docs/native-compiler/parity-policy.md`
-- `../../../docs/native-compiler/semantic-invariants.md`
-- `../../../docs/native-compiler/debugging.md`
-- `../../../docs/native-compiler/performance.md`
+- `../../docs/native-compiler/README.md`
+- `../../docs/native-compiler/architecture.md`
+- `../../docs/native-compiler/parity-policy.md`
+- `../../docs/native-compiler/semantic-invariants.md`
+- `../../docs/native-compiler/debugging.md`
+- `../../docs/native-compiler/performance.md`
 
 ## High-level architecture
 
@@ -72,12 +72,12 @@ The implementation uses caches heavily for repeated type operations. Caches are 
 
 ## Parser/compiler boundary
 
-The compiler consumes the AST from `open/crates/hatch/`. Parser choices can change compiler artifacts when they affect source spots, docs, `dbug` wrappers, or AST shape. Parser behavior that exists for compiler artifact parity is therefore documented with native compiler notes, not only parser notes.
+The compiler consumes the AST from `crates/hatch/`. Parser choices can change compiler artifacts when they affect source spots, docs, `dbug` wrappers, or AST shape. Parser behavior that exists for compiler artifact parity is therefore documented with native compiler notes, not only parser notes.
 
 Relevant docs:
 
-- `../../../docs/native-compiler/parity-policy.md`
-- `../../../docs/native-compiler/semantic-invariants.md`
+- `../../docs/native-compiler/parity-policy.md`
+- `../../docs/native-compiler/semantic-invariants.md`
 
 ## Output modes
 
@@ -92,23 +92,26 @@ The library-level `Compiled` type exposes helpers for these shapes. The CLI and 
 
 ## Bazel integration
 
-Native Hoon Bazel rules live in `open/rules_hoon/native_hoon.bzl`.
+Native Hoon Bazel rules live in `rules_hoon/hoon.bzl` and are exported from
+`rules_hoon/defs.bzl`.
 
-- `native_hoon_library` compiles one Hoon entry to one JAM artifact.
-- `native_hoon_batch` compiles multiple entries in one native compiler process with a shared prelude/context. Batch entries are compiled serially inside that process; the tradeoff is cache/context reuse rather than Bazel-level parallelism between entries.
+- `honk_library` compiles one Hoon entry to one native JAM artifact.
+- `hoon_library` builds the matching hoonc reference artifact.
 
-Open parity targets are defined under `open/crates/honk/test-assets/` and `open/assets/native/`.
+Strict parity targets are defined under `crates/honk/test-assets/` and
+`assets/native/`.
 
 ## Parity policy
 
 Native compiler parity is byte-for-byte artifact parity unless a test explicitly states a weaker diagnostic comparison. Source spots and `dbug` metadata are part of the artifact and should not be ignored to hide differences.
 
-Useful open validation commands:
+Useful validation commands:
 
 ```bash
 cargo test --release -p hatch --lib
-bazel test //open/crates/honk:honk_tests --test_output=errors
-bazel test //:compiler_parity_tests --test_output=errors
+cargo test --release -p honk
+bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test --test_output=errors
+bazel test //assets/native:kernel_parity_test --test_output=errors
 ```
 
 When changing compiler performance code, run parity first and profile second. When changing parser spot behavior for compiler parity, run parser unit tests and at least one byte-for-byte compiler artifact parity target.
@@ -137,9 +140,9 @@ target/release/honk \
   --new \
   --arbitrary \
   --output out.jam \
-  --prelude open/hoon/common/hoon.hoon \
-  open/crates/hoonc/hoon/hoon-138.hoon \
-  open
+  --prelude hoon/common/hoon.hoon \
+  crates/hoonc/hoon/hoon-138.hoon \
+  .
 ```
 
 Diff two JAM artifacts structurally:

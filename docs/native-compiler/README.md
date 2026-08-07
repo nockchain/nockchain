@@ -1,17 +1,17 @@
 # Native Hoon compiler notes
 
-These notes are for open-source native compiler work. Keep repo paths in this
-section under `open/`. Parser details belong here when they affect compiler
-artifact parity; parser-only notes belong in `open/docs/native-parser/`.
+These notes are for open-source native compiler work. Paths are relative to the
+repository root. Parser details belong here when they affect compiler artifact
+parity; parser-only notes belong in `docs/native-parser/`.
 
 ## Scope
 
 Primary code and reference inputs:
 
-- `honk` at `open/crates/honk/`
-- `open/crates/hoonc/hoon/hoon-138.hoon`
-- `hatch` at `open/crates/hatch/`
-- `open/hoon/common/hoon.hoon`
+- `honk` at `crates/honk/`
+- `crates/hoonc/hoon/hoon-138.hoon`
+- `hatch` at `crates/hatch/`
+- `hoon/common/hoon.hoon`
 
 The native compiler goal is byte-for-byte artifact parity with the canonical Hoon
 compiler for agreed open workloads, while preserving deterministic output and
@@ -25,13 +25,13 @@ practical compile time.
 - Prefer general semantic fixes over file-, line-, or workload-specific exceptions.
 - Bazel artifact tests are authoritative for checked-in parity. Ad hoc local CLI compiles are useful for profiling and debugging, but local path metadata or undeclared directory state can make them unsuitable as final parity evidence.
 
-Useful open validation targets and suites:
+Useful validation targets and suites:
 
 ```bash
 cargo test --release -p hatch --lib
 cargo test --release -p honk
-bazel test //open/crates/honk/test-assets:hoon_138_arbitrary_parity_test
-bazel test //open/assets/native:kernel_parity_test
+bazel test //crates/honk/test-assets:hoon_138_arbitrary_parity_test
+bazel test //assets/native:kernel_parity_test
 ```
 
 Performance design notes:
@@ -47,7 +47,7 @@ record that fact in the change notes.
 ## Semantic notes to preserve
 
 - Nock axis handling must support arbitrary-size atoms in axis-sensitive forms. Rejecting or truncating large axes is a compiler semantics bug.
-- `/*` data imports must use the canonical `$octs` type asset at `open/crates/honk/assets/hoonc-octs-type-138.jam`; the byte length matches the canonical `(met 3 fil)` behavior.
+- `/*` data imports must use the canonical `$octs` type asset at `crates/honk/assets/hoonc-octs-type-138.jam`; the byte length matches the canonical `(met 3 fil)` behavior.
 - Caches and memo tables are accelerators only. Cache hits and misses must be observationally identical.
 - Recursive type operations that depend on active `%hold` expansion state must include that state, or an equivalent guard signature, in any memoization rule.
 
