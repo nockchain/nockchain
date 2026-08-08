@@ -5,9 +5,8 @@ use std::fmt::Debug;
 use std::mem::size_of;
 use std::ptr::copy_nonoverlapping;
 
-use bitvec::prelude::{BitSlice, BitVec, Lsb0};
+use bitvec::prelude::{BitSlice, Lsb0};
 use bitvec::view::BitView;
-use bitvec::{bits, bitvec};
 use bytes::Bytes;
 use either::Either;
 use ibig::Stack;
@@ -1034,71 +1033,230 @@ pub struct NockJammer;
 
 impl Jammer for NockJammer {
     fn jam(noun: Noun, space: &NounSpace) -> Bytes {
-        fn mat_backref(buffer: &mut BitVec<u8, Lsb0>, backref: usize) {
+        use bitvec::field::BitField;
+        // LSB-first bit stream accumulated a u64 word at a time. Byte i, bit
+        // i%8 of the output is stream bit i — the exact layout
+        // `BitVec<u8, Lsb0>::as_raw_slice` produced — but appending costs a
+        // shift-or instead of per-field `BitVec` bookkeeping.
+        struct BitWriter {
+            words: Vec<u64>,
+            acc: u64,
+            used: u32,
+        }
+
+        impl BitWriter {
+            fn new() -> Self {
+                Self {
+                    words: Vec::with_capacity(1 << 16),
+                    acc: 0,
+                    used: 0,
+                }
+            }
+
+            fn len(&self) -> usize {
+                self.words.len() * 64 + self.used as usize
+            }
+
+            /// Append the low `count` bits of `value`, LSB first.
+            #[inline]
+            fn push_bits(&mut self, value: u64, count: u32) {
+                debug_assert!(count <= 64);
+                if count == 0 {
+                    return;
+                }
+                let value = if count == 64 {
+                    value
+                } else {
+                    value & ((1u64 << count) - 1)
+                };
+                self.acc |= value << self.used;
+                let filled = self.used + count;
+                if filled >= 64 {
+                    self.words.push(self.acc);
+                    let consumed = 64 - self.used;
+                    self.acc = if consumed == 64 { 0 } else { value >> consumed };
+                    self.used = filled - 64;
+                } else {
+                    self.used = filled;
+                }
+            }
+
+            #[inline]
+            fn push_zeros(&mut self, mut count: usize) {
+                while count > 0 {
+                    let chunk = count.min(64) as u32;
+                    self.push_bits(0, chunk);
+                    count -= chunk as usize;
+                }
+            }
+
+            fn into_bytes(self) -> Vec<u8> {
+                let bits = self.len();
+                let mut out = Vec::with_capacity(bits.div_ceil(8));
+                for word in &self.words {
+                    out.extend_from_slice(&word.to_le_bytes());
+                }
+                if self.used > 0 {
+                    let tail_bytes = (self.used as usize).div_ceil(8);
+                    out.extend_from_slice(&self.acc.to_le_bytes()[..tail_bytes]);
+                }
+                out
+            }
+        }
+
+        // Open-addressed structural memo: (cached mug, noun, bit offset)
+        // entries with linear probing. Same dedup relation as `NounMap`
+        // (`slab_mug` + `noun_equality`), so backref choices — and output
+        // bytes — are identical; it just avoids a heap-allocated `Vec` bucket
+        // per distinct mug and `IntMap`'s rehash churn.
+        struct JamMemo {
+            entries: Vec<(u32, Noun, u64)>,
+            empty: Vec<bool>,
+            mask: usize,
+            len: usize,
+        }
+
+        impl JamMemo {
+            fn new() -> Self {
+                let cap = 1 << 16;
+                Self {
+                    entries: vec![(0, D(0), 0); cap],
+                    empty: vec![true; cap],
+                    mask: cap - 1,
+                    len: 0,
+                }
+            }
+
+            #[inline]
+            fn slot_of(&self, mug: u32) -> usize {
+                // splitmix64-style spread so linear probing stays short.
+                let mut key = mug as u64;
+                key = (key ^ (key >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                key = (key ^ (key >> 27)).wrapping_mul(0x94d049bb133111eb);
+                (key ^ (key >> 31)) as usize & self.mask
+            }
+
+            fn grow(&mut self) {
+                let cap = self.entries.len() * 2;
+                let old = std::mem::replace(&mut self.entries, vec![(0, D(0), 0); cap]);
+                let old_empty = std::mem::replace(&mut self.empty, vec![true; cap]);
+                self.mask = cap - 1;
+                for (index, entry) in old.into_iter().enumerate() {
+                    if old_empty[index] {
+                        continue;
+                    }
+                    let mut slot = self.slot_of(entry.0);
+                    while !self.empty[slot] {
+                        slot = (slot + 1) & self.mask;
+                    }
+                    self.entries[slot] = entry;
+                    self.empty[slot] = false;
+                }
+            }
+
+            /// Offset of an equal noun, or the slot to insert it at.
+            fn find(
+                &mut self,
+                noun: Noun,
+                mug: u32,
+                space: &NounSpace,
+            ) -> std::result::Result<u64, usize> {
+                if (self.len + 1) * 4 >= self.entries.len() * 3 {
+                    self.grow();
+                }
+                let mut slot = self.slot_of(mug);
+                loop {
+                    if self.empty[slot] {
+                        return Err(slot);
+                    }
+                    let (entry_mug, entry_noun, offset) = self.entries[slot];
+                    if entry_mug == mug
+                        && (unsafe { noun.raw_equals(&entry_noun) }
+                            || noun_equality(noun.in_space(space), entry_noun.in_space(space)))
+                    {
+                        return Ok(offset);
+                    }
+                    slot = (slot + 1) & self.mask;
+                }
+            }
+
+            #[inline]
+            fn insert_at(&mut self, slot: usize, noun: Noun, mug: u32, offset: u64) {
+                self.entries[slot] = (mug, noun, offset);
+                self.empty[slot] = false;
+                self.len += 1;
+            }
+        }
+
+        fn mat_backref(buffer: &mut BitWriter, backref: usize) {
             if backref == 0 {
-                buffer.extend_from_bitslice(bits![u8, Lsb0; 1, 1, 1]);
+                buffer.push_bits(0b111, 3);
                 return;
             }
             let backref_sz = met0_u64_to_usize(backref as u64);
             let backref_sz_sz = met0_u64_to_usize(backref_sz as u64);
-            buffer.extend_from_bitslice(bits![u8, Lsb0; 1, 1]); // backref tag
-            let buffer_len = buffer.len();
-            buffer.resize(buffer_len + backref_sz_sz, false);
-            buffer.push(true);
-            buffer.extend_from_bitslice(
-                &BitSlice::<_, Lsb0>::from_element(&backref_sz)[0..backref_sz_sz - 1],
-            );
-            buffer
-                .extend_from_bitslice(&BitSlice::<_, Lsb0>::from_element(&backref)[0..backref_sz]);
+            buffer.push_bits(0b11, 2); // backref tag
+            buffer.push_zeros(backref_sz_sz);
+            buffer.push_bits(1, 1);
+            buffer.push_bits(backref_sz as u64, (backref_sz_sz - 1) as u32);
+            buffer.push_bits(backref as u64, backref_sz as u32);
         }
 
-        fn mat_atom(buffer: &mut BitVec<u8, Lsb0>, atom: Atom, space: &NounSpace) {
+        fn mat_atom(buffer: &mut BitWriter, atom: Atom, space: &NounSpace) {
             if unsafe { atom.as_noun().raw_equals(&D(0)) } {
-                buffer.extend_from_bitslice(bits![u8, Lsb0; 0, 1]);
+                buffer.push_bits(0b10, 2);
                 return;
             }
             let atom_sz = met0_usize(atom, space);
             let atom_sz_sz = met0_u64_to_usize(atom_sz as u64);
-            buffer.push(false); // atom tag
-            let buffer_len = buffer.len();
-            buffer.resize(buffer_len + atom_sz_sz, false);
-            buffer.push(true);
-            buffer.extend_from_bitslice(
-                &BitSlice::<_, Lsb0>::from_element(&atom_sz)[0..atom_sz_sz - 1],
-            );
-            buffer.extend_from_bitslice(&atom.in_space(space).as_bitslice()[0..atom_sz]);
-        }
-        let mut backref_map = NounMap::<usize>::new();
-        let mut stack = vec![noun];
-        let mut buffer = bitvec![u8, Lsb0; 0; 0];
-        while let Some(noun) = stack.pop() {
-            if let Some(backref) = backref_map.get(noun, space) {
-                if let Ok(atom) = noun.as_atom() {
-                    if met0_u64_to_usize(*backref as u64) < met0_usize(atom, space) {
-                        mat_backref(&mut buffer, *backref);
-                    } else {
-                        mat_atom(&mut buffer, atom, space)
-                    }
-                } else {
-                    mat_backref(&mut buffer, *backref);
-                }
+            buffer.push_bits(0, 1); // atom tag
+            buffer.push_zeros(atom_sz_sz);
+            buffer.push_bits(1, 1);
+            buffer.push_bits(atom_sz as u64, (atom_sz_sz - 1) as u32);
+            if let Ok(direct) = atom.as_direct() {
+                buffer.push_bits(direct.data(), atom_sz as u32);
             } else {
-                backref_map.insert(noun, buffer.len(), space);
-                match noun.as_either_atom_cell() {
-                    Either::Left(atom) => {
-                        mat_atom(&mut buffer, atom, space);
+                for chunk in atom.in_space(space).as_bitslice()[0..atom_sz].chunks(64) {
+                    buffer.push_bits(chunk.load_le::<u64>(), chunk.len() as u32);
+                }
+            }
+        }
+
+        let mut backref_map = JamMemo::new();
+        let mut stack = vec![noun];
+        let mut buffer = BitWriter::new();
+        while let Some(noun) = stack.pop() {
+            let mug = slab_mug(noun, space);
+            match backref_map.find(noun, mug, space) {
+                Ok(backref) => {
+                    if let Ok(atom) = noun.as_atom() {
+                        if met0_u64_to_usize(backref) < met0_usize(atom, space) {
+                            mat_backref(&mut buffer, backref as usize);
+                        } else {
+                            mat_atom(&mut buffer, atom, space)
+                        }
+                    } else {
+                        mat_backref(&mut buffer, backref as usize);
                     }
-                    Either::Right(cell) => {
-                        buffer.extend_from_bitslice(bits![u8, Lsb0; 1, 0]); // cell tag
-                        let cell = cell.in_space(space);
-                        stack.push(cell.tail().noun());
-                        stack.push(cell.head().noun());
+                }
+                Err(slot) => {
+                    backref_map.insert_at(slot, noun, mug, buffer.len() as u64);
+                    match noun.as_either_atom_cell() {
+                        Either::Left(atom) => {
+                            mat_atom(&mut buffer, atom, space);
+                        }
+                        Either::Right(cell) => {
+                            buffer.push_bits(0b01, 2); // cell tag
+                            let cell = cell.in_space(space);
+                            stack.push(cell.tail().noun());
+                            stack.push(cell.head().noun());
+                        }
                     }
                 }
             }
         }
 
-        Bytes::copy_from_slice(buffer.as_raw_slice())
+        Bytes::from(buffer.into_bytes())
     }
 
     fn cue(slab: &mut NounSlab, jammed: Bytes) -> Result<Noun, CueError> {
