@@ -60,3 +60,4 @@ pearl
 .fakenet-ai-pow-data/
 nock_fake/
 nock_fake_tandem/
+.honk-cache/

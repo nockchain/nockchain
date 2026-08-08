@@ -34,11 +34,14 @@ rust_library(
 # The persistent build cache embeds a fingerprint of the compiler's own code
 # in every cache key so that changing the compiler invalidates old caches
 # (crates/honk/build.rs computes it under cargo). Bazel builds skip build.rs,
-# so derive an equivalent here: hash the binary's own sources plus the
-# compiled rlibs of the crates the cargo fingerprint tracks as sources. The
-# value only needs to be deterministic and change-sensitive; it deliberately
-# differs from cargo's (differently-built binaries should not share a cache
-# namespace).
+# so derive an equivalent here from the same inputs build.rs hashes: the
+# compiler's sources plus the workspace Cargo.lock for third-party bumps.
+# Hashing sources — never rlibs or other config-varying artifacts — keeps the
+# fingerprint identical across configurations of one tree, so a cache primed
+# with the target-config binary (`just bazel prime-honk-cache`) is readable
+# by the exec-config honk that jam actions run. The value deliberately
+# differs from cargo's fingerprint; cargo-built and Bazel-built binaries do
+# not share a cache namespace.
 genrule(
     name = "native_compiler_fingerprint_env",
     srcs = glob([
@@ -46,9 +49,10 @@ genrule(
         "build.rs",
         "Cargo.toml",
     ]) + [
-        "//crates/hatch",
-        "//crates/nockapp",
-        "//crates/nockvm/rust/nockvm",
+        "//:Cargo.lock",
+        "//crates/hatch:fingerprint_srcs",
+        "//crates/nockapp:fingerprint_srcs",
+        "//crates/nockvm/rust/nockvm:fingerprint_srcs",
     ],
     outs = ["native_compiler_fingerprint.env"],
     cmd = "if command -v sha256sum >/dev/null 2>&1; then hash_tool='sha256sum'; " +

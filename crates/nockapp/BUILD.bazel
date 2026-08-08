@@ -13,6 +13,14 @@ package(default_visibility = ["//visibility:public"])
 
 cargo_lint_sources()
 
+# Source closure hashed into honk's cache-namespace fingerprint (see
+# //crates/honk:native_compiler_fingerprint_env). Sources, not rlibs, so the
+# fingerprint is identical across configurations of the same tree.
+filegroup(
+    name = "fingerprint_srcs",
+    srcs = glob(["src/**/*.rs"]),
+)
+
 exports_files(["Cargo.toml"])
 
 # Embedded Diesel migrations are read by a proc macro at compile time.
