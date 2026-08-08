@@ -105,10 +105,12 @@ impl BuildCache {
                 {
                     return Err("cache pack hash mismatch".into());
                 }
+                // blake3 above pins these as exactly the bytes the write path
+                // produced, and both write paths only emit canonical
+                // encodings, so decoding validates everything that matters —
+                // re-encoding the whole bundle to prove canonicality cost a
+                // full serialization of every pack on every warm start.
                 let bundle = Rc::new(NasmBundle::from_bytes(&bytes)?);
-                if bundle.to_bytes() != bytes {
-                    return Err("non-canonical cache pack".into());
-                }
                 self.loaded_packs
                     .insert(metadata.pack_blake3.clone(), bundle.clone());
                 bundle
@@ -151,6 +153,32 @@ impl BuildCache {
         if bundle.to_bytes() != graph {
             return Err("refusing to write non-canonical cache pack".into());
         }
+        self.write_pack_inner(entries, bundle, graph)
+    }
+
+    /// Write a pack whose bundle the caller just built. Skips the
+    /// decode/re-encode canonicality round trip `write_pack` performs on
+    /// untrusted bytes: `graph` must be `bundle.to_bytes()`, canonical by
+    /// construction.
+    pub fn write_pack_prebuilt(
+        &mut self,
+        entries: &[CacheWrite<'_>],
+        bundle: Rc<NasmBundle>,
+        graph: &[u8],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        debug_assert_eq!(bundle.to_bytes(), graph);
+        self.write_pack_inner(entries, bundle, graph)
+    }
+
+    fn write_pack_inner(
+        &mut self,
+        entries: &[CacheWrite<'_>],
+        bundle: Rc<NasmBundle>,
+        graph: &[u8],
+    ) -> Result<()> {
         for entry in entries {
             if !bundle
                 .roots()
@@ -164,7 +192,7 @@ impl BuildCache {
         let pack_hex = pack_hash.to_hex().to_string();
         let pack_path = self.pack_path(&pack_hex)?;
         if self.replace_existing || !pack_path.is_file() {
-            atomic_write(&pack_path, graph)?;
+            atomic_write(&pack_path, graph, Durability::Synced)?;
         }
         self.loaded_packs.insert(pack_hex.clone(), bundle);
         for entry in entries {
@@ -189,7 +217,16 @@ impl BuildCache {
                 pack_bytes: graph.len() as u64,
                 root_name: entry.root_name.to_string(),
             };
-            atomic_write(&metadata_path, &serde_json::to_vec_pretty(&metadata)?)?;
+            // Metadata is rename-atomic but deliberately not fsynced: losing a
+            // metadata file to a crash produces a cache miss, which the read
+            // path already tolerates, and per-file F_FULLFSYNC on macOS costs
+            // more than the entire logical write. The pack itself stays synced
+            // above so metadata can never outlive the bytes it points at.
+            atomic_write(
+                &metadata_path,
+                &serde_json::to_vec_pretty(&metadata)?,
+                Durability::Relaxed,
+            )?;
             self.damaged.remove(&entry.key);
             self.stats.writes += 1;
         }
@@ -231,7 +268,16 @@ impl BuildCache {
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Durability {
+    /// fsync the file and its directory: the write survives power loss.
+    Synced,
+    /// Rename-atomic only: readers never see partial bytes, but the file may
+    /// vanish on power loss. Fine for anything the cache treats as a miss.
+    Relaxed,
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], durability: Durability) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent", path.display()))?;
@@ -253,9 +299,13 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
             .create_new(true)
             .open(&temporary)?;
         file.write_all(bytes)?;
-        file.sync_all()?;
+        if durability == Durability::Synced {
+            file.sync_all()?;
+        }
         fs::rename(&temporary, path)?;
-        sync_directory(parent)?;
+        if durability == Durability::Synced {
+            sync_directory(parent)?;
+        }
         Ok(())
     })();
     if result.is_err() {
@@ -539,6 +589,45 @@ mod tests {
             .read(key, CacheObjectKind::DependencyVase)
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn prebuilt_pack_round_trips_like_the_parsing_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = blake3::hash(b"prebuilt");
+        let root_name = key.to_hex().to_string();
+        let noun = noun![[7 8] [7 8]];
+        let bundle = lift_bundle(&[DagInput {
+            name: &root_name,
+            noun: &noun,
+            mode: DagMode::Noun,
+        }])
+        .unwrap();
+        let graph = bundle.to_bytes();
+        let mut cache = BuildCache::new(temp.path().to_path_buf(), false);
+        cache
+            .write_pack_prebuilt(
+                &[CacheWrite {
+                    key,
+                    kind: CacheObjectKind::EntryProduct,
+                    logical_source: "b.hoon",
+                    dependency_keys: &[],
+                    root_name: &root_name,
+                }],
+                Rc::new(bundle),
+                &graph,
+            )
+            .unwrap();
+        assert_eq!(cache.stats().writes, 1);
+        // A fresh cache instance must read the prebuilt pack from disk exactly
+        // as it reads packs written through the parsing path.
+        let mut fresh = BuildCache::new(temp.path().to_path_buf(), false);
+        let cached = fresh
+            .read(key, CacheObjectKind::EntryProduct)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached.bundle.lower_root(&cached.root_name), Some(noun));
+        assert_eq!(fresh.stats().hits, 1);
     }
 
     #[test]
