@@ -24,7 +24,7 @@ use nockapp::noun::NounAllocatorExt;
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
 use nockvm::ext::{AtomExt, NounExt};
 use nockvm::interpreter::{interpret, Context as NockContext};
-use nockvm::jets::cold::{Cold, Nounable};
+use nockvm::jets::cold::Cold;
 use nockvm::jets::math::util::lth_b;
 use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
@@ -167,11 +167,13 @@ impl HoonArena {
         self.entries.clear();
     }
 
-    fn register(&mut self, nodes: Vec<HoonArenaBuildNode>) {
+    /// Register nodes, draining the build vector so its capacity returns to
+    /// the caller's scratch pool.
+    fn register(&mut self, nodes: &mut Vec<HoonArenaBuildNode>) {
         self.clear();
         self.entries.reserve(nodes.len());
         self.by_ptr.reserve(nodes.len());
-        for node in &nodes {
+        for node in nodes.iter() {
             let id = HoonId(
                 u32::try_from(self.entries.len())
                     .expect("one Hoon compiler scope cannot contain more than u32::MAX nodes"),
@@ -185,7 +187,7 @@ impl HoonArena {
                 opened: None,
             });
         }
-        for (index, node) in nodes.into_iter().enumerate() {
+        for (index, node) in nodes.drain(..).enumerate() {
             self.entries[index].hot_children = node
                 .hot_children
                 .map(|[head, tail]| [self.by_ptr[&head], self.by_ptr[&tail]]);
@@ -330,6 +332,12 @@ pub struct Ut<'a> {
     // parent. They receive their own dense arena and suspend the parent here;
     // LIFO scope guards restore the previous graph without pointer probing.
     hoon_arena_stack: Vec<HoonArena>,
+    // Retired arenas and signature scratch buffers, recycled so each scope
+    // entry reuses grown map/vec capacity instead of rebuilding it from
+    // empty — scope churn (one per distinct AST root, including every
+    // compiler-generated lowering) made the empty-map growth path hot.
+    hoon_arena_pool: Vec<HoonArena>,
+    sig_scratch_pool: Vec<(FastHashMap<usize, u64>, Vec<HoonArenaBuildNode>)>,
     pub hoon_ast_ptr_cache: HashMap<usize, (Option<u64>, Noun)>,
     pub hoon_ast_ptr_cache_order: VecDeque<usize>,
     pub hold_memo: HoldMemoSet,
@@ -428,10 +436,13 @@ pub struct Sig64 {
 }
 
 impl Sig64 {
-    // FNV-1a-like rolling signature; this is used only as a cache guard against pointer reuse.
-    // It must be stable for a given value, but does not need to be cryptographic.
+    // Rolling signature; this is used only as a cache guard against pointer
+    // reuse. It must be stable for a given value within one process, but does
+    // not need to be cryptographic — so it mixes one splitmix64 round per
+    // 8-byte word instead of eight FNV rounds per word. Sub-word tails mix
+    // their length as a second word, which keeps distinct call sequences
+    // distinct without per-byte work.
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
 
     fn new_with_dbug_spots(include_dbug_spot: bool) -> Self {
         Self {
@@ -447,26 +458,43 @@ impl Sig64 {
     }
 
     #[inline]
+    fn mix(state: u64, value: u64) -> u64 {
+        let mut mixed = state ^ value;
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        mixed ^ (mixed >> 31)
+    }
+
+    #[inline]
     fn write_byte(&mut self, byte: u8) {
-        self.state ^= u64::from(byte);
-        self.state = self.state.wrapping_mul(Self::PRIME);
+        self.state = Self::mix(self.state, u64::from(byte));
     }
 
     #[inline]
     fn write_bytes(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.write_byte(*byte);
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            let word = u64::from_le_bytes(chunk.try_into().expect("chunks_exact yields 8 bytes"));
+            self.state = Self::mix(self.state, word);
+        }
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            let mut word = [0u8; 8];
+            word[..tail.len()].copy_from_slice(tail);
+            self.state = Self::mix(self.state, u64::from_le_bytes(word));
+            self.state = Self::mix(self.state, tail.len() as u64);
         }
     }
 
     #[inline]
     fn write_u64(&mut self, value: u64) {
-        self.write_bytes(&value.to_le_bytes());
+        self.state = Self::mix(self.state, value);
     }
 
     #[inline]
     fn write_u128(&mut self, value: u128) {
-        self.write_bytes(&value.to_le_bytes());
+        self.state = Self::mix(self.state, value as u64);
+        self.state = Self::mix(self.state, (value >> 64) as u64);
     }
 
     #[inline]
@@ -517,6 +545,35 @@ impl Sig64 {
             .get(&(hoon as *const Hoon as usize))
             .copied()?;
         Some((root, sig.hoon_nodes))
+    }
+
+    /// `hoon_signatures_spot_sensitive` over recycled scratch storage: the
+    /// caller lends grown map/vec capacity and always gets it back, filled
+    /// with build nodes on success. Scope entry runs once per distinct AST
+    /// root, so rebuilding these tables from empty was measurable.
+    fn hoon_signatures_spot_sensitive_pooled(
+        hoon: &Hoon,
+        mut signatures: FastHashMap<usize, u64>,
+        mut nodes: Vec<HoonArenaBuildNode>,
+    ) -> (
+        Option<u64>,
+        FastHashMap<usize, u64>,
+        Vec<HoonArenaBuildNode>,
+    ) {
+        signatures.clear();
+        nodes.clear();
+        let mut sig = Self {
+            state: Self::OFFSET,
+            include_dbug_spot: true,
+            hoon_signatures: signatures,
+            hoon_nodes: nodes,
+        };
+        let root = sig.write_hoon(hoon).and_then(|_| {
+            sig.hoon_signatures
+                .get(&(hoon as *const Hoon as usize))
+                .copied()
+        });
+        (root, sig.hoon_signatures, sig.hoon_nodes)
     }
 
     fn spec_signature_spot_sensitive(spec: &Spec) -> Option<u64> {
@@ -2094,6 +2151,8 @@ impl<'a> Ut<'a> {
             hoon_ast_scope_depth: 0,
             hoon_arena: Default::default(),
             hoon_arena_stack: Vec::new(),
+            hoon_arena_pool: Vec::new(),
+            sig_scratch_pool: Vec::new(),
             hoon_ast_ptr_cache: HashMap::new(),
             hoon_ast_ptr_cache_order: VecDeque::new(),
             hold_memo: Default::default(),
@@ -2956,12 +3015,16 @@ impl<'a> Ut<'a> {
         let (pushed, root) = match self.hoon_arena.id_for(gen) {
             Some(root) => (false, root),
             None => {
-                let mut next = HoonArena::default();
-                if let Some((_root_signature, nodes)) = Sig64::hoon_signatures_spot_sensitive(gen) {
-                    next.register(nodes);
+                let mut next = self.hoon_arena_pool.pop().unwrap_or_default();
+                let (signatures, nodes) = self.sig_scratch_pool.pop().unwrap_or_default();
+                let (root_signature, signatures, mut nodes) =
+                    Sig64::hoon_signatures_spot_sensitive_pooled(gen, signatures, nodes);
+                if root_signature.is_some() {
+                    next.register(&mut nodes);
                 } else {
                     next.register_unsigned_root(Self::hoon_ast_ptr_key(gen));
                 }
+                self.sig_scratch_pool.push((signatures, nodes));
                 let root = next
                     .id_for(gen)
                     .expect("new Hoon arena must contain its root");
@@ -2988,11 +3051,16 @@ impl<'a> Ut<'a> {
         self.hoon_ast_scope_depth -= 1;
         if pushed {
             // The borrowed root may die or its address may be reused after this
-            // call. Drop its graph before restoring the longer-lived parent.
-            self.hoon_arena = self
+            // call. Drop its graph before restoring the longer-lived parent —
+            // clear() releases every entry while the map/vec capacity recycles
+            // through the pool for the next scope.
+            let parent = self
                 .hoon_arena_stack
                 .pop()
                 .expect("every pushed Hoon arena must have a suspended parent");
+            let mut finished = std::mem::replace(&mut self.hoon_arena, parent);
+            finished.clear();
+            self.hoon_arena_pool.push(finished);
         }
     }
 
@@ -4457,22 +4525,28 @@ impl<'a> Ut<'a> {
             return "?".to_string();
         }
 
-        if let Ok(cwd) = std::env::current_dir() {
-            let cwd_components = cwd
-                .components()
-                .filter_map(|component| match component {
-                    std::path::Component::Normal(segment) => {
-                        Some(segment.to_string_lossy().into_owned())
-                    }
-                    _ => None,
+        // getcwd is a syscall and this runs once per `%dbug` node; honk never
+        // chdirs, so resolve the cwd's components exactly once per process.
+        static CWD_COMPONENTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+        let cwd_components = CWD_COMPONENTS.get_or_init(|| {
+            std::env::current_dir()
+                .map(|cwd| {
+                    cwd.components()
+                        .filter_map(|component| match component {
+                            std::path::Component::Normal(segment) => {
+                                Some(segment.to_string_lossy().into_owned())
+                            }
+                            _ => None,
+                        })
+                        .collect()
                 })
-                .collect::<Vec<_>>();
-            if !cwd_components.is_empty()
-                && path.len() > cwd_components.len()
-                && path.starts_with(cwd_components.as_slice())
-            {
-                return path[cwd_components.len()..].join("/");
-            }
+                .unwrap_or_default()
+        });
+        if !cwd_components.is_empty()
+            && path.len() > cwd_components.len()
+            && path.starts_with(cwd_components.as_slice())
+        {
+            return path[cwd_components.len()..].join("/");
         }
 
         path.join("/")
@@ -12231,8 +12305,11 @@ fn install_musk_cold_state(context: &mut NockContext, raw: &[u8], label: &str) -
     let cold_noun = <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
         .map_err(|err| CompilerError::Decode(format!("cue {label} cold jam: {err:?}")))?;
     let stack_space = context.stack.noun_space();
+    // The cold noun was cued into this same stack above, so the resident
+    // decode borrows batteries and paths in place instead of deep-copying
+    // every core a second time.
     let (battery_to_paths, root_to_paths, path_to_batteries) =
-        Cold::from_noun(&mut context.stack, &cold_noun, &stack_space)
+        nockvm::jets::cold::cold_from_noun_resident(&mut context.stack, &cold_noun, &stack_space)
             .map_err(|err| CompilerError::Decode(format!("decode {label} cold state: {err:?}")))?;
     context.cold = Cold::from_vecs(
         &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
