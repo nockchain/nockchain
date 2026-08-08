@@ -65,5 +65,5 @@ boundaries before considering another arena rewrite. Map pre-sizing is the
 lower-risk second experiment.
 
 Raw measurements, the host fingerprint, checksums, hotspot ranking, and testable
-hypotheses are in
-`tests/artifacts/perf/20260807T021543Z-post-rebase/`.
+hypotheses were captured in a benchmark artifact package (kept out of the
+tree); regenerate with the profiling workflow above when revisiting.
