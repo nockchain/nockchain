@@ -21,6 +21,45 @@ In particular:
 - Treat memo hits as an optimization only. Disabling the memo must preserve artifact bytes.
 - After changing this memoization, run byte-for-byte compiler artifact parity before trusting timing improvements.
 
+## Serialization bridges
+
+The 2026-08 serialization round removed every jam/cue round trip whose only
+job was changing noun representations, and it is the reference for how to
+keep boundary costs down:
+
+- The cache write path lifts slab nouns straight into nockasm nouns through
+  `honk::nasm_bridge` (a hash-consing interner: parents key on their
+  children's intern ids, so no structural hashing or comparison of whole
+  subtrees ever runs). It replaced jamming every pending product and cueing
+  the bytes back through nockasm.
+- The cache read path hydrates only the requested pack root directly into the
+  slab (`hydrate_pack_root` in the honk binary), reusing already-hydrated
+  nodes across reads of the same pack. It replaced lowering every root,
+  jamming the whole list, and cueing it back.
+- Integrity on read is the pack's blake3 hash plus `NasmBundle::from_bytes`
+  validation. Do not reintroduce decode/re-encode canonicality proofs on hot
+  paths; both write paths only emit canonical bytes, and `write_pack` still
+  fully verifies untrusted bytes.
+- Cold-state loads decode in place (`cold_from_noun_resident` in nockvm)
+  because the cold noun is cued into the same stack the decoded structures
+  live in. The copying `Nounable` decode remains the right call across
+  allocators.
+- `NockJammer::jam` writes u64 words and dedups through an open-addressed
+  structural memo. Its output must stay bit-identical: the backref relation is
+  `slab_mug` + `noun_equality`, and any replacement must preserve exactly that
+  equivalence and the first-occurrence offset choice.
+- Signature hashing (`Sig64`) and jam memo tables must stay in-process-only
+  concerns; they may change algorithm freely, but nothing may persist their
+  values.
+
+Measure with isolated benchmark harnesses (per-run scratch trees, scrubbed
+env, `/usr/bin/time -lp`) and hold outputs byte-identical against the golden
+checksums before trusting any number. The
+compiler binary uses jemalloc (see the `#[global_allocator]` in
+`src/bin/honk.rs`); profile allocator pressure before adding new per-node
+allocations to compile paths — the system allocator was ~25% of cold-build
+samples before the switch.
+
 ## Useful workload
 
 `crates/hoonc/hoon/hoon-138.hoon` arbitrary compilation is a useful stress case because it exercises parser source spots, compiler type operations, and large emitted artifacts in a single parity target.
