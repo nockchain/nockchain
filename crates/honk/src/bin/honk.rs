@@ -7,16 +7,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::{cmp, env, fs, process};
 
+// The compile core is allocation-bound (slab, memo tables, AST churn): the
+// system zone allocator was ~25% of cold-build samples. Same allocator the
+// other workspace binaries use; disabled under Miri like theirs, and on MSVC
+// where tikv-jemallocator does not build (build_cache keeps a Windows path).
+#[cfg(all(not(miri), not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use hatch::ast::hoon::{Hoon, Limb};
 use hatch::utils::hoon_to_noun;
 use honk::build_cache::{BuildCache, CacheObjectKind, CacheRead, CacheWrite};
+use honk::nasm_bridge::SlabToNockasm;
 use honk::native::formula::comb;
 use honk::native::hot::native_hot_state;
 use honk::native::noun::term_to_noun;
 use honk::native::ut::{ty_noun, Ut};
 use honk::pipeline;
 use honk::pipeline::{NativeImportKind, ScopeMode};
-use nockapp::noun::slab::{Jammer, NockJammer, NounSlab};
+use nockapp::noun::slab::{NockJammer, NounSlab};
 use nockapp::noun::{BrandedEvalExt, BrandedNounSpaceExt, NounAllocatorExt};
 use nockapp::utils::{create_context, NOCK_STACK_SIZE_MEDIUM};
 use nockapp::AtomExt;
@@ -30,7 +39,7 @@ use nockvm::jets::warm::Warm;
 use nockvm::jets::JetDispatchMode;
 use nockvm::mem::{AllocationError, NockStack};
 use nockvm::mug::{calc_atom_mug_u32, calc_cell_mug_u32, get_mug, set_mug};
-use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, T};
+use nockvm::noun::{Atom, Cell, Noun, NounAllocator, NounSpace, D, DIRECT_MAX, T};
 use nockvm::serialization::jam as nock_jam;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
@@ -1411,7 +1420,11 @@ struct NativeBuildContext<'a> {
     key_visiting: HashSet<PathBuf>,
     build_cache: Option<BuildCache>,
     pending_cache: Vec<PendingCacheObject>,
-    hydrated_cache_roots: HashMap<String, Noun>,
+    /// Per-pack lazily hydrated slab nouns, indexed by DAG node id and keyed
+    /// by the pack bundle's `Rc` address (stable: `BuildCache` retains every
+    /// loaded pack for the session). Roots hydrate on demand and reads of the
+    /// same pack share every already-built node.
+    pack_hydration: HashMap<usize, Vec<Option<Noun>>>,
     cache_namespace: blake3::Hash,
     visiting: HashSet<PathBuf>,
     wrappers: ExactWrapperBatteries,
@@ -1452,7 +1465,7 @@ impl<'a> NativeBuildContext<'a> {
             key_visiting: HashSet::new(),
             build_cache: cache_dir.map(|directory| BuildCache::new(directory, fresh_cache)),
             pending_cache: Vec::new(),
-            hydrated_cache_roots: HashMap::new(),
+            pack_hydration: HashMap::new(),
             cache_namespace,
             visiting: HashSet::new(),
             wrappers: ExactWrapperBatteries::empty(),
@@ -2004,36 +2017,19 @@ impl<'a> NativeBuildContext<'a> {
     }
 
     fn decode_cache_noun(&mut self, cached: &CacheRead) -> Result<Noun> {
-        if let Some(root) = self.hydrated_cache_roots.get(&cached.root_name) {
-            return Ok(*root);
-        }
-        let lowered = cached.bundle.lower();
-        let mut list = nockasm::Noun::from(0u64);
-        for (_, noun) in lowered.iter().rev() {
-            list = nockasm::Noun::cell(noun.clone(), list);
-        }
-        let jam = nockasm::jam(&list);
-        let mut cursor = self
-            .ut
-            .slab
-            .cue_into(bytes::Bytes::from(jam))
-            .map_err(|error| format!("cache payload cue: {error}"))?;
-        let space = self.ut.slab.noun_space();
-        for (name, _) in lowered {
-            let cell = cursor
-                .in_space(&space)
-                .as_cell()
-                .map_err(|_| "cache pack root list has the wrong shape")?;
-            self.hydrated_cache_roots.insert(name, cell.head().noun());
-            cursor = cell.tail().noun();
-        }
-        if atom_u64(cursor, &space) != Some(0) {
-            return Err("cache pack root list has a nonzero tail".into());
-        }
-        self.hydrated_cache_roots
-            .get(&cached.root_name)
-            .copied()
-            .ok_or_else(|| "cache pack has no indexed root".into())
+        let bundle = &cached.bundle;
+        let root_id = bundle
+            .roots()
+            .iter()
+            .find(|root| root.name() == cached.root_name)
+            .ok_or("cache pack has no indexed root")?
+            .id();
+        let values = self
+            .pack_hydration
+            .entry(std::rc::Rc::as_ptr(bundle) as usize)
+            .or_insert_with(|| vec![None; bundle.nodes().len()]);
+        hydrate_pack_root(&mut *self.ut.slab, bundle.nodes(), root_id, values)?;
+        values[root_id.index()].ok_or_else(|| "cache pack root failed to hydrate".into())
     }
 
     fn cached_vase_noun(&mut self, vase: &NativeVase) -> Noun {
@@ -2151,25 +2147,17 @@ impl<'a> NativeBuildContext<'a> {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_cache);
-        let mut list = D(0);
-        for object in pending.iter().rev() {
-            list = T(&mut *self.ut.slab, &[object.root, list]);
-        }
+        // One interner across every root so cross-product sharing survives,
+        // exactly as the old whole-list jam preserved it. The direct walk
+        // replaces a jam of every product and a cue of those bytes — two full
+        // serializations that existed only to change noun representations.
         let space = self.ut.slab.noun_space();
-        let jam = NockJammer::jam(list, &space);
-        let list_noun = nockasm::cue(&jam).map_err(|error| format!("cache pack cue: {error}"))?;
+        let mut bridge = SlabToNockasm::new();
         let mut roots = Vec::with_capacity(pending.len());
-        let mut cursor = &list_noun;
-        for _ in &pending {
-            let nockasm::NounRef::Cell(head, tail) = cursor.view() else {
-                return Err("cache pack list has the wrong shape".into());
-            };
-            roots.push(head.clone());
-            cursor = tail;
+        for object in &pending {
+            roots.push(bridge.convert(object.root, &space)?);
         }
-        if !matches!(cursor.view(), nockasm::NounRef::Atom(atom) if atom.is_zero()) {
-            return Err("cache pack list has a nonzero tail".into());
-        }
+        drop(bridge);
         let inputs: Vec<_> = pending
             .iter()
             .zip(&roots)
@@ -2179,7 +2167,8 @@ impl<'a> NativeBuildContext<'a> {
                 mode: nockasm::DagMode::Noun,
             })
             .collect();
-        let graph = nockasm::lift_bundle(&inputs)?.to_bytes();
+        let bundle = nockasm::lift_bundle(&inputs)?;
+        let graph = bundle.to_bytes();
         let entries: Vec<_> = pending
             .iter()
             .map(|object| CacheWrite {
@@ -2193,7 +2182,7 @@ impl<'a> NativeBuildContext<'a> {
         self.build_cache
             .as_mut()
             .expect("cache checked above")
-            .write_pack(&entries, &graph)
+            .write_pack_prebuilt(&entries, std::rc::Rc::new(bundle), &graph)
     }
 
     fn compile_entry(&mut self, path: &Path) -> Result<NativeBuildProduct> {
@@ -3790,6 +3779,156 @@ fn jam_ut_noun(ut: &mut Ut<'_>, noun: Noun) -> Vec<u8> {
     ut.slab.jam().to_vec()
 }
 
+/// Build slab nouns for `root` and everything reachable from it, reusing any
+/// nodes hydrated by earlier reads of the same pack. Node ids are
+/// topologically ordered by construction (`NasmBundle::from_bytes` rejects
+/// forward references), so one forward pass hydrates children before parents.
+/// Mirrors `nockasm`'s `lower_root_node` for every node kind, but builds
+/// directly into the slab: the old path lowered the whole pack to nockasm
+/// nouns, jammed every root into one buffer, and cued the bytes back — three
+/// extra full traversals on every warm start, for every root in the pack.
+fn hydrate_pack_root(
+    slab: &mut NounSlab,
+    nodes: &[nockasm::DagNode],
+    root: nockasm::DagId,
+    values: &mut [Option<Noun>],
+) -> Result<()> {
+    if values[root.index()].is_some() {
+        return Ok(());
+    }
+    let mut reachable = vec![false; nodes.len()];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let index = id.index();
+        // Already-hydrated nodes stop the walk: their children are hydrated too.
+        if reachable[index] || values[index].is_some() {
+            continue;
+        }
+        reachable[index] = true;
+        push_pack_children(&nodes[index], &mut stack);
+    }
+    for index in 0..nodes.len() {
+        if !reachable[index] || values[index].is_some() {
+            continue;
+        }
+        values[index] = Some(build_pack_node(slab, &nodes[index], values));
+    }
+    Ok(())
+}
+
+fn push_pack_children(node: &nockasm::DagNode, output: &mut Vec<nockasm::DagId>) {
+    use nockasm::{DagNode, DagOp};
+    match node {
+        DagNode::Atom(_) | DagNode::Op(DagOp::Slot(_)) => {}
+        DagNode::Cell(a, b)
+        | DagNode::Op(DagOp::Eval(a, b))
+        | DagNode::Op(DagOp::Eq(a, b))
+        | DagNode::Op(DagOp::Comp(a, b))
+        | DagNode::Op(DagOp::Push(a, b))
+        | DagNode::Op(DagOp::Hint(a, b))
+        | DagNode::Op(DagOp::Scry(a, b))
+        | DagNode::Op(DagOp::Edit(_, a, b)) => output.extend([*a, *b]),
+        DagNode::Nock(a)
+        | DagNode::Op(DagOp::Const(a))
+        | DagNode::Op(DagOp::Isa(a))
+        | DagNode::Op(DagOp::Inc(a))
+        | DagNode::Op(DagOp::Call(_, a)) => output.push(*a),
+        DagNode::Op(DagOp::If(a, b, c)) | DagNode::Op(DagOp::Hintd(a, b, c)) => {
+            output.extend([*a, *b, *c]);
+        }
+    }
+}
+
+/// One node into the slab. Children are always hydrated first (topological
+/// order), so the lookups cannot miss. The op arms reproduce nockasm's
+/// `lower_op` noun shapes exactly; cache packs are written in `Noun` mode and
+/// should only contain atoms and cells, but a pack is untrusted input and the
+/// old decode path lowered every node kind, so this does too.
+fn build_pack_node(slab: &mut NounSlab, node: &nockasm::DagNode, values: &[Option<Noun>]) -> Noun {
+    use nockasm::{DagNode, DagOp};
+    let get =
+        |id: &nockasm::DagId| values[id.index()].expect("pack children hydrate before parents");
+    match node {
+        DagNode::Atom(atom) => nasm_atom_to_slab(slab, atom),
+        DagNode::Cell(head, tail) => {
+            let (head, tail) = (get(head), get(tail));
+            T(slab, &[head, tail])
+        }
+        DagNode::Nock(raw) => get(raw),
+        DagNode::Op(op) => match op {
+            DagOp::Slot(axis) => {
+                let axis = nasm_atom_to_slab(slab, axis);
+                T(slab, &[D(0), axis])
+            }
+            DagOp::Const(value) => {
+                let value = get(value);
+                T(slab, &[D(1), value])
+            }
+            DagOp::Eval(subject, formula) => {
+                let (subject, formula) = (get(subject), get(formula));
+                T(slab, &[D(2), subject, formula])
+            }
+            DagOp::Isa(formula) => {
+                let formula = get(formula);
+                T(slab, &[D(3), formula])
+            }
+            DagOp::Inc(formula) => {
+                let formula = get(formula);
+                T(slab, &[D(4), formula])
+            }
+            DagOp::Eq(left, right) => {
+                let (left, right) = (get(left), get(right));
+                T(slab, &[D(5), left, right])
+            }
+            DagOp::If(condition, then_, else_) => {
+                let (condition, then_, else_) = (get(condition), get(then_), get(else_));
+                T(slab, &[D(6), condition, then_, else_])
+            }
+            DagOp::Comp(first, second) => {
+                let (first, second) = (get(first), get(second));
+                T(slab, &[D(7), first, second])
+            }
+            DagOp::Push(value, body) => {
+                let (value, body) = (get(value), get(body));
+                T(slab, &[D(8), value, body])
+            }
+            DagOp::Call(axis, formula) => {
+                let formula = get(formula);
+                let axis = nasm_atom_to_slab(slab, axis);
+                T(slab, &[D(9), axis, formula])
+            }
+            DagOp::Edit(axis, value, formula) => {
+                let (value, formula) = (get(value), get(formula));
+                let axis = nasm_atom_to_slab(slab, axis);
+                let target = T(slab, &[axis, value]);
+                T(slab, &[D(10), target, formula])
+            }
+            DagOp::Hint(tag, formula) => {
+                let (tag, formula) = (get(tag), get(formula));
+                T(slab, &[D(11), tag, formula])
+            }
+            DagOp::Hintd(tag, clue, formula) => {
+                let (tag, clue, formula) = (get(tag), get(clue), get(formula));
+                let pair = T(slab, &[tag, clue]);
+                T(slab, &[D(11), pair, formula])
+            }
+            DagOp::Scry(reference, path) => {
+                let (reference, path) = (get(reference), get(path));
+                T(slab, &[D(12), reference, path])
+            }
+        },
+    }
+}
+
+fn nasm_atom_to_slab(slab: &mut NounSlab, atom: &nockasm::Atom) -> Noun {
+    if let Some(value) = atom.as_u64() {
+        if value <= DIRECT_MAX {
+            return D(value);
+        }
+    }
+    <Atom as nockvm::ext::AtomExt>::from_bytes(slab, &atom.to_le_bytes()).as_noun()
+}
+
 fn cue_subject_type_to_slab(slab: &mut NounSlab<NockJammer>, raw: &[u8]) -> Result<Noun> {
     let mut stack = NockStack::new(NOCK_STACK_SIZE_MEDIUM, 0);
     let root = <Noun as NounExt>::cue_bytes_slice(&mut stack, raw)
@@ -3812,19 +3951,32 @@ fn cue_noun_to_slab(slab: &mut NounSlab<NockJammer>, raw: &[u8], label: &str) ->
 }
 
 fn load_cold_state(context: &mut Context, raw: &[u8], label: &str) -> Result<()> {
-    let cold_noun = <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
-        .map_err(|err| format!("cue {label} cold jam: {err:?}"))?;
+    let cold_noun = trace_timed(format!("{label} cold cue"), || {
+        <Noun as NounExt>::cue_bytes_slice(&mut context.stack, raw)
+            .map_err(|err| format!("cue {label} cold jam: {err:?}").into())
+    })?;
     let stack_space = context.stack.noun_space();
     let (battery_to_paths, root_to_paths, path_to_batteries) =
-        Cold::from_noun(&mut context.stack, &cold_noun, &stack_space)
-            .map_err(|err| format!("decode {label} cold state: {err:?}"))?;
-    context.cold = Cold::from_vecs(
-        &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
-    );
-    context.warm = Warm::init(
-        &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
-        context.jet_dispatch,
-    );
+        trace_timed(format!("{label} cold from_noun"), || {
+            // The cold noun was cued into this same stack above, so the
+            // resident decode borrows batteries and paths in place instead of
+            // deep-copying every core a second time.
+            nockvm::jets::cold::cold_from_noun_resident(
+                &mut context.stack, &cold_noun, &stack_space,
+            )
+            .map_err(|err| format!("decode {label} cold state: {err:?}").into())
+        })?;
+    context.cold = trace_timed(format!("{label} cold from_vecs"), || {
+        Ok(Cold::from_vecs(
+            &mut context.stack, battery_to_paths, root_to_paths, path_to_batteries,
+        ))
+    })?;
+    context.warm = trace_timed(format!("{label} warm init"), || {
+        Ok(Warm::init(
+            &mut context.stack, &mut context.cold, &context.hot, &context.test_jets,
+            context.jet_dispatch,
+        ))
+    })?;
     Ok(())
 }
 

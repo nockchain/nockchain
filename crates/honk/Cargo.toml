@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 smallvec = { workspace = true }
 stacker = "0.1"
 thiserror = { workspace = true }
+tikv-jemallocator = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

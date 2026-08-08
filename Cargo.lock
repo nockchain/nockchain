@@ -4746,6 +4746,7 @@ dependencies = [
  "stacker",
  "tempfile",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "tracing-subscriber",
