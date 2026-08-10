@@ -198,18 +198,23 @@
             (~(get-asert-anchor-min-timestamp dcon con der bc) %zk 7 anchor-id)
         ==
   ==
-::  Both Logos re-pins are scheduled anchors. Their timestamps are recovered
-::  from the validated branch, not from puzzle-local ad hoc state.
-++  test-dual-puzzle-repins-share-asert-schedule
+::  Zoe preserves the 150-second ZK cadence before Logos. The two Logos re-pins
+::  are scheduled anchors whose timestamps are recovered from the validated
+::  branch, not from puzzle-local ad hoc state.
+++  test-asert-repins-follow-schedule
   =/  bc  *blockchain-constants:txe
   =/  con  (initial-consensus-state-custom:h bc)
+  =/  zoe=(unit asert-anchor:dcon)
+    (~(active-asert-anchor dcon con der bc) %zk proof-version-3-start:dcon)
   =/  zk=(unit asert-anchor:dcon)
     (~(active-asert-anchor dcon con der bc) %zk phase.zk-asert-post-ai.bc)
   =/  ai=(unit asert-anchor:dcon)
     (~(active-asert-anchor dcon con der bc) %ai phase.ai-asert.bc)
+  =/  expected-zoe=asert-anchor:dcon
+    [proof-version-3-start:dcon (asert-target-for-rate:dcon 3.000.000 ideal-block-time.zk-asert.bc) ~ ideal-block-time.zk-asert.bc half-life.zk-asert.bc max-target-atom:txe]
   =/  expected-zk=asert-anchor:dcon
     [phase.zk-asert-post-ai.bc anchor-target-atom.zk-asert-post-ai.bc ~ ideal-block-time.zk-asert-post-ai.bc half-life.zk-asert-post-ai.bc max-target-atom:txe]
   =/  expected-ai=asert-anchor:dcon
     [phase.ai-asert.bc anchor-target-atom.ai-asert.bc ~ ideal-block-time.ai-asert.bc half-life.ai-asert.bc max-ai-target-atom:txe]
-  (expect-eq !>([`expected-zk `expected-ai]) !>([zk ai]))
+  (expect-eq !>([`expected-zoe `expected-zk `expected-ai]) !>([zoe zk ai]))
 --

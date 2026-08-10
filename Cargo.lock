@@ -6604,6 +6604,7 @@ dependencies = [
  "tracing",
  "tracy-client",
  "vergen",
+ "zk-pow-miner",
  "zkvm-jetpack",
 ]
 

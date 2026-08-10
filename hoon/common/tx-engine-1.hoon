@@ -420,17 +420,19 @@
       anchor-min-timestamp=@
   ==
 ::
-::  ZK puzzle ASERT, post-AI-activation regime. A 375s target interval gives
-::  ZK roughly 40% of blocks when paired with AI's 250s target interval. The
-::  computation re-anchors at height (ai-pow-activation-height - 1) with
-::  anchor-target = 2^291.
+:::  ZK puzzle ASERT, post-AI-activation regime. A 214s target interval gives
+:::  ZK about 70% of blocks when paired with AI's 500s target interval. The
+:::  nearest whole-second ZK interval to 1,500 / 7 preserves the 150s combined
+:::  cadence within one tenth of a second. The computation re-anchors at height
+:::  (ai-pow-activation-height - 1).
 +$  zk-asert-post-ai
   $+  zk-asert-post-ai
-  $~  :*  phase=114.300
-          anchor-height=114.299
-          anchor-target-atom=^~((bex 291))
-          ::  375s ideal ⇒ ZK wins ~40% of blocks (paired with AI's 250s)
-          ideal-block-time=375
+  $~  :*  phase=126.000
+          anchor-height=125.999
+          ::  Preserve the calibrated ZK work rate at the 214s interval.
+          anchor-target-atom=^~((div (mul 375 (bex 291)) 214))
+          ::  214s ideal ⇒ ZK wins about 70% of blocks (paired with AI's 500s).
+          ideal-block-time=214
           half-life=^~((mul 12 ^~((mul 60 60))))
           ::  Recovered from the activation predecessor's validated branch
           ::  through the shared puzzle-keyed ASERT anchor cache.
@@ -449,8 +451,8 @@
 ::  AI block therefore uses virtual height 1 against that shared branch anchor.
 +$  ai-asert
   $+  ai-asert
-  $~  :*  phase=114.300
-          anchor-height=114.299
+  $~  :*  phase=126.000
+          anchor-height=125.999
           ::  Sets the AI puzzle's LAUNCH BLOCK INTERVAL and its launch
           ::  fork-choice weight: a post-activation block's heaviness is the
           ::  expected work at its own target, so 2^256/anchor below is also
@@ -459,19 +461,18 @@
           ::  An %ai-pow target prices one MAC-equivalent of matmul, so
           ::    expected-MAC-equivalents-per-block == 2^256 / anchor
           ::  and the launch cadence is that over the network's real MAC rate.
-          ::  bex 193 is 2^63 MAC-equivalents per block: ~3.7e16 MAC/s at the
-          ::  250s ideal, about a hundred consumer GPUs at the 200-400 TeraMAC/s
+          ::  bex 192 is 2^64 MAC-equivalents per block: ~3.7e16 MAC/s at the
+          ::  500s ideal, about a hundred consumer GPUs at the 200-400 TeraMAC/s
           ::  a 4090/5090 does in Pearl pools.
           ::
           ::  Erring HARD is the safe direction. Too hard costs a slow AI ramp
           ::  that ASERT heals at one doubling per half-life of ELAPSED time.
           ::  Too easy mints blocks at the wrong rate, and ASERT only heals that
-          ::  at ideal/half-life doublings per ACCEPTED AI block (~173 blocks
+          ::  at ideal/half-life doublings per ACCEPTED AI block (~86 blocks
           ::  each).
-          anchor-target-atom=^~((bex 193))
-          ::  250s ideal ⇒ AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40)
-          ::  to bootstrap the AI Compute Network; paired ZK ideal is 375s.
-          ideal-block-time=250
+          anchor-target-atom=^~((bex 192))
+          ::  500s ideal ⇒ AI wins about 30% of blocks (paired with ZK's 214s).
+          ideal-block-time=500
           half-life=^~((mul 12 ^~((mul 60 60))))
           ::  Recovered from the activation predecessor's median timestamp
           ::  through the puzzle-keyed ASERT anchor cache.
@@ -503,13 +504,13 @@
           ::  Defaults (including phase-2 hardcoded anchor-min-timestamp)
           ::  come from `+$ zk-asert`'s own $~ clause.
           *zk-asert
-          ::  ZK ASERT regime 2 (post-AI-activation, 375s ideal).
+          ::  ZK ASERT regime 2 (post-AI-activation, 214s ideal).
           ::  Active at and after ai-pow-activation-height.
           *zk-asert-post-ai
           ::  AI PoW activation threshold. At/after this height, %ai-pow
           ::  blocks are verified via the recursive-certificate jet
           ::  (%ai-pow-verify) and admitted like %pow blocks.
-          ai-pow-activation-height=114.300
+          ai-pow-activation-height=126.000
           ::  AI ASERT defaults come from `+$ ai-asert`'s own $~ clause.
           *ai-asert
       ==
@@ -1089,15 +1090,21 @@
     |=  [h=^hash pre=*]
     =(h (hash-noun:hax pre))
   ::
-  ::  +verify-without-signatures: verify without checking signatures
-  ++  verify-without-signatures
+  ::  +verify-parent-hashes: bind every seed to the input note
+  ++  verify-parent-hashes
     |=  [sen=form parent-note=nnote]
     ^-  ?
     ?>  ?=(@ -.parent-note)
     =/  parent-hash=hash  (hash:nnote parent-note)
-    ::  check that parent hash of each seed matches the note's hash
-    ?.  (~(all z-in seeds.sen) |=(sed=seed =(parent-hash.sed parent-hash)))
+    (~(all z-in seeds.sen) |=(sed=seed =(parent-hash.sed parent-hash)))
+  ::
+  ::  +verify-without-signatures: verify without checking signatures
+  ++  verify-without-signatures
+    |=  [sen=form parent-note=nnote]
+    ^-  ?
+    ?.  (verify-parent-hashes sen parent-note)
       %.n
+    ?>  ?=(@ -.parent-note)
     ::  check that witness is valid
     ?.  (based:witness witness.sen)
       %.n
@@ -1248,6 +1255,8 @@
       ::  v1 note must back a %1 spend
       ?:  ?=(^ -.note)  [%.n %v1-spend-version-mismatch]
       ?:  !=(%1 version.note)  [%.n %v1-note-version-mismatch]
+      ?.  (verify-parent-hashes:spend-1 +.sp note)
+        [%.n %v1-spend-1-parent-hash-failed]
       =/  ctx=check-context
         :*  page-num
             origin-page.note

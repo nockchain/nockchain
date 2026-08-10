@@ -220,8 +220,8 @@
     blocks-per-epoch               1.000.000
     ::  All four dual-puzzle phases sit together: +dual-puzzle-asert-phase is the
     ::  LAST of them, so leaving the post-AI ZK / AI ASERT phases at their mainnet
-    ::  defaults would put the per-puzzle-priced regime 114.300 blocks above any test
-    ::  chain. Mainnet has all four at 114.300 for the same reason.
+    ::  defaults would put the per-puzzle-priced regime 126.000 blocks above any test
+    ::  chain. Mainnet has all four at 126.000 for the same reason.
     phase.zk-asert-post-ai         2
     anchor-height.zk-asert-post-ai   1
     phase.ai-asert                 2

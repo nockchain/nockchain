@@ -147,14 +147,14 @@ easy to distinguish empirically.
 This constant is consensus-critical: every node must use the same value. It
 need not be exact; it must be stable and roughly track the real hardware ratio.
 
-**Cross-check at the launch anchors.** The ZK anchor (`2^291`) prices
-`2^320/(2^291+1) = 2^29 − 1 = 536,870,911` attempts per block; the AI anchor
-(`2^193`) prices `2^63` MAC-equivalents per block. At their ideals both lanes
-produce ≈ 1.43 × 10⁶ attempt-equivalents of heaviness per second — within
-0.1% of each other — and both calibrate to roughly a hundred reference-class
-consumer GPUs at their lane's ideal interval. At launch calibration neither
-puzzle orphans the other, and per-block weights differ only by the 375s/250s
-cadence ratio (≈ 1.499).
+**Cross-check at the launch anchors.** The ZK anchor
+(`floor(375 · 2^291 / 214)`) prices 306,374,333 attempts per block; the AI
+anchor (`2^192`) prices `2^64` MAC-equivalents per block. At their 214 s ZK
+and 500 s AI ideals, both lanes produce about 1.43 × 10⁶
+attempt-equivalents of heaviness per second — within 0.1% of each other — and
+both calibrate to roughly a hundred reference-class consumer GPUs. At launch
+calibration neither puzzle orphans the other, and per-block weights differ
+only by the 500 s / 214 s cadence ratio (≈ 2.336).
 
 **Why not unnormalized `1/target`.** ASERT pins each puzzle's target to that
 puzzle's own capacity, so a raw `1/target` heaviness would make per-block
@@ -207,23 +207,23 @@ height and the puzzle can compute it.
 
 ### I5 — the anchor targets a block interval and prices launch weight
 
-`anchor-target-atom.ai-asert = 2^193`. Under I4 the anchor prices both the AI
+`anchor-target-atom.ai-asert = 2^192`. Under I4 the anchor prices both the AI
 puzzle's launch block interval and its launch fork-choice weight:
 `2^256 / anchor` is both the expected MAC-equivalents per block and the
 anchor block's heaviness, convertible to attempt-equivalents at the I4 rate.
 
 An `%ai-pow` target prices one MAC-equivalent, so `2^256 / anchor` is the
 expected MAC-equivalents per block and the cadence is that over the network's
-real MAC rate. `2^193` is `2^63` MAC-equivalents — about 3.7e16 MAC/s at the 250s
-ideal, about a hundred consumer GPUs at the 200-400 TeraMAC/s a 4090/5090 does
-in Pearl pools.
+real MAC rate. `2^192` is `2^64` MAC-equivalents — about 3.7e16 MAC/s at the
+500s ideal, about a hundred consumer GPUs at the 200-400 TeraMAC/s a
+4090/5090 does in Pearl pools.
 
 Erring **hard** is the safe direction. Too hard costs a slow AI ramp that ASERT
 heals at one doubling per half-life of *elapsed* time. Too easy mints blocks at
 the wrong rate, and ASERT only heals that at `ideal/half-life` doublings per
-*accepted* AI block — `250/43200`, one doubling per ~173 blocks. At the previous
+*accepted* AI block — `500/43200`, one doubling per ~86 blocks. At the previous
 `2^227` the anchor implied `2^29` MAC-equivalents per block, which one consumer
-GPU clears in ~1.8 microseconds against a 250s target.
+GPU clears in ~1.8 microseconds against a 500s target.
 
 **Phase ordering.** Asserted at kernel load:
 `phase.zk-asert-post-ai == phase.ai-asert` (simultaneous re-pin),

@@ -95,16 +95,18 @@ impl AsertParams {
     }
 
     /// Defaults for the ZK puzzle ASERT post-AI-activation regime,
-    /// matching `+$ zk-asert-post-ai`'s `$~` clause. A 375s ideal gives
-    /// ZK roughly 40% of blocks when paired with AI's 250s ideal; their
-    /// rates sum to the chain's 150s global cadence.
+    /// matching `+$ zk-asert-post-ai`'s `$~` clause. A 214s ideal gives
+    /// ZK about 70% of blocks when paired with AI's 500s ideal; their rates
+    /// retain the chain's 150s global cadence within one tenth of a second.
     pub fn zk_post_ai_default() -> Self {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT - 1,
-            anchor_target_atom: UBig::from(1u64) << 291,
-            // 375s ideal => ZK wins ~40% of blocks (paired with AI's 250s).
-            ideal_block_time: 375,
+            // Preserve the calibrated ZK work rate at the 214s interval.
+            anchor_target_atom: (UBig::from(375u64) * (UBig::from(1u64) << 291))
+                / UBig::from(214u64),
+            // 214s ideal => ZK wins about 70% of blocks (paired with AI's 500s).
+            ideal_block_time: 214,
             half_life: 12 * 60 * 60,
             // Recovered from the activation predecessor's validated branch
             // through the shared puzzle-keyed ASERT anchor cache.
@@ -123,8 +125,8 @@ impl AsertParams {
     /// below is also the anchor block's weight in MAC-equivalents.
     ///
     /// An `%ai-pow` target prices one MAC-equivalent of matmul, so
-    /// `2^256 / anchor` is the expected MAC-equivalents per block. `2^193` is
-    /// `2^63` of them — about 3.7e16 MAC/s at the 250s ideal, about a hundred
+    /// `2^256 / anchor` is the expected MAC-equivalents per block. `2^192` is
+    /// `2^64` of them — about 3.7e16 MAC/s at the 500s ideal, about a hundred
     /// consumer GPUs at the 200-400 TeraMAC/s a 4090/5090 does in Pearl pools.
     ///
     /// It must also stay at or below `2^232 - 1` (Hoon `+max-ai-target-atom`,
@@ -138,10 +140,9 @@ impl AsertParams {
         Self {
             phase: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
             anchor_height: BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT - 1,
-            anchor_target_atom: UBig::from(1u64) << 193,
-            // 250s ideal => AI wins ~60% of blocks (1/250 : 1/375 = 60 : 40),
-            // bootstrapping the AI Compute Network.
-            ideal_block_time: 250,
+            anchor_target_atom: UBig::from(1u64) << 192,
+            // 500s ideal => AI wins about 30% of blocks (paired with ZK's 214s).
+            ideal_block_time: 500,
             half_life: 12 * 60 * 60,
             // Recovered from the activation predecessor's validated branch
             // through the shared puzzle-keyed ASERT anchor cache.
@@ -267,7 +268,7 @@ pub struct BlockchainConstants {
     pub input_fee_divisor: u64,
     pub zk_asert: AsertParams,
     /// ZK ASERT regime 2 — active at and after `ai_pow_activation_height`.
-    /// Its 375s ideal gives ZK roughly 40% of blocks beside AI's 250s regime.
+    /// Its 214s ideal gives ZK about 70% of blocks beside AI's 500s regime.
     pub zk_asert_post_ai: AsertParams,
     /// At and after this height, the kernel's mandatory recursive-certificate
     /// verify jet admits valid `%ai-pow` blocks. Pre-activation `%ai-pow` is
@@ -301,7 +302,7 @@ impl BlockchainConstants {
     pub const DEFAULT_NOTE_DATA_MIN_FEE: u64 = 256;
     pub const DEFAULT_BASE_FEE: u64 = 16_384;
     pub const DEFAULT_INPUT_FEE_DIVISOR: u64 = 4;
-    pub const DEFAULT_AI_POW_ACTIVATION_HEIGHT: u64 = 114_300;
+    pub const DEFAULT_AI_POW_ACTIVATION_HEIGHT: u64 = 126_000;
 
     pub fn new() -> Self {
         let max_target_atom = UBig::from_str_with_radix_prefix(Self::DEFAULT_MAX_TIP5_ATOM)
@@ -449,7 +450,7 @@ impl NounEncode for BlockchainConstants {
         //   slot 5 : input-fee-divisor
         //   slot 6 : blockchain-constants:v0 (13-atom sub-cell)
         //   slot 7 : zk-asert sub-cell (regime 1, pre-AI: 150s ideal)
-        //   slot 8 : zk-asert-post-ai sub-cell (regime 2, post-AI: 375s ideal)
+        //   slot 8 : zk-asert-post-ai sub-cell (regime 2, post-AI: 214s ideal)
         //   slot 9 : ai-pow-activation-height
         //   slot 10: ai-asert sub-cell
         let v1_phase = Atom::new(allocator, self.v1_phase).as_noun();
@@ -892,7 +893,7 @@ mod tests {
         assert_eq!(constants.base_fee, 16_384, "base-fee mismatch");
         assert_eq!(constants.input_fee_divisor, 4, "input-fee-divisor mismatch");
         // zk-asert defaults: 150s pre-AI;
-        // zk-asert-post-ai defaults: 375s post-AI activation.
+        // zk-asert-post-ai defaults: 214s post-AI activation.
         assert_eq!(
             constants.zk_asert,
             AsertParams::zk_default(),
@@ -903,16 +904,34 @@ mod tests {
             AsertParams::zk_post_ai_default(),
             "zk-asert-post-ai mismatch"
         );
-        // ai-pow activation + ai-asert defaults.
         assert_eq!(
-            constants.ai_pow_activation_height,
-            BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT,
+            constants.ai_pow_activation_height, 126_000,
             "ai-pow-activation-height mismatch"
         );
         assert_eq!(
+            constants.zk_asert_post_ai,
+            AsertParams {
+                phase: 126_000,
+                anchor_height: 125_999,
+                anchor_target_atom: (UBig::from(375u64) * (UBig::from(1u64) << 291))
+                    / UBig::from(214u64),
+                ideal_block_time: 214,
+                half_life: 12 * 60 * 60,
+                anchor_min_timestamp: 0,
+            },
+            "zk-asert post-AI schedule mismatch"
+        );
+        assert_eq!(
             constants.ai_asert,
-            AsertParams::ai_default(),
-            "ai-asert mismatch"
+            AsertParams {
+                phase: 126_000,
+                anchor_height: 125_999,
+                anchor_target_atom: UBig::from(1u64) << 192,
+                ideal_block_time: 500,
+                half_life: 12 * 60 * 60,
+                anchor_min_timestamp: 0,
+            },
+            "ai-asert schedule mismatch"
         );
     }
 
@@ -990,14 +1009,14 @@ mod tests {
 
     /// The AI anchor sets the puzzle's launch block interval: an `%ai-pow`
     /// target prices one MAC-equivalent, so `2^256 / anchor` is the expected
-    /// MAC-equivalents per block. It carries no fork-choice weight — every
-    /// post-activation block weighs the same. Mirrors Hoon
-    /// `test-ai-anchor-sets-the-launch-block-interval`.
+    /// MAC-equivalents per block and provides the launch fork-choice work.
+    /// Mirrors Hoon `test-ai-anchor-sets-the-launch-block-interval`.
     #[test]
     fn ai_anchor_sets_the_launch_block_interval() {
         let anchor = AsertParams::ai_default().anchor_target_atom;
-        assert_eq!(anchor, UBig::from(1u64) << 193);
-        assert_eq!(256 - (anchor.bit_len() - 1), 63);
+        assert_eq!(anchor, UBig::from(1u64) << 192);
+        assert_eq!(256 - (anchor.bit_len() - 1), 64);
+        assert_eq!(AsertParams::ai_default().ideal_block_time, 500);
     }
 
     /// The AI anchor must be minable: the accept path scales it by the tile

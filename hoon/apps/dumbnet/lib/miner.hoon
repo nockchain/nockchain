@@ -308,7 +308,7 @@
   =/  candidate-target=bignum:bignum:t
     ?:  (post-asert-activation:t candidate-height)
       ::  ZK target selection uses the 150s pre-AI regime or the branch-local
-      ::  375s post-AI regime according to candidate height.
+      ::  214s post-AI regime according to candidate height.
       ::
       ::  The immediate parent's branch-local state carries the latest ZK head
       ::  and count, so long AI-only gaps remain O(1) and cannot influence ZK.

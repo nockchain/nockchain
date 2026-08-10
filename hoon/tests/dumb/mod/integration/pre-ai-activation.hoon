@@ -15,10 +15,10 @@
 :::      - version recording:    pre-activation block versions are height-derived,
 :::                              never stored in block-versions,
 :::      - full chain:           a chain built entirely below activation accepts.
-::    bc-pre-ai activates AI at height 8 with the ZK re-anchor phase at 8 and
-::    anchor at 7, so heights 5..7 are post-asert (fund slots + ASERT targets)
-::    yet strictly pre-AI-activation — the exact window a real mainnet node
-::    occupies before block 114,300.
+:::    bc-pre-ai activates AI at height 8 with the ZK re-anchor phase at 8 and
+:::    anchor at 7, so heights 5..7 are post-asert (fund slots + ASERT targets)
+:::    yet strictly pre-AI-activation — the exact window a real mainnet node
+:::    occupies before block 126,000.
 /=  helpers  /tests/dumb/helpers
 /=  dcon  /apps/dumbnet/lib/consensus
 /=  txe   /common/tx-engine

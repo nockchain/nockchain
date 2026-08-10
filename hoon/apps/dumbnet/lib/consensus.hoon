@@ -421,8 +421,8 @@
 :::
 ++  zk-asert-anchor-schedule
   ^-  (list asert-anchor)
-  :~  [proof-version-3-start (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert-post-ai.blockchain-constants) ~ ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
-      [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+  :~  [phase.zk-asert-post-ai.blockchain-constants anchor-target-atom.zk-asert-post-ai.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert-post-ai.blockchain-constants) ideal-block-time.zk-asert-post-ai.blockchain-constants half-life.zk-asert-post-ai.blockchain-constants max-target-atom:t]
+      [proof-version-3-start (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
       [112.500 (asert-target-for-rate 3.000.000 ideal-block-time.zk-asert.blockchain-constants) ~ ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
       [phase.zk-asert.blockchain-constants anchor-target-atom.zk-asert.blockchain-constants (asert-anchor-min-timestamp anchor-min-timestamp.zk-asert.blockchain-constants) ideal-block-time.zk-asert.blockchain-constants half-life.zk-asert.blockchain-constants max-target-atom:t]
   ==
@@ -438,6 +438,8 @@
   =.  schedules  (~(put by schedules) %zk zk-asert-anchor-schedule)
   (~(put by schedules) %ai ai-asert-anchor-schedule)
 :::
+::  The highest scheduled phase at or below the child height is active. Equal
+::  phases use the earliest schedule row.
 ++  active-asert-anchor
   |=  [puzzle-type=@tas child-height=@]
   ^-  (unit asert-anchor)
@@ -445,11 +447,16 @@
     (~(get by asert-anchor-schedules) puzzle-type)
   ?~  schedule  ~
   =/  anchors=(list asert-anchor)  u.schedule
+  =/  best=(unit asert-anchor)  ~
   |-
-  ?~  anchors  ~
+  ?~  anchors  best
   =/  anchor=asert-anchor  i.anchors
-  ?:  (gte child-height activation-height.anchor)
-    `anchor
+  ?:  (lth child-height activation-height.anchor)
+    $(anchors t.anchors)
+  ?~  best
+    $(best `anchor, anchors t.anchors)
+  ?:  (gth activation-height.anchor activation-height.u.best)
+    $(best `anchor, anchors t.anchors)
   $(anchors t.anchors)
 :::
 ::  Dynamic ASERT re-pins resolve only through the O(1), puzzle-keyed branch

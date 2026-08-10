@@ -8,10 +8,11 @@
 //! `++ai-pow-verify` jet) and, on success, admits the block through `+heard-block`.
 //!
 //! This test exercises the LIVE consensus kernel end to end and asserts:
-//!   * the post-activation node emits a `%mine-ai` candidate (the AI work effect);
-//!   * NEGATIVE — a real certificate bound to the WRONG block commitment is rejected
-//!     by `do-pow` (the structurally-valid-but-invalid submission path); and
-//!   * POSITIVE — a valid `%ai-pow` block is admitted through `do-pow -> heard-block`.
+//!   * a post-activation node emits a `%mine-ai` candidate;
+//!   * a structurally valid certificate bound to the wrong commitment is rejected;
+//!   * a valid `%ai-pow` block is admitted through `do-pow -> heard-block`;
+//!   * replaying that accepted certificate after the tip advances cannot prevent the
+//!     current `%mine-zk` candidate from being admitted.
 //!
 //! The other adversarial cases are covered at the jet level (`ai-pow-jets::jet_tests`),
 //! where they can be tested without a full kernel boot: over-cap trace-height reject,
@@ -46,6 +47,8 @@ use nockchain_types::tx_engine::common::{Hash, SchnorrPubkey};
 use nockchain_types::{fakenet_blockchain_constants, AsertParams, Seconds};
 use nockvm::noun::{Atom, NounAllocator, D, T};
 use nockvm_macros::tas;
+use zk_pow_miner::worker::{build_candidate_poke, random_nonce};
+use zk_pow_miner::{MineResult, SerfWorker, Worker};
 
 const SIG: nockvm::noun::Noun = D(0);
 
@@ -175,11 +178,59 @@ fn artifact_for_miner_block(block: &ai_pow_miner::canonical::CanonicalBlock) -> 
     .expect("build MoE artifact noun")
 }
 
+fn candidate_from_effects(
+    effects: Vec<NounSlab>,
+    expected_kind: MiningCandidateKind,
+) -> MiningCandidate {
+    effects
+        .into_iter()
+        .filter_map(|effect| MiningCandidate::from_effect_slab(effect).ok().flatten())
+        .find(|candidate| candidate.kind == expected_kind)
+        .unwrap_or_else(|| panic!("kernel emitted no {expected_kind:?} mining candidate"))
+}
+
+async fn mine_zk_candidate(candidate: &MiningCandidate) -> NounSlab {
+    assert_eq!(
+        candidate.kind,
+        MiningCandidateKind::Zk,
+        "the ZK miner requires a %mine-zk candidate"
+    );
+    let worker = SerfWorker::spawn(0, zkvm_jetpack::hot::produce_prover_hot_state())
+        .await
+        .expect("spawn ZK miner");
+    let mut nonce = random_nonce();
+    let command = loop {
+        match worker
+            .mine_attempt(build_candidate_poke(candidate, nonce))
+            .await
+            .expect("mine ZK candidate")
+        {
+            MineResult::Success { poke_slab, .. } => break poke_slab,
+            MineResult::Retry { next_nonce } => nonce = next_nonce,
+        }
+    };
+    worker.cancel();
+    command
+}
+
 async fn drive_genesis(app: &mut NockApp<Chaff>) {
     drive_genesis_with_activation(app, 1).await
 }
 
 async fn drive_genesis_with_activation(app: &mut NockApp<Chaff>, ai_pow_activation_height: u64) {
+    drive_genesis_with_activation_and_zk_target(
+        app,
+        ai_pow_activation_height,
+        ibig::UBig::from(1u64) << 291,
+    )
+    .await
+}
+
+async fn drive_genesis_with_activation_and_zk_target(
+    app: &mut NockApp<Chaff>,
+    ai_pow_activation_height: u64,
+    zk_target: ibig::UBig,
+) {
     // Fakenet constants; AI-PoW activates at `ai_pow_activation_height` (genesis is
     // height 0), and a 1s candidate-update interval so a poke shortly after
     // enable-mining re-emits the candidate.
@@ -206,8 +257,8 @@ async fn drive_genesis_with_activation(app: &mut NockApp<Chaff>, ai_pow_activati
     let max_minable_ai_target = (ibig::UBig::from(1u64) << 232) - ibig::UBig::from(1u64);
     let constants = fakenet_blockchain_constants(2, 1)
         .with_ai_pow_activation_height(ai_pow_activation_height)
-        .with_zk_asert(asert(1, 0, ibig::UBig::from(1u64) << 291))
-        .with_zk_asert_post_ai(asert(1, 0, ibig::UBig::from(1u64) << 291))
+        .with_zk_asert(asert(1, 0, zk_target.clone()))
+        .with_zk_asert_post_ai(asert(1, 0, zk_target))
         .with_ai_asert(asert(1, 1, max_minable_ai_target))
         .with_update_candidate_timestamp_interval(Seconds(1));
     setup::poke(app, SetupCommand::PokeFakenetConstants(Box::new(constants)))
@@ -252,7 +303,8 @@ async fn ai_pow_valid_block_is_admitted() {
     .await
     .expect("boot dumb kernel");
 
-    drive_genesis(&mut app).await;
+    let max_zk_target = fakenet_blockchain_constants(2, 1).max_target_atom;
+    drive_genesis_with_activation_and_zk_target(&mut app, 1, max_zk_target).await;
     // Genesis (height 0) must be admitted.
     assert!(
         app.peek_handle(heaviest_block_path())
@@ -351,7 +403,8 @@ async fn ai_pow_valid_block_is_admitted() {
     let block = prove_canonical_moe_block_at(&params, 8, 2, 1, commit32, extranonce)
         .expect("prove ai-pow block");
     let artifact = artifact_for_miner_block(&block);
-    app.poke(SystemWire.to_wire(), pow_poke_from_artifact(&artifact))
+    let post_ai_effects = app
+        .poke(SystemWire.to_wire(), pow_poke_from_artifact(&artifact))
         .await
         .expect("poke %pow %ai-pow");
     assert!(
@@ -361,6 +414,27 @@ async fn ai_pow_valid_block_is_admitted() {
     eprintln!(
         "[positive] valid %ai-pow block ADMITTED at height 1 (commit {})",
         hex(&commit32)
+    );
+
+    // Replay the accepted height-1 certificate after the AI block advances the
+    // tip. It is stale for height 2 and must fail without replacing the height-2
+    // ZK candidate. The following ZK solution proves the candidate remains live.
+    let zk_candidate = candidate_from_effects(post_ai_effects, MiningCandidateKind::Zk);
+    app.poke(SystemWire.to_wire(), pow_poke_from_artifact(&artifact))
+        .await
+        .expect("poke stale %pow %ai-pow");
+    assert!(
+        app.peek_handle(heavy_n_path(2)).await.unwrap().is_none(),
+        "a stale AI certificate must not admit height 2",
+    );
+
+    let zk_poke = mine_zk_candidate(&zk_candidate).await;
+    app.poke(SystemWire.to_wire(), zk_poke)
+        .await
+        .expect("poke height-2 %pow %dumb-zkpow");
+    assert!(
+        app.peek_handle(heavy_n_path(2)).await.unwrap().is_some(),
+        "a stale AI certificate must not block the current ZK candidate",
     );
 }
 

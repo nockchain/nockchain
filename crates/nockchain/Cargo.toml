@@ -72,6 +72,7 @@ nockchain-math.workspace = true
 nockchain-mining-common.workspace = true
 ai-pow = { path = "../ai-pow", features = ["zk"] }
 ai-pow-miner = { path = "../ai-pow-miner", features = ["node"] }
+zk-pow-miner = { path = "../zk-pow-miner" }
 
 [lints]
 workspace = true

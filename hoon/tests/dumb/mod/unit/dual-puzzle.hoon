@@ -102,34 +102,52 @@
     ::  ...and the two rules genuinely differ here, so both pins are meaningful
     (expect-eq !>(%.y) !>(!=(w1 w2)))
   ==
+:::
+::  Mainnet schedules use whole-second intervals. The 214s ZK interval is the
+::  nearest integer to 1,500 / 7, so the target share is 30% AI and 70% ZK
+::  within the fixed 150s global cadence.
+++  test-mainnet-dual-puzzle-schedule
+  ^-  tang
+  =/  mainnet  *blockchain-constants:txe
+  ;:  weld
+    (expect-eq !>(126.000) !>(ai-pow-activation-height.mainnet))
+    (expect-eq !>(126.000) !>(phase.zk-asert-post-ai.mainnet))
+    (expect-eq !>(125.999) !>(anchor-height.zk-asert-post-ai.mainnet))
+    (expect-eq !>(214) !>(ideal-block-time.zk-asert-post-ai.mainnet))
+    (expect-eq !>((div (mul 375 (bex 291)) 214)) !>(anchor-target-atom.zk-asert-post-ai.mainnet))
+    (expect-eq !>(126.000) !>(phase.ai-asert.mainnet))
+    (expect-eq !>(125.999) !>(anchor-height.ai-asert.mainnet))
+    (expect-eq !>(500) !>(ideal-block-time.ai-asert.mainnet))
+    (expect-eq !>((bex 192)) !>(anchor-target-atom.ai-asert.mainnet))
+  ==
 ::
-::  ZK weight is continuous across the activation boundary: a post-activation
-::  ZK block contributes exactly what the pre-activation formula gives on the
-::  same target. KAT: at the mainnet post-activation anchor (2^291) that is
-::  2^29 - 1 attempts.
+:::  ZK weight is continuous across the activation boundary: a post-activation
+:::  ZK block contributes exactly what the pre-activation formula gives on the
+:::  same target. KAT: at the mainnet post-activation anchor the expected work
+::  is 306,374,333 attempts.
 ++  test-zk-work-continuous-at-activation
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
   =/  anchor-bn  (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet)
-  =/  post-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow anchor-bn))
+  =/  post-w=@  (merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow anchor-bn))
   =/  pre-w=@   (merge:bignum (compute-work:page:mt anchor-bn))
   ;:  weld
     (expect-eq !>(pre-w) !>(post-w))
-    (expect-eq !>(536.870.911) !>(post-w))
+    (expect-eq !>(306.374.333) !>(post-w))
   ==
-::
+:::
 ::  The AI ASERT anchor sets the puzzle's LAUNCH BLOCK INTERVAL and prices its
 ::  launch weight. An %ai-pow target prices one MAC-equivalent, so 2^256/anchor
-::  is the expected MAC-equivalents per block; bex 193 is 2^63 of them, about a
-::  hundred consumer GPUs at the 250s ideal.
+::  is the expected MAC-equivalents per block; bex 192 is 2^64 of them, about a
+::  hundred consumer GPUs at the 500s ideal.
 ++  test-ai-anchor-sets-the-launch-block-interval
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
   =/  anchor  anchor-target-atom.ai-asert.mainnet
   %+  weld
-    (expect-eq !>(63) !>((sub 256 (dec (met 0 anchor)))))
+    (expect-eq !>(64) !>((sub 256 (dec (met 0 anchor)))))
   (expect-eq !>(%.y) !>((lte anchor max-ai-target-atom:mt)))
 ::
 ::  Largest shape work factor the Pearl envelope admits: h*w <= 256 times
@@ -169,20 +187,19 @@
   %+  expect-eq  !>(%.y)
   !>((lte anchor-target-atom.ai-asert.mainnet max-ai-target-atom:mt))
 ::
-::  At AI activation the ZK puzzle re-anchors on a HARDCODED target equal to the
-::  one it launched with at the Aletheia ASERT phase, discarding the difficulty
-::  the chain accumulated across the intervening blocks. The regime's ideal block
-::  time changes at the same height, so some reset is intended; the size of the
-::  step is whatever the chain's real ZK target has drifted to by then, and ASERT
-::  can only walk it back at ideal-block-time/half-life doublings per ZK block.
-::
-::  Pinned so the reset is a deliberate constant rather than an emergent one.
-++  test-zk-post-ai-re-anchors-at-the-aletheia-launch-target
+:::  ZK and AI anchors preserve the calibrated lane work rates at their revised
+:::  214s and 500s ideal intervals.
+++  test-post-ai-asert-anchors-calibrate-revised-cadence
   ^-  tang
   =/  mainnet  *blockchain-constants:txe
-  %+  expect-eq
-    !>(anchor-target-atom.zk-asert.mainnet)
-  !>(anchor-target-atom.zk-asert-post-ai.mainnet)
+  ;:  weld
+    %+  expect-eq
+      !>((div (mul 375 (bex 291)) 214))
+    !>(anchor-target-atom.zk-asert-post-ai.mainnet)
+    %+  expect-eq
+      !>((bex 192))
+    !>(anchor-target-atom.ai-asert.mainnet)
+  ==
 ::
 ::  AI ASERT can never emit a target outside its minable domain, even
 ::  when a configured anchor or a long delay would otherwise saturate at the
@@ -215,23 +232,23 @@
     :(add (merge:bignum ~(accumulated-work get:page:t h1)) (work h2) (work tip.built))
   %+  expect-eq  !>(sum)  !>((merge:bignum ~(accumulated-work get:page:t tip.built)))
 ::
-::  A block that reaches its puzzle's ceiling contributes the floored minimum,
-::  so a discounted branch cannot win by count. At the launch anchors one block
-::  of either puzzle is within 1.5x of the other, so neither puzzle orphans the
-::  other's blocks at calibration; but a capped block is worth less than any
-::  honest anchor block of either puzzle.
+:::  A block that reaches its puzzle's ceiling contributes the floored minimum,
+:::  so a discounted branch cannot win by count. At the launch anchors one block
+:::  of either puzzle is within 2.4x of the other, so neither puzzle's blocks are
+:::  systematically orphaned at calibration; a capped block is worth less than
+:::  any honest anchor block of either puzzle.
 ++  test-single-block-cannot-outweigh-a-run
   ^-  tang
   =/  mt  ~(. txe *blockchain-constants:txe)
   =/  mainnet  *blockchain-constants:txe
-  =/  zk-anchor-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet)))
-  =/  ai-anchor-w=@  (merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet)))
-  =/  zk-cap-w=@  (merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum max-target-atom:mt)))
-  =/  ai-cap-w=@  (merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum max-ai-target-atom:mt)))
+  =/  zk-anchor-w=@  (merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet)))
+  =/  ai-anchor-w=@  (merge:bignum (block-work-at:page:mt 126.000 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet)))
+  =/  zk-cap-w=@  (merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow (chunk:bignum max-target-atom:mt)))
+  =/  ai-cap-w=@  (merge:bignum (block-work-at:page:mt 126.000 %ai-pow (chunk:bignum max-ai-target-atom:mt)))
   ;:  weld
-    ::  anchor blocks are within 2x of each other (1.499x exactly)
-    (expect-eq !>(%.y) !>((lth zk-anchor-w (mul 2 ai-anchor-w))))
-    (expect-eq !>(%.y) !>((lth ai-anchor-w (mul 2 zk-anchor-w))))
+    ::  anchor blocks are within 3x of each other (about 2.338x)
+    (expect-eq !>(%.y) !>((lth zk-anchor-w (mul 3 ai-anchor-w))))
+    (expect-eq !>(%.y) !>((lth ai-anchor-w (mul 3 zk-anchor-w))))
     ::  capped blocks contribute the floored minimum
     (expect-eq !>(1) !>(zk-cap-w))
     (expect-eq !>(1) !>(ai-cap-w))
@@ -249,10 +266,10 @@
   =/  mainnet  *blockchain-constants:txe
   ;:  weld
     (expect-eq !>(25.750.000.000) !>(mac-equivalents-per-zk-attempt:page:mt))
-    %+  expect-eq  !>(536.870.911)
-    !>((merge:bignum (block-work-at:page:mt 114.300 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))))
-    %+  expect-eq  !>(358.189.205)
-    !>((merge:bignum (block-work-at:page:mt 114.300 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet))))
+    %+  expect-eq  !>(306.374.333)
+    !>((merge:bignum (block-work-at:page:mt 126.000 %dumb-zkpow (chunk:bignum anchor-target-atom.zk-asert-post-ai.mainnet))))
+    %+  expect-eq  !>(716.378.410)
+    !>((merge:bignum (block-work-at:page:mt 126.000 %ai-pow (chunk:bignum anchor-target-atom.ai-asert.mainnet))))
   ==
 ::
 ::  Branch-local state counts each puzzle independently on a mixed chain.

@@ -377,7 +377,7 @@ pub struct NockchainCli {
                 sets phase.zk-asert-post-ai and phase.ai-asert to the same value so the \
                 ZK regime switch + AI puzzle activation happen together. \
                 Defaults to BlockchainConstants::DEFAULT_AI_POW_ACTIVATION_HEIGHT \
-                (114300 on mainnet, effectively never on fakenet). \
+                (126000 on mainnet, effectively never on fakenet). \
                 Requires --fakenet.",
         requires = "fakenet"
     )]

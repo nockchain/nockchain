@@ -4,7 +4,7 @@ status = "draft"
 consensus_critical = true
 
 # Activation
-activation_height = 114300  # ai-pow-activation-height (mainnet default; fakenet-overridable)
+activation_height = 126000  # ai-pow-activation-height (mainnet default; fakenet-overridable)
 
 # Dates
 published = "2026-07-17"
@@ -30,7 +30,7 @@ producing blocks, while AI miners join as a second block source.
 
 ## Summary
 
-Logos activates AI-PoW at height 114,300 (`ai-pow-activation-height`) as an
+Logos activates AI-PoW at height 126,000 (`ai-pow-activation-height`) as an
 **additive** consensus change:
 
 1. **A second block variant, `%ai-pow`.** Post-activation, a block may prove
@@ -49,15 +49,14 @@ Logos activates AI-PoW at height 114,300 (`ai-pow-activation-height`) as an
    can be "cheap-weighted" and the heaviest chain is a faithful sum of
    real work regardless of which puzzle mined which block.
 
-3. **Independent per-puzzle ASERT, weighted 60/40 toward AI.** Each puzzle
+3. **Independent per-puzzle ASERT, targeting a 30/70 block split.** Each puzzle
    retargets on its own aserti3-2d subchain — the AI target reacts only to the
    interval between consecutive `%ai-pow` blocks, the ZK target only to
-   consecutive `%pow` blocks. The per-puzzle ideal block times are set to give
-   the AI puzzle **~60% of blocks and ZK ~40%** (AI 250 s, ZK 375 s;
-   `1/250 : 1/375 = 60 : 40`), deliberately favouring AI to bootstrap and
-   incentivize the new AI Compute Network. The two rates still sum to Aletheia's
-   ~150 s combined cadence (`1/250 + 1/375 = 1/150`). ZK-PoW re-anchors at
-   `ai-pow-activation-height − 1` onto a new post-AI ASERT regime
+   consecutive `%pow` blocks. The per-puzzle ideal block times target about 30%
+   AI and 70% ZK (AI 500 s, ZK 214 s; `1/500 : 1/214 = 107 : 250`). The ZK
+   interval is the nearest whole-second value to `1,500 / 7`; the rates give a
+   149.86 s combined cadence (`1/500 + 1/214 = 357/53,500`). ZK-PoW re-anchors
+   at `ai-pow-activation-height − 1` onto a new post-AI ASERT regime
    (`zk-asert-post-ai`), leaving Aletheia's 150 s single-puzzle regime unchanged
    before activation.
 
@@ -106,28 +105,26 @@ aserti3-2d instance (Aletheia's algorithm, reused verbatim) that measures
 *only the blocks of its own type* since its own anchor, and each self-stabilises
 to its own ideal block time.
 
-### Why weight the block share 60/40 toward AI
+### Why target a 30/70 block split
 
-The per-puzzle ideal block times target an expected **~60% of blocks** for AI
-and **~40%** for ZK — AI at a 250 s ideal, ZK at a 375 s ideal. This biases
-expected block-reward opportunity toward AI miners while the market develops.
-The weighting changes expected miner opportunity only: both puzzle types retain
-Aletheia's protocol-fund recipient for the 20% new-issuance share. It grants no
-fixed percentage of total supply or chain-wide issuance.
+The per-puzzle ideal block times target about 30% of blocks for AI and 70% for
+ZK — AI at a 500 s ideal and ZK at a 214 s ideal. Whole-second consensus
+intervals make the realized share 29.97% AI and 70.03% ZK. This allocation
+changes expected miner opportunity only: both puzzle types retain Aletheia's
+protocol-fund recipient for the 20% new-issuance share. It grants no fixed
+percentage of total supply or chain-wide issuance.
 
-The weighting is expressed purely through the two ideal block times and falls out
-of the arithmetic: at ideals `t_ai`, `t_zk`, each puzzle produces blocks at rate
-`1/t`, so the AI share is `(1/t_ai) / (1/t_ai + 1/t_zk)`. With `t_ai = 250`,
-`t_zk = 375`: `1/250 : 1/375 = 60 : 40`, and the combined rate
-`1/250 + 1/375 = 1/150` keeps the **global cadence at 150 s (2.5 min)** —
-unchanged from Aletheia. The 12 h half-life is retained for both (a per-puzzle
-stability window of ~173 blocks for AI, ~115 for ZK).
+The weighting is expressed through the two ideal block times and falls out of
+the arithmetic: at ideals `t_ai`, `t_zk`, each puzzle produces blocks at rate
+`1/t`, so the AI share is `(1/t_ai) / (1/t_ai + 1/t_zk)`. With `t_ai = 500`,
+`t_zk = 214`: `1/500 : 1/214 = 107 : 250`, and the combined rate is
+`357/53,500` — a 149.86 s cadence that remains within one tenth of a second of
+Aletheia's 150 s target. The 12 h half-life is retained for both (a
+per-puzzle stability window of about 86 blocks for AI and 202 for ZK).
 
-The 60/40 tilt is a **bootstrapping measure, not the end state**. Once the
-upgraded, fully-useful ZK-PoW puzzle ships in a later protocol upgrade, the split
-is intended to move to a balanced **50/50** (equal ideal block times) — at which
-point both puzzles perform useful work and neither warrants a launch subsidy over
-the other.
+The 30/70 allocation is a consensus parameter. A later protocol upgrade can
+change the two ideal block times when both puzzles' economics justify a
+different allocation.
 
 ## Technical Specification
 
@@ -141,55 +138,55 @@ layout; the round-trip encode/decode is pinned by a Rust test
 (`blockchain_constants_roundtrip_from_noun_for_mainnet_and_fakenet`).
 
 ```hoon
-ai-pow-activation-height=114.300   :: AI-PoW activation height
+ai-pow-activation-height=126.000   :: AI-PoW activation height
 
 +$  ai-asert                      :: AI-puzzle aserti3-2d params
-  phase=114.300                    :: == ai-pow-activation-height
-  anchor-height=114.300            :: == phase (the first AI block IS the anchor)
-  anchor-target-atom=^~((bex 193)):: 2^193 (see below)
-  ideal-block-time=250            :: seconds; AI wins ~60% of blocks
+  phase=126.000                    :: == ai-pow-activation-height
+  anchor-height=125.999            :: == phase - 1
+  anchor-target-atom=^~((bex 192)):: 2^192 (see below)
+  ideal-block-time=500            :: seconds; AI wins about 30% of blocks
   half-life=^~((mul 12 (mul 60 60))) :: 12 h
 
 +$  zk-asert-post-ai              :: ZK-puzzle post-activation regime
-  phase=114.300
-  anchor-height=114.299            :: == phase - 1 (standard aserti3-2d anchor)
-  anchor-target-atom=^~((bex 291)):: 2^291 (unchanged ZK target space)
-  ideal-block-time=375            :: seconds; ZK wins ~40% of blocks
+  phase=126.000
+  anchor-height=125.999            :: == phase - 1 (standard aserti3-2d anchor)
+  anchor-target-atom=^~((div (mul 375 (bex 291)) 214))
+  ideal-block-time=214            :: seconds; ZK wins about 70% of blocks
   half-life=^~((mul 12 (mul 60 60)))
 ```
 
-Two anchor conventions coexist and differ deliberately:
+Both ASERT regimes use the standard aserti3-2d convention:
 
-- **ZK (standard aserti3-2d):** `anchor-height = phase − 1`. The anchor is the
-  last pre-activation block; the first post-activation ZK block is one interval
-  past it. This is the same convention Aletheia uses.
-- **AI:** `anchor-height = phase`. There is no AI block before activation, so the
-  *first* `%ai-pow` block becomes the AI puzzle's own anchor. Subsequent AI
-  blocks measure their interval against it.
+- **ZK:** `anchor-height = phase − 1`. The anchor is the last
+  pre-activation block; the first post-activation ZK block is one interval
+  past it.
+- **AI:** `anchor-height = phase − 1`. The first `%ai-pow` block uses virtual
+  height 1 against the activation predecessor because no earlier AI block
+  exists.
 
-The CLI enforces this split: `--fakenet-ai-asert-*` validates `anchor-height ==
-phase` and `--fakenet-asert-*`/`--fakenet-zk-asert-*` validates `anchor-height ==
-phase − 1`. A `--fakenet-ai-pow-activation-height 0` is rejected (it would make
+The CLI enforces this convention: `--fakenet-ai-asert-*` and
+`--fakenet-asert-*`/`--fakenet-zk-asert-*` validate `anchor-height == phase −
+1`. A `--fakenet-ai-pow-activation-height 0` is rejected (it would make
 `phase − 1` underflow).
 
-The AI anchor target is `2^193`, and it sets the AI puzzle's **launch block
-interval** and its launch fork-choice weight (see *Puzzle-priced heaviness*
-below): the anchor block's heaviness is `2^256/anchor` MAC-equivalents,
-converted at the exchange rate. The two anchors are cross-calibrated — both
-price ~120 consumer GPUs at their lane's ideal interval, so both lanes produce
-the same heaviness per second at launch.
+The AI anchor target is `2^192`; it sets the AI puzzle's launch block interval
+and launch fork-choice weight (see *Puzzle-priced heaviness* below). The anchor
+block's expected work is `2^256 / anchor = 2^64` MAC-equivalents. The ZK anchor
+is `floor(375 · 2^291 / 214)`. These anchors preserve the launch work rate of
+each lane at its revised ideal interval: about 1.43 × 10⁶
+ZKPoW-attempt-equivalents per second in either lane.
 
 An `%ai-pow` target prices one MAC-equivalent of matmul, so
-`expected-MAC-equivalents-per-block == 2^256 / anchor`; `2^193` is `2^63`
-MAC-equivalents per block, i.e. ~3.7e16 MAC/s at the 250 s ideal — about a
+`expected-MAC-equivalents-per-block == 2^256 / anchor`; `2^192` is `2^64`
+MAC-equivalents per block, i.e. ~3.7e16 MAC/s at the 500 s ideal — about a
 hundred consumer GPUs at the 200–400 TeraMAC/s a 4090/5090 does in Pearl pools.
-Erring hard is the safe direction: too hard costs a slow AI ramp that ASERT heals
-at one doubling per half-life of *elapsed* time, while too easy mints blocks at
-the wrong rate and ASERT only heals that at one doubling per ~173 *accepted* AI
+Erring hard is the safe direction: too hard costs a slow AI ramp that ASERT
+heals at one doubling per half-life of elapsed time, while too easy mints blocks
+at the wrong rate and ASERT only heals that at one doubling per ~86 accepted AI
 blocks.
 
-The anchor must also stay at or below `+max-ai-target-atom` (`2^232 − 1`). The
-verifier compares the jackpot against a *shape-scaled* threshold `target ·
+The AI anchor must also stay at or below `+max-ai-target-atom` (`2^232 − 1`).
+The verifier compares the jackpot against a *shape-scaled* threshold `target ·
 h·w·dot_product_length`, whose largest admissible shape factor is `2^24`; above
 `2^232 − 1` that product leaves the 256 bits it is computed in and fail-closes,
 which would make every block at such a target unminable rather than easy.
@@ -271,10 +268,10 @@ must be accumulated, not only enforced at admission.
 Heaviness therefore scales inversely with target for both puzzles: a branch
 whose ASERT lets its target drift to a ceiling earns proportionally less
 fork-choice credit per block and cannot win by count. At the launch anchors
-both lanes produce the same heaviness per second — both calibrate to ~120
-consumer GPUs at their ideals (375 s ZK / 250 s AI), so neither puzzle's blocks
-are systematically orphaned, and per-block weights differ only by the cadence
-ratio.
+both lanes produce the same heaviness per second — both calibrate to about a
+hundred consumer GPUs at their 214 s ZK and 500 s AI ideals, so neither puzzle's
+blocks are systematically orphaned. Per-block weights differ only by the
+cadence ratio.
 
 Difficulty is enforced exactly as before: `check-target` requires the block's
 target to equal the ASERT-recomputed target and `check-heaviness` requires
@@ -296,8 +293,8 @@ stores parent-derived ZK/AI counts, heads, and anchors in
 `puzzle-asert-states`, keyed by block ID. Target computation reads the candidate
 parent's entry, so `height-diff` counts only that branch's blocks of the same
 puzzle type; fork arrival order and the other puzzle's cadence are irrelevant.
-The activation parent initializes the ZK lineage. The first accepted `%ai-pow`
-block on each branch initializes that branch's AI anchor.
+The activation predecessor initializes both puzzle lineages. The first accepted
+`%ai-pow` block on each branch uses virtual height 1 against that shared anchor.
 
 ### Block variant and the verify jet
 
@@ -386,18 +383,18 @@ this specification and consensus code define the Logos rule.
 miner-side (`+build-ai-candidate` / `+new:coinbase`) uses the same coinbase
 builder for ZK and AI candidates. A miner who directs that share to any other
 address produces a block that fails `check-fund-split`. The targeting rules aim
-for an expected ~60% AI block share; all post-activation fund outputs still use
+for about 30% AI and 70% ZK blocks; all post-activation fund outputs still use
 the protocol-fund recipient.
 
 ## Activation
 
-- **Height**: 114,300 (`ai-pow-activation-height`). AI-PoW verification, the
+- **Height**: 126,000 (`ai-pow-activation-height`). AI-PoW verification, the
   per-puzzle ASERT regimes, and `%mine-ai` emission all activate at this height.
-- **AI anchor**: the first `%ai-pow` block at or after 114,300 becomes the AI
-  puzzle's ASERT anchor (bootstrapped by `accept-block`).
-- **ZK re-anchor**: block 114,299 is the anchor for the new
-  `zk-asert-post-ai` 375 s regime. Target computation switches for candidate
-  height 114,300; block 114,299 itself remains in the pre-activation 150 s regime.
+- **AI anchor**: block 125,999 is the AI puzzle's ASERT anchor. The first
+  `%ai-pow` block at or after 126,000 uses virtual height 1 against it.
+- **ZK re-anchor**: block 125,999 is the anchor for the new
+  `zk-asert-post-ai` 214 s regime. Target computation switches for candidate
+  height 126,000; block 125,999 itself remains in the pre-activation 150 s regime.
 - **Verifier setup**: every validating node must have the AI-PoW verifier setup
   installed before it needs to validate an `%ai-pow` block (first boot generates
   it, ~15 min; subsequent boots load the cache). A node without it shuts down on
@@ -410,7 +407,7 @@ the protocol-fund recipient.
 ### Requirements
 
 - Software version: 0.1.16+.
-- All nodes must upgrade before `ai-pow-activation-height = 114,300`.
+- All nodes must upgrade before `ai-pow-activation-height = 126,000`.
 - Validating nodes must complete the one-time verifier-setup generation (or ship
   a cache) before the first `%ai-pow` block.
 
@@ -439,7 +436,7 @@ layout, whose Rust encode/decode round-trip is regression-pinned.
 ### Steps
 
 1. Stop the node.
-2. Update to version 0.1.16+ before block 114,300.
+2. Update to version 0.1.16+ before block 126,000.
 3. Restart. On first boot the node generates + caches the AI-PoW verifier setup
    (~15 min, logged) and auto-upgrades kernel state.
 
@@ -462,8 +459,8 @@ This is a **consensus-critical** upgrade. After activation:
 - Heaviness diverges: pre-0.1.16 nodes apply the `1/target` work formula to
   post-`dual-puzzle-phase` blocks, so they cannot reproduce the accumulated work
   of any post-activation chain — including one containing only `%pow` blocks.
-- Per-puzzle ASERT changes ZK target computation for candidate height 114,300,
-  using block 114,299 as the new regime's anchor; pre-0.1.16 nodes will not
+- Per-puzzle ASERT changes ZK target computation for candidate height 126,000,
+  using block 125,999 as the new regime's anchor; pre-0.1.16 nodes will not
   reproduce it.
 - The `blockchain-constants` noun gains the AI-PoW fields, causing decode
   failures on pre-0.1.16 software.
@@ -472,7 +469,7 @@ This is a **consensus-critical** upgrade. After activation:
 
 Any node not upgraded (and without the verifier setup) before the first
 `%ai-pow` block will fork onto an incompatible chain and reject valid AI blocks.
-**All node operators must upgrade before block 114,300.**
+**All node operators must upgrade before block 126,000.**
 
 ### Transaction Compatibility
 
@@ -506,7 +503,7 @@ structurally valid across the boundary.
   product out of its 256-bit domain and fail-closes — unminable, not easy.
   `validate-page-without-txs` rejects such a block on every path
   (`%ai-pow-target-outside-minable-domain`), and `+compute-target-ai-asert` caps
-  its own output at the same bound. The `2^193` anchor sits well inside it.
+  its own output at the same bound. The `2^192` anchor sits well inside it.
 - **One PoW ⇒ one Nockchain block (merge mining).** `verify_pearl_aux_inclusion`
   enforces exactly one `NOCKCHAIN-AI-POW-AUX` tag in the Pearl coinbase, and the
   aux commitment must equal the consensus block commitment — so a single Pearl
@@ -538,20 +535,20 @@ structurally valid across the boundary.
   `ai-pow-mine` (the latter with a self-contained `--canonical` CPU mode). Each
   receives its own candidate effect (`%mine-zk` / `%mine-ai`) and submits its own
   block; both re-target immediately on a new heaviest block.
-- **Block cadence.** The AI puzzle targets a 250 s per-puzzle ideal and the ZK
-  puzzle 375 s, so their block rates sum to `1/250 + 1/375 = 1/150` — a ~150 s
-  combined cadence (Aletheia's target) split 60% AI / 40% ZK. If only one puzzle
-  is active, that puzzle's ASERT converges it toward its own ideal (250 s or
-  375 s).
+- **Block cadence.** The AI puzzle targets a 500 s per-puzzle ideal and the ZK
+  puzzle 214 s. Their block rates sum to `1/500 + 1/214 = 357/53,500` — a
+  149.86 s combined cadence that targets 29.97% AI and 70.03% ZK. If only one
+  puzzle is active, that puzzle's ASERT converges it toward its own ideal (500 s
+  or 214 s).
 - **AI proving cost.** A canonical CPU proof takes ~30 s; the node's
   candidate-update interval must exceed the prove time (fakenet:
   `--fakenet-update-candidate-interval-secs`). GPU-shaped provers are the
   intended mainnet path.
-- **Monitoring.** Operators should watch for: the first `%ai-pow` block at/after
-  114,300 becoming the AI ASERT anchor; per-puzzle target drift converging toward
-  250 s (AI) and 375 s (ZK); the verifier-setup digest matching the pinned v0
-  constant at boot; and the combined chain settling near ~150 s (≈60% AI / 40%
-  ZK) once both puzzles produce blocks.
+- **Monitoring.** Operators should watch for: the first `%ai-pow` block at or
+  after 126,000 using the shared ASERT anchor; per-puzzle target drift
+  converging toward 500 s (AI) and 214 s (ZK); the verifier-setup digest
+  matching the pinned v0 constant at boot; and the combined chain settling near
+  150 s (about 30% AI / 70% ZK) once both puzzles produce blocks.
 
 ## Testing and Validation
 

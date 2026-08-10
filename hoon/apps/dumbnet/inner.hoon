@@ -1934,25 +1934,22 @@
           ?:  (lth candidate-height ai-pow-activation-height.constants.k)
             ~>  %slog.[0 'do-pow: %ai-pow pre-activation; rejected']
             [~ k]
-          ::  Re-target the candidate to the AI ASERT target in-place (the exact
-          ::  block the miner solved against — the %mine-ai emission bound the AI
-          ::  commitment + AI target via the same +build-ai-candidate). Without
-          ::  this the candidate still carries the ZK target, so the certificate's
-          ::  commitment would not match and +heard-block would reject the block as
-          ::  %page-target-invalid. The next candidate rebuild overwrites this.
-          =.  candidate-block.m.k  (build-ai-candidate:con candidate-block.m.k shares.m.k)
-          ::  Set the AI-PoW artifact on the candidate, then verify it with
-          ::  +check-pow — which re-derives the block commitment + target from the
-          ::  candidate itself and runs the mandatory +ai-pow-verify jet against the
-          ::  boot-injected setup. A stale (mined for an old commitment) or forged
-          ::  certificate fails verification ⇒ clean reject (no liar-effect). Only a
-          ::  VERIFIED certificate is committed: set the digest and hand the block to
-          ::  +heard-block, which re-validates and accepts it.
-          =.  m.k  (set-pow:min pv.command)
-          ?.  (check-pow candidate-block.m.k)
+          ::  An unverified artifact cannot change the shared ZK candidate. Build the
+          ::  deterministic AI-targeted variant locally, validate it, then publish it
+          ::  as the candidate only after the certificate has verified.
+          =/  ai-candidate=page:t
+            (build-ai-candidate:con candidate-block.m.k shares.m.k)
+          =/  ai-mining=mining-state:dk
+            m.k(candidate-block ai-candidate)
+          =/  ai-miner  ~(. dumb-miner ai-mining d.k constants.k)
+          =.  ai-mining  (set-pow:ai-miner pv.command)
+          =/  ai-candidate=page:t  candidate-block.ai-mining
+          ?.  (check-pow ai-candidate)
             ~>  %slog.[1 'do-pow: %ai-pow certificate failed verification; rejected']
             [~ k]
-          =.  m.k  set-digest:min
+          =/  ai-miner-with-pow  ~(. dumb-miner ai-mining d.k constants.k)
+          =.  ai-mining  set-digest:ai-miner-with-pow
+          =.  candidate-block.m.k  candidate-block.ai-mining
           ::  Synthesize a `/poke/ai-pow-miner` wire — the block was produced by the
           ::  ai-pow-miner puzzle path.
           =^  heard-block-effs  k  (heard-block /poke/ai-pow-miner now candidate-block.m.k eny)
