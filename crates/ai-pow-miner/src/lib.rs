@@ -124,6 +124,9 @@ pub mod run;
 /// the same work arguments and choose their search implementation explicitly.
 #[cfg(feature = "node")]
 pub mod cli;
+/// CUDA search implementation selected by `ai-pow-mine --gpu`.
+#[cfg(all(feature = "node", feature = "gpu"))]
+pub mod gpu;
 
 /// Test-only synthetic nockchain targets sized so the factor-adjusted
 /// product fits the 256-bit band: fixtures previously used `[0xff; 32]`,

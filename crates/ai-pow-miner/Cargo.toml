@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "NockApp-compatible AI-PoW miner for Pearl-compatible ticket search and recursive %ai-pow submission."
 publish = false
+build = "build.rs"
 
 [lib]
 name = "ai_pow_miner"
@@ -25,6 +26,9 @@ required-features = ["node"]
 
 [features]
 default = []
+# CUDA builds use nvcc through `build.rs` and link cudart. The implementation
+# remains optional so normal CPU builds have no CUDA toolkit or driver contract.
+gpu = []
 # Out-of-process node-connecting integration: pulls in the gRPC +
 # nockapp stack so `src/run.rs` + `src/wire.rs` + the
 # `ai-pow-mine` binary build. The bare crate (no features) keeps the

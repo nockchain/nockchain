@@ -323,12 +323,15 @@ impl PreparedCanonicalMoeTemplate {
         }
     }
 
-    /// Recompute the complete attempt-dependent canonical transcript in reusable storage.
-    pub fn evaluate(
+    /// Recompute attempt-dependent commitments and noised opened strips.
+    ///
+    /// Search backends can upload the resulting strips to an accelerator. The
+    /// storage belongs to `scratch` and is overwritten by the next attempt.
+    pub fn prepare_attempt(
         &self,
         extranonce: u32,
         scratch: &mut PreparedCanonicalMoeScratch,
-    ) -> CanonicalMoeSearchResult {
+    ) -> PearlWorkCommitments {
         let header = self.header_for(extranonce);
         let kappa = pearl_kappa(&header.to_bytes(), &self.mu);
         let (h_a, h_b) = pearl_matrix_commitments(&self.a, &self.b, &kappa);
@@ -355,6 +358,31 @@ impl PreparedCanonicalMoeTemplate {
                 *out = (value as i16 + noise as i16) as i8;
             }
         }
+        PearlWorkCommitments {
+            kappa,
+            h_a,
+            h_b,
+            s_a,
+            s_b,
+        }
+    }
+
+    /// Opened noised strips produced by [`Self::prepare_attempt`].
+    pub fn prepared_strips<'a>(
+        &self,
+        scratch: &'a PreparedCanonicalMoeScratch,
+    ) -> (&'a [i8], &'a [i8]) {
+        (&scratch.a_prime_rows, &scratch.b_prime_cols)
+    }
+
+    /// Recompute the complete attempt-dependent canonical transcript in reusable storage.
+    pub fn evaluate(
+        &self,
+        extranonce: u32,
+        scratch: &mut PreparedCanonicalMoeScratch,
+    ) -> CanonicalMoeSearchResult {
+        let commitments = self.prepare_attempt(extranonce, scratch);
+        let k = self.params.k as usize;
         let tile_state = compute_pattern_tile_state_from_slices(
             &scratch.a_prime_rows,
             &scratch.b_prime_cols,
@@ -365,17 +393,10 @@ impl PreparedCanonicalMoeTemplate {
             k,
             &mut scratch.tile,
         );
-        let commitments = PearlWorkCommitments {
-            kappa,
-            h_a,
-            h_b,
-            s_a,
-            s_b,
-        };
         CanonicalMoeSearchResult {
             commitments,
             tile_state,
-            jackpot_hash: pearl_jackpot_hash(&tile_state, &s_a),
+            jackpot_hash: pearl_jackpot_hash(&tile_state, &commitments.s_a),
         }
     }
 

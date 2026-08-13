@@ -38,9 +38,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use ai_pow_miner::cli::{init_tracing, CommonArgs};
-use ai_pow_miner::run::{run, run_canonical_with_backend, MinerError};
+use ai_pow_miner::run::{run_canonical_with_backend, run_with_backend, MinerError};
 use ai_pow_miner::search::{CpuSearchBackend, SearchBackend};
-use clap::Parser;
+use clap::{Args as ClapArgs, Parser};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -54,6 +54,50 @@ use tracing::{error, info};
 struct Args {
     #[command(flatten)]
     common: CommonArgs,
+
+    #[command(flatten)]
+    accelerator: AcceleratorArgs,
+}
+
+#[derive(ClapArgs, Debug)]
+struct AcceleratorArgs {
+    /// Use CUDA for Pearl opened-tile GEMM search.
+    #[cfg(feature = "gpu")]
+    #[arg(long)]
+    gpu: bool,
+
+    /// CUDA device ordinal. The current backend supports device 0.
+    #[cfg(feature = "gpu")]
+    #[arg(long, default_value_t = 0)]
+    cuda_device: usize,
+
+    /// Attempts dispatched through CUDA before the scheduler checks cancellation.
+    #[cfg(feature = "gpu")]
+    #[arg(long, default_value_t = 256)]
+    gpu_batch_attempts: u64,
+}
+
+fn search_backend(args: &Args) -> Result<Arc<dyn SearchBackend>, String> {
+    #[cfg(feature = "gpu")]
+    if args.accelerator.gpu {
+        let backend = ai_pow_miner::gpu::GpuSearchBackend::new(
+            args.accelerator.cuda_device, args.accelerator.gpu_batch_attempts,
+        )
+        .map_err(|error| error.to_string())?;
+        info!(
+            cuda_device = backend.device_ordinal(),
+            gpu_batch_attempts = backend.batch_attempts(),
+            "ai-pow-mine: CUDA search enabled"
+        );
+        return Ok(Arc::new(backend));
+    }
+    let workers = args
+        .common
+        .mining_threads()
+        .map_err(|error| error.to_string())?;
+    CpuSearchBackend::new(workers)
+        .map(|backend| Arc::new(backend) as Arc<dyn SearchBackend>)
+        .map_err(|error| error.to_string())
 }
 
 fn main() -> ExitCode {
@@ -72,10 +116,10 @@ fn main() -> ExitCode {
     };
 
     let result = if args.common.canonical {
-        let mining_threads = match args.common.mining_threads() {
-            Ok(threads) => threads,
+        let backend = match search_backend(&args) {
+            Ok(backend) => backend,
             Err(error) => {
-                eprintln!("ai-pow-mine: invalid search config: {error:#}");
+                eprintln!("ai-pow-mine: cannot initialize search backend: {error}");
                 return ExitCode::from(1);
             }
         };
@@ -86,16 +130,9 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        let backend: Arc<dyn SearchBackend> = match CpuSearchBackend::new(mining_threads) {
-            Ok(backend) => Arc::new(backend),
-            Err(error) => {
-                eprintln!("ai-pow-mine: cannot initialize search backend: {error}");
-                return ExitCode::from(1);
-            }
-        };
         let node_addr = args.common.node_addr.clone();
         rt.block_on(async move {
-            info!(node = %node_addr, "ai-pow-mine: starting (canonical, gateway-free CPU miner)");
+            info!(node = %node_addr, "ai-pow-mine: starting canonical miner");
             let shutdown = CancellationToken::new();
             let shutdown_clone = shutdown.clone();
             tokio::spawn(async move {
@@ -111,6 +148,13 @@ fn main() -> ExitCode {
             Ok(cfg) => cfg,
             Err(error) => {
                 eprintln!("ai-pow-mine: invalid puzzle config: {error:#}");
+                return ExitCode::from(1);
+            }
+        };
+        let backend = match search_backend(&args) {
+            Ok(backend) => backend,
+            Err(error) => {
+                eprintln!("ai-pow-mine: cannot initialize search backend: {error}");
                 return ExitCode::from(1);
             }
         };
@@ -130,7 +174,7 @@ fn main() -> ExitCode {
                     shutdown_clone.cancel();
                 }
             });
-            run(cfg, shutdown).await
+            run_with_backend(cfg, shutdown, backend).await
         })
     };
 

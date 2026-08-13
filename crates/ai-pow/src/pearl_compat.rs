@@ -1611,13 +1611,16 @@ impl PreparedPearlPatternJob {
         }
     }
 
-    /// Evaluate one valid offset pair without allocating or constructing proof material.
-    pub fn evaluate(
+    /// Copy the noised strips selected by one valid pattern offset.
+    ///
+    /// Accelerator backends can consume these slices directly. They remain
+    /// valid until the same scratch storage is used for another offset.
+    pub fn prepare_offset<'a>(
         &self,
         t_rows: u32,
         t_cols: u32,
-        scratch: &mut PreparedPearlPatternScratch,
-    ) -> Result<PreparedPearlPatternResult, PearlCompatError> {
+        scratch: &'a mut PreparedPearlPatternScratch,
+    ) -> Result<(&'a [i8], &'a [i8]), PearlCompatError> {
         if self.row_offsets.binary_search(&t_rows).is_err()
             || self.col_offsets.binary_search(&t_cols).is_err()
         {
@@ -1638,6 +1641,18 @@ impl PreparedPearlPatternJob {
             scratch.b_prime_cols[slot * k..(slot + 1) * k]
                 .copy_from_slice(self.matrices.b_prime_col(col));
         }
+        Ok((&scratch.a_prime_rows, &scratch.b_prime_cols))
+    }
+
+    /// Evaluate one valid offset pair without allocating or constructing proof material.
+    pub fn evaluate(
+        &self,
+        t_rows: u32,
+        t_cols: u32,
+        scratch: &mut PreparedPearlPatternScratch,
+    ) -> Result<PreparedPearlPatternResult, PearlCompatError> {
+        self.prepare_offset(t_rows, t_cols, scratch)?;
+        let k = self.params.k as usize;
         let tile_state = compute_pattern_tile_state_from_slices(
             &scratch.a_prime_rows,
             &scratch.b_prime_cols,

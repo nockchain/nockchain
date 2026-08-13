@@ -1,0 +1,12 @@
+.git
+.env
+.DS_Store
+**/target
+bazel-*
+.data.*
+.fakenet-ai-pow-data
+nock_fake
+nock_fake_tandem
+pearl
+*.pdf
+*.jam

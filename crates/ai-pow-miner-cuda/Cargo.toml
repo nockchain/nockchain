@@ -21,10 +21,3 @@ clap = { version = "4.6.1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tokio-util = "0.7"
 tracing = "0.1"
-
-# CUDA 12.x is required by cuda-bindings. Pin every public cuda-oxide package
-# to one source revision so host and device ABI contracts cannot drift.
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
-cuda-core = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
-cuda-macros = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "0810ba95ff9dcf1ca379b779d3ebe33a8899b15d" }
