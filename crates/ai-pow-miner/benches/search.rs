@@ -19,6 +19,8 @@ use ai_pow::pearl_compat::{
 };
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow_miner::canonical::PreparedCanonicalMoeTemplate;
+#[cfg(feature = "gpu")]
+use ai_pow_miner::gpu::GpuSearchBackend;
 use ai_pow_miner::search::{CpuSearchBackend, SearchBackend, SearchBatch};
 use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 
@@ -143,6 +145,20 @@ fn main() {
             SearchBatch::new(0, 1, [0; 32]).expect("canonical warmup batch"),
         )
         .expect("canonical dedicated warmup");
+    let mut canonical_prepare_scratch = canonical_template.scratch();
+    let canonical_prepare_measurement = measure(|| {
+        for extranonce in 0..canonical_attempts {
+            std::hint::black_box(
+                canonical_template.prepare_attempt(extranonce, &mut canonical_prepare_scratch),
+            );
+        }
+    });
+    print_measurement(
+        "canonical_prepare_scalar",
+        u64::from(canonical_attempts),
+        1,
+        canonical_prepare_measurement,
+    );
     let mut canonical_scratch = canonical_template.scratch();
     let canonical_measurement = measure(|| {
         for extranonce in 0..canonical_attempts {
@@ -176,6 +192,35 @@ fn main() {
         workers,
         canonical_parallel_measurement,
     );
+
+    #[cfg(feature = "gpu")]
+    {
+        let gpu_backend =
+            GpuSearchBackend::new(0, u64::from(canonical_attempts)).expect("CUDA search backend");
+        gpu_backend
+            .search_canonical(
+                Arc::clone(&canonical_template),
+                SearchBatch::new(0, 1, [0; 32]).expect("CUDA warmup batch"),
+            )
+            .expect("CUDA warmup");
+        let canonical_gpu_measurement = measure(|| {
+            std::hint::black_box(
+                gpu_backend
+                    .search_canonical(
+                        Arc::clone(&canonical_template),
+                        SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
+                            .expect("CUDA canonical batch"),
+                    )
+                    .expect("CUDA canonical search"),
+            );
+        });
+        print_measurement(
+            "canonical_prepared_cuda",
+            u64::from(canonical_attempts),
+            1,
+            canonical_gpu_measurement,
+        );
+    }
 
     let header = dense_header();
     let config = dense_config();

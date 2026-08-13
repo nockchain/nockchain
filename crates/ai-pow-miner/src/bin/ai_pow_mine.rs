@@ -73,7 +73,7 @@ struct AcceleratorArgs {
 
     /// Attempts dispatched through CUDA before the scheduler checks cancellation.
     #[cfg(feature = "gpu")]
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 1024)]
     gpu_batch_attempts: u64,
 }
 

@@ -18,15 +18,19 @@ CMD ["/bin/bash"]
 FROM development AS builder
 RUN cargo build -p ai-pow-miner --release --features node,gpu --bin ai-pow-mine
 
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+FROM ubuntu:24.04
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so.12.8.90 /usr/local/cuda/lib64/
+RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
+    && ln -s libcudart.so.12 /usr/local/cuda/lib64/libcudart.so
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 COPY --from=builder /workspace/nockchain/target/release/ai-pow-mine /usr/local/bin/ai-pow-mine
 COPY docker/ai-pow-miner-entrypoint.sh /usr/local/bin/ai-pow-miner-entrypoint
 
 ENV CANONICAL=true \
     CUDA_DEVICE=0 \
-    GPU_BATCH_ATTEMPTS=256 \
+    GPU_BATCH_ATTEMPTS=1024 \
     RUST_LOG=info,ai_pow_miner=info,nockchain_mining_common=info
 ENTRYPOINT ["/usr/local/bin/ai-pow-miner-entrypoint"]

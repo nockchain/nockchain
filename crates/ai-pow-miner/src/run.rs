@@ -90,10 +90,7 @@ use crate::pearl_mining::{
     self, PearlMergeMineOptions, PearlMergeMinedTicket, PearlMergeMiningError, PearlMergeMiningJob,
 };
 use crate::pearl_plain_proof::PearlPlainProof;
-use crate::search::{
-    CpuSearchBackend, OrderedBatchScheduler, SearchBackend, SearchScheduleEnd,
-    DEFAULT_SEARCH_BATCH_ATTEMPTS,
-};
+use crate::search::{CpuSearchBackend, OrderedBatchScheduler, SearchBackend, SearchScheduleEnd};
 use crate::wire::AiPowMinerWire;
 use crate::{DifficultyTarget, MiningCancel};
 
@@ -986,13 +983,9 @@ fn grind_canonical_block_with_backend(
     let template = Arc::new(PreparedCanonicalMoeTemplate::new(
         &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
     )?);
-    let mut scheduler = OrderedBatchScheduler::new(
-        0,
-        u64::from(u32::MAX) + 1,
-        None,
-        DEFAULT_SEARCH_BATCH_ATTEMPTS,
-    )
-    .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
+    let mut scheduler =
+        OrderedBatchScheduler::new(0, u64::from(u32::MAX) + 1, None, backend.batch_attempts())
+            .map_err(|error| CanonicalProveError(format!("search scheduler: {error}")))?;
 
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -1058,7 +1051,7 @@ fn grind_canonical_block_with_backend(
     Ok(None)
 }
 
-/// Gateway-free CPU miner loop: connect to the node, subscribe to `%mine-ai`
+/// Gateway-free miner loop: connect to the node, subscribe to `%mine-ai`
 /// candidates, and for each candidate GRIND a CANONICAL AI-PoW block bound to the
 /// candidate's block commitment — sweeping the extranonce, computing each attempt's
 /// MoE tile jackpot, until one clears the candidate's difficulty target; then pay
@@ -1094,7 +1087,7 @@ pub async fn run_canonical_with_backend(
     info!(
         node = %node_addr,
         params = ?CANONICAL_MATMUL_PARAMS,
-        "ai-pow-miner: entering CANONICAL (gateway-free CPU) loop"
+        "ai-pow-miner: entering CANONICAL gateway-free loop"
     );
     loop {
         if shutdown.is_cancelled() {

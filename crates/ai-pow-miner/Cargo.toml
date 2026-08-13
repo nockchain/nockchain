@@ -59,6 +59,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 thiserror = { workspace = true }
 num_cpus = { workspace = true }
+rayon = { workspace = true }
 tracing = { workspace = true }
 
 # `node` feature (out-of-process gRPC integration).

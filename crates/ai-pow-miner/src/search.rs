@@ -213,6 +213,14 @@ pub trait SearchBackend: Send + Sync {
         template: Arc<PreparedCanonicalMoeTemplate>,
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError>;
+
+    /// Preferred upper bound for one scheduler dispatch.
+    ///
+    /// Backends with fixed launch geometry can override this value. The caller
+    /// still observes cancellation and deadlines between dispatches.
+    fn batch_attempts(&self) -> u64 {
+        DEFAULT_SEARCH_BATCH_ATTEMPTS
+    }
 }
 
 /// Fixed CPU workers that each own their reusable scratch state.

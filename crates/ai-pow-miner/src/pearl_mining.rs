@@ -134,7 +134,7 @@ pub fn run_with_backend(
         opts.attempt_start,
         total_attempts,
         opts.max_attempts,
-        crate::search::DEFAULT_SEARCH_BATCH_ATTEMPTS,
+        backend.batch_attempts(),
     )?;
     let started = Instant::now();
     let mut last_progress = started;

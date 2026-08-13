@@ -9,7 +9,7 @@ args=(
   --node-addr "$NODE_ADDR"
   --mining-pkh "$MINING_PKH"
   --cuda-device "${CUDA_DEVICE:-0}"
-  --gpu-batch-attempts "${GPU_BATCH_ATTEMPTS:-256}"
+  --gpu-batch-attempts "${GPU_BATCH_ATTEMPTS:-1024}"
 )
 
 if [[ "${CANONICAL:-true}" == "true" ]]; then

@@ -11,6 +11,7 @@ use ai_pow::matmul::TileState;
 use ai_pow::pearl_compat::pearl_jackpot_hash;
 use ai_pow::tile_hash::hash_le_target;
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 
 use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
 
@@ -169,18 +170,26 @@ impl SearchBackend for GpuSearchBackend {
         let w = config.cols_pattern.size()? as usize;
         let k = params.k as usize;
         let rank = params.noise_rank as usize;
+        let attempt_bytes_a = h * k;
+        let attempt_bytes_b = w * k;
         let dot = config.dot_product_length()? as usize;
-        let mut all_a = Vec::with_capacity(attempts * h * k);
-        let mut all_b = Vec::with_capacity(attempts * w * k);
-        let mut scratch = template.scratch();
-        for ordinal in batch.start..batch.end_exclusive() {
-            let (row, col) = template
-                .offsets_at_ordinal(ordinal)
-                .ok_or(SearchBackendError::DenseOrdinalOutOfRange(ordinal))?;
-            let (a, b) = template.prepare_offset(row, col, &mut scratch)?;
-            all_a.extend_from_slice(a);
-            all_b.extend_from_slice(b);
-        }
+        let mut all_a = vec![0; attempts * attempt_bytes_a];
+        let mut all_b = vec![0; attempts * attempt_bytes_b];
+        all_a
+            .par_chunks_mut(attempt_bytes_a)
+            .zip(all_b.par_chunks_mut(attempt_bytes_b))
+            .enumerate()
+            .try_for_each(|(offset, (destination_a, destination_b))| {
+                let ordinal = batch.start + offset as u64;
+                let (row, col) = template
+                    .offsets_at_ordinal(ordinal)
+                    .ok_or(SearchBackendError::DenseOrdinalOutOfRange(ordinal))?;
+                let mut scratch = template.scratch();
+                let (a, b) = template.prepare_offset(row, col, &mut scratch)?;
+                destination_a.copy_from_slice(a);
+                destination_b.copy_from_slice(b);
+                Ok::<_, SearchBackendError>(())
+            })?;
         let states =
             CudaBatchSession::new(attempts, h, w, k, rank, dot)?.run(&all_a, &all_b, attempts)?;
         for (offset, state) in states.iter().enumerate() {
@@ -211,19 +220,28 @@ impl SearchBackend for GpuSearchBackend {
         let w = local_b.len();
         let k = config.common_dim as usize;
         let rank = config.rank as usize;
-        let mut all_a = Vec::with_capacity(attempts * h * k);
-        let mut all_b = Vec::with_capacity(attempts * w * k);
-        let mut keys = Vec::with_capacity(attempts);
-        let mut scratch = template.scratch();
-        for ordinal in batch.start..batch.end_exclusive() {
-            let extranonce = u32::try_from(ordinal)
-                .map_err(|_| SearchBackendError::CanonicalOrdinalOutOfRange(ordinal))?;
-            let commitments = template.prepare_attempt(extranonce, &mut scratch);
-            let (a, b) = template.prepared_strips(&scratch);
-            all_a.extend_from_slice(a);
-            all_b.extend_from_slice(b);
-            keys.push(commitments.s_a);
-        }
+        let attempt_bytes_a = h * k;
+        let attempt_bytes_b = w * k;
+        let mut all_a = vec![0; attempts * attempt_bytes_a];
+        let mut all_b = vec![0; attempts * attempt_bytes_b];
+        let mut keys = vec![[0; 32]; attempts];
+        all_a
+            .par_chunks_mut(attempt_bytes_a)
+            .zip(all_b.par_chunks_mut(attempt_bytes_b))
+            .zip(keys.par_iter_mut())
+            .enumerate()
+            .try_for_each(|(offset, ((destination_a, destination_b), key))| {
+                let ordinal = batch.start + offset as u64;
+                let extranonce = u32::try_from(ordinal)
+                    .map_err(|_| SearchBackendError::CanonicalOrdinalOutOfRange(ordinal))?;
+                let mut scratch = template.scratch();
+                let commitments = template.prepare_attempt(extranonce, &mut scratch);
+                let (a, b) = template.prepared_strips(&scratch);
+                destination_a.copy_from_slice(a);
+                destination_b.copy_from_slice(b);
+                *key = commitments.s_a;
+                Ok::<_, SearchBackendError>(())
+            })?;
         let states =
             CudaBatchSession::new(attempts, h, w, k, rank, k)?.run(&all_a, &all_b, attempts)?;
         for (offset, (state, key)) in states.iter().zip(&keys).enumerate() {
@@ -236,6 +254,10 @@ impl SearchBackend for GpuSearchBackend {
             }
         }
         Ok(None)
+    }
+
+    fn batch_attempts(&self) -> u64 {
+        self.batch_attempts
     }
 }
 
