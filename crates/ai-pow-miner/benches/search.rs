@@ -116,12 +116,22 @@ fn dense_header() -> PearlIncompleteBlockHeader {
     }
 }
 
-fn print_measurement(name: &str, attempts: u64, workers: usize, measurement: Measurement) {
+fn print_measurement(
+    name: &str,
+    attempts: u64,
+    shape_work_factor: u128,
+    workers: usize,
+    measurement: Measurement,
+) {
     let elapsed_s = measurement.elapsed.as_secs_f64();
     let attempts_per_s = (attempts as f64) / elapsed_s;
+    let macs_per_s = attempts_per_s * shape_work_factor as f64;
     println!(
-        "{name}: attempts={attempts} elapsed_ms={:.3} attempts_per_s={attempts_per_s:.3} allocations={} workers={workers}",
+        "{name}: attempts={attempts} elapsed_ms={:.3} attempts_per_s={attempts_per_s:.3} \
+         macs_per_s={macs_per_s:.3} tera_macs_per_s={:.6} shape_work_factor={shape_work_factor} \
+         allocations={} workers={workers}",
         elapsed_s * 1_000.0,
+        macs_per_s / 1.0e12,
         measurement.allocations,
     );
 }
@@ -139,6 +149,10 @@ fn main() {
         PreparedCanonicalMoeTemplate::new(&canonical, 8, 2, 1, [0x5a; 32])
             .expect("canonical template"),
     );
+    let canonical_shape_work_factor = canonical_template
+        .config()
+        .shape_work_factor()
+        .expect("canonical shape work factor");
     backend
         .search_canonical(
             Arc::clone(&canonical_template),
@@ -156,6 +170,7 @@ fn main() {
     print_measurement(
         "canonical_prepare_scalar",
         u64::from(canonical_attempts),
+        canonical_shape_work_factor,
         1,
         canonical_prepare_measurement,
     );
@@ -172,6 +187,7 @@ fn main() {
     print_measurement(
         "canonical_prepared_scalar",
         u64::from(canonical_attempts),
+        canonical_shape_work_factor,
         1,
         canonical_measurement,
     );
@@ -189,6 +205,7 @@ fn main() {
     print_measurement(
         "canonical_prepared_dedicated",
         u64::from(canonical_attempts),
+        canonical_shape_work_factor,
         workers,
         canonical_parallel_measurement,
     );
@@ -217,6 +234,7 @@ fn main() {
         print_measurement(
             "canonical_prepared_cuda",
             u64::from(canonical_attempts),
+            canonical_shape_work_factor,
             1,
             canonical_gpu_measurement,
         );
@@ -229,6 +247,7 @@ fn main() {
         prepare_pearl_pattern_job(&header, &config, &DENSE_PRODUCTION_PARAMS, &a, &b, 8)
             .expect("prepared dense Pearl job"),
     );
+    let dense_shape_work_factor = config.shape_work_factor().expect("dense shape work factor");
     backend
         .search_dense(
             Arc::clone(&dense_prepared),
@@ -257,7 +276,8 @@ fn main() {
         }
     });
     print_measurement(
-        "dense_prepared_scalar_full_sweep", dense_attempts, 1, dense_measurement,
+        "dense_prepared_scalar_full_sweep", dense_attempts, dense_shape_work_factor, 1,
+        dense_measurement,
     );
     let dense_parallel_measurement = measure(|| {
         std::hint::black_box(
@@ -270,6 +290,7 @@ fn main() {
         );
     });
     print_measurement(
-        "dense_prepared_dedicated_full_sweep", dense_attempts, workers, dense_parallel_measurement,
+        "dense_prepared_dedicated_full_sweep", dense_attempts, dense_shape_work_factor, workers,
+        dense_parallel_measurement,
     );
 }

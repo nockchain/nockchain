@@ -15,8 +15,62 @@ WORKDIR /workspace/nockchain
 COPY . .
 CMD ["/bin/bash"]
 
-FROM development AS builder
-RUN cargo build -p ai-pow-miner --release --features node,gpu --bin ai-pow-mine
+FROM development AS fetched
+RUN --mount=type=cache,id=ai-pow-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=ai-pow-cargo-git,target=/root/.cargo/git \
+    cargo fetch --locked
+
+FROM fetched AS builder
+RUN --mount=type=cache,id=ai-pow-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=ai-pow-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=ai-pow-target-amd64,target=/workspace/nockchain/target \
+    cargo build --locked --offline -p ai-pow-miner --release --features node,gpu --bin ai-pow-mine \
+    && cp target/release/ai-pow-mine /tmp/ai-pow-mine
+
+FROM fetched AS benchmark-builder
+RUN --mount=type=cache,id=ai-pow-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=ai-pow-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=ai-pow-target-amd64,target=/workspace/nockchain/target \
+    cargo build --locked --offline -p ai-pow-miner --release --features node,gpu --bench search \
+    && for candidate in target/release/deps/search-*; do \
+         if [ -x "$candidate" ]; then cp "$candidate" /tmp/search; break; fi; \
+       done \
+    && test -x /tmp/search
+
+FROM fetched AS test-builder
+RUN --mount=type=cache,id=ai-pow-cargo-registry,target=/root/.cargo/registry \
+    --mount=type=cache,id=ai-pow-cargo-git,target=/root/.cargo/git \
+    --mount=type=cache,id=ai-pow-target-amd64,target=/workspace/nockchain/target \
+    cargo test --locked --offline -p ai-pow-miner --release --features node,gpu \
+      canonical_v3_device_pipeline_matches_scalar --no-run \
+    && for candidate in target/release/deps/ai_pow_miner-*; do \
+         if [ -x "$candidate" ]; then cp "$candidate" /tmp/ai-pow-gpu-tests; break; fi; \
+       done \
+    && test -x /tmp/ai-pow-gpu-tests
+
+FROM ubuntu:24.04 AS test
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=test-builder /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so.12.8.90 /usr/local/cuda/lib64/
+RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
+    && ln -s libcudart.so.12 /usr/local/cuda/lib64/libcudart.so
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+COPY --from=test-builder /tmp/ai-pow-gpu-tests /usr/local/bin/ai-pow-gpu-tests
+ENTRYPOINT ["/usr/local/bin/ai-pow-gpu-tests"]
+CMD ["canonical_v3_device_pipeline_matches_scalar", "--exact", "--nocapture"]
+
+FROM ubuntu:24.04 AS benchmark
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=benchmark-builder /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so.12.8.90 /usr/local/cuda/lib64/
+RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
+    && ln -s libcudart.so.12 /usr/local/cuda/lib64/libcudart.so
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
+COPY --from=benchmark-builder /tmp/search /usr/local/bin/search
+ENV AI_POW_SEARCH_BENCH_CANONICAL_ATTEMPTS=8192
+CMD ["sleep", "infinity"]
 
 FROM ubuntu:24.04
 RUN apt-get update \
@@ -26,7 +80,7 @@ COPY --from=builder /usr/local/cuda-12.8/targets/x86_64-linux/lib/libcudart.so.1
 RUN ln -s libcudart.so.12.8.90 /usr/local/cuda/lib64/libcudart.so.12 \
     && ln -s libcudart.so.12 /usr/local/cuda/lib64/libcudart.so
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
-COPY --from=builder /workspace/nockchain/target/release/ai-pow-mine /usr/local/bin/ai-pow-mine
+COPY --from=builder /tmp/ai-pow-mine /usr/local/bin/ai-pow-mine
 COPY docker/ai-pow-miner-entrypoint.sh /usr/local/bin/ai-pow-miner-entrypoint
 
 ENV CANONICAL=true \

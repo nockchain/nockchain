@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use ai_pow_miner::cli::{init_tracing, CommonArgs};
 use ai_pow_miner::run::{run_canonical_with_backend, run_with_backend, MinerError};
-use ai_pow_miner::search::{CpuSearchBackend, SearchBackend};
+use ai_pow_miner::search::{CpuSearchBackend, MeteredSearchBackend, SearchBackend};
 use clap::{Args as ClapArgs, Parser};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -89,14 +89,16 @@ fn search_backend(args: &Args) -> Result<Arc<dyn SearchBackend>, String> {
             gpu_batch_attempts = backend.batch_attempts(),
             "ai-pow-mine: CUDA search enabled"
         );
-        return Ok(Arc::new(backend));
+        return Ok(MeteredSearchBackend::new("cuda", Arc::new(backend)));
     }
     let workers = args
         .common
         .mining_threads()
         .map_err(|error| error.to_string())?;
     CpuSearchBackend::new(workers)
-        .map(|backend| Arc::new(backend) as Arc<dyn SearchBackend>)
+        .map(|backend| {
+            MeteredSearchBackend::new("cpu", Arc::new(backend)) as Arc<dyn SearchBackend>
+        })
         .map_err(|error| error.to_string())
 }
 

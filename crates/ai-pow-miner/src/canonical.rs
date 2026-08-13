@@ -280,6 +280,35 @@ impl PreparedCanonicalMoeTemplate {
         &self.aux_inclusion
     }
 
+    /// Fixed canonical inputs used to derive Pearl V3 commitments on an accelerator.
+    ///
+    /// The returned values are immutable for this template. Attempt-dependent
+    /// values, including `kappa`, matrix commitments, seeds, and noised strips,
+    /// must still be derived for every extranonce.
+    pub fn gpu_inputs(
+        &self,
+    ) -> (
+        &[i8],
+        &[i8],
+        &[u8],
+        &[u8],
+        &[u32],
+        &[u32],
+        [u8; ai_pow::pearl_compat::PEARL_INCOMPLETE_BLOCK_HEADER_SIZE],
+        [u8; ai_pow::pearl_compat::PEARL_MINING_CONFIG_SIZE],
+    ) {
+        (
+            &self.a,
+            &self.b,
+            &self.routing_data,
+            &self.routing_offsets,
+            &self.outer_indices,
+            &self.b_cols_global,
+            self.header.to_bytes(),
+            self.mu,
+        )
+    }
+
     pub fn scratch(&self) -> PreparedCanonicalMoeScratch {
         let k = self.params.k as usize;
         PreparedCanonicalMoeScratch {

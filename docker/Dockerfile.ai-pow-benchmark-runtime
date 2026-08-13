@@ -1,0 +1,3 @@
+FROM ghcr.io/nockchain/nockchain-ai-pow-benchmark:gpu-metrics
+COPY docker/ai-pow-benchmark-entrypoint.sh /usr/local/bin/ai-pow-benchmark-entrypoint
+ENTRYPOINT ["/usr/local/bin/ai-pow-benchmark-entrypoint"]

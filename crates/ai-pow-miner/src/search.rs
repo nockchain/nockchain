@@ -4,9 +4,10 @@
 //! the lowest winning ordinal and jackpot. The caller owns target classification,
 //! checked-ticket reconstruction, and certificate construction.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle, Thread};
+use std::time::{Duration, Instant};
 
 use ai_pow::pearl_compat::{
     PearlCompatError, PreparedPearlPatternJob, PreparedPearlPatternScratch,
@@ -22,6 +23,9 @@ use crate::canonical::{PreparedCanonicalMoeScratch, PreparedCanonicalMoeTemplate
 /// Cancellation and deadlines are observed between batches, so this bounds
 /// their latency independently of a backend's throughput.
 pub const DEFAULT_SEARCH_BATCH_ATTEMPTS: u64 = 256;
+
+/// Interval between production search-throughput reports.
+pub const THROUGHPUT_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Number of adjacent ticket ordinals assigned to a worker at a time.
 ///
@@ -220,6 +224,175 @@ pub trait SearchBackend: Send + Sync {
     /// still observes cancellation and deadlines between dispatches.
     fn batch_attempts(&self) -> u64 {
         DEFAULT_SEARCH_BATCH_ATTEMPTS
+    }
+}
+
+/// Adds lock-free throughput accounting to a search backend.
+///
+/// A successful dispatch contributes its full batch because CPU workers and the
+/// CUDA kernel complete every attempt before returning the lowest winner. The
+/// hot path performs two relaxed atomic additions per batch. A dedicated
+/// reporter swaps both window counters once per interval.
+pub struct MeteredSearchBackend {
+    inner: Arc<dyn SearchBackend>,
+    counters: Arc<ThroughputCounters>,
+    _reporter: ThroughputReporter,
+}
+
+impl MeteredSearchBackend {
+    pub fn new(backend: &'static str, inner: Arc<dyn SearchBackend>) -> Arc<Self> {
+        let counters = Arc::new(ThroughputCounters::default());
+        let reporter =
+            ThroughputReporter::spawn(backend, Arc::clone(&counters), THROUGHPUT_LOG_INTERVAL);
+        Arc::new(Self {
+            inner,
+            counters,
+            _reporter: reporter,
+        })
+    }
+
+    fn record(&self, attempts: u64, shape_work_factor: u128) {
+        let Ok(shape_work_factor) = u64::try_from(shape_work_factor) else {
+            tracing::warn!(
+                shape_work_factor = %shape_work_factor,
+                "AI-PoW throughput counter cannot represent shape work factor"
+            );
+            return;
+        };
+        let Some(macs) = attempts.checked_mul(shape_work_factor) else {
+            tracing::warn!(attempts, shape_work_factor, "AI-PoW throughput counter overflow");
+            return;
+        };
+        self.counters.record(attempts, macs);
+    }
+}
+
+impl SearchBackend for MeteredSearchBackend {
+    fn search_dense(
+        &self,
+        template: Arc<PreparedPearlPatternJob>,
+        batch: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        let shape_work_factor = template.config().shape_work_factor()?;
+        let result = self.inner.search_dense(template, batch);
+        if result.is_ok() {
+            self.record(batch.len, shape_work_factor);
+        }
+        result
+    }
+
+    #[cfg(feature = "node")]
+    fn search_canonical(
+        &self,
+        template: Arc<PreparedCanonicalMoeTemplate>,
+        batch: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        let shape_work_factor = template.config().shape_work_factor()?;
+        let result = self.inner.search_canonical(template, batch);
+        if result.is_ok() {
+            self.record(batch.len, shape_work_factor);
+        }
+        result
+    }
+
+    fn batch_attempts(&self) -> u64 {
+        self.inner.batch_attempts()
+    }
+}
+
+#[derive(Debug, Default)]
+struct ThroughputCounters {
+    attempts: AtomicU64,
+    macs: AtomicU64,
+}
+
+impl ThroughputCounters {
+    fn record(&self, attempts: u64, macs: u64) {
+        self.attempts.fetch_add(attempts, Ordering::Relaxed);
+        self.macs.fetch_add(macs, Ordering::Relaxed);
+    }
+
+    fn take_window(&self, elapsed: Duration) -> ThroughputWindow {
+        let attempts = self.attempts.swap(0, Ordering::Relaxed);
+        let macs = self.macs.swap(0, Ordering::Relaxed);
+        ThroughputWindow {
+            elapsed,
+            attempts,
+            macs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ThroughputWindow {
+    elapsed: Duration,
+    attempts: u64,
+    macs: u64,
+}
+
+impl ThroughputWindow {
+    fn attempts_per_second(self) -> f64 {
+        self.attempts as f64 / self.elapsed.as_secs_f64()
+    }
+
+    fn macs_per_second(self) -> f64 {
+        self.macs as f64 / self.elapsed.as_secs_f64()
+    }
+}
+
+struct ThroughputReporter {
+    stop: Arc<AtomicBool>,
+    thread: Thread,
+    join: Option<JoinHandle<()>>,
+}
+
+impl ThroughputReporter {
+    fn spawn(backend: &'static str, counters: Arc<ThroughputCounters>, interval: Duration) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let reporter_stop = Arc::clone(&stop);
+        let join = thread::Builder::new()
+            .name("ai-pow-throughput".to_string())
+            .spawn(move || {
+                let mut window_started = Instant::now();
+                loop {
+                    thread::park_timeout(interval);
+                    if reporter_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let elapsed = window_started.elapsed();
+                    window_started = Instant::now();
+                    let window = counters.take_window(elapsed);
+                    let macs_per_second = window.macs_per_second();
+                    tracing::info!(
+                        target: "ai_pow_miner",
+                        backend,
+                        window_seconds = elapsed.as_secs_f64(),
+                        window_attempts = window.attempts,
+                        attempts_per_second = window.attempts_per_second(),
+                        window_macs = window.macs,
+                        macs_per_second,
+                        tera_macs_per_second = macs_per_second / 1.0e12,
+                        "AI-PoW search throughput"
+                    );
+                }
+            })
+            .expect("throughput reporter thread must spawn");
+        let thread = join.thread().clone();
+        Self {
+            stop,
+            thread,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for ThroughputReporter {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.thread.unpark();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -511,6 +684,21 @@ fn search_canonical_with_scratch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throughput_window_reports_attempt_and_mac_rates() {
+        let counters = ThroughputCounters::default();
+        counters.record(2_000, 131_072_000);
+        let window = counters.take_window(Duration::from_secs(2));
+        assert_eq!(window.attempts, 2_000);
+        assert_eq!(window.macs, 131_072_000);
+        assert_eq!(window.attempts_per_second(), 1_000.0);
+        assert_eq!(window.macs_per_second(), 65_536_000.0);
+
+        let empty = counters.take_window(Duration::from_secs(1));
+        assert_eq!(empty.attempts, 0);
+        assert_eq!(empty.macs, 0);
+    }
 
     #[test]
     fn scheduler_caps_budget_across_batches_and_counts_through_winner() {
