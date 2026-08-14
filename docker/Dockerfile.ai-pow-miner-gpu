@@ -85,6 +85,6 @@ COPY docker/ai-pow-miner-entrypoint.sh /usr/local/bin/ai-pow-miner-entrypoint
 
 ENV CANONICAL=true \
     CUDA_DEVICE=0 \
-    GPU_BATCH_ATTEMPTS=1024 \
+    GPU_BATCH_ATTEMPTS=32768 \
     RUST_LOG=info,ai_pow_miner=info,nockchain_mining_common=info
 ENTRYPOINT ["/usr/local/bin/ai-pow-miner-entrypoint"]

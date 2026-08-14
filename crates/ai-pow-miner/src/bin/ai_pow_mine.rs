@@ -44,6 +44,9 @@ use clap::{Args as ClapArgs, Parser};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
+#[cfg(feature = "gpu")]
+const DEFAULT_GPU_BATCH_ATTEMPTS: u64 = 32_768;
+
 /// `ai-pow-mine` — standalone AI-PoW block miner.
 #[derive(Parser, Debug)]
 #[command(
@@ -73,7 +76,7 @@ struct AcceleratorArgs {
 
     /// Attempts dispatched through CUDA before the scheduler checks cancellation.
     #[cfg(feature = "gpu")]
-    #[arg(long, default_value_t = 1024)]
+    #[arg(long, default_value_t = DEFAULT_GPU_BATCH_ATTEMPTS)]
     gpu_batch_attempts: u64,
 }
 
