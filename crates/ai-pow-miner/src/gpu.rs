@@ -471,18 +471,51 @@ mod tests {
         let template = PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x42; 32])
             .expect("canonical template");
         let session = CudaSession::canonical(&template, 4).expect("CUDA V3 session");
-        let debug = session.debug_canonical(7).expect("CUDA V3 evaluation");
-        let mut scratch = template.scratch();
-        let scalar = template.evaluate(7, &mut scratch);
-        let (a_rows, b_cols) = template.prepared_strips(&scratch);
-        assert_eq!(debug.kappa, scalar.commitments.kappa);
-        assert_eq!(debug.h_a, scalar.commitments.h_a);
-        assert_eq!(debug.h_b, scalar.commitments.h_b);
-        assert_eq!(debug.s_a, scalar.commitments.s_a);
-        assert_eq!(debug.s_b, scalar.commitments.s_b);
-        assert_eq!(&debug.a_rows, a_rows);
-        assert_eq!(&debug.b_cols, b_cols);
-        assert_eq!(TileState(debug.state), scalar.tile_state);
-        assert_eq!(debug.jackpot, scalar.jackpot_hash);
+        for extranonce in [0, 1, 7, u32::MAX - 1, u32::MAX] {
+            let debug = session
+                .debug_canonical(extranonce)
+                .expect("CUDA V3 evaluation");
+            let mut scratch = template.scratch();
+            let scalar = template.evaluate(extranonce, &mut scratch);
+            let (a_rows, b_cols) = template.prepared_strips(&scratch);
+            assert_eq!(debug.kappa, scalar.commitments.kappa);
+            assert_eq!(debug.h_a, scalar.commitments.h_a);
+            assert_eq!(debug.h_b, scalar.commitments.h_b);
+            assert_eq!(debug.s_a, scalar.commitments.s_a);
+            assert_eq!(debug.s_b, scalar.commitments.s_b);
+            assert_eq!(&debug.a_rows, a_rows);
+            assert_eq!(&debug.b_cols, b_cols);
+            assert_eq!(TileState(debug.state), scalar.tile_state);
+            assert_eq!(debug.jackpot, scalar.jackpot_hash);
+        }
+    }
+
+    #[test]
+    fn canonical_search_obeys_targets_and_lowest_winner_order() {
+        let template = Arc::new(
+            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x24; 32])
+                .expect("canonical template"),
+        );
+        let backend = GpuSearchBackend::new(0, 4).expect("GPU backend");
+        let winner = backend
+            .search_canonical(
+                Arc::clone(&template),
+                SearchBatch::new(41, 4, [u8::MAX; 32]).expect("maximum target batch"),
+            )
+            .expect("maximum target search")
+            .expect("ordinal zero is a winner");
+        assert_eq!(winner.ordinal, 41);
+        assert_eq!(
+            winner.jackpot_hash,
+            template.evaluate(41, &mut template.scratch()).jackpot_hash
+        );
+
+        assert!(backend
+            .search_canonical(
+                template,
+                SearchBatch::new(45, 4, [0; 32]).expect("zero target batch"),
+            )
+            .expect("zero target search")
+            .is_none());
     }
 }
