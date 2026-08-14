@@ -491,29 +491,39 @@ mod tests {
     }
 
     #[test]
-    fn canonical_search_obeys_targets_and_lowest_winner_order() {
-        let template = Arc::new(
+    fn canonical_search_obeys_targets_and_session_lifetime() {
+        let first = Arc::new(
             PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x24; 32])
-                .expect("canonical template"),
+                .expect("first canonical template"),
+        );
+        let second = Arc::new(
+            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x25; 32])
+                .expect("second canonical template"),
         );
         let backend = GpuSearchBackend::new(0, 4).expect("GPU backend");
-        let winner = backend
-            .search_canonical(
-                Arc::clone(&template),
-                SearchBatch::new(41, 4, [u8::MAX; 32]).expect("maximum target batch"),
-            )
-            .expect("maximum target search")
-            .expect("ordinal zero is a winner");
-        assert_eq!(winner.ordinal, 41);
-        assert_eq!(
-            winner.jackpot_hash,
-            template.evaluate(41, &mut template.scratch()).jackpot_hash
-        );
+        for (template, start) in
+            [(Arc::clone(&first), 41), (Arc::clone(&first), 45), (Arc::clone(&second), 49)]
+        {
+            let winner = backend
+                .search_canonical(
+                    Arc::clone(&template),
+                    SearchBatch::new(start, 4, [u8::MAX; 32]).expect("maximum target batch"),
+                )
+                .expect("maximum target search")
+                .expect("ordinal zero is a winner");
+            assert_eq!(winner.ordinal, start);
+            assert_eq!(
+                winner.jackpot_hash,
+                template
+                    .evaluate(start as u32, &mut template.scratch())
+                    .jackpot_hash
+            );
+        }
 
         assert!(backend
             .search_canonical(
-                template,
-                SearchBatch::new(45, 4, [0; 32]).expect("zero target batch"),
+                second,
+                SearchBatch::new(53, 4, [0; 32]).expect("zero target batch"),
             )
             .expect("zero target search")
             .is_none());
