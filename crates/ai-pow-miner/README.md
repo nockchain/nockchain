@@ -46,6 +46,28 @@ Merge mining shares a mineable work unit, not a proof system or chain target. Pe
 
 The miner relies on `ai-pow` for Pearl byte compatibility and attempt binding, and on `ai-pow-zk` for certificate construction. Its security-sensitive obligations are canonical serialization, exact statement construction, fresh per-attempt work, and refusal to substitute prover-controlled setup or public parameters. Cryptographic acceptance properties are documented in [`../ai-pow-zk/docs/SECURITY.md`](../ai-pow-zk/docs/SECURITY.md).
 
+## GPU container configuration
+
+Build the Linux/amd64 production image:
+
+```sh
+docker buildx build \
+  --platform linux/amd64 \
+  -f docker/Dockerfile.ai-pow-miner-gpu \
+  -t ai-pow-miner-gpu .
+```
+
+The image mines to `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j` by default. Set `MINING_PKH` to direct rewards to a different v1 mining public-key hash. `NODE_ADDR` is required.
+
+```sh
+docker run --rm --gpus all \
+  -e NODE_ADDR=http://node.example:5555 \
+  -e MINING_PKH=<v1-mining-pkh> \
+  ai-pow-miner-gpu
+```
+
+The image uses CUDA device `0`, canonical mode, and batches of 32,768 attempts by default. Set `CUDA_DEVICE`, `CANONICAL`, or `GPU_BATCH_ATTEMPTS` to override these values. Non-canonical mode also requires `PEARL_GATEWAY`.
+
 ## Validation
 
 ```sh
