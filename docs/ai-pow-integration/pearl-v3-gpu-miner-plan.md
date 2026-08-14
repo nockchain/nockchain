@@ -14,72 +14,68 @@ The production interface must require only the mining public key, the Nockchain 
 4. Rust recomputes and validates every GPU winner before proof construction.
 5. A requested GPU backend fails closed. It does not fall back to CPU search.
 6. The recursive proof format and consensus verifier remain unchanged.
-7. Persistent device allocations do not cross a prepared-template boundary.
+7. Attempt-dependent device state does not cross a prepared-template boundary. Immutable source matrices may remain resident across templates.
 8. The steady-state no-hit path does not allocate device or host buffers per attempt.
 
 ## Active production shape
 
 | Property | Value |
 |---|---:|
-| Matrix rows (`m`) | 64 |
-| Matrix columns (`n`) | 64 |
-| Inner dimension (`k`) | 1,024 |
-| Noise rank | 64 |
-| Opened rows | 8 |
-| Opened columns | 8 |
-| Routing experts | 2 |
-| Top-k | 1 |
+| Matrix rows (`m`) | 4,096 |
+| Matrix columns (`n`) | 32,768 |
+| Inner dimension (`k`) | 8,192 |
+| Noise rank | 512 |
+| Opened rows | 16 |
+| Opened columns | 16 |
+| Dense tile tickets | 524,288 |
 | Rolling stripes | 16 |
 | Tile-state words | 16 × `i32` |
+| Layer-0 trace height | $2^{17}$ |
 
-Pearl's large consumer-GPU geometry does not apply to this canonical job. Reuse its persistent-session, signed INT8 MMA, fused fold/hash/target, and scalar winner-check design rather than its dimensions.
+The dense peak kernel is the primary production kernel for
+`--gpu --canonical`. The small MoE kernel remains available for CPU diagnosis
+and regression tests. Pearl Gateway work continues to use the backend that
+matches the Gateway-supplied shape.
 
-## RTX 5090 peak dense path
+The peak path evaluates one complete dense Pearl tile space as one GEMM. One
+prepared transcript supplies 524,288 ordered tile tickets. Operand reuse,
+rolling transcript updates, jackpot hashing, and target comparison stay on the
+GPU.
 
-The canonical MoE path remains the stable production path. Its small geometry is
-commitment-bound and cannot approach the RTX 5090 Tensor Core limit.
-
-The opt-in `peak` path evaluates the existing dense Pearl tile space as one full
-GEMM. One prepared transcript supplies millions of ordered tile tickets, so
-operand reuse and transcript work remain on the GPU. These documents define the
-independent path:
+These documents define the path:
 
 - `pearl-v3-rtx5090-roofline.md`
 - `pearl-v3-rtx5090-architecture.md`
 - `pearl-v3-rtx5090-implementation-plan.md`
 
-The peak path must preserve the same scalar winner check, recursive proof, and
-consensus wire format. It cannot replace the canonical path until all correctness,
-sanitizer, performance, proof, and accepted-block gates pass.
+The production cutover requires every correctness, sanitizer, complete-template
+performance, proof, multi-GPU, restart, failure, and accepted-block gate.
 
 ## Compatibility boundary
 
-Rust remains authoritative for job construction, ticket validation, and proof construction. CUDA must reproduce these operations:
+Rust remains authoritative for job construction, winner validation, and proof
+construction. CUDA must reproduce these dense operations:
 
 - `PearlIncompleteBlockHeader::to_bytes`;
 - `PearlMiningConfig::to_bytes`;
 - `pearl_kappa`;
 - `pearl_matrix_commitments`;
-- `canonical_noise_seeds_moe`;
+- `canonical_noise_seeds_from_matrix_commitments`;
 - Pearl `E_L`, `E_R`, `F_L`, and `F_R` expansion;
 - `compute_pattern_tile_state_from_slices`;
 - `pearl_jackpot_hash`;
 - `hash_le_target`.
 
-The transcript is:
+The dense transcript is:
 
 ```text
 kappa  = BLAKE3(sigma || mu)
-H_A    = BLAKE3(pad_1024(A), key=kappa)
-H_B    = BLAKE3(pad_1024(B), key=kappa)
-A'     = BLAKE3(H_A || LE32(m)   || zeroes, key=SEED_SALT_A)
-B'     = BLAKE3(H_B || LE32(n/e) || zeroes, key=SEED_SALT_B)
-rroot  = BLAKE3(pad_1024(routing_data),    key=kappa)
-hoff   = BLAKE3(pad_1024(routing_offsets), key=kappa)
-hrout  = BLAKE3(rroot || hoff)
-hact   = BLAKE3(A' || hrout)
+H_A    = MerkleTree(pad_1024(A), key=kappa).root
+H_B    = MerkleTree(pad_1024(B), key=kappa).root
+A'     = BLAKE3(H_A || LE32(m) || zeroes, key=SEED_SALT_A)
+B'     = BLAKE3(H_B || LE32(n) || zeroes, key=SEED_SALT_B)
 s_B    = BLAKE3(kappa || B')
-s_A    = BLAKE3(s_B || hact)
+s_A    = BLAKE3(s_B || A')
 jackpot = BLAKE3(tile_state_le, key=s_A)
 ```
 

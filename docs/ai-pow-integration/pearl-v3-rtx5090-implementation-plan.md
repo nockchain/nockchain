@@ -127,59 +127,96 @@ and little-endian predecessor. Each vector runs three fused device repetitions.
 First, last, CTA-boundary, maximum-target, zero-target, and adjacent range cases
 pass.
 
-## Stage 6: Opt-in miner integration
+## Stage 6: Production pipeline integration
 
-Add `peak` as a separate backend selector in the CUDA miner CLI and Docker entrypoint. It must require the peak dense profile and must conflict with the existing canonical V3 selector.
+The production GPU path uses the dense `AIP1` artifact. One synthetic Pearl
+header binds the Nockchain block commitment and one extranonce. Its complete
+tile grid is one prepared template. A miss advances the extranonce and creates
+a new template. The host keeps the winning template until proof construction
+finishes.
 
-The worker keeps the current order:
+The worker uses this order:
 
-1. search;
-2. scalar recheck;
-3. target recheck;
-4. recursive proof;
-5. artifact encoding;
-6. node submission.
+1. derive the header, commitments, noise seeds, and noised matrices;
+2. search every valid dense tile on the selected GPUs;
+3. select the lowest global tile ordinal;
+4. recompute the winner with the scalar evaluator;
+5. check the Nockchain target again;
+6. build and verify the compact recursive certificate;
+7. encode the existing dense `AIP1` artifact;
+8. submit the `%ai-pow` block.
 
-Gate: one GPU winner builds and verifies the existing compact recursive certificate. The certificate and noun wire contain no CUDA-specific field.
+The certificate binds the header, configuration, matrix commitments, winning
+row and column strips, jackpot, and Nockchain auxiliary commitment. CUDA state
+does not enter the certificate or noun wire.
 
-Status: the opt-in library backend is available. The production CLI selector,
-recursive-proof gate, and Docker entrypoint remain Stage 6 work.
+The production `--gpu --canonical` mode selects the peak backend. The Pearl
+Gateway mode keeps its existing generic backend because Gateway work controls
+the puzzle shape. CPU canonical mode remains available for diagnosis.
 
-## Stage 7: Runpod production flow
+Gate: one peak GPU winner builds a compact recursive certificate that the
+production verifier accepts.
 
-Build a CUDA 12.8 or newer Linux/amd64 image for `sm_120`. Start one RTX 5090
-pod with only `NODE_ADDR=http://23.252.122.18:5556` plus optional GPU tuning.
-Keep the image's default Docker `MINING_PKH`,
-`2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
+The profile satisfies the consensus parameter envelope. Its first and last
+dense tiles both require a $2^{17}$ Layer-0 trace. The production verifier table
+contains the matching `sx_bound=true` setup key.
+
+## Stage 7: Prepared-template throughput
+
+Measure the complete template cycle. Include header derivation, keyed matrix
+commitments, noise expansion, noised matrix construction, device transfer, and
+the search kernel. Repeated searches of one prepared template are not a valid
+production throughput measurement.
+
+Move transcript preparation to the GPU when host preparation or PCIe transfer
+keeps the complete cycle below 80% of the measured search-kernel rate. Keep the
+original matrices resident on each device. Derive the keyed commitments, noise
+factors, and noised matrices for each new header on the device. Return the
+commitments and noise seeds that the host needs for scalar validation and proof
+construction.
+
+Gate: the production miner reports complete-template ticket and TMAC rates for
+at least 60 seconds.
+
+## Stage 8: Multi-GPU production backend
+
+Each device owns one session and stream. All devices prepare the same template.
+For each ordered batch, partition the tile ordinals into adjacent, disjoint
+ranges. Each device returns its local minimum. The host waits for every active
+device and returns the lowest global ordinal.
+
+A device initialization, preparation, launch, synchronization, or result error
+is fatal. The backend does not retry the range on the CPU or on another GPU.
+Candidate replacement stops new launches, waits for the current launches, and
+destroys every stale session before it prepares the next template.
+
+Gate on every available device count:
+
+- exact range coverage with no gaps or overlaps;
+- global lowest winner with the maximum target;
+- no winner with the zero target;
+- scalar recheck of the selected global winner;
+- cancellation after candidate replacement;
+- throughput scaling against one device.
+
+## Stage 9: Runpod production flow
+
+Build a CUDA 12.8 or newer Linux/amd64 image for `sm_120`. Start RTX 5090 pods
+with only `NODE_ADDR=http://23.252.122.18:5556` and the production mining key.
+Do not start or connect to a fakenet.
 
 Verify:
 
 1. GPU enumeration and peak-backend startup;
-2. persistent template allocation;
-3. steady no-hit mining and progress accounting;
-4. connection to the mainnet API node maintained by the sibling `solo/`
-   Ansible directory;
-5. accepted `%ai-pow` block in the solo node logs;
+2. one persistent session per selected device;
+3. complete-template progress accounting;
+4. connection to the mainnet API node;
+5. an accepted `%ai-pow` block in the node logs;
 6. candidate replacement during a launch;
-7. full pod stop and restart with the same configuration;
-8. no CPU-search fallback after an injected CUDA failure.
+7. a full container stop and restart with the same configuration;
+8. no CPU fallback after an injected CUDA failure.
 
-Do not start or connect to a fakenet for a Runpod test.
-
-Gate: the solo node logs an accepted block before and after the restart.
-
-## Stage 8: Multi-GPU extension
-
-Partition each ordered batch into contiguous device ranges. Preserve one session and stream per device. Reduce device results by global ordinal.
-
-Gate on two, four, and eight devices:
-
-- exact range coverage with no gaps or overlaps;
-- global lowest winner under maximum target;
-- zero-target miss;
-- cancellation after a candidate replacement;
-- scalar recheck of the selected global winner;
-- throughput scaling recorded against one device.
+Gate: the node accepts a block before and after the restart.
 
 ## Stop rules
 

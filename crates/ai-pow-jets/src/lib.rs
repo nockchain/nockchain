@@ -812,6 +812,38 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn peak_dense_profile_uses_an_installed_setup_bucket() {
+        let params = ai_pow_miner::PEAK_PRODUCTION_PARAMS;
+        let trace_height = ai_pow::zk_bridge::pearl_dense_canonical_trace_height(&params, 0, 0)
+            .expect("peak dense trace height");
+        let key = VerifierSetupShapeKey::new(
+            trace_height,
+            (params.k / params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX,
+        );
+
+        let installed_keys: std::collections::BTreeSet<_> =
+            crate::setup::production_verifier_setup_buckets()
+                .into_iter()
+                .map(|bucket| {
+                    let height = crate::setup::canonical_moe_trace_height(
+                        &bucket.params, bucket.hw, bucket.e, bucket.top_k,
+                    )
+                    .expect("production setup bucket trace height");
+                    VerifierSetupShapeKey::new(
+                        height,
+                        (bucket.params.k / bucket.params.noise_rank) as usize
+                            <= ai_pow::params::STRIPE_MAX,
+                    )
+                })
+                .collect();
+
+        assert!(
+            installed_keys.contains(&key),
+            "missing peak setup key {key:?}"
+        );
+    }
 }
 
 #[cfg(test)]

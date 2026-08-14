@@ -38,6 +38,22 @@ pub const DENSE_PRODUCTION_PARAMS: ai_pow::params::MatmulParams = ai_pow::params
     difficulty_bits: 0,
 };
 
+/// Dense Pearl V3 profile for the RTX 5090 production search kernel.
+pub const PEAK_PRODUCTION_PARAMS: ai_pow::params::MatmulParams = ai_pow::params::MatmulParams {
+    m: 4096,
+    k: 8192,
+    n: 32768,
+    noise_rank: 512,
+    tile: 16,
+    spot_checks: 1,
+    difficulty_bits: 0,
+};
+
+/// Return the dense RTX 5090 production profile.
+pub const fn peak_production_params() -> ai_pow::params::MatmulParams {
+    PEAK_PRODUCTION_PARAMS
+}
+
 /// Return the exact dense production fixture parameters.
 pub const fn dense_production_params() -> ai_pow::params::MatmulParams {
     DENSE_PRODUCTION_PARAMS

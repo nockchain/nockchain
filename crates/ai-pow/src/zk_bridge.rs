@@ -1839,6 +1839,21 @@ fn prove_pearl_moe_l0_and_ticket(
     ))
 }
 
+/// Return the Layer-0 trace height for one dense Pearl tile.
+///
+/// `tile_i` and `tile_j` are zero-based tile indices. The result is the
+/// verifier setup key used by the compact recursive certificate.
+pub fn pearl_dense_canonical_trace_height(
+    params: &MatmulParams,
+    tile_i: u32,
+    tile_j: u32,
+) -> Result<usize, BridgeError> {
+    let zk_params = zk_params_from(params);
+    let schedule = StripIndexSchedule::from_tile(&zk_params, tile_i, tile_j)
+        .map_err(BridgeError::ZkParamsInvalid)?;
+    Ok(expected_layer0_rows_for_strip_schedule(params, &schedule)?.required_trace_len())
+}
+
 /// The Layer-0 trace height a canonical MoE block at this shape WOULD have —
 /// computed WITHOUT proving AND without the (large) synthesized matrices. The
 /// opened schedule (`outer_indices` from routing + `inner_a_rows`; `b_cols_global`
@@ -8595,6 +8610,39 @@ mod tests {
             "non-contiguous: a sweep on a row-permuted committed matrix \
              MUST be rejected by the position-keyed noised_packed bus even for a \
              non-contiguous opened row set."
+        );
+    }
+
+    #[test]
+    fn peak_dense_profile_fits_production_setup_band() {
+        let params = MatmulParams {
+            m: 4096,
+            k: 8192,
+            n: 32768,
+            noise_rank: 512,
+            tile: 16,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        params
+            .validate_prod_envelope()
+            .expect("peak profile must satisfy the consensus envelope");
+
+        let first = pearl_dense_canonical_trace_height(&params, 0, 0)
+            .expect("first peak tile trace height");
+        let last = pearl_dense_canonical_trace_height(
+            &params,
+            params.row_tiles() - 1,
+            params.col_tiles() - 1,
+        )
+        .expect("last peak tile trace height");
+
+        assert_eq!(first, 1 << 17, "peak profile setup bucket");
+        assert_eq!(last, first, "all peak tiles must select one setup bucket");
+        assert!(first >= ai_pow_zk::composite_layout::MIN_STARK_LEN);
+        assert!(
+            first <= crate::params::AI_POW_MAX_TRACE_HEIGHT,
+            "peak trace height {first} exceeds the production setup cap"
         );
     }
 
