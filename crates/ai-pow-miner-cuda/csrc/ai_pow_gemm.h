@@ -10,9 +10,13 @@ extern "C" {
 typedef struct AiPowCudaSession AiPowCudaSession;
 typedef struct AiPowCudaV3Session AiPowCudaV3Session;
 
+// Returns the CUDA runtime's visible device count.
+int ai_pow_cuda_device_count(uint32_t* count_out);
+
 // Generic opened-strip tile-state session. Retained for dense Pearl jobs and
 // differential tests. Canonical production mining uses the V3 session below.
 int ai_pow_cuda_session_create(
+    uint32_t device_ordinal,
     uint32_t max_attempts,
     uint32_t h,
     uint32_t w,
@@ -34,6 +38,7 @@ int ai_pow_cuda_session_destroy(AiPowCudaSession* session);
 // once. `sigma` is the 76-byte base header and `mu` is the 52-byte mining
 // configuration. The device adds each attempt ordinal to sigma's timestamp.
 int ai_pow_cuda_v3_session_create(
+    uint32_t device_ordinal,
     uint32_t max_attempts,
     const int8_t* a_matrix,
     const int8_t* b_matrix,
@@ -55,6 +60,7 @@ int ai_pow_cuda_v3_session_search(
     uint32_t extranonce_start,
     uint32_t attempts,
     const uint8_t target[32],
+    uint32_t capture_debug,
     uint32_t* winner_local,
     uint8_t jackpot_out[32]);
 

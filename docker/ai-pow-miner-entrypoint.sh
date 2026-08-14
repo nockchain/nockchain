@@ -8,7 +8,7 @@ args=(
   --gpu
   --node-addr "$NODE_ADDR"
   --mining-pkh "$MINING_PKH"
-  --cuda-device "${CUDA_DEVICE:-0}"
+  --cuda-devices "${CUDA_DEVICES:-all}"
   --gpu-batch-attempts "${GPU_BATCH_ATTEMPTS:-32768}"
 )
 

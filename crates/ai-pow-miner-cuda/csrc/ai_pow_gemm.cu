@@ -83,7 +83,17 @@ bool valid_shape(uint32_t h, uint32_t w, uint32_t k, uint32_t rank,
 
 }  // namespace
 
+extern "C" int ai_pow_cuda_device_count(uint32_t* count_out) {
+  if (count_out == nullptr) return static_cast<int>(cudaErrorInvalidValue);
+  int count = 0;
+  const cudaError_t error = cudaGetDeviceCount(&count);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  *count_out = static_cast<uint32_t>(count);
+  return static_cast<int>(cudaSuccess);
+}
+
 struct AiPowCudaSession {
+  uint32_t device_ordinal;
   uint32_t max_attempts;
   uint32_t h;
   uint32_t w;
@@ -99,8 +109,9 @@ struct AiPowCudaSession {
 };
 
 extern "C" int ai_pow_cuda_session_create(
-    uint32_t max_attempts, uint32_t h, uint32_t w, uint32_t k, uint32_t rank,
-    uint32_t dot_product_len, AiPowCudaSession** session_out) {
+    uint32_t device_ordinal, uint32_t max_attempts, uint32_t h, uint32_t w,
+    uint32_t k, uint32_t rank, uint32_t dot_product_len,
+    AiPowCudaSession** session_out) {
   if (session_out == nullptr || max_attempts == 0 ||
       !valid_shape(h, w, k, rank, dot_product_len)) {
     return static_cast<int>(cudaErrorInvalidValue);
@@ -108,6 +119,12 @@ extern "C" int ai_pow_cuda_session_create(
   *session_out = nullptr;
   AiPowCudaSession* session = new (std::nothrow) AiPowCudaSession{};
   if (session == nullptr) return static_cast<int>(cudaErrorMemoryAllocation);
+  cudaError_t error = cudaSetDevice(static_cast<int>(device_ordinal));
+  if (error != cudaSuccess) {
+    delete session;
+    return static_cast<int>(error);
+  }
+  session->device_ordinal = device_ordinal;
   session->max_attempts = max_attempts;
   session->h = h;
   session->w = w;
@@ -117,7 +134,7 @@ extern "C" int ai_pow_cuda_session_create(
   session->a_attempt_bytes = static_cast<size_t>(h) * k;
   session->b_attempt_bytes = static_cast<size_t>(w) * k;
 
-  cudaError_t error = cudaStreamCreateWithFlags(&session->stream, cudaStreamNonBlocking);
+  error = cudaStreamCreateWithFlags(&session->stream, cudaStreamNonBlocking);
   if (error != cudaSuccess) goto fail;
   error = cudaMalloc(&session->d_a, session->a_attempt_bytes * max_attempts);
   if (error != cudaSuccess) goto fail;
@@ -145,11 +162,14 @@ extern "C" int ai_pow_cuda_session_run(
       states_out == nullptr || attempts == 0 || attempts > session->max_attempts) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
+  cudaError_t error =
+      cudaSetDevice(static_cast<int>(session->device_ordinal));
+  if (error != cudaSuccess) return static_cast<int>(error);
   const size_t a_bytes = session->a_attempt_bytes * attempts;
   const size_t b_bytes = session->b_attempt_bytes * attempts;
   const size_t state_bytes = static_cast<size_t>(attempts) * 16 * sizeof(int32_t);
-  cudaError_t error = cudaMemcpyAsync(session->d_a, a_rows, a_bytes,
-                                      cudaMemcpyHostToDevice, session->stream);
+  error = cudaMemcpyAsync(session->d_a, a_rows, a_bytes,
+                          cudaMemcpyHostToDevice, session->stream);
   if (error != cudaSuccess) return static_cast<int>(error);
   error = cudaMemcpyAsync(session->d_b, b_cols, b_bytes,
                           cudaMemcpyHostToDevice, session->stream);
@@ -170,7 +190,8 @@ extern "C" int ai_pow_cuda_session_run(
 
 extern "C" int ai_pow_cuda_session_destroy(AiPowCudaSession* session) {
   if (session == nullptr) return static_cast<int>(cudaSuccess);
-  cudaError_t first = cudaSuccess;
+  cudaError_t first =
+      cudaSetDevice(static_cast<int>(session->device_ordinal));
   cudaError_t error = cudaFree(session->d_states);
   if (first == cudaSuccess) first = error;
   error = cudaFree(session->d_b);
@@ -189,7 +210,7 @@ extern "C" int ai_pow_cuda_tile_state(
     int32_t state_out[16], void*) {
   AiPowCudaSession* session = nullptr;
   int status = ai_pow_cuda_session_create(
-      1, h, w, k, rank, dot_product_len, &session);
+      0, 1, h, w, k, rank, dot_product_len, &session);
   if (status != 0) return status;
   status = ai_pow_cuda_session_run(session, a_rows, b_cols, 1, state_out);
   const int destroy_status = ai_pow_cuda_session_destroy(session);

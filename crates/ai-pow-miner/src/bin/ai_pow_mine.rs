@@ -69,10 +69,10 @@ struct AcceleratorArgs {
     #[arg(long)]
     gpu: bool,
 
-    /// CUDA device ordinal. The current backend supports device 0.
+    /// CUDA device ordinals as a comma-separated list, or `all` for up to eight visible devices.
     #[cfg(feature = "gpu")]
-    #[arg(long, default_value_t = 0)]
-    cuda_device: usize,
+    #[arg(long, default_value = "all")]
+    cuda_devices: String,
 
     /// Attempts dispatched through CUDA before the scheduler checks cancellation.
     #[cfg(feature = "gpu")]
@@ -80,16 +80,34 @@ struct AcceleratorArgs {
     gpu_batch_attempts: u64,
 }
 
+#[cfg(feature = "gpu")]
+fn gpu_backend(args: &AcceleratorArgs) -> Result<ai_pow_miner::gpu::MultiGpuSearchBackend, String> {
+    let selection = args.cuda_devices.trim();
+    if selection.eq_ignore_ascii_case("all") {
+        return ai_pow_miner::gpu::MultiGpuSearchBackend::all_visible(args.gpu_batch_attempts)
+            .map_err(|error| error.to_string());
+    }
+    let ordinals = selection
+        .split(',')
+        .map(|value| {
+            let value = value.trim();
+            value
+                .parse::<usize>()
+                .map_err(|_| format!("invalid CUDA device ordinal `{value}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ai_pow_miner::gpu::MultiGpuSearchBackend::new(ordinals, args.gpu_batch_attempts)
+        .map_err(|error| error.to_string())
+}
+
 fn search_backend(args: &Args) -> Result<Arc<dyn SearchBackend>, String> {
     #[cfg(feature = "gpu")]
     if args.accelerator.gpu {
-        let backend = ai_pow_miner::gpu::GpuSearchBackend::new(
-            args.accelerator.cuda_device, args.accelerator.gpu_batch_attempts,
-        )
-        .map_err(|error| error.to_string())?;
+        let backend = gpu_backend(&args.accelerator)?;
         info!(
-            cuda_device = backend.device_ordinal(),
-            gpu_batch_attempts = backend.batch_attempts(),
+            cuda_devices = ?backend.device_ordinals(),
+            gpu_batch_attempts_per_device = backend.batch_attempts_per_device(),
+            gpu_batch_attempts_total = backend.batch_attempts(),
             "ai-pow-mine: CUDA search enabled"
         );
         return Ok(MeteredSearchBackend::new("cuda", Arc::new(backend)));

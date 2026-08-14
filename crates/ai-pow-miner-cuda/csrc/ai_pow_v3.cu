@@ -211,7 +211,7 @@ __global__ void commitments_kernel(
     const uint8_t* routing, uint32_t routing_len,
     const uint8_t* offsets, uint32_t offsets_len,
     uint32_t* kappas, uint32_t* h_as, uint32_t* h_bs,
-    uint32_t* s_as, uint32_t* s_bs) {
+    uint32_t* s_as, uint32_t* s_bs, bool capture_debug) {
   __shared__ uint32_t kappa[8];
   __shared__ uint32_t roots_a[kChunks][8];
   __shared__ uint32_t roots_b[kChunks][8];
@@ -229,8 +229,10 @@ __global__ void commitments_kernel(
     input[68]=uint8_t(timestamp); input[69]=uint8_t(timestamp>>8);
     input[70]=uint8_t(timestamp>>16); input[71]=uint8_t(timestamp>>24);
     hash_bytes(input,128,kIv,0,kappa);
+    if (capture_debug) {
 #pragma unroll
-    for (int i=0;i<8;++i) kappas[attempt*8+i]=kappa[i];
+      for (int i=0;i<8;++i) kappas[attempt*8+i]=kappa[i];
+    }
   }
   __syncthreads();
   if (tid<kChunks) {
@@ -279,8 +281,12 @@ __global__ void commitments_kernel(
     hash_pair(s_b,activations,s_a);
 #pragma unroll
     for (int i=0;i<8;++i) {
-      h_as[attempt*8+i]=roots_a[0][i]; h_bs[attempt*8+i]=roots_b[0][i];
-      s_as[attempt*8+i]=s_a[i]; s_bs[attempt*8+i]=s_b[i];
+      if (capture_debug) {
+        h_as[attempt*8+i]=roots_a[0][i];
+        h_bs[attempt*8+i]=roots_b[0][i];
+      }
+      s_as[attempt*8+i]=s_a[i];
+      s_bs[attempt*8+i]=s_b[i];
     }
   }
 }
@@ -340,12 +346,13 @@ __global__ void noise_kernel(
 
 __global__ void tile_jackpot_kernel(
     const int8_t* open_a,const int8_t* open_b,const uint32_t* s_as,
-    const uint32_t* target,int32_t* states,uint32_t* jackpots,uint32_t* winner) {
+    const uint32_t* target,int32_t* states,uint32_t* jackpots,uint32_t* winner,
+    bool capture_debug) {
   __shared__ int32_t accum[64]; __shared__ int32_t reduction[64];
+  __shared__ int32_t state[16];
   const uint32_t attempt=blockIdx.x,tid=threadIdx.x;
   const size_t stride=size_t(kOpened)*kK;
   const int8_t* a=open_a+size_t(attempt)*stride; const int8_t* b=open_b+size_t(attempt)*stride;
-  int32_t* state=states+size_t(attempt)*16;
   if(tid<64) accum[tid]=0; if(tid<16) state[tid]=0; __syncthreads();
   for(uint32_t step=0;step<16;++step) {
     if(tid<64) {
@@ -371,6 +378,7 @@ __global__ void tile_jackpot_kernel(
     single_block(block,s_as+size_t(attempt)*8,kKeyed,hash);
 #pragma unroll
     for(int i=0;i<8;++i) jackpots[size_t(attempt)*8+i]=hash[i];
+    if(capture_debug) for(int i=0;i<16;++i) states[size_t(attempt)*16+i]=state[i];
     if(le_target(hash,target)) atomicMin(winner,attempt);
   }
 }
@@ -382,6 +390,7 @@ __global__ void copy_winner_kernel(const uint32_t* winner,const uint32_t* jackpo
 }  // namespace
 
 struct AiPowCudaV3Session {
+  uint32_t device_ordinal;
   uint32_t max_attempts;
   uint32_t routing_len;
   uint32_t offsets_len;
@@ -396,6 +405,7 @@ struct AiPowCudaV3Session {
 namespace {
 void destroy_v3(AiPowCudaV3Session* s) {
   if(!s) return;
+  cudaSetDevice(static_cast<int>(s->device_ordinal));
 #define FREE(field) if(s->field) cudaFree(s->field)
   FREE(winner_hash);FREE(winner);FREE(target);FREE(jackpots);FREE(states);FREE(s_bs);FREE(s_as);
   FREE(h_bs);FREE(h_as);FREE(kappas);FREE(cols);FREE(rows);FREE(offsets);FREE(routing);FREE(mu);FREE(sigma);
@@ -407,7 +417,7 @@ void destroy_v3(AiPowCudaV3Session* s) {
 }
 
 extern "C" int ai_pow_cuda_v3_session_create(
-    uint32_t max_attempts,const int8_t* a_matrix,const int8_t* b_matrix,
+    uint32_t device_ordinal,uint32_t max_attempts,const int8_t* a_matrix,const int8_t* b_matrix,
     const uint8_t sigma[76],const uint8_t mu[52],const uint8_t* routing_data,
     uint32_t routing_data_len,const uint8_t* routing_offsets,uint32_t routing_offsets_len,
     const uint32_t row_indices[8],const uint32_t col_indices[8],AiPowCudaV3Session** out) {
@@ -415,15 +425,17 @@ extern "C" int ai_pow_cuda_v3_session_create(
      routing_data_len>1024||!routing_offsets||!routing_offsets_len||routing_offsets_len>1024||!row_indices||!col_indices)
     return int(cudaErrorInvalidValue);
   *out=nullptr; auto* s=new(std::nothrow) AiPowCudaV3Session{}; if(!s) return int(cudaErrorMemoryAllocation);
+  cudaError_t e=cudaSetDevice(static_cast<int>(device_ordinal));if(e!=cudaSuccess){delete s;return int(e);}
+  s->device_ordinal=device_ordinal;
   const size_t hb=size_t(max_attempts)*32;
   const size_t strips=size_t(max_attempts)*8192;
   s->max_attempts=max_attempts;s->routing_len=routing_data_len;s->offsets_len=routing_offsets_len;
-  cudaError_t e=cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking);if(e!=cudaSuccess)goto fail;
+  e=cudaStreamCreateWithFlags(&s->stream,cudaStreamNonBlocking);if(e!=cudaSuccess)goto fail;
 #define ALLOC(field,bytes) do{e=cudaMalloc(reinterpret_cast<void**>(&s->field),(bytes));if(e!=cudaSuccess)goto fail;}while(0)
   ALLOC(a,65536);ALLOC(b,65536);ALLOC(sigma,76);ALLOC(mu,52);ALLOC(routing,1024);ALLOC(offsets,1024);
   ALLOC(rows,32);ALLOC(cols,32);
-  ALLOC(kappas,hb);ALLOC(h_as,hb);ALLOC(h_bs,hb);ALLOC(s_as,hb);ALLOC(s_bs,hb);ALLOC(open_a,strips);ALLOC(open_b,strips);
-  ALLOC(states,size_t(max_attempts)*64);ALLOC(jackpots,hb);ALLOC(target,32);ALLOC(winner,4);ALLOC(winner_hash,32);
+  ALLOC(kappas,32);ALLOC(h_as,32);ALLOC(h_bs,32);ALLOC(s_as,hb);ALLOC(s_bs,hb);ALLOC(open_a,strips);ALLOC(open_b,strips);
+  ALLOC(states,64);ALLOC(jackpots,hb);ALLOC(target,32);ALLOC(winner,4);ALLOC(winner_hash,32);
 #undef ALLOC
   e=cudaMallocHost(reinterpret_cast<void**>(&s->host_winner),4);if(e!=cudaSuccess)goto fail;e=cudaMallocHost(reinterpret_cast<void**>(&s->host_hash),32);if(e!=cudaSuccess)goto fail;
   e=cudaMemsetAsync(s->routing,0,1024,s->stream);if(e!=cudaSuccess)goto fail;
@@ -438,15 +450,16 @@ fail:destroy_v3(s);return int(e);
 
 extern "C" int ai_pow_cuda_v3_session_search(
     AiPowCudaV3Session* s,uint32_t start,uint32_t attempts,const uint8_t target[32],
-    uint32_t* winner_local,uint8_t jackpot_out[32]) {
-  if(!s||!attempts||attempts>s->max_attempts||!target||!winner_local||!jackpot_out||
+    uint32_t capture_debug,uint32_t* winner_local,uint8_t jackpot_out[32]) {
+  if(!s||!attempts||attempts>s->max_attempts||!target||capture_debug>1||!winner_local||!jackpot_out||
      uint64_t(start)+attempts>(uint64_t(1)<<32)) return int(cudaErrorInvalidValue);
-  cudaError_t e=cudaMemcpyAsync(s->target,target,32,cudaMemcpyHostToDevice,s->stream);if(e!=cudaSuccess)return int(e);
+  cudaError_t e=cudaSetDevice(static_cast<int>(s->device_ordinal));if(e!=cudaSuccess)return int(e);
+  e=cudaMemcpyAsync(s->target,target,32,cudaMemcpyHostToDevice,s->stream);if(e!=cudaSuccess)return int(e);
   e=cudaMemsetAsync(s->winner,0xff,4,s->stream);if(e!=cudaSuccess)return int(e);e=cudaMemsetAsync(s->winner_hash,0,32,s->stream);if(e!=cudaSuccess)return int(e);
   commitments_kernel<<<attempts,160,0,s->stream>>>(start,s->a,s->b,s->sigma,s->mu,s->routing,s->routing_len,s->offsets,s->offsets_len,
-      s->kappas,s->h_as,s->h_bs,s->s_as,s->s_bs);e=cudaGetLastError();if(e!=cudaSuccess)return int(e);
+      s->kappas,s->h_as,s->h_bs,s->s_as,s->s_bs,capture_debug!=0);e=cudaGetLastError();if(e!=cudaSuccess)return int(e);
   noise_kernel<<<attempts,256,0,s->stream>>>(s->a,s->b,s->rows,s->cols,s->s_as,s->s_bs,s->open_a,s->open_b);e=cudaGetLastError();if(e!=cudaSuccess)return int(e);
-  tile_jackpot_kernel<<<attempts,64,0,s->stream>>>(s->open_a,s->open_b,s->s_as,s->target,s->states,s->jackpots,s->winner);
+  tile_jackpot_kernel<<<attempts,64,0,s->stream>>>(s->open_a,s->open_b,s->s_as,s->target,s->states,s->jackpots,s->winner,capture_debug!=0);
   e=cudaGetLastError();if(e!=cudaSuccess)return int(e);copy_winner_kernel<<<1,1,0,s->stream>>>(s->winner,s->jackpots,s->winner_hash);
   e=cudaGetLastError();if(e!=cudaSuccess)return int(e);e=cudaMemcpyAsync(s->host_winner,s->winner,4,cudaMemcpyDeviceToHost,s->stream);if(e!=cudaSuccess)return int(e);
   e=cudaMemcpyAsync(s->host_hash,s->winner_hash,32,cudaMemcpyDeviceToHost,s->stream);if(e!=cudaSuccess)return int(e);e=cudaStreamSynchronize(s->stream);if(e!=cudaSuccess)return int(e);
@@ -458,7 +471,7 @@ extern "C" int ai_pow_cuda_v3_session_debug(
     int8_t a_rows[8192],int8_t b_cols[8192],int32_t state[16],uint8_t jackpot[32]) {
   if(!s||!kappa||!h_a||!h_b||!s_a||!s_b||!a_rows||!b_cols||!state||!jackpot)return int(cudaErrorInvalidValue);
   uint8_t target[32];std::memset(target,0xff,32);uint32_t winner;
-  int status=ai_pow_cuda_v3_session_search(s,extranonce,1,target,&winner,jackpot);if(status)return status;
+  int status=ai_pow_cuda_v3_session_search(s,extranonce,1,target,1,&winner,jackpot);if(status)return status;
 #define GET(destination,source,bytes) do{cudaError_t e=cudaMemcpyAsync((destination),(source),(bytes),cudaMemcpyDeviceToHost,s->stream);if(e!=cudaSuccess)return int(e);}while(0)
   GET(kappa,s->kappas,32);GET(h_a,s->h_as,32);GET(h_b,s->h_bs,32);GET(s_a,s->s_as,32);GET(s_b,s->s_bs,32);
   GET(a_rows,s->open_a,8192);GET(b_cols,s->open_b,8192);GET(state,s->states,64);

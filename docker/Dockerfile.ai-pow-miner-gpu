@@ -73,6 +73,7 @@ ENV AI_POW_SEARCH_BENCH_CANONICAL_ATTEMPTS=8192
 CMD ["sleep", "infinity"]
 
 FROM ubuntu:24.04
+LABEL org.opencontainers.image.source="https://github.com/nockchain/nockchain"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
@@ -84,7 +85,7 @@ COPY --from=builder /tmp/ai-pow-mine /usr/local/bin/ai-pow-mine
 COPY docker/ai-pow-miner-entrypoint.sh /usr/local/bin/ai-pow-miner-entrypoint
 
 ENV CANONICAL=true \
-    CUDA_DEVICE=0 \
+    CUDA_DEVICES=all \
     GPU_BATCH_ATTEMPTS=32768 \
     MINING_PKH=2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j \
     RUST_LOG=info,ai_pow_miner=info,nockchain_mining_common=info

@@ -17,9 +17,12 @@ use crate::canonical::PreparedCanonicalMoeTemplate;
 use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
 
 const NO_WINNER: u32 = u32::MAX;
+const MAX_GPU_DEVICES: usize = 8;
 
 unsafe extern "C" {
+    fn ai_pow_cuda_device_count(count_out: *mut u32) -> c_int;
     fn ai_pow_cuda_session_create(
+        device_ordinal: u32,
         max_attempts: u32,
         h: u32,
         w: u32,
@@ -37,6 +40,7 @@ unsafe extern "C" {
     ) -> c_int;
     fn ai_pow_cuda_session_destroy(session: *mut c_void) -> c_int;
     fn ai_pow_cuda_v3_session_create(
+        device_ordinal: u32,
         max_attempts: u32,
         a_matrix: *const i8,
         b_matrix: *const i8,
@@ -55,6 +59,7 @@ unsafe extern "C" {
         extranonce_start: u32,
         attempts: u32,
         target: *const u8,
+        capture_debug: u32,
         winner_local: *mut u32,
         jackpot_out: *mut u8,
     ) -> c_int;
@@ -81,6 +86,13 @@ pub struct GpuSearchBackend {
     dispatch: Mutex<CanonicalDispatch>,
 }
 
+/// One ordered CUDA search spread across independent devices.
+pub struct MultiGpuSearchBackend {
+    backends: Vec<GpuSearchBackend>,
+    batch_attempts_per_device: u64,
+    batch_attempts: u64,
+}
+
 #[derive(Default)]
 struct CanonicalDispatch {
     template: Option<Arc<PreparedCanonicalMoeTemplate>>,
@@ -98,6 +110,7 @@ unsafe impl Send for CudaSession {}
 
 impl CudaSession {
     fn generic(
+        device_ordinal: usize,
         attempts: usize,
         h: usize,
         w: usize,
@@ -109,6 +122,7 @@ impl CudaSession {
         // SAFETY: `raw` is writable. Dimensions are checked before crossing the ABI.
         let status = unsafe {
             ai_pow_cuda_session_create(
+                u32::try_from(device_ordinal).map_err(unavailable)?,
                 u32::try_from(attempts).map_err(unavailable)?,
                 u32::try_from(h).map_err(unavailable)?,
                 u32::try_from(w).map_err(unavailable)?,
@@ -130,6 +144,7 @@ impl CudaSession {
     fn canonical(
         template: &PreparedCanonicalMoeTemplate,
         max_attempts: u32,
+        device_ordinal: usize,
     ) -> Result<Self, SearchBackendError> {
         let (a, b, routing, offsets, rows, cols, sigma, mu) = template.gpu_inputs();
         let rows: &[u32; 8] = rows
@@ -142,6 +157,7 @@ impl CudaSession {
         // SAFETY: CUDA copies all fixed template inputs before returning.
         let status = unsafe {
             ai_pow_cuda_v3_session_create(
+                u32::try_from(device_ordinal).map_err(unavailable)?,
                 max_attempts,
                 a.as_ptr(),
                 b.as_ptr(),
@@ -210,6 +226,7 @@ impl CudaSession {
                 start,
                 attempts,
                 threshold.as_ptr(),
+                0,
                 &mut local,
                 jackpot.as_mut_ptr(),
             )
@@ -260,15 +277,32 @@ impl Drop for CudaSession {
 }
 
 impl GpuSearchBackend {
+    pub fn available_device_count() -> Result<usize> {
+        let mut count = 0u32;
+        // SAFETY: `count` is a valid writable output.
+        let status = unsafe { ai_pow_cuda_device_count(&mut count) };
+        if status != 0 {
+            bail!("CUDA device enumeration failed with error {status}");
+        }
+        if count == 0 {
+            bail!("no CUDA devices are visible");
+        }
+        Ok(count as usize)
+    }
+
     pub fn new(device_ordinal: usize, batch_attempts: u64) -> Result<Self> {
         if batch_attempts == 0 {
             bail!("--gpu-batch-attempts must be nonzero");
         }
-        if device_ordinal != 0 {
-            bail!("the GPU backend currently supports CUDA device 0 only");
-        }
         if batch_attempts > u64::from(u32::MAX) {
             bail!("--gpu-batch-attempts must fit in u32");
+        }
+        let device_count = Self::available_device_count()?;
+        if device_ordinal >= device_count {
+            bail!(
+                "CUDA device {device_ordinal} is not visible; visible ordinals are 0..{}",
+                device_count - 1
+            );
         }
         Ok(Self {
             device_ordinal,
@@ -283,6 +317,78 @@ impl GpuSearchBackend {
 
     pub const fn batch_attempts(&self) -> u64 {
         self.batch_attempts
+    }
+}
+
+impl MultiGpuSearchBackend {
+    pub fn all_visible(batch_attempts_per_device: u64) -> Result<Self> {
+        let count = GpuSearchBackend::available_device_count()?.min(MAX_GPU_DEVICES);
+        Self::new((0..count).collect(), batch_attempts_per_device)
+    }
+
+    pub fn new(device_ordinals: Vec<usize>, batch_attempts_per_device: u64) -> Result<Self> {
+        if device_ordinals.is_empty() {
+            bail!("--cuda-devices must select at least one CUDA device");
+        }
+        if device_ordinals.len() > MAX_GPU_DEVICES {
+            bail!("--cuda-devices supports at most {MAX_GPU_DEVICES} devices");
+        }
+        for (index, &ordinal) in device_ordinals.iter().enumerate() {
+            if device_ordinals[..index].contains(&ordinal) {
+                bail!("--cuda-devices contains duplicate device {ordinal}");
+            }
+        }
+        let batch_attempts = batch_attempts_per_device
+            .checked_mul(device_ordinals.len() as u64)
+            .ok_or_else(|| anyhow::anyhow!("combined GPU batch size overflows u64"))?;
+        let backends = device_ordinals
+            .into_iter()
+            .map(|ordinal| GpuSearchBackend::new(ordinal, batch_attempts_per_device))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            backends,
+            batch_attempts_per_device,
+            batch_attempts,
+        })
+    }
+
+    pub fn device_ordinals(&self) -> Vec<usize> {
+        self.backends
+            .iter()
+            .map(GpuSearchBackend::device_ordinal)
+            .collect()
+    }
+
+    pub const fn batch_attempts_per_device(&self) -> u64 {
+        self.batch_attempts_per_device
+    }
+}
+
+fn active_device_count(batch: SearchBatch, device_count: usize) -> usize {
+    device_count.min(usize::try_from(batch.len).unwrap_or(usize::MAX))
+}
+
+fn partition_for_device(batch: SearchBatch, active: usize, index: usize) -> SearchBatch {
+    let active = active as u64;
+    let index = index as u64;
+    let base = batch.len / active;
+    let remainder = batch.len % active;
+    SearchBatch {
+        start: batch.start + base * index + index.min(remainder),
+        len: base + u64::from(index < remainder),
+        threshold: batch.threshold,
+    }
+}
+
+fn lower_winner(left: Option<SearchWinner>, right: Option<SearchWinner>) -> Option<SearchWinner> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left.ordinal <= right.ordinal {
+            left
+        } else {
+            right
+        }),
+        (Some(winner), None) | (None, Some(winner)) => Some(winner),
+        (None, None) => None,
     }
 }
 
@@ -327,7 +433,7 @@ impl SearchBackend for GpuSearchBackend {
                 destination_b.copy_from_slice(b);
                 Ok::<_, SearchBackendError>(())
             })?;
-        let session = CudaSession::generic(attempts, h, w, k, rank, dot)?;
+        let session = CudaSession::generic(self.device_ordinal, attempts, h, w, k, rank, dot)?;
         let states = session.run_generic(&all_a, &all_b, attempts)?;
         for (offset, state) in states.iter().enumerate() {
             let jackpot = pearl_jackpot_hash(state, &template.commitments().s_a);
@@ -366,6 +472,7 @@ impl SearchBackend for GpuSearchBackend {
             dispatch.session = Some(CudaSession::canonical(
                 &template,
                 u32::try_from(self.batch_attempts).map_err(unavailable)?,
+                self.device_ordinal,
             )?);
             dispatch.template = Some(Arc::clone(&template));
         }
@@ -400,6 +507,48 @@ impl SearchBackend for GpuSearchBackend {
             ordinal,
             jackpot_hash: scalar.jackpot_hash,
         }))
+    }
+
+    fn batch_attempts(&self) -> u64 {
+        self.batch_attempts
+    }
+}
+
+impl SearchBackend for MultiGpuSearchBackend {
+    fn search_dense(
+        &self,
+        template: Arc<ai_pow::pearl_compat::PreparedPearlPatternJob>,
+        batch: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        let active = active_device_count(batch, self.backends.len());
+        self.backends[..active]
+            .par_iter()
+            .enumerate()
+            .map(|(index, backend)| {
+                backend.search_dense(
+                    Arc::clone(&template),
+                    partition_for_device(batch, active, index),
+                )
+            })
+            .try_reduce(|| None, |left, right| Ok(lower_winner(left, right)))
+    }
+
+    fn search_canonical(
+        &self,
+        template: Arc<PreparedCanonicalMoeTemplate>,
+        batch: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        let active = active_device_count(batch, self.backends.len());
+        self.backends[..active]
+            .par_iter()
+            .enumerate()
+            .map(|(index, backend)| {
+                backend.search_canonical(
+                    Arc::clone(&template),
+                    partition_for_device(batch, active, index),
+                )
+            })
+            .try_reduce(|| None, |left, right| Ok(lower_winner(left, right)))
     }
 
     fn batch_attempts(&self) -> u64 {
@@ -462,15 +611,94 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsupported_device() {
-        assert!(GpuSearchBackend::new(1, 1).is_err());
+    fn rejects_non_visible_device() {
+        let count = GpuSearchBackend::available_device_count().expect("visible CUDA devices");
+        assert!(GpuSearchBackend::new(count, 1).is_err());
+    }
+
+    #[test]
+    fn multi_gpu_partitions_preserve_the_ordered_batch() {
+        let batch = SearchBatch::new(41, 19, [0x5a; 32]).expect("search batch");
+        let active = active_device_count(batch, 8);
+        let partitions = (0..active)
+            .map(|index| partition_for_device(batch, active, index))
+            .collect::<Vec<_>>();
+        assert_eq!(partitions.len(), 8);
+        assert_eq!(partitions.first().expect("first").start, batch.start);
+        assert_eq!(
+            partitions.last().expect("last").end_exclusive(),
+            batch.end_exclusive()
+        );
+        assert_eq!(
+            partitions
+                .iter()
+                .map(|partition| partition.len)
+                .sum::<u64>(),
+            batch.len
+        );
+        assert!(partitions
+            .windows(2)
+            .all(|pair| pair[0].end_exclusive() == pair[1].start));
+    }
+
+    #[test]
+    fn multi_gpu_reduction_returns_the_global_lowest_winner() {
+        let lowest = [
+            Some(SearchWinner {
+                ordinal: 900,
+                jackpot_hash: [9; 32],
+            }),
+            None,
+            Some(SearchWinner {
+                ordinal: 100,
+                jackpot_hash: [1; 32],
+            }),
+        ]
+        .into_iter()
+        .fold(None, lower_winner)
+        .expect("winner");
+        assert_eq!(lowest.ordinal, 100);
+        assert_eq!(lowest.jackpot_hash, [1; 32]);
+    }
+    #[test]
+    fn multi_gpu_canonical_search_returns_global_lowest_winner() {
+        let device_count =
+            GpuSearchBackend::available_device_count().expect("visible CUDA devices");
+        if device_count < 2 {
+            return;
+        }
+        let template = Arc::new(
+            PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x4d; 32])
+                .expect("canonical template"),
+        );
+        let backend = MultiGpuSearchBackend::all_visible(4).expect("multi-GPU backend");
+        let batch_len = u64::try_from(device_count.min(8)).expect("device count") * 2;
+        let winner = backend
+            .search_canonical(
+                Arc::clone(&template),
+                SearchBatch::new(41, batch_len, [u8::MAX; 32]).expect("maximum target batch"),
+            )
+            .expect("maximum target search")
+            .expect("first ordinal is a winner");
+        assert_eq!(winner.ordinal, 41);
+        assert_eq!(
+            winner.jackpot_hash,
+            template.evaluate(41, &mut template.scratch()).jackpot_hash
+        );
+        assert!(backend
+            .search_canonical(
+                template,
+                SearchBatch::new(57, batch_len, [0; 32]).expect("zero target batch"),
+            )
+            .expect("zero target search")
+            .is_none());
     }
 
     #[test]
     fn canonical_v3_device_pipeline_matches_scalar() {
         let template = PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x42; 32])
             .expect("canonical template");
-        let session = CudaSession::canonical(&template, 4).expect("CUDA V3 session");
+        let session = CudaSession::canonical(&template, 4, 0).expect("CUDA V3 session");
         for extranonce in [0, 1, 7, u32::MAX - 1, u32::MAX] {
             let debug = session
                 .debug_canonical(extranonce)

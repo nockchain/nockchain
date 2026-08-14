@@ -20,7 +20,7 @@ use ai_pow::pearl_compat::{
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow_miner::canonical::PreparedCanonicalMoeTemplate;
 #[cfg(feature = "gpu")]
-use ai_pow_miner::gpu::GpuSearchBackend;
+use ai_pow_miner::gpu::{GpuSearchBackend, MultiGpuSearchBackend};
 use ai_pow_miner::search::{CpuSearchBackend, SearchBackend, SearchBatch};
 use ai_pow_miner::DENSE_PRODUCTION_PARAMS;
 
@@ -238,6 +238,40 @@ fn main() {
             1,
             canonical_gpu_measurement,
         );
+
+        let device_count = GpuSearchBackend::available_device_count()
+            .expect("visible CUDA devices")
+            .min(8);
+        if device_count > 1 {
+            let attempts_per_device = u64::from(canonical_attempts).div_ceil(device_count as u64);
+            let multi_gpu_backend = MultiGpuSearchBackend::all_visible(attempts_per_device)
+                .expect("multi-GPU search backend");
+            multi_gpu_backend
+                .search_canonical(
+                    Arc::clone(&canonical_template),
+                    SearchBatch::new(0, device_count as u64, [0; 32])
+                        .expect("multi-GPU warmup batch"),
+                )
+                .expect("multi-GPU warmup");
+            let canonical_multi_gpu_measurement = measure(|| {
+                std::hint::black_box(
+                    multi_gpu_backend
+                        .search_canonical(
+                            Arc::clone(&canonical_template),
+                            SearchBatch::new(0, u64::from(canonical_attempts), [0; 32])
+                                .expect("multi-GPU canonical batch"),
+                        )
+                        .expect("multi-GPU canonical search"),
+                );
+            });
+            print_measurement(
+                "canonical_prepared_multi_cuda",
+                u64::from(canonical_attempts),
+                canonical_shape_work_factor,
+                device_count,
+                canonical_multi_gpu_measurement,
+            );
+        }
     }
 
     let header = dense_header();

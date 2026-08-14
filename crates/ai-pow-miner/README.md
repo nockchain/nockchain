@@ -66,7 +66,7 @@ docker run --rm --gpus all \
   ai-pow-miner-gpu
 ```
 
-The image uses CUDA device `0`, canonical mode, and batches of 32,768 attempts by default. Set `CUDA_DEVICE`, `CANONICAL`, or `GPU_BATCH_ATTEMPTS` to override these values. Non-canonical mode also requires `PEARL_GATEWAY`.
+The image uses up to eight visible CUDA devices, canonical mode, and batches of 32,768 attempts per device by default. Set `CUDA_DEVICES` to `all` or a comma-separated ordinal list such as `0,1,2,3`; set `CANONICAL` or `GPU_BATCH_ATTEMPTS` to override the other values. Non-canonical mode also requires `PEARL_GATEWAY`.
 
 ## Validation
 
