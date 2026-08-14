@@ -138,10 +138,15 @@ All four checks must pass without suppressed errors. Confirm that the steady-sta
 1. Build the GPU image for Linux/amd64 with CUDA 12.8 and `sm_120` support.
 2. Start an RTX 5090 Runpod instance with a persistent container command.
 3. Confirm the allocated device with `nvidia-smi`.
-4. Run the miner with the mining public key, node address, CUDA device ordinal, and batch size.
-5. Connect it to a fakenet Nockchain node.
-6. Observe a GPU-found ticket, recursive proof construction, `%ai-pow` submission, and node acceptance.
-7. Restart the container with only its production environment configuration and repeat the connection path.
+4. Run the image with `NODE_ADDR=http://23.252.122.18:5556`. Do not override
+   the image's default `MINING_PKH`,
+   `2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
+5. Submit proofs to the mainnet API node maintained by the sibling `solo/`
+   Ansible directory. Do not start or connect to a fakenet for a Runpod test.
+6. Observe a GPU-found ticket, recursive proof construction, `%ai-pow`
+   submission, and acceptance in the solo node logs.
+7. Restart the container with the same production environment and observe
+   another accepted block through the solo node.
 
 ### Stage 7: Measure performance
 
@@ -174,10 +179,11 @@ state, jackpot hashes, and extranonces at `0`, `1`, `7`, `UINT32_MAX - 1`, and
 pass. Maximum-target, zero-target, adjacent-batch, template-replacement, scalar
 winner, recursive proof, production verifier, and proof-wire checks pass.
 
-A Runpod RTX 5090 completed the production CLI flow through a fakenet Nockchain
-node. The node accepted the submitted `%ai-pow` blocks. A four-RTX-5090 pod also
-completed the same flow with devices `[0, 1, 2, 3]`. An eight-GPU run is not
-validated because an eight-RTX-5090 allocation was not available.
+Runpod proof-submission validation uses the public mainnet API node maintained
+by the sibling `solo/` Ansible directory at `http://23.252.122.18:5556`. The
+container uses its default Docker mining key. A Runpod validation must not
+start or connect to a fakenet. The eight-GPU gate remains open because an
+eight-RTX-5090 allocation was not available.
 
 The throughput metric is
 `attempts_per_second * M * N * K / 10^12`, which is the same raw MAC-rate formula
@@ -203,3 +209,31 @@ The Linux/amd64 production image is available as
 A one-RTX-5090 Runpod started the image with only `NODE_ADDR` set, submitted
 accepted `%ai-pow` blocks, restarted from the same environment, and submitted
 accepted blocks again.
+
+## RTX 5090 peak-path evidence
+
+The isolated dense peak path uses:
+
+- $m=4096$, $n=32768$, $k=8192$, and rank 512;
+- $16 \times 16$ tickets;
+- a $256 \times 128 \times 64$ CTA;
+- two `cp.async` pipeline stages;
+- one persistent device session for each prepared dense template.
+
+On one Runpod RTX 5090, the five-second median is 348.179 TMAC/s and
+166.025 million complete tickets/s. A 60-second run is 334.740 TMAC/s and
+159.617 million tickets/s at 575 W. The matching raw GEMM is 368.1 TMAC/s.
+
+The hot kernel uses 248 registers per thread, 8,192 bytes of static shared
+memory, 49,152 bytes of dynamic shared memory, and one active CTA per SM. It
+has no stack frame and no spills.
+
+The scalar/device differential covers 1,000 deterministic tickets with three
+fused device repetitions for each ticket. It compares all debug transcript
+words and brackets every fused search hash with its exact target and unsigned
+predecessor. Compute Sanitizer `memcheck`, `racecheck`, `initcheck`, and
+`synccheck` report no errors on persistent, adjacent range searches.
+
+The peak library backend is not a production miner mode. Its CLI selector,
+recursive proof gate, Docker entrypoint, accepted-block validation, restart
+validation, and multi-GPU extension remain open.

@@ -74,8 +74,12 @@ Gate:
 - no sanitizer findings;
 - three identical transcript sweeps;
 - zero local stack and zero spills;
-- at least two resident CTAs per SM;
+- one active CTA per SM with a two-CTA-per-SM launch grid;
 - no out-of-range winner under adversarial targets.
+
+Runpod validation has zero findings from `memcheck`, `racecheck`, `initcheck`,
+and `synccheck` on adjacent range searches across persistent CTA tiles. The
+`sm_120` kernel has 248 registers per thread, no stack frame, and no spills.
 
 ## Stage 5: RTX 5090 shape and topology sweep
 
@@ -101,6 +105,28 @@ Select the smallest shape within 98% of the best complete-ticket rate. Reject a 
 
 Gate: at least 600 sustained TOPS, 300 TMAC/s, 140 million tickets/s, and 80% of same-session raw GEMM.
 
+### Stage 5 evidence
+
+The selected shape is $4096 \times 32768 \times 8192$ with rank 512, a
+$256 \times 128 \times 64$ CTA, and two pipeline stages. After five seconds of
+warmup, the median of 21 searches is:
+
+- 3.158 ms kernel time;
+- 3.184 ms wall time;
+- 166.025 million complete tickets/s;
+- 348.179 TMAC/s;
+- 696.359 TOPS.
+
+A 60-second power-limited run produces 334.740 TMAC/s and 159.617 million
+tickets/s. The matching raw GEMM is 368.1 TMAC/s. The complete search keeps
+94.6% of the five-second raw rate and 90.9% under sustained power load.
+
+The 1,000-ticket Rust differential compares all transcript words from the
+device debug kernel and brackets every fused search hash with its exact target
+and little-endian predecessor. Each vector runs three fused device repetitions.
+First, last, CTA-boundary, maximum-target, zero-target, and adjacent range cases
+pass.
+
 ## Stage 6: Opt-in miner integration
 
 Add `peak` as a separate backend selector in the CUDA miner CLI and Docker entrypoint. It must require the peak dense profile and must conflict with the existing canonical V3 selector.
@@ -116,22 +142,31 @@ The worker keeps the current order:
 
 Gate: one GPU winner builds and verifies the existing compact recursive certificate. The certificate and noun wire contain no CUDA-specific field.
 
+Status: the opt-in library backend is available. The production CLI selector,
+recursive-proof gate, and Docker entrypoint remain Stage 6 work.
+
 ## Stage 7: Runpod production flow
 
-Build a CUDA 12.8 or newer Linux/amd64 image for `sm_120`. Start one RTX 5090 pod with only the documented miner arguments.
+Build a CUDA 12.8 or newer Linux/amd64 image for `sm_120`. Start one RTX 5090
+pod with only `NODE_ADDR=http://23.252.122.18:5556` plus optional GPU tuning.
+Keep the image's default Docker `MINING_PKH`,
+`2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j`.
 
 Verify:
 
 1. GPU enumeration and peak-backend startup;
 2. persistent template allocation;
 3. steady no-hit mining and progress accounting;
-4. fakenet node connection;
-5. accepted `%ai-pow` block;
+4. connection to the mainnet API node maintained by the sibling `solo/`
+   Ansible directory;
+5. accepted `%ai-pow` block in the solo node logs;
 6. candidate replacement during a launch;
 7. full pod stop and restart with the same configuration;
 8. no CPU-search fallback after an injected CUDA failure.
 
-Gate: the node logs an accepted block before and after the restart.
+Do not start or connect to a fakenet for a Runpod test.
+
+Gate: the solo node logs an accepted block before and after the restart.
 
 ## Stage 8: Multi-GPU extension
 

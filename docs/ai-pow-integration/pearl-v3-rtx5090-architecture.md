@@ -54,7 +54,7 @@ The steady-state search call copies only the target and resets the winner. It do
 
 ### CTA schedule
 
-Use a fixed grid of two CTAs per SM. Each CTA walks the logical $256 \times 128$ output tiles with a grid-stride loop. The logical mapping is deterministic and covers every output tile exactly once.
+Use a fixed launch grid of two CTAs per SM. The selected kernel permits one active CTA per SM because each thread uses 248 registers. Each CTA walks the logical $256 \times 128$ output tiles with a grid-stride loop. The logical mapping is deterministic and covers every output tile exactly once.
 
 The K loop uses:
 

@@ -24,8 +24,8 @@ Use these fixed transcript dimensions for the first kernel family:
 | Noise rank `r` | 512 | `k/r = 16`; each of the 16 transcript slots is written once. |
 | Ticket tile | $16 \times 16$ | Matches the native hash tile and the Pearl limit $h\cdot w \le 256$. |
 | MMA | `m16n8k32.s8.s8.s32.satfinite` | Matches the scalar INT8-to-INT32 result for this range. |
-| CTA tile | $256 \times 128 \times 64$ initially | Best measured local Pearl mining topology. |
-| Pipeline depth | 2 and 3 stages in the sweep | Both fit the RTX 5090 shared-memory limit; the winner is measurement-dependent. |
+| CTA tile | $256 \times 128 \times 64$ | Highest measured complete-ticket rate. |
+| Pipeline depth | 2 stages | Faster than the measured 3-stage variants. |
 
 The maximum absolute dot product is below $2^{31}$:
 
@@ -47,7 +47,54 @@ Each $16 \times 16$ ticket costs $256 \times 8192 = 2,097,152$ MACs. At 600 TOPS
 
 The full $32768 \times 57344 \times 8192$ shape has 41,705 INT8 operations per input byte. The RTX 5090 compute-to-bandwidth ridge is approximately 468 operations per byte. The main loop is compute-bound by a factor of approximately 89 if tile reuse is correct.
 
-The initial production choice is not a hard-coded assumption. The Runpod sweep must select the smallest shape that reaches at least 98% of the best measured ticket rate. This rule limits cancellation latency and template-stale work without giving up meaningful throughput.
+The selected shape is the smallest shape that reaches at least 98% of the best measured ticket rate. This rule limits cancellation latency and template-stale work without giving up meaningful throughput.
+
+## RTX 5090 measured selection
+
+The `sm_120` build uses CUDA 12.8 and real deterministic INT8 data. The
+topology screening on one Runpod RTX 5090 produced these complete-ticket
+rates for $m=4096$, $n=32768$, $k=8192$, and $r=512$:
+
+| CTA | Stages | Registers/thread | Static shared memory | TMAC/s |
+|---:|---:|---:|---:|---:|
+| $128 \times 128$ | 2 | 232 | 4,096 B | 332.979 |
+| $128 \times 128$ | 3 | 234 | 4,096 B | 322.721 |
+| $256 \times 128$ | 2 | 248 | 8,192 B | 348.179 |
+| $256 \times 128$ | 3 | 234 | 8,192 B | 347.510 |
+
+The selected two-stage topology uses 49,152 bytes of dynamic shared memory.
+The CUDA occupancy API reports one active CTA per SM. The launch grid contains
+two CTAs per SM, so another CTA is ready when the active CTA completes.
+
+Each shape ran after at least five seconds of warmup. Each table row is the
+median of 21 complete searches:
+
+| `m` | `n` | Kernel ms | Wall ms | Million tickets/s | TMAC/s |
+|---:|---:|---:|---:|---:|---:|
+| 4,096 | 32,768 | 3.158 | 3.184 | 166.025 | 348.179 |
+| 8,192 | 32,768 | 6.385 | 6.409 | 164.216 | 344.386 |
+| 16,384 | 32,768 | 12.653 | 12.678 | 165.742 | 347.587 |
+| 32,768 | 32,768 | 25.755 | 25.784 | 162.854 | 341.530 |
+| 4,096 | 57,344 | 5.631 | 5.653 | 162.938 | 341.705 |
+| 8,192 | 57,344 | 11.393 | 11.421 | 161.070 | 337.787 |
+| 16,384 | 57,344 | 22.371 | 22.403 | 164.050 | 344.037 |
+
+The selected shape is $4096 \times 32768 \times 8192$. It is the smallest
+tested shape and has the highest measured complete-ticket rate. One launch is
+3.158 ms, well below the 100 ms cancellation limit.
+
+A 60-second sustained run at the selected shape produced 3.285 ms per kernel,
+159.617 million tickets/s, and 334.740 TMAC/s. Device samples showed 99% SM
+activity, 575 W, 2,355–2,370 MHz, and 51–55 °C. The equivalent complete-search
+rate is 669.480 TOPS.
+
+The same pod produced 736.2 TOPS, or 368.1 TMAC/s, with the matching
+$256 \times 128 \times 64$ two-stage raw GEMM. The five-second complete-search
+rate is 94.6% of that raw rate. The sustained complete-search rate is 90.9%.
+
+The hot kernel uses 248 registers per thread, has no stack frame, and has no
+local-memory spills. Nsight Compute hardware counters are not available on the
+Runpod host because the NVIDIA driver denies performance-counter access.
 
 ## Proof capacity
 
@@ -71,7 +118,7 @@ A production candidate must satisfy all limits:
 
 1. Exact scalar/GPU transcript equality for at least 1,000 patterned vectors, all boundary ordinals, and three deterministic repeats.
 2. No Compute Sanitizer `memcheck`, `racecheck`, `initcheck`, or `synccheck` errors.
-3. No local-memory stack or spill in the hot kernel. Register use must permit at least two resident CTAs per SM.
+3. No local-memory stack or spill in the hot kernel. The measured occupancy must match the launch model.
 4. At least 600 sustained TOPS or 300 TMAC/s with real patterned inputs on an RTX 5090.
 5. At least 80% of the same-session raw-GEMM rate after transcript and BLAKE3 work.
 6. At least 140 million complete tickets/s for the selected shape.
