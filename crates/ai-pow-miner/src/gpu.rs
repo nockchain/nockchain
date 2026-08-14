@@ -75,14 +75,13 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-#[derive(Debug)]
 pub struct GpuSearchBackend {
     device_ordinal: usize,
     batch_attempts: u64,
     dispatch: Mutex<CanonicalDispatch>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CanonicalDispatch {
     template: Option<Arc<PreparedCanonicalMoeTemplate>>,
     session: Option<CudaSession>,
@@ -133,8 +132,12 @@ impl CudaSession {
         max_attempts: u32,
     ) -> Result<Self, SearchBackendError> {
         let (a, b, routing, offsets, rows, cols, sigma, mu) = template.gpu_inputs();
-        let rows: &[u32; 8] = rows.try_into().map_err(|_| unavailable("canonical row count"))?;
-        let cols: &[u32; 8] = cols.try_into().map_err(|_| unavailable("canonical column count"))?;
+        let rows: &[u32; 8] = rows
+            .try_into()
+            .map_err(|_| unavailable("canonical row count"))?;
+        let cols: &[u32; 8] = cols
+            .try_into()
+            .map_err(|_| unavailable("canonical column count"))?;
         let mut raw = std::ptr::null_mut();
         // SAFETY: CUDA copies all fixed template inputs before returning.
         let status = unsafe {
@@ -437,8 +440,9 @@ impl Default for CanonicalDebug {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ai_pow::params::MatmulParams;
+
+    use super::*;
 
     fn canonical_params() -> MatmulParams {
         MatmulParams {
@@ -464,14 +468,8 @@ mod tests {
 
     #[test]
     fn canonical_v3_device_pipeline_matches_scalar() {
-        let template = PreparedCanonicalMoeTemplate::new(
-            &canonical_params(),
-            8,
-            2,
-            1,
-            [0x42; 32],
-        )
-        .expect("canonical template");
+        let template = PreparedCanonicalMoeTemplate::new(&canonical_params(), 8, 2, 1, [0x42; 32])
+            .expect("canonical template");
         let session = CudaSession::canonical(&template, 4).expect("CUDA V3 session");
         let debug = session.debug_canonical(7).expect("CUDA V3 evaluation");
         let mut scratch = template.scratch();
