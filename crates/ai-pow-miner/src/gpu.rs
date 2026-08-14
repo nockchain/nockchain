@@ -540,27 +540,36 @@ mod tests {
 
         let params = canonical_params();
         let commit = [0x42; 32];
+        let consensus_target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
+        let work_factor =
+            ai_pow::difficulty::shape_work_factor(8, 8, 1024).expect("canonical work factor");
+        let threshold =
+            ai_pow::difficulty::effective_jackpot_threshold(&consensus_target, work_factor)
+                .expect("effective jackpot threshold");
         let template = Arc::new(
             PreparedCanonicalMoeTemplate::new(&params, 8, 2, 1, commit)
                 .expect("canonical template"),
         );
-        let backend = GpuSearchBackend::new(0, 4).expect("GPU backend");
+        let backend = GpuSearchBackend::new(0, 1024).expect("GPU backend");
         let winner = backend
             .search_canonical(
                 Arc::clone(&template),
-                SearchBatch::new(7, 4, [u8::MAX; 32]).expect("maximum target batch"),
+                SearchBatch::new(0, 1024, threshold).expect("production-target batch"),
             )
             .expect("GPU search")
-            .expect("maximum target accepts the first GPU ticket");
-        assert_eq!(winner.ordinal, 7);
+            .expect("GPU batch contains a production-target ticket");
+        let extranonce = u32::try_from(winner.ordinal).expect("canonical extranonce");
         assert_eq!(
             winner.jackpot_hash,
-            template.evaluate(7, &mut template.scratch()).jackpot_hash
+            template
+                .evaluate(extranonce, &mut template.scratch())
+                .jackpot_hash
         );
 
-        let (block, verifier_context) =
-            prove_canonical_moe_block_at_with_verifier_context(&params, 8, 2, 1, commit, 7)
-                .expect("compact recursive proof");
+        let (block, verifier_context) = prove_canonical_moe_block_at_with_verifier_context(
+            &params, 8, 2, 1, commit, extranonce,
+        )
+        .expect("compact recursive proof");
         assert_eq!(block.jackpot_hash, winner.jackpot_hash);
         let AiProofNode::Bytes(certificate_bytes) = &block.certificate.certificate else {
             panic!("production compact certificate must use the canonical byte node");
@@ -589,7 +598,7 @@ mod tests {
             &artifact.jam(),
             CertificateNounLimits::default(),
             &commit,
-            &[u8::MAX; 32],
+            &consensus_target,
             4096,
             &verifier_context,
             &expected_digest_bytes,
