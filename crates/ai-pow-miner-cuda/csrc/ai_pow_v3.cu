@@ -303,15 +303,17 @@ __global__ void noise_kernel(
   const uint32_t* s_a=s_as+attempt*8; const uint32_t* s_b=s_bs+attempt*8;
   for (uint32_t work=tid;work<288;work+=blockDim.x) {
     if (work<16) {
-      uint32_t hash[8]; random_hash(work,false,s_a,0,hash);
+      const uint32_t opened=work/2,chunk=work%2;
+      uint32_t hash[8]; random_hash(rows[opened]*2+chunk,false,s_a,0,hash);
 #pragma unroll
       for (int word=0;word<8;++word) for(int byte=0;byte<4;++byte)
         e_l[work*32+word*4+byte]=int8_t(int((hash[word]>>(byte*8))&63)-32);
     } else if (work<32) {
-      const uint32_t chunk=work-16; uint32_t hash[8]; random_hash(chunk,true,s_b,0,hash);
+      const uint32_t relative=work-16,opened=relative/2,chunk=relative%2;
+      uint32_t hash[8]; random_hash(cols[opened]*2+chunk,true,s_b,0,hash);
 #pragma unroll
       for (int word=0;word<8;++word) for(int byte=0;byte<4;++byte)
-        f_r[chunk*32+word*4+byte]=int8_t(int((hash[word]>>(byte*8))&63)-32);
+        f_r[relative*32+word*4+byte]=int8_t(int((hash[word]>>(byte*8))&63)-32);
     } else if (work<160) {
       const uint32_t chunk=work-32; uint32_t hash[8]; random_hash(chunk,false,s_a,1,hash);
 #pragma unroll
