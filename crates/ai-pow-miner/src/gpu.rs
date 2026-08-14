@@ -528,4 +528,73 @@ mod tests {
             .expect("zero target search")
             .is_none());
     }
+
+    #[test]
+    #[ignore = "real compact recursive proof generation is opt-in"]
+    fn gpu_winner_builds_and_verifies_production_certificate() {
+        use crate::canonical::prove_canonical_moe_block_at_with_verifier_context;
+        use crate::certificate_noun::{
+            build_ai_pow_pearl_merge_moe_artifact_noun_from_node, verify_ai_pow_block_artifact_jam,
+            AiPowBlockVerifyOutcome, AiProofNode, CertificateNounLimits,
+        };
+
+        let params = canonical_params();
+        let commit = [0x42; 32];
+        let template = Arc::new(
+            PreparedCanonicalMoeTemplate::new(&params, 8, 2, 1, commit)
+                .expect("canonical template"),
+        );
+        let backend = GpuSearchBackend::new(0, 4).expect("GPU backend");
+        let winner = backend
+            .search_canonical(
+                Arc::clone(&template),
+                SearchBatch::new(7, 4, [u8::MAX; 32]).expect("maximum target batch"),
+            )
+            .expect("GPU search")
+            .expect("maximum target accepts the first GPU ticket");
+        assert_eq!(winner.ordinal, 7);
+        assert_eq!(
+            winner.jackpot_hash,
+            template.evaluate(7, &mut template.scratch()).jackpot_hash
+        );
+
+        let (block, verifier_context) =
+            prove_canonical_moe_block_at_with_verifier_context(&params, 8, 2, 1, commit, 7)
+                .expect("compact recursive proof");
+        assert_eq!(block.jackpot_hash, winner.jackpot_hash);
+        let AiProofNode::Bytes(certificate_bytes) = &block.certificate.certificate else {
+            panic!("production compact certificate must use the canonical byte node");
+        };
+        let decoded_certificate =
+            ai_pow_zk::recursion::decode_compact_batch_recursive_certificate(certificate_bytes)
+                .expect("canonical compact certificate bytes");
+        assert_eq!(
+            ai_pow_zk::recursion::encode_compact_batch_recursive_certificate(&decoded_certificate)
+                .expect("encode compact certificate"),
+            *certificate_bytes
+        );
+
+        let artifact = build_ai_pow_pearl_merge_moe_artifact_noun_from_node(
+            &block.statement, &block.aux_inclusion, &block.moe_art, &block.certificate.zk_params,
+            block.certificate.found_idx, block.certificate.trace_height,
+            &block.certificate.commitments, &block.certificate.public_inputs,
+            &block.certificate.certificate,
+        )
+        .expect("production MoE artifact");
+        let expected_digest_bytes =
+            ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+                verifier_context.verifier_key_digest(),
+            );
+        let outcome = verify_ai_pow_block_artifact_jam(
+            &artifact.jam(),
+            CertificateNounLimits::default(),
+            &commit,
+            &[u8::MAX; 32],
+            4096,
+            &verifier_context,
+            &expected_digest_bytes,
+        )
+        .expect("production V3 verifier accepts the GPU winner certificate");
+        assert!(matches!(outcome, AiPowBlockVerifyOutcome::Moe(_)));
+    }
 }

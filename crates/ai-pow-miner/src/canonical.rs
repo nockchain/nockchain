@@ -726,6 +726,44 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
     nock_commit: [u8; 32],
     extranonce: u32,
 ) -> Result<CanonicalBlock, CanonicalProveError> {
+    prove_canonical_moe_block_at_inner(params, hw, e, top_k, nock_commit, extranonce)
+        .map(|(block, _)| block)
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prove_canonical_moe_block_at_with_verifier_context(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
+) -> Result<
+    (
+        CanonicalBlock,
+        ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    ),
+    CanonicalProveError,
+> {
+    prove_canonical_moe_block_at_inner(params, hw, e, top_k, nock_commit, extranonce)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prove_canonical_moe_block_at_inner(
+    params: &MatmulParams,
+    hw: u32,
+    e: usize,
+    top_k: usize,
+    nock_commit: [u8; 32],
+    extranonce: u32,
+) -> Result<
+    (
+        CanonicalBlock,
+        ai_pow_zk::recursion::AiPowCompactBatchVerifierContext,
+    ),
+    CanonicalProveError,
+> {
     let CanonicalMoeInputs {
         a,
         b,
@@ -750,7 +788,7 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
 
     let PearlMoeCompactProveRun {
         compact_cert,
-        verifier_context: _,
+        verifier_context,
         pis,
         zk_params,
         trace_height,
@@ -798,14 +836,17 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
         routing_data: routing.routing_data.clone(),
     };
 
-    Ok(CanonicalBlock {
-        statement,
-        aux_inclusion,
-        moe_art,
-        certificate,
-        commit: nock_commit,
-        jackpot_hash: ticket.jackpot_hash,
-    })
+    Ok((
+        CanonicalBlock {
+            statement,
+            aux_inclusion,
+            moe_art,
+            certificate,
+            commit: nock_commit,
+            jackpot_hash: ticket.jackpot_hash,
+        },
+        verifier_context,
+    ))
 }
 
 #[cfg(test)]
