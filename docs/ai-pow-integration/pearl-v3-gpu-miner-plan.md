@@ -34,6 +34,24 @@ The production interface must require only the mining public key, the Nockchain 
 
 Pearl's large consumer-GPU geometry does not apply to this canonical job. Reuse its persistent-session, signed INT8 MMA, fused fold/hash/target, and scalar winner-check design rather than its dimensions.
 
+## RTX 5090 peak dense path
+
+The canonical MoE path remains the stable production path. Its small geometry is
+commitment-bound and cannot approach the RTX 5090 Tensor Core limit.
+
+The opt-in `peak` path evaluates the existing dense Pearl tile space as one full
+GEMM. One prepared transcript supplies millions of ordered tile tickets, so
+operand reuse and transcript work remain on the GPU. These documents define the
+independent path:
+
+- `pearl-v3-rtx5090-roofline.md`
+- `pearl-v3-rtx5090-architecture.md`
+- `pearl-v3-rtx5090-implementation-plan.md`
+
+The peak path must preserve the same scalar winner check, recursive proof, and
+consensus wire format. It cannot replace the canonical path until all correctness,
+sanitizer, performance, proof, and accepted-block gates pass.
+
 ## Compatibility boundary
 
 Rust remains authoritative for job construction, ticket validation, and proof construction. CUDA must reproduce these operations:
