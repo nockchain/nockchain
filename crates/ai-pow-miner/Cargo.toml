@@ -19,6 +19,11 @@ name = "ai-pow-mine"
 path = "src/bin/ai_pow_mine.rs"
 required-features = ["node"]
 
+[[bin]]
+name = "ai-pow-peak-bench"
+path = "src/bin/ai_pow_peak_bench.rs"
+required-features = ["gpu"]
+
 [[bench]]
 name = "search"
 harness = false

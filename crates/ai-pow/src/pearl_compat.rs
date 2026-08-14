@@ -1565,6 +1565,14 @@ impl PreparedPearlPatternJob {
         &self.commitments
     }
 
+    /// Complete noised matrices for a prepared dense accelerator session.
+    ///
+    /// `A'` is row-major and `B'` is transposed row-major (one original
+    /// matrix column per contiguous `k`-element row).
+    pub fn prepared_matrices(&self) -> (&[i8], &[i8]) {
+        (&self.matrices.a_prime, &self.matrices.b_prime)
+    }
+
     pub fn row_offsets(&self) -> &[u32] {
         &self.row_offsets
     }

@@ -5,14 +5,16 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=csrc/ai_pow_gemm.cu");
     println!("cargo:rerun-if-changed=csrc/ai_pow_v3.cu");
+    println!("cargo:rerun-if-changed=csrc/ai_pow_v3_peak.cu");
     println!("cargo:rerun-if-changed=csrc/ai_pow_gemm.h");
+    println!("cargo:rerun-if-changed=csrc/ai_pow_v3_peak.h");
 
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is set"));
     let library = out_dir.join("libai_pow_gemm.a");
     let arch = env::var("AI_POW_CUDA_ARCH").unwrap_or_else(|_| "compute_89".to_owned());
     let code = env::var("AI_POW_CUDA_CODE").unwrap_or_else(|_| "compute_89".to_owned());
     let mut objects = Vec::new();
-    for source in ["ai_pow_gemm.cu", "ai_pow_v3.cu"] {
+    for source in ["ai_pow_gemm.cu", "ai_pow_v3.cu", "ai_pow_v3_peak.cu"] {
         let object = out_dir.join(format!("{source}.o"));
         let status = Command::new("nvcc")
             .args([

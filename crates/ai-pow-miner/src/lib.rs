@@ -86,6 +86,10 @@ pub mod pearl_mining;
 /// Bounded CPU and accelerator ticket-search backend contract.
 pub mod search;
 
+/// RTX 5090 dense ticket-search session and benchmark contract.
+#[cfg(feature = "gpu")]
+pub mod peak;
+
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///
 /// Internal by design: Hoon and external Nockchain callers submit only the
