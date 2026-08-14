@@ -58,6 +58,36 @@ int main() {
       }
     }
   }
+  {
+    constexpr uint32_t h = 16;
+    constexpr uint32_t w = 16;
+    constexpr uint32_t rank = 128;
+    constexpr uint32_t steps = 32;
+    constexpr uint32_t k = rank * steps;
+    std::vector<int8_t> a(h * k), b(w * k);
+    for (size_t index = 0; index < a.size(); ++index) {
+      a[index] = static_cast<int8_t>((index * 73 + index / k * 19) % 255 - 127);
+    }
+    for (size_t index = 0; index < b.size(); ++index) {
+      b[index] = static_cast<int8_t>((index * 151 + index / k * 31) % 255 - 127);
+    }
+    int32_t expected[16], actual[16];
+    cpu_state(a, b, h, w, k, rank, k, expected);
+    const int status = ai_pow_cuda_tile_state(
+        a.data(), b.data(), h, w, k, rank, k, actual, nullptr);
+    if (status != 0) {
+      std::fprintf(stderr, "CUDA error %d in accumulation stress case\n", status);
+      return 1;
+    }
+    for (int slot = 0; slot < 16; ++slot) {
+      if (expected[slot] != actual[slot]) {
+        std::fprintf(stderr,
+                     "stress mismatch slot=%d expected=%08x actual=%08x\n",
+                     slot, uint32_t(expected[slot]), uint32_t(actual[slot]));
+        return 1;
+      }
+    }
+  }
   std::puts("1000 randomized Pearl tile-state differentials passed");
   return 0;
 }
