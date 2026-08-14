@@ -74,6 +74,9 @@ CMD ["sleep", "infinity"]
 
 FROM ubuntu:24.04
 LABEL org.opencontainers.image.source="https://github.com/nockchain/nockchain"
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_REQUIRE_CUDA="cuda>=12.8"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*

@@ -178,5 +178,10 @@ commitment, noising, tile, or winner kernels.
 The host library compiles with
 `cargo check --locked -p ai-pow-miner --features node,gpu --lib`.
 
-The final image publication and restart check remain blocked until the
-consensus-target proof gate is present on the image base branch.
+The Linux/amd64 production image is available as
+`docker.io/loganallc/nockchain-ai-pow-miner:gpu` and as the immutable
+`gpu-c142d390` tag. Both tags resolve to manifest
+`sha256:61022736c85e895925f3ac74080c83c9186054e67de86832eb5df7eb17c5f401`.
+A one-RTX-5090 Runpod started the image with only `NODE_ADDR` set, submitted
+accepted `%ai-pow` blocks, restarted from the same environment, and submitted
+accepted blocks again.
