@@ -133,8 +133,8 @@ creates the spare compute that pays for verification.
 The coverage gap is the central one, and it does not have a cryptographic
 solution at this model scale. Proving every GEMM in a 32-layer forward pass is
 not within a factor of a few of the 2¹⁹-row Layer-0 budget; it is off by orders
-of magnitude. **The mechanism must therefore rest on a sampling-and-stake
-argument, with cryptography used to make sampling unforgeable rather than to make
+of magnitude. **The mechanism must therefore rest on a detection-and-forfeiture
+argument, with cryptography used to make detection unforgeable rather than to make
 verification exhaustive.** That is the honest framing, and the rest of this
 document takes it as the premise.
 
@@ -188,7 +188,7 @@ The miner signs, and publishes, a commitment binding:
   disputes can bisect (32 layers × 258 B/32 tokens ≈ 8 KiB per 32 tokens — still
   negligible),
 - the BLAKE3 roots of the **integer GEMM operands** for the provable layers, and
-- the miner's staked identity.
+- the miner's **work-backed serving identity** (§8.6).
 
 The purpose is to **pin the computation before any challenge is issued.** After
 Tier 1 the miner has no remaining freedom to choose what it "computed."
@@ -242,9 +242,11 @@ divergent layer in ~5 rounds, then to tiles within it. The terminal step is
 exactly a Tier-2 proof: one proof system serves both, and the dispute game adds
 no new cryptography.
 
-**A fingerprint mismatch escalates; it never slashes directly.** Tier 0 is a
-trigger, not a verdict — see §10.5. Slashing follows only from a failed or
-contradicted Tier-2 certificate, or from a timeout.
+**A fingerprint mismatch escalates; it is never itself an adverse finding.** Tier 0
+is a trigger, not a verdict — see §10.5. Consequences follow only from a failed or
+contradicted Tier-2 certificate, or from a timeout, and they are forfeiture of
+payment plus retirement of the serving identity — never seizure of posted capital
+(§8.6).
 
 ### Why both, and not either alone
 
@@ -287,9 +289,10 @@ end-to-end proof coverage.
   parallelism only.
 - **Matching:** clients post signed requests (manifest digest, prompt digest, max
   tokens, sampling params, seed, bid per MAC-equivalent, deadline) to an offchain
-  mempool; miners claim them. Payment escrows in `$NOCK` through the existing UTXO
-  and wallet crates and settles on Tier-1 commitment plus a quiet dispute window,
-  splitting `(1−β)` to the miner and `β` to a `%brn` output (§8).
+  mempool; miners claim them with an admission ticket signed by a work-backed
+  serving identity (§8.7). Payment escrows in `$NOCK` through the existing UTXO and
+  wallet crates and settles only *after* verification, splitting `(1−β)` to the
+  miner and `β` to a `%brn` output (§8). Miners post no capital at any point.
 - **Interleaving:** the miner serves inference when paid demand exists and falls
   back to PoW otherwise — and per §3 it can do *both at once* during decode,
   because decode leaves the tensor cores mostly free.
@@ -343,8 +346,8 @@ The usual argument for a burn is deflation. That is real here given the 2³² ha
 cap, but it is the weaker reason. Two stronger ones:
 
 **Burn is the only self-dealing-proof payment rail.** The Tier-1/2/3 design in §5
-secures *correctness* — that a miner computed what it claimed — through stake and
-slashing. It does nothing whatsoever about **fake demand**: a miner paying itself
+secures *correctness* — that a miner computed what it claimed — through detection
+and forfeiture. It does nothing whatsoever about **fake demand**: a miner paying itself
 to manufacture the appearance of volume. That matters wherever serving volume
 becomes visible and valuable — advertising utilization to attract real clients,
 reputation weighting in the scheduler, or any future rule that lets volume
@@ -413,7 +416,7 @@ Not fairness, and not revenue maximization: **the off-chain escape hatch.**
 A miner and client can always settle privately and never touch the chain. The
 burn is a tax on using the onchain rail, so `β` must stay below what that rail is
 worth to the marginal client — escrow, the unpredictable beacon that makes Tier-2
-sampling unforgeable, slashing, and dispute adjudication. Sophisticated repeat
+sampling unforgeable, and dispute adjudication. Sophisticated repeat
 counterparties who already trust each other will defect off-chain at *any* `β`;
 the rail's real market is strangers and one-shot interactions, which is also
 exactly where verifiability is worth paying for.
@@ -426,66 +429,140 @@ One consequence: keep the split two-way. Adding the Aletheia protocol fund as a
 third claimant on inference revenue raises the tax on the rail without a clear
 need, and the fund is already financed from issuance. Cheap rail, narrow split.
 
-### 8.6 Slashing, refunds, and paying the challenger
+### 8.6 No bonds: forfeiture is the whole enforcement mechanism
 
-The burn interacts with §5's dispute tier, and getting this wrong makes Tier 3
-theater.
+**This is a pure proof-of-work system, and nothing about serving inference should
+require posting capital.** A bond that can be seized is stake under another name —
+attaching a signing pubkey to it changes who signs, not what is at risk. If the
+objective is to keep the chain's security denominated in work rather than capital,
+the bond has to go, not be renamed.
 
-- **The client's payment is refunded, never burned, on a failed proof.** If
-  clients bore the cost of miner misbehavior the service would be unusable.
-- **Slashed stake splits between challenger bounty and burn.** Burning 100% leaves
-  challengers unfunded — nobody spends a forward pass to catch a cheat for free,
-  and the whole tier collapses. Paying 100% to the challenger funds griefing
-  between competing miners. Size the bounty to somewhat exceed replay cost and
-  burn the remainder.
+It can go, and the analogy that shows how is already in the protocol: **an invalid
+block does not seize anything from the miner who produced it. It simply wastes the
+work.** Orphaning is a complete deterrent with no capital at risk, because the
+miner has already spent the electricity. Serving should work the same way.
 
-### 8.7 Sampling rate and stake
+**Verify before pay, never pay before verify.** Restructure so a miner is never
+paid ahead of verification. Then there is nothing to claw back and nothing to
+seize, because the escrow simply never releases. What a cheating miner loses is:
 
-With proof cost `C_p` and request cost `C_r`, sample rate `p` gives verification
-overhead `p · C_p / C_r`. Holding it to a budget `β_v` gives `p ≤ β_v · C_r / C_p`.
+- the payment, which returns to the client;
+- the GPU-seconds it already spent, which are sunk; and
+- the **mining EV it forwent** by serving instead of mining that window.
 
-A miner skipping work gains at most `value(C_r)` and is detected with probability
-`p`, so honesty requires `S > value(C_r) / p`. Substituting:
-**`S > value(C_p) / β_v`**. At a 5% verification budget, the stake floor is ~20×
-the value of a *single proof* — not of a request, and independent of request size.
-That mildness is why this can work with consumer-scale operators rather than only
-well-capitalized ones.
+That third term is the collateral, and it is denominated in proof-of-work. The
+miner posted nothing — it *spent* something, which is the only currency a PoW
+chain should ask for.
 
-**Tier 0 changes what `p` has to buy, and this is its largest economic effect.**
+**Ordering.** Client escrows payment with the request; miner claims with an
+admission ticket (below) signed by its serving identity; miner serves and publishes
+tokens, fingerprint, and commitment; client verifies at ~1% of serving cost, or
+accepts; escrow releases `(1−β)/β` on pass. On failure the beacon selects a tile
+and the miner must answer with a Tier-2 certificate. A verifying certificate
+releases the escrow to the miner — a spurious challenge does not win. A failed or
+absent certificate refunds the client and retires the identity.
 
-The most profitable cheat in a consumer GPU cloud is not fabricating outputs —
-those have to look plausible, which is hard. It is **serving a cheaper precision
-or a smaller model than was paid for**: a 2–4× cost saving on *every* request,
-indefinitely, with outputs that read as fine. Under ZK sampling alone that is
-caught at rate `p`, so the cheat earns roughly `1/p` requests of free margin
-before detection. TOPLOC detects precision and model substitution on **every**
-request, collapsing detection latency from `~1/p` requests to one.
+### 8.7 Work-backed serving identity
 
-So `p` no longer has to deter the cheap, high-volume cheats. It only has to deter
-the residual adversary who constructs activations that spoof top-`k` under the
-published tolerance while actually running a cheaper computation — a far narrower
-and far more expensive attack. **The same security is bought at a materially lower
-`p`**, which lowers verification overhead and, through `S > value(C_p) / β_v`, the
-stake floor with it.
+The salvageable half of the bond idea is the **pubkey**, without the capital behind
+it. A serving identity is a keypair whose standing comes from work rather than from
+a deposit:
 
-That feeds back into §8.5: a cheaper verification layer makes the onchain rail
-cheaper overall, which widens the headroom between `β` and the off-chain escape
-hatch.
+- **Admission costs work.** Activating an identity requires a PoW ticket — the same
+  puzzle at lower difficulty, priced in the same MAC-equivalents as everything else
+  (§8.2). This is what makes identities Sybil-resistant without capital.
+- **Claiming a request costs a ticket too.** A miner that claims work and abandons
+  it has burned real compute for nothing, which is the bondless answer to
+  claim-and-abandon griefing.
+- **Challenging costs a ticket, symmetrically.** This is what stops a client from
+  disputing every request to avoid paying; the certificate resolves who was right,
+  and the challenger's ticket is spent either way.
+- **History accrues to the identity.** Verified served requests earn scheduler
+  preference and access to higher-value work.
+- **A proven failure retires the identity** rather than seizing anything. The cost
+  of misbehavior is having to redo the admission work and rebuild the history —
+  exactly the cost structure of losing a block to a reorg.
 
-Two second-order effects, both favorable:
+No capital is locked at any point, so there is no minimum-capital barrier to a
+consumer operator joining, and no capital-seizure logic anywhere in the protocol.
 
-- **Challenger economics.** §8.6 needs a bounty large enough to pay someone to
-  catch a cheat. At up to 100× cheaper than generation, a challenge costs ~1% of
-  serving, so the bounty can be small — which also shrinks the griefing incentive
-  that an oversized bounty would create.
-- **Client-side verification becomes the default posture.** At that cost a client
-  can verify *all* of its own traffic rather than trusting a sampled deterrent.
-  The trust model shifts from "sampled deterrence" to "client-verified by default,
-  with the STARK as the escalation path when a client and miner disagree."
+### 8.8 What forfeiture alone actually buys
 
-Systematic cheating is bounded far more tightly than one-shot cheating: replay is
-cheap and available to anyone, so a repeat cheat faces detection probability
-approaching 1.
+Let `M` be mining EV per GPU-second (§8.1), `C_r` the GPU-seconds to serve
+honestly, `γ > 1` the cheat's compute advantage (so cheating costs `C_r/γ` and the
+remainder can be spent mining), `P` the payment, and `q` the probability of
+detection *before escrow releases*. Write `ρ = P / (M·C_r)` for the premium
+inference pays over simply mining — necessarily `ρ > 1`, or nobody serves.
+
+Over a window of `C_r` GPU-seconds, honest serving earns `P`, while cheating earns
+`(1−q)P + M·C_r(1 − 1/γ)`. Cheating fails to pay when:
+
+```text
+q  >  (1 − 1/γ) / ρ
+```
+
+| `γ` (cheat advantage) | `ρ = 1` | `ρ = 1.5` | `ρ = 2` | `ρ = 3` |
+|---|---:|---:|---:|---:|
+| 1.5 | 0.333 | 0.222 | 0.167 | 0.111 |
+| 2 | 0.500 | 0.333 | 0.250 | 0.167 |
+| 4 (INT4 for INT7) | 0.750 | 0.500 | 0.375 | 0.250 |
+| 8 | 0.875 | 0.583 | 0.438 | 0.292 |
+
+Two readings, and the second is why this design can drop bonds at all.
+
+**Without Tier 0, bondless enforcement is hopeless.** ZK sampling gives `q = p ≈
+0.01–0.05`. Every row of that table is out of reach. This is precisely why the
+earlier drafts needed stake: capital was substituting for a detection probability
+the verification layer could not deliver.
+
+**With Tier 0, `q ≈ 1` for exactly the cheats that have favourable `γ`.** Precision
+and model substitution — the high-`γ`, high-volume cheats that dominate the
+economics (§8.9) — are caught on every response, and cheaply enough that clients
+verify their own traffic in full. Every row is satisfied with enormous margin.
+
+Note also the reassuring monotonicity: **the more inference pays over mining, the
+less detection is needed**, because forfeiting a larger premium hurts more. The
+mechanism gets safer exactly as the market gets more valuable.
+
+**The residual adversary closes the argument.** For the attack Tier 0 cannot bound
+— constructing activations that spoof top-`k` under tolerance — the attacker
+plausibly needs the honest result to aim at, so `γ ≤ 1` and the right-hand side
+goes non-positive: **an attack that costs more than honest work needs no deterrent
+at all.** The gap between "cheats TOPLOC catches" and "cheats worth attempting" is
+what makes the bondless construction close. That is an argument, not a theorem, and
+`γ` for adversarial spoofing is a measurement gate (§9), not an assumption.
+
+### 8.9 Which cheat the economics are actually about
+
+The dominant cheat in a consumer GPU cloud is not fabricating outputs — those must
+look plausible, which is hard. It is **serving a cheaper precision or a smaller
+model than was paid for**: a 2–4× saving on *every* request, indefinitely, with
+outputs that read as fine. That is the `γ = 2…4` row above, and it is the case
+Tier 0 detects on every response at essentially no cost.
+
+Under ZK sampling alone that cheat earns roughly `1/p` requests of free margin
+before detection. Under Tier 0 it earns none.
+
+### 8.10 Funding the challenge, without a bond to seize
+
+The earlier draft paid challengers out of seized stake. With no stake, the burn leg
+funds it: **on a proven failure, the `β` that would have burned pays the
+challenger instead**, and the client is refunded in full. No new money, no bond,
+and the burn simply does not happen in the case where verification had to be paid
+for.
+
+This matters much less than it would have. At ~100× cheaper verification the
+natural challenger is the *client itself*, already motivated by its own refund, so
+third-party watchtowers are a supplement rather than the load-bearing role. And
+because challenging costs an admission ticket (§8.7), the griefing incentive an
+oversized bounty would create is bounded by work rather than by policy.
+
+Two invariants survive from the bonded design:
+
+- **The client's payment is refunded, never burned, on a failed proof.** If clients
+  bore the cost of miner misbehavior the service would be unusable.
+- **A certificate, not an assertion, decides.** Escrow releases on cryptography, so
+  neither party can win a dispute by insisting.
 
 ## 9. What must be measured first
 
@@ -521,7 +598,12 @@ Required before any of this is committed to:
    the former.
 6. **Tier-0 overhead on the serving path**: confirm the async tee costs neither
    TTFT nor throughput, rather than assuming it from the bandwidth arithmetic.
-7. **Off-chain defection rate** once a market exists. This is the only honest way
+7. **`γ` for adversarial top-`k` spoofing** (§8.8). The bondless construction closes
+   on the claim that spoofing the fingerprint costs *more* than serving honestly.
+   That is an argument, not a theorem, and it is the load-bearing one now that no
+   capital backstops a mistake. Attack it directly: try to produce a materially
+   cheaper computation whose top-`k` last-hidden-state values survive tolerance.
+8. **Off-chain defection rate** once a market exists. This is the only honest way
    to bound `β` (§8.5), and unlike the others it cannot be measured before
    launch — which is the argument for shipping a deliberately low constant `β`
    and raising it against evidence, rather than starting high.
@@ -548,8 +630,11 @@ both directions.
 audit record — the dual-puzzle consensus audit and
 `2026-07-29_TIME_BANKED_FORK_EXPLOIT.md` — shows how readily dual-puzzle
 economics produce exploits that are invisible in the component crates. A dispute
-game with timeouts and slashing added to the consensus kernel is a large new
-attack surface against a chain whose fork choice is already carrying two puzzles.
+game with timeouts added to the consensus kernel is a large new attack surface
+against a chain whose fork choice is already carrying two puzzles. Dropping bonds
+helps here as well as economically: with no capital to seize, the kernel never
+needs seizure logic, and the worst outcome of a dispute bug is a misrouted payment
+rather than a confiscation.
 
 The mitigation follows the repository's own stated architecture rather than
 fighting it. `README.md`: "Applications execute offchain as sovereign NockApps and
@@ -569,6 +654,15 @@ halves: soundly proven on a sampled tile of the integer linear path, empirically
 fingerprinted end to end. No amount of layering turns the second into the first at
 this model scale.
 
+**Forfeiture does not deter a griefer.** The §8.8 argument shows cheating does not
+*pay*; it does not show that an attacker indifferent to profit will not serve
+garbage to degrade the network. No bond fixes this either — a well-funded griefer
+posts and forfeits capital just as readily — but the honest statement is that the
+bondless design's protection here is the per-claim admission ticket (§8.7), which
+prices griefing in work rather than preventing it. Whether that price is high
+enough is a live question and depends on ticket difficulty, which is a policy dial
+this document does not set.
+
 **Tier 0 must not be allowed to displace Tier 2**, and this is the most likely way
 the design degrades in practice — it will arrive looking like a cost optimization.
 
@@ -583,11 +677,11 @@ perturbation is a strictly stronger property and is not established.
 
 Three consequences:
 
-- **Tier 0 escalates; it never slashes.** A fingerprint mismatch opens a Tier-2
-  challenge. Money moves on a failed or contradicted certificate, or on a timeout,
-  never on a fingerprint alone. This also contains the false-positive risk from
-  §9.5 — an honest miner on unusual hardware gets challenged, not slashed, and the
-  certificate exonerates it.
+- **Tier 0 escalates; it is never itself a verdict.** A fingerprint mismatch opens
+  a Tier-2 challenge. Payment is withheld only on a failed or contradicted
+  certificate, or on a timeout, never on a fingerprint alone. This also contains the
+  false-positive risk from §9.5 — an honest miner on unusual hardware gets
+  challenged, and the certificate exonerates it and releases its payment.
 - **Keep `p` strictly positive** however good Tier 0 looks in production. Its whole
   job is deterring the adversary Tier 0 cannot bound, and that adversary's absence
   from the logs is not evidence of their impossibility: a cheat designed to pass
@@ -614,8 +708,8 @@ that the measurement gate precedes the design commitments that depend on it.
 6. **Burn-split settlement** over the existing `%brn` primitive: per-MAC bid
    escrow, `(1−β)/β` split on success, refund on failed proof. No price
    controller; `β` fixed for the first deployment.
-8. **Tier-3 bisection game** as a NockApp, with slashing and the challenger
-   bounty; consensus untouched.
+8. **Tier-3 bisection game** as a NockApp: challenge, certificate, forfeiture, and
+   identity retirement. No capital-seizure path anywhere; consensus untouched.
 9. **Scheduler and interleaving**, including PoW/inference preemption at the
    existing cancellation granularity.
 
@@ -627,33 +721,48 @@ dial is worth its attack surface.
 
 ## 12. Summary
 
-The cryptography for verifiable inference on Nockchain largely exists; the
-missing pieces are provenance, addressing, sampling policy, and settlement. The
-mechanism that fits the hardware is commit-then-challenge with staked dispute:
-free commitments on every request, unforgeable random spot proofs, and cheap
-deterministic replay as the backstop.
+The cryptography for verifiable inference on Nockchain largely exists; the missing
+pieces are provenance, addressing, verification policy, and settlement. The
+mechanism that fits the hardware is layered commit-then-challenge with
+forfeiture-based dispute: a near-free locality-sensitive activation fingerprint on
+every response, unforgeable random STARK spot proofs, and cheap replay as the
+backstop. The two verification layers are chosen for complementary blind spots —
+the fingerprint covers the whole forward pass but is statistical, the STARK is
+sound but covers one tile — and neither suffices alone.
 
-The structural argument for consumer GPUs specifically is that an 8B model fits
-on one card — so the fleet needs no interconnect — and that KV-capped decode
-leaves ~92% of the INT8 tensor cores idle in exactly the units AI-PoW consumes.
-The verification is paid for out of compute that the serving workload cannot use.
+The structural argument for consumer GPUs specifically is that an 8B model fits on
+one card — so the fleet needs no interconnect — and that KV-capped decode leaves
+~92% of the INT8 tensor cores idle in exactly the units AI-PoW consumes. The
+verification is paid for out of compute that the serving workload cannot use.
+
+**Nothing in it requires posting capital.** Because the miner is never paid before
+verification, a cheat forfeits the payment, the compute it already spent, and the
+mining EV it gave up to serve — collateral denominated in work, not capital, which
+is what a proof-of-work chain should be asking for. Identities are backed by
+admission tickets rather than bonds, and a proven failure retires an identity
+instead of seizing anything, exactly as an orphaned block wastes work without
+confiscating it. That construction closes only because Tier 0 pushes detection
+probability near 1 on the cheats worth attempting; with STARK sampling alone the
+required detection rates are unreachable and capital would have to substitute for
+them.
 
 Settlement should be a burn split, denominated per MAC-equivalent so the manifest
 makes every request's quantity objective in advance. The burn's primary job is not
-deflation but making fake demand cost something — it is the only payment rail on
-which a miner cannot wash its own volume for free — and, against a hard supply cap,
-the only way inference demand can raise the real value of the 64-NOCK floor that
-funds long-run security. Price should be set by auction rather than by a protocol
+deflation but making fake demand cost something — it is the only rail on which a
+miner cannot wash its own volume for free — and, against a hard supply cap, the
+only way inference demand can raise the real value of the 64-NOCK floor that funds
+long-run security. Price should come from auction rather than a protocol
 controller: supply is self-reported and therefore a cartel lever, so the protocol
-should fix the split and let the market fix the price.
+fixes the split and the market fixes the price.
 
 The honest limits are that only one verification layer is cryptographically sound
 and it samples the INT7 linear path, that end-to-end coverage is statistical and
 rests on adversarial robustness nobody has yet stress-tested with money on the
-line, that miners see prompts, that `β` is bounded by
-an off-chain escape hatch nobody can measure before launch, and that the dispute
-game is the one genuinely risky addition — which is why it belongs in a NockApp
-and not in the consensus kernel.
+line, that miners see prompts, that forfeiture deters profit-seeking cheats but
+only prices griefing rather than preventing it, that `β` is bounded by an
+off-chain escape hatch nobody can measure before launch, and that the dispute game
+is the one genuinely risky addition — which is why it belongs in a NockApp and not
+in the consensus kernel.
 
 ## References
 
