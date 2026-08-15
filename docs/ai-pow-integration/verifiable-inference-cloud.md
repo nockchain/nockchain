@@ -95,7 +95,8 @@ One mechanism per purpose. Alternatives are named here and not carried further.
 | Make cheating unprofitable | **Forfeiture: never pay before verify** | Bonds — redundant once detection is near-certain (§5) |
 | Sybil / claim-abandon resistance | **One PoW admission ticket per claim** | Reputation, capital deposits, whitelists |
 | Set the price | **Auction, per MAC-equivalent** | Protocol price controller — supply is self-reported, so it is a cartel lever |
-| Post and match jobs | **Offchain mempool; assigned, not raced** | Jobs as transactions carrying prompts — 150 s blocks vs ~24 ms prefill, permanent public prompts, duplicated work, result front-running (§5) |
+| Post and match jobs | **Gossiped offer carrying prompt *length*, not the prompt** | Jobs as transactions carrying prompts — 150 s blocks vs ~24 ms prefill, permanent public prompts, duplicated work, result front-running (§5) |
+| Deliver the prompt | **Direct, encrypted to the winning miner's serving key** | Gossiping it to the fleet — every miner would see every prompt |
 | Pay per request | **Standing escrow, settled in batches** | One settlement transaction per request — impossible at a 150 s cadence |
 | Accrue value, price fake demand | **Fixed burn fraction `β`** | Moving `β` — damps the supply response exactly when it should attract capacity |
 | Weight authenticity | **Onchain model manifest** | Trusting `HASH_B` alone — it binds *some* weights, not the certified model's |
@@ -238,6 +239,60 @@ with a latency or privacy requirement stays off it:
 The chain never sees a prompt, never sees a result, and never sits in the serving
 path. It sees an output before, and an output after.
 
+### How prompts reach miners
+
+The prompt never touches the chain (above) and never gossips to the fleet. It goes
+to exactly one miner, over a direct authenticated channel, after that miner has been
+selected.
+
+**A separate network, on the crate patterns that already exist.**
+`nockchain-libp2p-io` already provides QUIC/TLS transport, Kademlia discovery,
+request/response, gossip, bounded untrusted input, and peer/IP abuse controls. The
+inference network reuses those patterns under **its own protocol IDs**, not the
+consensus mesh — inference traffic must never be able to degrade block propagation,
+and the two have opposite tuning: consensus wants global flood, inference wants
+point-to-point.
+
+**Two phases, and the first one carries no prompt.**
+
+1. **Offer (gossiped, ~hundreds of bytes).** Manifest digest, **prompt length**,
+   max tokens, sampling params, seed, bid per MAC-equivalent, deadline, escrow
+   reference, client pubkey.
+2. **Claim (direct).** Miners with capacity respond, signed by a serving identity and
+   carrying an admission ticket.
+3. **Prompt (direct, encrypted to the winner).** The client selects a miner and sends
+   the prompt to that miner only, encrypted to its serving-identity key — the keypair
+   §5 already requires doubles as the transport key.
+4. **Response (direct).** Tokens stream back, followed by the signed fingerprint.
+
+The offer works because of a property already established: **a miner can price a job
+without seeing it.** MAC count is deterministic from `(manifest, prompt length, max
+tokens)`, so `prompt length` — not the prompt — is all a miner needs to bid. The
+economics and the privacy boundary happen to want exactly the same field.
+
+**Discovery is per session, not per request.** A gossip round trip before every
+request would put network latency in front of ~24 ms of prefill. It does not have to:
+after the first match the client keeps talking to the same miner directly, and
+re-enters discovery only on failure, deadline miss, or deliberate rotation. Combined
+with batched settlement, **both the chain and the gossip mesh are amortized across a
+session, and only serving is per request.**
+
+**What this leaks, stated plainly.** The assigned miner sees the prompt in full —
+unavoidable here (§8). Beyond that, the *offer* is public: prompt length, token
+counts, timing, and client identity go to every listening miner. Length and timing
+are a real side channel over a session, and padding token counts to buckets is the
+obvious mitigation at some cost in price granularity. The direct connection also
+reveals client network identity to the serving miner unless separately routed.
+
+**A griefing vector this transport creates.** A miner can claim a job, receive the
+prompt, and never serve — harvesting prompts for the price of one admission ticket.
+The client loses no money, since escrow never releases, but it has already disclosed
+the prompt. Ticket difficulty is therefore doing double duty: it prices claim-abandon
+*and* prompt harvesting, and the second is the harder one to price, because a
+harvested prompt may be worth far more than the compute the ticket represents.
+Deprioritizing identities that claim without delivering bounds repetition, not the
+first offence. This is a limit of the design, not a solved problem.
+
 **Settle in batches, not per request.** Even with the prompt offchain, one settlement
 transaction per request cannot work at a 150 s cadence for a service billing in
 milliseconds. A standing escrow covering many requests, settled periodically against
@@ -376,12 +431,15 @@ inference, and nothing about this design requires a fork to start.
    quantization. Calibrate across the fleet's real hardware tail — a false positive
    on an honest miner is worse than a missed detection, since Tier B catches the
    latter and nothing repairs the former.
-4. **Tier-A overhead on the serving path** — confirm the async tee is free rather
+4. **Discovery round-trip latency** on the inference mesh, against the per-session
+   amortization assumption — the claim that gossip cost disappears across a session
+   holds only if session reuse is high in practice.
+5. **Tier-A overhead on the serving path** — confirm the async tee is free rather
    than assuming it from bandwidth arithmetic.
-5. **Per-transaction certificate verification cost and a mempool admission bound** —
+6. **Per-transaction certificate verification cost and a mempool admission bound** —
    required *before* `%aip` is considered, not after. Until this has an answer, the
    design ships on existing primitives.
-6. **Off-chain defection rate**, once a market exists. The only honest way to bound
+7. **Off-chain defection rate**, once a market exists. The only honest way to bound
    `β`, and the only gate that cannot be run before launch.
 
 ## 8. Limits
@@ -406,6 +464,12 @@ verdict** — payment moves only on a certificate or a timeout, which also means
 honest miner on unusual hardware gets challenged and then exonerated. And thresholds
 are versioned, consensus-visible parameters; a silently loosened tolerance weakens
 everything with no outward sign.
+
+**A miner can harvest prompts for the price of a ticket.** Claiming a job and never
+serving costs one admission ticket and yields the prompt; escrow protects the client's
+money but not its disclosure. Ticket difficulty prices both claim-abandon and prompt
+harvesting, and the latter is harder to price because a prompt may be worth far more
+than the compute a ticket represents (§5).
 
 **Forfeiture prices griefing rather than preventing it.** §5 shows cheating does not
 pay; it does not constrain an attacker indifferent to profit. No bond would fix that
