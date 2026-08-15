@@ -97,7 +97,7 @@ One mechanism per purpose. Alternatives are named here and not carried further.
 | Set the price | **Auction, per MAC-equivalent** | Protocol price controller — supply is self-reported, so it is a cartel lever |
 | Accrue value, price fake demand | **Fixed burn fraction `β`** | Moving `β` — damps the supply response exactly when it should attract capacity |
 | Weight authenticity | **Onchain model manifest** | Trusting `HASH_B` alone — it binds *some* weights, not the certified model's |
-| Consensus integration | **One lock primitive (§6)** | A dispute-game NockApp, kernel changes, a second puzzle |
+| Consensus integration | **None — existing primitives only (§6)** | A new lock primitive up front — it is a tx-engine change putting a STARK verifier in transaction validation; deferred to §6 |
 
 Cut entirely: the challenger bounty (the client is the challenger, motivated by its
 own refund), the optional bonded assurance tier, per-layer bisection, and separate
@@ -238,39 +238,74 @@ a theorem, and it is a measurement gate (§7).
 Note the monotonicity: the more inference pays over mining, the less detection is
 needed. The mechanism gets safer as the market gets more valuable.
 
-## 6. The consensus route: one lock primitive
+## 6. The consensus route: none at first, `%aip` later
 
-Everything above composes from primitives the chain already has, except one thing.
+An earlier version of this section proposed a new lock primitive as *the* route and
+called it small because the verifier is already resident. That undersold it. The
+count is right and the risk assessment was not.
 
-The escrow output is spendable three ways:
+**A lock primitive is a transaction-engine change.** `lock-primitive` is a `$%` in
+[`hoon/common/tx-engine-1.hoon`](../../hoon/common/tx-engine-1.hoon) (`%pkh`, `%tim`,
+`%hax`, `%brn`), mirrored in
+[`crates/nockchain-types/src/tx_engine/v1/tx.rs`](../../crates/nockchain-types/src/tx_engine/v1/tx.rs).
+A fifth variant touches the mold, `based`, `hashable`, `hash`, and `check` in **two**
+call sites (`check-lock` and `check-multisig-lock`), plus Rust serialize, deserialize,
+and leaf-hash — with exact Hoon/Rust agreement required, and respecting the ordering
+constraint the `%brn` comment flags ("it's important that this be the default to break
+a type loop in the compiler"). It also grows the **witness**, since `check` reads its
+argument from `form` and a certificate is not a signature.
 
-1. **Happy path** — miner signature + client signature. Plain multisig, already
-   expressible.
-2. **Miner never delivered** — client alone after timeout. Plain timelock, already
-   expressible.
-3. **Client disputes but the miner was honest** — miner alone, by presenting a
-   certificate that verifies against the committed statement digest.
+That is the most consensus-critical component in the repository. The AI-PoW puzzle is
+an opt-in second puzzle; the transaction engine validates every transaction on the
+chain.
 
-Only path 3 needs anything new: **one lock primitive, `%aip`, satisfied by an
-AI-PoW certificate verifying against a statement digest committed in the output.**
+**And the cost profile is a genuine regression, not just a fee question.**
+`ai-pow-verify` is the *block puzzle* verifier: one certificate per block, at block
+admission. Putting a STARK verification inside `check-lock`'s `levy` over spend
+conditions runs it per primitive, per spend, per transaction — a different throughput
+regime entirely. Setup-table residency is necessary and nowhere near sufficient. This
+is the same class of hazard `SPOT_CHECKS_MAX` exists to bound, and the repository's own
+comment there names it: a crafted block driving CPU-time DoS.
 
-This is small because the work is already done. `ai_pow_verify_jet` exists, and
-production nodes "build and validate the complete setup table at boot" for every
-reachable trace height — the verifier and its setup are **already resident for block
-acceptance**. The primitive exposes a check the node already performs.
+### What to do instead, for a first deployment
 
-Everything else stays off the consensus path: matching and the request mempool are
-offchain, the manifest registry is a NockApp with a well-known root, the burn leg is
-an existing `%brn` output, and identities are ordinary keypairs. The kernel learns
-nothing about inference, prompts, models, or fingerprints. There is no dispute game
-in consensus, no seizure logic, and no second puzzle.
+**Nothing.** The escrow needs no new primitive if the certificate is verified
+*offchain*:
 
-**The one real risk of this route** is transaction-validation cost: a spend that
-forces certificate verification is far more expensive to validate than a signature
-check, so `%aip` spends need fee pricing that reflects it, and the bounded-verify
-discipline that already protects block acceptance has to extend to the mempool.
-That is a contained, well-understood problem, and it is the whole of the new
-consensus surface.
+- 2-of-2 between client and miner, with a timeout that refunds the client. Plain
+  multisig and timelock, both already expressible.
+- On dispute the miner publishes its certificate. Anyone — the client, the scheduler,
+  a competing miner — verifies it offchain with the machinery that already exists.
+- A client that ignores a verifying certificate is publicly identifiable, and the
+  miner declines to serve it again.
+
+The residual weakness is bounded and cheap: a griefing client can take **one payment
+per miner** before that miner stops serving it, and it burns its own reputation doing
+so in public. For the request sizes this market starts at, that is a smaller cost than
+a hard fork.
+
+Where a client's downside genuinely warrants adjudication, a 2-of-3 with a
+market-chosen adjudicator that verifies certificates offchain is also expressible
+today. It reintroduces a trusted third party — which is exactly the trade, and it
+should be the client's to make, not the protocol's.
+
+### When `%aip` earns its hard fork
+
+`%aip` removes the griefing window by making the certificate directly spendable. That
+is a real improvement and it is an **optimization of a working market, not a
+prerequisite for one.** Defer it until there is volume that justifies the fork, and
+until the cost question above has an answer — a per-transaction verification bound, a
+fee schedule reflecting it, and mempool admission policy that cannot be used to make
+every node re-verify STARKs on demand.
+
+If it is built, the versioned engine is the precedent to follow: `tx-engine-0` and
+`tx-engine-1` both exist and `tx-engine.hoon` imports both, so a `tx-engine-2` is the
+idiomatic path rather than mutating a deployed engine in place.
+
+**Net for a first deployment: the consensus surface is zero.** Matching, manifest,
+disputes, identities, and adjudication are all offchain; settlement uses `%pkh`,
+`%tim`, and `%brn` exactly as they exist today. The kernel learns nothing about
+inference, and nothing about this design requires a fork to start.
 
 ## 7. What must be measured first
 
@@ -287,7 +322,9 @@ consensus surface.
    latter and nothing repairs the former.
 4. **Tier-A overhead on the serving path** — confirm the async tee is free rather
    than assuming it from bandwidth arithmetic.
-5. **`%aip` verification cost** per spend, for mempool fee pricing.
+5. **Per-transaction certificate verification cost and a mempool admission bound** —
+   required *before* `%aip` is considered, not after. Until this has an answer, the
+   design ships on existing primitives.
 6. **Off-chain defection rate**, once a market exists. The only honest way to bound
    `β`, and the only gate that cannot be run before launch.
 
@@ -341,13 +378,14 @@ commitments that depend on it.
    free, no consensus involvement, and it closes the substitution cheat that
    dominates the economics.
 5. **Tier B** on a named tile via `from_tile`, verified offchain end to end.
-6. **`%aip` lock primitive** with mempool fee pricing — the only consensus change,
-   and the only stage owed a full protocol review.
-7. **Settlement and scheduler** — escrow, auction, burn split, admission tickets,
-   PoW/inference interleaving at the existing cancellation granularity.
+6. **Settlement and scheduler** — escrow on `%pkh`/`%tim`/`%brn` as they exist,
+   auction, burn split, admission tickets, PoW/inference interleaving at the existing
+   cancellation granularity.
 
-Stages 2–5 carry no consensus risk and can proceed in parallel once stage 1 lands.
-Stage 6 is the review gate.
+**No stage in this plan changes consensus.** `%aip` (§6) is deliberately excluded: it
+optimizes a working market rather than enabling one, and it is owed its own protocol
+review, its own cost bound, and plausibly its own `tx-engine-2` — none of which should
+gate shipping the rest.
 
 ## 10. Summary
 
@@ -365,9 +403,11 @@ the fleet needs no interconnect, and that KV-capped decode leaves ~92% of the IN
 tensor cores idle in exactly the units AI-PoW consumes. Verification is paid for out
 of compute the serving workload cannot use.
 
-The route into consensus is one lock primitive exposing a verifier every node
-already runs at boot. Everything else — matching, manifest, disputes, identities —
-stays offchain.
+**The route into consensus is that there is not one.** Settlement composes from
+`%pkh`, `%tim`, and `%brn` as they exist; certificates are verified offchain, where
+the machinery already runs. A `%aip` lock primitive would remove the residual
+griefing window, but it is a transaction-engine change that puts a STARK verifier in
+the transaction-validation loop — an optimization to earn later, not a prerequisite.
 
 The honest limits are that only one layer is sound and it samples the integer linear
 path, that end-to-end coverage rests on adversarial robustness nobody has tested with
