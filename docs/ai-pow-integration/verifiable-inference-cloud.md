@@ -95,6 +95,8 @@ One mechanism per purpose. Alternatives are named here and not carried further.
 | Make cheating unprofitable | **Forfeiture: never pay before verify** | Bonds — redundant once detection is near-certain (§5) |
 | Sybil / claim-abandon resistance | **One PoW admission ticket per claim** | Reputation, capital deposits, whitelists |
 | Set the price | **Auction, per MAC-equivalent** | Protocol price controller — supply is self-reported, so it is a cartel lever |
+| Post and match jobs | **Offchain mempool; assigned, not raced** | Jobs as transactions carrying prompts — 150 s blocks vs ~24 ms prefill, permanent public prompts, duplicated work, result front-running (§5) |
+| Pay per request | **Standing escrow, settled in batches** | One settlement transaction per request — impossible at a 150 s cadence |
 | Accrue value, price fake demand | **Fixed burn fraction `β`** | Moving `β` — damps the supply response exactly when it should attract capacity |
 | Weight authenticity | **Onchain model manifest** | Trusting `HASH_B` alone — it binds *some* weights, not the certified model's |
 | Consensus integration | **None — existing primitives only (§6)** | A new lock primitive up front — it is a tx-engine change putting a STARK verifier in transaction validation; deferred to §6 |
@@ -188,6 +190,60 @@ allocation decision is a scalar comparison. The manifest fixes every shape, so a
 request's MAC count is deterministic from `(manifest, prompt length, max tokens)` and
 computable by both parties **before** execution — no metering to trust, no billing
 dispute surface. Quantity is objective; only price is negotiated, by auction.
+
+### What stays offchain, and why
+
+A natural reading of "settle inference onchain" is that jobs are *posted* as
+transactions — an output carrying the prompt under a lock that anyone can spend by
+performing the inference. It is a clean idea and it does not survive contact with
+this chain's parameters. Four reasons, any one of which is disqualifying:
+
+**Latency.** Post-Aletheia block time is **150 s**. Prefill of a 1,000-token prompt
+is **~24 ms**. Posting a job as a transaction means waiting for inclusion before a
+miner can even see it, and waiting again to settle: roughly 300 s of round trip
+around 24 ms of work, ~4 orders of magnitude of overhead. Interactive serving is
+impossible at that cadence no matter how the lock is written.
+
+**Permanence and bloat.** A prompt in a transaction is public forever, replicated to
+every node. That is a much stronger disclosure than §8's "miners see prompts" — it is
+*everyone, permanently*. It also puts kilobytes of application payload into a UTXO
+chain's permanent state, which size-based fees will price but never un-store.
+
+**Racing wastes the exact resource this design exists to conserve.** If any miner can
+claim by doing the work, `N` miners race and `N−1` results are discarded. Mining
+races are fine because the work *is* the lottery; here the work has a client who
+wanted it done once. A job that is *assigned* is computed once; a job that is
+*claimable* is computed as many times as there are bidders.
+
+**Front-running.** If the result rides in the spending transaction, a second miner
+reads it from the mempool and re-submits with a higher fee, collecting the payment
+without doing the work. Fixing that needs commit–reveal, which costs another block
+round trip and makes the latency worse.
+
+There is a fifth, structural: "spendable by completing the inference properly" means
+the *lock* must verify the work — which is exactly the `%aip` transaction-engine
+change §6 argues out of a first deployment. The posting model does not avoid that
+cost, it requires it.
+
+**The split that does work.** The chain holds the *payment commitment*; everything
+with a latency or privacy requirement stays off it:
+
+| Onchain | Offchain |
+|---|---|
+| Escrowed payment, `%pkh` + `%tim` | The prompt |
+| Request **digest** only | Matching and claiming |
+| Settlement: `(1−β)` + `%brn` | The result |
+| A certificate, only on dispute | Certificate verification, normally |
+
+The chain never sees a prompt, never sees a result, and never sits in the serving
+path. It sees an output before, and an output after.
+
+**Settle in batches, not per request.** Even with the prompt offchain, one settlement
+transaction per request cannot work at a 150 s cadence for a service billing in
+milliseconds. A standing escrow covering many requests, settled periodically against
+an accumulated balance, keeps per-request latency purely offchain and amortizes the
+onchain cost across a session. This needs no new primitives — a batch settlement is
+one ordinary transaction closing out `N` verified responses.
 
 **Why burn.** Not primarily deflation. Two stronger reasons:
 
