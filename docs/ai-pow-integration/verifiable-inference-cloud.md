@@ -123,7 +123,8 @@ creates the spare compute that pays for verification.
 
 | Gap | Severity | Note |
 |---|---|---|
-| **Coverage.** PoW proves one tile (`h·w ≤ 256`) out of a 4096×14336 = 58.7M-element output — a ~4×10⁻⁶ sample | Fundamental | Full-forward-pass ZK for 8B is out of reach; consensus caps Layer-0 trace at 2¹⁹ (`AI_POW_MAX_TRACE_HEIGHT`) |
+| **Coverage.** PoW proves one tile (`h·w ≤ 256`) out of a 4096×14336 = 58.7M-element output — a ~4×10⁻⁶ sample | Fundamental | Full-forward-pass ZK for 8B is out of reach; consensus caps Layer-0 trace at 2¹⁹ (`AI_POW_MAX_TRACE_HEIGHT`). Mitigated in breadth by Tier 0 (§5) |
+| **FP nondeterminism.** Norms, attention, dequant, and FP8 layers are not bit-reproducible across a heterogeneous fleet | Blocking | Bit-exact replay fails on honest miners; needs a tolerance-bearing commitment |
 | **Noise.** The puzzle proves `(A+E)(B+F)`, with commitment-keyed low-rank noise for anti-reuse | Design | Inference needs clean `A·B`; needs a domain-separated statement |
 | **Provenance.** `HASH_B` binds *some* weights, not *the certified model's* | Blocking | Needs a published model manifest |
 | **Addressing.** No request mempool, matching, or escrow | Blocking | Service layer, not protocol |
@@ -137,69 +138,128 @@ argument, with cryptography used to make sampling unforgeable rather than to mak
 verification exhaustive.** That is the honest framing, and the rest of this
 document takes it as the premise.
 
-## 5. The mechanism: commit, sample, dispute
+## 5. The mechanism: fingerprint, commit, sample, dispute
 
-Three tiers. Each is cheap where it is common and expensive only where it is
-rare.
+Four tiers. Each is cheap where it is common and expensive only where it is rare.
 
-### Tier 1 — Commitment (every request, effectively free)
+The tiers exist because **no single check has both breadth and soundness.** A
+locality-sensitive activation fingerprint covers the whole forward pass but is
+statistical; a STARK is cryptographically sound but covers one tile of one GEMM.
+Layering them is not redundancy — each covers precisely the other's blind spot.
 
-The miner returns the output tokens together with a signed commitment to the
-whole computation:
+### Tier 0 — TOPLOC fingerprint (every response, ~free)
+
+Every response carries a TOPLOC commitment: a locality-sensitive hash of the
+top-`k` values of the **last hidden state**, polynomial-encoded [1]. Because the
+final layer depends on every prior computation, a fingerprint of it is sensitive
+to the entire stack — attention, normalization, activation functions, dequant
+scales, and the FP8 layers the STARK cannot reach.
+
+The reported properties are an unusually good fit here:
+
+- **258 bytes per 32 new tokens** on Llama-3.1-8B-Instruct — a ~1000× reduction
+  versus recording activations. Against the ~512 KiB/token of raw per-layer
+  activations considered below, this is not an optimization, it is a different
+  order of thing.
+- **Detects modified model, prompt, or precision** at 100% accuracy with no false
+  positives or negatives in the paper's evaluation.
+- **Robust across GPU types, attention implementations, tensor-parallel layouts,
+  and algebraic reorderings** — thresholds are set on mantissa deviation where
+  exponents agree, chosen empirically to survive reordering.
+- **Verification up to 100× faster than generation**, because a validator passes
+  all committed tokens through a *single prefill* instead of decoding them
+  autoregressively.
+
+The evaluation model is Llama-3.1-8B-Instruct — the same family as the AI-PoW
+production model — and the cost profile lands on the right side of §3's roofline:
+a top-`k` reduction over a 4,096-wide hidden state is negligible compute, and its
+bandwidth cost (~8 KiB/token read) is nothing against the ~17 GB moved per decode
+step. Taken as an asynchronous tee off the serving path, it should cost neither
+TTFT nor throughput. That claim still belongs in the measurement gate (§9), not
+in the assumptions.
+
+### Tier 1 — Commitment (every request, ~free)
+
+The miner signs, and publishes, a commitment binding:
 
 - the model manifest digest (§6),
-- the request digest — prompt, sampling parameters, and an explicit seed, so the
-  forward pass is deterministic and independently replayable,
-- a Merkle root over the **per-layer activation stream**, and
+- the request digest — prompt, sampling parameters, explicit seed,
+- the Tier-0 fingerprint, extended to a **per-layer fingerprint chain** so
+  disputes can bisect (32 layers × 258 B/32 tokens ≈ 8 KiB per 32 tokens — still
+  negligible),
+- the BLAKE3 roots of the **integer GEMM operands** for the provable layers, and
 - the miner's staked identity.
 
-Per-layer activations are small: 4,096 dims × 4 bytes ≈ 16 KiB per token per
-layer, ~512 KiB per token across 32 layers. Hashing that is microseconds and does
-not perturb the decode roofline in §3. Committing at layer boundaries — rather
-than to every intermediate GEMM output — is what keeps Tier 1 free.
+The purpose is to **pin the computation before any challenge is issued.** After
+Tier 1 the miner has no remaining freedom to choose what it "computed."
 
-The purpose is to **pin every intermediate value before any challenge is
-issued**. After Tier 1 the miner has no remaining freedom to choose what it
-"computed."
+> **Correction to an earlier draft of this design.** A previous version committed
+> to a bit-exact Merkle root over the per-layer activation stream and asserted
+> that "execution is deterministic given the manifest and the seed." That is false
+> for a heterogeneous consumer fleet, and the error is not cosmetic: different GPU
+> architectures, attention kernels, and — critically — *different batch
+> compositions* produce different floating-point reduction orders. Since §3 shows
+> batch composition varies continuously under a KV-capped scheduler, two honest
+> miners would routinely produce different roots, and the dispute tier would fire
+> on honest disagreement.
+>
+> The precise statement is narrower and survives: **the INT7/INT8 GEMM accumulate
+> is integer and therefore exactly reproducible** — this is why the roofline can
+> rely on `mma.sync.satfinite` matching wrapping scalar accumulation, and why `Q`
+> can be bit-lossless. Bit-exact commitment is correct *for the integer operands*.
+> Everything float-contaminated — norms, softmax, attention, dequant scales, the
+> FP8 `down_proj` — needs a tolerance-bearing commitment, which is exactly what
+> Tier 0 supplies.
 
 ### Tier 2 — Sampled spot proofs (rare, expensive)
 
-Once the commitment is published, a public beacon the miner could not predict —
-the next block hash is already available and already unpredictable to it —
-selects a `(layer ℓ, tile i, j)`. The miner must produce the existing compact
-recursive certificate for exactly that tile:
+A public beacon the miner could not predict — the next block hash — selects a
+`(layer ℓ, tile i, j)`. The miner must produce the compact recursive certificate
+for exactly that tile:
 
 - `B` (weights) opened against the model manifest,
-- `A` (activations) opened against the Tier-1 activation root for layer ℓ,
+- `A` (activations) opened against the Tier-1 integer-operand root for layer ℓ,
 - the schedule from `StripIndexSchedule::from_tile`,
 - the claimed output tile.
 
-This is the current `ai-pow-zk` statement with the jackpot/target comparison
-removed and the noise zeroed. It proves: *the certified weights, times the
-activations this miner already committed to, produce the tile it claims.*
-Chained through the per-layer activation roots, a miner that fabricated any layer
-is caught whenever the beacon lands on it.
+This is the current `ai-pow-zk` statement with the jackpot comparison removed and
+the noise zeroed. It proves: *the certified weights, times the activations this
+miner already committed to, produce the tile it claims.*
 
 Commit-then-challenge is what makes a 4×10⁻⁶ tile sample meaningful. The sample
-is tiny, but the miner must be correct *everywhere* to survive a uniformly random
+is tiny, but the miner must be correct everywhere to survive a uniformly random
 draw it cannot anticipate.
 
 ### Tier 3 — Dispute by bisection (very rare)
 
-Execution is deterministic given the manifest and the seed, so any second miner,
-client, or watchtower can replay a request for roughly one forward pass of
-consumer GPU time and compare Tier-1 roots. On disagreement it opens a challenge.
+Any second miner, client, or watchtower re-runs the request as a **single prefill
+of the claimed output** and compares Tier-0 fingerprints under the published
+tolerance. At up to 100× cheaper than generation, this is affordable enough that
+a client can verify *its own* traffic in full rather than relying on sampling.
 
-Because Tier 1 already commits per layer, the parties bisect over the 32-layer
-chain to the first divergent layer in ~5 rounds, then over tiles within that
-layer. The terminal step of the bisection is exactly a Tier-2 proof. One proof
-system serves both tiers; the dispute game adds no new cryptography.
+On mismatch, the parties bisect the per-layer fingerprint chain to the first
+divergent layer in ~5 rounds, then to tiles within it. The terminal step is
+exactly a Tier-2 proof: one proof system serves both, and the dispute game adds
+no new cryptography.
 
-Failure to answer within the timeout, or an answer that verifies against a
-different value, slashes the stake.
+**A fingerprint mismatch escalates; it never slashes directly.** Tier 0 is a
+trigger, not a verdict — see §10.5. Slashing follows only from a failed or
+contradicted Tier-2 certificate, or from a timeout.
 
-The three tiers compose into: cheap always, cryptographic sometimes, adversarial
-rarely — with cost concentrated where dishonesty is, not where throughput is.
+### Why both, and not either alone
+
+| | Tier 0 — TOPLOC | Tier 2 — STARK |
+|---|---|---|
+| Cost | ~free, every response | expensive, sampled |
+| Coverage | whole forward pass, incl. attention, norms, FP8 | one tile of one INT7 GEMM |
+| Robust to FP nondeterminism | yes, by construction | n/a — integer path |
+| Guarantee | statistical | cryptographic |
+| Detection latency for precision/model swap | **1 request** | ~`1/p` requests |
+
+**TOPLOC gives breadth without soundness; the STARK gives soundness without
+breadth.** Dropping either is the failure mode to guard against — and the
+temptation runs toward dropping the expensive one, which is why §10.5 states the
+argument against it explicitly.
 
 ## 6. Model provenance
 
@@ -391,9 +451,41 @@ the value of a *single proof* — not of a request, and independent of request s
 That mildness is why this can work with consumer-scale operators rather than only
 well-capitalized ones.
 
-Systematic cheating is bounded far more tightly than one-shot cheating, because
-Tier-3 replay is cheap and available to anyone: a miner that cheats repeatedly
-faces detection probability approaching 1.
+**Tier 0 changes what `p` has to buy, and this is its largest economic effect.**
+
+The most profitable cheat in a consumer GPU cloud is not fabricating outputs —
+those have to look plausible, which is hard. It is **serving a cheaper precision
+or a smaller model than was paid for**: a 2–4× cost saving on *every* request,
+indefinitely, with outputs that read as fine. Under ZK sampling alone that is
+caught at rate `p`, so the cheat earns roughly `1/p` requests of free margin
+before detection. TOPLOC detects precision and model substitution on **every**
+request, collapsing detection latency from `~1/p` requests to one.
+
+So `p` no longer has to deter the cheap, high-volume cheats. It only has to deter
+the residual adversary who constructs activations that spoof top-`k` under the
+published tolerance while actually running a cheaper computation — a far narrower
+and far more expensive attack. **The same security is bought at a materially lower
+`p`**, which lowers verification overhead and, through `S > value(C_p) / β_v`, the
+stake floor with it.
+
+That feeds back into §8.5: a cheaper verification layer makes the onchain rail
+cheaper overall, which widens the headroom between `β` and the off-chain escape
+hatch.
+
+Two second-order effects, both favorable:
+
+- **Challenger economics.** §8.6 needs a bounty large enough to pay someone to
+  catch a cheat. At up to 100× cheaper than generation, a challenge costs ~1% of
+  serving, so the bounty can be small — which also shrinks the griefing incentive
+  that an oversized bounty would create.
+- **Client-side verification becomes the default posture.** At that cost a client
+  can verify *all* of its own traffic rather than trusting a sampled deterrent.
+  The trust model shifts from "sampled deterrence" to "client-verified by default,
+  with the STARK as the escalation path when a client and miner disagree."
+
+Systematic cheating is bounded far more tightly than one-shot cheating: replay is
+cheap and available to anyone, so a repeat cheat faces detection probability
+approaching 1.
 
 ## 9. What must be measured first
 
@@ -419,7 +511,17 @@ Required before any of this is committed to:
    here too).
 4. **Cost of the zero-noise inference statement**, and confirmation that
    domain-separating it cannot weaken the PoW anti-reuse invariant.
-5. **Off-chain defection rate** once a market exists. This is the only honest way
+5. **TOPLOC threshold calibration for the Pearl quantization.** The published
+   thresholds were established for Llama-3.1-8B-Instruct; the Pearl variant's
+   INT7 group_1 / FP8 group_0 mix is a *different* quantization, so the mantissa
+   thresholds must be re-derived against it rather than inherited. Calibrate
+   across the fleet's real hardware distribution, including its long tail — a
+   false positive on an honest miner with unusual hardware is far more damaging
+   than a missed detection, because Tier 2 catches the latter and nothing repairs
+   the former.
+6. **Tier-0 overhead on the serving path**: confirm the async tee costs neither
+   TTFT nor throughput, rather than assuming it from the bandwidth arithmetic.
+7. **Off-chain defection rate** once a market exists. This is the only honest way
    to bound `β` (§8.5), and unlike the others it cannot be measured before
    launch — which is the argument for shipping a deliberately low constant `β`
    and raising it against evidence, rather than starting high.
@@ -458,11 +560,41 @@ about inference beyond what it already verifies. Only the model manifest registr
 plausibly belongs onchain, and even that could start as a NockApp with a
 well-known root.
 
-**Verification is partial by construction.** Tier 2 covers INT7 group_1 linears.
-Attention, normalization, activation functions, sampling, and the FP8 layers are
-covered by Tier-1 commitment and Tier-3 replay determinism, not by proof. This is
-a real and permanent limit at this model scale, and the service must market
-itself accordingly.
+**Verification is layered, and only one layer is sound.** Tier 2's *cryptographic*
+guarantee covers INT7 group_1 linears and nothing else. Attention, normalization,
+activation functions, sampling, and the FP8 layers are covered by Tier 0's
+fingerprint and Tier 3's replay — real coverage, and far broader than proof
+coverage, but **statistical rather than sound.** The service must state both
+halves: soundly proven on a sampled tile of the integer linear path, empirically
+fingerprinted end to end. No amount of layering turns the second into the first at
+this model scale.
+
+**Tier 0 must not be allowed to displace Tier 2**, and this is the most likely way
+the design degrades in practice — it will arrive looking like a cost optimization.
+
+TOPLOC reports 100% detection with no false positives, but that is an *empirical*
+result against the modifications its authors tested, not a proof against an
+adversary who knows the scheme and optimizes against it. In a research evaluation
+that distinction is academic. Here, real money would reward finding a cheaper
+computation whose top-`k` last-hidden-state values survive the published
+tolerance, and nobody has yet had that incentive. Locality-sensitive hashing is
+built for robustness to *incidental* perturbation; robustness to *adversarial*
+perturbation is a strictly stronger property and is not established.
+
+Three consequences:
+
+- **Tier 0 escalates; it never slashes.** A fingerprint mismatch opens a Tier-2
+  challenge. Money moves on a failed or contradicted certificate, or on a timeout,
+  never on a fingerprint alone. This also contains the false-positive risk from
+  §9.5 — an honest miner on unusual hardware gets challenged, not slashed, and the
+  certificate exonerates it.
+- **Keep `p` strictly positive** however good Tier 0 looks in production. Its whole
+  job is deterring the adversary Tier 0 cannot bound, and that adversary's absence
+  from the logs is not evidence of their impossibility: a cheat designed to pass
+  Tier 0 is, by construction, invisible to Tier 0.
+- **Thresholds are consensus-visible parameters**, versioned and changed
+  deliberately. A silently loosened tolerance weakens the entire scheme with no
+  outward sign.
 
 ## 11. Staged plan
 
@@ -482,12 +614,12 @@ that the measurement gate precedes the design commitments that depend on it.
 6. **Burn-split settlement** over the existing `%brn` primitive: per-MAC bid
    escrow, `(1−β)/β` split on success, refund on failed proof. No price
    controller; `β` fixed for the first deployment.
-7. **Tier-3 bisection game** as a NockApp, with slashing and the challenger
+8. **Tier-3 bisection game** as a NockApp, with slashing and the challenger
    bounty; consensus untouched.
-8. **Scheduler and interleaving**, including PoW/inference preemption at the
+9. **Scheduler and interleaving**, including PoW/inference preemption at the
    existing cancellation granularity.
 
-Stages 2–6 are additive and carry no consensus risk. Stage 7 is where the real
+Stages 2–7 are additive and carry no consensus risk. Stage 8 is where the real
 design review is owed, and it should be reviewed against the existing dual-puzzle
 audit findings rather than in isolation. A moving `β` (§8.4) is explicitly *not*
 in this plan: ship a constant, observe the market, and only then decide whether a
@@ -515,8 +647,17 @@ funds long-run security. Price should be set by auction rather than by a protoco
 controller: supply is self-reported and therefore a cartel lever, so the protocol
 should fix the split and let the market fix the price.
 
-The honest limits are that proof coverage is a sample over the INT7 linear layers
-rather than the whole forward pass, that miners see prompts, that `β` is bounded by
+The honest limits are that only one verification layer is cryptographically sound
+and it samples the INT7 linear path, that end-to-end coverage is statistical and
+rests on adversarial robustness nobody has yet stress-tested with money on the
+line, that miners see prompts, that `β` is bounded by
 an off-chain escape hatch nobody can measure before launch, and that the dispute
 game is the one genuinely risky addition — which is why it belongs in a NockApp
 and not in the consensus kernel.
+
+## References
+
+[1] Jack Min Ong, Matthew Di Ferrante, Aaron Pazdera, Ryan Garner, Sami Jaghouar,
+Manveer Basra, Max Ryabinin, Johannes Hagemann. *TOPLOC: A Locality Sensitive
+Hashing Scheme for Trustless Verifiable Inference.* arXiv:2501.16007, January 2025
+(rev. May 2025); ICML 2025. <https://arxiv.org/abs/2501.16007>
