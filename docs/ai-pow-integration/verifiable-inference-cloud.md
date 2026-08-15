@@ -429,18 +429,52 @@ One consequence: keep the split two-way. Adding the Aletheia protocol fund as a
 third claimant on inference revenue raises the tax on the rail without a clear
 need, and the fund is already financed from issuance. Cheap rail, narrow split.
 
-### 8.6 No bonds: forfeiture is the whole enforcement mechanism
+### 8.6 Forfeiture, and why it makes bonds redundant rather than forbidden
 
-**This is a pure proof-of-work system, and nothing about serving inference should
-require posting capital.** A bond that can be seized is stake under another name —
-attaching a signing pubkey to it changes who signs, not what is at risk. If the
-objective is to keep the chain's security denominated in work rather than capital,
-the bond has to go, not be renamed.
+First, a distinction this document previously elided. **A non-yielding performance
+bond is not staking**, and it is worth being precise about why, because the
+imprecise version ("a bond you can seize is stake under another name") is
+rhetorically convenient and analytically wrong.
 
-It can go, and the analogy that shows how is already in the protocol: **an invalid
-block does not seize anything from the miner who produced it. It simply wastes the
-work.** Orphaning is a complete deterrent with no capital at risk, because the
-miner has already spent the electricity. Serving should work the same way.
+What makes staking *staking*, in the sense a proof-of-work chain should refuse, is
+three properties together:
+
+1. the bonded capital **earns yield** proportional to itself, so money begets money
+   without work;
+2. it confers **consensus weight** — capital buys the right to produce blocks or
+   order transactions; and
+3. it becomes **the security budget**, displacing work as the thing that secures
+   the chain.
+
+A performance bond that pays no yield, carries no fork-choice weight, and secures
+an application-layer service agreement has none of those. It is a surety deposit,
+closer to an escrowed damages cap than to a validator stake. Someone objecting to
+it on PoS grounds is objecting to the wrong thing.
+
+**So the argument against requiring one has to be made on its merits, and it is a
+different argument: with detection near-certain, a bond buys nothing.**
+
+The analogy is already in the protocol: **an invalid block does not seize anything
+from the miner who produced it. It simply wastes the work.** Orphaning is a
+complete deterrent with no capital at risk, because the miner has already spent the
+electricity. Serving can work the same way — and §8.8 shows that once Tier 0 pushes
+detection probability near 1, forfeited payment plus forgone mining EV *already*
+exceeds what any profitable cheat could gain. A bond stacked on top of that is
+redundant collateral against a loss the miner is already fully exposed to.
+
+Redundant is a weaker claim than forbidden, and it is the one that survives
+scrutiny. Two costs then decide it, and both argue for keeping the base path
+bondless:
+
+- **A bond is a capital barrier to entry.** §3's entire thesis is that one person
+  with one consumer card can join. Any mandatory locked balance sets a floor on
+  participation that has nothing to do with whether that person's GPU computes
+  correctly.
+- **Locked `$NOCK` has a real opportunity cost precisely because it does not
+  yield.** Against a hard-capped asset this design is deliberately making scarcer
+  (§8.3), capital that cannot be sold, spent, or moved is genuinely expensive to
+  post — which is a point in favour of the user's framing (no rentier dynamic,
+  no yield) and simultaneously a reason not to demand it of everyone.
 
 **Verify before pay, never pay before verify.** Restructure so a miner is never
 paid ahead of verification. Then there is nothing to claw back and nothing to
@@ -464,9 +498,10 @@ absent certificate refunds the client and retires the identity.
 
 ### 8.7 Work-backed serving identity
 
-The salvageable half of the bond idea is the **pubkey**, without the capital behind
-it. A serving identity is a keypair whose standing comes from work rather than from
-a deposit:
+Independently of whether anyone posts a bond, the base path needs an identity that
+is expensive to create and worth keeping. A serving identity is a keypair whose
+standing comes from work rather than from a deposit — which is what lets the
+default path require no capital at all:
 
 - **Admission costs work.** Activating an identity requires a PoW ticket — the same
   puzzle at lower difficulty, priced in the same MAC-equivalents as everything else
@@ -543,10 +578,10 @@ Tier 0 detects on every response at essentially no cost.
 Under ZK sampling alone that cheat earns roughly `1/p` requests of free margin
 before detection. Under Tier 0 it earns none.
 
-### 8.10 Funding the challenge, without a bond to seize
+### 8.10 Funding the challenge on the bondless path
 
-The earlier draft paid challengers out of seized stake. With no stake, the burn leg
-funds it: **on a proven failure, the `β` that would have burned pays the
+An earlier draft paid challengers out of seized collateral. With no bond on the
+base path, the burn leg funds it instead: **on a proven failure, the `β` that would have burned pays the
 challenger instead**, and the client is refunded in full. No new money, no bond,
 and the burn simply does not happen in the case where verification had to be paid
 for.
@@ -563,6 +598,31 @@ Two invariants survive from the bonded design:
   bore the cost of miner misbehavior the service would be unusable.
 - **A certificate, not an assertion, decides.** Escrow releases on cryptography, so
   neither party can win a dispute by insisting.
+
+### 8.11 Where a bond does real work: an optional assurance tier
+
+Forfeiture caps the miner's exposure at the fee. That is sufficient for deterrence
+(§8.8) and insufficient for **compensation** whenever a client's downside exceeds
+what it paid — inference costing a fraction of a cent feeding a decision worth far
+more. No detection probability fixes that; the gap is between deterrence and
+indemnity, and only capital closes it.
+
+So the useful form of the bond idea is **optional and market-priced, never
+protocol-mandated**:
+
+- A miner *may* post a non-yielding performance bond against its serving identity
+  to become eligible for higher-assurance work.
+- Clients needing recourse beyond fee forfeiture route to bonded miners and pay a
+  premium for it.
+- On a proven failure the bond compensates the client up to the posted amount, on
+  top of the refund.
+- The protocol pays no yield on it, grants it no fork-choice weight, and never
+  requires it.
+
+This keeps the base path pure proof-of-work and open to anyone with one GPU, while
+letting a market — rather than a protocol parameter — decide how much indemnity a
+given workload is worth. It is the same posture §8.4 takes on price: fix the
+structure, let the market set the level.
 
 ## 9. What must be measured first
 
@@ -735,8 +795,11 @@ one card — so the fleet needs no interconnect — and that KV-capped decode le
 ~92% of the INT8 tensor cores idle in exactly the units AI-PoW consumes. The
 verification is paid for out of compute that the serving workload cannot use.
 
-**Nothing in it requires posting capital.** Because the miner is never paid before
-verification, a cheat forfeits the payment, the compute it already spent, and the
+**Nothing in it requires posting capital**, though nothing forbids it either. A
+non-yielding performance bond is not staking — it earns no yield, carries no
+fork-choice weight, and does not become the security budget — so the case against
+*requiring* one rests on redundancy rather than principle: because the miner is
+never paid before a cheat forfeits the payment, the compute it already spent, and the
 mining EV it gave up to serve — collateral denominated in work, not capital, which
 is what a proof-of-work chain should be asking for. Identities are backed by
 admission tickets rather than bonds, and a proven failure retires an identity
