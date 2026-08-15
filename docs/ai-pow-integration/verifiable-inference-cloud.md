@@ -97,6 +97,7 @@ One mechanism per purpose. Alternatives are named here and not carried further.
 | Set the price | **Auction, per MAC-equivalent** | Protocol price controller — supply is self-reported, so it is a cartel lever |
 | Post and match jobs | **Gossiped offer carrying prompt *length*, not the prompt** | Jobs as transactions carrying prompts — 150 s blocks vs ~24 ms prefill, permanent public prompts, duplicated work, result front-running (§5) |
 | Deliver the prompt | **Direct, encrypted to the winning miner's serving key** | Gossiping it to the fleet — every miner would see every prompt |
+| Reach ordinary users | **Gateways with an OpenAI-compatible API, passing signed receipts through** | Assuming users run clients and hold `$NOCK`; or gateways that absorb verification and ask to be trusted (§5) |
 | Pay per request | **Standing escrow, settled in batches** | One settlement transaction per request — impossible at a 150 s cadence |
 | Accrue value, price fake demand | **Fixed burn fraction `β`** | Moving `β` — damps the supply response exactly when it should attract capacity |
 | Weight authenticity | **Onchain model manifest** | Trusting `HASH_B` alone — it binds *some* weights, not the certified model's |
@@ -159,7 +160,7 @@ dropping the expensive one — see §8.
 > exact commitment is correct for the integer operands only; everything
 > float-contaminated needs Tier A.
 
-## 5. Settlement: verify before pay
+## 5. The offchain system: settlement, transport, gateways
 
 **No capital is posted.** A non-yielding performance bond is not staking — it earns
 no yield, carries no fork-choice weight, and does not become the security budget.
@@ -349,6 +350,74 @@ a theorem, and it is a measurement gate (§7).
 Note the monotonicity: the more inference pays over mining, the less detection is
 needed. The mechanism gets safer as the market gets more valuable.
 
+### Gateways, and the trust they re-centralize
+
+Most demand will not arrive from users running a libp2p client, holding `$NOCK`,
+managing standing escrows, and verifying fingerprints. It will arrive at a website
+with an OpenAI-compatible HTTP API, and that operator will talk to miners. The design
+should expect this rather than treat it as a degradation — a gateway is exactly where
+the machinery consumer users cannot run was always going to live: fiat handling,
+demand aggregation, standing escrows that solve the 150 s settlement cadence, and
+persistent sessions that make discovery amortize.
+
+But it must be said plainly what a gateway does to the guarantee.
+
+**Verification protects the gateway from miners. It does not protect the user from
+the gateway.** A gateway that serves a cheaper model itself, pockets the difference,
+and claims it used the network is doing precisely what TOPLOC's own motivation
+identifies as the problem — a provider that may not be using the model configuration
+it claims. Every mechanism in this document sits *below* the gateway and none of it
+points at the gateway.
+
+**The fix is that the gateway passes the evidence through rather than absorbing it.**
+Every API response carries a receipt:
+
+- the miner's **signed TOPLOC fingerprint** of that response,
+- the **model manifest digest**,
+- the **serving identity** that produced it, and
+- the **settlement reference**.
+
+The gateway cannot forge this. The fingerprint is signed by a work-backed serving
+identity and is bound to *these* output tokens, so an old receipt cannot be replayed
+against a new response. In an OpenAI-compatible shape it is an added response field
+or header — inert for clients that ignore it, available to clients that do not.
+
+That converts "trust the operator" into "the operator hands you evidence it did not
+author," which is a materially different claim from what an ordinary inference API
+can make.
+
+**Being precise about who can check it.** TOPLOC verification requires a prefill of
+the claimed output, so it requires the weights and a GPU. **A typical end user cannot
+verify their own receipt.** The mechanism is not self-verification; it is that a
+receipt is checkable *by anyone* — a competing gateway, a watchtower service, a
+researcher, the user's own infrastructure if they have it — so a gateway that
+fabricates receipts is discoverable by whoever does check, and its identity is
+public. Fraud has to be detectable, not detected by everyone. That is the same shape
+as the miner-level argument in §5, one layer up.
+
+**What a gateway still absorbs, and cannot be designed away:**
+
+- **The prompt.** The user sends it to the gateway in the clear, and the gateway
+  forwards it to a miner. Two parties now see it instead of one; §8's privacy limit
+  gets worse, not better, under the deployment model users will actually use.
+- **Selection.** The gateway chooses miners and could route to its own. The burn
+  still prices that — routing to itself pays `β` like any other trade — but selection
+  opacity remains its own.
+- **Availability.** A gateway can refuse a user. The mitigation is that gateways are
+  commodity and the protocol beneath them is open, which is real only if running one
+  stays cheap.
+
+**The property to protect is that gateways stay thin and replaceable.** A user of an
+ordinary inference API cannot audit their provider at all, so they cannot compare
+providers on honesty. A user holding receipts can — and can switch. Anything that
+makes gateways sticky in ways receipts cannot audit erodes the only structural
+advantage this design has over a conventional provider.
+
+Sophisticated clients keep the direct path: run a client, hold an escrow, verify
+locally, skip the gateway entirely. **The guarantee is available to everyone and the
+gateway is a convenience** — which is the right ordering, and the opposite of the one
+that emerges if receipts are omitted.
+
 ## 6. The consensus route: none at first, `%aip` later
 
 An earlier version of this section proposed a new lock primitive as *the* route and
@@ -444,10 +513,15 @@ inference, and nothing about this design requires a fork to start.
 
 ## 8. Limits
 
-**No prompt privacy.** Miners see prompts and activations; mid-stack activations are
-substantially invertible. The proof layer establishes correctness, not
-confidentiality — the client's input is an input to the prover, not a secret from
-it. Keeping first and last layers client-side narrows but does not close this.
+**No prompt privacy, and it is worse under the deployment model users will actually
+use.** Miners see prompts and activations; mid-stack activations are substantially
+invertible. The proof layer establishes correctness, not confidentiality — the
+client's input is an input to the prover, not a secret from it. Through a gateway
+(§5) both the operator and the miner see it.
+
+**A typical user cannot verify their own receipt.** TOPLOC verification needs the
+weights and a GPU. The guarantee is that receipts are checkable by anyone and forgery
+is publicly discoverable, not that each user checks their own. Keeping first and last layers client-side narrows but does not close this.
 
 **Only one verification layer is sound.** Tier B's cryptographic guarantee covers
 INT7 group_1 linears. Attention, normalization, sampling, and FP8 are covered by
