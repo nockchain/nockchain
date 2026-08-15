@@ -15,7 +15,10 @@ tokens came from that model's real weights.
 It is a design exploration, not a protocol proposal. It does not change
 `PROTOCOL.md`, consensus activation, ASERT, fork choice, or block validity, and
 it deliberately stops short of code because the sampling rates it recommends
-depend on one quantity nobody in this repository has measured yet (§9).
+depend on one quantity nobody in this repository has measured yet (§9). It does
+assume the burn primitive (`%brn`) and the fixed-percentage-split precedent that
+Aletheia already established, rather than proposing new consensus machinery for
+either.
 
 ## 1. The claim
 
@@ -223,9 +226,10 @@ end-to-end proof coverage.
 - **Unit of supply:** one miner = one whole-model replica on one GPU. Request-level
   parallelism only.
 - **Matching:** clients post signed requests (manifest digest, prompt digest, max
-  tokens, sampling params, seed, price, deadline) to an offchain mempool; miners
-  claim them. Payment escrows in `$NOCK` through the existing UTXO and wallet
-  crates, releasing on Tier-1 commitment plus a quiet dispute window.
+  tokens, sampling params, seed, bid per MAC-equivalent, deadline) to an offchain
+  mempool; miners claim them. Payment escrows in `$NOCK` through the existing UTXO
+  and wallet crates and settles on Tier-1 commitment plus a quiet dispute window,
+  splitting `(1−β)` to the miner and `β` to a `%brn` output (§8).
 - **Interleaving:** the miner serves inference when paid demand exists and falls
   back to PoW otherwise — and per §3 it can do *both at once* during decode,
   because decode leaves the tensor cores mostly free.
@@ -234,30 +238,160 @@ end-to-end proof coverage.
   That is finer than a typical 20–50 ms per-token budget, so mining can yield to
   inference without violating interactive latency.
 
-## 8. Economics: PoW as the reserve price
+## 8. Settlement: burn-denominated inference
 
-The useful economic property is that Nockchain **already runs a continuous spot
-market for exactly this hardware doing exactly these GEMMs.** Block-reward EV per
-GPU-second is measurable from sustained TMAC/s and the current AI target — and
-`DIFFICULTY.md` is explicit that the target `T` prices one MAC-equivalent of
-matmul work, not one attempt, which is precisely the denomination needed.
+### 8.1 The reserve price already exists
+
+Nockchain already runs a spot market for exactly this hardware doing exactly
+these GEMMs. Block-reward EV per GPU-second is measurable from sustained TMAC/s
+and the current AI target — and `DIFFICULTY.md` is explicit that the target `T`
+prices *one MAC-equivalent of matmul work*, not one attempt, which is precisely
+the denomination needed.
 
 That gives a floor: inference must outbid mining EV per GPU-second, or the miner
-keeps mining. No token subsidy or bootstrapping incentive is required to price
-the fleet, and supply is elastic in both directions.
+keeps mining. No token subsidy is required to price the fleet, and supply is
+elastic in both directions.
 
-**Sampling rate.** With proof cost `C_p` and request cost `C_r` (both GPU-seconds)
-and sample rate `p`, verification overhead is `p · C_p / C_r`. Holding overhead
-to a budget `β` gives `p ≤ β · C_r / C_p`.
+### 8.2 Price per MAC-equivalent, quantity fixed by the manifest
 
-**Stake.** A miner skipping work gains at most the value of `C_r` and is detected
-with probability `p`, so honesty requires roughly `S > value(C_r) / p`.
-Substituting: `S > value(C_p) / β`. At `β = 5%`, the stake floor is about 20× the
-*value of a single proof* — not 20× the value of a request, and independent of
-request size. That is a mild requirement, and it is the reason this scheme can
-work with consumer-scale operators rather than only well-capitalized ones.
+Denominate inference in the same unit the puzzle already uses: **`$NOCK` per
+MAC-equivalent**. Two properties follow, and both remove trust rather than add it.
 
-Systematic cheating is bounded much more tightly than one-shot cheating, because
+A miner's allocation decision becomes a scalar comparison in one unit — mining EV
+per MAC-equivalent against the inference bid per MAC-equivalent — with no
+conversion and no oracle.
+
+And because the model manifest (§6) fixes every layer's shape, the MAC count of a
+request is **deterministic from `(manifest, prompt length, max tokens)` and
+computable by both parties before execution.** There is no metering to trust, no
+usage counter to falsify, and no billing dispute surface: the quantity is
+objective and known in advance, so only the price is negotiated.
+
+### 8.3 Burn is the right rail, and not primarily for deflation
+
+Payment should be a burn split: the client's payment settles as `(1−β)` to the
+serving miner and `β` to a provably unspendable output.
+
+The mechanism needs no new consensus primitive. `%brn` is already a first-class
+lock primitive in the v1 tx engine (`LockPrimitive::Burn` in
+`crates/nockchain-types/src/tx_engine/v1/tx.rs`, `%brn` in
+`hoon/common/tx-engine-1.hoon`), and Aletheia already established the precedent
+for splitting value by fixed percentage to a well-known destination — its 80/20
+miner/protocol-fund split of new issuance.
+
+The usual argument for a burn is deflation. That is real here given the 2³² hard
+cap, but it is the weaker reason. Two stronger ones:
+
+**Burn is the only self-dealing-proof payment rail.** The Tier-1/2/3 design in §5
+secures *correctness* — that a miner computed what it claimed — through stake and
+slashing. It does nothing whatsoever about **fake demand**: a miner paying itself
+to manufacture the appearance of volume. That matters wherever serving volume
+becomes visible and valuable — advertising utilization to attract real clients,
+reputation weighting in the scheduler, or any future rule that lets volume
+influence anything consensus-visible. Under a 100%-to-miner fee, a self-deal
+round-trips at *zero cost* and wash volume is free. Under a burn, every washed
+`$NOCK` costs exactly `β`.
+
+**This is the correct criterion for setting `β`**: not a revenue-split intuition
+about what feels fair to miners, but the price at which faking demand stops being
+profitable relative to the largest plausible benefit of faking it.
+
+**Burn is the only way to raise miner revenue against a hard cap.** Aletheia
+deliberately sustains a 64-NOCK floor for ~68 years to extend the chain's revenue
+tail, because the original schedule "front-loads ~99% of emissions into the
+chain's first thirty years… forcing the network onto fee revenue earlier than the
+application ecosystem can sustain." That floor is denominated in NOCK, so its
+*real* value is exactly what a burn improves — and improving it by issuance is
+impossible against a fixed cap. The loop closes:
+
+```text
+inference demand -> burn -> scarcer $NOCK -> higher real value of the
+64-NOCK floor -> more hashrate -> more serving capacity -> inference demand
+```
+
+A burn converts inference demand into security budget for the whole network
+rather than private revenue for whichever miner happened to serve. Given that
+Aletheia's stated motivation is precisely the long-run security-budget
+transition, the fit is unusually good.
+
+### 8.4 Modulate the market, not the price
+
+"Adjust the rate with supply and demand" is right as an objective and dangerous
+as an implementation, and the distinction is where this design most needs care.
+
+**A protocol-set price requires observing supply, and supply is not observable.**
+Settled demand is onchain and honest. Total idle GPU capacity across the fleet is
+not: it is self-reported. An EIP-1559-style controller works because block space
+is a hard cap the protocol *knows*; here the protocol has no idea what the fleet
+can do. A controller keyed on self-reported capacity is a cartel lever —
+under-report capacity, utilization appears high, the protocol raises the price —
+and it pays out precisely to coordinated under-reporting. The fewer large
+operators, the cheaper that attack.
+
+**So let the auction set the price and keep the protocol to the split.** Clients
+bid, miners accept, and the protocol burns `β` of whatever cleared. Price then
+modulates with supply and demand *automatically*, through a real two-sided market
+rather than an oracle reading, and there is nothing to manipulate: a miner that
+misrepresents its capacity moves no protocol variable, it just fails to win work.
+The burn *throughput* still rises and falls with real demand, which is the
+deflationary behavior the mechanism is meant to produce.
+
+**If `β` itself moves, key it to the security budget, not the demand cycle.**
+There is a defensible moving `β`, but the intuitive version is backwards. Burning
+a larger share when demand is high damps the miner-revenue signal exactly when
+that signal should be attracting capacity; the supply response is the one thing
+that must not be damped. The version that earns its complexity instead lets `β`
+*fall* as the block subsidy decays, shifting revenue toward miners as direct
+security funding is most needed — a slow monetary dial on a multi-month EMA,
+bounded within `[β_min, β_max]`, with hysteresis, and keyed on realized burn
+against subsidy rather than on anything a participant self-reports.
+
+### 8.5 What actually bounds `β`
+
+Not fairness, and not revenue maximization: **the off-chain escape hatch.**
+
+A miner and client can always settle privately and never touch the chain. The
+burn is a tax on using the onchain rail, so `β` must stay below what that rail is
+worth to the marginal client — escrow, the unpredictable beacon that makes Tier-2
+sampling unforgeable, slashing, and dispute adjudication. Sophisticated repeat
+counterparties who already trust each other will defect off-chain at *any* `β`;
+the rail's real market is strangers and one-shot interactions, which is also
+exactly where verifiability is worth paying for.
+
+That caps `β` well below a naive revenue-maximizing choice — my instinct is a
+10–30% band rather than 50%+ — and it should be set against *observed* off-chain
+defection once there is a market to observe, not guessed in advance.
+
+One consequence: keep the split two-way. Adding the Aletheia protocol fund as a
+third claimant on inference revenue raises the tax on the rail without a clear
+need, and the fund is already financed from issuance. Cheap rail, narrow split.
+
+### 8.6 Slashing, refunds, and paying the challenger
+
+The burn interacts with §5's dispute tier, and getting this wrong makes Tier 3
+theater.
+
+- **The client's payment is refunded, never burned, on a failed proof.** If
+  clients bore the cost of miner misbehavior the service would be unusable.
+- **Slashed stake splits between challenger bounty and burn.** Burning 100% leaves
+  challengers unfunded — nobody spends a forward pass to catch a cheat for free,
+  and the whole tier collapses. Paying 100% to the challenger funds griefing
+  between competing miners. Size the bounty to somewhat exceed replay cost and
+  burn the remainder.
+
+### 8.7 Sampling rate and stake
+
+With proof cost `C_p` and request cost `C_r`, sample rate `p` gives verification
+overhead `p · C_p / C_r`. Holding it to a budget `β_v` gives `p ≤ β_v · C_r / C_p`.
+
+A miner skipping work gains at most `value(C_r)` and is detected with probability
+`p`, so honesty requires `S > value(C_r) / p`. Substituting:
+**`S > value(C_p) / β_v`**. At a 5% verification budget, the stake floor is ~20×
+the value of a *single proof* — not of a request, and independent of request size.
+That mildness is why this can work with consumer-scale operators rather than only
+well-capitalized ones.
+
+Systematic cheating is bounded far more tightly than one-shot cheating, because
 Tier-3 replay is cheap and available to anyone: a miner that cheats repeatedly
 faces detection probability approaching 1.
 
@@ -285,6 +419,10 @@ Required before any of this is committed to:
    here too).
 4. **Cost of the zero-noise inference statement**, and confirmation that
    domain-separating it cannot weaken the PoW anti-reuse invariant.
+5. **Off-chain defection rate** once a market exists. This is the only honest way
+   to bound `β` (§8.5), and unlike the others it cannot be measured before
+   launch — which is the argument for shipping a deliberately low constant `β`
+   and raising it against evidence, rather than starting high.
 
 ## 10. Risks and honest limits
 
@@ -341,14 +479,19 @@ that the measurement gate precedes the design commitments that depend on it.
    roots emitted on the serving path, with the overhead measured against §9.2.
 5. **Tier-2 spot proof**, driven by block-hash beacon selection through
    `StripIndexSchedule::from_tile`.
-6. **Tier-3 bisection game** as a NockApp, with escrow and slashing; consensus
-   untouched.
-7. **Scheduler and interleaving**, including PoW/inference preemption at the
+6. **Burn-split settlement** over the existing `%brn` primitive: per-MAC bid
+   escrow, `(1−β)/β` split on success, refund on failed proof. No price
+   controller; `β` fixed for the first deployment.
+7. **Tier-3 bisection game** as a NockApp, with slashing and the challenger
+   bounty; consensus untouched.
+8. **Scheduler and interleaving**, including PoW/inference preemption at the
    existing cancellation granularity.
 
-Stages 2–5 are additive and carry no consensus risk. Stage 6 is where the real
+Stages 2–6 are additive and carry no consensus risk. Stage 7 is where the real
 design review is owed, and it should be reviewed against the existing dual-puzzle
-audit findings rather than in isolation.
+audit findings rather than in isolation. A moving `β` (§8.4) is explicitly *not*
+in this plan: ship a constant, observe the market, and only then decide whether a
+dial is worth its attack surface.
 
 ## 12. Summary
 
@@ -363,7 +506,17 @@ on one card — so the fleet needs no interconnect — and that KV-capped decode
 leaves ~92% of the INT8 tensor cores idle in exactly the units AI-PoW consumes.
 The verification is paid for out of compute that the serving workload cannot use.
 
+Settlement should be a burn split, denominated per MAC-equivalent so the manifest
+makes every request's quantity objective in advance. The burn's primary job is not
+deflation but making fake demand cost something — it is the only payment rail on
+which a miner cannot wash its own volume for free — and, against a hard supply cap,
+the only way inference demand can raise the real value of the 64-NOCK floor that
+funds long-run security. Price should be set by auction rather than by a protocol
+controller: supply is self-reported and therefore a cartel lever, so the protocol
+should fix the split and let the market fix the price.
+
 The honest limits are that proof coverage is a sample over the INT7 linear layers
-rather than the whole forward pass, that miners see prompts, and that the dispute
+rather than the whole forward pass, that miners see prompts, that `β` is bounded by
+an off-chain escape hatch nobody can measure before launch, and that the dispute
 game is the one genuinely risky addition — which is why it belongs in a NockApp
 and not in the consensus kernel.
