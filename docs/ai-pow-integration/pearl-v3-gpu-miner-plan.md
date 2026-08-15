@@ -169,21 +169,24 @@ The production path has:
 - allocation-free steady-state CUDA search buffers;
 - a CUDA 12.8 `sm_120` production image and Runpod entrypoint.
 
-The CUDA differential test covers transcript commitments, noised strips, rolling tile
-state, jackpot hashes, and extranonces at `0`, `1`, `7`, `UINT32_MAX - 1`, and
-`UINT32_MAX`. Compute Sanitizer `memcheck`, `racecheck`, `initcheck`, and `synccheck`
-pass. Maximum-target, zero-target, adjacent-batch, template-replacement, scalar
-winner, recursive proof, production verifier, and proof-wire checks pass.
+The CUDA differential test covers transcript commitments, noised strips, rolling
+tile state, jackpot hashes, and extranonces at `0`, `1`, `7`,
+`UINT32_MAX - 1`, and `UINT32_MAX`. Compute Sanitizer `memcheck`, `racecheck`,
+`initcheck`, and `synccheck` pass for single-device persistent and adjacent
+searches and for the two-device winner-reduction path. Maximum-target,
+zero-target, adjacent-batch, template-replacement, scalar-winner, recursive
+proof, production-verifier, and proof-wire checks pass.
 
 Runpod proof-submission validation uses the public mainnet API node maintained
 by the sibling `solo/` Ansible directory at `http://23.252.122.18:5556`. The
 container uses its default Docker mining key. A Runpod validation must not
-start or connect to a fakenet. The eight-GPU gate remains open because an
-eight-RTX-5090 allocation was not available.
+start or connect to a fakenet. One-device and two-device RTX 5090 sessions have
+completed the production startup and search gates.
 
-The throughput metric is
-`attempts_per_second * M * N * K / 10^12`, which is the same raw MAC-rate formula
-used by the Pearl wheel benchmark. For 65,536 canonical attempts on RTX 5090:
+The small MoE regression-kernel throughput metric is
+`attempts_per_second * M * N * K / 10^12`, which is the same raw MAC-rate
+formula used by the Pearl wheel benchmark. For 65,536 canonical attempts on
+RTX 5090:
 
 - one GPU: 2.92 million attempts/s and 0.1915 TMAC/s;
 - two GPUs: 5.68 million attempts/s and 0.3723 TMAC/s;
@@ -228,8 +231,11 @@ The scalar/device differential covers 1,000 deterministic tickets with three
 fused device repetitions for each ticket. It compares all debug transcript
 words and brackets every fused search hash with its exact target and unsigned
 predecessor. Compute Sanitizer `memcheck`, `racecheck`, `initcheck`, and
-`synccheck` report no errors on persistent, adjacent range searches.
+`synccheck` report no errors.
 
-The peak library backend is not a production miner mode. Its CLI selector,
-recursive proof gate, Docker entrypoint, accepted-block validation, restart
-validation, and multi-GPU extension remain open.
+The production selector is `--gpu --canonical`. It runs the peak backend on
+every visible device unless `--cuda-devices` selects a subset. A two-RTX-5090
+production run sustained 576,716 to 594,191 complete tickets/s and 1.209 to
+1.246 TMAC/s across consecutive 60-second windows. Both devices stayed fully
+utilized. The multi-device reducer returned the global lowest winner, and all
+four Compute Sanitizer tools passed on the two-device search.

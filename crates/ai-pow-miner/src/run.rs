@@ -44,6 +44,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ai_pow::params::MatmulParams;
+#[cfg(feature = "gpu")]
+use ai_pow::pearl_compat::PearlWorkCommitments;
 use ai_pow::pearl_compat::{
     pearl_nbits_to_target_le, validate_pearl_merge_config_for_recursive_prover,
     verify_pearl_aux_inclusion, PearlAuxInclusionProof, PearlCompatError,
@@ -78,6 +80,10 @@ use crate::canonical::{
     evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
     CanonicalProveError, PreparedCanonicalMoeTemplate,
 };
+#[cfg(feature = "gpu")]
+use crate::canonical::{
+    CanonicalDenseBlock, PreparedCanonicalDenseSearch, PreparedCanonicalDenseTemplate,
+};
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_public_inputs_node,
@@ -86,12 +92,20 @@ use crate::certificate_noun::{
     decode_ai_pow_pearl_merge_artifact_metadata_slab, AiProofNode, CertificateNounError,
     CertificateNounLimits,
 };
+#[cfg(feature = "gpu")]
+use crate::peak::MultiGpuPeakSearchBackend;
 use crate::pearl_mining::{
     self, PearlMergeMineOptions, PearlMergeMinedTicket, PearlMergeMiningError, PearlMergeMiningJob,
 };
 use crate::pearl_plain_proof::PearlPlainProof;
+#[cfg(feature = "gpu")]
+use crate::search::MeteredSearchBackend;
+#[cfg(feature = "gpu")]
+use crate::search::SearchBatch;
 use crate::search::{CpuSearchBackend, OrderedBatchScheduler, SearchBackend, SearchScheduleEnd};
 use crate::wire::AiPowMinerWire;
+#[cfg(feature = "gpu")]
+use crate::PEAK_PRODUCTION_PARAMS;
 use crate::{DifficultyTarget, MiningCancel};
 
 // Covers a base64-encoded max-size coinbase inclusion plus the Pearl header,
@@ -405,6 +419,8 @@ pub enum MinerError {
     CertificateBuild(String),
     #[error("{0}")]
     CanonicalCertificateUnavailable(String),
+    #[error("production AI-PoW worker failed: {0}")]
+    ProductionWorker(String),
 }
 
 /// Production entry point using a physical-core CPU search backend.
@@ -884,10 +900,105 @@ fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> 
     Ok(slab)
 }
 
-/// A grind worker returns `Ok(Some(block))` when a nonce cleared the target and
-/// its certificate was proved, `Ok(None)` when the grind was cancelled (a new
-/// candidate arrived) or exhausted the nonce space, and `Err` on a prove failure.
-type GrindResult = Result<Option<CanonicalBlock>, CanonicalProveError>;
+#[cfg(feature = "gpu")]
+fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+    let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+        block.attempt.attempt(),
+        &block.aux_inclusion,
+        &block.a,
+        &block.b,
+        PEAK_PRODUCTION_PARAMS.tile as usize,
+        &block.run,
+    )
+    .map_err(|e| MinerError::CertificateBuild(format!("peak dense artifact: {e}")))?;
+    let artifact_space = artifact.noun_space();
+    let mut slab = NounSlab::new();
+    let art = slab.copy_into(unsafe { *artifact.root() }, &artifact_space);
+    let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
+    slab.set_root(payload);
+    Ok(slab)
+}
+
+enum GatewayFreeBlock {
+    Canonical(CanonicalBlock),
+    #[cfg(feature = "gpu")]
+    Peak(CanonicalDenseBlock),
+}
+
+impl GatewayFreeBlock {
+    fn commit(&self) -> [u8; 32] {
+        match self {
+            Self::Canonical(block) => block.commit,
+            #[cfg(feature = "gpu")]
+            Self::Peak(block) => block.commit,
+        }
+    }
+
+    fn trace_height(&self) -> usize {
+        match self {
+            Self::Canonical(block) => block.certificate.trace_height,
+            #[cfg(feature = "gpu")]
+            Self::Peak(block) => block.run.trace_height(),
+        }
+    }
+
+    fn build_poke(&self) -> Result<NounSlab, MinerError> {
+        match self {
+            Self::Canonical(block) => build_canonical_poke(block),
+            #[cfg(feature = "gpu")]
+            Self::Peak(block) => build_peak_poke(block),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum GatewayFreeProfile {
+    Canonical,
+    #[cfg(feature = "gpu")]
+    Peak {
+        a: Arc<Vec<i8>>,
+        b: Arc<Vec<i8>>,
+    },
+}
+
+impl GatewayFreeProfile {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Canonical => "canonical-moe",
+            #[cfg(feature = "gpu")]
+            Self::Peak { .. } => "peak-dense",
+        }
+    }
+
+    fn worker_errors_are_fatal(&self) -> bool {
+        match self {
+            Self::Canonical => false,
+            #[cfg(feature = "gpu")]
+            Self::Peak { .. } => true,
+        }
+    }
+
+    fn grind(
+        &self,
+        commit: [u8; 32],
+        target: DifficultyTarget,
+        cancel: Arc<AtomicBool>,
+        backend: &dyn SearchBackend,
+    ) -> GrindResult {
+        match self {
+            Self::Canonical => grind_canonical_block_with_backend(commit, target, cancel, backend),
+            #[cfg(feature = "gpu")]
+            Self::Peak { a, b } => {
+                grind_peak_block_with_backend(commit, target, cancel, backend, a, b)
+            }
+        }
+    }
+}
+
+/// A grind worker returns `Ok(Some(block))` when a ticket cleared the target and
+/// its certificate was proved, `Ok(None)` when the grind was cancelled or
+/// exhausted, and `Err` on search, revalidation, or proof failure.
+type GrindResult = Result<Option<GatewayFreeBlock>, CanonicalProveError>;
 
 enum CanonicalOutcome {
     None,
@@ -1041,7 +1152,7 @@ fn grind_canonical_block_with_backend(
             &CANONICAL_MATMUL_PARAMS, CANONICAL_HW, CANONICAL_E, CANONICAL_TOP_K, commit,
             extranonce,
         )?;
-        return Ok(Some(proved));
+        return Ok(Some(GatewayFreeBlock::Canonical(proved)));
     }
     warn!(
         commit = %hex::encode(commit),
@@ -1051,20 +1162,99 @@ fn grind_canonical_block_with_backend(
     Ok(None)
 }
 
-/// Gateway-free miner loop: connect to the node, subscribe to `%mine-ai`
-/// candidates, and for each candidate GRIND a CANONICAL AI-PoW block bound to the
-/// candidate's block commitment — sweeping the extranonce, computing each attempt's
-/// MoE tile jackpot, until one clears the candidate's difficulty target; then pay
-/// the one-time recursive-certificate cost (~25-30s) and poke it as `%pow`. This is
-/// real proof-of-work: expected attempts ~= 2^256 / (target · F), where F is the
-/// canonical shape work factor — the consensus target prices one MAC-equivalent,
-/// not one attempt, so expected MAC-equivalents per block is 2^256 / target
-/// regardless of tile shape (`ai_pow::difficulty`). No Pearl Gateway. One
-/// grind runs at a time; candidates that arrive mid-grind are ignored until it
-/// finishes. Because a block takes grind + prove time, run the node with
-/// `--fakenet-update-candidate-interval-secs` LARGER than that (and tune the AI
-/// ASERT target so the grind fits inside the window) so the winning certificate
-/// still binds the current candidate when it lands.
+#[cfg(feature = "gpu")]
+fn grind_peak_block_with_backend(
+    commit: [u8; 32],
+    target: DifficultyTarget,
+    cancel: Arc<AtomicBool>,
+    backend: &dyn SearchBackend,
+    a: &Arc<Vec<i8>>,
+    b: &Arc<Vec<i8>>,
+) -> GrindResult {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let template = PreparedCanonicalDenseTemplate::new(
+        &PEAK_PRODUCTION_PARAMS,
+        commit,
+        Arc::clone(a),
+        Arc::clone(b),
+    )?;
+
+    for extranonce in 0..=u32::MAX {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let prepared = Arc::new(template.prepare_search(extranonce)?);
+        let factor = prepared
+            .config()
+            .shape_work_factor()
+            .map_err(|e| CanonicalProveError(format!("peak shape work factor: {e}")))?;
+        let threshold =
+            ai_pow::difficulty::effective_jackpot_threshold(&target, factor).map_err(|e| {
+                CanonicalProveError(format!(
+                    "candidate target {} is outside the representable AI-PoW domain for the peak \
+                     shape (factor {factor}): {e:?}",
+                    hex::encode(target)
+                ))
+            })?;
+        let total_tickets = prepared.total_tickets();
+        let batch = SearchBatch::new(0, total_tickets, threshold)
+            .map_err(|e| CanonicalProveError(format!("peak search batch: {e}")))?;
+        let outcome = backend
+            .search_peak(Arc::clone(&prepared), batch)
+            .map_err(|e| CanonicalProveError(format!("peak search backend: {e}")))?;
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let Some(winner) = outcome.winner else {
+            continue;
+        };
+        let attempt =
+            revalidate_peak_winner(&template, &prepared, winner, &outcome.commitments, &target)?;
+        info!(
+            extranonce,
+            ordinal = winner.ordinal,
+            commit = %hex::encode(commit),
+            "peak dense AI-PoW jackpot hit; proving recursive certificate"
+        );
+        let block = template.prove(attempt)?;
+        return Ok(Some(GatewayFreeBlock::Peak(block)));
+    }
+
+    warn!(
+        commit = %hex::encode(commit),
+        "peak AI-PoW grind exhausted the u32 extranonce space with no jackpot"
+    );
+    Ok(None)
+}
+
+#[cfg(feature = "gpu")]
+fn revalidate_peak_winner(
+    template: &PreparedCanonicalDenseTemplate,
+    prepared: &PreparedCanonicalDenseSearch,
+    winner: crate::search::SearchWinner,
+    device_commitments: &PearlWorkCommitments,
+    target: &DifficultyTarget,
+) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+    let attempt = template.checked_search_winner(prepared, winner.ordinal, target)?;
+    if attempt.commitments != *device_commitments {
+        return Err(CanonicalProveError(
+            "peak backend transcript disagrees with scalar winner recheck".to_string(),
+        ));
+    }
+    if attempt.ticket.jackpot_hash != winner.jackpot_hash {
+        return Err(CanonicalProveError(
+            "peak backend jackpot disagrees with scalar winner recheck".to_string(),
+        ));
+    }
+    Ok(attempt)
+}
+
+/// Gateway-free canonical CPU miner. It binds each MoE search to the current
+/// `%mine-ai` block commitment, applies the consensus shape-work adjustment, and
+/// builds the recursive certificate only after a scalar-validated hit. A new
+/// candidate cancels and drains the old search before its replacement starts.
 pub async fn run_canonical(
     node_addr: String,
     mining_pkh_configs: Vec<MiningPkhConfig>,
@@ -1073,7 +1263,14 @@ pub async fn run_canonical(
     let backend: Arc<dyn SearchBackend> = Arc::new(CpuSearchBackend::new(
         CpuSearchBackend::default_worker_count(),
     )?);
-    run_canonical_with_backend(node_addr, mining_pkh_configs, shutdown, backend).await
+    run_gateway_free_with_backend(
+        node_addr,
+        mining_pkh_configs,
+        shutdown,
+        backend,
+        GatewayFreeProfile::Canonical,
+    )
+    .await
 }
 
 /// Gateway-free canonical miner with an owned ticket-search backend.
@@ -1083,11 +1280,66 @@ pub async fn run_canonical_with_backend(
     shutdown: CancellationToken,
     backend: Arc<dyn SearchBackend>,
 ) -> Result<(), MinerError> {
+    run_gateway_free_with_backend(
+        node_addr,
+        mining_pkh_configs,
+        shutdown,
+        backend,
+        GatewayFreeProfile::Canonical,
+    )
+    .await
+}
+
+#[cfg(feature = "gpu")]
+pub async fn run_peak(
+    node_addr: String,
+    mining_pkh_configs: Vec<MiningPkhConfig>,
+    shutdown: CancellationToken,
+    device_ordinals: Option<Vec<usize>>,
+) -> Result<(), MinerError> {
+    let backend = match device_ordinals {
+        Some(ordinals) => MultiGpuPeakSearchBackend::new(ordinals),
+        None => MultiGpuPeakSearchBackend::all_visible(),
+    }
+    .map_err(|e| MinerError::Configure(format!("peak CUDA backend: {e}")))?;
+    let (a, b) = ai_pow::synth::synth_matrices(
+        ai_pow::synth::AI_POW_PROD_SYNTH_SEED,
+        &PEAK_PRODUCTION_PARAMS,
+    );
+    backend
+        .preflight(&a, &b)
+        .map_err(|e| MinerError::Configure(format!("peak CUDA preflight: {e}")))?;
+    info!(
+        cuda_devices = ?backend.device_ordinals(),
+        "ai-pow-miner: peak CUDA search initialized"
+    );
+    let backend: Arc<dyn SearchBackend> = MeteredSearchBackend::new("peak-cuda", Arc::new(backend));
+    run_gateway_free_with_backend(
+        node_addr,
+        mining_pkh_configs,
+        shutdown,
+        backend,
+        GatewayFreeProfile::Peak {
+            a: Arc::new(a),
+            b: Arc::new(b),
+        },
+    )
+    .await
+}
+
+async fn run_gateway_free_with_backend(
+    node_addr: String,
+    mining_pkh_configs: Vec<MiningPkhConfig>,
+    shutdown: CancellationToken,
+    backend: Arc<dyn SearchBackend>,
+    profile: GatewayFreeProfile,
+) -> Result<(), MinerError> {
     validate_mining_pkh_configs(&mining_pkh_configs)?;
+    let profile_name = profile.name();
     info!(
         node = %node_addr,
-        params = ?CANONICAL_MATMUL_PARAMS,
-        "ai-pow-miner: entering CANONICAL gateway-free loop"
+        profile = profile_name,
+        "ai-pow-miner: entering gateway-free production loop"
     );
     loop {
         if shutdown.is_cancelled() {
@@ -1128,7 +1380,8 @@ pub async fn run_canonical_with_backend(
             return Err(MinerError::Configure(format!("enable_mining(true): {e}")));
         }
         info!(
-            "ai-pow-miner: subscribed + mining enabled (canonical); awaiting %mine-ai candidates"
+            profile = profile_name,
+            "ai-pow-miner: subscribed + mining enabled; awaiting %mine-ai candidates"
         );
 
         let mut worker: Option<JoinHandle<GrindResult>> = None;
@@ -1162,13 +1415,11 @@ pub async fn run_canonical_with_backend(
                         continue;
                     }
                     if worker.is_some() {
-                        // A grind is already in flight; ignore intervening candidates
-                        // to keep exactly one CPU grind running. A grind that finishes
-                        // against a since-superseded commit produces a block the node
-                        // rejects as stale, and the next candidate starts a fresh grind
-                        // — so difficulty must be tuned (via the AI ASERT target) so the
-                        // grind completes inside the candidate refresh window.
-                        continue;
+                        info!(
+                            profile = profile_name,
+                            "new candidate replaces active gateway-free search"
+                        );
+                        cancel_and_await_canonical_worker(&mut worker, &grind_cancel).await?;
                     }
                     let inputs = match derive_nockchain_candidate_inputs(&candidate) {
                         Ok(x) => x,
@@ -1180,15 +1431,18 @@ pub async fn run_canonical_with_backend(
                     let commit = inputs.nock_block_commitment;
                     let target = inputs.target;
                     info!(
+                        profile = profile_name,
                         commit = %hex::encode(commit),
                         pow_len = inputs.pow_len,
                         target = %hex::encode(target),
-                        "new %mine-ai candidate; grinding canonical AI-PoW block against target"
+                        "new %mine-ai candidate; starting AI-PoW search"
                     );
+                    grind_cancel.store(false, Ordering::Relaxed);
                     let cancel = grind_cancel.clone();
                     let backend = backend.clone();
+                    let profile = profile.clone();
                     worker = Some(tokio::task::spawn_blocking(move || {
-                        grind_canonical_block_with_backend(commit, target, cancel, &*backend)
+                        profile.grind(commit, target, cancel, &*backend)
                     }));
                 }
                 joined = await_canonical_worker(&mut worker) => {
@@ -1204,12 +1458,13 @@ pub async fn run_canonical_with_backend(
                         }
                         CanonicalOutcome::Joined(Ok(Ok(Some(block)))) => {
                             info!(
-                                commit = %hex::encode(block.commit),
-                                trace_height = block.certificate.trace_height,
-                                "canonical AI-PoW block proved; submitting %pow to node"
+                                profile = profile_name,
+                                commit = %hex::encode(block.commit()),
+                                trace_height = block.trace_height(),
+                                "AI-PoW block proved; submitting %pow to node"
                             );
                             let poke_start = Instant::now();
-                            match build_canonical_poke(&block) {
+                            match block.build_poke() {
                                 Ok(poke) => {
                                     let poke_build_ms = poke_start.elapsed().as_millis();
                                     let jam_start = Instant::now();
@@ -1234,7 +1489,7 @@ pub async fn run_canonical_with_backend(
                                             transport_ms = submit_timings.transport_ms,
                                             submit_status = ?submit_timings.status,
                                             send_started = submit_timings.send_started,
-                                            "canonical %ai-pow submission acked by node"
+                                            "gateway-free %ai-pow submission acked by node"
                                         ),
                                         Err(e) => warn!(
                                             error = %e,
@@ -1243,18 +1498,24 @@ pub async fn run_canonical_with_backend(
                                             transport_ms = submit_timings.transport_ms,
                                             submit_status = ?submit_timings.status,
                                             send_started = submit_timings.send_started,
-                                            "submit canonical %pow failed (likely stale candidate)"
+                                            "submit gateway-free %pow failed (likely stale candidate)"
                                         ),
                                     }
                                 }
-                                Err(e) => warn!(error = %e, "build canonical poke failed"),
+                                Err(e) if profile.worker_errors_are_fatal() => return Err(e),
+                                Err(e) => warn!(error = %e, "build gateway-free poke failed"),
                             }
                         }
                         CanonicalOutcome::Joined(Ok(Ok(None))) => {
                             // Grind cancelled (shutdown) or exhausted the nonce space.
                         }
+                        CanonicalOutcome::Joined(Ok(Err(e)))
+                            if profile.worker_errors_are_fatal() =>
+                        {
+                            return Err(MinerError::ProductionWorker(e.to_string()));
+                        }
                         CanonicalOutcome::Joined(Ok(Err(e))) => {
-                            warn!(error = %e, "canonical AI-PoW grind/prove failed");
+                            warn!(error = %e, profile = profile_name, "gateway-free AI-PoW grind/prove failed");
                         }
                         CanonicalOutcome::Joined(Err(e)) => {
                             return Err(MinerError::WorkerJoin(format!("{e}")));
@@ -2550,6 +2811,49 @@ mod tests {
         assert!(error
             .to_string()
             .contains("disagrees with canonical scalar oracle"));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn peak_backend_winner_must_match_scalar_recheck_before_proving() {
+        let params = MatmulParams {
+            m: 16,
+            k: 1024,
+            n: 16,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let template =
+            PreparedCanonicalDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
+                .expect("dense template");
+        let prepared = template.prepare_search(0).expect("search transcript");
+        let scalar_prepared = template.prepare(0).expect("scalar preparation");
+        let scalar = scalar_prepared
+            .evaluate(0, 0, &mut scalar_prepared.scratch())
+            .expect("scalar ticket");
+        let mut corrupt = scalar.jackpot_hash;
+        corrupt[0] ^= 1;
+        let mut target = [0xff; 32];
+        target[30] = 0;
+        target[31] = 0;
+
+        let error = revalidate_peak_winner(
+            &template,
+            &prepared,
+            SearchWinner {
+                ordinal: 0,
+                jackpot_hash: corrupt,
+            },
+            scalar_prepared.commitments(),
+            &target,
+        )
+        .expect_err("corrupt peak result must not reach the prover");
+        assert!(error
+            .to_string()
+            .contains("disagrees with scalar winner recheck"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

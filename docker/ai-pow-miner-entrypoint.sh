@@ -6,17 +6,10 @@ set -euo pipefail
 
 args=(
   --gpu
+  --canonical
   --node-addr "$NODE_ADDR"
   --mining-pkh "$MINING_PKH"
   --cuda-devices "${CUDA_DEVICES:-all}"
-  --gpu-batch-attempts "${GPU_BATCH_ATTEMPTS:-32768}"
 )
-
-if [[ "${CANONICAL:-true}" == "true" ]]; then
-  args+=(--canonical)
-else
-  : "${PEARL_GATEWAY:?PEARL_GATEWAY is required when CANONICAL is not true}"
-  args+=(--pearl-gateway "$PEARL_GATEWAY")
-fi
 
 exec /usr/local/bin/ai-pow-mine "${args[@]}" "$@"

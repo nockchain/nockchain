@@ -64,9 +64,9 @@ pub struct CommonArgs {
     #[arg(long, value_name = "ENDPOINT", default_value = DEFAULT_PEARL_GATEWAY_ENDPOINT)]
     pub pearl_gateway: String,
 
-    /// Gateway-free mode: prove a CANONICAL AI-PoW block bound to each %mine-ai candidate,
-    /// with no Pearl Gateway. Intended for fakenet; the candidate refresh interval must
-    /// exceed the recursive proof time.
+    /// Gateway-free mode: prove a CANONICAL AI-PoW block bound to each
+    /// %mine-ai candidate. CUDA mode selects the dense production backend;
+    /// CPU mode retains the small diagnostic profile.
     #[arg(long)]
     pub canonical: bool,
 

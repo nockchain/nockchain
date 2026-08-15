@@ -42,6 +42,29 @@ constexpr int kDynamicSmemBytes = kStages * (kSmemABytes + kSmemBBytes);
 constexpr uint64_t kNoWinner = UINT64_MAX;
 constexpr int kRoutingBits = 4;
 constexpr int kRoutingMask = (1 << kRoutingBits) - 1;
+constexpr uint32_t kB3ChunkStart = 1u << 0;
+constexpr uint32_t kB3ChunkEnd = 1u << 1;
+constexpr uint32_t kB3Parent = 1u << 2;
+constexpr uint32_t kB3Root = 1u << 3;
+constexpr uint32_t kB3Keyed = 1u << 4;
+constexpr uint32_t kChunkBytes = 1024;
+constexpr uint32_t kSigmaBytes = 76;
+constexpr uint32_t kMuBytes = 52;
+constexpr uint32_t kTranscriptBytes = kSigmaBytes + kMuBytes;
+constexpr int kPrepareThreads = 256;
+
+__device__ __constant__ uint32_t kB3Iv[8] = {
+    0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+    0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+};
+__device__ __constant__ uint32_t kSeedSaltA[8] = {
+    0x6c404982u, 0x1615eda0u, 0x92f61696u, 0xf876f0fcu,
+    0x2adbdb92u, 0x52b82370u, 0x1977d4f0u, 0x7b0190c3u,
+};
+__device__ __constant__ uint32_t kSeedSaltB[8] = {
+    0x32063011u, 0xca0163ecu, 0x71afe22bu, 0x4f4d3f8bu,
+    0x39c6e91au, 0x04cce888u, 0x1d304448u, 0xa99ab871u,
+};
 
 static_assert(kThreads == 256);
 static_assert(kHashTilesPerCta == 128);
@@ -136,28 +159,155 @@ __device__ __forceinline__ void b3_round(uint32_t state[16], const uint32_t mess
 #undef MSG
 }
 
-__device__ __forceinline__ void b3_keyed_block(
-    const uint32_t message[16], const uint32_t key[8], uint32_t output[8]) {
-  constexpr uint32_t kIv0 = 0x6A09E667u;
-  constexpr uint32_t kIv1 = 0xBB67AE85u;
-  constexpr uint32_t kIv2 = 0x3C6EF372u;
-  constexpr uint32_t kIv3 = 0xA54FF53Au;
-  constexpr uint32_t kFlags = (1u << 0) | (1u << 1) | (1u << 3) | (1u << 4);
-  uint32_t state[16] = {
-      key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7],
-      kIv0, kIv1, kIv2, kIv3, 0, 0, 64, kFlags};
-  uint32_t block[16];
+__device__ __forceinline__ void b3_compress(
+    const uint32_t message[16],
+    const uint32_t cv[8],
+    uint64_t counter,
+    uint32_t block_len,
+    uint32_t flags,
+    uint32_t output[8]) {
+  uint32_t state[16];
 #pragma unroll
-  for (int i = 0; i < 16; ++i) block[i] = message[i];
-  b3_round<0>(state, block);
-  b3_round<1>(state, block);
-  b3_round<2>(state, block);
-  b3_round<3>(state, block);
-  b3_round<4>(state, block);
-  b3_round<5>(state, block);
-  b3_round<6>(state, block);
+  for (int i = 0; i < 8; ++i) state[i] = cv[i];
+  state[8] = kB3Iv[0];
+  state[9] = kB3Iv[1];
+  state[10] = kB3Iv[2];
+  state[11] = kB3Iv[3];
+  state[12] = static_cast<uint32_t>(counter);
+  state[13] = static_cast<uint32_t>(counter >> 32);
+  state[14] = block_len;
+  state[15] = flags;
+  b3_round<0>(state, message);
+  b3_round<1>(state, message);
+  b3_round<2>(state, message);
+  b3_round<3>(state, message);
+  b3_round<4>(state, message);
+  b3_round<5>(state, message);
+  b3_round<6>(state, message);
 #pragma unroll
   for (int i = 0; i < 8; ++i) output[i] = state[i] ^ state[i + 8];
+}
+
+__device__ __forceinline__ void b3_hash_bytes(
+    const uint8_t* input,
+    uint32_t length,
+    const uint32_t key[8],
+    uint32_t base_flags,
+    uint32_t output[8]) {
+  uint32_t cv[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) cv[i] = key[i];
+  const uint32_t blocks = (length + 63u) / 64u;
+  for (uint32_t block_index = 0; block_index < blocks; ++block_index) {
+    uint32_t message[16];
+#pragma unroll
+    for (int word = 0; word < 16; ++word) {
+      uint32_t value = 0;
+#pragma unroll
+      for (int byte = 0; byte < 4; ++byte) {
+        const uint32_t offset = block_index * 64 + word * 4 + byte;
+        if (offset < length) value |= uint32_t(input[offset]) << (byte * 8);
+      }
+      message[word] = value;
+    }
+    const bool first = block_index == 0;
+    const bool last = block_index + 1 == blocks;
+    const uint32_t block_len = last ? length - block_index * 64u : 64u;
+    uint32_t next[8];
+    b3_compress(message, cv, 0, block_len,
+                base_flags | (first ? kB3ChunkStart : 0) |
+                    (last ? (kB3ChunkEnd | kB3Root) : 0),
+                next);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) cv[i] = next[i];
+  }
+#pragma unroll
+  for (int i = 0; i < 8; ++i) output[i] = cv[i];
+}
+
+__device__ __forceinline__ void b3_single_block(
+    const uint32_t message[16],
+    const uint32_t key[8],
+    uint32_t flags,
+    uint32_t output[8]) {
+  b3_compress(message, key, 0, 64,
+              flags | kB3ChunkStart | kB3ChunkEnd | kB3Root, output);
+}
+
+__device__ __forceinline__ void b3_hash_pair(
+    const uint32_t left[8],
+    const uint32_t right[8],
+    uint32_t output[8]) {
+  uint32_t message[16];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    message[i] = left[i];
+    message[i + 8] = right[i];
+  }
+  b3_single_block(message, kB3Iv, 0, output);
+}
+
+__device__ __forceinline__ void b3_chunk_cv(
+    const uint8_t* bytes,
+    uint64_t counter,
+    const uint32_t key[8],
+    uint32_t output[8]) {
+  uint32_t cv[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) cv[i] = key[i];
+  for (uint32_t block_index = 0; block_index < 16; ++block_index) {
+    uint32_t message[16];
+#pragma unroll
+    for (int word = 0; word < 16; ++word) {
+      const uint8_t* source = bytes + block_index * 64 + word * 4;
+      message[word] = uint32_t(source[0]) | (uint32_t(source[1]) << 8) |
+                      (uint32_t(source[2]) << 16) |
+                      (uint32_t(source[3]) << 24);
+    }
+    uint32_t next[8];
+    b3_compress(message, cv, counter, 64,
+                kB3Keyed | (block_index == 0 ? kB3ChunkStart : 0) |
+                    (block_index == 15 ? kB3ChunkEnd : 0),
+                next);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) cv[i] = next[i];
+  }
+#pragma unroll
+  for (int i = 0; i < 8; ++i) output[i] = cv[i];
+}
+
+__device__ __forceinline__ void b3_parent_cv(
+    const uint32_t left[8],
+    const uint32_t right[8],
+    const uint32_t key[8],
+    bool root,
+    uint32_t output[8]) {
+  uint32_t message[16];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    message[i] = left[i];
+    message[i + 8] = right[i];
+  }
+  b3_compress(message, key, 0, 64,
+              kB3Keyed | kB3Parent | (root ? kB3Root : 0), output);
+}
+
+__device__ __forceinline__ void b3_random_hash(
+    uint32_t index,
+    bool b_side,
+    const uint32_t key[8],
+    uint32_t prepend,
+    uint32_t output[8]) {
+  uint32_t message[16]{};
+  message[prepend] = index + 1;
+  message[8] = b_side ? 0x65745f42u : 0x65745f41u;
+  message[9] = 0x726f736eu;
+  b3_single_block(message, key, kB3Keyed, output);
+}
+
+__device__ __forceinline__ void b3_keyed_block(
+    const uint32_t message[16], const uint32_t key[8], uint32_t output[8]) {
+  b3_single_block(message, key, kB3Keyed, output);
 }
 
 __device__ __forceinline__ bool hash_le_target(
@@ -226,6 +376,154 @@ __device__ __forceinline__ void mma_s8(
     static_cast<uint32_t>(accumulator[row][high_col][1]) ^                      \
     static_cast<uint32_t>(accumulator[row][high_col][2]) ^                      \
     static_cast<uint32_t>(accumulator[row][high_col][3]))
+
+__global__ void peak_kappa_kernel(
+    const uint8_t* transcript,
+    uint32_t* kappa) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  uint32_t output[8];
+  b3_hash_bytes(transcript, kTranscriptBytes, kB3Iv, 0, output);
+#pragma unroll
+  for (int i = 0; i < 8; ++i) kappa[i] = output[i];
+}
+
+__global__ void peak_matrix_chunk_kernel(
+    const uint8_t* matrix,
+    uint32_t chunk_count,
+    const uint32_t* key,
+    uint32_t* output) {
+  for (uint32_t chunk = blockIdx.x * blockDim.x + threadIdx.x;
+       chunk < chunk_count;
+       chunk += blockDim.x * gridDim.x) {
+    uint32_t cv[8];
+    b3_chunk_cv(matrix + size_t(chunk) * kChunkBytes, chunk, key, cv);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) output[size_t(chunk) * 8 + i] = cv[i];
+  }
+}
+
+__global__ void peak_matrix_parent_kernel(
+    const uint32_t* input,
+    uint32_t child_count,
+    const uint32_t* key,
+    uint32_t* output) {
+  const uint32_t parent_count = (child_count + 1) / 2;
+  for (uint32_t parent = blockIdx.x * blockDim.x + threadIdx.x;
+       parent < parent_count;
+       parent += blockDim.x * gridDim.x) {
+    const uint32_t left = parent * 2;
+    if (left + 1 == child_count) {
+#pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        output[size_t(parent) * 8 + i] = input[size_t(left) * 8 + i];
+      }
+      continue;
+    }
+    uint32_t cv[8];
+    b3_parent_cv(input + size_t(left) * 8,
+                 input + size_t(left + 1) * 8,
+                 key, child_count == 2, cv);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) output[size_t(parent) * 8 + i] = cv[i];
+  }
+}
+
+__global__ void peak_seed_kernel(
+    const uint32_t* kappa,
+    const uint32_t* h_a,
+    const uint32_t* h_b,
+    uint32_t m,
+    uint32_t n,
+    uint32_t* s_a,
+    uint32_t* s_b) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  uint32_t message_a[16]{};
+  uint32_t message_b[16]{};
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    message_a[i] = h_a[i];
+    message_b[i] = h_b[i];
+  }
+  message_a[8] = m;
+  message_b[8] = n;
+  uint32_t bound_a[8];
+  uint32_t bound_b[8];
+  uint32_t local_s_b[8];
+  uint32_t local_s_a[8];
+  b3_single_block(message_a, kSeedSaltA, kB3Keyed, bound_a);
+  b3_single_block(message_b, kSeedSaltB, kB3Keyed, bound_b);
+  b3_hash_pair(kappa, bound_b, local_s_b);
+  b3_hash_pair(local_s_b, bound_a, local_s_a);
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    s_a[i] = local_s_a[i];
+    s_b[i] = local_s_b[i];
+  }
+}
+
+__global__ void peak_uniform_noise_kernel(
+    uint32_t hash_count,
+    bool b_side,
+    const uint32_t* key,
+    int8_t* factors) {
+  for (uint32_t hash_index = blockIdx.x * blockDim.x + threadIdx.x;
+       hash_index < hash_count;
+       hash_index += blockDim.x * gridDim.x) {
+    uint32_t hash[8];
+    b3_random_hash(hash_index, b_side, key, 0, hash);
+#pragma unroll
+    for (int word = 0; word < 8; ++word) {
+#pragma unroll
+      for (int byte = 0; byte < 4; ++byte) {
+        const uint8_t value = uint8_t(hash[word] >> (byte * 8));
+        factors[size_t(hash_index) * 32 + word * 4 + byte] =
+            static_cast<int8_t>(int(value & 63) - 32);
+      }
+    }
+  }
+}
+
+__global__ void peak_position_kernel(
+    uint32_t hash_count,
+    bool b_side,
+    const uint32_t* key,
+    uint32_t* positions) {
+  for (uint32_t hash_index = blockIdx.x * blockDim.x + threadIdx.x;
+       hash_index < hash_count;
+       hash_index += blockDim.x * gridDim.x) {
+    uint32_t hash[8];
+    b3_random_hash(hash_index, b_side, key, 1, hash);
+#pragma unroll
+    for (int slot = 0; slot < 8; ++slot) {
+      const uint32_t random = hash[slot];
+      const uint32_t plus = random & (kRank - 1);
+      const uint32_t minus = plus ^ (1 + __umulhi(kRank - 1, random));
+      const size_t index = size_t(hash_index) * 8 + slot;
+      positions[index * 2] = plus;
+      positions[index * 2 + 1] = minus;
+    }
+  }
+}
+
+__global__ void peak_apply_noise_kernel(
+    const int8_t* source,
+    uint64_t element_count,
+    const int8_t* factors,
+    const uint32_t* positions,
+    int8_t* output) {
+  for (uint64_t index = uint64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < element_count;
+       index += uint64_t(blockDim.x) * gridDim.x) {
+    const uint32_t outer = static_cast<uint32_t>(index / kK);
+    const uint32_t inner = static_cast<uint32_t>(index % kK);
+    const uint32_t plus = positions[size_t(inner) * 2];
+    const uint32_t minus = positions[size_t(inner) * 2 + 1];
+    const int value = int(source[index]) +
+                      int(factors[size_t(outer) * kRank + plus]) -
+                      int(factors[size_t(outer) * kRank + minus]);
+    output[index] = static_cast<int8_t>(value);
+  }
+}
 
 extern "C" __global__ __launch_bounds__(kThreads, 1)
 void ai_pow_v3_peak_kernel(
@@ -517,6 +815,40 @@ void ai_pow_v3_peak_debug_kernel(
   }
 }
 
+cudaError_t launch_peak_matrix_commitment(
+    const int8_t* matrix,
+    uint32_t chunk_count,
+    const uint32_t* key,
+    uint32_t* ping,
+    uint32_t* pong,
+    uint32_t* root,
+    cudaStream_t stream) {
+  const uint32_t chunk_blocks =
+      (chunk_count + kPrepareThreads - 1) / kPrepareThreads;
+  peak_matrix_chunk_kernel<<<chunk_blocks, kPrepareThreads, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(matrix), chunk_count, key, ping);
+  cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) return error;
+
+  uint32_t count = chunk_count;
+  uint32_t* input = ping;
+  uint32_t* output = pong;
+  while (count > 1) {
+    const uint32_t parent_count = (count + 1) / 2;
+    const uint32_t parent_blocks =
+        (parent_count + kPrepareThreads - 1) / kPrepareThreads;
+    peak_matrix_parent_kernel<<<parent_blocks, kPrepareThreads, 0, stream>>>(
+        input, count, key, output);
+    error = cudaGetLastError();
+    if (error != cudaSuccess) return error;
+    uint32_t* temporary = input;
+    input = output;
+    output = temporary;
+    count = parent_count;
+  }
+  return cudaMemcpyAsync(root, input, 32, cudaMemcpyDeviceToDevice, stream);
+}
+
 }  // namespace
 
 struct AiPowCudaPeakSession {
@@ -524,13 +856,31 @@ struct AiPowCudaPeakSession {
   uint32_t m;
   uint32_t n;
   uint64_t total_tickets;
+  size_t a_bytes;
+  size_t b_bytes;
   int grid_size;
+  bool source_mode;
+  bool prepared;
   cudaStream_t stream;
   cudaEvent_t start_event;
+  cudaEvent_t commitment_event;
   cudaEvent_t end_event;
+  int8_t* d_source_a;
+  int8_t* d_source_b;
   int8_t* d_a;
   int8_t* d_b;
+  uint8_t* d_transcript;
+  uint32_t* d_kappa;
+  uint32_t* d_h_a;
+  uint32_t* d_h_b;
   uint32_t* d_key;
+  uint32_t* d_s_b;
+  uint32_t* d_cv_ping;
+  uint32_t* d_cv_pong;
+  int8_t* d_e_l;
+  int8_t* d_f_r;
+  uint32_t* d_e_positions;
+  uint32_t* d_f_positions;
   uint32_t* d_target;
   uint64_t* d_winner;
   int32_t* d_debug_state;
@@ -602,6 +952,10 @@ extern "C" int ai_pow_cuda_peak_session_create(
   session->m = m;
   session->n = n;
   session->total_tickets = row_tiles * col_tiles;
+  session->a_bytes = a_bytes;
+  session->b_bytes = b_bytes;
+  session->source_mode = false;
+  session->prepared = true;
 
   cudaDeviceProp properties{};
   cudaError_t error = cudaSetDevice(static_cast<int>(device_ordinal));
@@ -656,13 +1010,262 @@ fail:
   return static_cast<int>(error);
 }
 
+extern "C" int ai_pow_cuda_peak_source_session_create(
+    uint32_t device_ordinal,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    uint32_t rank,
+    uint32_t tile,
+    const int8_t* a,
+    const int8_t* b,
+    AiPowCudaPeakSession** session_out) {
+  if (session_out == nullptr || a == nullptr || b == nullptr ||
+      m == 0 || n == 0 || k != kK || rank != kRank ||
+      tile != kHashTile || m % kBm != 0 || n % kBn != 0) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  *session_out = nullptr;
+  size_t a_bytes = 0;
+  size_t b_bytes = 0;
+  size_t e_l_bytes = 0;
+  size_t f_r_bytes = 0;
+  if (!checked_product(m, k, &a_bytes) ||
+      !checked_product(n, k, &b_bytes) ||
+      !checked_product(m, rank, &e_l_bytes) ||
+      !checked_product(n, rank, &f_r_bytes)) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const uint32_t a_chunks = static_cast<uint32_t>(a_bytes / kChunkBytes);
+  const uint32_t b_chunks = static_cast<uint32_t>(b_bytes / kChunkBytes);
+  if (a_bytes % kChunkBytes != 0 || b_bytes % kChunkBytes != 0 ||
+      a_chunks == 0 || b_chunks == 0) {
+    return static_cast<int>(cudaErrorNotSupported);
+  }
+  const uint32_t max_chunks = a_chunks > b_chunks ? a_chunks : b_chunks;
+  size_t cv_words = 0;
+  size_t cv_bytes = 0;
+  size_t position_words = 0;
+  size_t position_bytes = 0;
+  if (!checked_product(max_chunks, 8, &cv_words) ||
+      !checked_product(cv_words, sizeof(uint32_t), &cv_bytes) ||
+      !checked_product(k, 2, &position_words) ||
+      !checked_product(position_words, sizeof(uint32_t), &position_bytes)) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  const uint64_t row_tiles = m / tile;
+  const uint64_t col_tiles = n / tile;
+  if (row_tiles > UINT64_MAX / col_tiles) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+
+  auto* session = static_cast<AiPowCudaPeakSession*>(
+      std::calloc(1, sizeof(AiPowCudaPeakSession)));
+  if (session == nullptr) return static_cast<int>(cudaErrorMemoryAllocation);
+  session->device_ordinal = device_ordinal;
+  session->m = m;
+  session->n = n;
+  session->total_tickets = row_tiles * col_tiles;
+  session->a_bytes = a_bytes;
+  session->b_bytes = b_bytes;
+  session->source_mode = true;
+  session->prepared = false;
+
+  cudaDeviceProp properties{};
+  cudaError_t error = cudaSetDevice(static_cast<int>(device_ordinal));
+  if (error != cudaSuccess) goto fail;
+  error = cudaGetDeviceProperties(&properties, static_cast<int>(device_ordinal));
+  if (error != cudaSuccess) goto fail;
+  if (properties.major != 12 || properties.minor != 0) {
+    error = cudaErrorNotSupported;
+    goto fail;
+  }
+  session->grid_size = properties.multiProcessorCount * 2;
+  error = cudaStreamCreateWithFlags(&session->stream, cudaStreamNonBlocking);
+  if (error != cudaSuccess) goto fail;
+  error = cudaEventCreate(&session->start_event);
+  if (error != cudaSuccess) goto fail;
+  error = cudaEventCreate(&session->commitment_event);
+  if (error != cudaSuccess) goto fail;
+  error = cudaEventCreate(&session->end_event);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_source_a, a_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_source_b, b_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_a, a_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_b, b_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_transcript, kTranscriptBytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_kappa, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_h_a, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_h_b, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_key, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_s_b, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_cv_ping, cv_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_cv_pong, cv_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_e_l, e_l_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_f_r, f_r_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_e_positions, position_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_f_positions, position_bytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_target, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_winner, sizeof(uint64_t));
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_debug_state, 16 * sizeof(int32_t));
+  if (error != cudaSuccess) goto fail;
+  error = cudaMalloc(&session->d_debug_hash, 32);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMemcpyAsync(session->d_source_a, a, a_bytes,
+                          cudaMemcpyHostToDevice, session->stream);
+  if (error != cudaSuccess) goto fail;
+  error = cudaMemcpyAsync(session->d_source_b, b, b_bytes,
+                          cudaMemcpyHostToDevice, session->stream);
+  if (error != cudaSuccess) goto fail;
+  error = cudaFuncSetAttribute(ai_pow_v3_peak_kernel,
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,
+                               kDynamicSmemBytes);
+  if (error != cudaSuccess) goto fail;
+  error = cudaStreamSynchronize(session->stream);
+  if (error != cudaSuccess) goto fail;
+  *session_out = session;
+  return static_cast<int>(cudaSuccess);
+
+fail:
+  ai_pow_cuda_peak_session_destroy(session);
+  return static_cast<int>(error);
+}
+
+extern "C" int ai_pow_cuda_peak_session_prepare(
+    AiPowCudaPeakSession* session,
+    const uint8_t sigma[76],
+    const uint8_t mu[52],
+    AiPowCudaPeakPrepareResult* result_out) {
+  if (session == nullptr || sigma == nullptr || mu == nullptr ||
+      result_out == nullptr || !session->source_mode) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  session->prepared = false;
+  uint8_t transcript[kTranscriptBytes];
+  std::memcpy(transcript, sigma, kSigmaBytes);
+  std::memcpy(transcript + kSigmaBytes, mu, kMuBytes);
+  cudaError_t error = cudaSetDevice(static_cast<int>(session->device_ordinal));
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaMemcpyAsync(session->d_transcript, transcript, kTranscriptBytes,
+                          cudaMemcpyHostToDevice, session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventRecord(session->start_event, session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  peak_kappa_kernel<<<1, 1, 0, session->stream>>>(
+      session->d_transcript, session->d_kappa);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+
+  const uint32_t a_chunks =
+      static_cast<uint32_t>(session->a_bytes / kChunkBytes);
+  const uint32_t b_chunks =
+      static_cast<uint32_t>(session->b_bytes / kChunkBytes);
+  error = launch_peak_matrix_commitment(
+      session->d_source_a, a_chunks, session->d_kappa,
+      session->d_cv_ping, session->d_cv_pong, session->d_h_a,
+      session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = launch_peak_matrix_commitment(
+      session->d_source_b, b_chunks, session->d_kappa,
+      session->d_cv_ping, session->d_cv_pong, session->d_h_b,
+      session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  peak_seed_kernel<<<1, 1, 0, session->stream>>>(
+      session->d_kappa, session->d_h_a, session->d_h_b,
+      session->m, session->n, session->d_key, session->d_s_b);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventRecord(session->commitment_event, session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+
+  const uint32_t e_hashes =
+      static_cast<uint32_t>((size_t(session->m) * kRank) / 32);
+  const uint32_t f_hashes =
+      static_cast<uint32_t>((size_t(session->n) * kRank) / 32);
+  const uint32_t e_blocks =
+      (e_hashes + kPrepareThreads - 1) / kPrepareThreads;
+  const uint32_t f_blocks =
+      (f_hashes + kPrepareThreads - 1) / kPrepareThreads;
+  peak_uniform_noise_kernel<<<e_blocks, kPrepareThreads, 0, session->stream>>>(
+      e_hashes, false, session->d_key, session->d_e_l);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  peak_uniform_noise_kernel<<<f_blocks, kPrepareThreads, 0, session->stream>>>(
+      f_hashes, true, session->d_s_b, session->d_f_r);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  constexpr uint32_t position_hashes = kK / 8;
+  constexpr uint32_t position_blocks =
+      (position_hashes + kPrepareThreads - 1) / kPrepareThreads;
+  peak_position_kernel<<<position_blocks, kPrepareThreads, 0, session->stream>>>(
+      position_hashes, false, session->d_key, session->d_e_positions);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  peak_position_kernel<<<position_blocks, kPrepareThreads, 0, session->stream>>>(
+      position_hashes, true, session->d_s_b, session->d_f_positions);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  const uint32_t noise_blocks =
+      static_cast<uint32_t>(session->grid_size) * 8;
+  peak_apply_noise_kernel<<<noise_blocks, kPrepareThreads, 0, session->stream>>>(
+      session->d_source_a, session->a_bytes, session->d_e_l,
+      session->d_e_positions, session->d_a);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  peak_apply_noise_kernel<<<noise_blocks, kPrepareThreads, 0, session->stream>>>(
+      session->d_source_b, session->b_bytes, session->d_f_r,
+      session->d_f_positions, session->d_b);
+  error = cudaGetLastError();
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventRecord(session->end_event, session->stream);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventSynchronize(session->end_event);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventElapsedTime(&result_out->commitment_ms, session->start_event,
+                               session->commitment_event);
+  if (error != cudaSuccess) return static_cast<int>(error);
+  error = cudaEventElapsedTime(&result_out->noise_ms,
+                               session->commitment_event, session->end_event);
+  if (error != cudaSuccess) return static_cast<int>(error);
+#define COPY_TRANSCRIPT(field, source) do {                                     \
+  error = cudaMemcpy((field), (source), 32, cudaMemcpyDeviceToHost);             \
+  if (error != cudaSuccess) return static_cast<int>(error);                      \
+} while (0)
+  COPY_TRANSCRIPT(result_out->kappa, session->d_kappa);
+  COPY_TRANSCRIPT(result_out->h_a, session->d_h_a);
+  COPY_TRANSCRIPT(result_out->h_b, session->d_h_b);
+  COPY_TRANSCRIPT(result_out->s_a, session->d_key);
+  COPY_TRANSCRIPT(result_out->s_b, session->d_s_b);
+#undef COPY_TRANSCRIPT
+  session->prepared = true;
+  return static_cast<int>(cudaSuccess);
+}
+
 extern "C" int ai_pow_cuda_peak_session_debug(
     AiPowCudaPeakSession* session,
     uint64_t ordinal,
     int32_t state_out[16],
     uint8_t jackpot_out[32]) {
   if (session == nullptr || state_out == nullptr || jackpot_out == nullptr ||
-      ordinal >= session->total_tickets) {
+      !session->prepared || ordinal >= session->total_tickets) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
   cudaError_t error = cudaSetDevice(static_cast<int>(session->device_ordinal));
@@ -689,7 +1292,8 @@ extern "C" int ai_pow_cuda_peak_session_search(
     const uint8_t target[32],
     AiPowCudaPeakSearchResult* result_out) {
   if (session == nullptr || target == nullptr || result_out == nullptr ||
-      ordinal_count == 0 || ordinal_start >= session->total_tickets ||
+      !session->prepared || ordinal_count == 0 ||
+      ordinal_start >= session->total_tickets ||
       ordinal_count > session->total_tickets - ordinal_start) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
@@ -737,6 +1341,17 @@ extern "C" int ai_pow_cuda_peak_session_destroy(AiPowCudaPeakSession* session) {
     if (first == cudaSuccess) first = current;                                   \
   }                                                                              \
 } while (0)
+  FREE_DEVICE(session->d_f_positions);
+  FREE_DEVICE(session->d_e_positions);
+  FREE_DEVICE(session->d_f_r);
+  FREE_DEVICE(session->d_e_l);
+  FREE_DEVICE(session->d_cv_pong);
+  FREE_DEVICE(session->d_cv_ping);
+  FREE_DEVICE(session->d_s_b);
+  FREE_DEVICE(session->d_h_b);
+  FREE_DEVICE(session->d_h_a);
+  FREE_DEVICE(session->d_kappa);
+  FREE_DEVICE(session->d_transcript);
   FREE_DEVICE(session->d_debug_hash);
   FREE_DEVICE(session->d_debug_state);
   FREE_DEVICE(session->d_winner);
@@ -744,9 +1359,15 @@ extern "C" int ai_pow_cuda_peak_session_destroy(AiPowCudaPeakSession* session) {
   FREE_DEVICE(session->d_key);
   FREE_DEVICE(session->d_b);
   FREE_DEVICE(session->d_a);
+  FREE_DEVICE(session->d_source_b);
+  FREE_DEVICE(session->d_source_a);
 #undef FREE_DEVICE
   if (session->end_event != nullptr) {
     const cudaError_t current = cudaEventDestroy(session->end_event);
+    if (first == cudaSuccess) first = current;
+  }
+  if (session->commitment_event != nullptr) {
+    const cudaError_t current = cudaEventDestroy(session->commitment_event);
     if (first == cudaSuccess) first = current;
   }
   if (session->start_event != nullptr) {

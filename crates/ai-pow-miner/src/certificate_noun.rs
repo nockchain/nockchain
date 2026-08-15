@@ -5966,7 +5966,11 @@ mod tests {
             .validate_prod_envelope()
             .expect("tile=16,k=4096,r=64 must be in the prod envelope");
         let aux = pearl_test_aux();
-        let (header, aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        let (mut header, aux_inclusion) = pearl_test_aux_inclusion(&aux.commitment().unwrap());
+        // This proof-size fixture needs an easy target that still fits after
+        // the 2^20 max-envelope shape-work adjustment.
+        header.nbits = 0x1e0f_ffff;
+        let easy_shape_target = ai_pow::pearl_compat::pearl_nbits_to_target_le(header.nbits);
         let config = PearlMiningConfig {
             common_dim: 4096,
             rank: 64,
@@ -5977,16 +5981,7 @@ mod tests {
         };
         let (a, b) = synth_matrices(b"pearl-max-envelope-t16-k4096", &params);
         let attempt = evaluate_pearl_merge_ticket_attempt(
-            &header,
-            &config,
-            &params,
-            0,
-            0,
-            &a,
-            &b,
-            &easy_nock_target(),
-            16,
-            aux,
+            &header, &config, &params, 0, 0, &a, &b, &easy_shape_target, 16, aux,
         )
         .expect("evaluate max-envelope Pearl merge ticket attempt");
 
@@ -8567,5 +8562,73 @@ mod tests {
             ),
             "expected a fail-closed threshold overflow, got {err:?}"
         );
+    }
+
+    #[test]
+    #[ignore = "builds and verifies the full peak production certificate"]
+    fn peak_production_certificate_verifies_through_consensus_entrypoint() {
+        let params = crate::PEAK_PRODUCTION_PARAMS;
+        let commit = [0x5a; 32];
+        let target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
+        let (a, b) = synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+            &params,
+            commit,
+            std::sync::Arc::new(a),
+            std::sync::Arc::new(b),
+        )
+        .expect("peak template");
+        let prepared = template.prepare(0).expect("peak transcript");
+        let factor = prepared
+            .config()
+            .shape_work_factor()
+            .expect("peak work factor");
+        let mut scratch = prepared.scratch();
+        let total_tickets =
+            prepared.row_offsets().len() as u64 * prepared.col_offsets().len() as u64;
+        let winner = (0..total_tickets)
+            .find(|&ordinal| {
+                let (rows, cols) = prepared
+                    .offsets_at_ordinal(ordinal)
+                    .expect("peak ticket offsets");
+                let ticket = prepared
+                    .evaluate(rows, cols, &mut scratch)
+                    .expect("peak ticket");
+                ai_pow::difficulty::attempt_wins(&ticket.jackpot_hash, &target, factor)
+                    .expect("peak target")
+            })
+            .expect("the deterministic fixture must contain a winning ticket");
+        let attempt = template
+            .checked_winner(&prepared, winner, &target)
+            .expect("checked peak winner");
+        let block = template.prove(attempt).expect("peak compact proof");
+        let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+            block.attempt.attempt(),
+            &block.aux_inclusion,
+            &block.a,
+            &block.b,
+            params.tile as usize,
+            &block.run,
+        )
+        .expect("peak artifact noun");
+        let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            block.run.verifier_key_digest(),
+        );
+        let outcome = verify_ai_pow_block_artifact_jam(
+            &artifact.jam(),
+            CertificateNounLimits::default(),
+            &commit,
+            &target,
+            params.tile as usize,
+            block.run.verifier_context(),
+            &digest,
+        )
+        .expect("peak artifact verifies through consensus");
+        match outcome {
+            AiPowBlockVerifyOutcome::Dense(verified) => {
+                assert_eq!(verified.work.ticket.jackpot_hash, block.jackpot_hash);
+            }
+            AiPowBlockVerifyOutcome::Moe(_) => panic!("peak artifact routed to the MoE verifier"),
+        }
     }
 }

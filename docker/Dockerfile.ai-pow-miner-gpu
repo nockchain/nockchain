@@ -87,9 +87,7 @@ ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 COPY --from=builder /tmp/ai-pow-mine /usr/local/bin/ai-pow-mine
 COPY docker/ai-pow-miner-entrypoint.sh /usr/local/bin/ai-pow-miner-entrypoint
 
-ENV CANONICAL=true \
-    CUDA_DEVICES=all \
-    GPU_BATCH_ATTEMPTS=32768 \
+ENV CUDA_DEVICES=all \
     MINING_PKH=2nFsk7KTv9Fm5zMU3ckWAM4p9eLhUSVeVEKUoPFkfzehyjuzmpXAN8j \
     RUST_LOG=info,ai_pow_miner=info,nockchain_mining_common=info
 ENTRYPOINT ["/usr/local/bin/ai-pow-miner-entrypoint"]

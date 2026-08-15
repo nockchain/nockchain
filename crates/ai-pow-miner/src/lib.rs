@@ -144,7 +144,8 @@ pub mod run;
 /// the same work arguments and choose their search implementation explicitly.
 #[cfg(feature = "node")]
 pub mod cli;
-/// CUDA search implementation selected by `ai-pow-mine --gpu`.
+/// CUDA search implementations. `--gpu --canonical` selects the production
+/// dense route. Gateway mode retains the generic CUDA backend.
 #[cfg(all(feature = "node", feature = "gpu"))]
 pub mod gpu;
 

@@ -591,22 +591,42 @@ impl StripIndexSchedule {
     }
 }
 
-/// Covering-range id span (`max lane + 1`) for one side: the sweep lane is
-/// `index − chunk_base`, so the span is `last − chunk_base + 1` (indices are
-/// validated strictly increasing). Errors instead of underflowing when the
-/// chunk base exceeds the last index (a `k > 1024` non-origin schedule — the
-/// lane arithmetic has no representation for it).
-pub fn covering_id_span(name: &str, indices: &[u32], chunk_base: usize) -> Result<usize, String> {
+/// Matrix-row origin represented by a selected BLAKE3 chunk base.
+///
+/// The positioned ID lane is relative to this row, not to the chunk index.
+/// A chunk base that starts inside a matrix row cannot use the lane encoding.
+pub fn covering_id_lane_base(name: &str, chunk_base: usize, k: usize) -> Result<usize, String> {
+    let byte_base = chunk_base
+        .checked_mul(crate::blake3_tree::CHUNK_LEN)
+        .ok_or_else(|| format!("{name} strip chunk byte offset overflow"))?;
+    if k == 0 || !byte_base.is_multiple_of(k) {
+        return Err(format!(
+            "{name} strip chunk base is not matrix-row aligned \
+             (chunk_base={chunk_base}, byte_base={byte_base}, k={k})"
+        ));
+    }
+    Ok(byte_base / k)
+}
+
+/// Covering-range ID span (`max lane + 1`) for one matrix side.
+pub fn covering_id_span(
+    name: &str,
+    indices: &[u32],
+    chunk_base: usize,
+    k: usize,
+) -> Result<usize, String> {
+    let lane_base = covering_id_lane_base(name, chunk_base, k)?;
     let last = *indices
         .last()
         .expect("validated strip schedule is nonempty") as usize;
-    last.checked_sub(chunk_base).map(|d| d + 1).ok_or_else(|| {
-        format!(
-            "{name} strip schedule covering range starts above its last index \
-                 (last={last}, chunk_base={chunk_base}); k > 1024 non-origin \
-                 schedules are not representable"
-        )
-    })
+    last.checked_sub(lane_base)
+        .map(|distance| distance + 1)
+        .ok_or_else(|| {
+            format!(
+                "{name} strip row origin exceeds its last index \
+                 (last={last}, lane_base={lane_base})"
+            )
+        })
 }
 
 fn validate_strip_indices(name: &str, indices: &[u32], dimension: u32) -> Result<(), String> {
@@ -969,6 +989,8 @@ pub fn strip_opening_rows_set(sel: &[usize], num_chunks: usize) -> usize {
 struct StripPlan {
     ca0: usize,
     cb0: usize,
+    a_lane_base: usize,
+    b_lane_base: usize,
     w_tile: usize,
     a_id_base: u64,
     b_id_base: u64,
@@ -998,18 +1020,22 @@ impl StripPlan {
             crate::blake3_tree::indexed_strips_chunk_set(&strip_schedule.b_indices, k, b_nc * 1024);
         let ca0 = a_chunks[0];
         let cb0 = b_chunks[0];
+        let a_lane_base = covering_id_lane_base("A", ca0, k)?;
+        let b_lane_base = covering_id_lane_base("B", cb0, k)?;
         let w_tile = strip_schedule.b_indices.len();
-        // Bases from the full covering-range lane span, not h_tile —
-        // side-disjoint for scattered openings; identical to the tile-height
-        // derivation for contiguous tiles (span == h_tile).
+        // Bases cover every lane from the row containing the first selected
+        // chunk through the last opened row or column. This keeps the matrix
+        // sides disjoint for sparse and non-origin schedules.
         let (a_id_base, b_id_base) = crate::composite_trace::try_noised_id_bases(
-            covering_id_span("A", &strip_schedule.a_indices, ca0)? - 1,
-            covering_id_span("B", &strip_schedule.b_indices, cb0)? - 1,
+            covering_id_span("A", &strip_schedule.a_indices, ca0, k)? - 1,
+            covering_id_span("B", &strip_schedule.b_indices, cb0, k)? - 1,
             k,
         )?;
         Ok(StripPlan {
             ca0,
             cb0,
+            a_lane_base,
+            b_lane_base,
             w_tile,
             a_id_base,
             b_id_base,
@@ -1319,15 +1345,13 @@ fn row_descriptor(
             let c0 = chunk * TILE_D;
             let w = (r - c0).min(TILE_D);
             let ids_for = |side_a: bool, sb_base: usize| -> [u64; 4] {
-                // Map the tile-local sub-block row to the actual opened
-                // (possibly non-contiguous) matrix row, then to its covering-range
-                // position (`row - c_base`) — the key the strip-opening producer
-                // publishes. For a contiguous tile `indices[i] - c_base == i`, so
-                // this is byte-identical to the previous tile-geometry path.
-                let (indices, c_base) = if side_a {
-                    (&sp.a_indices, sp.ca0)
+                // Map each tile-local row to its opened matrix row, then to the
+                // lane relative to the matrix row at the selected chunk base.
+                // This is the same byte origin that the strip producer uses.
+                let (indices, lane_base) = if side_a {
+                    (&sp.a_indices, sp.a_lane_base)
                 } else {
-                    (&sp.b_indices, sp.cb0)
+                    (&sp.b_indices, sp.b_lane_base)
                 };
                 core::array::from_fn(|jc| {
                     let mut src = [None; 8];
@@ -1335,7 +1359,7 @@ fn row_descriptor(
                         let f = jc * 8 + m;
                         let (di, col) = (f / TILE_D, f % TILE_D);
                         if col < w {
-                            let lane = indices[sb_base + di] as usize - c_base;
+                            let lane = indices[sb_base + di] as usize - lane_base;
                             src[m] = Some((lane as u32, (lo + c0 + col) as u32));
                         }
                     }
@@ -1772,7 +1796,7 @@ mod tests {
         assert_eq!(sp.a_id_base, crate::composite_trace::NOISED_CHUNK_ID_BASE);
         assert_eq!(sp.b_id_base, 8 + 74 * 128);
         for &i in &sched.a_indices {
-            let lane = (i as usize) - sp.ca0;
+            let lane = (i as usize) - sp.a_lane_base;
             for l in (0..p.k as usize).step_by(8) {
                 let mut src = [None; 8];
                 src[0] = Some((lane as u32, l as u32));
@@ -1790,9 +1814,8 @@ mod tests {
         );
     }
 
-    /// The canonical program build rejects schedules whose id span
-    /// overflows the pack_ab_id budget, and k>1024 non-origin schedules
-    /// (unrepresentable lanes), as clean errors rather than panics.
+    /// The canonical program rejects an ID span that exceeds the packed-key
+    /// budget.
     #[test]
     fn canonical_program_rejects_unprovable_id_spans() {
         let bp = bp0();
@@ -1810,8 +1833,12 @@ mod tests {
         let err = canonical_program_for_strip_schedule(&huge, &sched, &bp, 1 << 16)
             .expect_err("budget-overflowing schedule must be rejected");
         assert!(err.contains("pack_ab_id"), "unexpected error: {err}");
+    }
 
-        // k > 1024 non-origin: the lane arithmetic has no representation.
+    /// A non-origin schedule uses a matrix-row lane origin even when one row
+    /// spans multiple BLAKE3 chunks.
+    #[test]
+    fn strip_plan_supports_wide_non_origin_schedule() {
         let wide = ZkParams {
             m: 64,
             k: 2048,
@@ -1821,9 +1848,12 @@ mod tests {
             difficulty_bits: 0,
         };
         let sched = StripIndexSchedule::from_tile(&wide, 1, 1).expect("tile in grid");
-        let err = canonical_program_for_strip_schedule(&wide, &sched, &bp, 1 << 15)
-            .expect_err("k>1024 non-origin schedule must be rejected cleanly");
-        assert!(err.contains("not representable"), "unexpected error: {err}");
+        let plan = StripPlan::build_for_strip_schedule(&wide, &sched).expect("plan builds");
+        assert_eq!(plan.ca0, 16);
+        assert_eq!(plan.cb0, 16);
+        assert_eq!(plan.a_lane_base, 8);
+        assert_eq!(plan.b_lane_base, 8);
+        assert_eq!(plan.b_id_base, 8 + 8 * 256);
     }
 
     #[test]

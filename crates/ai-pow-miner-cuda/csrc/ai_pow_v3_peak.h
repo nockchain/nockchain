@@ -14,6 +14,16 @@ typedef struct AiPowCudaPeakSearchResult {
   float kernel_ms;
 } AiPowCudaPeakSearchResult;
 
+typedef struct AiPowCudaPeakPrepareResult {
+  uint8_t kappa[32];
+  uint8_t h_a[32];
+  uint8_t h_b[32];
+  uint8_t s_a[32];
+  uint8_t s_b[32];
+  float commitment_ms;
+  float noise_ms;
+} AiPowCudaPeakPrepareResult;
+
 typedef struct AiPowCudaPeakKernelInfo {
   uint32_t sm_count;
   uint32_t threads_per_cta;
@@ -41,6 +51,28 @@ int ai_pow_cuda_peak_session_create(
     const int8_t* b_prime,
     const uint8_t pow_key[32],
     AiPowCudaPeakSession** session_out);
+
+// Creates a persistent source-matrix session. The source matrices remain
+// resident while prepare replaces every attempt-bound device buffer.
+int ai_pow_cuda_peak_source_session_create(
+    uint32_t device_ordinal,
+    uint32_t m,
+    uint32_t n,
+    uint32_t k,
+    uint32_t rank,
+    uint32_t tile,
+    const int8_t* a,
+    const int8_t* b,
+    AiPowCudaPeakSession** session_out);
+
+// Derives the complete dense Pearl V3 transcript for one 76-byte header and
+// 52-byte mining configuration. The returned values are required for scalar
+// winner validation and proof construction.
+int ai_pow_cuda_peak_session_prepare(
+    AiPowCudaPeakSession* session,
+    const uint8_t sigma[76],
+    const uint8_t mu[52],
+    AiPowCudaPeakPrepareResult* result_out);
 
 // Searches [ordinal_start, ordinal_start + ordinal_count). The lowest matching
 // ordinal is returned. UINT64_MAX means no winner.

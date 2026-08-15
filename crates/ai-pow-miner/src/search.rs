@@ -9,12 +9,16 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle, Thread};
 use std::time::{Duration, Instant};
 
+#[cfg(all(feature = "node", feature = "gpu"))]
+use ai_pow::pearl_compat::PearlWorkCommitments;
 use ai_pow::pearl_compat::{
     PearlCompatError, PreparedPearlPatternJob, PreparedPearlPatternScratch,
 };
 use ai_pow::tile_hash::hash_le_target;
 use thiserror::Error;
 
+#[cfg(all(feature = "node", feature = "gpu"))]
+use crate::canonical::PreparedCanonicalDenseSearch;
 #[cfg(feature = "node")]
 use crate::canonical::{PreparedCanonicalMoeScratch, PreparedCanonicalMoeTemplate};
 
@@ -66,6 +70,15 @@ impl SearchBatch {
 pub struct SearchWinner {
     pub ordinal: u64,
     pub jackpot_hash: [u8; 32],
+}
+
+#[cfg(all(feature = "node", feature = "gpu"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeakSearchOutcome {
+    pub winner: Option<SearchWinner>,
+    pub commitments: PearlWorkCommitments,
+    pub commitment_ms: f32,
+    pub noise_ms: f32,
 }
 
 /// Terminal condition for an ordered search schedule.
@@ -218,6 +231,17 @@ pub trait SearchBackend: Send + Sync {
         batch: SearchBatch,
     ) -> Result<Option<SearchWinner>, SearchBackendError>;
 
+    #[cfg(all(feature = "node", feature = "gpu"))]
+    fn search_peak(
+        &self,
+        _template: Arc<PreparedCanonicalDenseSearch>,
+        _batch: SearchBatch,
+    ) -> Result<PeakSearchOutcome, SearchBackendError> {
+        Err(SearchBackendError::BackendUnavailable(
+            "backend does not accept peak dense jobs".to_string(),
+        ))
+    }
+
     /// Preferred upper bound for one scheduler dispatch.
     ///
     /// Backends with fixed launch geometry can override this value. The caller
@@ -291,6 +315,25 @@ impl SearchBackend for MeteredSearchBackend {
         let result = self.inner.search_canonical(template, batch);
         if result.is_ok() {
             self.record(batch.len, shape_work_factor);
+        }
+        result
+    }
+
+    #[cfg(all(feature = "node", feature = "gpu"))]
+    fn search_peak(
+        &self,
+        template: Arc<PreparedCanonicalDenseSearch>,
+        batch: SearchBatch,
+    ) -> Result<PeakSearchOutcome, SearchBackendError> {
+        let shape_work_factor = template.config().shape_work_factor()?;
+        let result = self.inner.search_peak(template, batch);
+        if let Ok(outcome) = &result {
+            self.record(batch.len, shape_work_factor);
+            tracing::debug!(
+                commitment_ms = outcome.commitment_ms,
+                noise_ms = outcome.noise_ms,
+                "peak CUDA transcript preparation"
+            );
         }
         result
     }

@@ -1,22 +1,21 @@
 //! Adversarial-audit regression — `noised_packed` side-disjoint keys.
 //!
-//! Deriving `b_id_base` from the tile height (`a_id_base + h_tile·k/8`)
-//! covers only tile-local lanes. For a SCATTERED opening the A-side lane
-//! is the covering-range position (`row − ca0`), which reaches beyond
-//! `h_tile` and collides with the B-side key space. The LogUp
-//! fingerprint's packed value only binds a read to *some* committed
-//! store entry, so the collision admits committed-B-value substitution
-//! at colliding A positions — an XOR-delta jackpot-grinding amplifier.
+//! `b_id_base` must cover every A-side positioned key. The lane origin is
+//! the matrix row at the first selected BLAKE3 chunk, not the chunk index.
+//! These units differ when `k != 1024`.
 //!
-//! Deriving the bases from the full A covering-range span
-//! (`max_a_lane + 1`) makes every A-side key `< b_id_base` and every
-//! B-side key `>= b_id_base`, for any schedule. Contiguous tiles have
-//! span == h_tile, so the tile-height derivation is byte-identical
-//! there. This test pins the disjointness invariant, the contiguous
-//! parity, the separation of the historical collision pair, and the
-//! 26-bit id-budget guard.
+//! A base derived only from the tile height does not cover sparse schedules.
+//! A base derived by subtracting the chunk index from the matrix row does not
+//! cover non-origin schedules when one row spans multiple chunks. Either error
+//! can overlap the A and B key spaces. The LogUp fingerprint then permits a
+//! committed B value to substitute for an A value at a colliding key.
+//!
+//! The full covering-range span keeps every A key below `b_id_base` and every
+//! B key at or above it. Contiguous origin tiles keep the original IDs. These
+//! tests pin side disjointness, matrix-row origin arithmetic, and the packed-ID
+//! budget.
 
-use ai_pow_zk::canonical::covering_id_span;
+use ai_pow_zk::canonical::{covering_id_lane_base, covering_id_span};
 use ai_pow_zk::composite_trace::{
     noised_chunk_id, noised_id_bases, try_noised_id_bases, NOISED_CHUNK_ID_BASE,
 };
@@ -133,9 +132,11 @@ fn noised_packed_id_budget_guard() {
         try_noised_id_bases((1 << 24) - 1, 1, 1 << 16).is_err(),
         "span overflowing the 26-bit pack_ab_id budget must be rejected"
     );
-    // covering_id_span rejects k > 1024 non-origin schedules (the lane
-    // arithmetic has no representation for them) instead of underflowing.
-    assert!(covering_id_span("A", &[64, 65], 128).is_err());
-    assert_eq!(covering_id_span("A", &[64, 65], 64).unwrap(), 2);
-    assert_eq!(covering_id_span("A", &[0, 1, 8], 0).unwrap(), 9);
+    // Chunk 128 begins at matrix row 64 when k=2048.
+    assert_eq!(covering_id_lane_base("A", 128, 2048).unwrap(), 64);
+    assert_eq!(covering_id_span("A", &[64, 65], 128, 2048).unwrap(), 2);
+    assert_eq!(covering_id_span("A", &[64, 65], 64, 1024).unwrap(), 2);
+    assert_eq!(covering_id_span("A", &[0, 1, 8], 0, 64).unwrap(), 9);
+    // A selected chunk that starts inside a matrix row cannot use lane IDs.
+    assert!(covering_id_span("A", &[1, 2], 1, 1536).is_err());
 }

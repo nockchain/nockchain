@@ -14,21 +14,30 @@
 //! depend back on it. Keep them in sync with the jets copy (the node's setup
 //! builder must prove the same shape it later verifies).
 
+use std::sync::Arc;
+
 use ai_pow::fiat_shamir::canonical_noise_seeds_moe;
 use ai_pow::matmul::{
     compute_pattern_tile_state_from_slices, BlockNoise, PatternTileScratch, TileState,
 };
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    compute_pearl_moe_ticket, derive_pearl_moe_work_commitments, moe_expert_b_cols_from_local,
+    compute_pearl_moe_ticket, derive_pearl_moe_work_commitments,
+    evaluate_pearl_merge_checked_ticket_attempt, moe_expert_b_cols_from_local,
     pearl_bitcoin_double_sha256_raw, pearl_jackpot_hash, pearl_kappa, pearl_matrix_commitments,
-    PearlAuxInclusionProof, PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams,
-    PearlNockchainAux, PearlPeriodicPattern, PearlPublicProofParams, PearlWorkCommitments,
-    PEARL_MMA_INT7XINT7_TO_INT32, PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
+    prepare_pearl_pattern_job, PearlAuxInclusionProof, PearlIncompleteBlockHeader,
+    PearlMergeCheckedTicketAttempt, PearlMiningConfig, PearlMoeParams, PearlNockchainAux,
+    PearlPeriodicPattern, PearlPublicProofParams, PearlWorkCommitments, PreparedPearlPatternJob,
+    PEARL_MINING_CONFIG_RESERVED_SIZE, PEARL_MMA_INT7XINT7_TO_INT32,
+    PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
-use ai_pow::zk_bridge::{prove_pearl_moe_compact_recursive_certificate, PearlMoeCompactProveRun};
+use ai_pow::zk_bridge::{
+    prove_pearl_merge_compact_recursive_certificate_checked,
+    prove_pearl_moe_compact_recursive_certificate, AiPowCompactRecursiveCertificateRun,
+    PearlMoeCompactProveRun,
+};
 
 use crate::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -56,6 +65,17 @@ pub struct CanonicalBlock {
     pub aux_inclusion: PearlAuxInclusionProof,
     pub moe_art: PearlMergeMoeArtifact,
     pub certificate: AiPowCertificateShape,
+    pub commit: [u8; 32],
+    pub jackpot_hash: [u8; 32],
+}
+
+/// A proved dense canonical block that is ready for `AIP1` artifact encoding.
+pub struct CanonicalDenseBlock {
+    pub attempt: PearlMergeCheckedTicketAttempt,
+    pub aux_inclusion: PearlAuxInclusionProof,
+    pub a: Arc<Vec<i8>>,
+    pub b: Arc<Vec<i8>>,
+    pub run: AiPowCompactRecursiveCertificateRun,
     pub commit: [u8; 32],
     pub jackpot_hash: [u8; 32],
 }
@@ -193,6 +213,32 @@ pub struct PreparedCanonicalMoeTemplate {
     aux_commitment: [u8; 32],
     aux_inclusion: PearlAuxInclusionProof,
     mu: [u8; ai_pow::pearl_compat::PEARL_MINING_CONFIG_SIZE],
+}
+
+/// Immutable dense canonical inputs for one Nockchain block commitment.
+///
+/// Source matrices and auxiliary inclusion remain immutable across
+/// attempt-bound search transcripts.
+pub struct PreparedCanonicalDenseTemplate {
+    params: MatmulParams,
+    config: PearlMiningConfig,
+    a: Arc<Vec<i8>>,
+    b: Arc<Vec<i8>>,
+    header: PearlIncompleteBlockHeader,
+    aux: PearlNockchainAux,
+    aux_inclusion: PearlAuxInclusionProof,
+}
+
+/// Host metadata for one dense search transcript prepared on the GPU.
+pub struct PreparedCanonicalDenseSearch {
+    extranonce: u32,
+    header: PearlIncompleteBlockHeader,
+    config: PearlMiningConfig,
+    params: MatmulParams,
+    sigma: [u8; ai_pow::pearl_compat::PEARL_INCOMPLETE_BLOCK_HEADER_SIZE],
+    mu: [u8; ai_pow::pearl_compat::PEARL_MINING_CONFIG_SIZE],
+    row_tickets: u64,
+    col_tickets: u64,
 }
 
 /// Reusable mutable storage for one canonical template worker.
@@ -439,6 +485,243 @@ impl PreparedCanonicalMoeTemplate {
         usize,
     ) {
         (&self.routing, &self.inner, &self.local_b, self.n_e, self.m)
+    }
+}
+
+impl PreparedCanonicalDenseTemplate {
+    pub fn new(
+        params: &MatmulParams,
+        nock_commit: [u8; 32],
+        a: Arc<Vec<i8>>,
+        b: Arc<Vec<i8>>,
+    ) -> Result<Self, CanonicalProveError> {
+        params
+            .validate_prod_envelope()
+            .map_err(err("dense canonical parameter envelope"))?;
+        if params.spot_checks != 1 || params.difficulty_bits != 0 {
+            return Err(CanonicalProveError(
+                "dense canonical proof requires spot_checks=1 and difficulty_bits=0".to_string(),
+            ));
+        }
+        let expected_a = usize::try_from(params.m)
+            .ok()
+            .and_then(|m| m.checked_mul(params.k as usize))
+            .ok_or_else(|| CanonicalProveError("dense A length overflow".to_string()))?;
+        let expected_b = usize::try_from(params.n)
+            .ok()
+            .and_then(|n| n.checked_mul(params.k as usize))
+            .ok_or_else(|| CanonicalProveError("dense B length overflow".to_string()))?;
+        if a.len() != expected_a || b.len() != expected_b {
+            return Err(CanonicalProveError(format!(
+                "dense matrix lengths must be {expected_a} and {expected_b}, got {} and {}",
+                a.len(),
+                b.len()
+            )));
+        }
+        let config = PearlMiningConfig {
+            common_dim: params.k,
+            rank: u16::try_from(params.noise_rank)
+                .map_err(|_| CanonicalProveError("dense rank does not fit u16".to_string()))?,
+            mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+            rows_pattern: setup_pattern(params.tile),
+            cols_pattern: setup_pattern(params.tile),
+            reserved: [0; PEARL_MINING_CONFIG_RESERVED_SIZE],
+        };
+        config.to_bytes().map_err(err("dense mining config"))?;
+        let aux = setup_aux(nock_commit);
+        let aux_commitment = aux.commitment().map_err(err("dense aux commitment"))?;
+        let (header, aux_inclusion) = setup_aux_inclusion(&aux_commitment, 0);
+        Ok(Self {
+            params: *params,
+            config,
+            a,
+            b,
+            header,
+            aux,
+            aux_inclusion,
+        })
+    }
+
+    pub const fn params(&self) -> MatmulParams {
+        self.params
+    }
+
+    pub const fn config(&self) -> PearlMiningConfig {
+        self.config
+    }
+
+    pub fn header_for(&self, extranonce: u32) -> PearlIncompleteBlockHeader {
+        PearlIncompleteBlockHeader {
+            timestamp: self.header.timestamp.wrapping_add(extranonce),
+            ..self.header
+        }
+    }
+
+    pub fn prepare_search(
+        &self,
+        extranonce: u32,
+    ) -> Result<PreparedCanonicalDenseSearch, CanonicalProveError> {
+        let header = self.header_for(extranonce);
+        let row_tickets = u64::from(self.params.m / self.params.tile);
+        let col_tickets = u64::from(self.params.n / self.params.tile);
+        if row_tickets == 0 || col_tickets == 0 {
+            return Err(CanonicalProveError(
+                "dense search requires at least one complete tile".to_string(),
+            ));
+        }
+        row_tickets
+            .checked_mul(col_tickets)
+            .ok_or_else(|| CanonicalProveError("dense ticket count overflow".to_string()))?;
+        Ok(PreparedCanonicalDenseSearch {
+            extranonce,
+            header,
+            config: self.config,
+            params: self.params,
+            sigma: header.to_bytes(),
+            mu: self
+                .config
+                .to_bytes()
+                .map_err(err("dense search mining config"))?,
+            row_tickets,
+            col_tickets,
+        })
+    }
+
+    pub fn prepare(&self, extranonce: u32) -> Result<PreparedPearlPatternJob, CanonicalProveError> {
+        prepare_pearl_pattern_job(
+            &self.header_for(extranonce),
+            &self.config,
+            &self.params,
+            &self.a,
+            &self.b,
+            self.params.tile as usize,
+        )
+        .map_err(err("prepare dense canonical template"))
+    }
+
+    pub fn checked_winner(
+        &self,
+        prepared: &PreparedPearlPatternJob,
+        ordinal: u64,
+        nockchain_target: &[u8; 32],
+    ) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+        if prepared.params() != self.params || prepared.config() != self.config {
+            return Err(CanonicalProveError(
+                "dense winner belongs to a different prepared template".to_string(),
+            ));
+        }
+        let (t_rows, t_cols) = prepared.offsets_at_ordinal(ordinal).ok_or_else(|| {
+            CanonicalProveError("dense winner ordinal is out of range".to_string())
+        })?;
+        let attempt = evaluate_pearl_merge_checked_ticket_attempt(
+            &prepared.header(),
+            &self.config,
+            &self.params,
+            t_rows,
+            t_cols,
+            &self.a,
+            &self.b,
+            nockchain_target,
+            self.params.tile as usize,
+            self.aux.clone(),
+        )
+        .map_err(err("validate dense canonical winner"))?;
+        attempt
+            .public_params
+            .check_nockchain_jackpot_target(nockchain_target)
+            .map_err(err("dense canonical winner target"))?;
+        Ok(attempt)
+    }
+
+    pub fn checked_search_winner(
+        &self,
+        prepared: &PreparedCanonicalDenseSearch,
+        ordinal: u64,
+        nockchain_target: &[u8; 32],
+    ) -> Result<PearlMergeCheckedTicketAttempt, CanonicalProveError> {
+        if prepared.params != self.params
+            || prepared.config != self.config
+            || prepared.header != self.header_for(prepared.extranonce)
+        {
+            return Err(CanonicalProveError(
+                "dense winner belongs to a different search transcript".to_string(),
+            ));
+        }
+        let (t_rows, t_cols) = prepared.offsets_at_ordinal(ordinal).ok_or_else(|| {
+            CanonicalProveError("dense winner ordinal is out of range".to_string())
+        })?;
+        let attempt = evaluate_pearl_merge_checked_ticket_attempt(
+            &prepared.header,
+            &self.config,
+            &self.params,
+            t_rows,
+            t_cols,
+            &self.a,
+            &self.b,
+            nockchain_target,
+            self.params.tile as usize,
+            self.aux.clone(),
+        )
+        .map_err(err("validate dense canonical search winner"))?;
+        attempt
+            .public_params
+            .check_nockchain_jackpot_target(nockchain_target)
+            .map_err(err("dense canonical search winner target"))?;
+        Ok(attempt)
+    }
+
+    pub fn prove(
+        &self,
+        attempt: PearlMergeCheckedTicketAttempt,
+    ) -> Result<CanonicalDenseBlock, CanonicalProveError> {
+        let run = prove_pearl_merge_compact_recursive_certificate_checked(
+            &attempt, &self.params, &self.a, &self.b,
+        )
+        .map_err(err("prove dense canonical winner"))?;
+        let jackpot_hash = attempt.ticket.jackpot_hash;
+        Ok(CanonicalDenseBlock {
+            attempt,
+            aux_inclusion: self.aux_inclusion.clone(),
+            a: Arc::clone(&self.a),
+            b: Arc::clone(&self.b),
+            run,
+            commit: self.aux.nock_block_commitment,
+            jackpot_hash,
+        })
+    }
+}
+
+impl PreparedCanonicalDenseSearch {
+    pub const fn config(&self) -> PearlMiningConfig {
+        self.config
+    }
+
+    pub const fn params(&self) -> MatmulParams {
+        self.params
+    }
+
+    pub fn sigma(&self) -> &[u8] {
+        &self.sigma
+    }
+
+    pub fn mu(&self) -> &[u8] {
+        &self.mu
+    }
+
+    pub fn total_tickets(&self) -> u64 {
+        self.row_tickets * self.col_tickets
+    }
+
+    pub fn offsets_at_ordinal(&self, ordinal: u64) -> Option<(u32, u32)> {
+        if ordinal >= self.total_tickets() {
+            return None;
+        }
+        let row = u32::try_from(ordinal / self.col_tickets).ok()?;
+        let col = u32::try_from(ordinal % self.col_tickets).ok()?;
+        Some((
+            row.checked_mul(self.params.tile)?,
+            col.checked_mul(self.params.tile)?,
+        ))
     }
 }
 
@@ -730,7 +1013,7 @@ pub(crate) fn prove_canonical_moe_block_at_for_miner(
         .map(|(block, _)| block)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "gpu"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prove_canonical_moe_block_at_with_verifier_context(
     params: &MatmulParams,
@@ -865,6 +1148,46 @@ mod tests {
             spot_checks: 1,
             difficulty_bits: 0,
         }
+    }
+
+    fn dense_params() -> MatmulParams {
+        MatmulParams {
+            m: 16,
+            k: 1024,
+            n: 16,
+            noise_rank: 64,
+            tile: 8,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        }
+    }
+
+    #[test]
+    fn dense_template_rebinds_every_extranonce_and_validates_the_winner() {
+        let params = dense_params();
+        let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, &params);
+        let template =
+            PreparedCanonicalDenseTemplate::new(&params, [0x5a; 32], Arc::new(a), Arc::new(b))
+                .expect("dense canonical template");
+        let first = template.prepare(0).expect("first dense template");
+        let second = template.prepare(1).expect("second dense template");
+
+        assert_ne!(first.header(), second.header());
+        assert_ne!(first.commitments(), second.commitments());
+        assert_eq!(first.row_offsets(), &[0, 8]);
+        assert_eq!(first.col_offsets(), &[0, 8]);
+
+        let mut target = [0xff; 32];
+        target[30] = 0;
+        target[31] = 0;
+        let checked = template
+            .checked_winner(&first, 0, &target)
+            .expect("scalar-checked dense winner");
+        let scalar = first
+            .evaluate(0, 0, &mut first.scratch())
+            .expect("scalar ticket");
+        assert_eq!(checked.ticket.jackpot_hash, scalar.jackpot_hash);
+        assert_eq!(checked.aux.nock_block_commitment, [0x5a; 32]);
     }
 
     /// The cheap grind evaluator must be byte-identical to the jackpot the full

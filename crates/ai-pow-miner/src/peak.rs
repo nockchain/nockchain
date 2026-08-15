@@ -8,24 +8,39 @@ use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex};
 
 use ai_pow::matmul::TileState;
-use ai_pow::pearl_compat::PreparedPearlPatternJob;
+use ai_pow::pearl_compat::{PearlWorkCommitments, PreparedPearlPatternJob};
 use ai_pow::tile_hash::hash_le_target;
 use anyhow::{bail, Result};
+use rayon::prelude::*;
 
 #[cfg(feature = "node")]
-use crate::canonical::PreparedCanonicalMoeTemplate;
+use crate::canonical::{PreparedCanonicalDenseSearch, PreparedCanonicalMoeTemplate};
+#[cfg(feature = "node")]
+use crate::search::PeakSearchOutcome;
 use crate::search::{SearchBackend, SearchBackendError, SearchBatch, SearchWinner};
+use crate::PEAK_PRODUCTION_PARAMS;
 
 pub const PEAK_K: usize = 8192;
 pub const PEAK_RANK: usize = 512;
 pub const PEAK_TILE: usize = 16;
 const NO_WINNER: u64 = u64::MAX;
+const MAX_PEAK_GPU_DEVICES: usize = 8;
 
 #[repr(C)]
 struct FfiSearchResult {
     winner_ordinal: u64,
     jackpot: [u8; 32],
     kernel_ms: f32,
+}
+#[repr(C)]
+struct FfiPrepareResult {
+    kappa: [u8; 32],
+    h_a: [u8; 32],
+    h_b: [u8; 32],
+    s_a: [u8; 32],
+    s_b: [u8; 32],
+    commitment_ms: f32,
+    noise_ms: f32,
 }
 #[repr(C)]
 struct FfiKernelInfo {
@@ -50,6 +65,23 @@ unsafe extern "C" {
         b_prime: *const i8,
         pow_key: *const u8,
         session_out: *mut *mut c_void,
+    ) -> c_int;
+    fn ai_pow_cuda_peak_source_session_create(
+        device_ordinal: u32,
+        m: u32,
+        n: u32,
+        k: u32,
+        rank: u32,
+        tile: u32,
+        a: *const i8,
+        b: *const i8,
+        session_out: *mut *mut c_void,
+    ) -> c_int;
+    fn ai_pow_cuda_peak_session_prepare(
+        session: *mut c_void,
+        sigma: *const u8,
+        mu: *const u8,
+        result_out: *mut FfiPrepareResult,
     ) -> c_int;
     fn ai_pow_cuda_peak_session_search(
         session: *mut c_void,
@@ -78,6 +110,13 @@ pub struct PeakSearchResult {
 pub struct PeakDebugResult {
     pub state: TileState,
     pub jackpot: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeakPreparation {
+    pub commitments: PearlWorkCommitments,
+    pub commitment_ms: f32,
+    pub noise_ms: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PeakKernelInfo {
@@ -181,6 +220,98 @@ impl PeakCudaSession {
         })
     }
 
+    pub fn new_source(
+        device_ordinal: usize,
+        m: usize,
+        n: usize,
+        a: &[i8],
+        b: &[i8],
+    ) -> Result<Self> {
+        if m == 0 || n == 0 || m % 256 != 0 || n % 128 != 0 {
+            bail!("peak shape requires nonzero m%256==0 and n%128==0");
+        }
+        let a_len = m
+            .checked_mul(PEAK_K)
+            .ok_or_else(|| anyhow::anyhow!("peak source A length overflow"))?;
+        let b_len = n
+            .checked_mul(PEAK_K)
+            .ok_or_else(|| anyhow::anyhow!("peak source B length overflow"))?;
+        if a.len() != a_len || b.len() != b_len {
+            bail!(
+                "peak source matrix lengths must be m*k={} and n*k={}, got {} and {}",
+                a_len,
+                b_len,
+                a.len(),
+                b.len()
+            );
+        }
+        let total_tickets = u64::try_from(m / PEAK_TILE)?
+            .checked_mul(u64::try_from(n / PEAK_TILE)?)
+            .ok_or_else(|| anyhow::anyhow!("peak ticket count overflow"))?;
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the source slices have the validated fixed lengths. CUDA
+        // copies them before this synchronous call returns.
+        let status = unsafe {
+            ai_pow_cuda_peak_source_session_create(
+                u32::try_from(device_ordinal)?,
+                u32::try_from(m)?,
+                u32::try_from(n)?,
+                PEAK_K as u32,
+                PEAK_RANK as u32,
+                PEAK_TILE as u32,
+                a.as_ptr(),
+                b.as_ptr(),
+                &mut raw,
+            )
+        };
+        check_cuda("peak source session creation", status)?;
+        if raw.is_null() {
+            bail!("peak source session creation returned a null session");
+        }
+        Ok(Self {
+            raw,
+            m,
+            n,
+            total_tickets,
+        })
+    }
+
+    pub fn prepare(&mut self, sigma: &[u8], mu: &[u8]) -> Result<PeakPreparation> {
+        if sigma.len() != 76 || mu.len() != 52 {
+            bail!(
+                "peak transcript lengths must be sigma=76 and mu=52, got {} and {}",
+                sigma.len(),
+                mu.len()
+            );
+        }
+        let mut result = FfiPrepareResult {
+            kappa: [0; 32],
+            h_a: [0; 32],
+            h_b: [0; 32],
+            s_a: [0; 32],
+            s_b: [0; 32],
+            commitment_ms: 0.0,
+            noise_ms: 0.0,
+        };
+        // SAFETY: both transcript slices have their ABI-required fixed lengths.
+        // The session is exclusively borrowed for the synchronous preparation.
+        let status = unsafe {
+            ai_pow_cuda_peak_session_prepare(self.raw, sigma.as_ptr(), mu.as_ptr(), &mut result)
+        };
+        check_cuda("peak transcript preparation", status)?;
+        Ok(PeakPreparation {
+            commitments: PearlWorkCommitments {
+                kappa: result.kappa,
+                h_a: result.h_a,
+                h_b: result.h_b,
+                s_a: result.s_a,
+                s_b: result.s_b,
+            },
+            commitment_ms: result.commitment_ms,
+            noise_ms: result.noise_ms,
+        })
+    }
+
     pub const fn m(&self) -> usize {
         self.m
     }
@@ -259,10 +390,18 @@ pub struct PeakSearchBackend {
     dispatch: Mutex<PeakDispatch>,
 }
 
+/// One ordered dense peak search distributed across independent devices.
+pub struct MultiGpuPeakSearchBackend {
+    backends: Vec<PeakSearchBackend>,
+}
+
 #[derive(Default)]
 struct PeakDispatch {
     template: Option<Arc<PreparedPearlPatternJob>>,
     session: Option<PeakCudaSession>,
+    peak_template: Option<Arc<PreparedCanonicalDenseSearch>>,
+    peak_session: Option<PeakCudaSession>,
+    peak_preparation: Option<PeakPreparation>,
 }
 
 impl PeakSearchBackend {
@@ -318,6 +457,101 @@ impl PeakSearchBackend {
             ));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "node")]
+    fn validate_peak_template(
+        template: &PreparedCanonicalDenseSearch,
+    ) -> Result<(), SearchBackendError> {
+        let params = template.params();
+        if params.k as usize != PEAK_K
+            || params.noise_rank as usize != PEAK_RANK
+            || params.tile as usize != PEAK_TILE
+            || params.m == 0
+            || params.n == 0
+            || params.m % 256 != 0
+            || params.n % 128 != 0
+        {
+            return Err(unavailable(format!(
+                "peak backend requires k={PEAK_K}, rank={PEAK_RANK}, tile={PEAK_TILE}, m%256=0, and n%128=0"
+            )));
+        }
+        let rows = template.config().rows_pattern.to_list_bounded(PEAK_TILE)?;
+        let cols = template.config().cols_pattern.to_list_bounded(PEAK_TILE)?;
+        if rows.len() != PEAK_TILE
+            || cols.len() != PEAK_TILE
+            || !rows.iter().copied().eq(0..PEAK_TILE as u32)
+            || !cols.iter().copied().eq(0..PEAK_TILE as u32)
+        {
+            return Err(unavailable(
+                "peak backend requires contiguous 16-element row and column patterns",
+            ));
+        }
+        let expected = u64::from(params.m / params.tile)
+            .checked_mul(u64::from(params.n / params.tile))
+            .ok_or_else(|| unavailable("peak ticket count overflow"))?;
+        if template.total_tickets() != expected {
+            return Err(unavailable(
+                "peak backend requires complete non-overlapping tile offsets",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl MultiGpuPeakSearchBackend {
+    pub fn all_visible() -> Result<Self> {
+        let count =
+            crate::gpu::GpuSearchBackend::available_device_count()?.min(MAX_PEAK_GPU_DEVICES);
+        Self::new((0..count).collect())
+    }
+
+    pub fn new(device_ordinals: Vec<usize>) -> Result<Self> {
+        if device_ordinals.is_empty() {
+            bail!("--cuda-devices must select at least one CUDA device");
+        }
+        if device_ordinals.len() > MAX_PEAK_GPU_DEVICES {
+            bail!("--cuda-devices supports at most {MAX_PEAK_GPU_DEVICES} devices");
+        }
+        let visible = crate::gpu::GpuSearchBackend::available_device_count()?;
+        for (index, &ordinal) in device_ordinals.iter().enumerate() {
+            if ordinal >= visible {
+                bail!("CUDA device {ordinal} is not visible; visible device count is {visible}");
+            }
+            if device_ordinals[..index].contains(&ordinal) {
+                bail!("--cuda-devices contains duplicate device {ordinal}");
+            }
+        }
+        Ok(Self {
+            backends: device_ordinals
+                .into_iter()
+                .map(PeakSearchBackend::new)
+                .collect(),
+        })
+    }
+
+    pub fn device_ordinals(&self) -> Vec<usize> {
+        self.backends
+            .iter()
+            .map(PeakSearchBackend::device_ordinal)
+            .collect()
+    }
+
+    pub fn preflight(&self, a: &[i8], b: &[i8]) -> Result<()> {
+        self.backends.par_iter().try_for_each(|backend| {
+            let session = PeakCudaSession::new_source(
+                backend.device_ordinal, PEAK_PRODUCTION_PARAMS.m as usize,
+                PEAK_PRODUCTION_PARAMS.n as usize, a, b,
+            )?;
+            let mut dispatch = backend
+                .dispatch
+                .lock()
+                .map_err(|_| anyhow::anyhow!("peak CUDA dispatch lock was poisoned"))?;
+            dispatch.peak_template = None;
+            dispatch.peak_preparation = None;
+            dispatch.peak_session = Some(session);
+            Ok(())
+        })
     }
 }
 
@@ -387,6 +621,69 @@ impl SearchBackend for PeakSearchBackend {
     }
 
     #[cfg(feature = "node")]
+    fn search_peak(
+        &self,
+        template: Arc<PreparedCanonicalDenseSearch>,
+        batch: SearchBatch,
+    ) -> Result<PeakSearchOutcome, SearchBackendError> {
+        let mut dispatch = self
+            .dispatch
+            .lock()
+            .map_err(|_| unavailable("peak CUDA dispatch lock was poisoned"))?;
+        let replace = dispatch
+            .peak_template
+            .as_ref()
+            .is_none_or(|current| !Arc::ptr_eq(current, &template));
+        if replace {
+            Self::validate_peak_template(&template)?;
+            let preparation = dispatch
+                .peak_session
+                .as_mut()
+                .ok_or_else(|| unavailable("peak source session is unavailable"))?
+                .prepare(template.sigma(), template.mu())
+                .map_err(unavailable)?;
+            dispatch.peak_template = Some(Arc::clone(&template));
+            dispatch.peak_preparation = Some(preparation);
+        }
+        let preparation = dispatch
+            .peak_preparation
+            .ok_or_else(|| unavailable("peak transcript preparation is unavailable"))?;
+        let result = dispatch
+            .peak_session
+            .as_mut()
+            .ok_or_else(|| unavailable("peak source session is unavailable"))?
+            .search(batch.start, batch.len, &batch.threshold)
+            .map_err(unavailable)?;
+        let winner = match result.winner {
+            Some(ordinal) => {
+                if ordinal < batch.start || ordinal >= batch.end_exclusive() {
+                    return Err(SearchBackendError::WinnerOutsideBatch {
+                        winner: ordinal,
+                        batch_start: batch.start,
+                        batch_end_exclusive: batch.end_exclusive(),
+                    });
+                }
+                if !hash_le_target(&result.jackpot, &batch.threshold) {
+                    return Err(unavailable(format!(
+                        "peak CUDA winner {ordinal} is above the dispatched threshold"
+                    )));
+                }
+                Some(SearchWinner {
+                    ordinal,
+                    jackpot_hash: result.jackpot,
+                })
+            }
+            None => None,
+        };
+        Ok(PeakSearchOutcome {
+            winner,
+            commitments: preparation.commitments,
+            commitment_ms: preparation.commitment_ms,
+            noise_ms: preparation.noise_ms,
+        })
+    }
+
+    #[cfg(feature = "node")]
     fn search_canonical(
         &self,
         _: Arc<PreparedCanonicalMoeTemplate>,
@@ -399,6 +696,108 @@ impl SearchBackend for PeakSearchBackend {
 
     fn batch_attempts(&self) -> u64 {
         u64::MAX
+    }
+}
+
+impl SearchBackend for MultiGpuPeakSearchBackend {
+    fn search_dense(
+        &self,
+        template: Arc<PreparedPearlPatternJob>,
+        batch: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        let active = self
+            .backends
+            .len()
+            .min(usize::try_from(batch.len).unwrap_or(usize::MAX));
+        self.backends[..active]
+            .par_iter()
+            .enumerate()
+            .map(|(index, backend)| {
+                backend.search_dense(
+                    Arc::clone(&template),
+                    peak_partition_for_device(batch, active, index),
+                )
+            })
+            .try_reduce(|| None, |left, right| Ok(lower_peak_winner(left, right)))
+    }
+
+    #[cfg(feature = "node")]
+    fn search_peak(
+        &self,
+        template: Arc<PreparedCanonicalDenseSearch>,
+        batch: SearchBatch,
+    ) -> Result<PeakSearchOutcome, SearchBackendError> {
+        let active = self
+            .backends
+            .len()
+            .min(usize::try_from(batch.len).unwrap_or(usize::MAX));
+        let outcomes = self.backends[..active]
+            .par_iter()
+            .enumerate()
+            .map(|(index, backend)| {
+                backend.search_peak(
+                    Arc::clone(&template),
+                    peak_partition_for_device(batch, active, index),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut outcomes = outcomes.into_iter();
+        let mut merged = outcomes
+            .next()
+            .ok_or_else(|| unavailable("peak multi-GPU search has no active device"))?;
+        for outcome in outcomes {
+            if outcome.commitments != merged.commitments {
+                return Err(unavailable(
+                    "peak devices derived different attempt transcripts",
+                ));
+            }
+            merged.winner = lower_peak_winner(merged.winner, outcome.winner);
+            merged.commitment_ms = merged.commitment_ms.max(outcome.commitment_ms);
+            merged.noise_ms = merged.noise_ms.max(outcome.noise_ms);
+        }
+        Ok(merged)
+    }
+
+    #[cfg(feature = "node")]
+    fn search_canonical(
+        &self,
+        _: Arc<PreparedCanonicalMoeTemplate>,
+        _: SearchBatch,
+    ) -> Result<Option<SearchWinner>, SearchBackendError> {
+        Err(unavailable(
+            "peak dense backend does not accept canonical MoE jobs",
+        ))
+    }
+
+    fn batch_attempts(&self) -> u64 {
+        u64::MAX
+    }
+}
+
+fn peak_partition_for_device(batch: SearchBatch, active: usize, index: usize) -> SearchBatch {
+    let active = active as u64;
+    let index = index as u64;
+    let base = batch.len / active;
+    let remainder = batch.len % active;
+    SearchBatch {
+        start: batch.start + base * index + index.min(remainder),
+        len: base + u64::from(index < remainder),
+        threshold: batch.threshold,
+    }
+}
+
+fn lower_peak_winner(
+    left: Option<SearchWinner>,
+    right: Option<SearchWinner>,
+) -> Option<SearchWinner> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left.ordinal <= right.ordinal {
+            left
+        } else {
+            right
+        }),
+        (Some(winner), None) | (None, Some(winner)) => Some(winner),
+        (None, None) => None,
     }
 }
 
@@ -428,6 +827,84 @@ mod tests {
     use ai_pow::pearl_compat::pearl_jackpot_hash;
 
     use super::*;
+
+    #[test]
+    fn multi_gpu_partitions_are_adjacent_and_cover_the_batch() {
+        let batch = SearchBatch::new(100, 10, [0; 32]).expect("batch");
+        let partitions: Vec<_> = (0..3)
+            .map(|index| peak_partition_for_device(batch, 3, index))
+            .collect();
+        assert_eq!(
+            partitions
+                .iter()
+                .map(|part| (part.start, part.len))
+                .collect::<Vec<_>>(),
+            vec![(100, 4), (104, 3), (107, 3)]
+        );
+        assert_eq!(partitions[0].start, batch.start);
+        assert_eq!(
+            partitions.last().expect("last").end_exclusive(),
+            batch.end_exclusive()
+        );
+    }
+
+    #[test]
+    fn multi_gpu_winner_reduction_uses_the_global_lowest_ordinal() {
+        let higher = SearchWinner {
+            ordinal: 29,
+            jackpot_hash: [0x29; 32],
+        };
+        let lower = SearchWinner {
+            ordinal: 17,
+            jackpot_hash: [0x17; 32],
+        };
+        assert_eq!(lower_peak_winner(Some(higher), Some(lower)), Some(lower));
+        assert_eq!(lower_peak_winner(None, Some(lower)), Some(lower));
+        assert_eq!(lower_peak_winner(None, None), None);
+    }
+
+    #[cfg(feature = "node")]
+    #[test]
+    #[ignore = "requires two compatible CUDA devices"]
+    fn multi_gpu_search_returns_global_lowest_winner() {
+        let params = ai_pow::params::MatmulParams {
+            m: 256,
+            k: PEAK_K as u32,
+            n: 128,
+            noise_rank: PEAK_RANK as u32,
+            tile: PEAK_TILE as u32,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+            &params,
+            [0x5a; 32],
+            Arc::new(a),
+            Arc::new(b),
+        )
+        .expect("dense template");
+        let prepared = Arc::new(template.prepare(0).expect("prepared template"));
+        let backend = MultiGpuPeakSearchBackend::new(vec![0, 1]).expect("two CUDA devices");
+
+        for start in [0, 17, 64] {
+            let winner = backend
+                .search_dense(
+                    Arc::clone(&prepared),
+                    SearchBatch::new(start, 128 - start, [0xff; 32]).expect("maximum-target batch"),
+                )
+                .expect("multi-GPU search")
+                .expect("maximum target always wins");
+            assert_eq!(winner.ordinal, start);
+        }
+        assert!(backend
+            .search_dense(
+                prepared,
+                SearchBatch::new(0, 128, [0; 32]).expect("zero-target batch"),
+            )
+            .expect("zero-target search")
+            .is_none());
+    }
 
     fn fixture(m: usize, n: usize) -> (Vec<i8>, Vec<i8>, [u8; 32]) {
         let mut state = 0x0123_4567_89ab_cdefu64;
@@ -490,6 +967,62 @@ mod tests {
             let scalar = scalar_ticket(&a, &b, 128, ordinal);
             assert_eq!(device.state, scalar, "ordinal {ordinal}");
             assert_eq!(device.jackpot, pearl_jackpot_hash(&scalar, &key));
+        }
+    }
+
+    #[cfg(feature = "node")]
+    #[test]
+    #[ignore = "requires a compatible CUDA device"]
+    fn peak_source_session_matches_complete_scalar_transcript() {
+        let params = ai_pow::params::MatmulParams {
+            m: 256,
+            k: PEAK_K as u32,
+            n: 128,
+            noise_rank: PEAK_RANK as u32,
+            tile: PEAK_TILE as u32,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+            &params,
+            [0x5a; 32],
+            Arc::clone(&a),
+            Arc::clone(&b),
+        )
+        .expect("dense template");
+        let mut session =
+            PeakCudaSession::new_source(0, params.m as usize, params.n as usize, &a, &b)
+                .expect("peak source session");
+        for extranonce in [0, 1, u32::MAX - 1, u32::MAX] {
+            let scalar = template.prepare(extranonce).expect("scalar preparation");
+            let device = session
+                .prepare(scalar.sigma(), scalar.mu())
+                .expect("device preparation");
+            assert_eq!(
+                device.commitments,
+                *scalar.commitments(),
+                "extranonce {extranonce}"
+            );
+            for ordinal in [0, scalar.row_offsets().len() as u64 - 1, 127] {
+                let (t_rows, t_cols) = scalar
+                    .offsets_at_ordinal(ordinal)
+                    .expect("scalar ticket offsets");
+                let expected = scalar
+                    .evaluate(t_rows, t_cols, &mut scalar.scratch())
+                    .expect("scalar ticket");
+                let actual = session.debug_ticket(ordinal).expect("device ticket");
+                assert_eq!(
+                    actual.state, expected.tile_state,
+                    "extranonce {extranonce}, ordinal {ordinal}"
+                );
+                assert_eq!(
+                    actual.jackpot, expected.jackpot_hash,
+                    "extranonce {extranonce}, ordinal {ordinal}"
+                );
+            }
         }
     }
 
