@@ -37,7 +37,7 @@ pub const BLOCKCHAIN_CONSTANTS_PATH: &str = "blockchain-constants";
 /// Default nockchain confirmation depth used by the driver if not specified in config.
 ///
 /// The bridge kernel assumes blocks it receives are final; this is enforced by the Rust driver.
-pub const DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH: u64 = 100;
+pub const DEFAULT_NOCKCHAIN_CONFIRMATION_DEPTH: u64 = 400;
 
 #[cfg(test)]
 fn confirmed_height(chain_tip: u64, confirmation_depth: u64) -> Option<u64> {

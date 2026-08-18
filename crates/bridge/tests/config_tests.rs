@@ -258,14 +258,26 @@ nock_pkh = "{pkh4}"
 }
 
 #[test]
-fn test_example_config_keeps_mainnet_nockchain_confirmation_depth_at_100() {
-    let config: toml::Value =
-        toml::from_str(include_str!("../bridge-conf.example.toml")).expect("parse example config");
-    assert_eq!(
-        config["nockchain_confirmation_depth"].as_integer(),
-        Some(100),
-        "bridge-conf.example.toml should keep the mainnet/default nockchain confirmation depth at 100",
-    );
+fn test_example_configs_keep_mainnet_nockchain_confirmation_depth() {
+    let configs = [
+        (
+            "bridge-conf.example.toml",
+            include_str!("../bridge-conf.example.toml"),
+        ),
+        (
+            "sequencer-conf.example.toml",
+            include_str!("../../nockchain-bridge-sequencer/sequencer-conf.example.toml"),
+        ),
+    ];
+
+    for (name, contents) in configs {
+        let config: toml::Value = toml::from_str(contents).expect("parse example config");
+        assert_eq!(
+            config["nockchain_confirmation_depth"].as_integer(),
+            Some(400),
+            "{name} should use the 400-block Nockchain confirmation depth",
+        );
+    }
 }
 
 #[test]

@@ -6,7 +6,7 @@
 nock_contract_address = "0x..."
 
 # Nockchain confirmations required before sequencer settlement observations are final.
-nockchain_confirmation_depth = 100
+nockchain_confirmation_depth = 400
 
 # Optional manual operator approval gate for authorized withdrawal submission.
 manual_submit_approval = false
