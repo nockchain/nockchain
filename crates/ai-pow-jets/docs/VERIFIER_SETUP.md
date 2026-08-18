@@ -1,10 +1,10 @@
 # AI-PoW verifier setup lifecycle
 
-The compact recursive verifier uses one proof-independent context for each reachable Layer-0 trace-height bucket. These contexts are large, but the set of buckets and each verifier-key digest are consensus-known.
+The compact recursive verifier uses one proof-independent context for each reachable `(trace_height, sx_bound)` shape key. These contexts are large, but the set of keys and each verifier-key digest are consensus-known.
 
 ## Boot path
 
-1. Enumerate every production trace-height bucket admitted by the Pearl parameter envelope.
+1. Enumerate every production shape key admitted by the Pearl parameter envelope.
 2. Load or deterministically rebuild each context from the production circuit parameters.
 3. Recompute and compare its verifier-key digest with the committed digest table.
 4. Serialize validated contexts beneath the node's data directory with a local file checksum.
@@ -21,7 +21,7 @@ resident table.
 
 ## Failure classes
 
-- **Unknown trace height:** deterministic invalid block. Every conforming node has the same committed bucket set.
+- **Unknown shape key:** deterministic invalid block. Every conforming node has the same committed bucket set.
 - **Known bucket cannot be read, decoded, or authenticated:** local node fault. The jet fails rather than rejecting a potentially valid block.
 - **Certificate digest differs from the selected setup:** deterministic invalid block.
 - **Setup table missing or empty:** initialization fault; the node must not validate AI blocks.
@@ -30,7 +30,7 @@ This distinction is consensus-critical. Local disk corruption must never become 
 
 ## Resource invariant
 
-All production buckets are committed and present. The default cap retains all 13
+All production buckets are committed and present. The default cap retains all 14
 shape keys across seven trace heights after first use. Operators can lower the cap
 to trade RSS for synchronous page-ins; that setting is unsuitable for adversarial
 validators unless the operator accepts the latency risk.

@@ -55,7 +55,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     cli.nockapp_cli.new_data_dir_allowlist.push("ai-pow".into());
 
     // CLI takes precedence over the environment. Lower caps are an explicit
-    // memory-for-latency tradeoff; the default keeps all 13 shape keys resident after
+    // memory-for-latency tradeoff; the default keeps all 14 shape keys resident after
     // first use.
     if let Some(cap) = cli.ai_pow_verifier_cache_cap {
         std::env::set_var(

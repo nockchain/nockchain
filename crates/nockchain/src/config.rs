@@ -414,7 +414,7 @@ pub struct NockchainCli {
     #[arg(
         long = "ai-pow-verifier-cache-cap",
         help = "Max resident AI-PoW verifier contexts (LRU). The production default \
-                retains all 13 supported shape keys across seven trace heights, preventing \
+                retains all 14 supported shape keys across seven trace heights, preventing \
                 attacker-controlled evict/reload thrash at the measured setup-table RSS. \
                 Lowering the cap reduces RSS by allowing verifier contexts to page in and \
                 out, but reintroduces synchronous page-in churn under adversarial traffic. \
