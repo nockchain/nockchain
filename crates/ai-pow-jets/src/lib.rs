@@ -232,10 +232,12 @@ static SETUP: OnceCell<DiskPagedSetup> = OnceCell::new();
 /// it is not already resident. See [`VerifierSetupLookup`] for how the jet treats
 /// each outcome.
 ///
-/// - `NoSuchBucket`: the table is missing a bucket for this shape. Because the
-///   committed table pins exactly the reachable verifier shapes, a missing bucket is
-///   a DETERMINISTIC invalid-block signal (the jet returns `NO`, and consensus marks
-///   the block a liar so it cannot be re-spammed).
+/// - `NoSuchBucket`: the table is missing a bucket for this shape. The
+///   committed table is derived from the consensus admission predicates
+///   (`validate_prod_envelope` + `envelope_check_dims`) — covering both MoE
+///   and dense reachable shapes — so a missing bucket means the block's
+///   certificate declares a shape consensus does not admit. The jet returns
+///   `NO`, and consensus marks the block a liar so it cannot be re-spammed.
 /// - `LoadFailed`: the table is uninjected, or a bucket EXISTS but its context could
 ///   not be loaded (missing / corrupt / bit-rotten file, disk error). That is a
 ///   NON-DETERMINISTIC per-node fault — the jet `%fail`s rather than voting.
@@ -758,15 +760,35 @@ mod tests {
         assert_eq!(
             crate::setup::AI_POW_VERIFIER_CACHE_CAP_DEFAULT,
             buckets.len(),
-            "the production default must retain all 13 attacker-selectable shape keys",
+            "the production default must retain all 14 attacker-selectable shape keys",
         );
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let mut keys: Vec<VerifierSetupShapeKey> = Vec::new();
         let mut by_height: std::collections::BTreeMap<u32, std::collections::BTreeSet<bool>> =
             std::collections::BTreeMap::new();
         for b in &buckets {
-            let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
-                .expect("cheap trace height");
+            let (th, sx_bound) = if b.dense {
+                let schedule = ai_pow_zk::canonical::StripIndexSchedule {
+                    a_indices: (0..b.params.tile).collect(),
+                    b_indices: (0..b.params.tile).collect(),
+                };
+                let budget = ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(
+                    &b.params, &schedule,
+                )
+                .expect("dense bucket trace height");
+                let th = budget.required_trace_len();
+                (
+                    th,
+                    (b.params.num_stripes() as usize) <= ai_pow::params::STRIPE_MAX,
+                )
+            } else {
+                let th = crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k)
+                    .expect("cheap trace height");
+                (
+                    th,
+                    (b.params.k / b.params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX,
+                )
+            };
             assert!(
                 th.is_power_of_two(),
                 "bucket height {th} must be a power of two"
@@ -779,8 +801,6 @@ mod tests {
                 th <= ai_pow::params::AI_POW_MAX_TRACE_HEIGHT,
                 "bucket height {th} must be <= the consensus cap 2^{cap_db}",
             );
-            let sx_bound =
-                (b.params.k / b.params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX;
             let key = VerifierSetupShapeKey::new(th, sx_bound);
             keys.push(key);
             by_height
@@ -804,7 +824,7 @@ mod tests {
             );
         }
         let both_sx_classes: std::collections::BTreeSet<bool> = [false, true].into_iter().collect();
-        for db in 14u32..=cap_db {
+        for db in 13u32..=cap_db {
             assert_eq!(
                 by_height.get(&db),
                 Some(&both_sx_classes),
@@ -827,15 +847,31 @@ mod tests {
             crate::setup::production_verifier_setup_buckets()
                 .into_iter()
                 .map(|bucket| {
-                    let height = crate::setup::canonical_moe_trace_height(
-                        &bucket.params, bucket.hw, bucket.e, bucket.top_k,
-                    )
-                    .expect("production setup bucket trace height");
-                    VerifierSetupShapeKey::new(
-                        height,
-                        (bucket.params.k / bucket.params.noise_rank) as usize
-                            <= ai_pow::params::STRIPE_MAX,
-                    )
+                    let (height, sx) = if bucket.dense {
+                        let schedule = ai_pow_zk::canonical::StripIndexSchedule {
+                            a_indices: (0..bucket.params.tile).collect(),
+                            b_indices: (0..bucket.params.tile).collect(),
+                        };
+                        let budget = ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(
+                            &bucket.params, &schedule,
+                        )
+                        .expect("dense bucket trace height");
+                        (
+                            budget.required_trace_len(),
+                            (bucket.params.num_stripes() as usize) <= ai_pow::params::STRIPE_MAX,
+                        )
+                    } else {
+                        let h = crate::setup::canonical_moe_trace_height(
+                            &bucket.params, bucket.hw, bucket.e, bucket.top_k,
+                        )
+                        .expect("production setup bucket trace height");
+                        (
+                            h,
+                            (bucket.params.k / bucket.params.noise_rank) as usize
+                                <= ai_pow::params::STRIPE_MAX,
+                        )
+                    };
+                    VerifierSetupShapeKey::new(height, sx)
                 })
                 .collect();
 
@@ -1866,16 +1902,26 @@ mod jet_tests {
     #[test]
     fn print_production_bucket_shapes() {
         for b in crate::setup::production_verifier_setup_buckets() {
-            let th =
-                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap();
+            let th = if b.dense {
+                let schedule = ai_pow_zk::canonical::StripIndexSchedule {
+                    a_indices: (0..b.params.tile).collect(),
+                    b_indices: (0..b.params.tile).collect(),
+                };
+                ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(&b.params, &schedule)
+                    .unwrap()
+                    .required_trace_len()
+            } else {
+                crate::setup::canonical_moe_trace_height(&b.params, b.hw, b.e, b.top_k).unwrap()
+            };
             eprintln!(
-                "2^{}: m={} k={} n={} r={} tile={} | hw={} e={} top_k={} ns={}",
+                "2^{}: m={} k={} n={} r={} tile={} | dense={} hw={} e={} top_k={} ns={}",
                 th.trailing_zeros(),
                 b.params.m,
                 b.params.k,
                 b.params.n,
                 b.params.noise_rank,
                 b.params.tile,
+                b.dense,
                 b.hw,
                 b.e,
                 b.top_k,
@@ -1897,14 +1943,18 @@ mod jet_tests {
         use std::collections::{BTreeMap, BTreeSet};
         let cap_db = (ai_pow::params::AI_POW_MAX_TRACE_HEIGHT as u32).trailing_zeros();
         let buckets = crate::setup::production_verifier_setup_buckets();
-        assert_eq!(buckets.len(), 13, "expected 13 production shape keys");
+        assert_eq!(buckets.len(), 14, "expected 14 production shape keys");
 
         let mut seeds = Vec::new();
         let mut total_bytes = 0usize;
         for (i, shape) in buckets.iter().enumerate() {
-            let seed = crate::setup::build_verifier_setup_seed(
-                &shape.params, shape.hw, shape.e, shape.top_k,
-            )
+            let seed = if shape.dense {
+                crate::setup::build_verifier_setup_seed_dense(&shape.params)
+            } else {
+                crate::setup::build_verifier_setup_seed(
+                    &shape.params, shape.hw, shape.e, shape.top_k,
+                )
+            }
             .unwrap_or_else(|e| panic!("bucket {i} generation failed: {e}"));
             let sz = bincode::serde::encode_to_vec(&seed, bincode::config::standard())
                 .expect("serialize seed")
@@ -1933,18 +1983,8 @@ mod jet_tests {
                 .or_default()
                 .insert(key.sx_bound);
         }
-        assert_eq!(by_height.len(), 7, "7 distinct-height buckets (2^13..2^19)");
-        for db in 13u32..=cap_db {
-            assert!(by_height.contains_key(&db), "table must cover 2^{db}");
-        }
-        let sx_only: BTreeSet<bool> = [true].into_iter().collect();
         let both_sx_classes: BTreeSet<bool> = [false, true].into_iter().collect();
-        assert_eq!(
-            by_height.get(&13),
-            Some(&sx_only),
-            "2^13 has only the sx-bound shape"
-        );
-        for db in 14u32..=cap_db {
+        for db in 13u32..=cap_db {
             assert_eq!(
                 by_height.get(&db),
                 Some(&both_sx_classes),
@@ -1964,7 +2004,7 @@ mod jet_tests {
         );
         let table = crate::setup::load_verifier_setup_table(&path).expect("load+rebuild table");
         let _ = std::fs::remove_dir_all(&tmp);
-        assert_eq!(table.len(), 13, "rebuilt table has 13 shape keys");
+        assert_eq!(table.len(), 14, "rebuilt table has 14 shape keys");
         let table_keys: BTreeSet<VerifierSetupShapeKey> =
             table.iter().map(|s| s.shape_key()).collect();
         let seed_keys: BTreeSet<VerifierSetupShapeKey> = seeds

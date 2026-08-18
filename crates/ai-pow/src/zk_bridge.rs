@@ -2173,6 +2173,7 @@ pub fn prove_pearl_merge_compact_recursive_certificate(
     prove_pearl_merge_compact_recursive_certificate_inner(
         attempt, params, a_row_major, b_col_major, max_pattern_len, None,
     )
+    .map(|(run, _)| run)
 }
 
 /// Cached-setup variant of [`prove_pearl_merge_compact_recursive_certificate`].
@@ -2192,6 +2193,7 @@ pub fn prove_pearl_merge_compact_recursive_certificate_with_prover_cache(
         max_pattern_len,
         Some(cache),
     )
+    .map(|(run, _)| run)
 }
 
 /// Build the compact recursive certificate from an already checked mining ticket.
@@ -2204,6 +2206,7 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked(
     prove_pearl_merge_compact_recursive_certificate_checked_inner(
         checked, params, a_row_major, b_col_major, None,
     )
+    .map(|(run, _)| run)
 }
 
 /// Cached-setup variant of [`prove_pearl_merge_compact_recursive_certificate_checked`].
@@ -2221,6 +2224,32 @@ pub fn prove_pearl_merge_compact_recursive_certificate_checked_with_prover_cache
         b_col_major,
         Some(cache),
     )
+    .map(|(run, _)| run)
+}
+
+/// Boot-setup variant of [`prove_pearl_merge_compact_recursive_certificate`]:
+/// identical proving, but ALSO returns the small serializable
+/// [`ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed`] — the L0
+/// program/proof/PIs + L1 outer proof + metadata from which the boot table
+/// rebuilds the compact verifier context WITHOUT proving. Used only to build
+/// the offline/boot setup table (one seed per trace-height bucket); NEVER on
+/// the per-block mining path, which discards these parts.
+pub fn prove_pearl_merge_compact_recursive_certificate_with_seed(
+    attempt: &PearlMergeTicketAttempt,
+    params: &MatmulParams,
+    a_row_major: &[i8],
+    b_col_major: &[i8],
+    max_pattern_len: usize,
+) -> Result<
+    (
+        AiPowCompactRecursiveCertificateRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
+    prove_pearl_merge_compact_recursive_certificate_inner(
+        attempt, params, a_row_major, b_col_major, max_pattern_len, None,
+    )
 }
 
 fn prove_pearl_merge_compact_recursive_certificate_inner(
@@ -2230,7 +2259,13 @@ fn prove_pearl_merge_compact_recursive_certificate_inner(
     b_col_major: &[i8],
     max_pattern_len: usize,
     cache: Option<&AiPowCompactRecursiveProverCache>,
-) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+) -> Result<
+    (
+        AiPowCompactRecursiveCertificateRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
     if params.difficulty_bits != 0 || params.spot_checks != 1 {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -2291,7 +2326,13 @@ fn prove_pearl_merge_compact_recursive_certificate_checked_inner(
     a_row_major: &[i8],
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
-) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+) -> Result<
+    (
+        AiPowCompactRecursiveCertificateRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
     if params.difficulty_bits != 0 || params.spot_checks != 1 {
         return Err(BridgeError::PearlMergeUnsupportedTileShape);
     }
@@ -2337,7 +2378,13 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
     a_row_major: &[i8],
     b_col_major: &[i8],
     cache: Option<&AiPowCompactRecursiveProverCache>,
-) -> Result<AiPowCompactRecursiveCertificateRun, BridgeError> {
+) -> Result<
+    (
+        AiPowCompactRecursiveCertificateRun,
+        ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed,
+    ),
+    BridgeError,
+> {
     if params.m != public_params.m
         || params.k != public_params.mining_config.common_dim
         || params.n != public_params.n
@@ -2455,7 +2502,23 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
     };
     let compact = prove_compact_batch_from_verified_l0(&zk_params, &verified_l0, cache)?;
 
-    Ok(AiPowCompactRecursiveCertificateRun {
+    // Capture the boot-setup seed: the small, serializable inputs from which
+    // the boot table rebuilds the compact verifier context WITHOUT proving.
+    // Mirrors `prove_pearl_moe_compact_recursive_certificate_with_seed`.
+    // `l1_outer_proof` is moved into the seed; the run does not carry it.
+    let metadata = compact
+        .verifier_context
+        .metadata_owned()
+        .map_err(|e| BridgeError::RecursiveCertificate(format!("{e:?}")))?;
+    let digest_bytes = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+        compact.compact_cert.verifier_key_digest(),
+    )
+    .to_vec();
+    let seed = ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed::from_run(
+        &zk_params, verified_l0, compact.l1_outer_proof, metadata, digest_bytes,
+    );
+
+    let run = AiPowCompactRecursiveCertificateRun {
         zk_params,
         found_idx,
         strip_schedule,
@@ -2476,7 +2539,8 @@ fn prove_pearl_merge_compact_recursive_certificate_prechecked(
         prover_cache: compact
             .prover_cache
             .map(AiPowCompactRecursiveProverCache::from_inner),
-    })
+    };
+    Ok((run, seed))
 }
 
 /// Check whether the current recursive certificate artifact can serve as a

@@ -13,15 +13,17 @@ use std::io::Write;
 
 use ai_pow::params::MatmulParams;
 use ai_pow::pearl_compat::{
-    derive_pearl_moe_work_commitments, pearl_bitcoin_double_sha256_raw, PearlAuxInclusionProof,
-    PearlIncompleteBlockHeader, PearlMiningConfig, PearlMoeParams, PearlNockchainAux,
-    PearlPeriodicPattern, PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32,
-    PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
+    derive_pearl_moe_work_commitments, evaluate_pearl_merge_ticket_attempt,
+    pearl_bitcoin_double_sha256_raw, PearlAuxInclusionProof, PearlIncompleteBlockHeader,
+    PearlMiningConfig, PearlMoeParams, PearlNockchainAux, PearlPeriodicPattern,
+    PearlPublicProofParams, PEARL_MMA_INT7XINT7_TO_INT32, PEARL_NOCKCHAIN_AUX_COMMITMENT_TAG,
 };
 use ai_pow::pearl_moe_routing::build_routing_data;
 use ai_pow::synth::{synth_matrices, AI_POW_PROD_SYNTH_SEED};
 use ai_pow::zk_bridge::{
-    prove_pearl_moe_compact_recursive_certificate_with_seed, PearlMoeCompactProveRun,
+    prove_pearl_merge_compact_recursive_certificate_with_seed,
+    prove_pearl_moe_compact_recursive_certificate_with_seed, AiPowCompactRecursiveCertificateRun,
+    PearlMoeCompactProveRun,
 };
 use ai_pow_miner::certificate_noun::{
     AiPowCertificateShape, AiProofNode, PearlMergeMoeArtifact, PearlMergePublicStatementShape,
@@ -29,7 +31,6 @@ use ai_pow_miner::certificate_noun::{
 use ai_pow_zk::recursion::AiPowCompactVerifierSetupSeed;
 
 use crate::{AiPowVerifierSetup, VerifierSetupShapeKey};
-
 /// Error building the canonical verifier setup.
 #[derive(Debug)]
 pub struct SetupError(pub String);
@@ -410,6 +411,86 @@ pub fn build_verifier_setup_seed(
 ) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
     Ok(prove_canonical_moe_block(params, hw, e, top_k, CANONICAL_SETUP_COMMIT)?.seed)
 }
+/// Build ONLY the small, cacheable rebuild seed for a DENSE boot verifier setup, by
+/// proving one canonical dense block at the given shape. The dense counterpart of
+/// [`build_verifier_setup_seed`]. Used for the `(2^13, false)` bucket that no MoE
+/// shape reaches — the MoE routing scatters opened A rows, inflating the Layer-0
+/// trace height above the dense budget for the same `(params, tile)`.
+pub fn build_verifier_setup_seed_dense(
+    params: &MatmulParams,
+) -> Result<AiPowCompactVerifierSetupSeed, SetupError> {
+    Ok(prove_canonical_dense_block(params, CANONICAL_SETUP_COMMIT)?.seed)
+}
+
+/// Prove a single canonical DENSE block at the given shape. Builds a
+/// Pearl-compatible dense ticket attempt (synth matrices, aux, header), grinds
+/// the aux height until the jackpot clears the max consensus target, then
+/// proves the compact recursive certificate with seed capture. The dense
+/// counterpart of [`prove_canonical_moe_block`].
+fn prove_canonical_dense_block(
+    params: &MatmulParams,
+    nock_commit: [u8; 32],
+) -> Result<CanonicalDenseBlock, SetupError> {
+    let (a, b) = synth_matrices(AI_POW_PROD_SYNTH_SEED, params);
+    let config = PearlMiningConfig {
+        common_dim: params.k,
+        rank: params.noise_rank as u16,
+        mma_type: PEARL_MMA_INT7XINT7_TO_INT32,
+        rows_pattern: setup_pattern(params.tile),
+        cols_pattern: setup_pattern(params.tile),
+        reserved: [0u8; ai_pow::pearl_compat::PEARL_MINING_CONFIG_RESERVED_SIZE],
+    };
+    let target = ai_pow::difficulty::AI_POW_MAX_CONSENSUS_TARGET;
+    let factor = ai_pow::difficulty::shape_work_factor_for(
+        params.tile, params.tile, params.k, params.noise_rank,
+    )
+    .map_err(err("dense shape work factor"))?;
+
+    let max_pattern_len = crate::AI_POW_VERIFY_MAX_PATTERN_LEN;
+    // Grind the aux height until the jackpot clears the max consensus target.
+    // The max target scaled by the shape work factor still rejects ~99.6% of
+    // jackpots (the adjusted threshold is ~2^248 for this shape), so a few
+    // hundred attempts suffice.
+    let mut attempt = None;
+    for n in 0..100_000 {
+        let aux = PearlNockchainAux {
+            nockchain_chain_id: b"nockchain-mainnet\0".to_vec(),
+            nock_block_commitment: nock_commit,
+            nockchain_target_epoch_or_height: 123_456 + n,
+            extra_domain_data: b"ai-pow-target-window\0\0".to_vec(),
+        };
+        let aux_commitment = aux.commitment().map_err(err("aux commitment"))?;
+        let (header, _aux_inclusion) = setup_aux_inclusion(&aux_commitment);
+        let ticket_attempt = evaluate_pearl_merge_ticket_attempt(
+            &header, &config, params, 0, 0, &a, &b, &target, max_pattern_len, aux,
+        )
+        .map_err(err("evaluate dense ticket"))?;
+        if ai_pow::difficulty::attempt_wins(&ticket_attempt.ticket.jackpot_hash, &target, factor)
+            .map_err(err("attempt_wins"))?
+        {
+            attempt = Some(ticket_attempt);
+            break;
+        }
+    }
+    let attempt = attempt.ok_or_else(|| {
+        SetupError(
+            "dense canonical block: no jackpot cleared the target in 100k attempts".to_string(),
+        )
+    })?;
+
+    let (run, seed) = prove_pearl_merge_compact_recursive_certificate_with_seed(
+        &attempt, params, &a, &b, max_pattern_len,
+    )
+    .map_err(err("prove dense compact certificate with seed"))?;
+
+    Ok(CanonicalDenseBlock { run, seed })
+}
+/// The canonical dense setup block: its prove run plus the boot-setup seed.
+#[allow(dead_code)]
+struct CanonicalDenseBlock {
+    run: AiPowCompactRecursiveCertificateRun,
+    seed: AiPowCompactVerifierSetupSeed,
+}
 
 /// Rebuild the full boot verifier setup from a cached seed WITHOUT proving — the
 /// boot-time counterpart of [`build_verifier_setup_seed`]. Rebuilds the compact
@@ -613,7 +694,7 @@ pub const AI_POW_VERIFIER_CACHE_CAP_ENV: &str = "AI_POW_VERIFIER_CACHE_CAP";
 /// Default resident-context LRU cap. The production default retains every supported
 /// setup shape, so remote inputs cannot create an evict/reload loop on the consensus
 /// thread unless an operator deliberately lowers the cap.
-pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 13;
+pub const AI_POW_VERIFIER_CACHE_CAP_DEFAULT: usize = 14;
 
 /// Resolve the resident-context LRU cap from `AI_POW_VERIFIER_CACHE_CAP` (clamped to
 /// `>= 1`), else the DoS-safe all-shape default.
@@ -942,6 +1023,11 @@ pub struct VerifierSetupBucketShape {
     pub hw: u32,
     pub e: usize,
     pub top_k: usize,
+    /// When `true`, the bucket is built by proving a DENSE canonical block (not MoE).
+    /// `hw`/`e`/`top_k` are ignored. Dense buckets cover verifier shapes that no MoE
+    /// shape reaches — the MoE routing scatters opened rows, inflating the Layer-0
+    /// trace height above the dense budget for the same `(params, tile)`.
+    pub dense: bool,
 }
 
 /// OFFLINE (expensive — one real compact proof per bucket): build the seed table
@@ -956,7 +1042,11 @@ pub fn build_and_cache_verifier_setup_seeds(
     let mut keys: Vec<VerifierSetupShapeKey> = Vec::with_capacity(buckets.len());
     let mut seeds: Vec<AiPowCompactVerifierSetupSeed> = Vec::with_capacity(buckets.len());
     for b in buckets {
-        let seed = build_verifier_setup_seed(&b.params, b.hw, b.e, b.top_k)?;
+        let seed = if b.dense {
+            build_verifier_setup_seed_dense(&b.params)?
+        } else {
+            build_verifier_setup_seed(&b.params, b.hw, b.e, b.top_k)?
+        };
         let key = shape_key_for_seed(&seed)?;
         if keys.contains(&key) {
             return Err(SetupError(format!(
@@ -1014,8 +1104,51 @@ pub fn production_verifier_setup_buckets() -> Vec<VerifierSetupBucketShape> {
                         hw,
                         e: E,
                         top_k: TOP_K,
+                        dense: false,
                     });
                 }
+            }
+        }
+    }
+    // Dense bucket: covers the `(2^13, false)` key that no MoE shape reaches.
+    // The MoE routing scatters opened A rows, inflating the strip-opening row
+    // budget above the dense budget for the same shape, so the MoE sweep never
+    // lands at `(8192, false)`. This dense shape — `m=n=tile=6, k=2112, r=32`
+    // (num_stripes=66 > STRIPE_MAX=64) — is inside `validate_prod_envelope` and
+    // `envelope_check_dims`, and its dense Layer-0 row budget (7970) rounds up
+    // to trace_height 8192 with `sx_bound = false`.
+    let dense_params = MatmulParams {
+        m: 6,
+        k: 2112,
+        n: 6,
+        noise_rank: 32,
+        tile: 6,
+        spot_checks: 1,
+        difficulty_bits: 0,
+    };
+    // Defense-in-depth: reject if the shape is ever removed from the admission
+    // envelope, rather than silently building a bucket for a shape consensus
+    // no longer admits.
+    if dense_params.validate_prod_envelope().is_ok() {
+        let dense_th = ai_pow::zk_bridge::expected_layer0_rows_for_strip_schedule(
+            &dense_params,
+            &ai_pow_zk::canonical::StripIndexSchedule {
+                a_indices: (0..6).collect(),
+                b_indices: (0..6).collect(),
+            },
+        )
+        .map_err(|e| SetupError(format!("dense bucket trace height: {e:?}")))
+        .map(|b| b.required_trace_len())
+        .unwrap_or(0);
+        if dense_th > 0 && dense_th <= ai_pow::params::AI_POW_MAX_TRACE_HEIGHT {
+            if let Ok(key) = shape_key_for_params(&dense_params, dense_th) {
+                by_bucket.entry(key).or_insert(VerifierSetupBucketShape {
+                    params: dense_params,
+                    hw: 0,
+                    e: 0,
+                    top_k: 0,
+                    dense: true,
+                });
             }
         }
     }
