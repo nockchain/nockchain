@@ -123,8 +123,6 @@ docker-nockchain-run:
 		-p $(DOCKER_P2P_PORT):$(DOCKER_P2P_PORT)/udp \
 		-v $(DOCKER_DATA_DIR):/data/.data.nockchain \
 		$(DOCKER_IMAGE) \
-		--fast-sync --num-threads 0 \
-		--save-interval 300000 \
 		--gc-interval 900 \
 		--data-dir /data/.data.nockchain \
 		--identity-path /data/.data.nockchain/.nockchain_identity \
