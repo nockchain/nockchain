@@ -43,7 +43,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     uv lock \
-    && uv sync --package nockchain-vllm-miner --no-dev --no-editable
+    && uv sync --package vllm-miner --no-dev --no-editable
 
 FROM source AS rust-builder
 WORKDIR /opt/nockchain

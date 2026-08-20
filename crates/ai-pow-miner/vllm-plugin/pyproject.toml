@@ -21,7 +21,7 @@ dev = [
 ]
 
 [project]
-name = "nockchain-vllm-miner"
+name = "vllm-miner"
 version = "0.1.0"
 description = "Nockchain AI-PoW integration for Pearl quantized vLLM kernels"
 authors = [
