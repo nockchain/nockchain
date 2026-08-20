@@ -102,7 +102,7 @@ pub mod pearl_mining;
 /// Bounded CPU and accelerator ticket-search backend contract.
 pub mod search;
 
-/// Gemma 4 31B checkpoint validation and fixed peak operand mapping.
+/// Gemma 4 31B checkpoint validation and native fused gate/up operand mapping.
 pub mod gemma4;
 
 /// RTX 5090 dense ticket-search session and benchmark contract.

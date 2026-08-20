@@ -834,14 +834,27 @@ mod tests {
     }
 
     #[test]
-    fn peak_dense_profile_uses_an_installed_setup_bucket() {
-        let params = ai_pow_miner::PEAK_PRODUCTION_PARAMS;
-        let trace_height = ai_pow::zk_bridge::pearl_dense_canonical_trace_height(&params, 0, 0)
-            .expect("peak dense trace height");
-        let key = VerifierSetupShapeKey::new(
-            trace_height,
-            (params.k / params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX,
-        );
+    fn dense_production_profiles_use_installed_setup_buckets() {
+        let expected_keys: Vec<(&str, VerifierSetupShapeKey)> = [
+            ("peak", ai_pow_miner::PEAK_PRODUCTION_PARAMS),
+            (
+                "fused Gemma",
+                ai_pow::params::MatmulParams::GEMMA_4_31B_GATE_UP_FUSED,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, params)| {
+            let trace_height = ai_pow::zk_bridge::pearl_dense_canonical_trace_height(&params, 0, 0)
+                .expect("dense production trace height");
+            (
+                label,
+                VerifierSetupShapeKey::new(
+                    trace_height,
+                    (params.k / params.noise_rank) as usize <= ai_pow::params::STRIPE_MAX,
+                ),
+            )
+        })
+        .collect();
 
         let installed_keys: std::collections::BTreeSet<_> =
             crate::setup::production_verifier_setup_buckets()
@@ -875,10 +888,12 @@ mod tests {
                 })
                 .collect();
 
-        assert!(
-            installed_keys.contains(&key),
-            "missing peak setup key {key:?}"
-        );
+        for (label, key) in expected_keys {
+            assert!(
+                installed_keys.contains(&key),
+                "missing {label} setup key {key:?}"
+            );
+        }
     }
 }
 
