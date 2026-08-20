@@ -69,7 +69,7 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
       /usr/local/bin/ai-pow-inference-seed-model \
       /usr/local/bin/ai-pow-inference-container-entrypoint \
     && ai-pow-inference-bridge --help >/dev/null \
-    && vllm --version
+    && python -c "from importlib.metadata import version; print(version('vllm'))"
 
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
