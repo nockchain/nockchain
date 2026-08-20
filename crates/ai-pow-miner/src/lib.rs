@@ -109,6 +109,10 @@ pub mod gemma4;
 #[cfg(feature = "gpu")]
 pub mod peak;
 
+/// Native Gemma 4 fused gate/up CUDA session and benchmark contract.
+#[cfg(feature = "gpu")]
+pub mod gemma4_cuda;
+
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///
 /// Internal by design: Hoon and external Nockchain callers submit only the
