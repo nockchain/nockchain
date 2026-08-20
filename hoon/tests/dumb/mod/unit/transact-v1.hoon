@@ -12,6 +12,35 @@
     h  ~(. helpers constants)
 ::  +der: pre-activation derived-state (read-only extra arg for consensus/miner doors)
 ++  der  ^-  derived-state  *derived-state
+++  test-v1-spend-1-parent-hash-binding
+  =/  note=nnote:t
+    (make-simple-note:v1:h p:default-keys-1:h 100.000)
+  =/  other-note=nnote:t
+    (make-simple-note:v1:h p:default-keys-2:h 100.000)
+  =/  parent-hash=hash:t  (hash:nnote:t note)
+  =/  other-parent-hash=hash:t  (hash:nnote:t other-note)
+  ?.  !=(parent-hash other-parent-hash)
+    (expect !>(%.n))
+  =/  pk=schnorr-pubkey:t
+    (head ~(tap z-in pubkeys.p:default-keys-1:h))
+  =/  [root=hash:t *]  (make-pkh-lock:v1:h 1 ~[pk])
+  =/  matching-seed=seed:v1:t
+    (make-seed:v1:h root 90.000 parent-hash)
+  =/  mismatched-seed=seed:v1:t
+    (make-seed:v1:h root 90.000 other-parent-hash)
+  =/  matching-spend=spend-1:v1:t
+    %*  .  *spend-1:v1:t
+      seeds  (~(put z-in *seeds:v1:t) matching-seed)
+      fee    10.000
+    ==
+  =/  mismatched-spend=spend-1:v1:t
+    matching-spend(seeds (~(put z-in *seeds:v1:t) mismatched-seed))
+  %+  expect-eq
+    !>([%.y %.n])
+  !>  :*  (verify-parent-hashes:spend-1:v1:t matching-spend note)
+          (verify-parent-hashes:spend-1:v1:t mismatched-spend note)
+      ==
+::
 ++  test-process-v0-into-v1
   =/  con=consensus-state  initial-consensus-state:h
   =^  par=page:t  con  (add-n-pages:h 1 con default-retain:h)
