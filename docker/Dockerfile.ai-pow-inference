@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG RUNPOD_BASE=nvidia/cuda:13.0.2-devel-ubuntu24.04
+ARG VLLM_BASE=vllm/vllm-openai:v0.20.2
 FROM ${RUNPOD_BASE} AS toolchain
 
 ARG RUST_TOOLCHAIN=nightly-2026-04-03
@@ -44,7 +45,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     uv lock \
-    && uv sync --package vllm-miner --no-dev --no-editable
+    && uv sync --package vllm-miner --no-dev --no-editable \
+    && uv build --all-packages --wheel --out-dir /wheelhouse
 
 FROM toolchain AS rust-builder
 WORKDIR /opt/nockchain
@@ -89,15 +91,19 @@ ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
 WORKDIR /workspace
 CMD ["sleep", "infinity"]
 
-FROM nvidia/cuda:13.0.2-runtime-ubuntu24.04 AS runtime
+FROM ${VLLM_BASE} AS runtime
+USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ca-certificates libgomp1 libssl3 libstdc++6 openssh-server \
     && mkdir -p /run/sshd \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=python-builder /root/.local/share/uv/python /root/.local/share/uv/python
-COPY --from=python-builder /opt/pearl/.venv /opt/pearl/.venv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=python-builder /wheelhouse /wheelhouse
+RUN uv pip install --system --find-links /wheelhouse /wheelhouse/vllm_miner-*.whl \
+    && rm -rf /wheelhouse /root/.cache/uv
+
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
@@ -107,9 +113,7 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
       /usr/local/bin/ai-pow-inference-seed-model \
       /usr/local/bin/ai-pow-inference-container-entrypoint
 
-ENV PATH=/opt/pearl/.venv/bin:${PATH} \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/opt/pearl/.venv/lib/python3.12/site-packages/torch/lib \
-    MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
