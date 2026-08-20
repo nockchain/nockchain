@@ -68,6 +68,32 @@ docker run --rm --gpus all \
 
 The image uses up to eight visible CUDA devices, canonical mode, and batches of 32,768 attempts per device by default. Set `CUDA_DEVICES` to `all` or a comma-separated ordinal list such as `0,1,2,3`; set `CANONICAL` or `GPU_BATCH_ATTEMPTS` to override the other values. Non-canonical mode also requires `PEARL_GATEWAY`.
 
+## Reusable inference image
+
+`docker/Dockerfile.ai-pow-inference` preinstalls CUDA 13, Compute Sanitizer,
+Rust, uv, the pinned Pearl workspace, the copied Nockchain vLLM plugin, vLLM,
+Pearl GEMM kernels, and the release inference bridge. Runpod validation starts
+from this image instead of installing toolchains on a rented GPU.
+
+```sh
+docker buildx build \
+  --platform linux/amd64 \
+  -f docker/Dockerfile.ai-pow-inference \
+  -t ghcr.io/nockchain/nockchain-ai-pow-inference:local .
+```
+
+Model weights remain on a reusable volume rather than in the container layer:
+
+```sh
+MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+  ai-pow-inference-seed-model
+ai-pow-inference-run
+```
+
+The `AI-PoW inference image` GitHub workflow publishes commit and branch tags to
+`ghcr.io/nockchain/nockchain-ai-pow-inference`. Rebuilding uses registry-independent
+GitHub Actions caches for the Python, Rust, and CUDA dependency layers.
+
 ## Validation
 
 ```sh

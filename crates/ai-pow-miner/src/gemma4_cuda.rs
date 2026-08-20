@@ -1,4 +1,4 @@
-//! RTX 5090 CUDA session for native Gemma 4 fused gate/up mining.
+//! Hopper/Blackwell CUDA session for native Gemma 4 fused gate/up mining.
 //!
 //! The session owns one immutable source-matrix generation and every
 //! candidate-bound CUDA allocation. The no-hit search path performs no allocation.

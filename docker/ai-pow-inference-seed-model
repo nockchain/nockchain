@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MODEL_PATH:=/workspace/models/Gemma-4-31B-it-pearl}"
+: "${MODEL_ID:=pearl-ai/Gemma-4-31B-it-pearl}"
+
+mkdir -p "${MODEL_PATH}"
+hf download "${MODEL_ID}" --local-dir "${MODEL_PATH}"
