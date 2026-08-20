@@ -33,13 +33,12 @@ RUN git clone https://github.com/pearl-research-labs/pearl.git /opt/pearl \
        miner/pearl-gemm/third_party/cutlass \
     && rm -rf /opt/pearl/.git /opt/pearl/miner/pearl-gemm/third_party/cutlass/.git
 
-FROM toolchain AS source
-WORKDIR /opt/nockchain
-COPY . /opt/nockchain
+FROM toolchain AS python-source
+COPY crates/ai-pow-miner/vllm-plugin /tmp/vllm-plugin
 RUN rm -rf /opt/pearl/miner/vllm-miner \
-    && cp -R /opt/nockchain/crates/ai-pow-miner/vllm-plugin /opt/pearl/miner/vllm-miner
+    && cp -R /tmp/vllm-plugin /opt/pearl/miner/vllm-miner
 
-FROM source AS python-builder
+FROM python-source AS python-builder
 WORKDIR /opt/pearl
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cargo/registry \
@@ -47,8 +46,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv lock \
     && uv sync --package vllm-miner --no-dev --no-editable
 
-FROM source AS rust-builder
+FROM toolchain AS rust-builder
 WORKDIR /opt/nockchain
+COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/nockchain/
+COPY .cargo /opt/nockchain/.cargo
+COPY patches /opt/nockchain/patches
+COPY crates /opt/nockchain/crates
 ENV AI_POW_CUDA_ARCH=compute_120 \
     AI_POW_CUDA_CODE=sm_120 \
     RUSTFLAGS="-C target-cpu=native"
