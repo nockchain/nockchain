@@ -406,4 +406,158 @@ mod tests {
         let error = validate_shape(256, 128, 0, 0).unwrap_err();
         assert!(error.to_string().contains("matrix lengths"));
     }
+
+    fn fixture(m: usize, n: usize) -> (Vec<i8>, Vec<i8>, [u8; 32]) {
+        let mut state = 0x0123_4567_89ab_cdefu64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            ((state >> 32) as u8 & 0x7f) as i8 - 64
+        };
+        let mut a = Vec::with_capacity(m * GEMMA4_K);
+        a.resize_with(m * GEMMA4_K, &mut next);
+        let mut b = Vec::with_capacity(n * GEMMA4_K);
+        b.resize_with(n * GEMMA4_K, &mut next);
+        let key = std::array::from_fn(|index| (index as u8).wrapping_mul(17).wrapping_add(3));
+        (a, b, key)
+    }
+
+    fn scalar_ticket(a: &[i8], b: &[i8], n: usize, ordinal: u64) -> TileState {
+        let col_tiles = n / GEMMA4_TILE;
+        let row_tile = ordinal as usize / col_tiles;
+        let col_tile = ordinal as usize % col_tiles;
+        let mut cells = [0i32; GEMMA4_TILE * GEMMA4_TILE];
+        let mut state = TileState::zero();
+        for step in 0..GEMMA4_K / GEMMA4_RANK {
+            for row in 0..GEMMA4_TILE {
+                let a_base = (row_tile * GEMMA4_TILE + row) * GEMMA4_K + step * GEMMA4_RANK;
+                for col in 0..GEMMA4_TILE {
+                    let b_base = (col_tile * GEMMA4_TILE + col) * GEMMA4_K + step * GEMMA4_RANK;
+                    let mut delta = 0i32;
+                    for index in 0..GEMMA4_RANK {
+                        delta += i32::from(a[a_base + index]) * i32::from(b[b_base + index]);
+                    }
+                    let cell = row * GEMMA4_TILE + col;
+                    cells[cell] = cells[cell].saturating_add(delta);
+                }
+            }
+            let x = cells
+                .iter()
+                .fold(0u32, |value, cell| value ^ (*cell as u32)) as i32;
+            state.fold(step as u32, x);
+        }
+        state
+    }
+
+    fn little_endian_predecessor(mut value: [u8; 32]) -> [u8; 32] {
+        for byte in &mut value {
+            if *byte != 0 {
+                *byte -= 1;
+                return value;
+            }
+            *byte = 0xff;
+        }
+        panic!("zero has no unsigned predecessor");
+    }
+
+    #[test]
+    #[ignore = "requires an RTX 5090 CUDA device"]
+    fn device_matches_one_thousand_deterministic_tickets() {
+        const TICKET_COUNT: usize = 1_000;
+        let (a, b, key) = fixture(2_048, 256);
+        let mut session =
+            Gemma4CudaSession::new(0, 2_048, 256, &a, &b, &key).expect("Gemma CUDA session");
+        let total_tickets = session.total_tickets();
+        let mut ordinals = Vec::with_capacity(TICKET_COUNT);
+        ordinals.extend([0, 1, 127, 128, 129, 1_023, 1_024, total_tickets - 1]);
+        let mut random = 0xd1b5_4a32_d192_ed03u64;
+        while ordinals.len() < TICKET_COUNT {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            ordinals.push(random % total_tickets);
+        }
+        for ordinal in ordinals {
+            let scalar = scalar_ticket(&a, &b, 256, ordinal);
+            let jackpot = ai_pow::pearl_compat::pearl_jackpot_hash(&scalar, &key);
+            let device = session.debug_ticket(ordinal).expect("device ticket");
+            assert_eq!(device.state, scalar, "ordinal {ordinal}");
+            assert_eq!(device.jackpot, jackpot, "ordinal {ordinal}");
+            let lower_target = little_endian_predecessor(jackpot);
+            for repetition in 0..3 {
+                let hit = session
+                    .search(ordinal, 1, &jackpot)
+                    .expect("exact-target search");
+                assert_eq!(
+                    hit.winner,
+                    Some(ordinal),
+                    "ordinal {ordinal}, repetition {repetition}"
+                );
+                assert_eq!(hit.jackpot, jackpot);
+                let miss = session
+                    .search(ordinal, 1, &lower_target)
+                    .expect("predecessor-target search");
+                assert_eq!(miss.winner, None);
+            }
+        }
+    }
+
+    #[cfg(feature = "node")]
+    #[test]
+    #[ignore = "requires an RTX 5090 CUDA device"]
+    fn source_session_matches_complete_scalar_transcript() {
+        use std::sync::Arc;
+
+        let params = ai_pow::params::MatmulParams {
+            m: 256,
+            k: GEMMA4_K as u32,
+            n: 128,
+            noise_rank: GEMMA4_RANK as u32,
+            tile: GEMMA4_TILE as u32,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(ai_pow::synth::AI_POW_PROD_SYNTH_SEED, &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+            &params,
+            [0x5a; 32],
+            Arc::clone(&a),
+            Arc::clone(&b),
+        )
+        .expect("dense template");
+        let mut session =
+            Gemma4CudaSession::new_source(0, params.m as usize, params.n as usize, &a, &b)
+                .expect("Gemma source session");
+        for extranonce in [0, 1, u32::MAX - 1, u32::MAX] {
+            let scalar = template.prepare(extranonce).expect("scalar preparation");
+            let device = session
+                .prepare(scalar.sigma(), scalar.mu())
+                .expect("device preparation");
+            assert_eq!(
+                device.commitments,
+                *scalar.commitments(),
+                "extranonce {extranonce}"
+            );
+            for ordinal in [0, scalar.row_offsets().len() as u64 - 1, 127] {
+                let (t_rows, t_cols) = scalar
+                    .offsets_at_ordinal(ordinal)
+                    .expect("scalar ticket offsets");
+                let expected = scalar
+                    .evaluate(t_rows, t_cols, &mut scalar.scratch())
+                    .expect("scalar ticket");
+                let actual = session.debug_ticket(ordinal).expect("device ticket");
+                assert_eq!(
+                    actual.state, expected.tile_state,
+                    "extranonce {extranonce}, ordinal {ordinal}"
+                );
+                assert_eq!(
+                    actual.jackpot, expected.jackpot_hash,
+                    "extranonce {extranonce}, ordinal {ordinal}"
+                );
+            }
+        }
+    }
 }

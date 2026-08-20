@@ -164,6 +164,34 @@ The fused Gemma sweep performs 947,040,288,768 useful MACs, 86.1% of the current
 peak sweep, with no common/output zero padding. Normalized TMAC/s, not raw ticket
 count, is the performance comparison.
 
+## RTX 5090 mining evidence
+
+Hardware validation uses one RTX 5090 (`sm_120`, 170 SMs, 32,607 MiB),
+driver 580.126.09, CUDA 12.8.93, and a 600 W power limit.
+
+The kernel uses 230 registers per thread, one active 256-thread CTA per SM,
+8,192 bytes of static shared memory, and 49,152 bytes of dynamic shared memory.
+`cuobjdump` reports zero stack and zero local memory for the search, debug,
+commitment, seed, noise, and noising kernels.
+
+The scalar/device differential passes 1,000 deterministic tickets, including
+first, last, CTA-boundary, exact-target, and predecessor-target cases. The source
+session matches CPU commitments, noise, tile state, and jackpot across four
+candidate extranonces. `memcheck`, `racecheck`, `initcheck`, and `synccheck`
+report zero findings.
+
+After 100 warmup launches, 20,000 measured full-grid launches produce:
+
+| Kernel | Median launch | Tickets/s | Complete-ticket TMAC/s |
+|---|---:|---:|---:|
+| Gemma fused gate/up | 2.825 ms | 243,544,431 | 335.179 |
+| Existing peak baseline | 3.206 ms | 163,550,520 | 342.990 |
+
+The isolated Gemma kernel retains 97.72% of the peak kernel's normalized mining
+rate while every common/output MAC remains useful inference. The separate
+compilation unit leaves the existing peak source and ABI unchanged. Inference
+output materialization remains outside this mining-only measurement.
+
 ## Failure behavior
 
 - A checkpoint mismatch fails before CUDA allocation.
