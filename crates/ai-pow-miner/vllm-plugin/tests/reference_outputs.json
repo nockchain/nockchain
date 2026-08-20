@@ -1,0 +1,10 @@
+{
+  "qwen3_moe_mining": "Le chat est sur la table.",
+  "llama_8b_no_mining": "Le chat est sur la table.",
+  "qwen3_moe_consistency_mining": "2 + 2 = 4.",
+  "qwen3_moe_consistency_no_mining": "2 + 2 = 4.",
+  "llama_8b_mining": "Le chat est sur la table.",
+  "llama_8b_consistency_mining": "2 + 2 = 4",
+  "llama_8b_consistency_no_mining": "2 + 2 = 4",
+  "qwen3_moe_no_mining": "Le chat est sur la table."
+}

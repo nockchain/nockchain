@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use ai_pow::params::{PEARL_K_MAX, PEARL_MN_MAX};
 use anyhow::{bail, Result};
 use nockapp_grpc_proto::pb::ai_pow::v1::inference_mining_service_server::{
     InferenceMiningService, InferenceMiningServiceServer,
@@ -30,8 +31,8 @@ const HEADER_BYTES: usize = 76;
 const TARGET_BYTES: usize = 32;
 const MAX_TENSOR_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_OPENED_TENSOR_BYTES: u64 = 512 * 1024 * 1024;
-const GEMMA_COMMON_DIM: u32 = 5_376;
-const GEMMA_FUSED_OUTPUT_DIM: u32 = 43_008;
+pub const GEMMA_COMMON_DIM: u32 = 5_376;
+pub const GEMMA_FUSED_OUTPUT_DIM: u32 = 43_008;
 const GEMMA_MAX_TOKENS: u32 = 4_096;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -122,8 +123,11 @@ impl InferenceSchedulerState {
         if request.token_count == 0 || request.token_count > GEMMA_MAX_TOKENS {
             bail!("token_count must be in 1..={GEMMA_MAX_TOKENS}");
         }
-        if request.common_dim != GEMMA_COMMON_DIM || request.output_dim != GEMMA_FUSED_OUTPUT_DIM {
-            bail!("work shape must be token_count x {GEMMA_COMMON_DIM} x {GEMMA_FUSED_OUTPUT_DIM}");
+        if request.common_dim == 0 || request.common_dim > PEARL_K_MAX {
+            bail!("common_dim must be in 1..={PEARL_K_MAX}");
+        }
+        if request.output_dim == 0 || request.output_dim > PEARL_MN_MAX {
+            bail!("output_dim must be in 1..={PEARL_MN_MAX}");
         }
         let key = WorkKey {
             runtime_id,

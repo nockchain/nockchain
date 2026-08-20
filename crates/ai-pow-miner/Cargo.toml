@@ -29,6 +29,11 @@ name = "ai-pow-gemma4-bench"
 path = "src/bin/ai_pow_gemma4_bench.rs"
 required-features = ["gpu"]
 
+[[bin]]
+name = "ai-pow-inference-bridge"
+path = "src/bin/ai_pow_inference_bridge.rs"
+required-features = ["node"]
+
 [[bench]]
 name = "search"
 harness = false

@@ -1,0 +1,60 @@
+[build-system]
+requires = ["uv_build>=0.9.18,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+  "black>=23.0.0",
+  "isort>=5.12.0",
+  "loguru-caplog>=0.2.0",
+  "mypy>=1.0.0",
+  "myst-parser>=2.0.0",
+  "pre-commit>=3.0.0",
+  "pylsp-mypy>=0.7.0",
+  "pytest-asyncio>=1.2.0",
+  "pytest-cov>=4.0.0",
+  "pytest>=8.3.0",
+  "python-lsp-ruff>=2.3.0",
+  "ruff>=0.13.3",
+  "sphinx-rtd-theme>=1.0.0",
+  "sphinx>=7.0.0"
+]
+
+[project]
+name = "nockchain-vllm-miner"
+version = "0.1.0"
+description = "Nockchain AI-PoW integration for Pearl quantized vLLM kernels"
+authors = [
+  {name = "Pearl Research", email = "research@pearlresearch.ai"},
+  {name = "Nockchain contributors"}
+]
+dependencies = [
+  "PyYAML>=6.0.1",
+  "aiohttp>=3.13.3",
+  "grpcio>=1.83.0",
+  "protobuf>=7.35.1",
+  "compressed-tensors",
+  "miner-utils",
+  "pearl-gateway",
+  "miner-base",
+  "pearl-gemm",
+  "numpy>=1.20.0",
+  "torch==2.11.0",
+  "torchaudio==2.11.0",
+  "torchvision==0.26.0",
+  "vllm==0.20.2",
+]
+requires-python = "==3.12.*"
+license = {text = "MIT"}
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+
+[project.entry-points."vllm.general_plugins"]
+register_nockchain_mining_plugin = "vllm_miner:register_pearl_miner_layer"
+
+
