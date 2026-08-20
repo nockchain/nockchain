@@ -110,6 +110,7 @@ dependencies = [
  "hex",
  "nockapp",
  "nockapp-grpc",
+ "nockapp-grpc-proto",
  "nockchain-mining-common",
  "nockvm",
  "nockvm_macros",
@@ -120,7 +121,9 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic 0.14.6",
  "tracing",
  "tracing-subscriber",
 ]
