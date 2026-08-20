@@ -1,4 +1,4 @@
-name: Compiler parity
+name: Compiler parity (manual)
 
 # Byte-for-byte artifact parity between hoonc (reference) and honk (native
 # compiler): each kernel plus the hoon-138 arbitrary self-mint, one job per
@@ -17,16 +17,7 @@ name: Compiler parity
 # included so changes to the gate exercise the gate itself.
 
 on:
-  push:
-    branches: ["master", "nightly"]
-    paths:
-      - "crates/honk/**"
-      - ".github/workflows/parity.yml"
-  pull_request:
-    branches: ["master", "nightly"]
-    paths:
-      - "crates/honk/**"
-      - ".github/workflows/parity.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
