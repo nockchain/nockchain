@@ -49,7 +49,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM toolchain AS rust-builder
 WORKDIR /opt/nockchain
 COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/nockchain/
-COPY .cargo /opt/nockchain/.cargo
 COPY patches /opt/nockchain/patches
 COPY crates /opt/nockchain/crates
 ENV AI_POW_CUDA_ARCH=compute_120 \
