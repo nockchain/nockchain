@@ -53,6 +53,9 @@ node = [
     "dep:nockchain-mining-common",
     "dep:nockapp-grpc",
     "dep:futures",
+    "dep:nockapp-grpc-proto",
+    "dep:tonic",
+    "dep:tokio-stream",
     "dep:tokio-util",
     "dep:tracing-subscriber",
 ]
@@ -77,10 +80,13 @@ futures = { workspace = true, optional = true }
 gnort = { workspace = true, optional = true }
 nockapp = { path = "../nockapp", optional = true }
 nockapp-grpc = { workspace = true, optional = true }
+nockapp-grpc-proto = { workspace = true, optional = true, features = ["server"] }
 nockchain-mining-common = { workspace = true, optional = true }
 nockvm = { workspace = true, optional = true }
 nockvm_macros = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tokio-stream = { workspace = true, optional = true, features = ["net"] }
+tonic = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true, features = ["env-filter", "ansi"] }
 

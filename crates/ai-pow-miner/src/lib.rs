@@ -113,6 +113,10 @@ pub mod peak;
 #[cfg(feature = "gpu")]
 pub mod gemma4_cuda;
 
+/// Typed vLLM control plane and mining-first request scheduler.
+#[cfg(feature = "node")]
+pub mod inference;
+
 /// Pearl Gateway `submitPlainProof` artifact construction.
 ///
 /// Internal by design: Hoon and external Nockchain callers submit only the
