@@ -69,10 +69,9 @@ impl IdleMiningBackend for BridgeIdleBackend {
                     .map_err(|_| anyhow::anyhow!("CUDA idle session lock poisoned"))?;
                 let prepared = state.template.prepare_search(state.extranonce)?;
                 state.session.prepare(prepared.sigma(), prepared.mu())?;
-                let result =
-                    state
-                        .session
-                        .search(0, state.session.total_tickets(), &state.target)?;
+                let total_tickets = state.session.total_tickets();
+                let target = state.target;
+                let result = state.session.search(0, total_tickets, &target)?;
                 if result.winner.is_some() {
                     bail!("zero-target idle batch returned a winner");
                 }
