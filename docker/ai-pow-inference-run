@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${MODEL_PATH:?MODEL_PATH is required}"
+: "${NOCKCHAIN_AI_POW_ENDPOINT:=127.0.0.1:5590}"
+: "${AI_POW_CUDA_DEVICE:=0}"
+: "${VLLM_TENSOR_PARALLEL_SIZE:=2}"
+: "${VLLM_MAX_MODEL_LEN:=8192}"
+: "${VLLM_GPU_MEMORY_UTILIZATION:=0.80}"
+
+if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
+  echo "model config not found: ${MODEL_PATH}/config.json" >&2
+  exit 1
+fi
+
+bridge_host="${NOCKCHAIN_AI_POW_ENDPOINT%:*}"
+bridge_port="${NOCKCHAIN_AI_POW_ENDPOINT##*:}"
+if [[ "${bridge_host}" != "127.0.0.1" && "${bridge_host}" != "localhost" ]]; then
+  echo "NOCKCHAIN_AI_POW_ENDPOINT must use loopback" >&2
+  exit 1
+fi
+
+ai-pow-inference-bridge \
+  --listen "127.0.0.1:${bridge_port}" \
+  --cuda-device "${AI_POW_CUDA_DEVICE}" &
+bridge_pid=$!
+
+cleanup() {
+  kill "${bridge_pid}" 2>/dev/null || true
+  wait "${bridge_pid}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+for _ in $(seq 1 100); do
+  if python -c "import grpc; c=grpc.insecure_channel('${NOCKCHAIN_AI_POW_ENDPOINT}'); grpc.channel_ready_future(c).result(timeout=0.1)" 2>/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+
+exec vllm serve "${MODEL_PATH}" \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --language-model-only \
+  --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
+  --max-model-len "${VLLM_MAX_MODEL_LEN}" \
+  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
+  --enforce-eager \
+  "$@"

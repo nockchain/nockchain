@@ -970,7 +970,7 @@ extern "C" int ai_pow_cuda_gemma4_session_create(
   if (error != cudaSuccess) goto fail;
   error = cudaGetDeviceProperties(&properties, static_cast<int>(device_ordinal));
   if (error != cudaSuccess) goto fail;
-  if (properties.major != 12 || properties.minor != 0) {
+  if (properties.major < 9) {
     error = cudaErrorNotSupported;
     goto fail;
   }
@@ -1084,7 +1084,7 @@ extern "C" int ai_pow_cuda_gemma4_source_session_create(
   if (error != cudaSuccess) goto fail;
   error = cudaGetDeviceProperties(&properties, static_cast<int>(device_ordinal));
   if (error != cudaSuccess) goto fail;
-  if (properties.major != 12 || properties.minor != 0) {
+  if (properties.major < 9) {
     error = cudaErrorNotSupported;
     goto fail;
   }
