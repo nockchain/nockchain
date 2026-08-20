@@ -61,7 +61,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
       --bin ai-pow-inference-bridge \
     && cp target/release/ai-pow-inference-bridge /usr/local/bin/
 
-FROM python-builder
+FROM python-builder AS development
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
@@ -86,5 +86,40 @@ ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
 EXPOSE 22
 ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
 
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+
+FROM nvidia/cuda:13.0.2-runtime-ubuntu24.04 AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates libgomp1 libssl3 libstdc++6 openssh-server \
+    && mkdir -p /run/sshd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=python-builder /root/.local/share/uv/python /root/.local/share/uv/python
+COPY --from=python-builder /opt/pearl/.venv /opt/pearl/.venv
+COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
+COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
+COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
+COPY docker/ai-pow-inference-container-entrypoint \
+  /usr/local/bin/ai-pow-inference-container-entrypoint
+RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
+      /usr/local/bin/ai-pow-inference-seed-model \
+      /usr/local/bin/ai-pow-inference-container-entrypoint
+
+ENV PATH=/opt/pearl/.venv/bin:${PATH} \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/opt/pearl/.venv/lib/python3.12/site-packages/torch/lib \
+    MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
+    NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
+    AI_POW_CUDA_DEVICE=0 \
+    VLLM_TENSOR_PARALLEL_SIZE=2 \
+    VLLM_MAX_MODEL_LEN=8192 \
+    VLLM_GPU_MEMORY_UTILIZATION=0.80 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_DISABLE_REQUIRE=1
+
+EXPOSE 22
+ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
 WORKDIR /workspace
 CMD ["sleep", "infinity"]
