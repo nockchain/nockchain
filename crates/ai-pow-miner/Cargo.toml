@@ -24,6 +24,11 @@ name = "ai-pow-peak-bench"
 path = "src/bin/ai_pow_peak_bench.rs"
 required-features = ["gpu"]
 
+[[bin]]
+name = "ai-pow-gemma4-bench"
+path = "src/bin/ai_pow_gemma4_bench.rs"
+required-features = ["gpu"]
+
 [[bench]]
 name = "search"
 harness = false

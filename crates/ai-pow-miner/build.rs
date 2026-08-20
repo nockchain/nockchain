@@ -6,8 +6,10 @@ fn main() {
     println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_gemm.cu");
     println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_v3.cu");
     println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_v3_peak.cu");
+    println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_v3_gemma4.cu");
     println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_gemm.h");
     println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_v3_peak.h");
+    println!("cargo:rerun-if-changed=../ai-pow-miner-cuda/csrc/ai_pow_v3_gemma4.h");
     println!("cargo:rerun-if-env-changed=AI_POW_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=AI_POW_CUDA_CODE");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -20,7 +22,7 @@ fn main() {
     let arch = env::var("AI_POW_CUDA_ARCH").unwrap_or_else(|_| "compute_89".to_owned());
     let code = env::var("AI_POW_CUDA_CODE").unwrap_or_else(|_| "compute_89".to_owned());
     let mut objects = Vec::new();
-    for source in ["ai_pow_gemm.cu", "ai_pow_v3.cu", "ai_pow_v3_peak.cu"] {
+    for source in ["ai_pow_gemm.cu", "ai_pow_v3.cu", "ai_pow_v3_peak.cu", "ai_pow_v3_gemma4.cu"] {
         let object = out_dir.join(format!("{source}.o"));
         let status = Command::new("nvcc")
             .args([
