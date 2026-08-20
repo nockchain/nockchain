@@ -29,7 +29,9 @@ ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
 
 RUN git clone https://github.com/pearl-research-labs/pearl.git /opt/pearl \
     && git -C /opt/pearl checkout "${PEARL_REV}" \
-    && rm -rf /opt/pearl/.git
+    && git -C /opt/pearl submodule update --init --depth 1 \
+       miner/pearl-gemm/third_party/cutlass \
+    && rm -rf /opt/pearl/.git /opt/pearl/miner/pearl-gemm/third_party/cutlass/.git
 
 FROM toolchain AS source
 WORKDIR /opt/nockchain
