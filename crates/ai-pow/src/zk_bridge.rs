@@ -8705,6 +8705,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fused_gemma_dense_profile_uses_installed_trace_band() {
+        let params = MatmulParams::GEMMA_4_31B_GATE_UP_FUSED;
+        params
+            .validate_prod_envelope()
+            .expect("fused Gemma profile must satisfy the consensus envelope");
+        let first = pearl_dense_canonical_trace_height(&params, 0, 0)
+            .expect("first fused Gemma tile trace height");
+        let last = pearl_dense_canonical_trace_height(
+            &params,
+            params.row_tiles() - 1,
+            params.col_tiles() - 1,
+        )
+        .expect("last fused Gemma tile trace height");
+        assert_eq!(first, 1 << 17, "fused Gemma setup bucket");
+        assert_eq!(last, first, "all fused Gemma tiles use one setup bucket");
+        assert_eq!(params.num_stripes(), 42);
+        assert!(params.num_stripes() as usize <= crate::params::STRIPE_MAX);
+    }
+
     // ===================================================================
     // Structural-invariant defense at the `pub` bridge
     // boundary. A `MatmulParams` with `noise_rank = 0` historically hit

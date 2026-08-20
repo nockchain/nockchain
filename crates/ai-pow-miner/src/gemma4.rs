@@ -1,19 +1,18 @@
-//! Gemma 4 31B checkpoint validation and dense peak operand mapping.
+//! Gemma 4 31B checkpoint validation and native fused gate/up operand mapping.
 //!
 //! Nockchain consensus admits arbitrary INT7 matrices inside the Pearl production
 //! envelope. Model identity is therefore miner policy, not a consensus input. This
-//! module validates the selected Pearl checkpoint and maps its mineable MLP operands
-//! into the existing fixed peak geometry without changing the `%ai-pow` statement.
+//! module validates the selected Pearl checkpoint and constructs the exact fused
+//! Gemma MLP matrix used by the native CUDA target.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use ai_pow::params::MatmulParams;
 use serde::Deserialize;
 use thiserror::Error;
-
-use crate::PEAK_PRODUCTION_PARAMS;
 
 /// Exact language model architecture supported by this target profile.
 pub const GEMMA4_ARCHITECTURE: &str = "Gemma4ForConditionalGeneration";
@@ -25,14 +24,17 @@ pub const GEMMA4_TEXT_MODEL_TYPE: &str = "gemma4_text";
 pub const GEMMA4_LAYERS: usize = 60;
 /// Input width of each mineable Gemma 4 MLP projection.
 pub const GEMMA4_HIDDEN_SIZE: usize = 5_376;
-/// Output width of each mineable Gemma 4 MLP projection.
-pub const GEMMA4_INTERMEDIATE_SIZE: usize = 21_504;
-/// Maximum logical token rows carried by one fixed peak work matrix.
-pub const GEMMA4_MAX_TOKENS: usize = PEAK_PRODUCTION_PARAMS.m as usize;
-/// Physical common dimension required by the production peak CUDA kernel.
-pub const GEMMA4_PEAK_K: usize = PEAK_PRODUCTION_PARAMS.k as usize;
-/// Physical output width required by the production peak CUDA kernel.
-pub const GEMMA4_PEAK_N: usize = PEAK_PRODUCTION_PARAMS.n as usize;
+/// Output width of one Gemma 4 gate or up projection.
+pub const GEMMA4_PROJECTION_SIZE: usize = 21_504;
+/// Output width of the fused gate + up projection.
+pub const GEMMA4_FUSED_OUTPUT_SIZE: usize = 2 * GEMMA4_PROJECTION_SIZE;
+/// Consensus-admitted native fused gate/up mining profile.
+pub const GEMMA4_NATIVE_PARAMS: MatmulParams = MatmulParams::GEMMA_4_31B_GATE_UP_FUSED;
+/// Maximum token rows carried by one native fused work matrix.
+pub const GEMMA4_MAX_TOKENS: usize = GEMMA4_NATIVE_PARAMS.m as usize;
+/// Number of rank-128 transcript cadences in one native Gemma dot product.
+pub const GEMMA4_TRANSCRIPT_CADENCES: usize =
+    GEMMA4_NATIVE_PARAMS.k as usize / GEMMA4_NATIVE_PARAMS.noise_rank as usize;
 
 const CONFIG_FILE: &str = "config.json";
 const WEIGHTS_FILE: &str = "model.safetensors";
@@ -90,8 +92,8 @@ impl LayerTensorSlices {
 /// Validated metadata for the selected Pearl Gemma 4 31B checkpoint.
 ///
 /// Opening a checkpoint reads only `config.json` and the bounded safetensors JSON
-/// header. Weight bytes remain on disk until [`Self::load_peak_b_col_major`] is
-/// called.
+/// header. Weight bytes remain on disk until
+/// [`Self::load_fused_gate_up_b_col_major`] is called.
 #[derive(Debug)]
 pub struct Gemma4Checkpoint {
     root: PathBuf,
@@ -146,74 +148,48 @@ impl Gemma4Checkpoint {
         self.weights_file_len
     }
 
-    /// Load one INT7 MLP weight and zero-pad it into peak `B` column-major layout.
+    /// Load one decoder layer's INT7 gate and up weights as one native `B`.
     ///
-    /// Safetensors stores the logical weight as `[out, in]` row-major. The same byte
-    /// order is column-major for Pearl's conceptual `[in, out]` matrix. Each logical
-    /// output column is extended from 5,376 to 8,192 elements, and the remaining
-    /// output columns through 32,768 are zero.
-    pub fn load_peak_b_col_major(
+    /// Safetensors stores each logical weight as `[out, in]` row-major. The same
+    /// byte order is column-major for Pearl's conceptual `[in, out]` matrix.
+    /// Gate columns precede up columns, so the resulting output splits at
+    /// [`GEMMA4_PROJECTION_SIZE`] without padding or transposition.
+    pub fn load_fused_gate_up_b_col_major(
         &self,
         layer: usize,
-        projection: Gemma4MlpProjection,
     ) -> Result<Vec<i8>, Gemma4TargetError> {
         validate_layer(layer)?;
-        let tensor_name = projection.tensor_name(layer)?;
-        let slice = self.layers[layer].get(projection);
-        let expected_logical_bytes = GEMMA4_INTERMEDIATE_SIZE
+        let physical_len = GEMMA4_FUSED_OUTPUT_SIZE
             .checked_mul(GEMMA4_HIDDEN_SIZE)
             .ok_or_else(|| {
-                Gemma4TargetError::InvalidManifest("Gemma weight size overflow".into())
+                Gemma4TargetError::InvalidManifest("fused Gemma B size overflow".into())
             })?;
-        if slice.byte_len != expected_logical_bytes as u64 {
-            return Err(Gemma4TargetError::InvalidManifest(format!(
-                "{tensor_name} has {} bytes; expected {expected_logical_bytes}",
-                slice.byte_len
-            )));
-        }
-
-        let mut file = File::open(&self.weights_path).map_err(|source| Gemma4TargetError::Io {
+        let mut fused = vec![0i8; physical_len];
+        let file = File::open(&self.weights_path).map_err(|source| Gemma4TargetError::Io {
             operation: "open",
             path: self.weights_path.clone(),
             source,
         })?;
-        file.seek(SeekFrom::Start(slice.absolute_offset))
-            .map_err(|source| Gemma4TargetError::Io {
-                operation: "seek",
-                path: self.weights_path.clone(),
-                source,
-            })?;
         let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
-        let physical_len = GEMMA4_PEAK_N
-            .checked_mul(GEMMA4_PEAK_K)
-            .ok_or_else(|| Gemma4TargetError::InvalidManifest("peak B size overflow".into()))?;
-        let mut padded = vec![0i8; physical_len];
-        let mut logical_row = vec![0u8; GEMMA4_HIDDEN_SIZE];
-
-        for output in 0..GEMMA4_INTERMEDIATE_SIZE {
-            reader
-                .read_exact(&mut logical_row)
-                .map_err(|source| Gemma4TargetError::Io {
-                    operation: "read tensor",
-                    path: self.weights_path.clone(),
-                    source,
-                })?;
-            let row_start = output * GEMMA4_PEAK_K;
-            for (input, byte) in logical_row.iter().copied().enumerate() {
-                let value = byte as i8;
-                if !(-64..=64).contains(&value) {
-                    return Err(Gemma4TargetError::InvalidOperands(format!(
-                        "{tensor_name}[{output},{input}] is {value}; INT7 operands must be in [-64, 64]"
-                    )));
-                }
-                padded[row_start + input] = value;
-            }
+        for (projection_index, projection) in [Gemma4MlpProjection::Gate, Gemma4MlpProjection::Up]
+            .into_iter()
+            .enumerate()
+        {
+            let tensor_name = projection.tensor_name(layer)?;
+            let slice = self.layers[layer].get(projection);
+            let output_base = projection_index * GEMMA4_PROJECTION_SIZE;
+            read_projection_into(
+                &mut reader, &self.weights_path, slice, &tensor_name, output_base, &mut fused,
+            )?;
         }
-        Ok(padded)
+        Ok(fused)
     }
 
-    /// Zero-pad token-major INT7 activations into peak `A` row-major layout.
-    pub fn pad_peak_a_row_major(
+    /// Zero-pad token-major INT7 activations to the native 4,096-row batch.
+    ///
+    /// The common dimension remains the model's exact 5,376 values. Only absent
+    /// token rows are zero, so a full batch performs no padded MACs.
+    pub fn build_native_a_row_major(
         tokens: usize,
         quantized_activations: &[i8],
     ) -> Result<Vec<i8>, Gemma4TargetError> {
@@ -223,10 +199,58 @@ impl Gemma4Checkpoint {
             )));
         }
         pad_i8_rows(
-            quantized_activations, tokens, GEMMA4_HIDDEN_SIZE, GEMMA4_MAX_TOKENS, GEMMA4_PEAK_K,
-            "Gemma activation",
+            quantized_activations, tokens, GEMMA4_HIDDEN_SIZE, GEMMA4_MAX_TOKENS,
+            GEMMA4_HIDDEN_SIZE, "Gemma activation",
         )
     }
+}
+
+fn read_projection_into(
+    reader: &mut BufReader<File>,
+    weights_path: &Path,
+    slice: TensorSlice,
+    tensor_name: &str,
+    output_base: usize,
+    fused: &mut [i8],
+) -> Result<(), Gemma4TargetError> {
+    let expected_bytes = GEMMA4_PROJECTION_SIZE
+        .checked_mul(GEMMA4_HIDDEN_SIZE)
+        .ok_or_else(|| Gemma4TargetError::InvalidManifest("Gemma weight size overflow".into()))?;
+    if slice.byte_len != expected_bytes as u64 {
+        return Err(Gemma4TargetError::InvalidManifest(format!(
+            "{tensor_name} has {} bytes; expected {expected_bytes}",
+            slice.byte_len
+        )));
+    }
+    reader
+        .seek(SeekFrom::Start(slice.absolute_offset))
+        .map_err(|source| Gemma4TargetError::Io {
+            operation: "seek",
+            path: weights_path.to_path_buf(),
+            source,
+        })?;
+    let mut logical_row = vec![0u8; GEMMA4_HIDDEN_SIZE];
+    for output in 0..GEMMA4_PROJECTION_SIZE {
+        reader
+            .read_exact(&mut logical_row)
+            .map_err(|source| Gemma4TargetError::Io {
+                operation: "read tensor",
+                path: weights_path.to_path_buf(),
+                source,
+            })?;
+        let fused_row = output_base + output;
+        let row_start = fused_row * GEMMA4_HIDDEN_SIZE;
+        for (input, byte) in logical_row.iter().copied().enumerate() {
+            let value = byte as i8;
+            if !(-64..=64).contains(&value) {
+                return Err(Gemma4TargetError::InvalidOperands(format!(
+                    "{tensor_name}[{output},{input}] is {value}; INT7 operands must be in [-64, 64]"
+                )));
+            }
+            fused[row_start + input] = value;
+        }
+    }
+    Ok(())
 }
 
 /// Gemma target validation failure.
@@ -318,7 +342,7 @@ fn validate_config(config: &GemmaConfig) -> Result<(), Gemma4TargetError> {
         "text_config.hidden_size must be 5376",
     )?;
     require_config(
-        config.text_config.intermediate_size == GEMMA4_INTERMEDIATE_SIZE,
+        config.text_config.intermediate_size == GEMMA4_PROJECTION_SIZE,
         "text_config.intermediate_size must be 21504",
     )?;
     require_config(
@@ -595,14 +619,14 @@ fn validate_tensor_manifest(
         let gate = tensor_slice(
             entries,
             &gate_name,
-            &[GEMMA4_INTERMEDIATE_SIZE as u64, GEMMA4_HIDDEN_SIZE as u64],
+            &[GEMMA4_PROJECTION_SIZE as u64, GEMMA4_HIDDEN_SIZE as u64],
             data_start,
             file_len,
         )?;
         let up = tensor_slice(
             entries,
             &up_name,
-            &[GEMMA4_INTERMEDIATE_SIZE as u64, GEMMA4_HIDDEN_SIZE as u64],
+            &[GEMMA4_PROJECTION_SIZE as u64, GEMMA4_HIDDEN_SIZE as u64],
             data_start,
             file_len,
         )?;
@@ -764,15 +788,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn peak_mapping_keeps_the_consensus_profile() {
+    fn native_mapping_uses_the_fused_consensus_profile() {
         assert_eq!(GEMMA4_MAX_TOKENS, 4_096);
-        assert_eq!(GEMMA4_PEAK_K, 8_192);
-        assert_eq!(GEMMA4_PEAK_N, 32_768);
-        assert!(GEMMA4_HIDDEN_SIZE <= GEMMA4_PEAK_K);
-        assert!(GEMMA4_INTERMEDIATE_SIZE <= GEMMA4_PEAK_N);
-        PEAK_PRODUCTION_PARAMS
+        assert_eq!(GEMMA4_NATIVE_PARAMS.k, 5_376);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.n, 43_008);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.noise_rank, 128);
+        assert_eq!(GEMMA4_NATIVE_PARAMS.tile, 16);
+        assert_eq!(GEMMA4_FUSED_OUTPUT_SIZE, 2 * GEMMA4_PROJECTION_SIZE);
+        GEMMA4_NATIVE_PARAMS
             .validate_prod_envelope()
-            .expect("the shared peak profile must stay consensus-admitted");
+            .expect("native Gemma profile must stay consensus-admitted");
+    }
+
+    #[test]
+    fn forty_two_cadence_transcript_matches_known_answer() {
+        let x_steps: Vec<i32> = (0..GEMMA4_TRANSCRIPT_CADENCES)
+            .map(|step| ((step as u32).wrapping_mul(0x9e37_79b9) ^ 0xa5a5_5a5a) as i32)
+            .collect();
+        let state = ai_pow::matmul::TileState::from_x_steps(&x_steps);
+        assert_eq!(
+            state.0.map(|word| word as u32),
+            [
+                0x51e5_b0c9, 0x058f_c68d, 0x7e37_4924, 0xab90_d1bb, 0x7a18_7992, 0x51a5_e6e9,
+                0xcc2d_6a80, 0x3eb6_e727, 0x923e_6afe, 0x68c7_0655, 0x476b_17e1, 0xe669_a1e1,
+                0x766a_d381, 0xc76a_6601, 0x916d_99a1, 0x2263_5b21,
+            ]
+        );
     }
 
     #[test]
@@ -803,17 +844,17 @@ mod tests {
     }
 
     #[test]
-    fn activation_mapping_uses_the_complete_peak_shape() {
+    fn activation_mapping_uses_the_native_common_dimension() {
         let mut logical = vec![0i8; GEMMA4_HIDDEN_SIZE];
         logical[0] = -64;
         logical[GEMMA4_HIDDEN_SIZE - 1] = 64;
-        let padded = Gemma4Checkpoint::pad_peak_a_row_major(1, &logical).unwrap();
-        assert_eq!(padded.len(), GEMMA4_MAX_TOKENS * GEMMA4_PEAK_K);
+        let padded = Gemma4Checkpoint::build_native_a_row_major(1, &logical).unwrap();
+        assert_eq!(padded.len(), GEMMA4_MAX_TOKENS * GEMMA4_HIDDEN_SIZE);
         assert_eq!(padded[0], -64);
         assert_eq!(padded[GEMMA4_HIDDEN_SIZE - 1], 64);
         assert!(padded[GEMMA4_HIDDEN_SIZE..].iter().all(|value| *value == 0));
-        assert!(Gemma4Checkpoint::pad_peak_a_row_major(0, &[]).is_err());
-        assert!(Gemma4Checkpoint::pad_peak_a_row_major(GEMMA4_MAX_TOKENS + 1, &[]).is_err());
+        assert!(Gemma4Checkpoint::build_native_a_row_major(0, &[]).is_err());
+        assert!(Gemma4Checkpoint::build_native_a_row_major(GEMMA4_MAX_TOKENS + 1, &[]).is_err());
     }
 
     #[test]
@@ -844,22 +885,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "reads and expands one 115 MB checkpoint tensor"]
-    fn reference_gate_weight_maps_to_peak_b() {
+    #[ignore = "reads and concatenates two 115 MB checkpoint tensors"]
+    fn reference_gate_up_weights_map_to_native_b() {
         let path = reference_checkpoint_path();
         let checkpoint = Gemma4Checkpoint::open(path).unwrap();
-        let b = checkpoint
-            .load_peak_b_col_major(0, Gemma4MlpProjection::Gate)
-            .unwrap();
-        assert_eq!(b.len(), GEMMA4_PEAK_N * GEMMA4_PEAK_K);
-        assert!(b[..GEMMA4_HIDDEN_SIZE]
-            .iter()
-            .all(|value| (-64..=64).contains(value)));
-        assert!(b[GEMMA4_HIDDEN_SIZE..GEMMA4_PEAK_K]
-            .iter()
-            .all(|value| *value == 0));
-        assert!(b[GEMMA4_INTERMEDIATE_SIZE * GEMMA4_PEAK_K..]
-            .iter()
-            .all(|value| *value == 0));
+        let b = checkpoint.load_fused_gate_up_b_col_major(0).unwrap();
+        assert_eq!(b.len(), GEMMA4_FUSED_OUTPUT_SIZE * GEMMA4_HIDDEN_SIZE);
+        assert!(b.iter().all(|value| (-64..=64).contains(value)));
+        let up_start = GEMMA4_PROJECTION_SIZE * GEMMA4_HIDDEN_SIZE;
+        assert_ne!(
+            &b[..GEMMA4_HIDDEN_SIZE],
+            &b[up_start..up_start + GEMMA4_HIDDEN_SIZE],
+            "gate and up columns must come from distinct tensors"
+        );
     }
 }

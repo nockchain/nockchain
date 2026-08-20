@@ -2,164 +2,191 @@
 
 ## Decision
 
-Use Gemma 4 inference operands as the source matrices for the existing dense peak work profile. Keep the consensus statement, proof, target adjustment, certificate, and noun format unchanged.
+Use one native INT7 GEMM for the Gemma 4 MLP gate and up projections. Both
+projections consume the same quantized activations, so their output channels can
+be concatenated without changing inference:
 
-The physical work shape stays fixed:
+$$
+A_{T \times 5376}
+\begin{bmatrix}B_{\mathrm{gate}} & B_{\mathrm{up}}\end{bmatrix}_{5376 \times 43008}
+=
+\begin{bmatrix}C_{\mathrm{gate}} & C_{\mathrm{up}}\end{bmatrix}_{T \times 43008}.
+$$
+
+The production mining profile is:
 
 | Dimension | Value |
 |---|---:|
 | Rows (`m`) | 4,096 |
-| Common dimension (`k`) | 8,192 |
-| Columns (`n`) | 32,768 |
-| Noise rank (`r`) | 512 |
+| Common dimension (`k`) | 5,376 |
+| Columns (`n`) | 43,008 |
+| Noise rank (`r`) | 128 |
 | Ticket tile | 16 × 16 |
+| Spot checks | 1 |
+| Local difficulty bits | 0 |
 
-The selected Gemma 4 MLP operation has this logical INT7 shape:
-
-$$A_{T\times 5376} B_{5376\times 21504} = C_{T\times 21504}, \quad 1 \le T \le 4096.$$
-
-The target pads `A` with zero columns and zero rows. It pads each column of `B` with zero common-dimension values and adds zero output columns. The padded matrices have the existing peak shape. The logical top-left result is unchanged because every added term is zero.
-
-This design keeps the measured peak CUDA geometry. A native `5376 × 21504` kernel would change the common-dimension cadence, transcript recurrence, launch geometry, and Tensor Core utilization. It would need a new performance program and could reduce mining rate.
+This shape performs no padded MACs in the common or output dimensions. A batch
+with fewer than 4,096 token rows pads only absent rows. Inference backpressure
+favors full batches because mining throughput has priority over latency.
 
 ## Checkpoint contract
 
-The target profile is the Pearl checkpoint `pearl-ai/Gemma-4-31B-it-pearl` with these properties:
+The target profile is the Pearl checkpoint `pearl-ai/Gemma-4-31B-it-pearl`:
 
-- architecture: `Gemma4ForConditionalGeneration`;
-- text model type: `gemma4_text`;
+- architecture `Gemma4ForConditionalGeneration`;
+- text model type `gemma4_text`;
 - 60 decoder layers;
-- hidden size: 5,376;
-- intermediate size: 21,504;
-- no MoE block;
+- hidden size 5,376;
+- intermediate size 21,504;
 - Pearl mixed-precision quantization version `0.15.0.1`;
-- INT7, per-channel weights and dynamic per-token INT7 activations for the mineable group;
+- INT7 per-channel gate and up weights;
+- dynamic per-token INT7 gate and up activations;
 - FP8 Q, K, V, and MLP down projections outside the mineable group.
 
-Each decoder layer has two mineable MLP weights:
+For decoder layer `L`, the fused matrix concatenates these safetensors:
 
-- `model.language_model.layers.<L>.mlp.gate_proj.weight`;
-- `model.language_model.layers.<L>.mlp.up_proj.weight`.
+- `model.language_model.layers.L.mlp.gate_proj.weight`;
+- `model.language_model.layers.L.mlp.up_proj.weight`.
 
-Each weight has safetensors type `I8` and shape `[21504, 5376]`. Safetensors row-major `[out, in]` bytes are Pearl column-major `[in, out]` bytes without a transpose. Padding extends each 5,376-byte output column to 8,192 bytes and extends the output count to 32,768.
+Each tensor has type `I8` and shape `[21504, 5376]`. Safetensors row-major
+`[out, in]` bytes are Pearl column-major `[in, out]` bytes without a transpose.
+Gate columns precede up columns. The inference result splits at column 21,504,
+and the per-channel scales concatenate in the same order.
 
-`ai_pow_miner::gemma4::Gemma4Checkpoint` enforces this profile. It reads only `config.json` and the bounded safetensors header during registration. It reads one selected weight by file offset when it builds the persistent peak `B` matrix. It rejects a wrong model type, quantization scheme, layer schedule, INT7 tensor set, tensor shape, file range, or operand outside `[-64, 64]`.
-
-The safetensors layout digest identifies names, shapes, and offsets for the runtime handshake. It is not a weight commitment. The existing attempt-specific Pearl commitments bind all padded matrix bytes.
+`ai_pow_miner::gemma4::Gemma4Checkpoint` validates the model configuration and
+bounded safetensors header before CUDA allocation. It rejects wrong tensor names,
+shapes, ranges, or values outside `[-64, 64]`. The safetensors layout digest is a
+runtime identity, not a weight commitment. Pearl V3 attempt commitments bind the
+fused matrix bytes.
 
 ## Consensus boundary
 
-No consensus change is required.
+The profile is `MatmulParams::GEMMA_4_31B_GATE_UP_FUSED`. It passes the production
+parameter envelope:
 
-The production verifier accepts miner-chosen matrices. It verifies these properties:
+- `128 | 5376`;
+- `16·128 ≤ 5376 ≤ 4·128²`;
+- `k/r = 42 ≤ STRIPE_MAX`;
+- `16·16 = PEARL_HW_MAX`;
+- `m` and `n` are divisible by the ticket side;
+- the ticket count is 688,128, below the `u32` address limit.
 
-1. the dense Pearl V3 transcript;
-2. the matrix commitments;
-3. the opened noised tile and jackpot in the compact recursive certificate;
-4. the Nockchain candidate commitment in the auxiliary inclusion;
-5. the shape-adjusted Nockchain target;
-6. the production parameter envelope and Layer-0 trace-height cap.
+The first and last dense tickets both select verifier setup key
+`(trace_height=2^17, sx_bound=true)`. The production verifier table contains this
+key. The existing dense `AIP1` artifact, shape-adjusted target, compact recursive
+certificate, noun format, and Hoon interface remain unchanged.
 
-The padded target uses `PEAK_PRODUCTION_PARAMS`. This profile is already admitted and uses the existing dense `AIP1` artifact. Its Layer-0 trace uses the existing $2^{17}$ setup bucket.
+Consensus commits to the fused INT7 matrix and its ticket. It does not identify
+Gemma, a decoder layer, an inference request, or dequantization scales. Model
+admission remains operator policy. A consensus model registry would require a
+separate versioned protocol.
 
-Consensus does not know the name Gemma, the checkpoint digest, the layer number, the projection name, the activation scales, or the request. A miner can use other valid INT7 matrices. Model admission is operator policy in this architecture. Consensus enforcement of a model registry would require a candidate and artifact version change, a model-commitment rule, and an activation-source rule. It is a separate protocol change.
+## CUDA kernel
+
+The Gemma kernel is a separate compilation unit and C ABI. The RTX 5090 peak
+kernel remains unchanged.
+
+The Gemma specialization uses:
+
+- a 256 × 128 × 64 CTA;
+- 16 × 16 signed INT8 Tensor Core tickets;
+- `k=5376`, which is 84 K tiles;
+- `r=128`, which is two K tiles per transcript cadence;
+- 42 transcript cadences;
+- the canonical 16-slot recurrence
+  `M[s] = rotl13(M[s]) XOR x`, where `s = cadence mod 16`;
+- device-side keyed BLAKE3 and little-endian target comparison;
+- `atomicMin` on the canonical row-major ticket ordinal.
+
+The device returns only the lowest winning ordinal and jackpot in the no-output
+path. Rust reconstructs the offsets, recomputes the complete ticket with the
+scalar implementation, checks the target again, and constructs the existing
+compact certificate. A device mismatch is fatal for the selected backend.
+
+The source session keeps the fused model weight and current activation matrix
+resident. Each candidate-bound transcript rebuilds `kappa`, commitments, noise,
+noised matrices, and ticket states. A header change never reuses attempt-bound
+state.
+
+## Inference output
+
+Mining accumulation uses noised matrices. Inference needs the clean fused output.
+The output-capable path is a separate kernel symbol:
+
+1. store noised accumulators for the logical token rows;
+2. reconstruct the clean `A × B` result with the Pearl low-rank factors;
+3. apply concatenated per-token and per-channel scales;
+4. split gate and up outputs at column 21,504.
+
+The normal no-output mining kernel has no output pointer, inference branch,
+additional allocation, or additional synchronization. Output work may run on a
+separate target device if it reduces mining throughput on the primary device.
 
 ## Execution planes
 
-### Inference plane
+The inference process owns tokenization, transformer state, KV cache, scales,
+activation quantization, activation functions, and model scheduling.
 
-The inference process owns tokenization, transformer state, KV cache, activation quantization, per-token scales, per-channel weight scales, and model scheduling. It selects a gate or up projection and forms up to 4,096 INT7 activation rows.
+The miner owns the Nockchain candidate, target, fused INT7 operands, Pearl
+transcript, noise, ticket search, scalar winner validation, proof, and submission.
 
-Inference can wait. A bounded queue applies backpressure to inference requests. It never pauses the active mining search to accept a new request.
+Inference and mining communicate through a versioned local control channel.
+Large same-host tensors use bounded CUDA IPC handles where peer access is
+available. A pending activation generation never interrupts an active search.
+Queue saturation delays inference rather than mining.
 
-### Mining plane
-
-The miner owns the Nockchain candidate, target, Pearl transcript, padded INT7 operands, noise, ticket search, winner validation, proof, and submission.
-
-The selected padded `B` stays resident. Two padded `A` buffers permit one activation upload while the current immutable operand generation remains active. The miner changes the active operand generation only at a prepared-template boundary. A generation includes:
+An immutable operand generation contains:
 
 - checkpoint layout digest;
-- layer and projection;
+- decoder layer;
 - logical token count;
-- padded `A` and `B` bytes;
-- quantization-scale handle for inference output;
-- monotonically increasing target generation.
+- fused gate/up weight identity;
+- activation and scale handles;
+- monotonically increasing generation number.
 
-A new Nockchain candidate does not require new inference operands. It derives a new header, `kappa`, commitments, noise, and jackpot schedule from the current immutable operands. A stale candidate result cannot enter proof construction because the existing miner generation check remains authoritative.
-
-### Output plane
-
-The mining accumulation uses noised matrices. Inference needs the clean logical result. The output path therefore has two parts:
-
-1. A separate peak kernel variant stores noised accumulators only for the logical `T × 21504` rectangle. The normal no-output kernel remains unchanged.
-2. A correction worker reconstructs `A × B` from the stored noised result and the Pearl low-rank factors. It then applies the existing per-token and per-channel scales.
-
-The correction worker runs outside the mining device when the hardware topology permits peer access. It may be slow. The inference request waits for it while the mining device continues no-output search on the same immutable operands.
-
-The output variant must produce the same 16 ticket-state words and jackpot bytes as the no-output variant for every tile. Output materialization is not part of the consensus statement.
+Candidate replacement and operand replacement are independent generations.
+Existing stale-candidate checks remain authoritative for block submission.
 
 ## Mining-performance rule
 
-Mining throughput has priority over inference throughput.
+The existing peak kernel is the regression baseline and remains available under
+its current selector. The Gemma target ships only if:
 
-The production mining device does not host the vLLM model, KV cache, attention kernels, sampling kernels, or low-rank correction kernels. Inference devices and mining devices use disjoint CUDA ordinals. The only mining-device additions are:
+- the peak kernel's binary behavior and sustained throughput do not regress;
+- Gemma mining-only throughput is measured as complete-ticket TMAC/s;
+- inference-loaded Gemma throughput remains within the accepted non-regression
+  band or uses an additional output device;
+- no-hit search performs no allocation;
+- launch and candidate-cancellation latency stay bounded;
+- every device winner matches the scalar Rust oracle.
 
-- an asynchronous activation copy into the inactive `A` buffer;
-- one bounded logical-output store when an inference batch needs a result;
-- a generation swap at a normal template boundary.
-
-The normal search path calls the existing `ai_pow_v3_peak_kernel` symbol. It has no inference branch, output pointer, extra allocation, or extra synchronization.
-
-A same-device output store is acceptable only if hardware measurement shows no mining-rate regression. The acceptance gate compares sustained complete-ticket TMAC/s under inference load with the same device and source matrices in mining-only mode. The target must remain within measurement noise and must not increase template-preparation latency or cancellation latency. If the gate fails, the output variant runs on an additional target device. Existing mining devices do not share inference work.
-
-This rule has a direct hardware consequence: one finite GPU cannot perform extra visible work at zero cost unless the work uses otherwise idle execution or memory capacity. The implementation does not hide that cost in a lower reported inference rate or in partial ticket accounting.
-
-## Local process boundary
-
-Use a versioned Unix-domain control channel. Keep model traffic off the node gRPC and Hoon wire.
-
-The control protocol needs these bounded messages:
-
-1. `RegisterTarget`: layout digest, logical profile, layer, projection, and weight-scale metadata;
-2. `ActivationBatch`: generation, token count, INT7 activation handle, and token-scale handle;
-3. `OutputReady`: generation, logical shape, output handle, and completion event;
-4. `RejectGeneration`: exact validation or capacity error.
-
-Large tensors use CUDA IPC handles on a peer-capable host. The socket carries only fixed-size metadata and bounded strings. A pinned-host transport is diagnostic because PCIe readback can consume mining bandwidth. The miner validates every dimension and byte length before it opens a handle or allocates a buffer.
-
-Loss of the inference process does not invalidate the current operand generation. The miner continues with the last validated Gemma operand snapshot. It does not substitute synthetic matrices after target registration. Inference reconnects with a new monotonic generation.
+The fused Gemma sweep performs 947,040,288,768 useful MACs, 86.1% of the current
+peak sweep, with no common/output zero padding. Normalized TMAC/s, not raw ticket
+count, is the performance comparison.
 
 ## Failure behavior
 
-- A checkpoint mismatch fails target registration before CUDA allocation.
+- A checkpoint mismatch fails before CUDA allocation.
 - A non-INT7 activation fails before template preparation.
-- An invalid tensor handle or length rejects only the pending inference generation.
-- A CUDA output mismatch disables the Gemma target path. It does not fall back to an unverified output.
-- A GPU winner still passes the existing scalar Rust ticket recheck before proof construction.
-- A candidate change can discard a mining hit but does not corrupt a clean inference result. The result is tied to the operand generation and matching noise factors, not to block acceptance.
-- Queue saturation delays inference. It does not delay mining.
-
-## Code ownership
-
-- `crates/ai-pow-miner/src/gemma4.rs` owns checkpoint validation, tensor selection, INT7 validation, and deterministic peak padding.
-- `crates/ai-pow-miner/src/peak.rs` owns the immutable operand generation and output-capable peak session API.
-- `crates/ai-pow-miner-cuda/csrc/ai_pow_v3_peak.cu` owns mining accumulation and optional logical-output capture. The existing no-output kernel remains a separate symbol.
-- The inference adapter owns vLLM hooks, scale transfer, correction, and result delivery.
-- `crates/ai-pow-miner/src/run.rs` owns candidate generation, target checks, proof construction, and stale-work rejection.
-- Consensus code remains model-agnostic.
+- An unsupported device or geometry fails without CPU fallback.
+- A transcript, tile-state, jackpot, or winner mismatch disables the Gemma
+  backend.
+- A new candidate cancels and drains stale work before proof construction.
+- A recursive certificate is built only after a scalar-validated target hit.
 
 ## Hardware validation gate
 
-Runpod work starts only after review of this boundary. The first hardware stage must record:
+Runpod validation records:
 
-1. GPU model, topology, peer-access matrix, driver, CUDA Toolkit, and compiler flags;
-2. exact checkpoint layout digest and selected tensor;
-3. padded-operand equality against the logical Gemma INT7 matmul;
-4. output/no-output transcript equality for first, last, and random tickets;
-5. clean-output equality after low-rank correction and dequantization;
-6. 60-second mining-only and inference-loaded complete-ticket TMAC/s;
-7. template preparation, operand swap, output copy, and cancellation latency;
-8. Compute Sanitizer results for both kernel variants;
-9. compact proof verification through the existing consensus entry point.
+1. GPU model, topology, driver, CUDA Toolkit, and compiler flags;
+2. kernel registers, shared memory, occupancy, stack, and spills;
+3. first, last, CTA-boundary, and randomized scalar/device differentials;
+4. all 16 transcript words and jackpot bytes across the 42-cadence recurrence;
+5. maximum-target, zero-target, adjacent-range, and lowest-winner behavior;
+6. `memcheck`, `racecheck`, `initcheck`, and `synccheck`;
+7. 60-second peak and Gemma mining-only TMAC/s;
+8. inference-output equality and mining-loaded throughput;
+9. compact certificate verification through the existing consensus entry point.
 
-Do not start model-quality or serving-throughput tuning until the mining non-regression and byte-equality gates pass.
+Correctness failures stop performance work. Runpod model-serving tuning starts
+only after byte equality and the peak non-regression gate pass.
