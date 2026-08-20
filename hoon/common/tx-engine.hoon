@@ -970,6 +970,23 @@
   =+  spends:v1
   |%
   +$  form  $|(^form |=(* %&))
+  ++  validate-with-context
+    |=  $:  balance=(h-map nname nnote)
+            sps=form
+            page-num=page-number
+            max-size=@
+            bythos-phase=page-number
+        ==
+    ^-  (reason ~)
+    %-  validate-with-context:spends:v1
+    :*  balance
+        sps
+        page-num
+        max-size
+        bythos-phase
+        ai-pow-activation-height
+    ==
+  ::
   ::  count note-data words as stored on output notes (outputs are built by
   ::  grouping all seeds across the tx by lock-root)
   ++  note-data-by-lock-root

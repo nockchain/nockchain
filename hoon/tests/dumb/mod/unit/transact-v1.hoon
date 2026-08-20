@@ -41,6 +41,68 @@
           (verify-parent-hashes:spend-1:v1:t mismatched-spend note)
       ==
 ::
+++  replay-guard-validation
+  |=  [activation=page-number:t page-num=page-number:t parent-match=?]
+  =/  bc=blockchain-constants:t
+    constants(ai-pow-activation-height activation)
+  =/  et  ~(. tx-engine bc)
+  =/  pk=schnorr-pubkey:t
+    (head ~(tap z-in pubkeys.p:default-keys-1:h))
+  =/  [root=hash:t sc=spend-condition:v1:t *]
+    (make-pkh-lock:v1:h 1 ~[pk])
+  =/  note=nnote-1:v1:t
+    %*  .  *nnote-1:v1:t
+      version      %1
+      origin-page  0
+      name         (new-v1:nname:t root [*hash:t %.n])
+      note-data    *(z-map @tas *)
+      assets       100.000
+    ==
+  =/  other-note=nnote-1:v1:t  note(origin-page 1)
+  =/  parent-hash=hash:t
+    ?:(parent-match (hash:nnote:t note) (hash:nnote:t other-note))
+  =/  seed=seed:v1:t
+    (make-seed:v1:h root 90.000 parent-hash)
+  =/  spend=spend-1:v1:t
+    %*  .  *spend-1:v1:t
+      seeds  (~(put z-in *seeds:v1:t) seed)
+      fee    10.000
+    ==
+  =/  sig-hash=hash:t  (sig-hash:spend-1:v1:t spend)
+  =/  witness=witness:t
+    (make-pkh-witness:v1:h root sc sig-hash ~[[s:default-keys-1:h pk]])
+  =.  spend  spend(witness witness)
+  =/  name=nname:t  ~(name get:nnote:t note)
+  =/  balance=(h-map nname:t nnote:t)
+    (~(put h-by *(h-map nname:t nnote:t)) name note)
+  =/  spends=spends:v1:t
+    (~(put z-by *spends:v1:t) name [%1 spend])
+  %-  validate-with-context:spends:et
+  :*  balance
+      spends
+      page-num
+      max-size.data.bc
+      bythos-phase.bc
+  ==
+::
+++  test-v1-spend-1-parent-hash-legacy-before-ai-activation
+  =/  activation=page-number:t  50
+  %+  expect-eq
+    !>([%.y ~])
+  !>((replay-guard-validation [activation (dec activation) %.n]))
+::
+++  test-v1-spend-1-parent-hash-rejected-at-ai-activation
+  =/  activation=page-number:t  50
+  %+  expect-eq
+    !>([%.n %v1-spend-1-parent-hash-failed])
+  !>((replay-guard-validation [activation activation %.n]))
+::
+++  test-v1-spend-1-matching-parent-hash-accepted-at-ai-activation
+  =/  activation=page-number:t  50
+  %+  expect-eq
+    !>([%.y ~])
+  !>((replay-guard-validation [activation activation %.y]))
+::
 ++  test-process-v0-into-v1
   =/  con=consensus-state  initial-consensus-state:h
   =^  par=page:t  con  (add-n-pages:h 1 con default-retain:h)

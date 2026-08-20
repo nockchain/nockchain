@@ -65,6 +65,10 @@ Logos activates AI-PoW at height 126,000 (`ai-pow-activation-height`) as an
    existing protocol fund (`protocol-fund-address`). AI-PoW changes the puzzle
    and per-puzzle retargeting, not the coinbase recipient.
 
+5. **Spend parent binding.** At and after `ai-pow-activation-height`, every seed
+   in a v1 `%1` spend must contain the hash of its input note. Pre-activation
+   pages use the transaction validation rules that produced the existing chain.
+
 This upgrade does **not** change the ZK-PoW puzzle, the emissions schedule, the
 80/20 split *ratio*, transaction formats, or any pre-activation behaviour. It
 adds a puzzle; it does not replace one.
@@ -396,6 +400,9 @@ the protocol-fund recipient.
 - **ZK re-anchor**: block 125,999 is the anchor for the new
   `zk-asert-post-ai` 214 s regime. Target computation switches for candidate
   height 126,000; block 125,999 itself remains in the pre-activation 150 s regime.
+- **Spend parent binding**: v1 `%1` seed parent hashes become mandatory at
+  `ai-pow-activation-height`. The configured activation height controls this
+  boundary on mainnet and fakenets.
 - **Verifier setup**: every validating node must have the AI-PoW verifier setup
   installed before it needs to validate an `%ai-pow` block (first boot generates
   it, ~15 min; subsequent boots load the cache). A node without it shuts down on

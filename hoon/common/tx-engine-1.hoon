@@ -1229,6 +1229,8 @@
             page-num=page-number
             max-size=@
             bythos-phase=page-number
+            ::  first page whose %1 spends bind seeds to their input note
+            parent-hash-phase=page-number
         ==
     ^-  (reason ~)
     ?:  (note-data-exceeds-max sps max-size)
@@ -1255,7 +1257,9 @@
       ::  v1 note must back a %1 spend
       ?:  ?=(^ -.note)  [%.n %v1-spend-version-mismatch]
       ?:  !=(%1 version.note)  [%.n %v1-note-version-mismatch]
-      ?.  (verify-parent-hashes:spend-1 +.sp note)
+      ?.  ?|  (lth page-num parent-hash-phase)
+              (verify-parent-hashes:spend-1 +.sp note)
+          ==
         [%.n %v1-spend-1-parent-hash-failed]
       =/  ctx=check-context
         :*  page-num
