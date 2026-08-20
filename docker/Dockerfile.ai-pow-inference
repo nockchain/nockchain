@@ -78,7 +78,8 @@ ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     VLLM_MAX_MODEL_LEN=8192 \
     VLLM_GPU_MEMORY_UTILIZATION=0.80 \
     NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    NVIDIA_DISABLE_REQUIRE=1
 
 EXPOSE 22
 ENTRYPOINT ["/usr/local/bin/ai-pow-inference-container-entrypoint"]
