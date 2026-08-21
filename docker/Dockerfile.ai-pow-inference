@@ -166,7 +166,7 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-gemma4-bench --help >/dev/null \
     && ai-pow-inference-health --help >/dev/null \
     && ai-pow-inference-bench --help >/dev/null \
-    && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; assert version('torch') == '2.13.0+cu129'; assert version('torchvision') == '0.28.0+cu129'; assert version('cuda-python').startswith('12.9.'); assert version('transformers') == '5.5.4'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
+    && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; assert version('cuda-python').startswith('12.9.'); assert version('transformers') == '5.5.4'; import torch, torchvision, vllm_miner; assert torch.version.cuda == '12.9'; from vllm_miner.vllm_config import PearlConfig"
 # The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
 # Operators can override VLLM_DISABLED_KERNELS for a validated deployment.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \

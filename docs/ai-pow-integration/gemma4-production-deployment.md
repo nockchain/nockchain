@@ -370,7 +370,8 @@ no selected inference work is active.
   application.
 
 CUDA status 804 on RTX 5090
-: Select a host with NVIDIA driver 580.126.09 or newer.
+: Use the CUDA 12.9 production image. CUDA 13 forward compatibility does not
+  support GeForce driver 570.
 
 Container is unhealthy during startup
 : Model loading can take several minutes. Inspect container logs and confirm
