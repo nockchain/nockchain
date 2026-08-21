@@ -114,9 +114,9 @@ runpodctl pod create \
   --docker-args "sleep infinity"
 ```
 
-Set `VLLM_TENSOR_PARALLEL_SIZE=1` for H100 and RTX PRO 6000. Use
-`VLLM_TENSOR_PARALLEL_SIZE=2` and `VLLM_GPU_MEMORY_UTILIZATION=0.62` for two
-RTX 5090 devices.
+The launcher uses the visible GPU count as its tensor-parallel size and defaults
+GPU memory utilization to `0.62`. Override either value only for a measured
+deployment-specific reason.
 
 Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
 `scripts/compare-gemma4-openai.py` sends the same greedy request to each local

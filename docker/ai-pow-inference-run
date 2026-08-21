@@ -3,10 +3,18 @@ set -euo pipefail
 
 : "${MODEL_PATH:?MODEL_PATH is required}"
 : "${NOCKCHAIN_AI_POW_ENDPOINT:=127.0.0.1:5590}"
+: "${NOCKCHAIN_GEMMA4_MINING_LAYER:=0}"
 : "${AI_POW_CUDA_DEVICE:=0}"
-: "${VLLM_TENSOR_PARALLEL_SIZE:=2}"
+if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
+  mapfile -t visible_gpus < <(nvidia-smi --list-gpus)
+  VLLM_TENSOR_PARALLEL_SIZE="${#visible_gpus[@]}"
+fi
+: "${VLLM_TENSOR_PARALLEL_SIZE:?no visible CUDA devices}"
 : "${VLLM_MAX_MODEL_LEN:=8192}"
-: "${VLLM_GPU_MEMORY_UTILIZATION:=0.80}"
+: "${VLLM_GPU_MEMORY_UTILIZATION:=0.62}"
+: "${VLLM_DISABLED_KERNELS:=FlashInferFp8DeepGEMMDynamicBlockScaledKernel}"
+export NOCKCHAIN_AI_POW_ENDPOINT NOCKCHAIN_GEMMA4_MINING_LAYER
+export VLLM_DISABLED_KERNELS
 
 if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
   echo "model config not found: ${MODEL_PATH}/config.json" >&2
