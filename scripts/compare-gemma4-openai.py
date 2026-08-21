@@ -9,7 +9,7 @@ import sys
 import urllib.error
 import urllib.request
 
-_DEFAULT_MODEL = "/models/Gemma-4-31B-it-pearl"
+_DEFAULT_MODEL = "/workspace/models/Gemma-4-31B-it-pearl"
 
 
 def parse_endpoint(value: str) -> tuple[str, str]:
