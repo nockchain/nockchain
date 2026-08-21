@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires an RTX 5090 CUDA device"]
+    #[ignore = "requires a supported CUDA device"]
     fn device_matches_one_thousand_deterministic_tickets() {
         const TICKET_COUNT: usize = 1_000;
         let (a, b, key) = fixture(2_048, 256);
@@ -505,7 +505,7 @@ mod tests {
 
     #[cfg(feature = "node")]
     #[test]
-    #[ignore = "requires an RTX 5090 CUDA device"]
+    #[ignore = "requires a supported CUDA device"]
     fn source_session_matches_complete_scalar_transcript() {
         use std::sync::Arc;
 

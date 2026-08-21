@@ -33,7 +33,7 @@ const MAX_TENSOR_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_OPENED_TENSOR_BYTES: u64 = 512 * 1024 * 1024;
 pub const GEMMA_COMMON_DIM: u32 = 5_376;
 pub const GEMMA_FUSED_OUTPUT_DIM: u32 = 43_008;
-const GEMMA_MAX_TOKENS: u32 = 4_096;
+const GEMMA_MAX_TOKENS: u32 = 8_192;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct WorkKey {
@@ -519,6 +519,25 @@ mod tests {
         );
         assert_eq!(state.status().mode, SchedulerMode::IdleMining as i32);
         assert_eq!(state.status().inference_batches, 1);
+    }
+
+    #[test]
+    fn work_token_limit_matches_runtime_context() {
+        let state = InferenceSchedulerState::default();
+        let runtime_id = state.register_runtime(runtime_request()).unwrap();
+        let mut maximum = work(&runtime_id, 1, WorkPhase::Started);
+        maximum.token_count = GEMMA_MAX_TOKENS;
+        state.notify_work(maximum).unwrap();
+        state
+            .notify_work(work(&runtime_id, 1, WorkPhase::Finished))
+            .unwrap();
+
+        let mut over_limit = work(&runtime_id, 2, WorkPhase::Started);
+        over_limit.token_count = GEMMA_MAX_TOKENS + 1;
+        assert_eq!(
+            state.notify_work(over_limit).unwrap_err().to_string(),
+            "token_count must be in 1..=8192"
+        );
     }
 
     struct CountingBackend {
