@@ -48,6 +48,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Cache Python dependency wheels
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.ai-pow-inference
+          platforms: linux/amd64
+          target: python-deps-builder
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-python
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-python,mode=max
+          provenance: false
+
+      - name: Cache Rust and CUDA binaries
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.ai-pow-inference
+          platforms: linux/amd64
+          target: rust-builder
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-rust
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-rust,mode=max
+          provenance: false
+
       - id: metadata
         uses: docker/metadata-action@v5
         with:
@@ -65,6 +87,9 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha,scope=ai-pow-inference
-          cache-to: type=gha,mode=max,scope=ai-pow-inference
+          cache-from: |
+            type=registry,ref=${{ env.IMAGE }}:buildcache-python
+            type=registry,ref=${{ env.IMAGE }}:buildcache-rust
+            type=registry,ref=${{ env.IMAGE }}:buildcache-runtime
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-runtime,mode=max
           provenance: false

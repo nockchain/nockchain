@@ -38,7 +38,25 @@ RUN git clone https://github.com/pearl-research-labs/pearl.git /opt/pearl \
     && rm -rf /opt/pearl/.git /opt/pearl/miner/pearl-gemm/third_party/cutlass/.git \
        /tmp/pearl-vllm.patch
 
-FROM toolchain AS python-source
+FROM toolchain AS python-deps-source
+COPY crates/ai-pow-miner/vllm-plugin/pyproject.toml \
+  /opt/pearl/miner/vllm-miner/pyproject.toml
+
+FROM python-deps-source AS python-deps-builder
+WORKDIR /opt/pearl
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    uv lock \
+    && uv sync --package vllm-miner --no-dev --no-editable \
+    && uv build --package miner-utils --wheel --out-dir /wheelhouse \
+    && uv build --package miner-base --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gateway --wheel --out-dir /wheelhouse \
+    && uv build --package py-pearl-mining --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gemm-build-utils --wheel --out-dir /wheelhouse \
+    && uv build --package pearl-gemm --wheel --out-dir /wheelhouse
+
+FROM python-deps-builder AS python-source
 COPY crates/ai-pow-miner/vllm-plugin /tmp/vllm-plugin
 RUN rm -rf /opt/pearl/miner/vllm-miner \
     && cp -R /tmp/vllm-plugin /opt/pearl/miner/vllm-miner
@@ -46,11 +64,7 @@ RUN rm -rf /opt/pearl/miner/vllm-miner \
 FROM python-source AS python-builder
 WORKDIR /opt/pearl
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    uv lock \
-    && uv sync --package vllm-miner --no-dev --no-editable \
-    && uv build --all-packages --wheel --out-dir /wheelhouse
+    uv build --package vllm-miner --wheel --out-dir /wheelhouse
 
 FROM toolchain AS rust-builder
 WORKDIR /opt/nockchain
