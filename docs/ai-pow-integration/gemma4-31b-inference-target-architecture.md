@@ -86,6 +86,13 @@ separate versioned protocol.
 The Gemma kernel is a separate compilation unit and C ABI. The RTX 5090 peak
 kernel remains unchanged.
 
+The CUDA object contains separate `sm_90a` and `sm_120a` code. The `sm_90a`
+variant targets NVIDIA H100. The `sm_120a` variant targets RTX PRO 6000
+Blackwell and RTX 5090. CUDA selects an exact code object for the active device;
+the runtime does not depend on PTX just-in-time compilation. Each variant must
+pass the same scalar differential, sanitizer, output, and consensus checks.
+Throughput and launch geometry are measured and tuned for each device class.
+
 The Gemma specialization uses:
 
 - a 256 × 128 × 64 CTA;
@@ -191,6 +198,35 @@ The isolated Gemma kernel retains 97.72% of the peak kernel's normalized mining
 rate while every common/output MAC remains useful inference. The separate
 compilation unit leaves the existing peak source and ABI unchanged. Inference
 output materialization remains outside this mining-only measurement.
+
+## H100 and RTX PRO 6000 mining evidence
+
+The exact-SASS image contains `sm_90a` and `sm_120a` code objects. Validation
+uses driver 580.159.04 on one 310 W H100 PCIe with 114 SMs and one 600 W RTX
+PRO 6000 Blackwell Server Edition with 188 SMs.
+
+After 100 warmup launches, 20 measured full-grid launches produce:
+
+| Device | Median launch | Tickets/s | Complete-ticket TMAC/s |
+|---|---:|---:|---:|
+| H100 PCIe | 4.836 ms | 142,294,215 | 195.833 |
+| RTX PRO 6000 Blackwell | 2.807 ms | 245,136,655 | 337.371 |
+
+Both code objects pass the 1,000-ticket scalar differential and the complete
+source-session transcript differential. `memcheck`, `racecheck`, `initcheck`,
+and `synccheck` report zero findings on both devices.
+
+The H100 model-serving path returns deterministic Gemma 4 output while the
+idle miner uses the same `sm_90a` consensus kernel. Its idle mining rate returns
+to 99.28% of the pre-request rate after eight inference requests. The common
+warp-MMA kernel is the H100 correctness baseline; an H100 WGMMA specialization
+is required before its throughput is final.
+
+Pearl GEMM uses Hopper WGMMA and TMA kernels for model-serving matrix
+multiplication. Compiling those kernels as `sm_120a` is not valid: the first
+noising launch fails on RTX 5090. Blackwell model serving therefore requires a
+native `sm_120a` inference GEMM path. The consensus mining code object itself
+works on RTX 5090 and RTX PRO 6000 Blackwell.
 
 ## Failure behavior
 

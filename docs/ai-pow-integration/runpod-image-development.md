@@ -107,13 +107,17 @@ Create a pod with the published development image:
 ```sh
 runpodctl pod create \
   --image "ghcr.io/nockchain/nockchain-ai-pow-inference:${DEV_TAG}" \
-  --gpu-id "NVIDIA GeForce RTX 5090" \
-  --gpu-count 2 \
-  --container-disk-in-gb 120 \
+  --gpu-id "NVIDIA H100 PCIe" \
+  --gpu-count 1 \
+  --container-disk-in-gb 80 \
   --volume-in-gb 60 \
   --ports 22/tcp \
   --docker-args "sleep infinity"
 ```
+
+The complete image is large. For GraphQL deployments, set `minDownload` to at
+least 500 Mbit/s. A low-bandwidth host can spend most of its rental time pulling
+the image.
 
 Record the pod ID from the create result. Do not repeat a create command after a timeout until `runpodctl pod list` proves that no matching pod exists.
 

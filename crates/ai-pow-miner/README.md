@@ -70,10 +70,16 @@ The image uses up to eight visible CUDA devices, canonical mode, and batches of 
 
 ## Reusable inference image
 
-`docker/Dockerfile.ai-pow-inference` preinstalls CUDA 13, Compute Sanitizer,
-Rust, uv, the pinned Pearl workspace, the copied Nockchain vLLM plugin, vLLM,
-Pearl GEMM kernels, and the release inference bridge. Runpod validation starts
-from this image instead of installing toolchains on a rented GPU.
+`docker/Dockerfile.ai-pow-inference` builds the pinned Pearl workspace and Rust
+bridge in disposable CUDA 13 stages. The runtime contains vLLM 0.20.2, the Pearl
+and Nockchain Python wheels, the release bridge, and the launch tools. It does
+not contain the Rust or CUDA build toolchains.
+
+The bridge contains exact `sm_90a` code for H100 and exact `sm_120a` code for
+RTX PRO 6000 Blackwell and RTX 5090. Full Gemma model serving works on H100.
+Pearl's model-serving GEMM is Hopper-specific; Blackwell model serving requires
+a native `sm_120a` replacement. The consensus mining kernel works on all three
+device classes.
 
 ```sh
 docker buildx build \
@@ -93,6 +99,20 @@ ai-pow-inference-run
 The `AI-PoW inference image` GitHub workflow publishes commit and branch tags to
 `ghcr.io/nockchain/nockchain-ai-pow-inference`. Rebuilding uses registry-independent
 GitHub Actions caches for the Python, Rust, and CUDA dependency layers.
+
+Runpod needs at least 80 GB of container disk for the unpacked runtime. Use one
+80 GB H100 for the current full model-serving path:
+
+```sh
+runpodctl pod create \
+  --image ghcr.io/nockchain/nockchain-ai-pow-inference:la-gemma4 \
+  --gpu-id "NVIDIA H100 PCIe" \
+  --gpu-count 1 \
+  --container-disk-in-gb 80 \
+  --volume-in-gb 60 \
+  --ports 22/tcp \
+  --docker-args "sleep infinity"
+```
 
 ## Validation
 
