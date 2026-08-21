@@ -15,8 +15,10 @@
  override-dependencies = [
 -  "transformers>=5.5.1,<6",
 +  "transformers==5.5.4",
-   "cuda-bindings>=13.0,<13.1",
-   "cuda-python>=13.0,<13.1",
+-  "cuda-bindings>=13.0,<13.1",
++  "cuda-bindings>=12.9,<13",
+-  "cuda-python>=13.0,<13.1",
++  "cuda-python>=12.9,<13",
 +  "compressed-tensors==0.17.0",
 +  "torch==2.13.0",
 +  "torchaudio==2.11.0",
