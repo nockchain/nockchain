@@ -21,6 +21,7 @@ use nockapp_grpc_proto::pb::ai_pow::v1::{
     RegisterRuntimeRequest, RegisterRuntimeResponse, SchedulerMode, SubmitOpenedBlockResponse,
     WorkPhase,
 };
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -32,6 +33,10 @@ const TARGET_BYTES: usize = 32;
 const MAX_TENSOR_CHUNK_BYTES: usize = 1024 * 1024;
 const MAX_OPENED_TENSOR_BYTES: u64 = 512 * 1024 * 1024;
 pub const GEMMA_COMMON_DIM: u32 = 5_376;
+const GEMMA_NOISE_RANK: u32 = 128;
+const GEMMA_ROW_ALIGNMENT: u32 = 256;
+const GEMMA_TILE: u32 = 16;
+const GEMMA_MAX_PADDED_ROWS: u32 = 4_096;
 pub const GEMMA_FUSED_OUTPUT_DIM: u32 = 43_008;
 const GEMMA_MAX_TOKENS: u32 = 8_192;
 
@@ -40,6 +45,29 @@ struct WorkKey {
     runtime_id: [u8; RUNTIME_ID_BYTES],
     work_id: u64,
 }
+
+#[derive(Debug)]
+pub struct OpenedDenseWitness {
+    pub candidate_generation: u64,
+    pub work_id: u64,
+    pub a_row_indices: Vec<u32>,
+    pub b_column_indices: Vec<u32>,
+    pub noise_seed_a: [u8; DIGEST_BYTES],
+    pub noise_seed_b: [u8; DIGEST_BYTES],
+    pub noise_rank: u32,
+    pub a_rows: u32,
+    pub b_columns: u32,
+    pub common_dim: u32,
+    pub a: Vec<i8>,
+    pub b_transposed: Vec<i8>,
+}
+
+pub struct InferenceProofRequest {
+    pub witness: OpenedDenseWitness,
+    pub response: oneshot::Sender<Result<String, String>>,
+}
+
+pub type InferenceProofSender = mpsc::Sender<InferenceProofRequest>;
 
 #[derive(Debug, Default)]
 struct SchedulerInner {
@@ -268,6 +296,7 @@ impl Drop for IdleMiningWorker {
 pub struct InferenceMiningRpc {
     state: Arc<InferenceSchedulerState>,
     mining_job: Arc<Mutex<MiningJob>>,
+    proof_sender: Option<InferenceProofSender>,
 }
 
 impl InferenceMiningRpc {
@@ -279,7 +308,13 @@ impl InferenceMiningRpc {
         Ok(Self {
             state,
             mining_job: Arc::new(Mutex::new(mining_job)),
+            proof_sender: None,
         })
+    }
+
+    pub fn with_proof_sender(mut self, proof_sender: InferenceProofSender) -> Self {
+        self.proof_sender = Some(proof_sender);
+        self
     }
 
     pub fn set_mining_job(&self, mining_job: MiningJob) -> Result<()> {
@@ -349,7 +384,7 @@ impl InferenceMiningService for InferenceMiningRpc {
     ) -> Result<Response<SubmitOpenedBlockResponse>, Status> {
         let mut stream = request.into_inner();
         let mut metadata: Option<OpenedBlockMetadata> = None;
-        let mut next_offsets = [0u64; 3];
+        let mut buffers: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
         while let Some(part) = stream.message().await? {
             match part
                 .part
@@ -362,10 +397,13 @@ impl InferenceMiningService for InferenceMiningRpc {
                     self.state
                         .validate_runtime(&value.runtime_id)
                         .map_err(unauthenticated)?;
-                    if value.noise_seed_a.len() != DIGEST_BYTES
-                        || value.noise_seed_b.len() != DIGEST_BYTES
-                    {
-                        return Err(Status::invalid_argument("noise seeds must be 32 bytes"));
+                    let current_generation =
+                        self.state.candidate_generation.load(Ordering::Acquire);
+                    if value.candidate_generation != current_generation {
+                        return Err(Status::failed_precondition(format!(
+                            "stale candidate generation {}; current generation is {current_generation}",
+                            value.candidate_generation
+                        )));
                     }
                     metadata = Some(value);
                 }
@@ -392,31 +430,53 @@ impl InferenceMiningService for InferenceMiningRpc {
                             ));
                         }
                     };
-                    if chunk.offset != next_offsets[index] {
+                    if chunk.offset != buffers[index].len() as u64 {
                         return Err(Status::invalid_argument("tensor chunks must be contiguous"));
                     }
-                    next_offsets[index] = next_offsets[index]
-                        .checked_add(chunk.data.len() as u64)
+                    let next_length = buffers[index]
+                        .len()
+                        .checked_add(chunk.data.len())
                         .ok_or_else(|| Status::invalid_argument("tensor length overflow"))?;
-                    if next_offsets[index] > MAX_OPENED_TENSOR_BYTES {
+                    if next_length as u64 > MAX_OPENED_TENSOR_BYTES {
                         return Err(Status::resource_exhausted(
                             "opened tensor exceeds byte limit",
                         ));
                     }
+                    buffers[index].extend_from_slice(&chunk.data);
                 }
             }
         }
         let metadata =
             metadata.ok_or_else(|| Status::invalid_argument("opened block metadata missing"))?;
+        let witness = validate_opened_dense_witness(metadata, buffers).map_err(invalid_argument)?;
         self.state
             .opened_blocks_received
             .fetch_add(1, Ordering::Relaxed);
+
+        let Some(proof_sender) = &self.proof_sender else {
+            return Ok(Response::new(SubmitOpenedBlockResponse {
+                accepted: false,
+                detail: format!(
+                    "opened witness received for generation {}; proof handoff is not configured",
+                    witness.candidate_generation
+                ),
+            }));
+        };
+        let (response, response_rx) = oneshot::channel();
+        proof_sender
+            .send(InferenceProofRequest { witness, response })
+            .await
+            .map_err(|_| Status::unavailable("proof worker is unavailable"))?;
+        let proof_result = response_rx
+            .await
+            .map_err(|_| Status::unavailable("proof worker dropped the response"))?;
+        let (accepted, detail) = match proof_result {
+            Ok(detail) => (true, detail),
+            Err(detail) => (false, detail),
+        };
         Ok(Response::new(SubmitOpenedBlockResponse {
-            accepted: false,
-            detail: format!(
-                "opened witness received for generation {}; proof handoff is not configured",
-                metadata.candidate_generation
-            ),
+            accepted,
+            detail,
         }))
     }
 
@@ -426,6 +486,145 @@ impl InferenceMiningService for InferenceMiningRpc {
     ) -> Result<Response<InferenceMiningStatus>, Status> {
         Ok(Response::new(self.state.status()))
     }
+}
+
+fn validate_opened_dense_witness(
+    metadata: OpenedBlockMetadata,
+    buffers: [Vec<u8>; 3],
+) -> Result<OpenedDenseWitness> {
+    validate_opened_dense_witness_for_output(metadata, buffers, GEMMA_FUSED_OUTPUT_DIM)
+}
+
+fn validate_opened_dense_witness_for_output(
+    metadata: OpenedBlockMetadata,
+    buffers: [Vec<u8>; 3],
+    expected_output_dim: u32,
+) -> Result<OpenedDenseWitness> {
+    if metadata.noise_rank != GEMMA_NOISE_RANK {
+        bail!("noise_rank must be {GEMMA_NOISE_RANK}");
+    }
+    if metadata.common_dim != GEMMA_COMMON_DIM {
+        bail!("common_dim must be {GEMMA_COMMON_DIM}");
+    }
+    if metadata.b_columns != expected_output_dim {
+        bail!("b_columns must be {expected_output_dim}");
+    }
+    if metadata.a_rows == 0
+        || metadata.a_rows > GEMMA_MAX_PADDED_ROWS
+        || !metadata.a_rows.is_multiple_of(GEMMA_ROW_ALIGNMENT)
+    {
+        bail!(
+            "a_rows must be a nonzero multiple of {GEMMA_ROW_ALIGNMENT} no greater than {GEMMA_MAX_PADDED_ROWS}"
+        );
+    }
+    if !metadata.b_columns.is_multiple_of(GEMMA_TILE) {
+        bail!("b_columns must be a multiple of {GEMMA_TILE}");
+    }
+    validate_opened_indices(&metadata.a_row_indices, metadata.a_rows, "a_row_indices")?;
+    validate_opened_indices(
+        &metadata.b_column_indices, metadata.b_columns, "b_column_indices",
+    )?;
+    if !buffers[2].is_empty() {
+        bail!("dense opened witnesses must not contain routing data");
+    }
+
+    let expected_a = checked_tensor_elements(metadata.a_rows, metadata.common_dim, "A")?;
+    let expected_b =
+        checked_tensor_elements(metadata.b_columns, metadata.common_dim, "B-transposed")?;
+    if buffers[0].len() != expected_a {
+        bail!(
+            "A tensor length {} does not match shape {}x{} ({expected_a} bytes)",
+            buffers[0].len(),
+            metadata.a_rows,
+            metadata.common_dim
+        );
+    }
+    if buffers[1].len() != expected_b {
+        bail!(
+            "B-transposed tensor length {} does not match shape {}x{} ({expected_b} bytes)",
+            buffers[1].len(),
+            metadata.b_columns,
+            metadata.common_dim
+        );
+    }
+    validate_int7(&buffers[0], "A")?;
+    validate_int7(&buffers[1], "B-transposed")?;
+
+    let noise_seed_a = fixed_bytes(&metadata.noise_seed_a, "noise_seed_a")?;
+    let noise_seed_b = fixed_bytes(&metadata.noise_seed_b, "noise_seed_b")?;
+    let [a_bytes, b_bytes, _routing] = buffers;
+    Ok(OpenedDenseWitness {
+        candidate_generation: metadata.candidate_generation,
+        work_id: metadata.work_id,
+        a_row_indices: metadata.a_row_indices,
+        b_column_indices: metadata.b_column_indices,
+        noise_seed_a,
+        noise_seed_b,
+        noise_rank: metadata.noise_rank,
+        a_rows: metadata.a_rows,
+        b_columns: metadata.b_columns,
+        common_dim: metadata.common_dim,
+        a: bytes_into_i8(a_bytes),
+        b_transposed: bytes_into_i8(b_bytes),
+    })
+}
+
+fn validate_opened_indices(indices: &[u32], dimension: u32, field: &str) -> Result<()> {
+    if indices.len() != GEMMA_TILE as usize {
+        bail!("{field} must contain exactly {GEMMA_TILE} indices");
+    }
+    let start = indices[0];
+    if !start.is_multiple_of(GEMMA_TILE) {
+        bail!("{field} must start on a {GEMMA_TILE}-element tile boundary");
+    }
+    if start
+        .checked_add(GEMMA_TILE)
+        .is_none_or(|end| end > dimension)
+    {
+        bail!("{field} exceeds its tensor dimension");
+    }
+    if indices
+        .iter()
+        .copied()
+        .enumerate()
+        .any(|(offset, value)| value != start + offset as u32)
+    {
+        bail!("{field} must describe one contiguous tile");
+    }
+    Ok(())
+}
+
+fn checked_tensor_elements(rows: u32, columns: u32, field: &str) -> Result<usize> {
+    let elements = (rows as u64)
+        .checked_mul(columns as u64)
+        .ok_or_else(|| anyhow::anyhow!("{field} tensor length overflow"))?;
+    if elements > MAX_OPENED_TENSOR_BYTES {
+        bail!("{field} tensor exceeds byte limit");
+    }
+    usize::try_from(elements).map_err(|_| anyhow::anyhow!("{field} tensor length overflow"))
+}
+
+fn validate_int7(bytes: &[u8], field: &str) -> Result<()> {
+    if let Some((offset, value)) = bytes
+        .iter()
+        .copied()
+        .map(|value| value as i8)
+        .enumerate()
+        .find(|(_, value)| !(-64..=63).contains(value))
+    {
+        bail!("{field} tensor byte {offset} has non-INT7 value {value}");
+    }
+    Ok(())
+}
+
+fn bytes_into_i8(mut bytes: Vec<u8>) -> Vec<i8> {
+    let pointer = bytes.as_mut_ptr().cast::<i8>();
+    let length = bytes.len();
+    let capacity = bytes.capacity();
+    std::mem::forget(bytes);
+    // SAFETY: u8 and i8 have identical size and alignment. The original
+    // allocation is transferred exactly once and keeps its length and capacity.
+    unsafe { Vec::from_raw_parts(pointer, length, capacity) }
 }
 
 fn validate_mining_job(job: &MiningJob) -> Result<()> {
@@ -622,5 +821,99 @@ mod tests {
         let mut job = mining_job();
         job.target_le.pop();
         assert!(InferenceMiningRpc::new(Arc::new(state), job).is_err());
+    }
+
+    fn opened_metadata(output_dim: u32) -> OpenedBlockMetadata {
+        OpenedBlockMetadata {
+            runtime_id: vec![0x55; RUNTIME_ID_BYTES],
+            candidate_generation: 1,
+            work_id: 9,
+            a_row_indices: (0..GEMMA_TILE).collect(),
+            b_column_indices: (16..16 + GEMMA_TILE).collect(),
+            noise_seed_a: vec![0x66; DIGEST_BYTES],
+            noise_seed_b: vec![0x77; DIGEST_BYTES],
+            noise_rank: GEMMA_NOISE_RANK,
+            a_rows: GEMMA_ROW_ALIGNMENT,
+            b_columns: output_dim,
+            common_dim: GEMMA_COMMON_DIM,
+        }
+    }
+
+    fn opened_buffers(output_dim: u32) -> [Vec<u8>; 3] {
+        [
+            vec![0; GEMMA_ROW_ALIGNMENT as usize * GEMMA_COMMON_DIM as usize],
+            vec![0; output_dim as usize * GEMMA_COMMON_DIM as usize],
+            Vec::new(),
+        ]
+    }
+
+    #[test]
+    fn dense_witness_reconstruction_enforces_shapes_and_preserves_signed_bytes() {
+        const TEST_OUTPUT_DIM: u32 = 128;
+        let mut buffers = opened_buffers(TEST_OUTPUT_DIM);
+        buffers[0][0] = (-64i8) as u8;
+        buffers[1][0] = 63;
+        let witness = validate_opened_dense_witness_for_output(
+            opened_metadata(TEST_OUTPUT_DIM),
+            buffers,
+            TEST_OUTPUT_DIM,
+        )
+        .unwrap();
+        assert_eq!(witness.a[0], -64);
+        assert_eq!(witness.b_transposed[0], 63);
+        assert_eq!(witness.a_row_indices, (0..GEMMA_TILE).collect::<Vec<_>>());
+        assert_eq!(
+            witness.b_column_indices,
+            (16..16 + GEMMA_TILE).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dense_witness_reconstruction_rejects_malformed_inputs() {
+        const TEST_OUTPUT_DIM: u32 = 128;
+
+        let mut metadata = opened_metadata(TEST_OUTPUT_DIM);
+        metadata.a_row_indices[3] = 99;
+        assert!(validate_opened_dense_witness_for_output(
+            metadata,
+            opened_buffers(TEST_OUTPUT_DIM),
+            TEST_OUTPUT_DIM,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("contiguous"));
+
+        let mut buffers = opened_buffers(TEST_OUTPUT_DIM);
+        buffers[1].pop();
+        assert!(validate_opened_dense_witness_for_output(
+            opened_metadata(TEST_OUTPUT_DIM),
+            buffers,
+            TEST_OUTPUT_DIM,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("does not match shape"));
+
+        let mut buffers = opened_buffers(TEST_OUTPUT_DIM);
+        buffers[0][0] = 64;
+        assert!(validate_opened_dense_witness_for_output(
+            opened_metadata(TEST_OUTPUT_DIM),
+            buffers,
+            TEST_OUTPUT_DIM,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("non-INT7"));
+
+        let mut buffers = opened_buffers(TEST_OUTPUT_DIM);
+        buffers[2].push(1);
+        assert!(validate_opened_dense_witness_for_output(
+            opened_metadata(TEST_OUTPUT_DIM),
+            buffers,
+            TEST_OUTPUT_DIM,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("routing"));
     }
 }
