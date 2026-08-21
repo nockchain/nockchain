@@ -320,14 +320,14 @@ class PearlKernel(Int8ScaledMMLinearKernel):
         w_s: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        full_weight, full_scale, tp_rank, _local_n = self._full_tp_weight(w_q, w_s)
-        tp_world = get_tensor_model_parallel_world_size()
         if x_q.shape[1] != 5376:
             raise ValueError(f"native Gemma mining requires K=5376, got {x_q.shape[1]}")
         if x_q.shape[0] > 8192:
             raise ValueError("native Gemma mining supports at most 8192 logical tokens")
         if bias is not None:
             raise ValueError("native Gemma gate/up does not support bias")
+        full_weight, full_scale, tp_rank, _local_n = self._full_tp_weight(w_q, w_s)
+        tp_world = get_tensor_model_parallel_world_size()
         manager = get_async_manager()
         mining_job = manager.get_mining_job()
         matmul_config = GPUMatmulConfigFactory.create(

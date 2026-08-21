@@ -7,12 +7,14 @@ set -euo pipefail
 : "${AI_POW_CUDA_DEVICE:=0}"
 : "${AI_POW_REQUIRE_MINING:=0}"
 : "${AI_POW_BRIDGE_READY_TIMEOUT:=30}"
+: "${AI_POW_HF_CONFIG_DIR:=/run/nockchain-gemma-hf-config}"
 : "${VLLM_HOST:=127.0.0.1}"
 : "${VLLM_PORT:=8000}"
 : "${VLLM_SERVED_MODEL_NAME:=gemma-4-31b-it-pearl}"
 : "${VLLM_MAX_MODEL_LEN:=8192}"
 : "${VLLM_GPU_MEMORY_UTILIZATION:=0.62}"
 : "${VLLM_ENFORCE_EAGER:=1}"
+: "${VLLM_DISABLED_KERNELS:=FlashInferFp8DeepGEMMDynamicBlockScaledKernel}"
 : "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
 
 if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
@@ -95,11 +97,28 @@ if ! ai-pow-inference-health \
   exit 1
 fi
 
+mkdir -p "${AI_POW_HF_CONFIG_DIR}"
+python3 - "${MODEL_PATH}/config.json" "${AI_POW_HF_CONFIG_DIR}/config.json" <<'PY'
+import json
+import sys
+
+source, destination = sys.argv[1:3]
+with open(source) as input_file:
+    config = json.load(input_file)
+text_config = config.get("text_config")
+if not isinstance(text_config, dict):
+    raise SystemExit("Gemma config is missing text_config")
+text_config["allow_global_per_layer_attribute_access"] = True
+with open(destination, "w") as output_file:
+    json.dump(config, output_file)
+PY
+
 vllm_args=(
   serve "${MODEL_PATH}"
   --host "${VLLM_HOST}"
   --port "${VLLM_PORT}"
   --served-model-name "${VLLM_SERVED_MODEL_NAME}"
+  --hf-config-path "${AI_POW_HF_CONFIG_DIR}"
   --language-model-only
   --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}"
   --max-model-len "${VLLM_MAX_MODEL_LEN}"

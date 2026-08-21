@@ -56,13 +56,11 @@ class PearlConfig(CompressedTensorsConfig):
             target_scheme_map=parent_config.target_scheme_map,
             ignore=parent_config.ignore,
             quant_format=parent_config.quant_format,
-            sparsity_scheme_map=parent_config.sparsity_scheme_map,
-            sparsity_ignore_list=parent_config.sparsity_ignore_list,
             kv_cache_scheme=parent_config.kv_cache_scheme,
             config=parent_config.config,
-            transform_config=getattr(parent_config, "transform_config", None),
-            total_num_heads=getattr(parent_config, "total_num_heads", None),
-            total_num_kv_heads=getattr(parent_config, "total_num_kv_heads", None),
+            transform_config=parent_config.transform_config,
+            total_num_heads=parent_config.total_num_heads,
+            total_num_kv_heads=parent_config.total_num_kv_heads,
         )
 
     @staticmethod
@@ -133,8 +131,8 @@ class PearlConfig(CompressedTensorsConfig):
         )
         return is_fp8 and is_block and act_group
 
-    # Expert-0 projection suffixes used to resolve a FusedMoE layer's per-projection
-    # schemes (mirrors vLLM's CompressedTensorsMoEMethod.get_moe_method).
+    # Expert-0 projection suffixes used to resolve a routed-expert layer's
+    # per-projection schemes.
     _GATE_UP_PROBE_SUFFIX = ".0.gate_proj"
     _DOWN_PROBE_SUFFIX = ".0.down_proj"
 
@@ -153,12 +151,12 @@ class PearlConfig(CompressedTensorsConfig):
         layer: torch.nn.Module,
         prefix: str,
     ) -> "QuantizeMethodBase | None":
-        """Route mixed int7-gate/up + fp8-block-down FusedMoE layers to PearlMoE."""
-        from vllm.model_executor.layers.fused_moe import FusedMoE
+        """Route mixed int7-gate/up + fp8-block-down routed experts to PearlMoE."""
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
 
         from .pearl_moe_method import PearlMoEMethod
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             gate_weight, gate_input = self._moe_proj_quant_args(
                 layer, prefix, self._GATE_UP_PROBE_SUFFIX
             )
@@ -188,6 +186,7 @@ class PearlConfig(CompressedTensorsConfig):
         self,
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
+        output_quant: QuantizationArgs | None = None,
         format: str | None = None,
         layer_name: str | None = None,
     ) -> CompressedTensorsScheme:
@@ -226,5 +225,9 @@ class PearlConfig(CompressedTensorsConfig):
 
         # Fall back to parent's implementation for all other schemes
         return super()._get_scheme_from_parts(
-            weight_quant, input_quant, format, layer_name
+            weight_quant=weight_quant,
+            input_quant=input_quant,
+            output_quant=output_quant,
+            format=format,
+            layer_name=layer_name,
         )
