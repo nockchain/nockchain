@@ -37,6 +37,14 @@ struct FfiPrepareResult {
 }
 
 #[repr(C)]
+struct FfiInferenceResult {
+    winner_ordinal: u64,
+    jackpot: [u8; 32],
+    kernel_ms: f32,
+    output_ms: f32,
+}
+
+#[repr(C)]
 struct FfiKernelInfo {
     sm_count: u32,
     threads_per_cta: u32,
@@ -77,6 +85,15 @@ unsafe extern "C" {
         mu: *const u8,
         result_out: *mut FfiPrepareResult,
     ) -> c_int;
+    fn ai_pow_cuda_gemma4_session_infer(
+        session: *mut c_void,
+        logical_m: u32,
+        a_scales: *const f32,
+        b_scales: *const f32,
+        target: *const u8,
+        output_bf16: *mut u16,
+        result_out: *mut FfiInferenceResult,
+    ) -> c_int;
     fn ai_pow_cuda_gemma4_session_search(
         session: *mut c_void,
         ordinal_start: u64,
@@ -111,6 +128,15 @@ pub struct Gemma4Preparation {
     pub commitments: PearlWorkCommitments,
     pub commitment_ms: f32,
     pub noise_ms: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Gemma4InferenceResult {
+    pub winner: Option<u64>,
+    pub jackpot: [u8; 32],
+    pub kernel_ms: f32,
+    pub output_ms: f32,
+    pub output_bf16: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -252,6 +278,58 @@ impl Gemma4CudaSession {
             },
             commitment_ms: result.commitment_ms,
             noise_ms: result.noise_ms,
+        })
+    }
+
+    pub fn infer(
+        &mut self,
+        logical_m: usize,
+        a_scales: &[f32],
+        b_scales: &[f32],
+        target: &[u8; 32],
+    ) -> Result<Gemma4InferenceResult> {
+        if logical_m == 0 || logical_m > self.m {
+            bail!("Gemma logical token count must be in 1..={}", self.m);
+        }
+        if a_scales.len() != logical_m || b_scales.len() != self.n {
+            bail!(
+                "Gemma scale lengths must be logical_m={} and n={}, got {} and {}",
+                logical_m,
+                self.n,
+                a_scales.len(),
+                b_scales.len()
+            );
+        }
+        let output_len = logical_m
+            .checked_mul(self.n)
+            .ok_or_else(|| anyhow::anyhow!("Gemma inference output length overflow"))?;
+        let mut output_bf16 = vec![0u16; output_len];
+        let mut result = FfiInferenceResult {
+            winner_ordinal: NO_WINNER,
+            jackpot: [0; 32],
+            kernel_ms: 0.0,
+            output_ms: 0.0,
+        };
+        // SAFETY: all host slices have the validated ABI lengths. The session is
+        // exclusively borrowed for the synchronous inference call.
+        let status = unsafe {
+            ai_pow_cuda_gemma4_session_infer(
+                self.raw,
+                u32::try_from(logical_m)?,
+                a_scales.as_ptr(),
+                b_scales.as_ptr(),
+                target.as_ptr(),
+                output_bf16.as_mut_ptr(),
+                &mut result,
+            )
+        };
+        check_cuda("Gemma inference", status)?;
+        Ok(Gemma4InferenceResult {
+            winner: (result.winner_ordinal != NO_WINNER).then_some(result.winner_ordinal),
+            jackpot: result.jackpot,
+            kernel_ms: result.kernel_ms,
+            output_ms: result.output_ms,
+            output_bf16,
         })
     }
 
@@ -559,5 +637,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "node")]
+    #[test]
+    #[ignore = "requires a supported CUDA device"]
+    fn inference_output_matches_direct_clean_product() {
+        use std::sync::Arc;
+
+        let params = ai_pow::params::MatmulParams {
+            m: 256,
+            k: GEMMA4_K as u32,
+            n: 128,
+            noise_rank: GEMMA4_RANK as u32,
+            tile: GEMMA4_TILE as u32,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(b"nockchain-gemma-output-kat-v1", &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let template = crate::canonical::PreparedCanonicalDenseTemplate::new(
+            &params,
+            [0x3c; 32],
+            Arc::clone(&a),
+            Arc::clone(&b),
+        )
+        .expect("dense template");
+        let prepared = template.prepare_search(17).expect("search transcript");
+        let mut session =
+            Gemma4CudaSession::new_source(0, params.m as usize, params.n as usize, &a, &b)
+                .expect("Gemma source session");
+        session
+            .prepare(prepared.sigma(), prepared.mu())
+            .expect("device preparation");
+        let a_scales = (0..params.m)
+            .map(|row| 0.001 + row as f32 / 100_000.0)
+            .collect::<Vec<_>>();
+        let b_scales = (0..params.n)
+            .map(|col| 0.002 + col as f32 / 200_000.0)
+            .collect::<Vec<_>>();
+        let actual = session
+            .infer(params.m as usize, &a_scales, &b_scales, &[0; 32])
+            .expect("Gemma inference");
+        assert_eq!(actual.winner, None);
+
+        let mut expected = vec![0u16; params.m as usize * params.n as usize];
+        for row in 0..params.m as usize {
+            for col in 0..params.n as usize {
+                let mut clean = 0i32;
+                for k in 0..GEMMA4_K {
+                    clean += i32::from(a[row * GEMMA4_K + k]) * i32::from(b[col * GEMMA4_K + k]);
+                }
+                let scaled = clean as f32 * a_scales[row] * b_scales[col];
+                let bits = scaled.to_bits();
+                expected[row * params.n as usize + col] =
+                    (bits.wrapping_add(0x7fff + ((bits >> 16) & 1)) >> 16) as u16;
+            }
+        }
+        assert_eq!(actual.output_bf16, expected);
     }
 }

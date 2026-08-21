@@ -14,6 +14,7 @@ on:
       - "crates/ai-pow-miner/build.rs"
       - "crates/ai-pow-miner/src/**"
       - "crates/ai-pow-miner/vllm-plugin/**"
+      - "crates/ai-pow-miner-cuda/**"
       - "crates/ai-pow-zk/**"
       - "crates/nockapp-grpc-proto/**"
       - "Cargo.toml"

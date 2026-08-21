@@ -45,6 +45,19 @@ def pearl_gemm_vanilla(
     :return: Result matrix C
     """
     assert out_dtype is torch.bfloat16 or out_dtype is torch.float16
+    if torch.cuda.get_device_capability(A.device) == (12, 0):
+        logical_m = A.shape[0]
+        if logical_m <= 16:
+            padded = torch.zeros((32, A.shape[1]), device=A.device, dtype=A.dtype)
+            padded[:logical_m].copy_(A)
+            accumulator = torch._int_mm(padded, B.T.contiguous())[:logical_m]
+        else:
+            accumulator = torch._int_mm(A, B.T.contiguous())
+        return (
+            accumulator.to(torch.float32)
+            * scale_a.reshape(-1, 1)
+            * scale_b.reshape(1, -1)
+        ).to(out_dtype)
 
     A_scales = scale_a
     B_scales = scale_b
@@ -113,7 +126,9 @@ def pearl_gemm_noisy(
     mining_job = get_async_manager().get_mining_job()
 
     # Calculate adjusted pow_target
-    adjusted_target = mining_job.adjust_target(mining_config=matmul_config.mining_config)
+    adjusted_target = mining_job.adjust_target(
+        mining_config=matmul_config.mining_config
+    )
 
     hash_key = CommitmentHasher.get_key(
         mining_job.incomplete_header_bytes, matmul_config.mining_config
@@ -178,7 +193,9 @@ def pearl_gemm_noisy(
     A_E_BL = torch.empty((m, r), dtype=torch.float16, device=a.device)
 
     host_signal_sync_size = get_host_signal_sync_size()
-    host_signal_sync = torch.zeros((host_signal_sync_size,), dtype=torch.int8, device="cuda")
+    host_signal_sync = torch.zeros(
+        (host_signal_sync_size,), dtype=torch.int8, device="cuda"
+    )
     host_signal_header_pinned = get_pinned_pool().acquire()
 
     # Create pow_target tensor from adjusted_target

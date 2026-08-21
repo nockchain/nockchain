@@ -8,6 +8,7 @@ Extends CompressedTensorsConfig to add support for:
 Both kernels handle smooth_quant_scale internally.
 """
 
+import os
 from typing import Any, override
 
 import torch
@@ -78,7 +79,9 @@ class PearlConfig(CompressedTensorsConfig):
             weight_quant.strategy == QuantizationStrategy.TENSOR.value
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value
         )
-        is_token = weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
+        is_token = (
+            weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
+        )
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
         return is_7_bits and is_token and weight_quant.symmetric and is_dynamic
@@ -97,7 +100,9 @@ class PearlConfig(CompressedTensorsConfig):
             weight_quant.strategy == QuantizationStrategy.TENSOR.value
             or weight_quant.strategy == QuantizationStrategy.CHANNEL.value
         )
-        is_token = weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
+        is_token = (
+            weight_strategy and input_quant.strategy == QuantizationStrategy.TOKEN.value
+        )
         is_dynamic = not weight_quant.dynamic and input_quant.dynamic
 
         return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
@@ -122,7 +127,10 @@ class PearlConfig(CompressedTensorsConfig):
         is_block = weight_quant.strategy == QuantizationStrategy.BLOCK.value and bool(
             weight_quant.block_structure
         )
-        act_group = input_quant.strategy == QuantizationStrategy.GROUP.value and input_quant.dynamic
+        act_group = (
+            input_quant.strategy == QuantizationStrategy.GROUP.value
+            and input_quant.dynamic
+        )
         return is_fp8 and is_block and act_group
 
     # Expert-0 projection suffixes used to resolve a FusedMoE layer's per-projection
@@ -157,13 +165,23 @@ class PearlConfig(CompressedTensorsConfig):
             down_weight, down_input = self._moe_proj_quant_args(
                 layer, prefix, self._DOWN_PROBE_SUFFIX
             )
-            if self._is_mining_layer(gate_weight, gate_input) and self._is_fp8_block_layer(
-                down_weight, down_input
-            ):
-                _LOGGER.debug(f"Pearl MoE (int7 gate/up + fp8 block down) detected for {prefix}")
+            if self._is_mining_layer(
+                gate_weight, gate_input
+            ) and self._is_fp8_block_layer(down_weight, down_input):
+                _LOGGER.debug(
+                    f"Pearl MoE (int7 gate/up + fp8 block down) detected for {prefix}"
+                )
                 return PearlMoEMethod(layer.moe_config, down_weight, down_input)
 
         return super().get_quant_method(layer, prefix)
+
+    @staticmethod
+    def _is_dense_gate_up_layer(layer_name: str | None) -> bool:
+        target_layer = int(os.environ.get("NOCKCHAIN_GEMMA4_MINING_LAYER", "0"))
+        if not 0 <= target_layer < 60:
+            raise ValueError("NOCKCHAIN_GEMMA4_MINING_LAYER must be in 0..=59")
+        suffix = f".layers.{target_layer}.mlp.gate_up_proj"
+        return bool(layer_name and layer_name.endswith(suffix))
 
     @override
     def _get_scheme_from_parts(
@@ -182,14 +200,17 @@ class PearlConfig(CompressedTensorsConfig):
         3. Otherwise -> delegates to parent
 
         """
-        # Check for 7-bit mining layer
         if self._is_mining_layer(weight_quant, input_quant):
-            _LOGGER.debug(f"Mining layer (7-bit) detected for {layer_name}")
+            mining_enabled = self._is_dense_gate_up_layer(layer_name)
+            _LOGGER.debug(
+                f"INT7 layer detected for {layer_name}; mining_enabled={mining_enabled}"
+            )
             return PearlScheme(
                 strategy=weight_quant.strategy,
                 is_static_input_scheme=False,
                 input_symmetric=input_quant.symmetric,
-                mining_enabled=True,
+                mining_enabled=mining_enabled,
+                input_num_bits=7,
             )
 
         # Check for 8-bit non-mining layer
@@ -200,7 +221,10 @@ class PearlConfig(CompressedTensorsConfig):
                 is_static_input_scheme=False,
                 input_symmetric=input_quant.symmetric,
                 mining_enabled=False,
+                input_num_bits=8,
             )
 
         # Fall back to parent's implementation for all other schemes
-        return super()._get_scheme_from_parts(weight_quant, input_quant, format, layer_name)
+        return super()._get_scheme_from_parts(
+            weight_quant, input_quant, format, layer_name
+        )
