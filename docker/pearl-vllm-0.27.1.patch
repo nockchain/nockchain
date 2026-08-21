@@ -21,3 +21,42 @@
  ]
  
  # Workspace sources - these apply globally to all members
+--- a/miner/miner-base/pyproject.toml
++++ b/miner/miner-base/pyproject.toml
+@@ -22,6 +22,6 @@
+   "pearl-gateway",
+   "py-pearl-mining",
+   "pydantic-settings>=2.12.0",
+-  "torch==2.11.0",
++  "torch==2.13.0",
+ ]
+ 
+--- a/miner/pearl-gateway/pyproject.toml
++++ b/miner/pearl-gateway/pyproject.toml
+@@ -29,7 +29,7 @@
+   "pydantic>=2.12.5",
+   "pydantic-settings>=2.12.0",
+   "pyyaml>=6.0",
+-  "torch==2.11.0",
++  "torch==2.13.0",
+ ]
+ 
+ [project.scripts]
+--- a/miner/pearl-gemm/pyproject.toml
++++ b/miner/pearl-gemm/pyproject.toml
+@@ -15,13 +15,13 @@
+     "packaging>=21.0",
+     "pydantic>=2.12.0,<3.0.0",
+     "sortedcontainers>=2.4.0",
+-    "torch==2.11.0",
++    "torch==2.13.0",
+     "wheel>=0.38.0",
+ ]
+ 
+ 
+ [build-system]
+-requires = ["setuptools>=61", "torch==2.11.0", "numpy", "ninja", "pydantic", "pearl-gemm-build-utils"]
++requires = ["setuptools>=61", "torch==2.13.0", "numpy", "ninja", "pydantic", "pearl-gemm-build-utils"]
+ build-backend = "setuptools.build_meta"
+ 
+ [tool.setuptools.packages.find]
