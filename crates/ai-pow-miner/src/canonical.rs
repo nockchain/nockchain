@@ -164,6 +164,21 @@ fn setup_aux_inclusion(
     )
 }
 
+/// Return the candidate-bound dense mining header before inference tensors exist.
+///
+/// The header depends on the node commitment and extranonce, not on matrix
+/// dimensions or contents. The proof path reconstructs the same header after it
+/// receives the opened tensors.
+pub fn canonical_dense_incomplete_header(
+    nock_commit: [u8; 32],
+    extranonce: u32,
+) -> Result<[u8; ai_pow::pearl_compat::PEARL_INCOMPLETE_BLOCK_HEADER_SIZE], CanonicalProveError> {
+    let aux = setup_aux(nock_commit);
+    let aux_commitment = aux.commitment().map_err(err("dense aux commitment"))?;
+    let (header, _) = setup_aux_inclusion(&aux_commitment, extranonce);
+    Ok(header.to_bytes())
+}
+
 struct CanonicalMoeInputs {
     a: Vec<i8>,
     b: Vec<i8>,

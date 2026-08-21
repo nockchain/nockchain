@@ -28,9 +28,19 @@ if [[ "${bridge_host}" != "127.0.0.1" && "${bridge_host}" != "localhost" ]]; the
   exit 1
 fi
 
-ai-pow-inference-bridge \
-  --listen "127.0.0.1:${bridge_port}" \
-  --cuda-device "${AI_POW_CUDA_DEVICE}" &
+bridge_args=(
+  --listen "127.0.0.1:${bridge_port}"
+  --cuda-device "${AI_POW_CUDA_DEVICE}"
+)
+if [[ -n "${NOCKCHAIN_NODE_ADDR:-}" ]]; then
+  : "${NOCKCHAIN_MINING_PKH:?NOCKCHAIN_MINING_PKH is required with NOCKCHAIN_NODE_ADDR}"
+  bridge_args+=(--node-addr "${NOCKCHAIN_NODE_ADDR}" --mining-pkh "${NOCKCHAIN_MINING_PKH}")
+elif [[ -n "${NOCKCHAIN_MINING_PKH:-}" ]]; then
+  echo "NOCKCHAIN_MINING_PKH requires NOCKCHAIN_NODE_ADDR" >&2
+  exit 1
+fi
+
+ai-pow-inference-bridge "${bridge_args[@]}" &
 bridge_pid=$!
 vllm_pid=""
 

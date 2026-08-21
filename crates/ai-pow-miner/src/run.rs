@@ -62,6 +62,7 @@ use ai_pow_zk::{CompositePublicInputs, ZkParams};
 use futures::StreamExt;
 use nockapp::nockapp::wire::Wire;
 use nockapp::noun::slab::NounSlab;
+use nockapp_grpc_proto::pb::ai_pow::v1::MiningJob as InferenceMiningJob;
 use nockchain_mining_common::{
     MiningCandidate, MiningCandidateKind, MiningPkhConfig, NodeClient, NodeClientError,
     PokeTransportOutcome, PokeTransportStatus, PreparedPoke,
@@ -76,13 +77,12 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::canonical::{
-    evaluate_canonical_moe_jackpot, prove_canonical_moe_block_at_for_miner, CanonicalBlock,
-    CanonicalProveError, PreparedCanonicalMoeTemplate,
-};
 #[cfg(feature = "gpu")]
+use crate::canonical::PreparedCanonicalDenseSearch;
 use crate::canonical::{
-    CanonicalDenseBlock, PreparedCanonicalDenseSearch, PreparedCanonicalDenseTemplate,
+    canonical_dense_incomplete_header, evaluate_canonical_moe_jackpot,
+    prove_canonical_moe_block_at_for_miner, CanonicalBlock, CanonicalDenseBlock,
+    CanonicalProveError, PreparedCanonicalDenseTemplate, PreparedCanonicalMoeTemplate,
 };
 use crate::certificate_noun::{
     build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run,
@@ -91,6 +91,9 @@ use crate::certificate_noun::{
     build_ai_pow_pearl_merge_moe_artifact_noun_from_node,
     decode_ai_pow_pearl_merge_artifact_metadata_slab, AiProofNode, CertificateNounError,
     CertificateNounLimits,
+};
+use crate::inference::{
+    InferenceMiningRpc, InferenceProofRequest, InferenceProofSender, OpenedDenseWitness,
 };
 #[cfg(feature = "gpu")]
 use crate::peak::MultiGpuPeakSearchBackend;
@@ -900,23 +903,30 @@ fn build_canonical_poke(block: &CanonicalBlock) -> Result<NounSlab, MinerError> 
     Ok(slab)
 }
 
-#[cfg(feature = "gpu")]
-fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+fn build_dense_poke(
+    block: &CanonicalDenseBlock,
+    max_pattern_len: usize,
+) -> Result<NounSlab, MinerError> {
     let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
         block.attempt.attempt(),
         &block.aux_inclusion,
         &block.a,
         &block.b,
-        PEAK_PRODUCTION_PARAMS.tile as usize,
+        max_pattern_len,
         &block.run,
     )
-    .map_err(|e| MinerError::CertificateBuild(format!("peak dense artifact: {e}")))?;
+    .map_err(|e| MinerError::CertificateBuild(format!("dense artifact: {e}")))?;
     let artifact_space = artifact.noun_space();
     let mut slab = NounSlab::new();
     let art = slab.copy_into(unsafe { *artifact.root() }, &artifact_space);
     let payload = T(&mut slab, &[D(tas!(b"command")), D(tas!(b"pow")), art]);
     slab.set_root(payload);
     Ok(slab)
+}
+
+#[cfg(feature = "gpu")]
+fn build_peak_poke(block: &CanonicalDenseBlock) -> Result<NounSlab, MinerError> {
+    build_dense_poke(block, PEAK_PRODUCTION_PARAMS.tile as usize)
 }
 
 enum GatewayFreeBlock {
@@ -1540,6 +1550,295 @@ async fn run_gateway_free_with_backend(
     Ok(())
 }
 
+pub struct InferenceNodeConfig {
+    pub node_addr: String,
+    pub mining_pkh_configs: Vec<MiningPkhConfig>,
+}
+
+impl InferenceNodeConfig {
+    pub fn validate(&self) -> Result<(), MinerError> {
+        if self.node_addr.trim().is_empty() {
+            return Err(MinerError::InvalidConfig(
+                "inference node address must not be empty".to_string(),
+            ));
+        }
+        if self.mining_pkh_configs.is_empty() {
+            return Err(MinerError::InvalidConfig(
+                "inference mining requires at least one reward public-key hash".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn inference_proof_channel() -> (
+    InferenceProofSender,
+    tokio::sync::mpsc::Receiver<InferenceProofRequest>,
+) {
+    tokio::sync::mpsc::channel(1)
+}
+
+type InferenceProofWorkerResult = (
+    u64,
+    tokio::sync::oneshot::Sender<Result<String, String>>,
+    Result<PreparedPoke, String>,
+);
+
+enum InferenceProofOutcome {
+    Joined(Result<InferenceProofWorkerResult, tokio::task::JoinError>),
+    Pending,
+}
+
+async fn await_inference_proof_worker(
+    worker: &mut Option<JoinHandle<InferenceProofWorkerResult>>,
+) -> InferenceProofOutcome {
+    match worker.as_mut() {
+        Some(handle) => InferenceProofOutcome::Joined(handle.await),
+        None => {
+            std::future::pending::<()>().await;
+            InferenceProofOutcome::Pending
+        }
+    }
+}
+
+async fn reject_and_await_inference_proof_worker(
+    worker: &mut Option<JoinHandle<InferenceProofWorkerResult>>,
+    detail: &str,
+) -> Result<(), MinerError> {
+    if let Some(handle) = worker.take() {
+        let (_, response, _) = handle
+            .await
+            .map_err(|error| MinerError::WorkerJoin(error.to_string()))?;
+        let _ = response.send(Err(detail.to_string()));
+    }
+    Ok(())
+}
+
+fn publish_inference_job(
+    rpc: &InferenceMiningRpc,
+    candidate: InferenceNodeCandidate,
+) -> Result<(), MinerError> {
+    rpc.set_mining_job(InferenceMiningJob {
+        candidate_generation: candidate.generation,
+        incomplete_header: candidate.incomplete_header.to_vec(),
+        target_le: candidate.inputs.target.to_vec(),
+        certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+    })
+    .map_err(|error| MinerError::Configure(format!("publish inference mining job: {error}")))
+}
+
+fn invalidate_inference_job(rpc: &InferenceMiningRpc, generation: u64) -> Result<(), MinerError> {
+    let incomplete_header = canonical_dense_incomplete_header([0; 32], 0)
+        .map_err(|error| MinerError::Configure(error.to_string()))?;
+    rpc.set_mining_job(InferenceMiningJob {
+        candidate_generation: generation,
+        incomplete_header: incomplete_header.to_vec(),
+        target_le: vec![0; 32],
+        certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+    })
+    .map_err(|error| MinerError::Configure(format!("invalidate inference mining job: {error}")))
+}
+
+/// Subscribe the inference bridge to `%mine-ai`, prove scalar-rechecked native
+/// winners, and submit the canonical `%ai-pow` command.
+pub async fn run_inference_node(
+    cfg: InferenceNodeConfig,
+    rpc: InferenceMiningRpc,
+    mut proof_requests: tokio::sync::mpsc::Receiver<InferenceProofRequest>,
+    shutdown: CancellationToken,
+) -> Result<(), MinerError> {
+    cfg.validate()?;
+    let mut generation = rpc.candidate_generation();
+    let mut active_candidate: Option<InferenceNodeCandidate> = None;
+    info!(node = %cfg.node_addr, "inference bridge: entering production node loop");
+
+    loop {
+        if shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let mut client = match NodeClient::connect(&cfg.node_addr).await {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(error = %error, "inference bridge node connect failed; retrying in 2s");
+                tokio::select! {
+                    _ = shutdown.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+                }
+                continue;
+            }
+        };
+        client
+            .set_mining_key(
+                AiPowMinerWire::SetPubKey.to_wire(),
+                Vec::new(),
+                cfg.mining_pkh_configs.clone(),
+            )
+            .await
+            .map_err(|error| MinerError::Configure(format!("set_mining_key: {error}")))?;
+        let mut candidates = match client.watch_candidates(vec![b"mine-ai".to_vec()]).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                warn!(error = %error, "inference bridge watch_candidates failed; reconnecting");
+                continue;
+            }
+        };
+        client
+            .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
+            .await
+            .map_err(|error| MinerError::Configure(format!("enable_mining(true): {error}")))?;
+        info!("inference bridge: subscribed + mining enabled; awaiting %mine-ai candidates");
+
+        let mut proof_worker: Option<JoinHandle<InferenceProofWorkerResult>> = None;
+        let reconnect = loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    reject_and_await_inference_proof_worker(
+                        &mut proof_worker,
+                        "inference proof cancelled during shutdown",
+                    ).await?;
+                    let _ = client
+                        .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
+                        .await;
+                    return Ok(());
+                }
+                maybe_candidate = candidates.next() => {
+                    let Some(candidate_result) = maybe_candidate else {
+                        warn!("inference bridge candidate stream ended; reconnecting");
+                        break true;
+                    };
+                    let candidate = match candidate_result {
+                        Ok(candidate) => candidate,
+                        Err(NodeClientError::Grpc(error)) => {
+                            warn!(error = %error, "inference bridge candidate stream failed; reconnecting");
+                            break true;
+                        }
+                        Err(error) => {
+                            warn!(error = %error, "inference bridge candidate decode error; skipping");
+                            continue;
+                        }
+                    };
+                    if candidate.kind != MiningCandidateKind::Ai {
+                        continue;
+                    }
+                    let inputs = match derive_nockchain_candidate_inputs(&candidate) {
+                        Ok(inputs) => inputs,
+                        Err(error) => {
+                            warn!(error = %error, "inference bridge rejected node candidate");
+                            continue;
+                        }
+                    };
+                    generation = generation.checked_add(1).ok_or_else(|| {
+                        MinerError::Configure("inference candidate generation overflow".to_string())
+                    })?;
+                    let incomplete_header = canonical_dense_incomplete_header(
+                        inputs.nock_block_commitment,
+                        0,
+                    ).map_err(|error| MinerError::Configure(error.to_string()))?;
+                    let candidate = InferenceNodeCandidate {
+                        generation,
+                        inputs,
+                        incomplete_header,
+                    };
+                    publish_inference_job(&rpc, candidate)?;
+                    active_candidate = Some(candidate);
+                    info!(
+                        generation,
+                        commit = %hex::encode(inputs.nock_block_commitment),
+                        pow_len = inputs.pow_len,
+                        target = %hex::encode(inputs.target),
+                        "inference bridge published %mine-ai candidate"
+                    );
+                }
+                maybe_request = proof_requests.recv() => {
+                    let Some(request) = maybe_request else {
+                        break false;
+                    };
+                    let Some(candidate) = active_candidate else {
+                        let _ = request.response.send(Err(
+                            "no active %mine-ai candidate".to_string()
+                        ));
+                        continue;
+                    };
+                    if request.witness.candidate_generation != candidate.generation {
+                        let _ = request.response.send(Err(format!(
+                            "stale inference witness generation {}; current generation is {}",
+                            request.witness.candidate_generation,
+                            candidate.generation
+                        )));
+                        continue;
+                    }
+                    if proof_worker.is_some() {
+                        let _ = request.response.send(Err(
+                            "an inference winner proof is already in progress".to_string()
+                        ));
+                        continue;
+                    }
+                    proof_worker = Some(tokio::task::spawn_blocking(move || {
+                        prepare_inference_proof(candidate, request)
+                    }));
+                }
+                outcome = await_inference_proof_worker(&mut proof_worker) => {
+                    let InferenceProofOutcome::Joined(joined) = outcome else {
+                        continue;
+                    };
+                    proof_worker = None;
+                    let (proof_generation, response, prepared) = joined
+                        .map_err(|error| MinerError::WorkerJoin(error.to_string()))?;
+                    if proof_generation != generation {
+                        let _ = response.send(Err(format!(
+                            "candidate generation changed from {proof_generation} to {generation} while proving"
+                        )));
+                        continue;
+                    }
+                    let prepared = match prepared {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let _ = response.send(Err(format!(
+                                "inference winner proof rejected: {error}"
+                            )));
+                            continue;
+                        }
+                    };
+                    let outcome = client
+                        .send_prepared_poke_with_timeout_or_cancel(
+                            prepared,
+                            NODE_POKE_ACK_TIMEOUT,
+                            shutdown.cancelled(),
+                        )
+                        .await;
+                    let response_result = outcome.into_result().map(
+                        |_| "canonical %ai-pow submission acknowledged by node".to_string()
+                    ).map_err(
+                        |error| format!("canonical %ai-pow submission failed: {error}")
+                    );
+                    let _ = response.send(response_result);
+                }
+            }
+        };
+
+        reject_and_await_inference_proof_worker(
+            &mut proof_worker, "candidate stream disconnected while proving",
+        )
+        .await?;
+        generation = generation.checked_add(1).ok_or_else(|| {
+            MinerError::Configure("inference candidate generation overflow".to_string())
+        })?;
+        active_candidate = None;
+        invalidate_inference_job(&rpc, generation)?;
+        let _ = client
+            .enable_mining(AiPowMinerWire::Enable.to_wire(), false)
+            .await;
+        if !reconnect {
+            return Ok(());
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return Ok(()),
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+        }
+    }
+}
+
 type CandidateWorkerJoin =
     Result<(u64, Result<NockchainCandidateInputs, String>), tokio::task::JoinError>;
 
@@ -1751,6 +2050,132 @@ fn derive_nockchain_candidate_inputs(
         nock_block_commitment,
         pow_len: candidate.pow_len,
     })
+}
+const INFERENCE_DENSE_TILE: u32 = 16;
+
+#[derive(Clone, Copy)]
+struct InferenceNodeCandidate {
+    generation: u64,
+    inputs: NockchainCandidateInputs,
+    incomplete_header: [u8; ai_pow::pearl_compat::PEARL_INCOMPLETE_BLOCK_HEADER_SIZE],
+}
+
+fn reconstruct_inference_dense_attempt(
+    candidate: InferenceNodeCandidate,
+    witness: OpenedDenseWitness,
+) -> Result<
+    (
+        PreparedCanonicalDenseTemplate,
+        PearlMergeCheckedTicketAttempt,
+    ),
+    CanonicalProveError,
+> {
+    if witness.candidate_generation != candidate.generation {
+        return Err(CanonicalProveError(format!(
+            "stale inference witness generation {}; current generation is {}",
+            witness.candidate_generation, candidate.generation
+        )));
+    }
+    let params = MatmulParams {
+        m: witness.a_rows,
+        k: witness.common_dim,
+        n: witness.b_columns,
+        noise_rank: witness.noise_rank,
+        tile: INFERENCE_DENSE_TILE,
+        spot_checks: 1,
+        difficulty_bits: 0,
+    };
+    let ordinal = opened_dense_ordinal(&witness, &params)?;
+    let template = PreparedCanonicalDenseTemplate::new(
+        &params,
+        candidate.inputs.nock_block_commitment,
+        Arc::clone(&witness.a),
+        Arc::clone(&witness.b_transposed),
+    )?;
+    let expected_base =
+        canonical_dense_incomplete_header(candidate.inputs.nock_block_commitment, 0)?;
+    if candidate.incomplete_header != expected_base {
+        return Err(CanonicalProveError(
+            "active inference candidate has a noncanonical base header".to_string(),
+        ));
+    }
+    let prepared = template.prepare_search(witness.extranonce)?;
+    let expected_header = canonical_dense_incomplete_header(
+        candidate.inputs.nock_block_commitment, witness.extranonce,
+    )?;
+    if prepared.sigma() != expected_header {
+        return Err(CanonicalProveError(
+            "opened witness header does not match its candidate extranonce".to_string(),
+        ));
+    }
+    let attempt = template.checked_search_winner(&prepared, ordinal, &candidate.inputs.target)?;
+    if attempt.commitments.s_a != witness.noise_seed_a
+        || attempt.commitments.s_b != witness.noise_seed_b
+    {
+        return Err(CanonicalProveError(
+            "opened witness noise seeds disagree with scalar reconstruction".to_string(),
+        ));
+    }
+    Ok((template, attempt))
+}
+
+fn prove_inference_dense_block(
+    candidate: InferenceNodeCandidate,
+    witness: OpenedDenseWitness,
+) -> Result<CanonicalDenseBlock, CanonicalProveError> {
+    let (template, attempt) = reconstruct_inference_dense_attempt(candidate, witness)?;
+    template.prove(attempt)
+}
+
+fn opened_dense_ordinal(
+    witness: &OpenedDenseWitness,
+    params: &MatmulParams,
+) -> Result<u64, CanonicalProveError> {
+    let tile = params.tile as usize;
+    let valid_tile = |indices: &[u32], dimension: u32| {
+        indices.len() == tile
+            && indices
+                .first()
+                .is_some_and(|start| start.is_multiple_of(params.tile))
+            && indices
+                .iter()
+                .copied()
+                .enumerate()
+                .all(|(offset, value)| value == indices[0] + offset as u32 && value < dimension)
+    };
+    if !valid_tile(&witness.a_row_indices, params.m)
+        || !valid_tile(&witness.b_column_indices, params.n)
+    {
+        return Err(CanonicalProveError(
+            "opened witness indices do not describe one in-range dense tile".to_string(),
+        ));
+    }
+    let row_ticket = u64::from(witness.a_row_indices[0] / params.tile);
+    let col_ticket = u64::from(witness.b_column_indices[0] / params.tile);
+    let col_tickets = u64::from(params.n / params.tile);
+    row_ticket
+        .checked_mul(col_tickets)
+        .and_then(|base| base.checked_add(col_ticket))
+        .ok_or_else(|| CanonicalProveError("opened witness ordinal overflow".to_string()))
+}
+
+fn prepare_inference_proof(
+    candidate: InferenceNodeCandidate,
+    request: InferenceProofRequest,
+) -> (
+    u64,
+    tokio::sync::oneshot::Sender<Result<String, String>>,
+    Result<PreparedPoke, String>,
+) {
+    let generation = request.witness.candidate_generation;
+    let result = prove_inference_dense_block(candidate, request.witness)
+        .map_err(|error| error.to_string())
+        .and_then(|block| {
+            build_dense_poke(&block, INFERENCE_DENSE_TILE as usize)
+                .map_err(|error| error.to_string())
+        })
+        .map(|poke| NodeClient::prepare_poke_wire(AiPowMinerWire::Mined.to_wire(), poke));
+    (generation, request.response, result)
 }
 
 #[cfg(test)]
@@ -2630,6 +3055,7 @@ mod tests {
         pearl_merge_recursive_certificate_parts_from_ticket,
         pearl_merge_recursive_public_inputs_from_work, AiProofNode, PearlMergePublicStatementShape,
     };
+    use crate::inference::InferenceSchedulerState;
     use crate::pearl_mining::{
         self, PearlMergeMineOptions, PearlMergeMiningError, PearlMergeMiningJob,
     };
@@ -2778,6 +3204,44 @@ mod tests {
     }
 
     #[test]
+    fn inference_candidate_publication_and_invalidation_are_generation_bound() {
+        let state = Arc::new(InferenceSchedulerState::default());
+        let rpc = InferenceMiningRpc::new(
+            state,
+            InferenceMiningJob {
+                candidate_generation: 1,
+                incomplete_header: vec![0; 76],
+                target_le: vec![0; 32],
+                certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+            },
+        )
+        .expect("initial inference job");
+        let commit = [0x5a; 32];
+        let target = crate::easy_nock_target();
+        let candidate = InferenceNodeCandidate {
+            generation: 2,
+            inputs: NockchainCandidateInputs {
+                target,
+                nock_block_commitment: commit,
+                pow_len: 77,
+            },
+            incomplete_header: canonical_dense_incomplete_header(commit, 0)
+                .expect("candidate header"),
+        };
+
+        publish_inference_job(&rpc, candidate).expect("publish candidate");
+        let published = rpc.mining_job().expect("published job");
+        assert_eq!(published.candidate_generation, candidate.generation);
+        assert_eq!(published.incomplete_header, candidate.incomplete_header);
+        assert_eq!(published.target_le, target);
+
+        invalidate_inference_job(&rpc, 3).expect("invalidate candidate");
+        let invalidated = rpc.mining_job().expect("invalidated job");
+        assert_eq!(invalidated.candidate_generation, 3);
+        assert_eq!(invalidated.target_le, vec![0; 32]);
+    }
+
+    #[test]
     fn canonical_grind_exits_when_cancelled() {
         let cancel = Arc::new(AtomicBool::new(true));
         assert!(
@@ -2785,6 +3249,134 @@ mod tests {
                 .expect("cancelled grind should exit cleanly")
                 .is_none()
         );
+    }
+
+    fn inference_scalar_fixture(
+        extranonce: u32,
+    ) -> (
+        InferenceNodeCandidate,
+        OpenedDenseWitness,
+        PearlMergeCheckedTicketAttempt,
+    ) {
+        let params = MatmulParams {
+            m: 32,
+            k: 1024,
+            n: 32,
+            noise_rank: 64,
+            tile: INFERENCE_DENSE_TILE,
+            spot_checks: 1,
+            difficulty_bits: 0,
+        };
+        let (a, b) = ai_pow::synth::synth_matrices(b"nockchain-inference-proof-kat-v1", &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let commit = [0x5a; 32];
+        let template =
+            PreparedCanonicalDenseTemplate::new(&params, commit, Arc::clone(&a), Arc::clone(&b))
+                .expect("inference scalar template");
+        let prepared = template
+            .prepare_search(extranonce)
+            .expect("search transcript");
+        let target = crate::easy_target_for(&prepared.config());
+        let ordinal = 3;
+        let expected = template
+            .checked_search_winner(&prepared, ordinal, &target)
+            .expect("forced scalar winner");
+        let (rows, columns) = prepared
+            .offsets_at_ordinal(ordinal)
+            .expect("opened tile offsets");
+        let candidate = InferenceNodeCandidate {
+            generation: 7,
+            inputs: NockchainCandidateInputs {
+                target,
+                nock_block_commitment: commit,
+                pow_len: 99,
+            },
+            incomplete_header: canonical_dense_incomplete_header(commit, 0)
+                .expect("candidate header"),
+        };
+        let witness = OpenedDenseWitness {
+            candidate_generation: candidate.generation,
+            extranonce,
+            work_id: 11,
+            a_row_indices: (rows..rows + params.tile).collect(),
+            b_column_indices: (columns..columns + params.tile).collect(),
+            noise_seed_a: expected.commitments.s_a,
+            noise_seed_b: expected.commitments.s_b,
+            noise_rank: params.noise_rank,
+            a_rows: params.m,
+            b_columns: params.n,
+            common_dim: params.k,
+            a,
+            b_transposed: b,
+        };
+        (candidate, witness, expected)
+    }
+
+    #[test]
+    fn inference_winner_reconstruction_matches_scalar_transcript() {
+        let (candidate, witness, expected) = inference_scalar_fixture(1);
+        let (_, reconstructed) =
+            reconstruct_inference_dense_attempt(candidate, witness).expect("scalar reconstruction");
+        assert_eq!(reconstructed.commitments, expected.commitments);
+        assert_eq!(
+            reconstructed.ticket.jackpot_hash,
+            expected.ticket.jackpot_hash
+        );
+        assert_eq!(
+            reconstructed.aux.nock_block_commitment,
+            candidate.inputs.nock_block_commitment
+        );
+    }
+
+    #[test]
+    fn inference_winner_reconstruction_rejects_stale_and_corrupt_witnesses() {
+        let (candidate, mut stale, _) = inference_scalar_fixture(0);
+        stale.candidate_generation += 1;
+        assert!(reconstruct_inference_dense_attempt(candidate, stale)
+            .err()
+            .expect("stale witness must fail")
+            .to_string()
+            .contains("stale inference witness generation"));
+
+        let (candidate, mut corrupt, _) = inference_scalar_fixture(0);
+        corrupt.noise_seed_b[0] ^= 1;
+        assert!(reconstruct_inference_dense_attempt(candidate, corrupt)
+            .err()
+            .expect("corrupt witness must fail")
+            .to_string()
+            .contains("noise seeds disagree"));
+    }
+
+    #[test]
+    #[ignore = "builds and verifies a compact recursive inference-winner certificate"]
+    fn inference_forced_winner_verifies_through_consensus_entrypoint() {
+        let (candidate, witness, _) = inference_scalar_fixture(0);
+        let (template, attempt) =
+            reconstruct_inference_dense_attempt(candidate, witness).expect("scalar reconstruction");
+        let block = template.prove(attempt).expect("compact recursive proof");
+        let artifact = build_ai_pow_pearl_merge_artifact_noun_from_ticket_compact_recursive_run(
+            block.attempt.attempt(),
+            &block.aux_inclusion,
+            &block.a,
+            &block.b,
+            INFERENCE_DENSE_TILE as usize,
+            &block.run,
+        )
+        .expect("inference artifact noun");
+        let digest = ai_pow_zk::recursion::compact_batch_verifier_key_digest_to_bytes(
+            block.run.verifier_key_digest(),
+        );
+        crate::certificate_noun::verify_ai_pow_block_artifact_jam(
+            &artifact.jam(),
+            CertificateNounLimits::default(),
+            &candidate.inputs.nock_block_commitment,
+            &candidate.inputs.target,
+            INFERENCE_DENSE_TILE as usize,
+            block.run.verifier_context(),
+            &digest,
+        )
+        .expect("inference artifact verifies through consensus");
     }
 
     #[test]
@@ -3816,6 +4408,288 @@ mod tests {
 
     fn expected_aux_commitment_bridge(candidate: &MiningCandidate) -> [u8; 32] {
         *blake3::hash(&candidate.block_header.jam()).as_bytes()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inference_node_tracks_real_candidate_replacement() {
+        let node = MockNode::spawn().await;
+        let state = Arc::new(InferenceSchedulerState::default());
+        let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
+        let rpc = InferenceMiningRpc::new(
+            state,
+            InferenceMiningJob {
+                candidate_generation: 1,
+                incomplete_header: initial_header.to_vec(),
+                target_le: vec![0; 32],
+                certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+            },
+        )
+        .expect("initial inference job");
+        let (proof_sender, proof_requests) = inference_proof_channel();
+        let shutdown = CancellationToken::new();
+        let runner_shutdown = shutdown.clone();
+        let runner_rpc = rpc.clone();
+        let node_url = node.url();
+        let runner = tokio::spawn(async move {
+            run_inference_node(
+                InferenceNodeConfig {
+                    node_addr: node_url,
+                    mining_pkh_configs: vec![MiningPkhConfig {
+                        share: 1,
+                        pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
+                    }],
+                },
+                runner_rpc,
+                proof_requests,
+                runner_shutdown,
+            )
+            .await
+        });
+        let _proof_sender = proof_sender;
+
+        assert_node_received_pkh_only_set_key(&node).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        node.publish_synth_mine_effect_with_target_limbs(800, &fitting_target_limbs(), 64);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            let job = rpc.mining_job().expect("active inference job");
+            if job.candidate_generation > 1 {
+                break job;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not publish the first candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_ne!(first.target_le, vec![0; 32]);
+
+        node.publish_synth_mine_effect_with_target_limbs(801, &fitting_target_limbs(), 64);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let second = loop {
+            let job = rpc.mining_job().expect("replacement inference job");
+            if job.candidate_generation > first.candidate_generation {
+                break job;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not replace the candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert_ne!(second.incomplete_header, first.incomplete_header);
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), runner)
+            .await
+            .expect("inference node shutdown timeout")
+            .expect("inference node task")
+            .expect("inference node result");
+        node.shutdown().await;
+    }
+
+    #[cfg(feature = "gpu")]
+    fn opened_tensor_parts(
+        tensor: nockapp_grpc_proto::pb::ai_pow::v1::OpenedTensor,
+        values: &[i8],
+    ) -> Vec<nockapp_grpc_proto::pb::ai_pow::v1::OpenedBlockPart> {
+        use nockapp_grpc_proto::pb::ai_pow::v1::{
+            opened_block_part, OpenedBlockPart, OpenedTensorChunk,
+        };
+
+        // SAFETY: i8 and u8 have identical layout. The borrowed byte view does
+        // not outlive `values` and is copied into owned protobuf chunks.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), values.len()) };
+        bytes
+            .chunks(1024 * 1024)
+            .enumerate()
+            .map(|(index, chunk)| OpenedBlockPart {
+                part: Some(opened_block_part::Part::TensorChunk(OpenedTensorChunk {
+                    tensor: tensor as i32,
+                    offset: (index * 1024 * 1024) as u64,
+                    data: chunk.to_vec(),
+                })),
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "gpu")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "runs the full native GPU winner, recursive proof, and node submission path"]
+    async fn native_inference_winner_submits_through_bridge() {
+        use nockapp_grpc_proto::pb::ai_pow::v1::inference_mining_service_client::InferenceMiningServiceClient;
+        use nockapp_grpc_proto::pb::ai_pow::v1::{
+            opened_block_part, GetMiningJobRequest, OpenedBlockMetadata, OpenedBlockPart,
+            OpenedTensor, RegisterRuntimeRequest,
+        };
+
+        let node = MockNode::spawn().await;
+        let state = Arc::new(InferenceSchedulerState::default());
+        let initial_header = canonical_dense_incomplete_header([0; 32], 0).expect("initial header");
+        let initial_job = InferenceMiningJob {
+            candidate_generation: 1,
+            incomplete_header: initial_header.to_vec(),
+            target_le: vec![0; 32],
+            certificate_version: PEARL_GATEWAY_CERTIFICATE_VERSION_V3,
+        };
+        let (proof_sender, proof_requests) = inference_proof_channel();
+        let rpc = InferenceMiningRpc::new(state, initial_job)
+            .expect("initial inference job")
+            .with_proof_sender(proof_sender);
+
+        let node_shutdown = CancellationToken::new();
+        let node_runner = tokio::spawn(run_inference_node(
+            InferenceNodeConfig {
+                node_addr: node.url(),
+                mining_pkh_configs: vec![MiningPkhConfig {
+                    share: 1,
+                    pkh: "9yPePjfWAdUnzaQKyxcRXKRa5PpUzKKEwtpECBZsUYt9Jd7egSDEWoV".to_string(),
+                }],
+            },
+            rpc.clone(),
+            proof_requests,
+            node_shutdown.clone(),
+        ));
+        assert_node_received_pkh_only_set_key(&node).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut target_limbs = vec![u64::from(u32::MAX); 7];
+        target_limbs.push(0xff);
+        node.publish_synth_mine_effect_with_target_limbs(900, &target_limbs, 64);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while rpc.candidate_generation() == 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "inference bridge did not publish the GPU candidate"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind inference bridge");
+        let bridge_addr = listener.local_addr().expect("inference bridge address");
+        drop(listener);
+        let bridge_shutdown = CancellationToken::new();
+        let bridge_server_shutdown = bridge_shutdown.clone();
+        let bridge_server = tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(rpc.clone().into_server())
+                .serve_with_shutdown(bridge_addr, async move {
+                    bridge_server_shutdown.cancelled().await;
+                }),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut client = InferenceMiningServiceClient::connect(format!("http://{bridge_addr}"))
+            .await
+            .expect("connect inference bridge");
+        let registered = client
+            .register_runtime(RegisterRuntimeRequest {
+                protocol_version: 1,
+                checkpoint_layout_digest: vec![0x33; 32],
+                cuda_device_uuid: vec![0x44; 16],
+                process_id: std::process::id(),
+            })
+            .await
+            .expect("register native runtime")
+            .into_inner();
+        let mining_job = client
+            .get_mining_job(GetMiningJobRequest {
+                runtime_id: registered.runtime_id.clone(),
+            })
+            .await
+            .expect("get node mining job")
+            .into_inner();
+
+        let params = crate::gemma4::GEMMA4_NATIVE_PARAMS;
+        let (a, b) =
+            ai_pow::synth::synth_matrices(b"nockchain-native-proof-bridge-kat-v1", &params);
+        let a = Arc::new(a);
+        let b = Arc::new(b);
+        let template =
+            PreparedCanonicalDenseTemplate::new(&params, [0; 32], Arc::clone(&a), Arc::clone(&b))
+                .expect("native template");
+        let prepared = template.prepare_search(0).expect("native mining config");
+        let raw_target: [u8; 32] = mining_job
+            .target_le
+            .as_slice()
+            .try_into()
+            .expect("fixed node target");
+        let target = ai_pow::difficulty::effective_jackpot_threshold(
+            &raw_target,
+            prepared.config().shape_work_factor().expect("work factor"),
+        )
+        .expect("adjusted target");
+        let mut session = crate::gemma4_cuda::Gemma4CudaSession::new_source(
+            0, params.m as usize, params.n as usize, &a, &b,
+        )
+        .expect("native Gemma session");
+        let total_tickets = session.total_tickets();
+        let base_header = PearlIncompleteBlockHeader::from_bytes(&mining_job.incomplete_header)
+            .expect("candidate header");
+        let mut winner = None;
+        for extranonce in 0..32 {
+            let mut header = base_header;
+            header.timestamp = header.timestamp.wrapping_add(extranonce);
+            let preparation = session
+                .prepare(&header.to_bytes(), prepared.mu())
+                .expect("prepare native transcript");
+            let result = session
+                .search(0, total_tickets, &target)
+                .expect("native target search");
+            if let Some(ordinal) = result.winner {
+                winner = Some((extranonce, ordinal, preparation));
+                break;
+            }
+        }
+        let (extranonce, ordinal, preparation) =
+            winner.expect("deterministic native fixture must find a consensus-target winner");
+        let col_tickets = u64::from(params.n / params.tile);
+        let row_start = u32::try_from(ordinal / col_tickets)
+            .expect("winner row")
+            .checked_mul(params.tile)
+            .expect("winner row offset");
+        let column_start = u32::try_from(ordinal % col_tickets)
+            .expect("winner column")
+            .checked_mul(params.tile)
+            .expect("winner column offset");
+
+        let metadata = OpenedBlockMetadata {
+            runtime_id: registered.runtime_id,
+            candidate_generation: mining_job.candidate_generation,
+            work_id: 0,
+            a_row_indices: (row_start..row_start + params.tile).collect(),
+            b_column_indices: (column_start..column_start + params.tile).collect(),
+            noise_seed_a: preparation.commitments.s_a.to_vec(),
+            noise_seed_b: preparation.commitments.s_b.to_vec(),
+            noise_rank: params.noise_rank,
+            a_rows: params.m,
+            b_columns: params.n,
+            common_dim: params.k,
+            extranonce,
+        };
+        let mut parts = vec![OpenedBlockPart {
+            part: Some(opened_block_part::Part::Metadata(metadata)),
+        }];
+        parts.extend(opened_tensor_parts(OpenedTensor::A, &a));
+        parts.extend(opened_tensor_parts(OpenedTensor::BTransposed, &b));
+        let response = client
+            .submit_opened_block(tokio_stream::iter(parts))
+            .await
+            .expect("submit native opened witness")
+            .into_inner();
+        assert!(response.accepted, "{}", response.detail);
+        assert_eq!(node.mined_pokes.lock().await.len(), 1);
+
+        bridge_shutdown.cancel();
+        node_shutdown.cancel();
+        bridge_server
+            .await
+            .expect("inference bridge server task")
+            .expect("inference bridge server");
+        node_runner
+            .await
+            .expect("inference node task")
+            .expect("inference node result");
+        node.shutdown().await;
     }
 
     #[test]
