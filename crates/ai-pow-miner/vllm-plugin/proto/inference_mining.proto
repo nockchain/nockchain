@@ -75,6 +75,7 @@ message OpenedBlockMetadata {
   uint32 a_rows = 9;
   uint32 b_columns = 10;
   uint32 common_dim = 11;
+  uint32 extranonce = 12;
 }
 
 message OpenedTensorChunk {

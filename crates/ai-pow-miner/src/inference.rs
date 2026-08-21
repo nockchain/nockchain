@@ -50,6 +50,7 @@ struct WorkKey {
 pub struct OpenedDenseWitness {
     pub candidate_generation: u64,
     pub work_id: u64,
+    pub extranonce: u32,
     pub a_row_indices: Vec<u32>,
     pub b_column_indices: Vec<u32>,
     pub noise_seed_a: [u8; DIGEST_BYTES],
@@ -58,8 +59,8 @@ pub struct OpenedDenseWitness {
     pub a_rows: u32,
     pub b_columns: u32,
     pub common_dim: u32,
-    pub a: Vec<i8>,
-    pub b_transposed: Vec<i8>,
+    pub a: Arc<Vec<i8>>,
+    pub b_transposed: Arc<Vec<i8>>,
 }
 
 pub struct InferenceProofRequest {
@@ -328,6 +329,16 @@ impl InferenceMiningRpc {
             .map_err(|_| anyhow::anyhow!("mining job lock poisoned"))? = mining_job;
         Ok(())
     }
+    pub fn candidate_generation(&self) -> u64 {
+        self.state.candidate_generation.load(Ordering::Acquire)
+    }
+
+    pub fn mining_job(&self) -> Result<MiningJob> {
+        self.mining_job
+            .lock()
+            .map(|job| job.clone())
+            .map_err(|_| anyhow::anyhow!("mining job lock poisoned"))
+    }
 
     pub fn into_server(self) -> InferenceMiningServiceServer<Self> {
         InferenceMiningServiceServer::new(self)
@@ -449,6 +460,12 @@ impl InferenceMiningService for InferenceMiningRpc {
         let metadata =
             metadata.ok_or_else(|| Status::invalid_argument("opened block metadata missing"))?;
         let witness = validate_opened_dense_witness(metadata, buffers).map_err(invalid_argument)?;
+        let current_generation = self.state.candidate_generation.load(Ordering::Acquire);
+        if witness.candidate_generation != current_generation {
+            return Err(Status::failed_precondition(format!(
+                "candidate generation changed to {current_generation} while receiving the opened witness"
+            )));
+        }
         self.state
             .opened_blocks_received
             .fetch_add(1, Ordering::Relaxed);
@@ -557,6 +574,7 @@ fn validate_opened_dense_witness_for_output(
         candidate_generation: metadata.candidate_generation,
         work_id: metadata.work_id,
         a_row_indices: metadata.a_row_indices,
+        extranonce: metadata.extranonce,
         b_column_indices: metadata.b_column_indices,
         noise_seed_a,
         noise_seed_b,
@@ -564,8 +582,8 @@ fn validate_opened_dense_witness_for_output(
         a_rows: metadata.a_rows,
         b_columns: metadata.b_columns,
         common_dim: metadata.common_dim,
-        a: bytes_into_i8(a_bytes),
-        b_transposed: bytes_into_i8(b_bytes),
+        a: Arc::new(bytes_into_i8(a_bytes)),
+        b_transposed: Arc::new(bytes_into_i8(b_bytes)),
     })
 }
 
@@ -828,6 +846,7 @@ mod tests {
             runtime_id: vec![0x55; RUNTIME_ID_BYTES],
             candidate_generation: 1,
             work_id: 9,
+            extranonce: 0,
             a_row_indices: (0..GEMMA_TILE).collect(),
             b_column_indices: (16..16 + GEMMA_TILE).collect(),
             noise_seed_a: vec![0x66; DIGEST_BYTES],

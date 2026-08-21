@@ -5,17 +5,25 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(feature = "gpu")]
+use ai_pow::pearl_compat::PearlIncompleteBlockHeader;
+#[cfg(feature = "gpu")]
 use ai_pow_miner::canonical::PreparedCanonicalDenseTemplate;
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gemma4::GEMMA4_NATIVE_PARAMS;
 #[cfg(feature = "gpu")]
 use ai_pow_miner::gemma4_cuda::Gemma4CudaSession;
 use ai_pow_miner::inference::{
-    IdleMiningBackend, IdleMiningWorker, InferenceMiningRpc, InferenceSchedulerState,
+    IdleMiningBackend, IdleMiningWorker, InferenceMiningRpc, InferenceProofSender,
+    InferenceSchedulerState,
 };
+#[cfg(feature = "gpu")]
+use ai_pow_miner::inference::{InferenceProofRequest, OpenedDenseWitness};
+use ai_pow_miner::run::{inference_proof_channel, run_inference_node, InferenceNodeConfig};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use nockapp_grpc_proto::pb::ai_pow::v1::MiningJob;
+use nockchain_mining_common::MiningPkhConfig;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 #[derive(Debug, Parser)]
@@ -30,6 +38,18 @@ struct Args {
 
     #[arg(long, default_value_t = 3)]
     certificate_version: u32,
+
+    /// Node's private gRPC URL. Supplying it enables proof-producing mining.
+    #[arg(long)]
+    node_addr: Option<String>,
+
+    /// Single-recipient v1 mining public-key hash.
+    #[arg(long, conflicts_with = "mining_pkh_adv")]
+    mining_pkh: Option<String>,
+
+    /// Multi-recipient v1 mining configurations. Each entry is `share,pkh`.
+    #[arg(long, value_parser = clap::value_parser!(MiningPkhConfig), num_args = 1..)]
+    mining_pkh_adv: Option<Vec<MiningPkhConfig>>,
 
     #[arg(long, default_value_t = 3)]
     mock_idle_batch_ms: u64,
@@ -51,8 +71,29 @@ enum BridgeIdleBackend {
 struct CudaIdleState {
     session: Gemma4CudaSession,
     template: PreparedCanonicalDenseTemplate,
+    a: Arc<Vec<i8>>,
+    b: Arc<Vec<i8>>,
+    candidate_generation: u64,
     extranonce: u32,
-    target: [u8; 32],
+    rpc: Option<InferenceMiningRpc>,
+    proof_sender: Option<InferenceProofSender>,
+}
+
+impl BridgeIdleBackend {
+    fn configure_production(
+        &mut self,
+        rpc: InferenceMiningRpc,
+        proof_sender: InferenceProofSender,
+    ) {
+        #[cfg(feature = "gpu")]
+        if let Self::Cuda(state) = self {
+            let state = state.get_mut().expect("new CUDA idle mutex");
+            state.rpc = Some(rpc);
+            state.proof_sender = Some(proof_sender);
+        }
+        #[cfg(not(feature = "gpu"))]
+        let _ = (rpc, proof_sender);
+    }
 }
 
 impl IdleMiningBackend for BridgeIdleBackend {
@@ -67,16 +108,75 @@ impl IdleMiningBackend for BridgeIdleBackend {
                 let mut state = state
                     .lock()
                     .map_err(|_| anyhow::anyhow!("CUDA idle session lock poisoned"))?;
-                let prepared = state.template.prepare_search(state.extranonce)?;
-                state.session.prepare(prepared.sigma(), prepared.mu())?;
-                let total_tickets = state.session.total_tickets();
-                let target = state.target;
-                let result = state.session.search(0, total_tickets, &target)?;
-                if result.winner.is_some() {
-                    bail!("zero-target idle batch returned a winner");
+                let prepared = state.template.prepare_search(0)?;
+                let Some(rpc) = &state.rpc else {
+                    state.session.prepare(prepared.sigma(), prepared.mu())?;
+                    let total_tickets = state.session.total_tickets();
+                    state.session.search(0, total_tickets, &[0; 32])?;
+                    return Ok(());
+                };
+                let mining_job = rpc.mining_job()?;
+                if state.candidate_generation != mining_job.candidate_generation {
+                    state.candidate_generation = mining_job.candidate_generation;
+                    state.extranonce = 0;
                 }
+                let mut header =
+                    PearlIncompleteBlockHeader::from_bytes(&mining_job.incomplete_header)?;
+                header.timestamp = header.timestamp.wrapping_add(state.extranonce);
+                let preparation = state.session.prepare(&header.to_bytes(), prepared.mu())?;
+                let raw_target: [u8; 32] = mining_job
+                    .target_le
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("node target must be 32 bytes"))?;
+                let factor = prepared.config().shape_work_factor()?;
+                let target = ai_pow::difficulty::effective_jackpot_threshold(&raw_target, factor)
+                    .map_err(|error| anyhow::anyhow!("adjust idle target: {error:?}"))?;
+                let total_tickets = state.session.total_tickets();
+                let result = state.session.search(0, total_tickets, &target)?;
+                let Some(ordinal) = result.winner else {
+                    state.extranonce = state.extranonce.wrapping_add(1);
+                    return Ok(());
+                };
+                let proof_sender = state.proof_sender.clone().ok_or_else(|| {
+                    anyhow::anyhow!("idle winner proof handoff is not configured")
+                })?;
+                let params = GEMMA4_NATIVE_PARAMS;
+                let col_tickets = u64::from(params.n / params.tile);
+                let row_start = u32::try_from(ordinal / col_tickets)?
+                    .checked_mul(params.tile)
+                    .ok_or_else(|| anyhow::anyhow!("idle winner row overflow"))?;
+                let column_start = u32::try_from(ordinal % col_tickets)?
+                    .checked_mul(params.tile)
+                    .ok_or_else(|| anyhow::anyhow!("idle winner column overflow"))?;
+                let current_extranonce = state.extranonce;
                 state.extranonce = state.extranonce.wrapping_add(1);
-                Ok(())
+                let witness = OpenedDenseWitness {
+                    candidate_generation: mining_job.candidate_generation,
+                    work_id: 0,
+                    extranonce: current_extranonce,
+                    a_row_indices: (row_start..row_start + params.tile).collect(),
+                    b_column_indices: (column_start..column_start + params.tile).collect(),
+                    noise_seed_a: preparation.commitments.s_a,
+                    noise_seed_b: preparation.commitments.s_b,
+                    noise_rank: params.noise_rank,
+                    a_rows: params.m,
+                    b_columns: params.n,
+                    common_dim: params.k,
+                    a: Arc::clone(&state.a),
+                    b_transposed: Arc::clone(&state.b),
+                };
+                let (response, response_rx) = tokio::sync::oneshot::channel();
+                proof_sender
+                    .blocking_send(InferenceProofRequest { witness, response })
+                    .map_err(|_| anyhow::anyhow!("inference proof worker is unavailable"))?;
+                match response_rx.blocking_recv()? {
+                    Ok(detail) => {
+                        tracing::info!(%detail, "idle inference-bridge winner submitted");
+                        Ok(())
+                    }
+                    Err(detail) => bail!("{detail}"),
+                }
             }
         }
     }
@@ -106,8 +206,12 @@ fn cuda_backend(device: usize) -> Result<(BridgeIdleBackend, Vec<u8>)> {
         BridgeIdleBackend::Cuda(Mutex::new(CudaIdleState {
             session,
             template,
+            a,
+            b,
+            candidate_generation: 0,
             extranonce: 0,
-            target: [0; 32],
+            rpc: None,
+            proof_sender: None,
         })),
         first.sigma().to_vec(),
     ))
@@ -130,19 +234,51 @@ fn build_backend(args: &Args) -> Result<(BridgeIdleBackend, Vec<u8>)> {
     }
 }
 
+fn node_config(args: &Args) -> Result<Option<InferenceNodeConfig>> {
+    let mining_pkh_configs = if let Some(pkh) = &args.mining_pkh {
+        vec![MiningPkhConfig {
+            share: 1,
+            pkh: pkh.clone(),
+        }]
+    } else {
+        args.mining_pkh_adv.clone().unwrap_or_default()
+    };
+    match &args.node_addr {
+        Some(node_addr) if mining_pkh_configs.is_empty() => {
+            bail!("--node-addr requires --mining-pkh or --mining-pkh-adv")
+        }
+        Some(node_addr) => Ok(Some(InferenceNodeConfig {
+            node_addr: node_addr.clone(),
+            mining_pkh_configs,
+        })),
+        None if !mining_pkh_configs.is_empty() => {
+            bail!("reward public-key hashes require --node-addr")
+        }
+        None => Ok(None),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let node_config = node_config(&args)?;
     let state = Arc::new(InferenceSchedulerState::default());
-    let (backend, incomplete_header) = build_backend(&args)?;
+    let (mut backend, incomplete_header) = build_backend(&args)?;
     let mining_job = MiningJob {
         candidate_generation: args.candidate_generation,
         incomplete_header,
-        // Zero target keeps integration runs deterministic and hit-free.
+        // A zero target keeps standalone integration runs deterministic and hit-free.
         target_le: vec![0; 32],
         certificate_version: args.certificate_version,
     };
+    let (proof_sender, proof_requests) = inference_proof_channel();
     let rpc = InferenceMiningRpc::new(Arc::clone(&state), mining_job)?;
+    let rpc = if node_config.is_some() {
+        backend.configure_production(rpc.clone(), proof_sender.clone());
+        rpc.with_proof_sender(proof_sender)
+    } else {
+        rpc
+    };
     let idle = IdleMiningWorker::spawn(Arc::clone(&state), Arc::new(backend));
 
     tracing_subscriber::fmt()
@@ -151,15 +287,40 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "ai_pow_miner=info".into()),
         )
         .init();
-    tracing::info!(listen = %args.listen, "starting AI-PoW inference bridge");
+    tracing::info!(
+        listen = %args.listen,
+        production_node = node_config.is_some(),
+        "starting AI-PoW inference bridge"
+    );
 
-    let result = Server::builder()
-        .add_service(rpc.into_server())
-        .serve_with_shutdown(args.listen, async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .context("serve inference mining gRPC");
-    idle.stop()?;
-    result
+    let shutdown = CancellationToken::new();
+    let signal_shutdown = shutdown.clone();
+    let signal = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        signal_shutdown.cancel();
+    });
+    let server_shutdown = shutdown.clone();
+    let server = Server::builder()
+        .add_service(rpc.clone().into_server())
+        .serve_with_shutdown(args.listen, async move {
+            server_shutdown.cancelled().await;
+        });
+    let result = if let Some(node_config) = node_config {
+        tokio::try_join!(
+            async { server.await.context("serve inference mining gRPC") },
+            async {
+                run_inference_node(node_config, rpc, proof_requests, shutdown.clone())
+                    .await
+                    .context("run inference mining node integration")
+            }
+        )
+        .map(|_| ())
+    } else {
+        server.await.context("serve inference mining gRPC")
+    };
+    shutdown.cancel();
+    signal.abort();
+    let idle_result = idle.stop();
+    result?;
+    idle_result
 }

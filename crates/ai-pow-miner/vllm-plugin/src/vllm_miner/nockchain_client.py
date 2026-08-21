@@ -63,7 +63,7 @@ class NockchainMiningClient:
         self._runtime_id = registered.runtime_id
         self._work_ids = itertools.count(1)
         self._work_shapes: dict[int, tuple[int, int, int, int]] = {}
-        self._candidate_generation = 0
+        self._job_generations: dict[int, tuple[MiningJob, int]] = {}
         _LOGGER.info(f"Connected to Nockchain AI-PoW service at {endpoint}")
 
     def get_mining_info(self) -> MiningJob:
@@ -72,12 +72,15 @@ class NockchainMiningClient:
         )
         if len(value.incomplete_header) != 76 or len(value.target_le) != 32:
             raise RuntimeError("Nockchain mining job has invalid fixed-width fields")
-        self._candidate_generation = value.candidate_generation
-        return MiningJob(
+        job = MiningJob(
             incomplete_header_bytes=value.incomplete_header,
             target=int.from_bytes(value.target_le, "little"),
             cert_version=CertificateVersion(value.certificate_version),
         )
+        self._job_generations[id(job)] = (job, value.candidate_generation)
+        if len(self._job_generations) > 128:
+            self._job_generations.pop(next(iter(self._job_generations)))
+        return job
 
     def notify_work_started(
         self, *, layer: int, token_count: int, common_dim: int, output_dim: int
@@ -130,6 +133,10 @@ class NockchainMiningClient:
             raise ValueError("opened block submission requires A and B tensors")
         if opened_block_info.commitment_hash is None:
             raise ValueError("opened block submission requires commitment hashes")
+        tracked_job = self._job_generations.get(id(mining_job))
+        if tracked_job is None or tracked_job[0] is not mining_job:
+            raise ValueError("opened block submission has an untracked mining job")
+        candidate_generation = tracked_job[1]
         a = opened_block_info.A.detach().cpu().contiguous()
         b_t = opened_block_info.B_t.detach().cpu().contiguous()
         if a.dtype is not torch.int8 or b_t.dtype is not torch.int8:
@@ -139,8 +146,9 @@ class NockchainMiningClient:
             yield pb.OpenedBlockPart(
                 metadata=pb.OpenedBlockMetadata(
                     runtime_id=self._runtime_id,
-                    candidate_generation=self._candidate_generation,
+                    candidate_generation=candidate_generation,
                     work_id=0,
+                    extranonce=0,
                     a_row_indices=opened_block_info.A_row_indices,
                     b_column_indices=opened_block_info.B_column_indices,
                     noise_seed_a=opened_block_info.commitment_hash.noise_seed_A,
@@ -154,11 +162,12 @@ class NockchainMiningClient:
             yield from _tensor_parts(pb.OPENED_TENSOR_A, a)
             yield from _tensor_parts(pb.OPENED_TENSOR_B_TRANSPOSED, b_t)
 
-        response = self._stub.SubmitOpenedBlock(parts(), timeout=120)
+        response = self._stub.SubmitOpenedBlock(parts(), timeout=600)
+        self._job_generations.pop(id(mining_job), None)
         if not response.accepted:
             raise RuntimeError(response.detail or "Nockchain opened block was rejected")
         _LOGGER.info(
-            f"Submitted Nockchain opened block for generation {self._candidate_generation}"
+            f"Submitted Nockchain opened block for generation {candidate_generation}"
         )
 
     def close(self) -> None:
