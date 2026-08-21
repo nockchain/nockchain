@@ -43,6 +43,23 @@ const REFERENCE_QUANTIZATION_VERSION: &str = "0.15.0.1";
 const FULL_ATTENTION_INPUT_SIZE: u64 = 16_384;
 const SLIDING_ATTENTION_INPUT_SIZE: u64 = 8_192;
 
+/// CUDA implementation selected for one exact device capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gemma4CudaBackend {
+    HopperSm90a,
+    BlackwellSm120a,
+}
+
+impl Gemma4CudaBackend {
+    pub const fn for_compute_capability(major: u32, minor: u32) -> Option<Self> {
+        match (major, minor) {
+            (9, 0) => Some(Self::HopperSm90a),
+            (12, 0) => Some(Self::BlackwellSm120a),
+            _ => None,
+        }
+    }
+}
+
 /// Mineable INT7 MLP projection in the selected Gemma 4 checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gemma4MlpProjection {
@@ -801,6 +818,24 @@ mod tests {
     }
 
     #[test]
+    fn backend_dispatch_accepts_only_exact_supported_capabilities() {
+        assert_eq!(
+            Gemma4CudaBackend::for_compute_capability(9, 0),
+            Some(Gemma4CudaBackend::HopperSm90a)
+        );
+        assert_eq!(
+            Gemma4CudaBackend::for_compute_capability(12, 0),
+            Some(Gemma4CudaBackend::BlackwellSm120a)
+        );
+        for capability in [(8, 9), (9, 1), (10, 0), (12, 1)] {
+            assert_eq!(
+                Gemma4CudaBackend::for_compute_capability(capability.0, capability.1),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn forty_two_cadence_transcript_matches_known_answer() {
         let x_steps: Vec<i32> = (0..GEMMA4_TRANSCRIPT_CADENCES)
             .map(|step| ((step as u32).wrapping_mul(0x9e37_79b9) ^ 0xa5a5_5a5a) as i32)
@@ -814,6 +849,83 @@ mod tests {
                 0x766a_d381, 0xc76a_6601, 0x916d_99a1, 0x2263_5b21,
             ]
         );
+    }
+    #[test]
+    fn pearl_denoising_and_bf16_output_kat() {
+        const A: [[i32; 4]; 2] = [[1, -2, 3, 4], [-3, 2, 1, -1]];
+        const B: [[i32; 4]; 3] = [[2, 1, -1, 3], [-2, 4, 1, 0], [3, -1, 2, -2]];
+        const E_AL: [[i32; 2]; 2] = [[2, -1], [-2, 3]];
+        const E_AR: [[i32; 2]; 4] = [[1, 0], [0, 1], [-1, 0], [0, -1]];
+        const E_BR: [[i32; 2]; 3] = [[1, 2], [-1, 1], [2, -2]];
+        const E_BL: [[i32; 2]; 4] = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+        const A_SCALES: [f32; 2] = [0.5, 1.25];
+        const B_SCALES: [f32; 3] = [0.25, 2.0, -0.75];
+
+        let mut a_prime = A;
+        for row in 0..2 {
+            for k in 0..4 {
+                for rank in 0..2 {
+                    a_prime[row][k] += E_AL[row][rank] * E_AR[k][rank];
+                }
+            }
+        }
+        let mut b_prime = B;
+        for row in 0..3 {
+            for k in 0..4 {
+                for rank in 0..2 {
+                    b_prime[row][k] += E_BR[row][rank] * E_BL[k][rank];
+                }
+            }
+        }
+        assert_eq!(a_prime, [[3, -3, 1, 5], [-5, 5, 3, -4]]);
+        assert_eq!(b_prime, [[4, 2, -3, 2], [-1, 3, 0, 1], [1, 1, 4, -4]]);
+
+        let mut noised = [[0i32; 3]; 2];
+        let mut ax_ebl = [[0i32; 2]; 2];
+        let mut ear_b_prime = [[0i32; 2]; 3];
+        for row in 0..2 {
+            for col in 0..3 {
+                for k in 0..4 {
+                    noised[row][col] += a_prime[row][k] * b_prime[col][k];
+                }
+            }
+            for rank in 0..2 {
+                for k in 0..4 {
+                    ax_ebl[row][rank] += A[row][k] * E_BL[k][rank];
+                }
+            }
+        }
+        for col in 0..3 {
+            for rank in 0..2 {
+                for k in 0..4 {
+                    ear_b_prime[col][rank] += b_prime[col][k] * E_AR[k][rank];
+                }
+            }
+        }
+        assert_eq!(noised, [[13, -7, -16], [-27, 16, 28]]);
+        assert_eq!(ax_ebl, [[-6, -2], [3, -4]]);
+        assert_eq!(ear_b_prime, [[7, 0], [-1, 2], [-3, 5]]);
+
+        let mut clean = noised;
+        let mut output = [[0u16; 3]; 2];
+        for row in 0..2 {
+            for col in 0..3 {
+                for rank in 0..2 {
+                    clean[row][col] -= E_AL[row][rank] * ear_b_prime[col][rank]
+                        + ax_ebl[row][rank] * E_BR[col][rank];
+                }
+                output[row][col] =
+                    f32_to_bf16_bits(clean[row][col] as f32 * A_SCALES[row] * B_SCALES[col]);
+            }
+        }
+        assert_eq!(clean, [[9, -7, 3], [-8, 15, -7]]);
+        assert_eq!(output, [[0x3f90, 0xc0e0, 0xbf90], [0xc020, 0x4216, 0x40d2]]);
+    }
+
+    fn f32_to_bf16_bits(value: f32) -> u16 {
+        let bits = value.to_bits();
+        let rounded = bits.wrapping_add(0x7fff + ((bits >> 16) & 1));
+        (rounded >> 16) as u16
     }
 
     #[test]
