@@ -39,7 +39,8 @@ class PearlScheme(CompressedTensorsScheme):
         strategy: Quantization strategy (TENSOR or CHANNEL)
         is_static_input_scheme: Whether input quantization is static
         input_symmetric: Whether input quantization is symmetric
-        mining_enabled: If True, uses int7 + noisy GEMM; if False, uses int8 + vanilla GEMM
+        mining_enabled: If True, emits consensus work for this layer
+        input_num_bits: Dynamic activation quantization width (7 or 8)
     """
 
     def __init__(
@@ -48,11 +49,17 @@ class PearlScheme(CompressedTensorsScheme):
         is_static_input_scheme: bool,
         input_symmetric: bool,
         mining_enabled: bool,
+        input_num_bits: int,
     ):
         self.strategy = strategy
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
         self.mining_enabled = mining_enabled
+        if input_num_bits not in (7, 8):
+            raise ValueError(
+                f"PearlScheme input_num_bits must be 7 or 8, got {input_num_bits}"
+            )
+        self.input_num_bits = input_num_bits
 
     @override
     @classmethod
@@ -146,6 +153,7 @@ class PearlScheme(CompressedTensorsScheme):
                 "azp_adj",
             ],
             mining_enabled=self.mining_enabled,
+            input_num_bits=self.input_num_bits,
         )
 
     @override

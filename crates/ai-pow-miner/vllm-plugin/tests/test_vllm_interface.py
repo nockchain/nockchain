@@ -321,7 +321,9 @@ class TestNoisyGemmSelectionThresholds:
 class TestPearlConfig:
     """Tests for PearlConfig layer detection and scheme selection."""
 
-    def _make_quant_args(self, num_bits: int, strategy: str = "token", dynamic: bool = True):
+    def _make_quant_args(
+        self, num_bits: int, strategy: str = "token", dynamic: bool = True
+    ):
         """Helper to create QuantizationArgs for testing."""
         return QuantizationArgs(
             num_bits=num_bits,
@@ -359,9 +361,7 @@ class TestPearlConfig:
 
         assert PearlConfig._is_non_mining_layer(weight_quant, input_quant) is False
 
-    def test_get_scheme_returns_mining_scheme_for_7bit(self):
-        """Test that _get_scheme_from_parts returns PearlScheme with mining_enabled=True for 7-bit."""
-        # Create a minimal PearlConfig with all required arguments
+    def test_get_scheme_mines_only_selected_gate_up_layer(self):
         cfg = PearlConfig(
             target_scheme_map={},
             ignore=[],
@@ -369,14 +369,25 @@ class TestPearlConfig:
             sparsity_scheme_map={},
             sparsity_ignore_list=[],
         )
-
         weight_quant = self._make_quant_args(7, strategy="tensor", dynamic=False)
         input_quant = self._make_quant_args(7, strategy="token", dynamic=True)
 
-        scheme = cfg._get_scheme_from_parts(weight_quant, input_quant, layer_name="test_layer")
-
-        assert isinstance(scheme, PearlScheme)
-        assert scheme.mining_enabled is True
+        selected = cfg._get_scheme_from_parts(
+            weight_quant,
+            input_quant,
+            layer_name="model.language_model.layers.0.mlp.gate_up_proj",
+        )
+        other = cfg._get_scheme_from_parts(
+            weight_quant,
+            input_quant,
+            layer_name="model.language_model.layers.1.mlp.gate_up_proj",
+        )
+        assert isinstance(selected, PearlScheme)
+        assert selected.mining_enabled is True
+        assert selected.input_num_bits == 7
+        assert isinstance(other, PearlScheme)
+        assert other.mining_enabled is False
+        assert other.input_num_bits == 7
 
     def test_get_scheme_returns_non_mining_scheme_for_8bit(self):
         """Test that _get_scheme_from_parts returns PearlScheme with mining_enabled=False for 8-bit."""
@@ -392,10 +403,13 @@ class TestPearlConfig:
         weight_quant = self._make_quant_args(8, strategy="tensor", dynamic=False)
         input_quant = self._make_quant_args(8, strategy="token", dynamic=True)
 
-        scheme = cfg._get_scheme_from_parts(weight_quant, input_quant, layer_name="test_layer")
+        scheme = cfg._get_scheme_from_parts(
+            weight_quant, input_quant, layer_name="test_layer"
+        )
 
         assert isinstance(scheme, PearlScheme)
         assert scheme.mining_enabled is False
+        assert scheme.input_num_bits == 8
 
     def test_channel_strategy_also_works(self):
         """Test that channel strategy (not just tensor) works for detection."""
@@ -429,7 +443,9 @@ def mock_vllm_distributed():
 
     with (
         patch("vllm.distributed.parallel_state._TP", mock_tp_group),
-        patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group),
+        patch(
+            "vllm.distributed.parallel_state.get_tp_group", return_value=mock_tp_group
+        ),
         patch(
             "vllm.distributed.parallel_state.get_tensor_model_parallel_rank",
             return_value=0,
@@ -446,13 +462,16 @@ class TestPearlScheme:
     """Tests for PearlScheme."""
 
     @pytest.mark.parametrize("mining_enabled", [True, False])
-    def test_scheme_creates_kernel_with_correct_mode(self, mock_vllm_distributed, mining_enabled):
+    def test_scheme_creates_kernel_with_correct_mode(
+        self, mock_vllm_distributed, mining_enabled
+    ):
         """Test that PearlScheme creates kernel with correct mining_enabled setting."""
         scheme = PearlScheme(
             strategy="tensor",
             is_static_input_scheme=False,
             input_symmetric=True,
             mining_enabled=mining_enabled,
+            input_num_bits=7 if mining_enabled else 8,
         )
 
         layer = torch.nn.Module()
@@ -470,3 +489,47 @@ class TestPearlScheme:
 
         assert hasattr(scheme, "kernel")
         assert scheme.kernel.mining_enabled is mining_enabled
+        assert scheme.kernel.input_num_bits == (7 if mining_enabled else 8)
+
+
+def test_native_tp_gate_up_reordering_is_canonical():
+    rank_major = torch.tensor([[10], [20], [11], [21]], dtype=torch.int8)
+    canonical = PearlKernel._canonical_gate_up_shards(rank_major, 2)
+    assert canonical.tolist() == [[10], [11], [20], [21]]
+    full_output = torch.tensor([[10, 11, 20, 21]], dtype=torch.bfloat16)
+    local = PearlKernel._local_gate_up_output(full_output, rank=1, world_size=2)
+    assert local.tolist() == [[11, 21]]
+
+
+def test_native_tp_weight_uses_rank_order_and_caches_full_matrix():
+    kernel = object.__new__(PearlKernel)
+    kernel._native_full_weight = None
+    kernel._native_full_scale = None
+    kernel._native_full_weight_key = None
+    local_weight = torch.empty((21504, 5376), dtype=torch.int8, device="meta")
+    local_scale = torch.empty((21504, 1), dtype=torch.float32, device="meta")
+    full_weight = torch.empty((43008, 5376), dtype=torch.int8, device="meta")
+    full_scale = torch.empty((43008, 1), dtype=torch.float32, device="meta")
+    with (
+        patch(
+            "vllm_miner.vllm_kernels.get_tensor_model_parallel_world_size",
+            return_value=2,
+        ),
+        patch(
+            "vllm_miner.vllm_kernels.get_tensor_model_parallel_rank",
+            return_value=1,
+        ),
+        patch(
+            "vllm_miner.vllm_kernels.tensor_model_parallel_all_gather",
+            side_effect=[full_weight, full_scale],
+        ) as gather,
+    ):
+        weight, scale, rank, local_n = kernel._full_tp_weight(local_weight, local_scale)
+        cached = kernel._full_tp_weight(local_weight, local_scale)
+    assert weight.shape == (43008, 5376)
+    assert scale.shape == (43008, 1)
+    assert cached[0] is weight
+    assert cached[1] is scale
+    assert rank == 1
+    assert local_n == 21504
+    assert gather.call_count == 2

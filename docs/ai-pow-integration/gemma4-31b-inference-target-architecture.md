@@ -251,34 +251,49 @@ rate while every common/output MAC remains useful inference. The separate
 compilation unit leaves the existing peak source and ABI unchanged. Inference
 output materialization remains outside this mining-only measurement.
 
-## H100 and RTX PRO 6000 mining evidence
+## Multi-device full-flow evidence
 
-The exact-SASS image contains `sm_90a` and `sm_120a` code objects. Validation
-uses driver 580.159.04 on one 310 W H100 PCIe with 114 SMs and one 600 W RTX
-PRO 6000 Blackwell Server Edition with 188 SMs.
+The runtime contains exact `sm_90a` and `sm_120a` code objects. The native
+in-process API consumes the real quantized vLLM activation and weight pointers
+on the active PyTorch CUDA stream. Its output is bit-equal to direct INT32 GEMM,
+FP32 scale multiplication, and BF16 round-to-nearest-even on every tested
+device.
 
-After 100 warmup launches, 20 measured full-grid launches produce:
+After 100 warmup launches, 20 measured full-grid mining launches produce:
 
-| Device | Median launch | Tickets/s | Complete-ticket TMAC/s |
-|---|---:|---:|---:|
-| H100 PCIe | 4.836 ms | 142,294,215 | 195.833 |
-| RTX PRO 6000 Blackwell | 2.807 ms | 245,136,655 | 337.371 |
+| Device | Median launch | Complete-ticket TMAC/s |
+|---|---:|---:|
+| H100 SXM, 132 SMs | 3.593 ms | 263.558 |
+| RTX PRO 6000 Blackwell, 188 SMs | 2.654 ms | 356.902 |
+| RTX 5090 device 0, 170 SMs | 2.815 ms | 336.380 |
+| RTX 5090 device 1, 170 SMs | 2.838 ms | 333.713 |
 
-Both code objects pass the 1,000-ticket scalar differential and the complete
-source-session transcript differential. `memcheck`, `racecheck`, `initcheck`,
-and `synccheck` report zero findings on both devices.
+The complete candidate preparation, mining GEMM, exact denoising, scaling, and
+device-output path produces:
 
-The H100 model-serving path returns deterministic Gemma 4 output while the
-idle miner uses the same `sm_90a` consensus kernel. Its idle mining rate returns
-to 99.28% of the pre-request rate after eight inference requests. The common
-warp-MMA kernel is the H100 correctness baseline; an H100 WGMMA specialization
-is required before its throughput is final.
+| Device | Tokens | Wall median | Mining GEMM | Clean output |
+|---|---:|---:|---:|---:|
+| H100 SXM | 256 | 8.986 ms | 0.339 ms | 4.579 ms |
+| H100 SXM | 4,096 | 81.959 ms | 4.337 ms | 73.117 ms |
+| RTX PRO 6000 Blackwell | 256 | 5.875 ms | 0.250 ms | 2.809 ms |
+| RTX PRO 6000 Blackwell | 4,096 | 50.400 ms | 3.153 ms | 44.287 ms |
+| RTX 5090 | 256 | 5.261 ms | 0.223 ms | 2.464 ms |
+| RTX 5090 | 4,096 | 44.763 ms | 2.920 ms | 39.005 ms |
 
-Pearl GEMM uses Hopper WGMMA and TMA kernels for model-serving matrix
-multiplication. Compiling those kernels as `sm_120a` is not valid: the first
-noising launch fails on RTX 5090. Blackwell model serving therefore requires a
-native `sm_120a` inference GEMM path. The consensus mining code object itself
-works on RTX 5090 and RTX PRO 6000 Blackwell.
+H100 and RTX PRO 6000 serve the model on one GPU. Two RTX 5090 devices gather
+the selected gate/up weight shards in rank order, restore canonical
+`[gate, up]` row order, derive one full-matrix commitment, execute the same
+global work on both ranks, and return each rank's local gate/up output shard.
+Only rank zero reports lifecycle work and submits a winner.
+
+Each device class passes the 1,000-ticket scalar differential, the complete
+source-session transcript differential, and exact clean-output comparison.
+`memcheck`, `racecheck`, `initcheck`, and `synccheck` report zero findings for
+the device-pointer rebind and output path on all three classes.
+
+At temperature zero, H100, RTX PRO 6000, and dual RTX 5090 return identical
+responses across repeated exact-string, arithmetic, and factual OpenAI chat
+requests.
 
 ## Failure behavior
 

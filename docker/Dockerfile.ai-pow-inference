@@ -60,10 +60,16 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/opt/nockchain/target \
     cargo build --locked -p ai-pow-miner --release --features node,gpu \
       --bin ai-pow-inference-bridge \
-    && cp target/release/ai-pow-inference-bridge /usr/local/bin/
+    && cp target/release/ai-pow-inference-bridge /usr/local/bin/ \
+    && nvcc -std=c++17 -O3 -shared -Xcompiler -fPIC \
+      -gencode arch=compute_90a,code=sm_90a \
+      -gencode arch=compute_120a,code=sm_120a \
+      crates/ai-pow-miner-cuda/csrc/ai_pow_v3_gemma4.cu \
+      -o /usr/local/lib/libai_pow_gemma4.so
 
 FROM python-builder AS development
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
+COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
 COPY docker/ai-pow-inference-container-entrypoint \
@@ -78,10 +84,11 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
+    NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
     VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
-    VLLM_GPU_MEMORY_UTILIZATION=0.80 \
+    VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_DISABLE_REQUIRE=1
@@ -106,6 +113,7 @@ RUN uv pip install --system --find-links /wheelhouse /wheelhouse/vllm_miner-*.wh
     && rm -rf /wheelhouse /root/.cache/uv
 
 COPY --from=rust-builder /usr/local/bin/ai-pow-inference-bridge /usr/local/bin/
+COPY --from=rust-builder /usr/local/lib/libai_pow_gemma4.so /usr/local/lib/
 COPY docker/ai-pow-inference-run /usr/local/bin/ai-pow-inference-run
 COPY docker/ai-pow-inference-seed-model /usr/local/bin/ai-pow-inference-seed-model
 COPY docker/ai-pow-inference-container-entrypoint \
@@ -118,10 +126,11 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
+    NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
     VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
-    VLLM_GPU_MEMORY_UTILIZATION=0.80 \
+    VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     NVIDIA_DISABLE_REQUIRE=1

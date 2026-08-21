@@ -115,6 +115,11 @@ runpodctl pod create \
   --docker-args "sleep infinity"
 ```
 
+RTX PRO 6000 Blackwell also uses one GPU. RTX 5090 uses two GPUs. Set
+`VLLM_TENSOR_PARALLEL_SIZE=1` for H100 and RTX PRO 6000. Set
+`VLLM_TENSOR_PARALLEL_SIZE=2` and `VLLM_GPU_MEMORY_UTILIZATION=0.62` for RTX
+5090.
+
 The complete image is large. For GraphQL deployments, set `minDownload` to at
 least 500 Mbit/s. A low-bandwidth host can spend most of its rental time pulling
 the image.

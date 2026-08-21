@@ -75,11 +75,11 @@ bridge in disposable CUDA 13 stages. The runtime contains vLLM 0.20.2, the Pearl
 and Nockchain Python wheels, the release bridge, and the launch tools. It does
 not contain the Rust or CUDA build toolchains.
 
-The bridge contains exact `sm_90a` code for H100 and exact `sm_120a` code for
-RTX PRO 6000 Blackwell and RTX 5090. Full Gemma model serving works on H100.
-Pearl's model-serving GEMM is Hopper-specific; Blackwell model serving requires
-a native `sm_120a` replacement. The consensus mining kernel works on all three
-device classes.
+The bridge and in-process inference library contain exact `sm_90a` code for
+H100 and exact `sm_120a` code for RTX PRO 6000 Blackwell and RTX 5090. All
+three device classes execute the same candidate-bound noising, mining GEMM,
+exact clean-output reconstruction, FP32 scaling, and BF16 rounding contract.
+H100 and RTX PRO 6000 use one GPU. RTX 5090 uses two tensor-parallel GPUs.
 
 ```sh
 docker buildx build \
@@ -101,7 +101,7 @@ The `AI-PoW inference image` GitHub workflow publishes commit and branch tags to
 GitHub Actions caches for the Python, Rust, and CUDA dependency layers.
 
 Runpod needs at least 80 GB of container disk for the unpacked runtime. Use one
-80 GB H100 for the current full model-serving path:
+80 GB H100 or RTX PRO 6000, or two 32 GB RTX 5090 devices:
 
 ```sh
 runpodctl pod create \
@@ -113,6 +113,14 @@ runpodctl pod create \
   --ports 22/tcp \
   --docker-args "sleep infinity"
 ```
+
+Set `VLLM_TENSOR_PARALLEL_SIZE=1` for H100 and RTX PRO 6000. Use
+`VLLM_TENSOR_PARALLEL_SIZE=2` and `VLLM_GPU_MEMORY_UTILIZATION=0.62` for two
+RTX 5090 devices.
+
+Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
+`scripts/compare-gemma4-openai.py` sends the same greedy request to each local
+tunnel and rejects unstable, cross-device-different, or unexpected output.
 
 ## Validation
 
