@@ -353,12 +353,11 @@ recursive certificate, and requires a node-acknowledged canonical poke.
 | RTX PRO 6000 Blackwell | 13.0, `sm_120a` | 31.20 s |
 | Dual RTX 5090 host, rank-zero full-matrix path | 12.8, `sm_120a` | 20.65 s |
 
-The same source builds one CUDA 13 test binary with exact `sm_90a` and
-`sm_120a` code objects. CUDA 12.8 recompilation confirms the RTX 5090 path on
-driver 570.195.03. The CUDA 13 runtime requires a native CUDA 13 GeForce driver;
-the CUDA forward-compatibility package does not support GeForce and returns
-status 804 on driver 570. Use driver 580.126.09 or newer for the published CUDA
-13 image on RTX 5090.
+The production image builds the same source with CUDA 12.9 and exact `sm_90a`
+and `sm_120a` code objects. This stays within CUDA 12 minor-version
+compatibility on driver 570 hosts. A CUDA 13 binary returns status 804 on
+GeForce driver 570 because the CUDA forward-compatibility package does not
+support GeForce devices.
 
 `compute-sanitizer --tool memcheck` reports zero errors for the complete source
 transcript differential on H100 and RTX PRO 6000. The H100 full-grid
