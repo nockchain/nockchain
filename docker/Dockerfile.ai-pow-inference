@@ -91,7 +91,7 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-gemma4-bench --help >/dev/null \
     && ai-pow-inference-health --help >/dev/null \
     && ai-pow-inference-bench --help >/dev/null \
-    && python -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
+    && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 
 # vLLM selects the fastest compatible FP8 kernels. Set VLLM_DISABLED_KERNELS
 # only for a measured device-specific workaround.
@@ -145,7 +145,7 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-gemma4-bench --help >/dev/null \
     && ai-pow-inference-health --help >/dev/null \
     && ai-pow-inference-bench --help >/dev/null \
-    && python -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
+    && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 # vLLM selects the fastest compatible FP8 kernels. Set VLLM_DISABLED_KERNELS
 # only for a measured device-specific workaround.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \

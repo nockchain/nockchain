@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
-_DEFAULT_MODEL = "/workspace/models/Gemma-4-31B-it-pearl"
+_DEFAULT_MODEL = "gemma-4-31b-it-pearl"
 
 
 def parse_endpoint(value: str) -> tuple[str, str]:
@@ -19,11 +20,14 @@ def parse_endpoint(value: str) -> tuple[str, str]:
     return label, url.rstrip("/")
 
 
-def request(base_url: str, payload: bytes, timeout: float) -> str:
+def request(base_url: str, payload: bytes, timeout: float, api_key: str) -> str:
+    headers = {"content-type": "application/json"}
+    if api_key:
+        headers["authorization"] = f"Bearer {api_key}"
     http_request = urllib.request.Request(
         f"{base_url}/v1/chat/completions",
         data=payload,
-        headers={"content-type": "application/json"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -45,6 +49,9 @@ def main() -> int:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--expected")
     parser.add_argument("--model", default=_DEFAULT_MODEL)
+    parser.add_argument(
+        "--api-key", default=os.getenv("VLLM_API_KEY", os.getenv("OPENAI_API_KEY", ""))
+    )
     parser.add_argument("--repeat", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=float, default=300)
@@ -69,7 +76,8 @@ def main() -> int:
         if label in outputs:
             parser.error(f"duplicate endpoint label: {label}")
         outputs[label] = [
-            request(endpoint, payload, args.timeout) for _ in range(args.repeat)
+            request(endpoint, payload, args.timeout, args.api_key)
+            for _ in range(args.repeat)
         ]
 
     stable = all(len(set(values)) == 1 for values in outputs.values())

@@ -100,6 +100,11 @@ scripts/publish-ai-pow-inference-image.sh \
 
 ## Start the Runpod pod
 
+Use [`gemma4-production-deployment.md`](gemma4-production-deployment.md) for
+production application configuration, API authentication, health checks,
+monitoring, graceful shutdown, and capacity benchmarks. This document covers
+image development and Runpod validation only.
+
 Keep model weights on the Runpod volume at `/workspace/models`. The volume survives pod replacement and prevents repeated model downloads.
 
 Create a pod with the published development image:
@@ -148,11 +153,11 @@ MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
   ai-pow-inference-seed-model
 MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
 NOCKCHAIN_NODE_ADDR=http://<node-private-grpc-host>:5555 \
-NOCKCHAIN_MINING_PKH=<v1-mining-pkh> \
+MINING_PKH=<v1-mining-pkh> \
   ai-pow-inference-run
 ```
 
-`NOCKCHAIN_NODE_ADDR` and `NOCKCHAIN_MINING_PKH` enable production candidate
+`NOCKCHAIN_NODE_ADDR` and `MINING_PKH` enable production candidate
 subscription, recursive proof construction, and node submission. Omit both
 only for a zero-target inference diagnostic. The OpenAI-compatible server
 listens on port 8000; keep it on the pod and use an SSH tunnel for remote

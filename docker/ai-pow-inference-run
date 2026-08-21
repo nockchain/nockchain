@@ -60,13 +60,15 @@ bridge_args=(
   --cuda-device "${AI_POW_CUDA_DEVICE}"
 )
 if [[ -n "${NOCKCHAIN_NODE_ADDR:-}" ]]; then
-  : "${NOCKCHAIN_MINING_PKH:?NOCKCHAIN_MINING_PKH is required with NOCKCHAIN_NODE_ADDR}"
-  bridge_args+=(--node-addr "${NOCKCHAIN_NODE_ADDR}" --mining-pkh "${NOCKCHAIN_MINING_PKH}")
-elif [[ -n "${NOCKCHAIN_MINING_PKH:-}" ]]; then
-  echo "NOCKCHAIN_MINING_PKH requires NOCKCHAIN_NODE_ADDR" >&2
+  : "${MINING_PKH:?MINING_PKH is required with NOCKCHAIN_NODE_ADDR}"
+  bridge_args+=(--node-addr "${NOCKCHAIN_NODE_ADDR}" --mining-pkh "${MINING_PKH}")
+  printf 'AI-PoW production mining: node=%s mining_pkh=%s\n' \
+    "${NOCKCHAIN_NODE_ADDR}" "${MINING_PKH}"
+elif [[ -n "${MINING_PKH:-}" ]]; then
+  echo "MINING_PKH requires NOCKCHAIN_NODE_ADDR" >&2
   exit 1
 elif [[ "${AI_POW_REQUIRE_MINING}" == "1" ]]; then
-  echo "AI_POW_REQUIRE_MINING=1 requires NOCKCHAIN_NODE_ADDR and NOCKCHAIN_MINING_PKH" >&2
+  echo "AI_POW_REQUIRE_MINING=1 requires NOCKCHAIN_NODE_ADDR and MINING_PKH" >&2
   exit 1
 fi
 
@@ -106,9 +108,6 @@ vllm_args=(
 if [[ "${VLLM_ENFORCE_EAGER}" == "1" ]]; then
   vllm_args+=(--enforce-eager)
 fi
-if [[ -n "${VLLM_API_KEY:-}" ]]; then
-  vllm_args+=(--api-key "${VLLM_API_KEY}")
-fi
 if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
   vllm_args+=(--max-num-seqs "${VLLM_MAX_NUM_SEQS}")
 fi
@@ -116,7 +115,20 @@ if [[ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]]; then
   vllm_args+=(--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}")
 fi
 
-setsid vllm "${vllm_args[@]}" "$@" &
+vllm_environment=(
+  env
+  -u VLLM_HOST
+  -u VLLM_SERVED_MODEL_NAME
+  -u VLLM_TENSOR_PARALLEL_SIZE
+  -u VLLM_MAX_MODEL_LEN
+  -u VLLM_GPU_MEMORY_UTILIZATION
+  -u VLLM_ENFORCE_EAGER
+  -u VLLM_ALLOW_UNAUTHENTICATED
+  -u VLLM_MAX_NUM_SEQS
+  -u VLLM_MAX_NUM_BATCHED_TOKENS
+)
+
+setsid "${vllm_environment[@]}" vllm "${vllm_args[@]}" "$@" &
 vllm_pid=$!
 
 set +e

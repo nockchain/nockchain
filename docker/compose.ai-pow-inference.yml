@@ -1,0 +1,27 @@
+name: nockchain-gemma
+
+services:
+  seed-model:
+    profiles: ["seed"]
+    image: ${AI_POW_IMAGE:?Set AI_POW_IMAGE to an immutable production image}
+    command: ["ai-pow-inference-seed-model"]
+    environment:
+      MODEL_PATH: /workspace/models/Gemma-4-31B-it-pearl
+    volumes:
+      - gemma-models:/workspace/models
+
+  inference:
+    image: ${AI_POW_IMAGE:?Set AI_POW_IMAGE to an immutable production image}
+    command: ["ai-pow-inference-run"]
+    env_file:
+      - ${AI_POW_ENV_FILE:-./ai-pow-inference.env}
+    gpus: all
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - gemma-models:/workspace/models:ro
+    restart: unless-stopped
+    stop_grace_period: 3m
+
+volumes:
+  gemma-models:

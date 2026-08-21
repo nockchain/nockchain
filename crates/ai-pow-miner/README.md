@@ -71,15 +71,19 @@ The image uses up to eight visible CUDA devices, canonical mode, and batches of 
 ## Reusable inference image
 
 `docker/Dockerfile.ai-pow-inference` builds the pinned Pearl workspace and Rust
-bridge in disposable CUDA 13 stages. The runtime contains vLLM 0.20.2, the Pearl
-and Nockchain Python wheels, the release bridge, and the launch tools. It does
-not contain the Rust or CUDA build toolchains.
+bridge in disposable CUDA 13 stages. The runtime contains stable vLLM 0.27.1,
+the Pearl and Nockchain Python wheels, the release bridge, health and benchmark
+tools, and the supervised launcher. It does not contain build toolchains.
 
 The bridge and in-process inference library contain exact `sm_90a` code for
 H100 and exact `sm_120a` code for RTX PRO 6000 Blackwell and RTX 5090. All
 three device classes execute the same candidate-bound noising, mining GEMM,
 exact clean-output reconstruction, FP32 scaling, and BF16 rounding contract.
 H100 and RTX PRO 6000 use one GPU. RTX 5090 uses two tensor-parallel GPUs.
+
+The complete one-command deployment, application API examples, health probes,
+security requirements, configuration reference, and benchmark procedure are in
+[`gemma4-production-deployment.md`](../../docs/ai-pow-integration/gemma4-production-deployment.md).
 
 ```sh
 docker buildx build \
@@ -102,7 +106,8 @@ public-key hash:
 ```sh
 MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
 NOCKCHAIN_NODE_ADDR=http://node.example:5555 \
-NOCKCHAIN_MINING_PKH=<v1-mining-pkh> \
+MINING_PKH=<v1-mining-pkh> \
+AI_POW_REQUIRE_MINING=1 \
   ai-pow-inference-run
 ```
 
