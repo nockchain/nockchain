@@ -115,44 +115,96 @@ resident. Each candidate-bound transcript rebuilds `kappa`, commitments, noise,
 noised matrices, and ticket states. A header change never reuses attempt-bound
 state.
 
-## Inference output
+## Noising and clean-output contract
 
-Mining accumulation uses noised matrices. Inference needs the clean fused output.
-The output-capable path is a separate kernel symbol:
+Let `A` contain token rows and let `B` contain output-channel rows. Pearl noise
+uses rank-128 factors:
 
-1. store noised accumulators for the logical token rows;
-2. reconstruct the clean `A × B` result with the Pearl low-rank factors;
-3. apply concatenated per-token and per-channel scales;
-4. split gate and up outputs at column 21,504.
+```text
+A' = A + E_AL × E_ARᵀ
+B' = B + E_BR × E_BLᵀ
+```
 
-The normal no-output mining kernel has no output pointer, inference branch,
-additional allocation, or additional synchronization. Output work may run on a
-separate target device if it reduces mining throughput on the primary device.
+The mining accumulator is `D = A' × B'ᵀ`. The same execution derives two
+low-rank intermediates:
+
+```text
+X = A  × E_BL
+Y = B' × E_AR
+```
+
+The clean integer output is:
+
+```text
+A × Bᵀ = D - E_AL × Yᵀ - X × E_BRᵀ
+```
+
+All three products use signed INT8 inputs and INT32 accumulation. The
+subtractions are exact INT32 operations. Each clean element is multiplied by
+its per-token and per-channel FP32 scales and converted to BF16 with
+round-to-nearest-even. This order is the cross-device output contract.
+
+The output-capable kernel writes only logical token rows. It splits gate and up
+at output column 21,504. The no-output mining specialization has no output
+pointer, denoising work, scale loads, or output stores.
+
+## Architecture backends
+
+The runtime selects an exact backend from the CUDA compute capability:
+
+| Device class | Code object | Main inference GEMM |
+|---|---|---|
+| NVIDIA H100 | `sm_90a` | WGMMA and TMA |
+| RTX PRO 6000 Blackwell | `sm_120a` | Blackwell Tensor Core MMA |
+| RTX 5090 | `sm_120a` | Blackwell Tensor Core MMA |
+
+Both backends implement the same noising, transcript, clean-output, scaling,
+and winner contract. Unsupported capabilities fail before model serving. The
+runtime does not JIT a PTX fallback.
+
+Only the fused gate/up projection is consensus mining work. Other INT7 linear
+layers use an inference-only INT8 GEMM and do not create work notifications.
 
 ## Execution planes
 
 The inference process owns tokenization, transformer state, KV cache, scales,
-activation quantization, activation functions, and model scheduling.
+activation quantization, activation functions, and model scheduling. It loads
+the native kernel in-process and passes contiguous tensor pointers on the
+current PyTorch CUDA stream. Device matrices never enter protobuf messages.
 
-The miner owns the Nockchain candidate, target, fused INT7 operands, Pearl
-transcript, noise, ticket search, scalar winner validation, proof, and submission.
-
-Inference and mining communicate through a versioned local control channel.
-Large same-host tensors use bounded CUDA IPC handles where peer access is
-available. A pending activation generation never interrupts an active search.
-Queue saturation delays inference rather than mining.
+The miner service owns the Nockchain candidate, target, scheduler generation,
+scalar winner validation, proof, and submission. The local control channel
+carries bounded candidate and lifecycle metadata.
 
 An immutable operand generation contains:
 
 - checkpoint layout digest;
 - decoder layer;
-- logical token count;
+- logical and padded token counts;
 - fused gate/up weight identity;
-- activation and scale handles;
+- activation and scale pointers;
+- tensor-parallel rank and global column range;
 - monotonically increasing generation number.
 
 Candidate replacement and operand replacement are independent generations.
 Existing stale-candidate checks remain authoritative for block submission.
+
+## RTX 5090 tensor parallelism
+
+Two RTX 5090 devices hold contiguous output-column shards. Each rank computes
+its local BF16 output and searches only its global column interval.
+
+Both ranks derive one canonical work statement:
+
+1. Hash local contiguous `B` chunks with their global BLAKE3 chunk counters.
+2. Merge the ordered chunk chaining values into the canonical full-`B` root.
+3. Broadcast the full commitments and derive one pair of noise seeds with
+   global `n=43008`.
+4. Generate `E_BR` with the rank's global output-column offset.
+5. Convert local winners to global row-major ordinals.
+6. Reduce the lowest global winner across ranks before scalar validation.
+
+No rank-local commitment, local `n`, or local ordinal can enter a certificate.
 
 ## Mining-performance rule
 
