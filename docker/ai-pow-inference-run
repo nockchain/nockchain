@@ -14,7 +14,6 @@ set -euo pipefail
 : "${VLLM_MAX_MODEL_LEN:=8192}"
 : "${VLLM_GPU_MEMORY_UTILIZATION:=0.62}"
 : "${VLLM_ENFORCE_EAGER:=1}"
-: "${VLLM_DISABLED_KERNELS:=FlashInferFp8DeepGEMMDynamicBlockScaledKernel}"
 : "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
 
 if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
@@ -24,6 +23,21 @@ fi
 if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" -le 0 ]]; then
   echo "no visible CUDA devices" >&2
   exit 1
+fi
+
+if [[ -z "${VLLM_DISABLED_KERNELS+x}" ]]; then
+  primary_compute_capability="$(
+    nvidia-smi --query-gpu=compute_cap --format=csv,noheader \
+      | sed -n '1p' \
+      | tr -d ' '
+  )"
+  if [[ "${primary_compute_capability}" == 9.* ]]; then
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel
+  elif [[ "${primary_compute_capability}" == 12.* ]]; then
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel,DeepGemmFp8BlockScaledMMKernel
+  else
+    VLLM_DISABLED_KERNELS=
+  fi
 fi
 
 export AI_POW_REQUIRE_MINING NOCKCHAIN_AI_POW_ENDPOINT

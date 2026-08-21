@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUNPOD_BASE=nvidia/cuda:13.0.2-devel-ubuntu24.04
+ARG RUNPOD_BASE=nvidia/cuda:12.9.1-devel-ubuntu24.04
 ARG VLLM_VERSION=0.27.1
-ARG VLLM_BASE=vllm/vllm-openai:v${VLLM_VERSION}
+ARG VLLM_BASE=vllm/vllm-openai:v${VLLM_VERSION}-cu129
 FROM ${RUNPOD_BASE} AS toolchain
 
 ARG RUST_TOOLCHAIN=nightly-2026-04-03
@@ -25,7 +25,7 @@ ENV PATH=/root/.cargo/bin:/usr/local/cuda/bin:/opt/pearl/.venv/bin:${PATH} \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/pearl/.venv \
     UV_PYTHON=3.12 \
-    UV_TORCH_BACKEND=cu130 \
+    UV_TORCH_BACKEND=cu129 \
     TORCH_CUDA_ARCH_LIST="9.0a;12.0a" \
     PEARL_GEMM_FORCE_BUILD=TRUE
 
@@ -71,7 +71,8 @@ WORKDIR /opt/nockchain
 COPY Cargo.toml Cargo.lock rust-toolchain.toml /opt/nockchain/
 COPY patches /opt/nockchain/patches
 COPY crates /opt/nockchain/crates
-ENV AI_POW_CUDA_GENCODES="compute_90a:sm_90a,compute_120a:sm_120a"
+ENV AI_POW_CUDA_GENCODES="compute_90a:sm_90a,compute_120a:sm_120a" \
+    AI_POW_CUDA_TOOLKIT=12.9
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/opt/nockchain/target \
@@ -106,15 +107,14 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 
-# The stable vLLM image lacks a runnable FlashInfer SM90 block-scale cubin.
-# Disable the hybrid kernel so H100 uses DeepGEMM.
+# The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
+# Operators can override VLLM_DISABLED_KERNELS for a validated deployment.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
     NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
-    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
     VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
@@ -160,15 +160,14 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-inference-health --help >/dev/null \
     && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
-# The stable vLLM image lacks a runnable FlashInfer SM90 block-scale cubin.
-# Disable the hybrid kernel so H100 uses DeepGEMM.
+# The launcher applies measured FP8 kernel exclusions for H100 and Blackwell.
+# Operators can override VLLM_DISABLED_KERNELS for a validated deployment.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
     NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
-    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
     VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \

@@ -179,9 +179,8 @@ only for a zero-target inference diagnostic. The OpenAI-compatible server
 listens on port 8000; keep it on the pod and use an SSH tunnel for remote
 clients.
 
-For RTX 5090, select a host with NVIDIA driver 580.126.09 or newer. The
-published image uses CUDA 13. The CUDA forward-compatibility package rejects
-GeForce on driver 570 with status 804.
+The published CUDA 12.9 image supports the driver 570 series used by many RTX
+5090 hosts. It does not depend on the CUDA forward-compatibility package.
 
 Run `ai-pow-inference-seed-model` only when the model volume does not contain the required weights.
 

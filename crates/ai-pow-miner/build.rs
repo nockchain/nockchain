@@ -43,6 +43,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=AI_POW_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=AI_POW_CUDA_CODE");
     println!("cargo:rerun-if-env-changed=AI_POW_CUDA_GENCODES");
+    println!("cargo:rerun-if-env-changed=AI_POW_CUDA_TOOLKIT");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     if env::var_os("CARGO_FEATURE_GPU").is_none() {
         return;

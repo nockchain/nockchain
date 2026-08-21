@@ -14,8 +14,8 @@ Use one of these GPU layouts:
 | One RTX PRO 6000 Blackwell | 1 | 96 GB |
 | Two RTX 5090 | 2 | 32 GB per GPU |
 
-RTX 5090 requires NVIDIA driver 580.126.09 or newer for the CUDA 13 image.
-Driver 570 cannot use the CUDA forward-compatibility package on GeForce.
+The CUDA 12.9 image runs on supported CUDA 12 drivers, including the driver 570
+series used by many RTX 5090 hosts.
 
 ## Runtime architecture
 
@@ -294,7 +294,7 @@ Give the container a termination grace period of at least 180 seconds.
 | `VLLM_ENFORCE_EAGER` | `1` | Validated plugin execution mode |
 | `VLLM_MAX_NUM_SEQS` | unset | Optional vLLM scheduler limit |
 | `VLLM_MAX_NUM_BATCHED_TOKENS` | unset | Optional vLLM scheduler token limit |
-| `VLLM_DISABLED_KERNELS` | unset | Device-specific measured workaround only |
+| `VLLM_DISABLED_KERNELS` | selected by compute capability | Validated FP8 kernel exclusions; override only after device testing |
 
 Extra command-line arguments after `ai-pow-inference-run` pass directly to
 `vllm serve`.

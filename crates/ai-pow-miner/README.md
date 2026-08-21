@@ -71,7 +71,7 @@ The image uses up to eight visible CUDA devices, canonical mode, and batches of 
 ## Reusable inference image
 
 `docker/Dockerfile.ai-pow-inference` builds the pinned Pearl workspace and Rust
-bridge in disposable CUDA 13 stages. The runtime contains stable vLLM 0.27.1,
+bridge in disposable CUDA 12.9 stages. The runtime contains stable vLLM 0.27.1,
 the Pearl and Nockchain Python wheels, the release bridge, health and benchmark
 tools, and the supervised launcher. It does not contain build toolchains.
 
@@ -143,9 +143,8 @@ The launcher uses the visible GPU count as its tensor-parallel size and defaults
 GPU memory utilization to `0.62`. Override either value only for a measured
 deployment-specific reason.
 
-The CUDA 13 image requires NVIDIA driver 580.126.09 or newer on RTX 5090.
-Driver 570 can run a CUDA 12.8 build, but the CUDA forward-compatibility package
-does not support GeForce devices.
+The CUDA 12.9 image runs on supported CUDA 12 drivers, including the driver 570
+series used by many RTX 5090 hosts.
 
 Keep each HTTP server on loopback and use SSH port forwarding from the laptop.
 `scripts/compare-gemma4-openai.py` sends the same greedy request to each local

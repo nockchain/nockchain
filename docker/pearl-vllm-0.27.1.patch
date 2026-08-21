@@ -1,11 +1,15 @@
 --- a/pyproject.toml
 +++ b/pyproject.toml
-@@ -9,13 +9,19 @@
- url = "https://download.pytorch.org/whl/cu130"
+@@ -7,15 +7,21 @@
+ [[tool.uv.index]]
+-name = "pytorch-cu130"
+-url = "https://download.pytorch.org/whl/cu130"
++name = "pytorch-cu129"
++url = "https://download.pytorch.org/whl/cu129"
  explicit = true
  
 -# vLLM 0.20.2+cu130 allows transformers 5.x (see wheel requires-dist); default resolution
-+# vLLM 0.27.1+cu130 allows transformers 5.x (see wheel requires-dist); default resolution
++# vLLM 0.27.1+cu129 allows transformers 5.x (see wheel requires-dist); default resolution
  # stayed on 4.57.x. Gemma 4 checkpoints need transformers>=5.5 with model_type gemma4.
  [tool.uv]
  override-dependencies = [
@@ -22,6 +26,20 @@
  ]
  
  # Workspace sources - these apply globally to all members
+@@ -31,10 +37,10 @@
+ torch = [
+-  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
++  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+ ]
+ torchvision = [
+-  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
++  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+ ]
+ torchaudio = [
+-  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
++  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+ ]
+ 
 --- a/miner/miner-base/pyproject.toml
 +++ b/miner/miner-base/pyproject.toml
 @@ -22,6 +22,6 @@
