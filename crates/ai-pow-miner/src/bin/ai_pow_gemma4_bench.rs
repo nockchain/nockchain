@@ -15,7 +15,9 @@ struct Options {
 }
 
 fn main() -> Result<()> {
-    let options = parse_options()?;
+    let Some(options) = parse_options()? else {
+        return Ok(());
+    };
     let kernel_info = Gemma4CudaSession::kernel_info(options.device)?;
     let total_tickets = (options.m / GEMMA4_TILE)
         .checked_mul(options.n / GEMMA4_TILE)
@@ -107,7 +109,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn parse_options() -> Result<Options> {
+fn parse_options() -> Result<Option<Options>> {
     let mut options = Options {
         device: 0,
         m: 4096,
@@ -120,7 +122,7 @@ fn parse_options() -> Result<Options> {
         let value = match argument.as_str() {
             "--help" | "-h" => {
                 println!("Usage: ai_pow_gemma4_bench [--device N] [--m N] [--n N] [--warmup-iterations N] [--iterations N]");
-                return Ok(options);
+                return Ok(None);
             }
             "--device" | "--m" | "--n" | "--warmup-iterations" | "--iterations" => args
                 .next()
@@ -144,7 +146,7 @@ fn parse_options() -> Result<Options> {
     if options.m == 0 || options.m % 256 != 0 || options.n == 0 || options.n % 128 != 0 {
         bail!("shape requires nonzero m%256==0 and n%128==0");
     }
-    Ok(options)
+    Ok(Some(options))
 }
 
 fn scalar_ticket(a: &[i8], b: &[i8], n: usize, ordinal: u64) -> TileState {
