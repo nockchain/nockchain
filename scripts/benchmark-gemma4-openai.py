@@ -158,6 +158,7 @@ def main() -> int:
     parser.add_argument("--max-tokens", type=int, default=128)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--stream", action="store_true")
+    parser.add_argument("--vary-prompts", action="store_true")
     parser.add_argument("--include-requests", action="store_true")
     args = parser.parse_args()
     if args.requests <= 0 or args.concurrency <= 0 or args.warmup < 0:
@@ -179,7 +180,6 @@ def main() -> int:
 
     request_value: dict[str, Any] = {
         "model": args.model,
-        "messages": [{"role": "user", "content": args.prompt}],
         "temperature": 0,
         "top_p": 1,
         "seed": 0,
@@ -188,21 +188,31 @@ def main() -> int:
     }
     if args.stream:
         request_value["stream_options"] = {"include_usage": True}
-    payload = json.dumps(request_value).encode()
+
+    def payload(index: int) -> bytes:
+        prompt = args.prompt
+        if args.vary_prompts:
+            prompt = f"{prompt}\n\nBenchmark request id: {index}"
+        value = {
+            **request_value,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        return json.dumps(value).encode()
+
     request_fn = _stream_request if args.stream else _nonstream_request
 
     try:
-        for _ in range(args.warmup):
-            request_fn(base_url, payload, args.api_key, args.timeout)
+        for index in range(args.warmup):
+            request_fn(base_url, payload(-index - 1), args.api_key, args.timeout)
         batch_started = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=args.concurrency
         ) as executor:
             futures = [
                 executor.submit(
-                    request_fn, base_url, payload, args.api_key, args.timeout
+                    request_fn, base_url, payload(index), args.api_key, args.timeout
                 )
-                for _ in range(args.requests)
+                for index in range(args.requests)
             ]
             results = [future.result() for future in futures]
         wall_seconds = time.perf_counter() - batch_started
@@ -225,6 +235,7 @@ def main() -> int:
         "requests": args.requests,
         "concurrency": args.concurrency,
         "warmup_requests": args.warmup,
+        "vary_prompts": args.vary_prompts,
         "max_tokens": args.max_tokens,
         "wall_seconds": wall_seconds,
         "request_throughput_per_second": args.requests / wall_seconds,

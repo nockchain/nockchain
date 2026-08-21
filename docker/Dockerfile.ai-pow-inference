@@ -107,14 +107,15 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
 
-# vLLM selects the fastest compatible FP8 kernels. Set VLLM_DISABLED_KERNELS
-# only for a measured device-specific workaround.
+# The stable vLLM image lacks a runnable FlashInfer SM90 block-scale cubin.
+# Disable the hybrid kernel so H100 uses DeepGEMM.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
     NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
     VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
@@ -160,14 +161,15 @@ RUN chmod 0755 /usr/local/bin/ai-pow-inference-run \
     && ai-pow-inference-health --help >/dev/null \
     && ai-pow-inference-bench --help >/dev/null \
     && python3 -c "from importlib.metadata import version; assert version('vllm') == '0.27.1'; import vllm_miner; from vllm_miner.vllm_config import PearlConfig"
-# vLLM selects the fastest compatible FP8 kernels. Set VLLM_DISABLED_KERNELS
-# only for a measured device-specific workaround.
+# The stable vLLM image lacks a runnable FlashInfer SM90 block-scale cubin.
+# Disable the hybrid kernel so H100 uses DeepGEMM.
 ENV MODEL_PATH=/workspace/models/Gemma-4-31B-it-pearl \
     NOCKCHAIN_AI_POW_ENDPOINT=127.0.0.1:5590 \
     AI_POW_CUDA_DEVICE=0 \
     NOCKCHAIN_GEMMA4_MINING_LAYER=0 \
     VLLM_TENSOR_PARALLEL_SIZE=2 \
     VLLM_MAX_MODEL_LEN=8192 \
+    VLLM_DISABLED_KERNELS=FlashInferFp8DeepGEMMDynamicBlockScaledKernel \
     VLLM_GPU_MEMORY_UTILIZATION=0.62 \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \

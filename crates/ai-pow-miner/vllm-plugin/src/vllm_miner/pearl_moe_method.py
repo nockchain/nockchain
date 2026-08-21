@@ -23,7 +23,7 @@ from .mining_state import ensure_pinned_pool_at_least
 from .quantization_operators import NO_HADAMARD_BLOCK_SIZE
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
 
 _LOGGER = get_logger("vllm.pearl_miner")
 
@@ -253,7 +253,7 @@ class PearlMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: "FusedMoE",
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,

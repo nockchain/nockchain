@@ -83,6 +83,22 @@ ghcr.io/nockchain/nockchain-ai-pow-inference:buildcache
 
 The selected local Buildx builder remains usable when no remote native builder is available. Its first complete amd64 build is slower because Docker Desktop uses emulation. Later builds reuse its local cache.
 
+GitHub Actions materializes the expensive dependency targets before assembling
+the runtime image. It stores three registry-backed BuildKit caches:
+
+```text
+ghcr.io/nockchain/nockchain-ai-pow-inference:buildcache-python
+ghcr.io/nockchain/nockchain-ai-pow-inference:buildcache-rust
+ghcr.io/nockchain/nockchain-ai-pow-inference:buildcache-runtime
+```
+
+The Python cache contains the pinned Pearl dependency wheels, including the
+long CUDA extension build. The vLLM-miner source wheel is a later, inexpensive
+layer. The Rust cache contains the bridge, benchmark, and native CUDA library.
+A runtime assembly failure therefore does not discard either expensive cache.
+Changing only Python source, launcher scripts, documentation, or final-image
+configuration reuses the dependency caches.
+
 Inspect available builders with:
 
 ```sh

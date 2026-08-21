@@ -9,7 +9,8 @@
  # stayed on 4.57.x. Gemma 4 checkpoints need transformers>=5.5 with model_type gemma4.
  [tool.uv]
  override-dependencies = [
-   "transformers>=5.5.1,<6",
+-  "transformers>=5.5.1,<6",
++  "transformers==5.5.4",
    "cuda-bindings>=13.0,<13.1",
    "cuda-python>=13.0,<13.1",
 +  "compressed-tensors==0.17.0",
