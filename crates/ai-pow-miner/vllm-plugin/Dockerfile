@@ -1,5 +1,5 @@
 # Version pins for reproducible builds (override with docker build --build-arg)
-# CUDA 13.0 user-space + PyTorch cu130 + vLLM 0.20.2 (see miner/vllm-miner/pyproject.toml).
+# CUDA 13.0 user-space + PyTorch cu130 + vLLM 0.27.1 (see miner/vllm-miner/pyproject.toml).
 ARG CUDA_VERSION=13.0.3
 
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS builder

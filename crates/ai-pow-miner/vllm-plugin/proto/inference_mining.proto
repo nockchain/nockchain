@@ -111,4 +111,6 @@ message InferenceMiningStatus {
   uint64 inference_batches = 4;
   uint64 candidate_generation = 5;
   uint64 opened_blocks_received = 6;
+  bool production_enabled = 7;
+  bool node_connected = 8;
 }

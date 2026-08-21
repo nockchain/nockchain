@@ -5,16 +5,33 @@ set -euo pipefail
 : "${NOCKCHAIN_AI_POW_ENDPOINT:=127.0.0.1:5590}"
 : "${NOCKCHAIN_GEMMA4_MINING_LAYER:=0}"
 : "${AI_POW_CUDA_DEVICE:=0}"
+: "${AI_POW_REQUIRE_MINING:=0}"
+: "${AI_POW_BRIDGE_READY_TIMEOUT:=30}"
+: "${VLLM_HOST:=127.0.0.1}"
+: "${VLLM_PORT:=8000}"
+: "${VLLM_SERVED_MODEL_NAME:=gemma-4-31b-it-pearl}"
+: "${VLLM_MAX_MODEL_LEN:=8192}"
+: "${VLLM_GPU_MEMORY_UTILIZATION:=0.62}"
+: "${VLLM_ENFORCE_EAGER:=1}"
+: "${VLLM_ALLOW_UNAUTHENTICATED:=0}"
+
 if [[ -z "${VLLM_TENSOR_PARALLEL_SIZE:-}" ]]; then
   mapfile -t visible_gpus < <(nvidia-smi --list-gpus)
   VLLM_TENSOR_PARALLEL_SIZE="${#visible_gpus[@]}"
 fi
-: "${VLLM_TENSOR_PARALLEL_SIZE:?no visible CUDA devices}"
-: "${VLLM_MAX_MODEL_LEN:=8192}"
-: "${VLLM_GPU_MEMORY_UTILIZATION:=0.62}"
-: "${VLLM_DISABLED_KERNELS:=FlashInferFp8DeepGEMMDynamicBlockScaledKernel}"
-export NOCKCHAIN_AI_POW_ENDPOINT NOCKCHAIN_GEMMA4_MINING_LAYER
-export VLLM_DISABLED_KERNELS
+if [[ "${VLLM_TENSOR_PARALLEL_SIZE}" -le 0 ]]; then
+  echo "no visible CUDA devices" >&2
+  exit 1
+fi
+
+export AI_POW_REQUIRE_MINING NOCKCHAIN_AI_POW_ENDPOINT
+export NOCKCHAIN_GEMMA4_MINING_LAYER VLLM_HOST VLLM_PORT
+export VLLM_SERVED_MODEL_NAME
+if [[ -n "${VLLM_DISABLED_KERNELS:-}" ]]; then
+  export VLLM_DISABLED_KERNELS
+else
+  unset VLLM_DISABLED_KERNELS
+fi
 
 if [[ ! -f "${MODEL_PATH}/config.json" ]]; then
   echo "model config not found: ${MODEL_PATH}/config.json" >&2
@@ -28,6 +45,16 @@ if [[ "${bridge_host}" != "127.0.0.1" && "${bridge_host}" != "localhost" ]]; the
   exit 1
 fi
 
+case "${VLLM_HOST}" in
+  127.0.0.1|localhost|::1|\[::1\]) ;;
+  *)
+    if [[ -z "${VLLM_API_KEY:-}" && "${VLLM_ALLOW_UNAUTHENTICATED}" != "1" ]]; then
+      echo "VLLM_API_KEY is required when VLLM_HOST is not loopback" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 bridge_args=(
   --listen "127.0.0.1:${bridge_port}"
   --cuda-device "${AI_POW_CUDA_DEVICE}"
@@ -37,6 +64,9 @@ if [[ -n "${NOCKCHAIN_NODE_ADDR:-}" ]]; then
   bridge_args+=(--node-addr "${NOCKCHAIN_NODE_ADDR}" --mining-pkh "${NOCKCHAIN_MINING_PKH}")
 elif [[ -n "${NOCKCHAIN_MINING_PKH:-}" ]]; then
   echo "NOCKCHAIN_MINING_PKH requires NOCKCHAIN_NODE_ADDR" >&2
+  exit 1
+elif [[ "${AI_POW_REQUIRE_MINING}" == "1" ]]; then
+  echo "AI_POW_REQUIRE_MINING=1 requires NOCKCHAIN_NODE_ADDR and NOCKCHAIN_MINING_PKH" >&2
   exit 1
 fi
 
@@ -55,21 +85,47 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-for _ in $(seq 1 100); do
-  if python3 -c "import grpc; c=grpc.insecure_channel('${NOCKCHAIN_AI_POW_ENDPOINT}'); grpc.channel_ready_future(c).result(timeout=0.1)" 2>/dev/null; then
-    break
-  fi
-  sleep 0.1
-done
+if ! ai-pow-inference-health \
+  --bridge-only \
+  --wait "${AI_POW_BRIDGE_READY_TIMEOUT}" \
+  --timeout 1 >/dev/null; then
+  echo "AI-PoW bridge did not become ready" >&2
+  exit 1
+fi
 
-setsid vllm serve "${MODEL_PATH}" \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --language-model-only \
-  --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}" \
-  --max-model-len "${VLLM_MAX_MODEL_LEN}" \
-  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}" \
-  --enforce-eager \
-  "$@" &
+vllm_args=(
+  serve "${MODEL_PATH}"
+  --host "${VLLM_HOST}"
+  --port "${VLLM_PORT}"
+  --served-model-name "${VLLM_SERVED_MODEL_NAME}"
+  --language-model-only
+  --tensor-parallel-size "${VLLM_TENSOR_PARALLEL_SIZE}"
+  --max-model-len "${VLLM_MAX_MODEL_LEN}"
+  --gpu-memory-utilization "${VLLM_GPU_MEMORY_UTILIZATION}"
+)
+if [[ "${VLLM_ENFORCE_EAGER}" == "1" ]]; then
+  vllm_args+=(--enforce-eager)
+fi
+if [[ -n "${VLLM_API_KEY:-}" ]]; then
+  vllm_args+=(--api-key "${VLLM_API_KEY}")
+fi
+if [[ -n "${VLLM_MAX_NUM_SEQS:-}" ]]; then
+  vllm_args+=(--max-num-seqs "${VLLM_MAX_NUM_SEQS}")
+fi
+if [[ -n "${VLLM_MAX_NUM_BATCHED_TOKENS:-}" ]]; then
+  vllm_args+=(--max-num-batched-tokens "${VLLM_MAX_NUM_BATCHED_TOKENS}")
+fi
+
+setsid vllm "${vllm_args[@]}" "$@" &
 vllm_pid=$!
-wait "${vllm_pid}"
+
+set +e
+wait -n "${bridge_pid}" "${vllm_pid}"
+status=$?
+set -e
+if ! kill -0 "${bridge_pid}" 2>/dev/null; then
+  echo "AI-PoW bridge exited; stopping vLLM" >&2
+elif ! kill -0 "${vllm_pid}" 2>/dev/null; then
+  echo "vLLM exited; stopping AI-PoW bridge" >&2
+fi
+exit "${status}"

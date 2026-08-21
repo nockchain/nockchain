@@ -1648,12 +1648,15 @@ pub async fn run_inference_node(
     shutdown: CancellationToken,
 ) -> Result<(), MinerError> {
     cfg.validate()?;
+    rpc.set_production_enabled(true);
+    rpc.set_node_connected(false);
     let mut generation = rpc.candidate_generation();
     let mut active_candidate: Option<InferenceNodeCandidate> = None;
     info!(node = %cfg.node_addr, "inference bridge: entering production node loop");
 
     loop {
         if shutdown.is_cancelled() {
+            rpc.set_node_connected(false);
             return Ok(());
         }
         let mut client = match NodeClient::connect(&cfg.node_addr).await {
@@ -1686,6 +1689,7 @@ pub async fn run_inference_node(
             .enable_mining(AiPowMinerWire::Enable.to_wire(), true)
             .await
             .map_err(|error| MinerError::Configure(format!("enable_mining(true): {error}")))?;
+        rpc.set_node_connected(true);
         info!("inference bridge: subscribed + mining enabled; awaiting %mine-ai candidates");
 
         let mut proof_worker: Option<JoinHandle<InferenceProofWorkerResult>> = None;
@@ -1693,6 +1697,7 @@ pub async fn run_inference_node(
             tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
+                    rpc.set_node_connected(false);
                     reject_and_await_inference_proof_worker(
                         &mut proof_worker,
                         "inference proof cancelled during shutdown",
@@ -1817,6 +1822,7 @@ pub async fn run_inference_node(
             }
         };
 
+        rpc.set_node_connected(false);
         reject_and_await_inference_proof_worker(
             &mut proof_worker, "candidate stream disconnected while proving",
         )

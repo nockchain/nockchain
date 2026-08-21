@@ -7,6 +7,8 @@ on:
       - ".github/workflows/ai-pow-inference-image.yml"
       - "docker/Dockerfile.ai-pow-inference"
       - "docker/ai-pow-inference-container-entrypoint"
+      - "docker/ai-pow-inference-health"
+      - "docker/pearl-vllm-0.27.1.patch"
       - "docker/ai-pow-inference-run"
       - "docker/ai-pow-inference-seed-model"
       - "crates/ai-pow/**"
@@ -17,6 +19,7 @@ on:
       - "crates/ai-pow-miner-cuda/**"
       - "crates/ai-pow-zk/**"
       - "crates/nockapp-grpc-proto/**"
+      - "scripts/benchmark-gemma4-openai.py"
       - "Cargo.toml"
       - "Cargo.lock"
 

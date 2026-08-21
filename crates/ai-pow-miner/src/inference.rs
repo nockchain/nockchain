@@ -85,6 +85,8 @@ pub struct InferenceSchedulerState {
     inference_batches: AtomicU64,
     opened_blocks_received: AtomicU64,
     candidate_generation: AtomicU64,
+    production_enabled: AtomicBool,
+    node_connected: AtomicBool,
 }
 
 impl Default for InferenceSchedulerState {
@@ -97,6 +99,8 @@ impl Default for InferenceSchedulerState {
             inference_batches: AtomicU64::new(0),
             opened_blocks_received: AtomicU64::new(0),
             candidate_generation: AtomicU64::new(0),
+            production_enabled: AtomicBool::new(false),
+            node_connected: AtomicBool::new(false),
         }
     }
 }
@@ -223,6 +227,8 @@ impl InferenceSchedulerState {
             inference_batches: self.inference_batches.load(Ordering::Relaxed),
             candidate_generation: self.candidate_generation.load(Ordering::Acquire),
             opened_blocks_received: self.opened_blocks_received.load(Ordering::Relaxed),
+            production_enabled: self.production_enabled.load(Ordering::Acquire),
+            node_connected: self.node_connected.load(Ordering::Acquire),
         }
     }
 
@@ -338,6 +344,18 @@ impl InferenceMiningRpc {
             .lock()
             .map(|job| job.clone())
             .map_err(|_| anyhow::anyhow!("mining job lock poisoned"))
+    }
+
+    pub fn set_production_enabled(&self, enabled: bool) {
+        self.state
+            .production_enabled
+            .store(enabled, Ordering::Release);
+    }
+
+    pub fn set_node_connected(&self, connected: bool) {
+        self.state
+            .node_connected
+            .store(connected, Ordering::Release);
     }
 
     pub fn into_server(self) -> InferenceMiningServiceServer<Self> {
@@ -821,6 +839,8 @@ mod tests {
         )))
         .await
         .unwrap();
+        rpc.set_production_enabled(true);
+        rpc.set_node_connected(true);
         let status = rpc
             .get_status(Request::new(GetStatusRequest {}))
             .await
@@ -828,6 +848,8 @@ mod tests {
             .into_inner();
         assert_eq!(status.mode, SchedulerMode::InferenceMining as i32);
         assert_eq!(status.active_work_items, 1);
+        assert!(status.production_enabled);
+        assert!(status.node_connected);
     }
 
     #[test]
